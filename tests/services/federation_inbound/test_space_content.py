@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from types import SimpleNamespace
 
 import pytest
@@ -26,25 +26,25 @@ from socialhome.domain.events import (
     TaskUpdated,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from socialhome.services.federation_inbound.space_content import _deleter
-from socialhome.domain.timetable import Timetable, TimetableEntry, to_wire_dict
+from socialhome.domain.post import BazaarStatus
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
+from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
+from socialhome.domain.timetable import Timetable, TimetableEntry, to_wire_dict
+from socialhome.domain.user import SYSTEM_AUTHOR
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
     SPACE_TASK_LIST_KIND,
     mint_owner_bound_id,
 )
-from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
-from socialhome.domain.post import BazaarStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
-from socialhome.domain.user import SYSTEM_AUTHOR
-from socialhome.services.legacy_album_deletes import LegacyAlbumDeletes
+from socialhome.services.federation_inbound.space_content import _deleter
 from socialhome.services.gallery_service import (
     ALBUMS_PER_SPACE,
     DESCRIPTION_MAX,
     NAME_MAX,
 )
+from socialhome.services.legacy_album_deletes import LegacyAlbumDeletes
 
 
 class _FakeRegistry:
@@ -248,17 +248,17 @@ class _FakeStickyRepo:
 def _held_task(task_id: str, **kw) -> Task:
     """A task row as the repo would hand it back (``created_by`` matches
     :class:`_ScopedRows`)."""
-    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
-    base = dict(
-        id=task_id,
-        list_id="list-1",
-        title="held",
-        status=TaskStatus.TODO,
-        position=0,
-        created_by="u-author",
-        created_at=now,
-        updated_at=now,
-    )
+    now = datetime(2026, 9, 1, tzinfo=UTC)
+    base = {
+        "id": task_id,
+        "list_id": "list-1",
+        "title": "held",
+        "status": TaskStatus.TODO,
+        "position": 0,
+        "created_by": "u-author",
+        "created_at": now,
+        "updated_at": now,
+    }
     base.update(kw)
     return Task(**base)
 
@@ -514,7 +514,7 @@ def _event(event_type, payload, *, from_instance="peer-a", space_id=None):
         event_type=event_type,
         from_instance=from_instance,
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=space_id,
     )
@@ -1718,7 +1718,7 @@ async def test_rsvp_updated_applies_when_event_present(repos, handlers):
     """RSVP arriving after the event lands → applied directly."""
     from socialhome.domain.calendar import CalendarEvent
 
-    seed = datetime(2026, 4, 18, 10, 0, tzinfo=timezone.utc)
+    seed = datetime(2026, 4, 18, 10, 0, tzinfo=UTC)
     repos["calendar"]._events["e-known"] = (
         "sp-1",
         CalendarEvent(
@@ -1806,7 +1806,7 @@ async def test_rsvp_deleted_with_event_present(repos, handlers):
     """SPACE_RSVP_DELETED removes the live row when the event is local."""
     from socialhome.domain.calendar import CalendarEvent, CalendarRSVP
 
-    seed = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    seed = datetime(2026, 5, 20, tzinfo=UTC)
     repos["calendar"]._events["e-rm"] = (
         "sp-1",
         CalendarEvent(
@@ -4676,7 +4676,7 @@ async def test_an_album_edit_can_clear_the_cover(gallery_env):
 async def test_applied_album_changes_are_published_with_their_origin(gallery_env):
     """This household's own screens refresh; the origin keeps the outbound
     bridge from sending them back."""
-    handlers, gallery, _media, seen = gallery_env
+    handlers, _gallery, _media, seen = gallery_env
     await handlers._on_gallery_album_created(_created())
     await handlers._on_gallery_album_updated(
         _event(
@@ -4703,7 +4703,7 @@ async def test_applied_album_changes_are_published_with_their_origin(gallery_env
 
 
 async def test_applied_item_changes_are_published_with_their_origin(gallery_env):
-    handlers, gallery, _media, seen = gallery_env
+    handlers, _gallery, _media, seen = gallery_env
     payload = {
         "id": "gi-1",
         "album_id": "alb-1",
@@ -4760,7 +4760,7 @@ async def test_item_media_references_are_normalised(gallery_env):
 
 
 async def test_a_federated_item_delete_removes_its_files(gallery_env):
-    handlers, gallery, media, _seen = gallery_env
+    handlers, _gallery, media, _seen = gallery_env
     for name in ("full.webp", "thumb.webp"):
         (media / name).write_bytes(b"x")
     await handlers._on_gallery_item_saved(
@@ -4859,7 +4859,7 @@ async def test_timetable_handlers_register_only_with_a_repo(bus, repos):
 async def test_timetable_with_an_icon_the_emoji_rule_now_refuses_still_parses():
     """An older peer may send an icon the looser pre-2026.10 emoji rule
     accepted: only that icon is dropped, never the whole timetable."""
-    at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    at = datetime(2026, 6, 1, tzinfo=UTC)
     lesson = TimetableEntry(
         id="e1",
         weekday=0,
@@ -4895,7 +4895,7 @@ async def test_timetable_payload_without_a_space_or_timetable_is_dropped(bus, re
             event_type=event_type,
             from_instance="peer",
             to_instance="us",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload=payload,
             space_id=space_id,
         )
@@ -5026,7 +5026,7 @@ async def test_task_with_an_invisible_title_is_dropped_with_a_warning(
         await handlers._on_task_saved(
             _event(
                 FederationEventType.SPACE_TASK_CREATED,
-                {"id": "t-1", "list_id": "list-1", "title": "‮​"},
+                {"id": "t-1", "list_id": "list-1", "title": "\u202e\u200b"},
                 space_id="sp-1",
             )
         )

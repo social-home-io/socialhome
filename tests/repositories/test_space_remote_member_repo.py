@@ -124,16 +124,16 @@ async def test_list_admin_instances_empty_when_no_admins(repo):
 
 
 def _evt(**over):
-    base = dict(
-        space_id="sp1",
-        user_id="u1",
-        instance_id="i-a",
-        display_name="Anna",
-        user_pk="pk1",
-        role="member",
-        member_version=1,
-        tombstoned=False,
-    )
+    base = {
+        "space_id": "sp1",
+        "user_id": "u1",
+        "instance_id": "i-a",
+        "display_name": "Anna",
+        "user_pk": "pk1",
+        "role": "member",
+        "member_version": 1,
+        "tombstoned": False,
+    }
     base.update(over)
     return base
 
@@ -464,16 +464,16 @@ async def test_reset_member_state_ignores_the_version_guard(repo):
 async def test_apply_member_event_with_a_stale_verified_epoch_is_dropped(repo):
     """v_44: an event verified against the epoch-0 key cannot land once the
     space pins a newer key — in the same statement as the write."""
-    kw = dict(
-        space_id="sp1",
-        user_id="u1",
-        instance_id="i-a",
-        display_name=None,
-        user_pk=None,
-        role="admin",
-        member_version=5,
-        tombstoned=False,
-    )
+    kw = {
+        "space_id": "sp1",
+        "user_id": "u1",
+        "instance_id": "i-a",
+        "display_name": None,
+        "user_pk": None,
+        "role": "admin",
+        "member_version": 5,
+        "tombstoned": False,
+    }
     await repo._db.enqueue("UPDATE spaces SET authority_key_epoch=7 WHERE id='sp1'")
     assert not await repo.apply_member_event(**kw, verified_epoch=0)
     assert await repo.get_including_tombstones("sp1", "i-a", "u1") is None
@@ -532,9 +532,13 @@ async def test_a_gossip_tombstone_insert_stamps_removed_at(repo):
 
 
 async def test_re_adding_clears_removed_at(repo):
-    kw = dict(
-        space_id="sp1", instance_id="i-a", user_id="u1", user_pk=None, display_name=None
-    )
+    kw = {
+        "space_id": "sp1",
+        "instance_id": "i-a",
+        "user_id": "u1",
+        "user_pk": None,
+        "display_name": None,
+    }
     await repo.add(**kw)
     await repo.remove("sp1", "i-a", "u1")
     await repo.add(**kw)
@@ -542,14 +546,14 @@ async def test_re_adding_clears_removed_at(repo):
 
 
 async def test_reset_member_state_maintains_removed_at(repo):
-    kw = dict(
-        space_id="sp1",
-        user_id="u1",
-        instance_id="i-a",
-        display_name=None,
-        user_pk=None,
-        role="member",
-    )
+    kw = {
+        "space_id": "sp1",
+        "user_id": "u1",
+        "instance_id": "i-a",
+        "display_name": None,
+        "user_pk": None,
+        "role": "member",
+    }
     await repo.add(
         space_id="sp1", instance_id="i-a", user_id="u1", user_pk=None, display_name=None
     )

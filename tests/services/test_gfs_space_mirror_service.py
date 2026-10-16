@@ -5,45 +5,47 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta, timezone
-
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 import socialhome.services.gfs_directory as directory_mod
 import socialhome.services.gfs_space_mirror_service as mirror_mod
-
 from socialhome.capabilities_sig import sign_capabilities
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.federation import GfsConnection
-from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
-from socialhome.infrastructure.key_manager import KeyManager
-from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
-from socialhome.repositories.gfs_space_seat_repo import SqliteGfsSpaceSeatRepo
-from socialhome.domain.gfs_space_seat import GfsSpaceSeat
 from socialhome.domain.events import (
     RemoteSpaceMemberBanned,
     RemoteSpaceMemberRemoved,
     SpaceConfigChanged,
     SpaceMemberLeft,
 )
-from socialhome.domain.space import SpaceConfigEventType
+from socialhome.domain.federation import GfsConnection
+from socialhome.domain.gfs_space_seat import GfsSpaceSeat
+from socialhome.domain.public_space import PublicSpaceListing
+from socialhome.domain.space import (
+    JoinMode,
+    Space,
+    SpaceConfigEventType,
+    SpaceFeatures,
+    SpaceType,
+)
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.repositories.gfs_space_seat_repo import SqliteGfsSpaceSeatRepo
+from socialhome.repositories.public_space_repo import SqlitePublicSpaceRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.gfs_connection_service import (
     GfsConnectionError,
     GfsConnectionService,
 )
-from socialhome.domain.public_space import PublicSpaceListing
-from socialhome.repositories.public_space_repo import SqlitePublicSpaceRepo
 from socialhome.services.gfs_http import MAX_GFS_BODY_BYTES
 from socialhome.services.gfs_space_mirror_service import (
     _MIRROR_FETCH_TIMEOUT_S,
     GfsSpaceMirrorService,
 )
-
 
 PIN_A = "aa" * 32
 PIN_B = "bb" * 32
@@ -68,7 +70,7 @@ class _Content:
 
 
 class _StubResp:
-    __slots__ = ("status", "_body", "content", "content_length")
+    __slots__ = ("_body", "content", "content_length", "status")
 
     def __init__(
         self,
@@ -106,7 +108,7 @@ class _StubSession:
     model a server whose directory says otherwise.
     """
 
-    __slots__ = ("responses", "calls", "raise_for")
+    __slots__ = ("calls", "raise_for", "responses")
 
     def __init__(
         self,
@@ -143,11 +145,11 @@ class _StubGfs:
     """Records subscribe / unsubscribe calls against the GFS service seam."""
 
     __slots__ = (
+        "challenged",
+        "possession",
+        "raise_on_unsubscribe",
         "subscribes",
         "unsubscribes",
-        "raise_on_unsubscribe",
-        "possession",
-        "challenged",
     )
 
     def __init__(self, *, raise_on_unsubscribe: bool = False, possession=False):
@@ -1646,7 +1648,7 @@ async def test_a_failed_unpair_unsubscribe_stays_a_tombstone_and_is_retried(
     seat = await env.seats.get("sp-x", "inst-gfs-1")
     assert seat.detached and not seat.released
 
-    later = datetime.now(timezone.utc) + timedelta(days=400)
+    later = datetime.now(UTC) + timedelta(days=400)
     monkeypatch.setattr(mirror_mod, "_utcnow", lambda: later)
     for _ in range(3):
         later += timedelta(days=2)
@@ -1669,7 +1671,7 @@ async def test_a_released_detached_seat_ages_out_after_a_confirmed_sweep(
     await _seat(env, "sp-x", "gfs-1")
     gfs = _StubGfs()
     mirror = _mirror(env, _StubSession(), gfs)
-    t0 = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    t0 = datetime(2026, 10, 10, tzinfo=UTC)
     clock = [t0]
     monkeypatch.setattr(mirror_mod, "_utcnow", lambda: clock[0])
     await _unpairer(env, mirror).disconnect("gfs-1")
@@ -1692,7 +1694,7 @@ async def test_the_sweep_distrusts_an_insane_or_backwards_clock(env, monkeypatch
     await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
     await _seat(env, "sp-x", "gfs-1")
     mirror = _mirror(env, _StubSession(), _StubGfs())
-    clock = [datetime(1970, 1, 2, tzinfo=timezone.utc)]
+    clock = [datetime(1970, 1, 2, tzinfo=UTC)]
     monkeypatch.setattr(mirror_mod, "_utcnow", lambda: clock[0])
     await env.conns.delete("gfs-1")  # gone without an unpair
 
@@ -1701,21 +1703,21 @@ async def test_the_sweep_distrusts_an_insane_or_backwards_clock(env, monkeypatch
     assert seat.detached and seat.detached_at is None  # no stamp from 1970
     await env.seats.mark_released("sp-x", "inst-gfs-1")
 
-    clock[0] = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    clock[0] = datetime(2026, 10, 10, tzinfo=UTC)
     await mirror.sweep_orphan_seats()
     assert (
         await env.seats.get("sp-x", "inst-gfs-1")
     ).detached_at == "2026-10-10 00:00:00"
 
-    clock[0] = datetime(2026, 1, 5, tzinfo=timezone.utc)  # went back
+    clock[0] = datetime(2026, 1, 5, tzinfo=UTC)  # went back
     await mirror.sweep_orphan_seats()
     assert (
         await env.seats.get("sp-x", "inst-gfs-1")
     ).detached_at == "2026-01-05 00:00:00"
     # A forward jump past the age only marks it; a later sweep confirms.
-    clock[0] = datetime(2027, 1, 1, tzinfo=timezone.utc)
+    clock[0] = datetime(2027, 1, 1, tzinfo=UTC)
     assert await mirror.sweep_orphan_seats() == 0
-    clock[0] = datetime(2026, 12, 31, tzinfo=timezone.utc)  # back again
+    clock[0] = datetime(2026, 12, 31, tzinfo=UTC)  # back again
     assert await mirror.sweep_orphan_seats() == 0
     assert await _seat_ids(env, "sp-x") == ["inst-gfs-1"]
 
@@ -2137,7 +2139,7 @@ async def test_a_wanted_detached_seat_survives_release_events_and_the_sweep(
     assert await mirror.release_unused_seats("sp-1") == 0
     assert await _seat_ids(env, "sp-1") == ["inst-gfs-1"]
 
-    later = datetime.now(timezone.utc) + timedelta(days=100)
+    later = datetime.now(UTC) + timedelta(days=100)
     monkeypatch.setattr(mirror_mod, "_utcnow", lambda: later)
     for _ in range(3):
         later += timedelta(days=2)

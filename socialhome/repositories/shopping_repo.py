@@ -20,22 +20,20 @@ from __future__ import annotations
 
 import builtins
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..db.unit_of_work import UnitOfWork
-from .base import bool_col, row_to_dict, rows_to_dicts
-
 
 # Domain dataclasses live in ``socialhome/domain/shopping.py``;
 # re-exported here so existing repo-level imports keep working.
-from ..domain.shopping import (  # noqa: F401,E402
+from ..domain.shopping import (
     ShoppingItem,
     ShoppingStore,
     StoreRenameResult,
 )
-
+from .base import bool_col, row_to_dict, rows_to_dicts
 
 # The repo has a method named ``list`` which shadows the builtin
 # inside class scope under mypy's strict resolution. Use this alias
@@ -125,7 +123,7 @@ class SqliteShoppingRepo:
             raise ValueError("shopping item text must not be empty")
         if store:
             store = await self._canonical_store_name(store)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         item = ShoppingItem(
             id=uuid.uuid4().hex,
             text=text,

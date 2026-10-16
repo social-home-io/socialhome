@@ -11,7 +11,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +19,6 @@ import pytest
 from socialhome.authority_cert import sign_authority_cert
 from socialhome.authority_sig import sign_authority_event, strip_authority_sig_fields
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
-from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
     SpaceAdminAuthorityRevoked,
@@ -32,6 +31,7 @@ from socialhome.domain.federation import (
     FederationEventType,
 )
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
@@ -247,7 +247,7 @@ async def _deliver(env, payload, *, sender):
             event_type=FET.SPACE_AUTHORITY_ROTATED,
             from_instance=sender,
             to_instance="us",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload=payload,
             space_id=payload.get("space_id"),
         )
@@ -323,7 +323,7 @@ async def test_bundle_parts_not_signed_by_the_new_key_are_ignored(env):
             event_type=FET.SPACE_AUTHORITY_ROTATED,
             from_instance=env.fed.own_instance_id,
             to_instance="member-household",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload={
                 "space_id": SPACE,
                 "authority_cert": cert,
@@ -582,7 +582,7 @@ async def _begin(env, *, sender="v44", echo=None, space_id=SPACE, raw=False):
             event_type=FET.SPACE_SYNC_BEGIN,
             from_instance=sender,
             to_instance=env.fed.own_instance_id,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload=payload,
             space_id=space_id,
         )
@@ -1110,7 +1110,7 @@ async def test_member_stores_the_cert_from_the_bundle(env):
             event_type=FET.SPACE_AUTHORITY_ROTATED,
             from_instance=env.fed.own_instance_id,
             to_instance="member-household",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload={**bundle, "writer_cert": cert},
             space_id=SPACE,
         )
@@ -1130,7 +1130,7 @@ async def test_member_ignores_a_bundle_cert_from_a_non_owner(env):
             event_type=FET.SPACE_AUTHORITY_ROTATED,
             from_instance="not-the-owner",
             to_instance="member-household",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload={**bundle, "writer_cert": {"x": 1}},
             space_id=SPACE,
         )
@@ -1217,7 +1217,7 @@ async def test_member_takes_the_channel_grant_from_the_owner_bundle_only(env):
                 event_type=FET.SPACE_AUTHORITY_ROTATED,
                 from_instance=sender,
                 to_instance="member-household",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload={**bundle, "gfs_channel": {"grant": sender}},
                 space_id=SPACE,
             )

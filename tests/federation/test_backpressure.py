@@ -17,8 +17,8 @@ from __future__ import annotations
 import pytest
 
 from socialhome.federation.sync_rtc import SEND_HWM_BYTES, SyncRtcSession
-from socialhome.federation.transport import SEND_HWM_BYTES as FED_HWM, _RtcPeer
-
+from socialhome.federation.transport import SEND_HWM_BYTES as FED_HWM
+from socialhome.federation.transport import _RtcPeer
 
 # ── fed-v1 transport ────────────────────────────────────────────────
 

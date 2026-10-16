@@ -15,6 +15,7 @@ shared session keys and ``RemoteInstance`` row.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import hashlib
@@ -25,11 +26,10 @@ import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import aiohttp
-import asyncio
 import orjson as _orjson
 
 if TYPE_CHECKING:
@@ -45,7 +45,6 @@ from ..crypto import (
     derive_instance_id,
 )
 from ..db import AsyncDatabase
-from ..peer_http import post_to_peer
 from ..domain.events import (
     ConnectionReachable,
     ConnectionUnreachable,
@@ -59,10 +58,6 @@ from ..domain.events import (
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
-from ..domain.federation_capabilities import FederationCapability
-from ..domain.space import parse_have_seq
-from ..domain.media_validator import validate_inbound_media_meta
-from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from ..domain.federation import (
     DELIVERY_ERROR_MESH_DEFER_FULL,
     DELIVERY_ERROR_MESH_DEFERRED,
@@ -83,39 +78,33 @@ from ..domain.federation import (
     RemoteInstance,
     pending_kind,
 )
+from ..domain.federation_capabilities import FederationCapability
+from ..domain.media_validator import validate_inbound_media_meta
+from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
+from ..peer_http import post_to_peer
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
-from .encoder import FederationEncoder
-from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
-from .mesh_member_claim import (
-    MESH_CLAIM_IDENTITY_PK_FIELD,
-    MESH_CLAIM_VERSION_FIELD,
-    parse_mesh_member_claim,
-)
+from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from .app_framing import (
     APP_AEAD_SUITE_AESGCM_256,
     SUPPORTED_APP_AEAD_SUITES,
     UnsupportedAppAeadSuite,
 )
-from .media_framing import (
-    MEDIA_AEAD_SUITE_AESGCM_256,
-    SUPPORTED_MEDIA_AEAD_SUITES,
-    UnsupportedMediaAeadSuite,
-)
-from .pq_signer import PqSigner
+from .encoder import FederationEncoder
+from .event_dispatch_registry import EventDispatchRegistry
 from .inbound_validator import (
     InboundContext,
     InboundPipeline,
     _InboxInstance,
     make_ban_check,
     make_check_deprovisioned_author,
-    make_check_space_archived,
-    make_check_space_writer,
-    make_check_replay,
     make_check_peer_class,
     make_check_relay_opt_in,
+    make_check_replay,
+    make_check_space_archived,
+    make_check_space_writer,
     make_check_timestamp,
     make_check_unpairing,
     make_confirm_relay_approval,
@@ -128,10 +117,21 @@ from .inbound_validator import (
     make_verify_signature,
     run_post_decrypt_gates,
 )
+from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
+from .media_framing import (
+    MEDIA_AEAD_SUITE_AESGCM_256,
+    SUPPORTED_MEDIA_AEAD_SUITES,
+    UnsupportedMediaAeadSuite,
+)
+from .mesh_member_claim import (
+    MESH_CLAIM_IDENTITY_PK_FIELD,
+    MESH_CLAIM_VERSION_FIELD,
+    parse_mesh_member_claim,
+)
 from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
-from .event_dispatch_registry import EventDispatchRegistry
+from .pq_signer import PqSigner
 
 
 def _dumps(obj: dict) -> str:
@@ -285,51 +285,51 @@ class FederationService:
     """
 
     __slots__ = (
-        "_db",
-        "_federation_repo",
-        "_outbox_repo",
-        "_key_manager",
-        "_bus",
-        "_own_instance_id",
-        "_own_identity_seed",
-        "_own_identity_pk",
-        "_own_pq_seed",
-        "_own_pq_pk",
-        "_sig_suite",
-        "_http_client",
-        "_replay_cache",
-        "_sync_manager",
-        "_call_signaling",
-        "_ice_servers",
-        "_idempotency_cache",
-        "_typing_service",
-        "_dm_routing_service",
-        "_transport",
-        "_presence_service",
-        "_online_status_service",
-        "_space_sync_service",
-        "_space_sync_receiver",
-        "_encoder",
-        "_pairing",
-        "_inbound_pipeline",
-        "_rtc_inbound_pipeline",
-        "_event_registry",
-        "_user_repo",
-        "_space_repo",
-        "_space_remote_member_repo",
-        "_pending_seat_buffer",
-        "_route_service",
-        "_last_mesh_begin_at",
-        "_relay_accepted_at",
-        "_routed_handler",
         "_app_fed",
+        "_archived_write_listeners",
+        "_bus",
+        "_call_signaling",
+        "_db",
+        "_deferred_mesh_bytes",
+        "_deferred_mesh_cap_logged",
         "_deferred_mesh_queues",
         "_deferred_mesh_tasks",
         "_deferred_mesh_wake",
-        "_deferred_mesh_bytes",
-        "_deferred_mesh_cap_logged",
+        "_dm_routing_service",
+        "_encoder",
+        "_event_registry",
+        "_federation_repo",
+        "_http_client",
+        "_ice_servers",
+        "_idempotency_cache",
+        "_inbound_pipeline",
+        "_key_manager",
+        "_last_mesh_begin_at",
+        "_online_status_service",
+        "_outbox_repo",
+        "_own_identity_pk",
+        "_own_identity_seed",
+        "_own_instance_id",
+        "_own_pq_pk",
+        "_own_pq_seed",
+        "_pairing",
+        "_pending_seat_buffer",
+        "_presence_service",
+        "_relay_accepted_at",
+        "_replay_cache",
+        "_route_service",
+        "_routed_handler",
+        "_rtc_inbound_pipeline",
+        "_sig_suite",
+        "_space_remote_member_repo",
+        "_space_repo",
+        "_space_sync_receiver",
+        "_space_sync_service",
         "_stopping",
-        "_archived_write_listeners",
+        "_sync_manager",
+        "_transport",
+        "_typing_service",
+        "_user_repo",
     )
 
     def __init__(
@@ -385,7 +385,7 @@ class FederationService:
         # seated as a read-only Follower.
         self._space_repo = None
         self._space_remote_member_repo = None
-        self._pending_seat_buffer: "PendingSeatBuffer | None" = None
+        self._pending_seat_buffer: PendingSeatBuffer | None = None
         #: Hear writes the archived-space gate refused (v_48 pages answer a
         #: member's proposal ``refused/archived``).
         self._archived_write_listeners: list = []
@@ -763,7 +763,7 @@ class FederationService:
         self._space_repo = space_repo
         self._space_remote_member_repo = space_remote_member_repo
 
-    def attach_pending_seat_buffer(self, buffer: "PendingSeatBuffer") -> None:
+    def attach_pending_seat_buffer(self, buffer: PendingSeatBuffer) -> None:
         """Hold space writes whose seat has not reached the roster mirror.
 
         The §24.11 follower gate and the authorship rule both judge a write
@@ -832,7 +832,7 @@ class FederationService:
         )
 
     @property
-    def transport(self) -> "FederationTransport | None":
+    def transport(self) -> FederationTransport | None:
         """The attached :class:`FederationTransport` facade, or ``None``.
 
         Read by the outbox redelivery, which reaches the relay tier
@@ -1072,7 +1072,7 @@ class FederationService:
         this never touches reachability — it only lets the operator see
         "handed to the connection server at T" beside "last connected".
         """
-        self._relay_accepted_at[instance_id] = datetime.now(timezone.utc).strftime(
+        self._relay_accepted_at[instance_id] = datetime.now(UTC).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
 
@@ -1107,6 +1107,10 @@ class FederationService:
         try:
             peer = await self._federation_repo.get_instance(instance_id)
         except Exception:  # pragma: no cover — defensive
+            log.debug(
+                "FederationService.peer_supports: fail-soft error ignored",
+                exc_info=True,
+            )
             return False
         if peer is None:
             return False
@@ -1130,6 +1134,10 @@ class FederationService:
         try:
             peer = await self._federation_repo.get_instance(instance_id)
         except Exception:  # pragma: no cover — defensive
+            log.debug(
+                "FederationService.peer_identity_public_key: fail-soft error ignored",
+                exc_info=True,
+            )
             return None
         if peer is None:
             return None
@@ -1171,12 +1179,20 @@ class FederationService:
         try:
             peer = await self._federation_repo.get_instance(instance_id)
         except Exception:  # pragma: no cover — defensive
+            log.debug(
+                "FederationService.space_member_version: fail-soft error ignored",
+                exc_info=True,
+            )
             return 0
         if peer is not None:
             return int(peer.proto_version)
         try:
             claim = await self._federation_repo.get_space_member_version(instance_id)
         except Exception:  # pragma: no cover — defensive
+            log.debug(
+                "FederationService.space_member_version: fail-soft error ignored",
+                exc_info=True,
+            )
             return 0
         return int(claim[0]) if claim is not None else 0
 
@@ -1193,6 +1209,10 @@ class FederationService:
                 return None
             claim = await self._federation_repo.get_space_member_version(instance_id)
         except Exception:  # pragma: no cover — defensive
+            log.debug(
+                "FederationService.mesh_member_identity_pk: fail-soft error ignored",
+                exc_info=True,
+            )
             return None
         if claim is None or not claim[1]:
             return None
@@ -1238,6 +1258,10 @@ class FederationService:
             if await self._federation_repo.get_instance(origin) is not None:
                 return False
         except Exception:  # pragma: no cover — defensive
+            log.debug(
+                "FederationService.record_mesh_member_claim: fail-soft error ignored",
+                exc_info=True,
+            )
             return False
         payload = event.payload if isinstance(event.payload, dict) else {}
         claim = parse_mesh_member_claim(payload, instance_id=origin)
@@ -1295,6 +1319,10 @@ class FederationService:
         try:
             peer = await self._federation_repo.get_instance(instance_id)
         except Exception:  # pragma: no cover — defensive
+            log.debug(
+                "FederationService.is_space_session_peer: fail-soft error ignored",
+                exc_info=True,
+            )
             return False
         return peer is not None and peer.source is InstanceSource.SPACE_SESSION
 
@@ -1316,6 +1344,10 @@ class FederationService:
         try:
             peer = await self._federation_repo.get_instance(instance_id)
         except Exception:  # pragma: no cover — defensive
+            log.debug(
+                "FederationService.is_confirmed_peer: fail-soft error ignored",
+                exc_info=True,
+            )
             return False
         if peer is None:
             return False
@@ -1358,7 +1390,7 @@ class FederationService:
         ``"invite-bootstrap:<nonce>"``) so they can never collide with
         an envelope ``msg_id``.
         """
-        if self._replay_cache.seen(msg_id, now=datetime.now(timezone.utc)):
+        if self._replay_cache.seen(msg_id, now=datetime.now(UTC)):
             return True
         await self._federation_repo.insert_replay_id(msg_id)
         return False
@@ -1514,6 +1546,7 @@ class FederationService:
                     "send_event: transport error to %s: %s",
                     to_instance_id,
                     exc,
+                    exc_info=True,
                 )
                 status_code = None
 
@@ -1630,6 +1663,7 @@ class FederationService:
                 "send_event_once: transport error to %s: %s",
                 instance.id,
                 exc,
+                exc_info=True,
             )
             return DeliveryResult(
                 instance_id=instance.id, ok=False, error="transport_error"
@@ -1727,6 +1761,7 @@ class FederationService:
             log.warning(
                 "send_event: failed to decrypt session key for %s",
                 instance.id,
+                exc_info=True,
             )
             log.debug(
                 "send_event: key decrypt error detail for %s: %s",
@@ -1747,7 +1782,7 @@ class FederationService:
             "event_type": event_type.value,
             "from_instance": self._own_instance_id,
             "to_instance": instance.id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "encrypted_payload": encrypted_payload,
             "space_id": space_id,
             "proto_version": 1,
@@ -1835,7 +1870,7 @@ class FederationService:
             "event_type": data["event_type"],
             "from_instance": data["from_instance"],
             "to_instance": data["to_instance"],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "encrypted_payload": data["encrypted_payload"],
             "space_id": data.get("space_id"),
             "proto_version": data.get("proto_version", 1),
@@ -1939,6 +1974,7 @@ class FederationService:
                 " invalidating the cached route and retrying once",
                 to_instance_id,
                 exc,
+                exc_info=True,
             )
             await self._route_service.invalidate(to_instance_id)
             retry = await self._route_service.discover_route(to_instance_id)
@@ -1969,6 +2005,7 @@ class FederationService:
                     "send_with_mesh_fallback: routed retry to %s failed: %s",
                     to_instance_id,
                     retry_exc,
+                    exc_info=True,
                 )
                 return DeliveryResult(
                     instance_id=to_instance_id,
@@ -2054,6 +2091,7 @@ class FederationService:
                 space_id,
                 host_instance_id,
                 exc,
+                exc_info=True,
             )
             return False
 
@@ -2157,6 +2195,7 @@ class FederationService:
             log.warning(
                 "send_media_chunk: failed to decrypt session key for %s",
                 instance.id,
+                exc_info=True,
             )
             return None
         chunk_sha256 = b64url_encode(hashlib.sha256(raw_chunk).digest())
@@ -2167,7 +2206,7 @@ class FederationService:
         }
         encrypted_payload = self._encrypt_payload(_dumps(metadata), session_key)
         msg_id = str(uuid.uuid4())
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
         effective_suite = instance.sig_suite or self._encoder.sig_suite
         envelope_dict: dict = {
             "msg_id": msg_id,
@@ -2301,6 +2340,7 @@ class FederationService:
             log.warning(
                 "send_app_message: failed to decrypt session key for %s",
                 instance.id,
+                exc_info=True,
             )
             return None
         # Serialize the plaintext payload before encrypting so we can hash it.
@@ -2317,7 +2357,7 @@ class FederationService:
         }
         encrypted_payload = self._encrypt_payload(_dumps(metadata), session_key)
         msg_id = str(uuid.uuid4())
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
         effective_suite = instance.sig_suite or self._encoder.sig_suite
         envelope_dict: dict = {
             "msg_id": msg_id,
@@ -3467,6 +3507,7 @@ class FederationService:
                 event.from_instance,
                 event.space_id,
                 exc,
+                exc_info=True,
             )
         # In DataChannel mode this runs inside the session's own chunk-drain
         # task, which ``close_session`` cancels: defer the close to the next
@@ -4250,7 +4291,7 @@ def _require_fields(data: dict, *fields: str) -> None:
 async def _lookup_by_inbox_id(
     repo: AbstractFederationRepo,
     inbox_id: str,
-) -> "_InboxInstance | None":
+) -> _InboxInstance | None:
     """Find a ``RemoteInstance`` by its ``local_inbox_id``.
 
     Includes unpair tombstones: the pipeline's unpairing gate must see one

@@ -77,7 +77,7 @@ def load_static_assets(directory: Path) -> dict[str, StaticAsset]:
 class DashboardRenderer:
     """Renders dashboard pages in a given locale."""
 
-    __slots__ = ("_env", "_catalog", "_static")
+    __slots__ = ("_catalog", "_env", "_static")
 
     def __init__(self, catalog: Catalog, *, static_dir: Path = STATIC_DIR) -> None:
         self._catalog = catalog

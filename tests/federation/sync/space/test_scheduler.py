@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,11 +18,11 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEventType, PairingStatus
 from socialhome.domain.space import (
-    SpaceRole,
     JoinMode,
     Space,
     SpaceFeatures,
     SpaceMember,
+    SpaceRole,
     SpaceType,
 )
 from socialhome.federation.sync.space import scheduler as scheduler_mod
@@ -41,6 +41,8 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 
 class _FakeFederation:
     def __init__(self, *, confirmed: set[str] | None = None):
+        #: Instance ids seated from an invite link (relay-only).
+        self.space_session: set[str] = set()
         self.sent: list[dict] = []
         #: Instance ids ``is_confirmed_peer`` answers True for. Anything
         #: else is treated as reachable only over the mesh.
@@ -72,9 +74,6 @@ class _FakeFederation:
 
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         return instance_id in self.confirmed
-
-    #: Instance ids seated from an invite link (relay-only).
-    space_session: set[str] = set()
 
     async def is_space_session_peer(self, instance_id: str) -> bool:
         return instance_id in self.space_session
@@ -1147,7 +1146,7 @@ async def test_mesh_catchup_also_asks_the_trusted_inviting_admin(db, delegation)
         role=SpaceRole.ADMIN.value,
     )
     await spaces.set_invited_by("sp-inv", "admin-hh", 0)
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     await spaces.set_owner_statement(
         "sp-inv",
         json.dumps(

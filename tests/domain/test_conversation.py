@@ -2,29 +2,28 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
 from socialhome.domain.conversation import (
+    MESSAGE_TYPES,
     MUTE_DURATIONS,
     MUTED_FOREVER,
     Conversation,
     ConversationMember,
     ConversationMessage,
     ConversationType,
-    MESSAGE_TYPES,
     RemoteConversationMember,
     mute_active,
     mute_until_for,
 )
 
-
 # ── Mute ─────────────────────────────────────────────────────────────────────
 
 
 def test_mute_until_for_presets():
-    now = datetime(2026, 9, 29, 10, 0, 0, 123456, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 29, 10, 0, 0, 123456, tzinfo=UTC)
     assert mute_until_for("1h", now=now) == "2026-09-29T11:00:00+00:00"
     assert mute_until_for("8h", now=now) == "2026-09-29T18:00:00+00:00"
     assert mute_until_for("1w", now=now) == "2026-10-06T10:00:00+00:00"
@@ -40,11 +39,11 @@ def test_mute_until_for_normalises_to_utc():
 
 def test_mute_until_for_rejects_unknown_length():
     with pytest.raises(ValueError):
-        mute_until_for("2d", now=datetime.now(timezone.utc))
+        mute_until_for("2d", now=datetime.now(UTC))
 
 
 def test_mute_active_reads_past_as_unmuted():
-    now = datetime(2026, 9, 29, 10, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 29, 10, 0, 0, tzinfo=UTC)
     assert mute_active("2026-09-29T11:00:00+00:00", now=now) is True
     assert mute_active("2026-09-29T09:59:59+00:00", now=now) is False
     assert mute_active("2026-09-29T10:00:00+00:00", now=now) is False
@@ -73,7 +72,7 @@ def test_message_types_is_frozenset():
 
 def test_conversation_dm():
     """Conversation can be constructed as a DM."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     conv = Conversation(id="conv-1", type=ConversationType.DM, created_at=now)
     assert conv.id == "conv-1"
     assert conv.type == ConversationType.DM
@@ -84,7 +83,7 @@ def test_conversation_dm():
 
 def test_conversation_group_dm():
     """Conversation with GROUP_DM type can carry a name."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     conv = Conversation(
         id="conv-2",
         type=ConversationType.GROUP_DM,
@@ -103,7 +102,7 @@ def test_conversation_type_string_values():
 
 def test_conversation_message_construction():
     """ConversationMessage can be constructed with required fields and defaults."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     msg = ConversationMessage(
         id="msg-1",
         conversation_id="conv-1",
@@ -120,7 +119,7 @@ def test_conversation_message_construction():
 
 def test_conversation_message_soft_delete():
     """soft_delete returns a new message with content cleared and deleted=True."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     msg = ConversationMessage(
         id="msg-1",
         conversation_id="conv-1",
@@ -140,7 +139,7 @@ def test_conversation_message_soft_delete():
 
 def test_conversation_message_edit():
     """edit returns a new message with updated content and edited_at set."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     msg = ConversationMessage(
         id="msg-1",
         conversation_id="conv-1",
@@ -158,8 +157,8 @@ def test_conversation_message_edit():
 
 def test_conversation_message_edit_with_explicit_now():
     """edit uses the provided 'now' datetime for edited_at."""
-    now = datetime.now(timezone.utc)
-    edit_time = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    now = datetime.now(UTC)
+    edit_time = datetime(2025, 6, 1, tzinfo=UTC)
     msg = ConversationMessage(
         id="msg-1",
         conversation_id="conv-1",

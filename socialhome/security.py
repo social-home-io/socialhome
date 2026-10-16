@@ -19,7 +19,6 @@ from typing import Any
 
 from aiohttp import web
 
-
 #: Fields that MUST NEVER appear in any API response or federation payload.
 #:
 #: The route layer calls :func:`sanitise_for_api` on any dict derived from a

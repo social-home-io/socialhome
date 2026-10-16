@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -15,7 +15,6 @@ from socialhome.app_keys import (
     auto_pair_coordinator_key,
     auto_pair_inbox_key,
     capabilities_outbound_key,
-    db_key as _db_key,
     dm_routing_service_key,
     event_bus_key,
     federation_repo_key,
@@ -30,6 +29,9 @@ from socialhome.app_keys import (
     peer_home_sharing_service_key,
     peer_unpair_service_key,
     platform_adapter_key,
+)
+from socialhome.app_keys import (
+    db_key as _db_key,
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
@@ -1401,7 +1403,7 @@ async def test_transport_detail_returns_recent_relay(client):
     """For a peer with a recent DM relay, the endpoint returns
     {last_relay: {via, ts}}."""
     svc = client.app[dm_routing_service_key]
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     await _seed_relay(svc, target="peer-target", via="peer-relay", ts=now)
 
     r = await client.get(
@@ -2197,7 +2199,7 @@ class _SendRecorderPatch:
         self.sent: list[dict] = []
         self.ok = True
 
-    def install(self, client, monkeypatch) -> "_SendRecorderPatch":
+    def install(self, client, monkeypatch) -> _SendRecorderPatch:
         rec = self
 
         async def _send(self_, *, to_instance_id, event_type, payload, **kw):
@@ -2600,8 +2602,7 @@ def _enqueue_request(client, *, ts: str) -> str:
 async def test_approving_a_stale_request_is_410(client, monkeypatch):
     rec = _SendRecorderPatch().install(client, monkeypatch)
     old = (
-        datetime.now(timezone.utc)
-        - timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS + 60)
+        datetime.now(UTC) - timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS + 60)
     ).isoformat()
     request_id = _enqueue_request(client, ts=old)
 
@@ -2620,7 +2621,7 @@ async def test_approving_stores_a_pending_row_until_the_requester_confirms(
 ):
     rec = _SendRecorderPatch().install(client, monkeypatch)
     await client.app[federation_repo_key].save_instance(_fake_instance("peer-b"))
-    request_id = _enqueue_request(client, ts=datetime.now(timezone.utc).isoformat())
+    request_id = _enqueue_request(client, ts=datetime.now(UTC).isoformat())
 
     r = await client.post(
         f"/api/pairing/auto-pair-requests/{request_id}/approve",

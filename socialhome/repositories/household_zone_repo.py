@@ -16,8 +16,7 @@ between a service's reads and its write can't slip past them.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -142,7 +141,7 @@ def _clear_home(conn: sqlite3.Connection, *, except_id: str) -> None:
     )
 
 
-async def _translating_name_clash(run: Awaitable[T]) -> T:
+async def _translating_name_clash[T](run: Awaitable[T]) -> T:
     """Await ``run``; the ``UNIQUE`` on ``name`` becomes
     :class:`HouseholdZoneNameTakenError` (409) so a write that raced the
     service's own name check never surfaces as a 500. Every other

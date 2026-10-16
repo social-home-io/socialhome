@@ -35,7 +35,7 @@ meaningful rather than a handler that silently does nothing.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -55,6 +55,10 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
 )
+from socialhome.federation.inbound_validator import (
+    InboundContext,
+    run_post_decrypt_gates,
+)
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
@@ -68,10 +72,6 @@ from socialhome.federation.owner_bound_id import (
     SPACE_TASK_LIST_KIND,
     SPACE_TIMETABLE_KIND,
     mint_owner_bound_id,
-)
-from socialhome.federation.inbound_validator import (
-    InboundContext,
-    run_post_decrypt_gates,
 )
 from socialhome.federation.sync.space.exporter import ALLOWED_RESOURCES
 from socialhome.services.space_crypto_service import (
@@ -210,14 +210,18 @@ _SEED = [
         ("local", LOCAL_USER, "local"),
     ),
     (
-        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
-        " identity_public_key) VALUES(?,?,?,?,?)",
+        (
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES(?,?,?,?,?)"
+        ),
         (SP, SP, HOST, "anna", "00" * 32),
     ),
     *[
         (
-            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
-            " VALUES(?,?,?,?)",
+            (
+                "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+                " VALUES(?,?,?,?)"
+            ),
             (SP, inst, uid, role),
         )
         for inst, uid, role in (
@@ -236,8 +240,10 @@ _SEED = [
     # bazaar anchor, a bare schedule anchor, and one by our local user.
     *[
         (
-            "INSERT INTO space_posts(id, space_id, author, type, content)"
-            " VALUES(?,?,?,?,?)",
+            (
+                "INSERT INTO space_posts(id, space_id, author, type, content)"
+                " VALUES(?,?,?,?,?)"
+            ),
             (pid, SP, author, ptype, "body"),
         )
         for pid, author, ptype in (
@@ -253,24 +259,32 @@ _SEED = [
     # state on post-a (pinned, reactions, a comment count) that no
     # re-send may reset.
     (
-        "INSERT INTO space_posts(id, space_id, author, type, content, deleted)"
-        " VALUES('post-del', ?, 'u-a', 'text', NULL, 1)",
+        (
+            "INSERT INTO space_posts(id, space_id, author, type, content, deleted)"
+            " VALUES('post-del', ?, 'u-a', 'text', NULL, 1)"
+        ),
         (SP,),
     ),
     (
-        "INSERT INTO space_posts(id, space_id, author, type, content, moderated)"
-        " VALUES('post-mod', ?, 'u-a', 'text', 'held', 1)",
+        (
+            "INSERT INTO space_posts(id, space_id, author, type, content, moderated)"
+            " VALUES('post-mod', ?, 'u-a', 'text', 'held', 1)"
+        ),
         (SP,),
     ),
     (
-        "UPDATE space_posts SET pinned=1, comment_count=3,"
-        " reactions='{\"👍\": [\"u-o\"]}' WHERE id='post-a'",
+        (
+            "UPDATE space_posts SET pinned=1, comment_count=3,"
+            " reactions='{\"👍\": [\"u-o\"]}' WHERE id='post-a'"
+        ),
         (),
     ),
     *[
         (
-            "INSERT INTO space_post_comments(id, post_id, author, type, content)"
-            " VALUES(?, ?, ?, 'text', 'c')",
+            (
+                "INSERT INTO space_post_comments(id, post_id, author, type, content)"
+                " VALUES(?, ?, ?, 'text', 'c')"
+            ),
             (cid, pid, author),
         )
         for cid, pid, author in (
@@ -279,102 +293,138 @@ _SEED = [
         )
     ],
     (
-        "INSERT INTO space_task_lists(id, space_id, name, created_by)"
-        " VALUES('list-a', ?, 'L', 'u-a')",
+        (
+            "INSERT INTO space_task_lists(id, space_id, name, created_by)"
+            " VALUES('list-a', ?, 'L', 'u-a')"
+        ),
         (SP,),
     ),
     (
-        "INSERT INTO space_tasks(id, list_id, space_id, title, created_by)"
-        " VALUES('task-a', 'list-a', ?, 'A task', 'u-a')",
+        (
+            "INSERT INTO space_tasks(id, list_id, space_id, title, created_by)"
+            " VALUES('task-a', 'list-a', ?, 'A task', 'u-a')"
+        ),
         (SP,),
     ),
     (
-        "INSERT INTO space_pages(id, space_id, title, content, created_by)"
-        " VALUES('page-a', ?, 'A page', 'body', 'u-a')",
+        (
+            "INSERT INTO space_pages(id, space_id, title, content, created_by)"
+            " VALUES('page-a', ?, 'A page', 'body', 'u-a')"
+        ),
         (SP,),
     ),
     (
-        "INSERT INTO stickies(id, space_id, author, content)"
-        " VALUES('sticky-a', ?, 'u-a', 'A sticky')",
+        (
+            "INSERT INTO stickies(id, space_id, author, content)"
+            " VALUES('sticky-a', ?, 'u-a', 'A sticky')"
+        ),
         (SP,),
     ),
     (
-        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
-        " end_dt, created_by) VALUES('ev-a', ?, 'A event', ?, ?, 'u-a')",
+        (
+            "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
+            " end_dt, created_by) VALUES('ev-a', ?, 'A event', ?, ?, 'u-a')"
+        ),
         (SP, _OCC, _END),
     ),
     (
-        "INSERT INTO space_calendar_rsvps(event_id, user_id, status,"
-        " occurrence_at, updated_at) VALUES('ev-a', 'u-a', 'maybe', ?, ?)",
+        (
+            "INSERT INTO space_calendar_rsvps(event_id, user_id, status,"
+            " occurrence_at, updated_at) VALUES('ev-a', 'u-a', 'maybe', ?, ?)"
+        ),
         (_OCC, "2026-05-01T00:00:00+00:00"),
     ),
     # A capacity-limited event by u-a: u-o has asked to join, u-w (a
     # household-a member) waits for a seat, nobody is going yet.
     (
-        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
-        " end_dt, created_by, capacity) VALUES('ev-cap', ?, 'Cap', ?, ?, 'u-a', 1)",
+        (
+            "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
+            " end_dt, created_by, capacity) VALUES('ev-cap', ?, 'Cap', ?, ?, 'u-a', 1)"
+        ),
         (SP, _OCC, _END),
     ),
     *[
         (
-            "INSERT INTO space_calendar_rsvps(event_id, user_id, status,"
-            " occurrence_at, updated_at) VALUES('ev-cap', ?, ?, ?, ?)",
+            (
+                "INSERT INTO space_calendar_rsvps(event_id, user_id, status,"
+                " occurrence_at, updated_at) VALUES('ev-cap', ?, ?, ?, ?)"
+            ),
             (uid, status, _OCC, "2026-05-01T00:00:00+00:00"),
         )
         for uid, status in (("u-o", "requested"), ("u-w", "waitlist"))
     ],
     ("INSERT INTO space_polls(post_id, question) VALUES('post-a', 'Q')", ()),
     (
-        "INSERT INTO space_poll_options(id, post_id, text)"
-        " VALUES('opt-a', 'post-a', 'Yes')",
+        (
+            "INSERT INTO space_poll_options(id, post_id, text)"
+            " VALUES('opt-a', 'post-a', 'Yes')"
+        ),
         (),
     ),
     (
-        "INSERT INTO space_schedule_poll_meta(post_id, title)"
-        " VALUES('post-a', 'When?')",
+        (
+            "INSERT INTO space_schedule_poll_meta(post_id, title)"
+            " VALUES('post-a', 'When?')"
+        ),
         (),
     ),
     (
-        "INSERT INTO space_schedule_slots(id, post_id, slot_date)"
-        " VALUES('slot-a', 'post-a', '2026-07-01')",
+        (
+            "INSERT INTO space_schedule_slots(id, post_id, slot_date)"
+            " VALUES('slot-a', 'post-a', '2026-07-01')"
+        ),
         (),
     ),
     (
-        "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
-        " item_count) VALUES('album-a', ?, ?, 'Album', 1)",
+        (
+            "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
+            " item_count) VALUES('album-a', ?, ?, 'Album', 1)"
+        ),
         (SP, LOCAL_USER),
     ),
     (
-        "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
-        " item_count) VALUES('album-g', ?, 'u-g', 'Theirs', 0)",
+        (
+            "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
+            " item_count) VALUES('album-g', ?, 'u-g', 'Theirs', 0)"
+        ),
         (SP,),
     ),
     (
-        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
-        " filename, thumbnail_filename, width, height)"
-        " VALUES('gi-a', 'album-a', 'u-g', 'photo', 'f.webp', 't.webp', 1, 1)",
+        (
+            "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
+            " filename, thumbnail_filename, width, height)"
+            " VALUES('gi-a', 'album-a', 'u-g', 'photo', 'f.webp', 't.webp', 1, 1)"
+        ),
         (),
     ),
     (
-        "INSERT INTO space_zones(id, space_id, name, latitude, longitude,"
-        " radius_m, created_by, created_at, updated_at)"
-        " VALUES('zone-a', ?, 'Home', 47.1, 8.5, 100, 'u-adm', ?, ?)",
+        (
+            "INSERT INTO space_zones(id, space_id, name, latitude, longitude,"
+            " radius_m, created_by, created_at, updated_at)"
+            " VALUES('zone-a', ?, 'Home', 47.1, 8.5, 100, 'u-adm', ?, ?)"
+        ),
         (SP, _NOW, _NOW),
     ),
     (
-        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode,"
-        " title, end_time, currency) VALUES('post-a-listing', ?, 'u-a', 'offer',"
-        " 'Bike', ?, 'EUR')",
+        (
+            "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode,"
+            " title, end_time, currency) VALUES('post-a-listing', ?, 'u-a', 'offer',"
+            " 'Bike', ?, 'EUR')"
+        ),
         (SP, _FAR),
     ),
     (
-        "INSERT INTO bazaar_bids(id, listing_post_id, bidder_user_id, amount)"
-        " VALUES('bid-o', 'post-a-listing', 'u-o', 50)",
+        (
+            "INSERT INTO bazaar_bids(id, listing_post_id, bidder_user_id, amount)"
+            " VALUES('bid-o', 'post-a-listing', 'u-o', 50)"
+        ),
         (),
     ),
     (
-        "INSERT INTO space_timetables(id, space_id, name, created_by, updated_by,"
-        " created_at, updated_at) VALUES(?, ?, 'Plan', 'u-adm', 'u-adm', ?, ?)",
+        (
+            "INSERT INTO space_timetables(id, space_id, name, created_by, updated_by,"
+            " created_at, updated_at) VALUES(?, ?, 'Plan', 'u-adm', 'u-adm', ?, ?)"
+        ),
         (_TT_A, SP, _TS, _TS),
     ),
     # Space chat (v_55): our local user writes in SP, so its chat lives
@@ -384,21 +434,27 @@ _SEED = [
         (SP, LOCAL_USER),
     ),
     (
-        "INSERT INTO conversations(id, type, system_scope, space_id)"
-        " VALUES('chat-sp', 'group_dm', 'space', ?)",
+        (
+            "INSERT INTO conversations(id, type, system_scope, space_id)"
+            " VALUES('chat-sp', 'group_dm', 'space', ?)"
+        ),
         (SP,),
     ),
     *[
         (
-            "INSERT INTO conversation_messages(id, conversation_id,"
-            " sender_user_id, content) VALUES(?, 'chat-sp', ?, 'hello')",
+            (
+                "INSERT INTO conversation_messages(id, conversation_id,"
+                " sender_user_id, content) VALUES(?, 'chat-sp', ?, 'hello')"
+            ),
             (mid, uid),
         )
         for mid, uid in ((_CHAT_A, "u-a"), (_CHAT_L, LOCAL_USER))
     ],
     (
-        "INSERT INTO message_reactions(message_id, user_id, emoji)"
-        " VALUES(?, 'u-o', '👍')",
+        (
+            "INSERT INTO message_reactions(message_id, user_id, emoji)"
+            " VALUES(?, 'u-o', '👍')"
+        ),
         (_CHAT_A,),
     ),
 ]
@@ -428,7 +484,7 @@ def _event(event_type, payload, *, sender) -> FederationEvent:
         event_type=event_type,
         from_instance=sender,
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=dict(payload),
         space_id=SP,
     )
@@ -1357,7 +1413,7 @@ async def test_an_album_id_held_for_one_owner_is_never_claimed_for_another(env, 
 
 
 async def test_a_redelivered_album_from_its_owners_household_is_quiet(env, caplog):
-    app, db = env
+    app, _db = env
     with caplog.at_level("WARNING"):
         await _deliver(
             app,
@@ -1450,7 +1506,7 @@ async def test_an_owner_less_v33_delete_that_overtakes_a_create_keeps_it_deleted
 async def test_federated_gallery_deletes_remove_the_files(env, tmp_dir):
     """An item delete takes its files; an album delete takes every item's
     files — each unless another row still names it."""
-    app, db = env
+    app, _db = env
     media = tmp_dir / "media"
     media.mkdir(exist_ok=True)
     await _deliver(

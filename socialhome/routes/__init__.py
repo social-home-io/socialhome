@@ -12,14 +12,51 @@ import logging
 from aiohttp import web
 
 from .. import app_keys as K
+from .admin_dashboard import (
+    AdminDashboardDisplaysView,
+    AdminDashboardDisplayView,
+    AdminDashboardHaPanelConnectView,
+    AdminDashboardHaPanelsView,
+    AdminDashboardPasswordView,
+    AdminDashboardPinView,
+    AdminDashboardSessionsView,
+    AdminDashboardSetupLinkView,
+    AdminDashboardView,
+)
+from .admin_diagnostics import AdminDiagnosticsView
+from .admin_federation import (
+    AdminFederationCompatView,
+    AdminFederationExternalUrlView,
+    AdminFederationIceServersView,
+    AdminFederationResyncView,
+)
+from .admin_instance import AdminInstanceView
+from .admin_instance_bans import (
+    InstanceBanCollectionView,
+    InstanceBanDetailView,
+)
+from .aliases import AliasCollectionView, AliasItemView
+from .app_bundle import AppBundleView, AppRuntimeView
+from .apps import (
+    AppCatalogView,
+    AppCollectionView,
+    AppContactsView,
+    AppDetailView,
+    AppMessagesView,
+    AppPeersView,
+    AppPendingSessionsView,
+    AppSessionsView,
+    AppStoreCollectionView,
+    AppStoreItemView,
+    AppUpdatesView,
+    AppUpdateView,
+)
 from .backup import (
     BackupExportView,
     BackupImportView,
     BackupPostView,
     BackupPreView,
 )
-from .recovery import RecoveryKitExportView
-from .blocks import BlockCollectionView, BlockDetailView
 from .bazaar import (
     BazaarBidAcceptView,
     BazaarBidCollectionView,
@@ -34,6 +71,11 @@ from .bazaar import (
     BazaarSaveView,
     MySavedBazaarView,
     SpaceBazaarView,
+)
+from .blocks import BlockCollectionView, BlockDetailView
+from .bot_bridge import (
+    BotBridgeConversationPostView,
+    BotBridgeSpacePostView,
 )
 from .calendar import (
     CalendarCollectionView,
@@ -75,14 +117,14 @@ from .child_protection import (
     CPBlockView,
     CPConversationCollectionView,
     CPDmContactCollectionView,
+    CPGuardiansView,
     CPKickView,
     CPMembershipAuditView,
     CPMinorsForGuardianView,
-    MeProtectionView,
-    CPSpaceCollectionView,
-    CPGuardiansView,
     CPProtectionStatusView,
     CPProtectionView,
+    CPSpaceCollectionView,
+    MeProtectionView,
 )
 from .conversations import (
     ConversationCollectionView,
@@ -92,20 +134,20 @@ from .conversations import (
     ConversationGroupView,
     ConversationItemView,
     ConversationLeaveView,
-    ConversationMuteView,
-    ConversationNotifPrefsView,
-    ConversationMemberView,
     ConversationMembersView,
+    ConversationMemberView,
     ConversationMessageDeliveryView,
+    ConversationMessageItemView,
     ConversationMessageReactionListView,
     ConversationMessageReactionView,
-    ConversationMessageItemView,
     ConversationMessageView,
+    ConversationMuteView,
+    ConversationNotifPrefsView,
     ConversationReadView,
     ConversationUnreadView,
 )
+from .corner import CornerView
 from .federation import FederationInboxView
-from .ha_integration import HaIntegrationFederationBaseView
 from .feed import (
     FeedCollectionView,
     FeedReadWatermarkView,
@@ -118,16 +160,7 @@ from .feed import (
     PostSaveView,
     SavedPostsView,
 )
-from .gfs import (
-    GfsDefaultConnectionView,
-    GfsAppealView,
-    GfsConnectionCollectionView,
-    GfsConnectionDetailView,
-    GfsPublicationsView,
-    GfsSpacePublicationsView,
-    GfsSpacePublishView,
-    GfsSpaceServersView,
-)
+from .friends import FriendsView, FriendView
 from .gallery import (
     AlbumDetailView,
     AlbumItemCollectionView,
@@ -136,28 +169,64 @@ from .gallery import (
     HouseholdAlbumCollectionView,
     SpaceAlbumCollectionView,
 )
-from .health import HealthView
-from .household import HouseholdChatView, HouseholdPreferencesView
-from .apps import (
-    AppCatalogView,
-    AppCollectionView,
-    AppContactsView,
-    AppDetailView,
-    AppMessagesView,
-    AppPeersView,
-    AppPendingSessionsView,
-    AppSessionsView,
-    AppStoreCollectionView,
-    AppStoreItemView,
-    AppUpdateView,
-    AppUpdatesView,
+from .gfs import (
+    GfsAppealView,
+    GfsConnectionCollectionView,
+    GfsConnectionDetailView,
+    GfsDefaultConnectionView,
+    GfsPublicationsView,
+    GfsSpacePublicationsView,
+    GfsSpacePublishView,
+    GfsSpaceServersView,
 )
-from .app_bundle import AppBundleView, AppRuntimeView
-from .me_preferences import MePreferencesView
-from .me_space_location import MeSpaceLocationSharingView
+from .ha_integration import HaIntegrationFederationBaseView
+from .ha_users import HaUserProvisionView, HaUsersCollectionView
+from .health import HealthView
+from .highlight_publications import (
+    HighlightPublishTokenView,
+    HighlightPublishView,
+)
+from .highlights import (
+    HighlightDetailView,
+    HighlightDmReplyView,
+    HighlightFrameDetailView,
+    HighlightFrameReactionView,
+    HighlightFramesCollectionView,
+    HighlightFrameViewView,
+    HighlightReportView,
+    HighlightsCollectionView,
+    HighlightShareView,
+)
+from .household import HouseholdChatView, HouseholdPreferencesView
+from .household_zones import (
+    HouseholdZoneDetailView,
+    HouseholdZonesCollectionView,
+    HouseholdZoneSyncView,
+)
+from .instance import InstanceConfigView
 from .link_preview import LinkPreviewView
 from .map_tiles import MapConfigView, MapTileView
+from .me_preferences import MePreferencesView
+from .me_space_location import MeSpaceLocationSharingView
 from .media import MediaServeView, MediaUploadView
+from .moments import (
+    MomentArchiveView,
+    MomentCollectionView,
+    MomentDetailView,
+    MomentFollowsCollectionView,
+    MomentFollowsDetailView,
+    MomentHashtagsView,
+    MomentReactionView,
+    MomentReportView,
+)
+from .moments_public import (
+    GfsUserDirectoryProxyView,
+    GfsUserPictureProxyView,
+    MomentPublicFollowCollectionView,
+    MomentPublicFollowDetailView,
+    MomentPublicRegistrationCollectionView,
+    MomentPublicRegistrationDetailView,
+)
 from .notifications import (
     NotificationCollectionView,
     NotificationReadAllView,
@@ -199,6 +268,7 @@ from .pairing import (
     PairingRelayDeclineView,
     PairingRelayRequestCollectionView,
 )
+from .peer_spaces import PeerSpaceCollectionView
 from .polls import (
     PollCloseView,
     PollSummaryView,
@@ -208,6 +278,47 @@ from .polls import (
     SchedulePollRespondView,
     SchedulePollSlotResponseView,
     SchedulePollSummaryView,
+)
+from .presence import PresenceCollectionView, PresenceLocationView
+from .public_spaces import (
+    PublicSpaceBlockInstanceView,
+    PublicSpaceCollectionView,
+    PublicSpaceHideView,
+    PublicSpaceJoinRequestView,
+    PublicSpacesRefreshView,
+)
+from .push import PushSubscribeView, PushSubscriptionListView, PushVapidKeyView
+from .recovery import RecoveryKitExportView
+from .reports import (
+    AdminReportCollectionView,
+    AdminReportResolveView,
+    ReportCollectionView,
+    SpaceReportCollectionView,
+    SpaceReportResolveView,
+)
+from .search import SearchView
+from .setup import (
+    HaosCompleteSetupView,
+    HaOwnerSetupView,
+    HaPersonsSetupView,
+    RecoverySetupRestoreView,
+    StandaloneSetupView,
+)
+from .shopping import (
+    ShoppingClearCompletedView,
+    ShoppingCollectionView,
+    ShoppingItemCompleteView,
+    ShoppingItemDetailView,
+    ShoppingItemUncompleteView,
+    ShoppingStoreDetailView,
+    ShoppingStoresOrderView,
+    ShoppingStoresView,
+)
+from .spa import mount_spa
+from .space_bots import (
+    SpaceBotCollectionView,
+    SpaceBotDetailView,
+    SpaceBotTokenView,
 )
 from .space_polls import (
     SpacePollCloseView,
@@ -219,73 +330,36 @@ from .space_polls import (
     SpaceSchedulePollSlotResponseView,
     SpaceSchedulePollSummaryView,
 )
-from .friends import FriendView, FriendsView
-from .presence import PresenceCollectionView, PresenceLocationView
-from .peer_spaces import PeerSpaceCollectionView
-from .public_spaces import (
-    PublicSpaceBlockInstanceView,
-    PublicSpaceCollectionView,
-    PublicSpaceHideView,
-    PublicSpaceJoinRequestView,
-    PublicSpacesRefreshView,
-)
-from .push import PushSubscribeView, PushSubscriptionListView, PushVapidKeyView
-from .search import SearchView
-from .shopping import (
-    ShoppingClearCompletedView,
-    ShoppingCollectionView,
-    ShoppingItemCompleteView,
-    ShoppingItemDetailView,
-    ShoppingItemUncompleteView,
-    ShoppingStoreDetailView,
-    ShoppingStoresOrderView,
-    ShoppingStoresView,
-)
-from .bot_bridge import (
-    BotBridgeConversationPostView,
-    BotBridgeSpacePostView,
-)
-from .space_bots import (
-    SpaceBotCollectionView,
-    SpaceBotDetailView,
-    SpaceBotTokenView,
-)
+from .space_zones import SpaceZoneDetailView, SpaceZonesCollectionView
 from .spaces import (
     AdminSpaceCollectionView,
-    MyJoinRequestsView,
-    MySubscriptionsView,
-    SpaceBanListView,
-    SpaceArchiveView,
-    SpaceBanView,
-    SpaceCollectionView,
-    SpaceCompatView,
-    SpaceDetailView,
-    SpaceProposalsView,
-    SpaceProposalVoteView,
-    SpaceCoverView,
-    SpaceIconView,
-    SpaceFeedView,
-    SpaceSubscribeView,
+    InviteLinkCodeView,
     LocalInviteCollectionView,
     LocalInviteDecisionView,
+    MyJoinRequestsView,
+    MySubscriptionsView,
     RemoteInviteCollectionView,
     RemoteInviteDecisionView,
-    SpaceInviteTokenItemView,
-    InviteLinkCodeView,
-    SpaceInviteTokenView,
-    SpaceLinkCollectionView,
-    SpaceLinkDetailView,
-    SpaceNotifPrefsView,
+    SpaceArchiveView,
+    SpaceBanListView,
+    SpaceBanView,
     SpaceChatUnreadView,
     SpaceChatView,
-    SpaceMemberLocationSharingView,
-    SpacePresenceView,
+    SpaceCollectionView,
+    SpaceCompatView,
+    SpaceCoverView,
+    SpaceDetailView,
+    SpaceFeedView,
+    SpaceIconView,
+    SpaceInviteTokenItemView,
+    SpaceInviteTokenView,
     SpaceJoinRequestCollectionView,
     SpaceJoinRequestDetailView,
     SpaceJoinView,
-    SpaceRemoteInviteView,
-    SpaceRemoteMemberRoleView,
+    SpaceLinkCollectionView,
+    SpaceLinkDetailView,
     SpaceMemberDetailView,
+    SpaceMemberLocationSharingView,
     SpaceMemberMePictureView,
     SpaceMemberMeProfileView,
     SpaceMemberPictureView,
@@ -294,20 +368,21 @@ from .spaces import (
     SpaceModerationMineView,
     SpaceModerationQueueView,
     SpaceModerationRejectView,
+    SpaceNotifPrefsView,
     SpaceOwnershipView,
     SpacePostCollectionView,
     SpacePostCommentDetailView,
     SpacePostCommentView,
     SpacePostItemView,
     SpacePostReactionView,
+    SpacePresenceView,
+    SpaceProposalsView,
+    SpaceProposalVoteView,
+    SpaceRemoteInviteView,
+    SpaceRemoteMemberRoleView,
+    SpaceSubscribeView,
     SpaceSyncTriggerView,
     SpaceUnbanView,
-)
-from .space_zones import SpaceZoneDetailView, SpaceZonesCollectionView
-from .household_zones import (
-    HouseholdZoneDetailView,
-    HouseholdZonesCollectionView,
-    HouseholdZoneSyncView,
 )
 from .stickies import (
     SpaceStickyCollectionView,
@@ -315,71 +390,8 @@ from .stickies import (
     StickyCollectionView,
     StickyDetailView,
 )
-from .highlights import (
-    HighlightsCollectionView,
-    HighlightDetailView,
-    HighlightDmReplyView,
-    HighlightFrameDetailView,
-    HighlightFrameReactionView,
-    HighlightFrameViewView,
-    HighlightFramesCollectionView,
-    HighlightReportView,
-    HighlightShareView,
-)
-from .highlight_publications import (
-    HighlightPublishTokenView,
-    HighlightPublishView,
-)
-from .moments import (
-    MomentArchiveView,
-    MomentCollectionView,
-    MomentDetailView,
-    MomentFollowsCollectionView,
-    MomentFollowsDetailView,
-    MomentHashtagsView,
-    MomentReactionView,
-    MomentReportView,
-)
-from .moments_public import (
-    GfsUserDirectoryProxyView,
-    GfsUserPictureProxyView,
-    MomentPublicFollowCollectionView,
-    MomentPublicFollowDetailView,
-    MomentPublicRegistrationCollectionView,
-    MomentPublicRegistrationDetailView,
-)
-from .admin_dashboard import (
-    AdminDashboardDisplayView,
-    AdminDashboardDisplaysView,
-    AdminDashboardHaPanelConnectView,
-    AdminDashboardHaPanelsView,
-    AdminDashboardPasswordView,
-    AdminDashboardPinView,
-    AdminDashboardSessionsView,
-    AdminDashboardSetupLinkView,
-    AdminDashboardView,
-)
-from .admin_diagnostics import AdminDiagnosticsView
-from .admin_federation import (
-    AdminFederationCompatView,
-    AdminFederationExternalUrlView,
-    AdminFederationIceServersView,
-    AdminFederationResyncView,
-)
-from .admin_instance import AdminInstanceView
-from .admin_instance_bans import (
-    InstanceBanCollectionView,
-    InstanceBanDetailView,
-)
-from .ha_users import HaUserProvisionView, HaUsersCollectionView
-from .reports import (
-    AdminReportCollectionView,
-    AdminReportResolveView,
-    ReportCollectionView,
-    SpaceReportCollectionView,
-    SpaceReportResolveView,
-)
 from .storage import StorageQuotaView, StorageUsageView
+from .stt import SttStreamView
 from .tasks import (
     SpaceTaskArchiveView,
     SpaceTaskDetailView,
@@ -428,7 +440,6 @@ from .timetables import (
     TimetableWeekOverridesView,
     TimetableWeekView,
 )
-from .corner import CornerView
 from .users import (
     AdminAuthAuditLogView,
     AdminTokenCollectionView,
@@ -451,23 +462,12 @@ from .users import (
     UserExportView,
     UserPictureView,
 )
-from .aliases import AliasCollectionView, AliasItemView
-from .instance import InstanceConfigView
-from .setup import (
-    HaOwnerSetupView,
-    HaPersonsSetupView,
-    HaosCompleteSetupView,
-    RecoverySetupRestoreView,
-    StandaloneSetupView,
-)
-from .spa import mount_spa
-from .stt import SttStreamView
 from .ws import WebSocketView
 
 log = logging.getLogger(__name__)
 
 
-def setup_routes(app: web.Application) -> None:  # noqa: C901
+def setup_routes(app: web.Application) -> None:
     """Add all route definitions to *app*."""
 
     # ── Health (public — no auth) ───────────────────────────────────────

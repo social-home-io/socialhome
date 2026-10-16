@@ -35,7 +35,7 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import orjson
@@ -182,16 +182,16 @@ class CallSignalingService(ProtectionGateMixin):
     """
 
     __slots__ = (
-        "_child_protection",
         "_call_repo",
+        "_calls",
+        "_child_protection",
         "_conv_repo",
-        "_user_repo",
         "_federation",
         "_own_seed",
-        "_ws_manager",
-        "_calls",
         "_per_user",
         "_push",
+        "_user_repo",
+        "_ws_manager",
     )
 
     def __init__(
@@ -404,6 +404,7 @@ class CallSignalingService(ProtectionGateMixin):
                         "CALL_OFFER to %s failed: %s",
                         remote_instance,
                         exc,
+                        exc_info=True,
                     )
 
         return {
@@ -870,6 +871,10 @@ class CallSignalingService(ProtectionGateMixin):
                 if inst is not None:
                     sender_pk = bytes.fromhex(inst.remote_identity_pk)
             except Exception:
+                log.debug(
+                    "CallSignalingService.handle_federated_signal: fail-soft error ignored",
+                    exc_info=True,
+                )
                 sender_pk = None
 
         signed_dict = payload.get("signed_sdp")
@@ -880,7 +885,9 @@ class CallSignalingService(ProtectionGateMixin):
                     log.warning("call signal: SDP signature failed (%s)", call_id)
                     return
             except Exception as exc:
-                log.warning("call signal: bad signed_sdp (%s): %s", call_id, exc)
+                log.warning(
+                    "call signal: bad signed_sdp (%s): %s", call_id, exc, exc_info=True
+                )
                 return
 
         match et:
@@ -993,7 +1000,12 @@ class CallSignalingService(ProtectionGateMixin):
                     )
                     await self._call_repo.save_quality_sample(sample)
                 except Exception as exc:
-                    log.debug("CALL_QUALITY ingest failed (%s): %s", call_id, exc)
+                    log.debug(
+                        "CALL_QUALITY ingest failed (%s): %s",
+                        call_id,
+                        exc,
+                        exc_info=True,
+                    )
 
     # ─── Quality sampling (local) ─────────────────────────────────────────
 
@@ -1029,7 +1041,7 @@ class CallSignalingService(ProtectionGateMixin):
                         },
                     )
                 except Exception as exc:  # pragma: no cover
-                    log.debug("CALL_QUALITY fanout failed: %s", exc)
+                    log.debug("CALL_QUALITY fanout failed: %s", exc, exc_info=True)
 
     # ─── Inspection (for routes / tests) ──────────────────────────────────
 
@@ -1184,9 +1196,12 @@ class CallSignalingService(ProtectionGateMixin):
             existing = await self._call_repo.get_call(call_id)
             if existing is not None and existing.conversation_id != conversation_id:
                 reject = "call_id already used by another conversation"
-        if reject is None and existing is None:
-            if len(self._per_user.get(callee_user, set())) >= MAX_CALLS_PER_USER:
-                reject = "callee has too many concurrent calls"
+        if (
+            reject is None
+            and existing is None
+            and len(self._per_user.get(callee_user, set())) >= MAX_CALLS_PER_USER
+        ):
+            reject = "callee has too many concurrent calls"
         if reject is not None:
             log.warning(
                 "CALL_OFFER %s from %s dropped: %s",
@@ -1565,6 +1580,10 @@ class CallSignalingService(ProtectionGateMixin):
         try:
             return await self._user_repo.get_instance_for_user(user_id)
         except Exception:
+            log.debug(
+                "CallSignalingService._instance_of: fail-soft error ignored",
+                exc_info=True,
+            )
             return None
 
     async def _emit_call_event_message(
@@ -1598,14 +1617,14 @@ class CallSignalingService(ProtectionGateMixin):
                 conversation_id=session.conversation_id,
                 sender_user_id=session.initiator_user_id,
                 content=content,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
                 type="call_event",
             )
         )
         try:
             await self._conv_repo.touch_last_message(session.conversation_id)
         except Exception:  # pragma: no cover
-            pass
+            log.debug("call: touching the conversation failed", exc_info=True)
 
     async def _emit_missed_call_push(self, session: CallSession) -> None:
         """Fire a missed-call push notification (§25.3 — title only)."""
@@ -1628,7 +1647,7 @@ class CallSignalingService(ProtectionGateMixin):
                 conversation_id=session.conversation_id,
             )
         except Exception as exc:  # pragma: no cover
-            log.debug("missed-call push failed: %s", exc)
+            log.debug("missed-call push failed: %s", exc, exc_info=True)
 
     async def _fanout_to_user(self, user_id: str, payload: dict[str, Any]) -> None:
         """Forward an event to all of *user_id*'s WS sessions, if any."""
@@ -1637,11 +1656,11 @@ class CallSignalingService(ProtectionGateMixin):
         try:
             await self._ws_manager.broadcast_to_user(user_id, payload)
         except Exception as exc:
-            log.debug("call ws fanout failed for %s: %s", user_id, exc)
+            log.debug("call ws fanout failed for %s: %s", user_id, exc, exc_info=True)
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _duration_since(connected_at: str | None) -> int | None:
@@ -1653,7 +1672,7 @@ def _duration_since(connected_at: str | None) -> int | None:
         start = datetime.fromisoformat(connected_at)
     except ValueError:
         return 0
-    return int((datetime.now(timezone.utc) - start).total_seconds())
+    return int((datetime.now(UTC) - start).total_seconds())
 
 
 # ─── Stale-call cleanup scheduler ────────────────────────────────────────
@@ -1666,7 +1685,7 @@ class StaleCallCleanupScheduler:
     :mod:`~socialhome.infrastructure.replay_cache_scheduler`).
     """
 
-    __slots__ = ("_service", "_interval", "_task", "_stop")
+    __slots__ = ("_interval", "_service", "_stop", "_task")
 
     def __init__(
         self,
@@ -1692,7 +1711,7 @@ class StaleCallCleanupScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -1709,5 +1728,5 @@ class StaleCallCleanupScheduler:
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue

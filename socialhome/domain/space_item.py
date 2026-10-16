@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
 
@@ -118,9 +118,7 @@ def item_stamp(raw: object, *, now: datetime | None = None) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         return None
-    limit = (now or datetime.now(timezone.utc)) + timedelta(
-        seconds=MAX_ITEM_CLOCK_SKEW_S
-    )
+    limit = (now or datetime.now(UTC)) + timedelta(seconds=MAX_ITEM_CLOCK_SKEW_S)
     if parsed > limit:
         return None
     return parsed
@@ -131,7 +129,7 @@ def stamp_to_db(stamp: datetime) -> str:
     microseconds — so the ``edited_at`` column keeps one shape and compares
     as a string against rows the local edit paths stamped."""
     return (
-        stamp.astimezone(timezone.utc)
+        stamp.astimezone(UTC)
         .replace(tzinfo=None)
         .isoformat(sep=" ", timespec="microseconds")
     )
@@ -258,7 +256,7 @@ class AuthorityRemoval:
         return inner
 
     @classmethod
-    def from_inner(cls, inner: dict) -> "AuthorityRemoval":
+    def from_inner(cls, inner: dict) -> AuthorityRemoval:
         """Parse a decrypted inner; :class:`ValueError` when it is not a
         well-formed removal notice."""
         if inner.get(AUTHORITY_KIND_FIELD) != AUTHORITY_KIND_REMOVAL:

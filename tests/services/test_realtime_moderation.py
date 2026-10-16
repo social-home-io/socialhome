@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -61,7 +61,7 @@ class _FakeWS:
 
 
 def _item(submitted_by: str = "sub") -> SpaceModerationItem:
-    now = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 15, tzinfo=UTC)
     return SpaceModerationItem(
         id="mod-1",
         space_id="sp-1",

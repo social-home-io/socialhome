@@ -97,10 +97,10 @@ class PairingCancelService:
     """Cancels a pending pairing: close the handshake, tell the peer, forget."""
 
     __slots__ = (
+        "_auto_pair",
         "_bus",
         "_federation",
         "_federation_repo",
-        "_auto_pair",
         "_notify_timeout_s",
     )
 
@@ -108,8 +108,8 @@ class PairingCancelService:
         self,
         *,
         bus: EventBus,
-        federation: "FederationService",
-        federation_repo: "AbstractFederationRepo",
+        federation: FederationService,
+        federation_repo: AbstractFederationRepo,
         auto_pair: PendingAutoPairRequests | None = None,
         notify_timeout_s: float = PAIRING_CANCEL_NOTIFY_TIMEOUT_S,
     ) -> None:

@@ -71,13 +71,12 @@ async def test_diagnostics_contains_no_sensitive_field_name(client):
 async def test_diagnostics_omits_peer_inbox_paths_and_names(client):
     """A peer's inbox path embeds a per-pair secret; its display name is
     user-authored text. Neither belongs in a shareable file."""
+    from socialhome.app_keys import federation_repo_key
     from socialhome.domain.federation import (
         InstanceSource,
         PairingStatus,
         RemoteInstance,
     )
-
-    from socialhome.app_keys import federation_repo_key
 
     repo = client.app[federation_repo_key]
     await repo.save_instance(

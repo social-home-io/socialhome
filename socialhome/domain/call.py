@@ -33,7 +33,7 @@ class CallSession:
     ended_at: str | None = None
     duration_seconds: int | None = None
 
-    def with_status(self, status: str, **extra) -> "CallSession":
+    def with_status(self, status: str, **extra) -> CallSession:
         """Return a copy with the status transitioned + optional extras."""
         return copy.replace(self, status=status, **extra)
 

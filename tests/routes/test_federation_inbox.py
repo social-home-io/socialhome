@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC
 
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -32,7 +33,7 @@ def _build_envelope(
     event_type: FederationEventType = FederationEventType.PRESENCE_UPDATED,
     timestamp: str | None = None,
 ) -> bytes:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     aead = AESGCM(session_key)
     nonce = os.urandom(12)
@@ -45,7 +46,7 @@ def _build_envelope(
         "event_type": event_type.value,
         "from_instance": derive_instance_id(peer_kp.public_key),
         "to_instance": own_iid,
-        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+        "timestamp": timestamp or datetime.now(UTC).isoformat(),
         "encrypted_payload": encrypted,
         "space_id": None,
         "proto_version": 1,

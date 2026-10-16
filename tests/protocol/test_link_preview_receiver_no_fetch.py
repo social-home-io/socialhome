@@ -21,10 +21,10 @@ import pytest
 
 from socialhome.federation.sync.space.receiver import _post_from_record
 from socialhome.outbound_fetch import OutboundFetcher
+from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
-from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.services.federation_inbound_service import FederationInboundService
 from socialhome.services.link_preview_service import LinkPreviewService
 from socialhome.services.space_public_inbound import SpacePublicInbound

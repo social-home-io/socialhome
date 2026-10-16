@@ -10,11 +10,11 @@ from __future__ import annotations
 import pytest
 
 from socialhome.global_server.domain import GfsHighlightPublication, GfsHighlightToken
+from socialhome.global_server.highlight_publications import HighlightPublicationRegistry
 from socialhome.global_server.repositories import (
     SqliteGfsHighlightPublicationRepo,
     SqliteGfsHighlightTokenRepo,
 )
-from socialhome.global_server.highlight_publications import HighlightPublicationRegistry
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 
 

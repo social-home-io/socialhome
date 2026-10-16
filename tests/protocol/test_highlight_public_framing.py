@@ -29,12 +29,11 @@ from socialhome.services.highlight_public_framing import (
     encode,
     error_frame,
     frame_chunk,
+    highlight_meta,
     iter_frames,
     moment_index_meta,
     stream_end,
-    highlight_meta,
 )
-
 
 # ─── Wire constants ──────────────────────────────────────────────────────
 

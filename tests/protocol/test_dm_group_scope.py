@@ -24,7 +24,7 @@ against the real application registry and SQLite:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -166,7 +166,7 @@ async def _send(app, event_type, payload, *, from_instance) -> None:
                 event_type=event_type,
                 from_instance=from_instance,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )
@@ -314,7 +314,7 @@ async def test_a_message_never_opens_a_group(env):
 
 @pytest.fixture
 async def group(env):
-    app, db, own, sent, meshed = env
+    app, _db, own, _sent, _meshed = env
     conv = _group_id(AUTH)
     await _send(app, FET.DM_GROUP_ROSTER, _roster(conv, 1, own), from_instance=AUTH)
     return conv
@@ -462,7 +462,7 @@ async def test_a_member_household_cannot_relay_another_members_history(env, grou
 @pytest.fixture
 async def own_group(env):
     """A group we are the authority of: ula + uwe here, bob, anna."""
-    app, db, own, sent, meshed = env
+    app, _db, _own, _sent, _meshed = env
     svc = app[dm_service_key]
     conv = await svc.create_group_dm(
         creator_username="ula",
@@ -489,7 +489,7 @@ async def test_group_content_reaches_member_households_only(env, own_group):
 
 
 async def test_a_removed_household_gets_the_final_roster_then_nothing(env, own_group):
-    app, db, _, sent, meshed = env
+    app, _db, _, sent, _meshed = env
     svc = app[dm_service_key]
     sent.clear()
     await svc.remove_group_member(own_group, actor_username="ula", user_id="u-bob")
@@ -541,7 +541,7 @@ async def test_a_member_household_leaves_for_its_own_user(env, own_group):
 
 
 async def test_a_leave_sent_to_a_non_authority_changes_nothing(env, group):
-    app, db, _, sent, _ = env
+    app, db, _, _sent, _ = env
     before = await _state(db)
     await _send(
         app,

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 
 import orjson
-
 from aiohttp import web
 
 from .. import app_keys as K

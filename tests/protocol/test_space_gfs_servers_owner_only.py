@@ -26,7 +26,7 @@ federation transport is a mock.
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -48,18 +48,14 @@ from socialhome.domain.space import (
     SpaceRole,
 )
 from socialhome.federation.encoder import FederationEncoder
-from socialhome.federation.space_authorship import SpaceAuthorship
-from socialhome.federation.sync.space.exporter import serialise_chunk
-from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from socialhome.federation.invite_token_redeem import (
     SpaceInviteTokenRedeemCoordinator,
 )
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
+from socialhome.federation.space_authorship import SpaceAuthorship
+from socialhome.federation.sync.space.exporter import serialise_chunk
+from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
-from socialhome.space_owner_statement import (
-    sign_inviter_proof,
-    sign_owner_statement,
-)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories import (
@@ -78,7 +74,10 @@ from socialhome.services.space_crypto_service import (
 )
 from socialhome.services.space_service import SpaceService
 from socialhome.services.user_service import UserService
-
+from socialhome.space_owner_statement import (
+    sign_inviter_proof,
+    sign_owner_statement,
+)
 from tests.invite_accept import accept_invite, accepting_service
 
 pytestmark = pytest.mark.security
@@ -170,7 +169,7 @@ def _event(event_type, from_instance: str, payload: dict) -> FederationEvent:
         event_type=event_type,
         from_instance=from_instance,
         to_instance=JOINER,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=SPACE,
     )

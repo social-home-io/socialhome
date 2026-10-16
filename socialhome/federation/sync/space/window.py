@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
@@ -58,13 +58,11 @@ class SyncWindow:
 KEEP_FOREVER = SyncWindow()
 
 
-def window_for_space(
-    space: "Space | None", *, now: datetime | None = None
-) -> SyncWindow:
+def window_for_space(space: Space | None, *, now: datetime | None = None) -> SyncWindow:
     """The :class:`SyncWindow` of ``space`` at ``now`` (default: now)."""
     if space is None or not space.retention_days or space.retention_days <= 0:
         return KEEP_FOREVER
-    at = now if now is not None else datetime.now(timezone.utc)
+    at = now if now is not None else datetime.now(UTC)
     cutoff = (at - timedelta(days=int(space.retention_days))).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -78,7 +76,7 @@ class SyncWindows:
 
     __slots__ = ("_spaces",)
 
-    def __init__(self, space_repo: "AbstractSpaceRepo") -> None:
+    def __init__(self, space_repo: AbstractSpaceRepo) -> None:
         self._spaces = space_repo
 
     async def for_space(self, space_id: str) -> SyncWindow:
@@ -97,7 +95,7 @@ class SyncWindows:
         return f"{days}:{','.join(window.exempt_types)}"
 
 
-async def iter_pages(
+async def iter_pages[T](
     fetch: Callable[[int | None], Awaitable[tuple[list[T], int | None]]],
 ) -> AsyncIterator[list[T]]:
     """Drive a keyset-paged repo read to the end.
@@ -115,7 +113,7 @@ async def iter_pages(
             return
 
 
-async def iter_tombstone_pages(
+async def iter_tombstone_pages[T](
     fetch: Callable[[tuple[str, str] | None], Awaitable[list[T]]],
     key: Callable[[T], tuple[str, str]],
 ) -> AsyncIterator[list[T]]:

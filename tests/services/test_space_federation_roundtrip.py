@@ -36,7 +36,6 @@ import dataclasses
 import json
 
 from socialhome.domain.gfs_server import GfsServer, SignedGfsServerList
-from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -44,6 +43,7 @@ from socialhome.domain.space import (
     SpaceFeatures,
     SpaceType,
 )
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.services.space_service import (
     space_metadata_for_federation,
     stub_space_from_metadata,
@@ -321,10 +321,9 @@ def test_intentionally_local_fields_do_not_leak() -> None:
     meta_json = json.dumps(meta)
 
     # No INTENTIONALLY_LOCAL field name is a top-level meta key.
-    for name in INTENTIONALLY_LOCAL:
+    for name, why in INTENTIONALLY_LOCAL.items():
         assert name not in meta, (
-            f"Host-local field {name!r} leaked into the federation snapshot "
-            f"({INTENTIONALLY_LOCAL[name]})."
+            f"Host-local field {name!r} leaked into the federation snapshot ({why})."
         )
 
     # The secret join_code value must not appear anywhere in the serialized

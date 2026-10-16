@@ -48,11 +48,11 @@ from __future__ import annotations
 
 import abc
 import logging
+from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
-    AsyncIterable,
     Protocol,
     runtime_checkable,
 )
@@ -191,7 +191,7 @@ class AuthProvider(Protocol):
 
     async def authenticate(
         self,
-        request: "web.Request",
+        request: web.Request,
     ) -> ExternalUser | None: ...
 
 
@@ -316,7 +316,7 @@ class ZoneSource(Protocol):
     Standalone: none (``PlatformAdapter.zones`` is ``None``).
     """
 
-    async def list_zones(self) -> list["ExternalHouseholdZone"]:
+    async def list_zones(self) -> list[ExternalHouseholdZone]:
         """Every zone the platform has right now — ``[]`` when it truly
         has none. Raises
         :class:`~socialhome.domain.household_zone.ZoneSourceUnavailableError`
@@ -336,14 +336,14 @@ class DisplayDirectory(Protocol):
     Standalone: none (``PlatformAdapter.displays`` is ``None``).
     """
 
-    async def list_panels(self) -> list["ExternalDisplayPanel"]:
+    async def list_panels(self) -> list[ExternalDisplayPanel]:
         """Every panel the platform has — ``[]`` when it has none.
         Raises
         :class:`~socialhome.domain.household_dashboard.DisplayDiscoveryFailedError`
         when the platform couldn't be read."""
         ...
 
-    async def connect(self, panel: "ExternalDisplayPanel", *, sealed: str) -> None:
+    async def connect(self, panel: ExternalDisplayPanel, *, sealed: str) -> None:
         """Ask ``panel`` to pair itself: deliver ``sealed`` — its claim
         and the dashboard's address, sealed to ``panel.panel_key``
         (:mod:`socialhome.dashboard.claim_seal`). Raises
@@ -359,7 +359,7 @@ class NoopEventSink:
     upstream event bus. Returns ``False`` for every call so callers
     learn the event was not published, but raises nothing."""
 
-    async def fire(self, event_type: str, data: dict) -> bool:  # noqa: ARG002
+    async def fire(self, event_type: str, data: dict) -> bool:
         return False
 
 
@@ -450,12 +450,12 @@ class PlatformAdapter(abc.ABC):
         ...
 
     @abc.abstractmethod
-    async def on_startup(self, app: "web.Application") -> None:
+    async def on_startup(self, app: web.Application) -> None:
         """Wire platform-specific services + run any first-boot bootstrap."""
         ...
 
     @abc.abstractmethod
-    async def on_cleanup(self, app: "web.Application") -> None:
+    async def on_cleanup(self, app: web.Application) -> None:
         """Tear down platform-specific resources."""
         ...
 
@@ -478,7 +478,7 @@ class PlatformAdapter(abc.ABC):
 
     async def authenticate(
         self,
-        request: "web.Request",
+        request: web.Request,
     ) -> ExternalUser | None:
         """Delegate to :attr:`auth`. Kept on the adapter so existing
         call sites don't need to migrate to ``adapter.auth.authenticate``
@@ -657,7 +657,7 @@ _PLATFORM_SECTION: dict[str, str] = {
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _extract_bearer(request: "web.Request") -> str | None:
+def _extract_bearer(request: web.Request) -> str | None:
     """Extract a raw bearer token from a request.
 
     Checks, in order:

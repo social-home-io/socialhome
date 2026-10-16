@@ -70,7 +70,7 @@ def is_approved(inner: dict) -> bool:
     return inner.get(AUTHORITY_KIND_FIELD) == AUTHORITY_KIND_APPROVED_POST
 
 
-def _post_fields(post: "Post") -> dict:
+def _post_fields(post: Post) -> dict:
     """The content fields of ``post`` as the author's signed inner carries
     them (``space_public_author.build_signed_author_inner``)."""
     return {
@@ -91,7 +91,7 @@ def _post_fields(post: "Post") -> dict:
     }
 
 
-def approved_relay_for(relay: object, *, post: "Post", space_id: str) -> dict | None:
+def approved_relay_for(relay: object, *, post: Post, space_id: str) -> dict | None:
     """The inner to relay for ``post`` — just released from the moderation
     queue of ``space_id`` — from its author's signed copy ``relay``, marked
     ``approved_post``; ``None`` unless ``relay`` is a valid author-signed

@@ -2,22 +2,22 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from types import SimpleNamespace
 
 import orjson
 import pytest
 
 from socialhome.crypto import generate_identity_keypair
-from socialhome.domain.federation import (
-    InstanceSource,
-    PairingStatus,
-    RemoteInstance,
-)
 from socialhome.domain.events import (
     RemoteSpaceMemberBanned,
     SpaceCommentSynced,
     TimetableSaved,
+)
+from socialhome.domain.federation import (
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
 )
 from socialhome.domain.task import Task, TaskPriority, TaskStatus
 from socialhome.domain.timetable import (
@@ -100,9 +100,9 @@ class _FakeRepos:
         if len(args) == 2:
             self.posts.append(args)
         else:
-            self.pages.append(args[0]) if isinstance(
-                args[0], type(None)
-            ) is False and hasattr(args[0], "title") else self.stickies.append(args[0])
+            self.pages.append(args[0]) if (args[0] is None) is False and hasattr(
+                args[0], "title"
+            ) else self.stickies.append(args[0])
         return args[-1]
 
     async def add_comment(self, comment, *, space_id):
@@ -393,7 +393,7 @@ async def test_bans(setup):
 async def test_a_synced_ban_of_a_seated_member_is_published(setup, bus):
     """Like the live ban: the seat's dependents (space chat, GFS seats)
     hear of it. A ban of someone not seated here publishes nothing."""
-    r, c, kp = setup
+    r, _c, kp = setup
     got: list = []
 
     async def _rec(event):
@@ -438,7 +438,7 @@ async def test_a_post_deleted_here_is_never_resurrected_by_a_sync(setup):
     """v_49: a delete can overtake its create (a member-published delete
     leaves a soft-deleted row); a provider that missed the delete must not
     bring the post back."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from socialhome.domain.post import Post, PostType
 
@@ -447,7 +447,7 @@ async def test_a_post_deleted_here_is_never_resurrected_by_a_sync(setup):
         id="p-gone",
         author="u-1",
         type=PostType.TEXT,
-        created_at=datetime(2026, 4, 18, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 18, tzinfo=UTC),
         deleted=True,
     )
     record = {
@@ -511,7 +511,7 @@ async def test_comments(setup):
 async def test_a_synced_comment_tells_the_parent_wait_buffer(setup, bus):
     """A stored comment publishes ``SpaceCommentSynced`` (and nothing that
     notifies), so replies held for it replay."""
-    r, c, kp = setup
+    r, _c, kp = setup
     seen: list = []
 
     async def _on(event):
@@ -676,21 +676,21 @@ async def test_task_lists(setup):
 
 
 def _held_task(**kw):
-    at = datetime(2026, 9, 1, tzinfo=timezone.utc)
-    base = dict(
-        id="t-held",
-        list_id="list-1",
-        title="Held",
-        status=TaskStatus.TODO,
-        position=0,
-        created_by="u-1",
-        created_at=at,
-        updated_at=at,
-        due_date=date(2026, 10, 3),
-        archived_at=at,
-        priority=TaskPriority.HIGH,
-        labels=("Bills",),
-    )
+    at = datetime(2026, 9, 1, tzinfo=UTC)
+    base = {
+        "id": "t-held",
+        "list_id": "list-1",
+        "title": "Held",
+        "status": TaskStatus.TODO,
+        "position": 0,
+        "created_by": "u-1",
+        "created_at": at,
+        "updated_at": at,
+        "due_date": date(2026, 10, 3),
+        "archived_at": at,
+        "priority": TaskPriority.HIGH,
+        "labels": ("Bills",),
+    }
     base.update(kw)
     return Task(**base)
 
@@ -724,7 +724,7 @@ async def test_v39_host_sync_does_not_wipe_held_fields(setup):
     assert task.priority is TaskPriority.HIGH
     assert task.labels == ("Bills",)
     assert task.due_date == date(2026, 10, 3)
-    assert task.archived_at == datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert task.archived_at == datetime(2026, 9, 1, tzinfo=UTC)
 
 
 async def test_v40_host_sync_may_clear_held_fields(setup):
@@ -791,7 +791,7 @@ async def test_tasks_carry_due_date_archived_priority_labels(setup):
     )
     _, task = c.tasks[0]
     assert task.due_date == date(2026, 10, 3)
-    assert task.archived_at == datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert task.archived_at == datetime(2026, 9, 1, tzinfo=UTC)
     assert task.priority is TaskPriority.URGENT
     assert task.labels == ("Bills",)
 
@@ -1642,7 +1642,7 @@ def _timetable_receiver(bus, peer, repo):
 
 
 def _tt_record(owner: str = "u-adm", space_id: str = "sp-1", **extra) -> dict:
-    at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    at = datetime(2026, 6, 1, tzinfo=UTC)
     return {
         **to_wire_dict(
             Timetable(
@@ -1742,7 +1742,7 @@ async def test_a_held_comment_mid_chunk_never_stops_the_rest(setup, tmp_dir):
     delete-before-create tombstone, used to make the plain INSERT raise and
     lose the rest of the chunk. Held rows stay as they are; the later
     records land."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from socialhome.db.database import AsyncDatabase
     from socialhome.domain.post import Comment, CommentType, Post, PostType
@@ -1757,7 +1757,7 @@ async def test_a_held_comment_mid_chunk_never_stops_the_rest(setup, tmp_dir):
             " identity_public_key) VALUES('sp-1','S','peer-a','o','ab')"
         )
         repo = SqliteSpacePostRepo(db)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         await repo.save(
             "sp-1",
             Post(id="p-1", author="u-1", type=PostType.TEXT, created_at=now),
@@ -1808,7 +1808,7 @@ async def test_a_sync_keeps_a_held_posts_reactions_and_comment_count(setup):
     """Review repro S1: re-sending a held post must not wipe the reactions
     (or comment count) held here — the stamps would then refuse the copy
     that could restore them."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from socialhome.domain.post import Post, PostType
 
@@ -1817,7 +1817,7 @@ async def test_a_sync_keeps_a_held_posts_reactions_and_comment_count(setup):
         id="p-1",
         author="u-1",
         type=PostType.TEXT,
-        created_at=datetime(2026, 4, 18, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 18, tzinfo=UTC),
         content="hi",
         reactions={"👍": frozenset({"u-2"})},
         comment_count=3,
@@ -1845,7 +1845,7 @@ async def test_a_new_post_from_a_sync_carries_its_reactions(setup):
 async def test_relayed_reactions_survive_a_sync_end_to_end(setup, tmp_dir):
     """S1 on real SQLite: a relayed reaction, a sync re-sending the post, a
     duplicate copy of the add — the reaction is still there."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from socialhome.db.database import AsyncDatabase
     from socialhome.domain.post import Post, PostType
@@ -1866,7 +1866,7 @@ async def test_relayed_reactions_survive_a_sync_end_to_end(setup, tmp_dir):
                 id="p-1",
                 author="u-1",
                 type=PostType.TEXT,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
                 content="hi",
             ),
         )

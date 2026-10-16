@@ -14,14 +14,15 @@ import os
 import sys
 import time
 from dataclasses import replace
+from datetime import UTC
 
-import pytest
 import aiohttp
+import pytest
 from aiohttp import FormData
-from PIL import Image
 from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from PIL import Image
 
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
@@ -118,9 +119,9 @@ async def client(tmp_dir):
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 async def _publish_known_space(
@@ -910,7 +911,7 @@ def test_main_runtime_path_calls_run_app(tmp_path, monkeypatch):
     # Stub out run_app so we don't actually bind a port.
     called = {}
 
-    def _fake_run_app(app, *, host, port, access_log_class):  # noqa: D401
+    def _fake_run_app(app, *, host, port, access_log_class):
         called["host"] = host
         called["port"] = port
 

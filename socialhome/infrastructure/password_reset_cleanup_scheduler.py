@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 class PasswordResetCleanupScheduler:
     """Background task that drops expired password-reset tokens."""
 
-    __slots__ = ("_repo", "_interval", "_task", "_stop")
+    __slots__ = ("_interval", "_repo", "_stop", "_task")
 
     def __init__(
         self,
@@ -49,7 +49,7 @@ class PasswordResetCleanupScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -63,13 +63,13 @@ class PasswordResetCleanupScheduler:
                         pruned,
                     )
             except Exception as exc:  # pragma: no cover
-                log.warning("password-reset cleanup failed: %s", exc)
+                log.warning("password-reset cleanup failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _prune_once(self) -> int:

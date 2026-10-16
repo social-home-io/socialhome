@@ -14,7 +14,6 @@ from socialhome.repositories.space_media_outbox_repo import (
     SqliteSpaceMediaOutboxRepo,
 )
 
-
 pytestmark = pytest.mark.asyncio
 
 

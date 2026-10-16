@@ -20,7 +20,7 @@ keeps off a blocked person's household. Against the real application
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -278,7 +278,7 @@ async def test_blocked_remote_persons_status_never_reaches_the_account(env):
                 event_type=FET.USER_STATUS_UPDATED,
                 from_instance=REX_HOME,
                 to_instance="self",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload={"user_id": REX, "emoji": "🎮", "text": "Gaming"},
             )
         )

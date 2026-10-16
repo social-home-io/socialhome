@@ -9,28 +9,30 @@ import re
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from socialhome.capabilities_sig import (
+    CAPS_SIG_SUITE_ED25519,
+    verify_capabilities,
+)
 from socialhome.crypto import (
     b64url_decode,
     generate_identity_keypair,
     verify_ed25519,
 )
-from socialhome.capabilities_sig import (
-    CAPS_SIG_SUITE_ED25519,
-    verify_capabilities,
-)
+from socialhome.global_server import cluster as cluster_mod
+from socialhome.global_server.app_keys import gfs_cluster_key
 from socialhome.global_server.cluster import (
     CLUSTER_IDENTITY_MISMATCH_TTL_S,
     CLUSTER_RATE_LIMIT_PER_MIN,
     CLUSTER_SIG_SUITE_ED25519,
-    ClusterReplayCache,
     CLUSTER_TS_SKEW_S,
-    SUPPORTED_CLUSTER_SIG_SUITES,
     CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
     MAX_SIGNALING_SESSIONS,
     NODE_DRAIN_HINT,
     NODE_HEARTBEAT,
     NODE_HELLO,
     NODE_POLICY_PUSH,
+    SUPPORTED_CLUSTER_SIG_SUITES,
+    ClusterReplayCache,
     ClusterService,
     FrameVerdict,
     UnsupportedClusterSigSuite,
@@ -39,12 +41,10 @@ from socialhome.global_server.cluster import (
     member_url,
     parse_cluster_sig_suite,
 )
-from socialhome.global_server import cluster as cluster_mod
-from socialhome.global_server.app_keys import gfs_cluster_key
-from socialhome.global_server.server import create_gfs_app
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClusterNode
 from socialhome.global_server.repositories import SqliteClusterRepo
+from socialhome.global_server.server import create_gfs_app
 
 # ``cluster_nodes.added_at`` is SQLite's naive ``datetime('now')`` default
 # shape — UTC, no ``T``, no zone designator. ``last_seen`` must match it.

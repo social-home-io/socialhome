@@ -19,5 +19,5 @@ class ZonesDeletedExporter(RowTombstonesExporter):
 
     __slots__ = ()
 
-    def __init__(self, zone_repo: "AbstractSpaceZoneRepo") -> None:
+    def __init__(self, zone_repo: AbstractSpaceZoneRepo) -> None:
         super().__init__(zone_repo.list_tombstones_page)

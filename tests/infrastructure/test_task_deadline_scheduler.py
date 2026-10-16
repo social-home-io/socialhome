@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -46,7 +46,7 @@ class _FakeDb:
 
 
 def _task(tid: str, status: TaskStatus, due: date | None) -> Task:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return Task(
         id=tid,
         list_id="L",
@@ -154,7 +154,7 @@ async def test_tick_uses_household_date_west_of_utc():
     """Los Angeles, 20:00 on Apr 20 local = 03:00 UTC on Apr 21: only the
     task due on the household's Apr 20 fires — not tomorrow's."""
     sched, fired = _tz_env(_FakePreferences("America/Los_Angeles"))
-    now = datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 21, 3, 0, tzinfo=UTC)
 
     assert await sched.tick_once(now=now) == 1
 
@@ -168,7 +168,7 @@ async def test_tick_uses_household_date_east_of_utc():
     """Auckland, 01:00 on Apr 21 local = 13:00 UTC on Apr 20: today's
     (Apr 21) task fires now, not ~13 h later at UTC midnight."""
     sched, fired = _tz_env(_FakePreferences("Pacific/Auckland"))
-    now = datetime(2026, 4, 20, 13, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 20, 13, 0, tzinfo=UTC)
 
     assert await sched.tick_once(now=now) == 1
 
@@ -178,7 +178,7 @@ async def test_tick_uses_household_date_east_of_utc():
 
 async def test_tick_falls_back_to_utc_when_preferences_fail(caplog):
     sched, fired = _tz_env(_BrokenPreferences())
-    now = datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 21, 3, 0, tzinfo=UTC)
 
     with caplog.at_level(logging.WARNING):
         assert await sched.tick_once(now=now) == 1
@@ -189,7 +189,7 @@ async def test_tick_falls_back_to_utc_when_preferences_fail(caplog):
 
 async def test_tick_without_preferences_uses_utc():
     sched, fired = _tz_env(None)
-    now = datetime(2026, 4, 20, 13, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 20, 13, 0, tzinfo=UTC)
 
     assert await sched.tick_once(now=now) == 1
 

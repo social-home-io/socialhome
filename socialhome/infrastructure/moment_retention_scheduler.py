@@ -24,11 +24,11 @@ log = logging.getLogger(__name__)
 class MomentRetentionScheduler:
     """Periodically run :meth:`MomentService.expire_due`."""
 
-    __slots__ = ("_service", "_interval", "_task", "_stop")
+    __slots__ = ("_interval", "_service", "_stop", "_task")
 
     def __init__(
         self,
-        service: "MomentService",
+        service: MomentService,
         *,
         interval_seconds: float = 3600.0,  # one pass per hour
     ) -> None:
@@ -50,7 +50,7 @@ class MomentRetentionScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -61,13 +61,13 @@ class MomentRetentionScheduler:
                 if pruned:
                     log.debug("moment-retention: pruned %d expired moments", pruned)
             except Exception as exc:  # pragma: no cover — defensive
-                log.warning("moment-retention prune failed: %s", exc)
+                log.warning("moment-retention prune failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
 

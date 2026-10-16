@@ -73,9 +73,8 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-
 from dataclasses import replace
+from datetime import UTC, datetime
 
 from ..domain.errors import (
     GfsSelectionInvalidError,
@@ -104,10 +103,10 @@ from ..domain.space import (
 )
 from ..gfs_server_list_sig import sign_gfs_server_list
 from ..infrastructure.event_bus import EventBus
-from ..space_owner_statement import MAX_STATEMENT_FUTURE_SKEW_MS
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
+from ..space_owner_statement import MAX_STATEMENT_FUTURE_SKEW_MS
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
 from .gfs_server_targets import connections_on_list
 
@@ -118,18 +117,18 @@ class GfsServerSelectionService:
     """Derives, signs and distributes the owner's ``spaces.gfs_servers``."""
 
     __slots__ = (
-        "_spaces",
-        "_gfs",
         "_bus",
-        "_users",
-        "_publisher",
-        "_own_instance_id",
-        "_own_signing_key",
-        "_locks",
         "_change_locks",
         "_channel_hook",
         "_follow_later",
+        "_gfs",
+        "_locks",
+        "_own_instance_id",
+        "_own_signing_key",
         "_provisional",
+        "_publisher",
+        "_spaces",
+        "_users",
     )
 
     def __init__(
@@ -295,7 +294,7 @@ class GfsServerSelectionService:
             return False
         if record_withdrawals:
             await self._note_dropped(space_id, current, servers)
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
         issued_at = max(now_ms, current.issued_at + 1 if current else 0)
         if issued_at > now_ms + MAX_STATEMENT_FUTURE_SKEW_MS:
             # Members refuse a list more than a day ahead; a runaway stored
@@ -616,22 +615,21 @@ class GfsServerSelectionService:
         capable = await self._capable_connections()
         preferred = [c for c in capable if prefer is not None and c.id == prefer]
         chosen = preferred or (capable if len(capable) == 1 else [])
-        async with self.changing(space_id):
-            async with _space_lock(self._locks, space_id):
-                # Re-checked under the locks: an owner's PUT may have landed.
-                current = await self._spaces.get(space_id)
-                if (
-                    current is None
-                    or not is_channel_space(current)
-                    or (
-                        current.gfs_servers is not None
-                        and current.gfs_servers.servers_json != "[]"
-                    )
-                ):
-                    return False
-                await self._store_locked(
-                    space_id, current.gfs_servers, self._entries_of(space_id, chosen)
+        async with self.changing(space_id), _space_lock(self._locks, space_id):
+            # Re-checked under the locks: an owner's PUT may have landed.
+            current = await self._spaces.get(space_id)
+            if (
+                current is None
+                or not is_channel_space(current)
+                or (
+                    current.gfs_servers is not None
+                    and current.gfs_servers.servers_json != "[]"
                 )
+            ):
+                return False
+            await self._store_locked(
+                space_id, current.gfs_servers, self._entries_of(space_id, chosen)
+            )
         return bool(chosen)
 
     async def on_connection_removed(self, conn: GfsConnection) -> int:
@@ -670,33 +668,35 @@ class GfsServerSelectionService:
                 self._provisional.pop(space_id, None)
             if capable:
                 continue
-            async with self.changing(space_id):
-                async with _space_lock(self._locks, space_id):
-                    current = await self._spaces.get(space_id)
-                    if current is None or current.gfs_servers is None:
-                        continue
-                    keep = [
-                        c
-                        for c in connections_on_list(
-                            current.gfs_servers,
-                            await self._gfs.list_all(),
-                            include_inactive=True,
-                        )
-                        if c.id != conn.id
-                    ]
-                    if await self._store_locked(
-                        space_id,
+            async with (
+                self.changing(space_id),
+                _space_lock(self._locks, space_id),
+            ):
+                current = await self._spaces.get(space_id)
+                if current is None or current.gfs_servers is None:
+                    continue
+                keep = [
+                    c
+                    for c in connections_on_list(
                         current.gfs_servers,
-                        self._entries_of(space_id, keep),
-                        record_withdrawals=False,
-                    ):
-                        changed += 1
-                        log.info(
-                            "space %s: GFS %s adopted provisionally can't carry "
-                            "private channels — dropped from the channel list",
-                            space_id,
-                            conn.id,
-                        )
+                        await self._gfs.list_all(),
+                        include_inactive=True,
+                    )
+                    if c.id != conn.id
+                ]
+                if await self._store_locked(
+                    space_id,
+                    current.gfs_servers,
+                    self._entries_of(space_id, keep),
+                    record_withdrawals=False,
+                ):
+                    changed += 1
+                    log.info(
+                        "space %s: GFS %s adopted provisionally can't carry "
+                        "private channels — dropped from the channel list",
+                        space_id,
+                        conn.id,
+                    )
         return changed
 
     async def _capable_connections(self) -> list[GfsConnection]:

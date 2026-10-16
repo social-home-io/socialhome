@@ -56,11 +56,11 @@ class PeerGfsRelayService:
     """Turn the GFS relay fallback on or off for one paired household."""
 
     __slots__ = (
-        "_federation_repo",
-        "_send_capabilities",
-        "_probe_peer",
-        "_forget_probes",
         "_bus",
+        "_federation_repo",
+        "_forget_probes",
+        "_probe_peer",
+        "_send_capabilities",
     )
 
     def __init__(
@@ -70,7 +70,7 @@ class PeerGfsRelayService:
         send_capabilities: Callable[[str], Awaitable[bool]],
         probe_peer: Callable[..., Awaitable[int]],
         forget_probes: Callable[[str], None],
-        bus: "EventBus | None" = None,
+        bus: EventBus | None = None,
     ) -> None:
         self._federation_repo = federation_repo
         #: Re-sends our capabilities to one peer —
@@ -166,7 +166,7 @@ class PeerGfsRelayService:
     async def _tell_peer(self, instance_id: str) -> None:
         try:
             await self._send_capabilities(instance_id)
-        except Exception:  # noqa: BLE001 — the switch is saved; retry later
+        except Exception:
             log.warning(
                 "GFS fallback: could not tell %s about the switch",
                 instance_id,
@@ -179,7 +179,7 @@ class PeerGfsRelayService:
                 await self._probe_peer(instance_id)
             else:
                 await self._probe_peer(instance_id, throttled=False)
-        except Exception:  # noqa: BLE001 — discovery retries on its own timer
+        except Exception:
             log.warning(
                 "GFS fallback: route probe for %s failed",
                 instance_id,

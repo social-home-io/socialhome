@@ -218,9 +218,8 @@ async def test_bootstrap_connection_without_a_relay_capable_server(caplog):
         raise RuntimeError("info fetch exploded")
 
     reach = _reach([_conn("c1", "https://a.example")], capable=_boom)
-    with caplog.at_level(logging.WARNING):
-        with pytest.raises(GfsNotConnectedError):
-            await reach.bootstrap_connection(None)
+    with caplog.at_level(logging.WARNING), pytest.raises(GfsNotConnectedError):
+        await reach.bootstrap_connection(None)
     assert "capability check failed" in caplog.text
     with pytest.raises(GfsNotConnectedError):
         await _reach([]).bootstrap_connection(None)

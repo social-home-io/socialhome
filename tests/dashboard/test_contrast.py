@@ -11,9 +11,6 @@ from socialhome.dashboard.contrast import (
     BLACK,
     BUBBLE_DARK,
     BUBBLE_LIGHT,
-    WHITE,
-    frame_color,
-    mix_srgb,
     NOTE_DARK_BG,
     NOTE_LIGHT_BG,
     NOTE_MIX_DARK,
@@ -23,11 +20,14 @@ from socialhome.dashboard.contrast import (
     SURFACE_LIGHT,
     SURFACE_NIGHT,
     WARM_INK,
-    mix_oklab,
-    note_colors,
+    WHITE,
     contrast_ratio,
+    frame_color,
     hex_color,
     ink_on,
+    mix_oklab,
+    mix_srgb,
+    note_colors,
     note_ink,
     past_colors,
     readable_on,
@@ -341,7 +341,7 @@ def _rule(css: str, selector: str) -> str:
 def _rules_with_opacity(css: str) -> set[str]:
     """Every selector (one per comma-separated part) whose rule sets an
     ``opacity`` below 1."""
-    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
     found: set[str] = set()
     for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
         match = re.search(r"(?<![-\w])opacity:\s*([0-9.]+)", body)

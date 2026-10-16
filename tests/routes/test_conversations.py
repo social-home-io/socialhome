@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
@@ -623,7 +623,7 @@ async def test_list_messages_drops_stored_non_local_media_url(client):
                 type="file",
                 media_url=url,
                 file_name=f"{mid}.pdf",
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
         )
     resp = await client.get(
@@ -857,8 +857,8 @@ async def test_gaps_endpoint_non_member_forbidden(client):
     )
     conv_id = (await r.json())["id"]
     # Seed a third user who isn't a member.
-    from socialhome.crypto import derive_user_id
     from socialhome.auth import sha256_token_hash
+    from socialhome.crypto import derive_user_id
 
     db = client.server.app[_db_key]
     row = await db.fetchone(
@@ -1721,7 +1721,7 @@ async def test_conversation_row_shows_a_guardian_block_counterpart_by_name_only(
         svc=NS(groups=NS(is_authority_here=lambda _cid: True)),
         repo=_Repo(),
         user_repo=_Users(),
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
         withheld=frozenset({"u-kid"}),
     )
     members = {m["user_id"]: m for m in row["members"]}

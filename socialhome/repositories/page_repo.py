@@ -26,16 +26,15 @@ from __future__ import annotations
 import builtins
 import json
 import uuid
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.page_version import DraftBase, PageConflictSide, version_hash
 from ..federation.owner_bound_id import SPACE_PAGE_KIND, mint_owner_bound_id
 from .base import changed_since_sql, row_to_dict, rows_to_dicts
-
 
 #: How long an edit lock stays valid before anyone else can claim it
 #: (spec §23.72). Clients refresh every ``LOCK_TTL / 2`` via
@@ -74,7 +73,7 @@ class _CrossSpaceWrite(Exception):
 
 # Domain dataclasses live in ``socialhome/domain/page.py``. They are
 # re-exported here so existing repo-level imports keep working.
-from ..domain.page import Page, PageTombstone, PageVersion  # noqa: F401,E402
+from ..domain.page import Page, PageTombstone, PageVersion
 
 
 @runtime_checkable
@@ -229,7 +228,7 @@ class SqlitePageRepo:
         back is exactly what its next ``base_updated_at`` must match. An
         empty one is stamped now.
         """
-        stamp = page.updated_at or datetime.now(timezone.utc).isoformat()
+        stamp = page.updated_at or datetime.now(UTC).isoformat()
         if space_id is None:
             n = await self._db.enqueue_rowcount(
                 """
@@ -557,8 +556,8 @@ class SqlitePageRepo:
         has not yet expired. Raises :class:`PageNotFoundError` if no row
         matches ``page_id``.
         """
-        now_iso = datetime.now(timezone.utc).isoformat()
-        expires = (datetime.now(timezone.utc) + ttl).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
+        expires = (datetime.now(UTC) + ttl).isoformat()
 
         def _run(conn):
             row = conn.execute(
@@ -597,7 +596,7 @@ class SqlitePageRepo:
         else (so the ``/lock/refresh`` route can return 409), or
         :class:`PageNotFoundError` if the page is gone.
         """
-        expires = (datetime.now(timezone.utc) + ttl).isoformat()
+        expires = (datetime.now(UTC) + ttl).isoformat()
 
         def _run(conn):
             row = conn.execute(
@@ -630,7 +629,7 @@ class SqlitePageRepo:
         lock_expires_at}`` or ``None`` if the page is unlocked /
         missing / the lock has already expired.
         """
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         row = await self._db.fetchone(
             "SELECT locked_by, locked_at, lock_expires_at FROM pages WHERE id=?",
             (page_id,),
@@ -661,7 +660,7 @@ class SqlitePageRepo:
         Returns the count released. Scheduled periodically by
         ``PageLockExpiryScheduler``.
         """
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         count = 0
         for table in ("pages", "space_pages"):
             n = await self._db.fetchval(
@@ -820,7 +819,7 @@ class SqlitePageRepo:
             body = encode_side_body(title, body)
         # microsecond-precision timestamp avoids primary-key collisions
         # under rapid concurrent inserts.
-        now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        now = datetime.now(UTC).isoformat(timespec="microseconds")
         await self._db.enqueue(
             """
             INSERT INTO space_page_snapshots(
@@ -1208,7 +1207,7 @@ WHERE space_pages.space_id = excluded.space_id
 
 
 def _space_page_params(page: Page, space_id: str) -> tuple:
-    stamp = page.updated_at or datetime.now(timezone.utc).isoformat()
+    stamp = page.updated_at or datetime.now(UTC).isoformat()
     return (
         page.id,
         space_id,
@@ -1301,7 +1300,7 @@ def new_page(
 ) -> Page:
     """A fresh page row. ``page_id`` is the id a moderation-queue item
     minted at submit time (owner-bound to the same creator)."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     return Page(
         id=page_id or mint_page_id(space_id=space_id, created_by=created_by),
         title=title,

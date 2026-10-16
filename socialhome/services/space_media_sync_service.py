@@ -30,7 +30,7 @@ import asyncio
 import logging
 import pathlib
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import aiofiles
@@ -45,8 +45,8 @@ from .backoff import jittered_backoff_seconds
 from .peer_unpair_service import is_unpair_tombstone
 
 if TYPE_CHECKING:
-    from ..repositories.federation_repo import AbstractFederationRepo
     from ..federation.federation_service import FederationService
+    from ..repositories.federation_repo import AbstractFederationRepo
 
 log = logging.getLogger(__name__)
 
@@ -75,13 +75,13 @@ class SpaceMediaSyncService:
     """Build + dispatch ``SPACE_MEDIA_BLOB`` rows."""
 
     __slots__ = (
-        "_outbox",
         "_federation",
         "_federation_repo",
-        "_media_dir",
         "_interval",
-        "_task",
+        "_media_dir",
+        "_outbox",
         "_stop",
+        "_task",
         "_wake",
     )
 
@@ -89,10 +89,10 @@ class SpaceMediaSyncService:
         self,
         *,
         outbox: AbstractSpaceMediaOutboxRepo,
-        federation: "FederationService | None",
+        federation: FederationService | None,
         media_dir: pathlib.Path,
         interval_seconds: float = 5.0,
-        federation_repo: "AbstractFederationRepo | None" = None,
+        federation_repo: AbstractFederationRepo | None = None,
     ) -> None:
         self._outbox = outbox
         self._federation = federation
@@ -107,7 +107,7 @@ class SpaceMediaSyncService:
         # the next poll. ``_interval`` remains a fallback poll.
         self._wake = asyncio.Event()
 
-    def attach_federation(self, federation: "FederationService") -> None:
+    def attach_federation(self, federation: FederationService) -> None:
         """Wire federation after construction (breaks the boot cycle).
 
         :class:`FederationService` is built later than this service
@@ -194,7 +194,9 @@ class SpaceMediaSyncService:
                     stuck,
                 )
         except Exception as exc:  # pragma: no cover
-            log.warning("space-media-sync: reclaim_in_flight failed: %s", exc)
+            log.warning(
+                "space-media-sync: reclaim_in_flight failed: %s", exc, exc_info=True
+            )
         try:
             # Backstop for a crash mid-teardown: rows for a household that is
             # gone could only ever be refused.
@@ -205,7 +207,9 @@ class SpaceMediaSyncService:
                     orphaned,
                 )
         except Exception as exc:  # pragma: no cover
-            log.warning("space-media-sync: purge_orphaned failed: %s", exc)
+            log.warning(
+                "space-media-sync: purge_orphaned failed: %s", exc, exc_info=True
+            )
         self._stop.clear()
         self._task = asyncio.create_task(self._loop())
 
@@ -216,7 +220,7 @@ class SpaceMediaSyncService:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -233,7 +237,7 @@ class SpaceMediaSyncService:
                         shipped,
                     )
             except Exception as exc:  # pragma: no cover
-                log.warning("space-media-sync flush failed: %s", exc)
+                log.warning("space-media-sync flush failed: %s", exc, exc_info=True)
             if self._stop.is_set():
                 break
             # Wake on a fresh enqueue, else fall back to the periodic poll.
@@ -242,7 +246,7 @@ class SpaceMediaSyncService:
                     self._wake.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def flush_once(self, *, limit: int = 25) -> int:
@@ -278,6 +282,7 @@ class SpaceMediaSyncService:
                     entry.blob_id,
                     entry.target_instance_id,
                     exc,
+                    exc_info=True,
                 )
                 await self._reschedule_or_fail(entry, str(exc))
                 continue
@@ -298,7 +303,11 @@ class SpaceMediaSyncService:
             sem = asyncio.Semaphore(PIPELINE_WINDOW)
 
             async def _send(
-                item: tuple[dict, bytes], *, tgt: str = entry.target_instance_id
+                item: tuple[dict, bytes],
+                *,
+                tgt: str = entry.target_instance_id,
+                space_id: str = entry.space_id,
+                sem: asyncio.Semaphore = sem,
             ) -> None:
                 payload, raw = item
                 async with sem:
@@ -318,7 +327,7 @@ class SpaceMediaSyncService:
                         # the §24.11 ban check reads it off the envelope and
                         # silently no-ops when it is absent, so a household
                         # banned from the space could still push bytes at us.
-                        space_id=entry.space_id,
+                        space_id=space_id,
                     )
                     if not result.ok:
                         raise RuntimeError(result.error or "delivery_failed")
@@ -436,7 +445,7 @@ class SpaceMediaSyncService:
             base_seconds=BACKOFF_BASE_SECONDS,
             cap_seconds=BACKOFF_CAP_SECONDS,
         )
-        next_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        next_at = datetime.now(UTC) + timedelta(seconds=delay)
         await self._outbox.reschedule(
             blob_id=entry.blob_id,
             target_instance_id=entry.target_instance_id,

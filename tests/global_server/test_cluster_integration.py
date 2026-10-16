@@ -31,10 +31,10 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.cluster import (
     CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN,
+    CLUSTER_MAX_NODES,
     CLUSTER_RATE_LIMIT_PER_MIN,
     CLUSTER_REPLAY_MAX_ENTRIES,
     CLUSTER_REPLAY_MAX_PER_NODE,
-    CLUSTER_MAX_NODES,
     CLUSTER_REPLAY_SLACK_S,
     CLUSTER_REPLAY_TTL_S,
     CLUSTER_TS_SKEW_S,
@@ -528,7 +528,7 @@ async def test_admin_cluster_add_peer_rejects_unsafe_node_id_characters(
     ],
 )
 async def test_admin_cluster_add_peer_accepts_existing_node_id_shapes(client, node_id):
-    seed, pub_hex = _keypair()
+    _seed, pub_hex = _keypair()
     resp = await client.post(
         "/admin/api/cluster/peers",
         json={"node_id": node_id, "url": "http://c.test", "public_key": pub_hex},
@@ -1413,8 +1413,8 @@ _UNSAFE_PEER_URLS = [
     "http://h/\x00",
     "http://a b.com",
     "http://h:99999",
-    "http://‮evil.com",
-    "http://q.test/‮evil\r\nX: 1",
+    "http://\u202eevil.com",
+    "http://q.test/\u202eevil\r\nX: 1",
 ]
 
 
@@ -1708,7 +1708,7 @@ async def test_collection_keeps_approved_active_and_unapproved_rows(
     svc = client._app[gfs_cluster_key]
     monkeypatch.setattr(ClusterService, "_ping_peer", _never_reachable)
     repo = client._app[gfs_cluster_repo_key]
-    seed, key = _keypair()
+    _seed, key = _keypair()
     await repo.approve_node("approved", "http://approved.test", key)
     await repo.touch_node("approved", status="offline", last_seen=_LONG_AGO)
     await repo.insert_node(

@@ -46,7 +46,6 @@ from socialhome.federation.transport import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 
-
 # ─── Fakes ────────────────────────────────────────────────────────────────
 
 
@@ -724,12 +723,12 @@ class _RacingPeerConnection(rtc.PeerConnection):  # type: ignore[misc]
     def close(self) -> None:
         try:
             self._ice_queue.put_nowait(None)
-        except Exception:  # noqa: BLE001
+        except asyncio.QueueShutDown:
             pass
         super().close()
 
 
-async def _settle_drain(signal: "_FakeSignaler", *, attempts: int = 20) -> None:
+async def _settle_drain(signal: _FakeSignaler, *, attempts: int = 20) -> None:
     """Yield until the drain task has emitted at least one ICE event
     (or we run out of patience). Deterministic on the fake event loop —
     a handful of ``sleep(0)`` cycles is enough because the fake signaler

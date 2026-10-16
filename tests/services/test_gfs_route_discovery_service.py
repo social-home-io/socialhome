@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -247,7 +247,7 @@ async def test_an_unknown_peer_is_not_probed():
 
 
 async def test_no_relay_connection_means_no_probe_and_no_throttle_spent():
-    svc, fed, _repo, gfs_repo, _ = _svc(_peer())
+    svc, _fed, _repo, gfs_repo, _ = _svc(_peer())
     gfs_repo.conns.clear()
     assert await svc.probe_peer(PEER) == 0
     gfs_repo.conns.append(_conn("a-y", URL_Y))
@@ -301,7 +301,7 @@ async def test_probe_all_probes_every_eligible_confirmed_peer():
 
 async def test_pending_probes_are_capped_oldest_first(monkeypatch):
     monkeypatch.setattr(mod, "MAX_PENDING_PROBES", 3)
-    svc, fed, _repo, _gfs, clock = _svc(_peer(), _peer(OTHER))
+    svc, fed, _repo, _gfs, _clock = _svc(_peer(), _peer(OTHER))
 
     await svc.probe_peer(PEER)
     first_nonce = fed.sent[0]["payload"]["nonce"]
@@ -318,7 +318,7 @@ async def test_pending_probes_are_capped_oldest_first(monkeypatch):
 
 
 async def test_expired_pending_probes_are_pruned_on_the_next_probe():
-    svc, fed, _repo, _gfs, clock = _svc(_peer(), _peer(OTHER))
+    svc, _fed, _repo, _gfs, clock = _svc(_peer(), _peer(OTHER))
     await svc.probe_peer(PEER)
     clock.t += PENDING_PROBE_TTL_S + 1
     await svc.probe_peer(OTHER)
@@ -358,7 +358,7 @@ async def test_a_relayed_probe_is_acked_via_the_same_server_but_records_no_route
 
 
 async def test_probing_back_is_throttled_like_any_probe():
-    svc, fed, repo, _gfs, clock = _svc(_peer())
+    svc, fed, _repo, _gfs, clock = _svc(_peer())
 
     await _deliver(
         svc._on_probe,
@@ -417,7 +417,7 @@ async def test_a_malformed_probe_is_ignored(payload):
 
 
 async def test_answers_to_one_peer_over_one_server_are_rate_capped():
-    svc, fed, repo, _gfs, clock = _svc(_peer())
+    svc, fed, _repo, _gfs, clock = _svc(_peer())
     probe = _event(FederationEventType.GFS_RELAY_PROBE, {"nonce": "n" * 22})
 
     await _deliver(svc._on_probe, probe, via="a-x")
@@ -437,7 +437,7 @@ async def test_answers_to_one_peer_over_one_server_are_rate_capped():
 
 async def test_the_answer_throttle_is_bounded(monkeypatch):
     monkeypatch.setattr(mod, "MAX_ANSWER_ENTRIES", 2)
-    svc, fed, repo, _gfs, clock = _svc(_peer())
+    svc, _fed, _repo, _gfs, clock = _svc(_peer())
     probe = _event(FederationEventType.GFS_RELAY_PROBE, {"nonce": "n" * 22})
 
     await _deliver(svc._on_probe, probe, via="a-x")
@@ -675,7 +675,7 @@ async def test_an_ack_after_the_ttl_is_ignored_and_forgotten():
 
 async def test_expiry_drops_routes_not_refreshed_for_three_intervals():
     svc, _fed, repo, *_ = _svc(_peer())
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     repo.routes[(PEER, "old")] = (now - ROUTE_MAX_AGE - timedelta(hours=1)).isoformat()
     repo.routes[(PEER, "fresh")] = (now - timedelta(hours=1)).isoformat()
 
@@ -685,7 +685,7 @@ async def test_expiry_drops_routes_not_refreshed_for_three_intervals():
 
 
 async def test_expiry_with_nothing_stale_is_quiet():
-    svc, _fed, repo, *_ = _svc(_peer())
+    svc, _fed, _repo, *_ = _svc(_peer())
     assert await svc.expire_stale_routes() == 0
 
 

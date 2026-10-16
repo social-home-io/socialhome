@@ -147,7 +147,6 @@ from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import SeenPayloadCache
 from .public import ClientIpResolver, SlidingWindowCounter, build_window_limiter
 
-
 if TYPE_CHECKING:
     from .domain import GlobalSpace
     from .envelope_relay import GfsEnvelopeRelay
@@ -249,17 +248,17 @@ class GfsMemberPublishService:
     item it is on instead of being cancelled mid-write."""
 
     __slots__ = (
+        "_addressee",
+        "_anon_ip_limiter",
+        "_anon_seen",
         "_clock",
         "_closing",
         "_epoch_repo",
         "_fed_repo",
         "_federation",
-        "_addressee",
         "_limiter",
         "_pending",
         "_queues",
-        "_anon_ip_limiter",
-        "_anon_seen",
         "_relay",
         "_seen",
         "_space_limiter",
@@ -271,10 +270,10 @@ class GfsMemberPublishService:
     def __init__(
         self,
         *,
-        federation: "GfsFederationService",
-        fed_repo: "AbstractGfsFederationRepo",
-        epoch_repo: "AbstractGfsSpaceEpochRepo",
-        relay: "GfsEnvelopeRelay",
+        federation: GfsFederationService,
+        fed_repo: AbstractGfsFederationRepo,
+        epoch_repo: AbstractGfsSpaceEpochRepo,
+        relay: GfsEnvelopeRelay,
         gfs_instance_id: str,
         addressee: GfsAddressee | None = None,
         limiter: SlidingWindowCounter | None = None,
@@ -381,7 +380,7 @@ class GfsMemberPublishService:
         self._pending[job.space_id] = self._pending.get(job.space_id, 0) + 1
         return True
 
-    async def _worker(self, queue: "asyncio.Queue[_FanOutJob]") -> None:
+    async def _worker(self, queue: asyncio.Queue[_FanOutJob]) -> None:
         while not self._stop.is_set():
             try:
                 job = await asyncio.wait_for(queue.get(), timeout=FAN_OUT_IDLE_POLL_S)
@@ -662,7 +661,7 @@ class GfsMemberPublishService:
                 )
 
     @staticmethod
-    def _verified_writer_pk(space: "GlobalSpace", epoch: int, raw: object) -> str:
+    def _verified_writer_pk(space: GlobalSpace, epoch: int, raw: object) -> str:
         """The b64url writer public key of a ``writer_key_cert`` that the
         space's PINNED authority key signed for ``epoch``, else
         :class:`PermissionError`."""
@@ -738,7 +737,7 @@ class GfsMemberPublishService:
             space_id, epoch_int, writer_pk, replace=False
         )
 
-    async def _readable_space(self, space_id: str) -> "GlobalSpace":
+    async def _readable_space(self, space_id: str) -> GlobalSpace:
         space = await self._fed_repo.get_space(space_id)
         if space is None:
             raise PermissionError("space not published")

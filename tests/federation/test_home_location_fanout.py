@@ -28,7 +28,6 @@ from tests.federation.test_federation_service import (
     InMemoryOutboxRepo,
 )
 
-
 # ─── Shared helpers ──────────────────────────────────────────────────────────
 
 
@@ -84,7 +83,7 @@ _SEND_EVENT_PATH = (
 async def test_local_home_location_fans_out_to_v5_confirmed_peer():
     """LocalHomeLocationUpdated → LOCAL_HOME_LOCATION_CHANGED sent to a
     confirmed peer at proto_version=5."""
-    svc, fed_repo, bus = _make_service()
+    _svc, fed_repo, bus = _make_service()
     await fed_repo.save_instance(_peer("peer-v5", proto_version=5))
 
     with patch(_SEND_EVENT_PATH, new_callable=AsyncMock) as mock_send:
@@ -102,7 +101,7 @@ async def test_local_home_location_fans_out_to_v5_confirmed_peer():
 @pytest.mark.asyncio
 async def test_local_home_location_skips_sub_v5_peer():
     """A confirmed peer at proto_version=4 is silently skipped."""
-    svc, fed_repo, bus = _make_service()
+    _svc, fed_repo, bus = _make_service()
     await fed_repo.save_instance(_peer("peer-v4", proto_version=4))
 
     with patch(_SEND_EVENT_PATH, new_callable=AsyncMock) as mock_send:
@@ -114,7 +113,7 @@ async def test_local_home_location_skips_sub_v5_peer():
 @pytest.mark.asyncio
 async def test_local_home_location_skips_v4_sends_to_v5():
     """When both a v4 and a v5 peer are present, only v5 receives."""
-    svc, fed_repo, bus = _make_service()
+    _svc, fed_repo, bus = _make_service()
     await fed_repo.save_instance(_peer("peer-v4", proto_version=4))
     await fed_repo.save_instance(_peer("peer-v5", proto_version=5))
 
@@ -129,7 +128,7 @@ async def test_local_home_location_skips_v4_sends_to_v5():
 @pytest.mark.asyncio
 async def test_local_home_location_skips_share_home_false_peer():
     """A v5 confirmed peer with share_home=False is silently skipped."""
-    svc, fed_repo, bus = _make_service()
+    _svc, fed_repo, bus = _make_service()
     await fed_repo.save_instance(
         _peer("peer-v5-no-share", proto_version=5, share_home=False)
     )
@@ -143,7 +142,7 @@ async def test_local_home_location_skips_share_home_false_peer():
 @pytest.mark.asyncio
 async def test_local_home_location_skips_when_all_peers_have_share_home_false():
     """All confirmed peers with share_home=False → zero sends, no error."""
-    svc, fed_repo, bus = _make_service()
+    _svc, fed_repo, bus = _make_service()
     await fed_repo.save_instance(_peer("peer-v5-a", proto_version=5, share_home=False))
     await fed_repo.save_instance(_peer("peer-v5-b", proto_version=5, share_home=False))
 

@@ -24,7 +24,7 @@ import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ..domain.federation_retention import NEVER_DROP, TERMINAL_GRACE
 from ..repositories.outbox_repo import (
@@ -32,7 +32,6 @@ from ..repositories.outbox_repo import (
     AbstractOutboxRepo,
     OutboxEntry,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -153,15 +152,15 @@ class OutboxProcessor:
     """
 
     __slots__ = (
-        "_repo",
+        "_after_prune",
         "_deliver",
+        "_jitter",
+        "_last_prune",
         "_poll_interval",
         "_prune_interval",
-        "_last_prune",
-        "_task",
+        "_repo",
         "_stop",
-        "_jitter",
-        "_after_prune",
+        "_task",
     )
 
     def __init__(
@@ -207,7 +206,7 @@ class OutboxProcessor:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -240,7 +239,7 @@ class OutboxProcessor:
                     self._stop.wait(),
                     timeout=self._poll_interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     # ── Single tick ────────────────────────────────────────────────────
@@ -266,6 +265,7 @@ class OutboxProcessor:
                     "OutboxProcessor delivery raised for %s: %s",
                     entry.id,
                     exc,
+                    exc_info=True,
                 )
                 outcome = DeliveryOutcome.TRANSIENT
             if outcome is DeliveryOutcome.SUCCESS:
@@ -303,9 +303,7 @@ class OutboxProcessor:
                         entry.id,
                     )
                     delay = max(self._delay_for(MAX_ATTEMPTS), floor_s)
-                    next_at = (
-                        datetime.now(timezone.utc) + timedelta(seconds=delay)
-                    ).isoformat()
+                    next_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
                     await self._repo.reschedule(
                         entry.id,
                         next_at,
@@ -320,9 +318,7 @@ class OutboxProcessor:
                 await self._repo.mark_failed(entry.id)
                 continue
             delay = max(self._delay_for(new_attempts), floor_s)
-            next_at = (
-                datetime.now(timezone.utc) + timedelta(seconds=delay)
-            ).isoformat()
+            next_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
             await self._repo.reschedule(
                 entry.id,
                 next_at,
@@ -341,7 +337,7 @@ class OutboxProcessor:
         Then the optional ``after_prune`` hook (best-effort).
         Returns orphaned + expired + purged count.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         now_iso = now.isoformat()
         # Rows for a household whose ``remote_instances`` row is gone (a
         # crash between a teardown's row delete and its outbox purge) can

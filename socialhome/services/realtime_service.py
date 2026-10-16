@@ -18,6 +18,7 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..domain.events import (
+    AutoPairRequestIncoming,
     BazaarBidPlaced,
     BazaarBidWithdrawn,
     BazaarListingCancelled,
@@ -27,31 +28,13 @@ from ..domain.events import (
     BazaarOfferAccepted,
     BazaarOfferRejected,
     CalendarEventCreated,
-    ConnectionReachable,
-    ConnectionUnreachable,
-    GalleryAlbumCreated,
-    GalleryAlbumDeleted,
-    GalleryAlbumUpdated,
-    GalleryItemDeleted,
-    GalleryItemUploaded,
     CalendarEventDeleted,
     CalendarEventUpdated,
-    AutoPairRequestIncoming,
     CommentAdded,
     CommentDeleted,
     CommentUpdated,
-    PairingAborted,
-    PairingAcceptReceived,
-    PairingConfirmed,
-    PairingIntroReceived,
-    PeerTransportChanged,
-    PeerUnpaired,
-    SpaceMemberProfileUpdated,
-    UserCameOnline,
-    UserProfileUpdated,
-    UserResumedActive,
-    UserWentIdle,
-    UserWentOffline,
+    ConnectionReachable,
+    ConnectionUnreachable,
     CpBlockAdded,
     CpBlockRemoved,
     CpGuardianAdded,
@@ -65,36 +48,49 @@ from ..domain.events import (
     DmMessageDeleted,
     DmMessageReactionChanged,
     DmMessageUpdated,
-    HouseholdConfigChanged,
-    HouseholdZonesChanged,
-    LocalHomeLocationUpdated,
-    NotificationCreated,
-    NotificationReadChanged,
-    PageConflictEmitted,
-    PageProposalSettled,
-    PageEditLockAcquired,
-    PageEditLockReleased,
-    PeerHomeChanged,
-    PostCreated,
-    PostDeleted,
-    PostEdited,
-    PostReactionChanged,
-    StickyCreated,
-    StickyDeleted,
-    StickyUpdated,
+    GalleryAlbumCreated,
+    GalleryAlbumDeleted,
+    GalleryAlbumUpdated,
+    GalleryItemDeleted,
+    GalleryItemUploaded,
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
     HighlightFrameRemoved,
     HighlightFrameViewed,
     HighlightRemoved,
+    HouseholdConfigChanged,
+    HouseholdZonesChanged,
+    LocalHomeLocationUpdated,
     LocalSpaceInviteCreated,
     MediaTranscodeFailed,
     MediaTranscodeReady,
     MomentCreated,
     MomentDeleted,
     MomentReactionChanged,
+    NotificationCreated,
+    NotificationReadChanged,
+    PageConflictEmitted,
+    PageEditLockAcquired,
+    PageEditLockReleased,
+    PageProposalSettled,
+    PairingAborted,
+    PairingAcceptReceived,
+    PairingConfirmed,
+    PairingIntroReceived,
+    PeerHomeChanged,
+    PeerTransportChanged,
+    PeerUnpaired,
+    PollClosed,
+    PollCreated,
+    PollVoted,
+    PostCreated,
+    PostDeleted,
+    PostEdited,
+    PostReactionChanged,
     PresenceUpdated,
     RemoteSpaceDissolved,
+    SchedulePollFinalized,
+    SchedulePollResponded,
     ShoppingItemAdded,
     ShoppingItemRemoved,
     ShoppingItemsCleared,
@@ -104,25 +100,24 @@ from ..domain.events import (
     ShoppingStoreRenamed,
     ShoppingStoresReordered,
     SpaceConfigChanged,
-    SpaceProposalUpdated,
     SpaceJoinApproved,
     SpaceJoinDenied,
     SpaceJoinRequested,
     SpaceMemberJoined,
     SpaceMemberLeft,
+    SpaceMemberProfileUpdated,
     SpaceModerationApproved,
     SpaceModerationExpired,
     SpaceModerationQueued,
     SpaceModerationRejected,
     SpacePostCreated,
     SpacePostModerated,
+    SpaceProposalUpdated,
     SpaceZoneDeleted,
     SpaceZoneUpserted,
-    PollClosed,
-    PollCreated,
-    PollVoted,
-    SchedulePollFinalized,
-    SchedulePollResponded,
+    StickyCreated,
+    StickyDeleted,
+    StickyUpdated,
     TaskAssigned,
     TaskCompleted,
     TaskCreated,
@@ -134,8 +129,13 @@ from ..domain.events import (
     TaskUpdated,
     TimetableDeleted,
     TimetableSaved,
+    UserCameOnline,
     UserPreferencesChanged,
+    UserProfileUpdated,
+    UserResumedActive,
     UserStatusChanged,
+    UserWentIdle,
+    UserWentOffline,
 )
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
@@ -185,13 +185,13 @@ class RealtimeService:
 
     __slots__ = (
         "_bus",
-        "_ws",
-        "_user_repo",
-        "_space_repo",
         "_conversation_repo",
+        "_cp_repo",
         "_media_signer",
         "_media_transcode_repo",
-        "_cp_repo",
+        "_space_repo",
+        "_user_repo",
+        "_ws",
     )
 
     def __init__(
@@ -203,8 +203,8 @@ class RealtimeService:
         space_repo,
         conversation_repo=None,
         media_signer: MediaUrlSigner | None = None,
-        media_transcode_repo: "AbstractMediaTranscodeRepo | None" = None,
-        cp_repo: "AbstractCpRepo | None" = None,
+        media_transcode_repo: AbstractMediaTranscodeRepo | None = None,
+        cp_repo: AbstractCpRepo | None = None,
     ) -> None:
         self._bus = bus
         self._ws = ws
@@ -513,7 +513,7 @@ class RealtimeService:
             return
         try:
             statuses = await self._media_transcode_repo.status_for([fn])
-        except Exception:  # noqa: BLE001 — annotation must not break the frame
+        except Exception:
             log.warning("media_status annotation failed for %s", fn, exc_info=True)
             return
         item["media_status"] = statuses.get(fn, "ready")
@@ -1892,9 +1892,12 @@ class RealtimeService:
         ``also`` (e.g. a submitter) while that user is still a member."""
         members = await self._space_repo.list_members(space_id)
         ids = [m.user_id for m in members if m.role in _SPACE_MODERATOR_ROLES]
-        if also is not None and also not in ids:
-            if any(m.user_id == also for m in members):
-                ids.append(also)
+        if (
+            also is not None
+            and also not in ids
+            and any(m.user_id == also for m in members)
+        ):
+            ids.append(also)
         return await self._ws.broadcast_to_users(ids, payload)
 
     # ─── Shopping list (§23.120 — local household only) ─────────────────

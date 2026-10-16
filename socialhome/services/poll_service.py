@@ -54,7 +54,7 @@ class PollClosedError(CodedError, PollServiceError):
 class PollService(BusPublisherMixin):
     """One shared service for both reply polls and schedule polls."""
 
-    __slots__ = ("_repo", "_bus")
+    __slots__ = ("_bus", "_repo")
 
     def __init__(
         self,

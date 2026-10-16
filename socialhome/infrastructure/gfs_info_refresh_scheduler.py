@@ -36,7 +36,7 @@ RefreshFn = Callable[..., Awaitable[int]]
 class GfsInfoRefreshScheduler:
     """Periodic, jittered ``/gfs/info`` refresh of every active connection."""
 
-    __slots__ = ("_refresh", "_interval", "_jitter", "_rand", "_task", "_stop")
+    __slots__ = ("_interval", "_jitter", "_rand", "_refresh", "_stop", "_task")
 
     def __init__(
         self,
@@ -72,7 +72,7 @@ class GfsInfoRefreshScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -81,11 +81,11 @@ class GfsInfoRefreshScheduler:
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.next_delay())
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             try:
                 await self._refresh(should_stop=self._stop.is_set)
-            except Exception:  # noqa: BLE001 — a background self-heal
+            except Exception:
                 log.warning("gfs: periodic /gfs/info refresh failed", exc_info=True)
 
 

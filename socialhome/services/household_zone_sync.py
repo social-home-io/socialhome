@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ..domain.errors import WrongTypeError
 from ..domain.household_zone import HouseholdZoneSyncStatus, ZoneSourceUnavailableError
 from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
 from .household_zone_service import HouseholdZoneService
@@ -52,30 +53,30 @@ _SYNC_FAILED = "sync failed"
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class HouseholdZoneSync:
     """Periodic platform → household zone mirror with an on/off option."""
 
     __slots__ = (
-        "_zones",
-        "_config",
-        "_source",
-        "_interval",
-        "_task",
-        "_stop",
-        "_lock",
         "_cleared",
-        "_last_synced_at",
+        "_config",
+        "_interval",
         "_last_error",
+        "_last_synced_at",
+        "_lock",
+        "_source",
+        "_stop",
+        "_task",
+        "_zones",
     )
 
     def __init__(
         self,
         zone_service: HouseholdZoneService,
         instance_config: AbstractInstanceConfigRepo,
-        source: "ZoneSource | None",
+        source: ZoneSource | None,
         *,
         interval_seconds: float = SYNC_INTERVAL_SECONDS,
     ) -> None:
@@ -108,7 +109,7 @@ class HouseholdZoneSync:
         """Store the option and sync right away (on: pull the platform's
         zones; off: remove the synced ones). Returns the new status."""
         if not isinstance(enabled, bool):
-            raise ValueError("enabled must be true or false")
+            raise WrongTypeError("enabled must be true or false")
         if not self.available:
             raise ValueError("This household has no platform zones to sync.")
         await self._config.set(SYNC_ENABLED_KEY, "1" if enabled else "0")
@@ -152,7 +153,7 @@ class HouseholdZoneSync:
                 self._last_error = _SYNC_FAILED
                 log.warning("household zones: sync failed: %s", exc, exc_info=True)
 
-    async def _pull(self, source: "ZoneSource") -> None:
+    async def _pull(self, source: ZoneSource) -> None:
         try:
             zones = await source.list_zones()
         except ZoneSourceUnavailableError as exc:
@@ -189,7 +190,7 @@ class HouseholdZoneSync:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -198,5 +199,5 @@ class HouseholdZoneSync:
             await self.sync_now()
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue

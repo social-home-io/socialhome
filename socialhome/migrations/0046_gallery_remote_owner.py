@@ -84,18 +84,30 @@ CREATE TABLE gallery_items_new (
 
 #: Recreated verbatim from 0001 after the swap.
 _INDEXES = (
-    "CREATE INDEX IF NOT EXISTS idx_gallery_albums_space"
-    "   ON gallery_albums(space_id, created_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_gallery_albums_owner"
-    "   ON gallery_albums(owner_user_id) WHERE owner_user_id IS NOT NULL",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_gallery_albums_system_unique"
-    "   ON gallery_albums(COALESCE(space_id, '__household__')) WHERE is_system = 1",
-    "CREATE INDEX IF NOT EXISTS idx_gallery_items_album"
-    "   ON gallery_items(album_id, sort_order, created_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_gallery_items_uploader"
-    "   ON gallery_items(uploaded_by)",
-    "CREATE INDEX IF NOT EXISTS idx_gallery_items_source_post"
-    "   ON gallery_items(source_post_id) WHERE source_post_id IS NOT NULL",
+    (
+        "CREATE INDEX IF NOT EXISTS idx_gallery_albums_space"
+        "   ON gallery_albums(space_id, created_at DESC)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_gallery_albums_owner"
+        "   ON gallery_albums(owner_user_id) WHERE owner_user_id IS NOT NULL"
+    ),
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_gallery_albums_system_unique"
+        "   ON gallery_albums(COALESCE(space_id, '__household__')) WHERE is_system = 1"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_gallery_items_album"
+        "   ON gallery_items(album_id, sort_order, created_at DESC)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_gallery_items_uploader"
+        "   ON gallery_items(uploaded_by)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_gallery_items_source_post"
+        "   ON gallery_items(source_post_id) WHERE source_post_id IS NOT NULL"
+    ),
 )
 
 

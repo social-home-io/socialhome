@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from enum import StrEnum
 
 from .link_preview import LinkPreview
-
 
 # ─── Core enums ───────────────────────────────────────────────────────────
 
@@ -298,7 +297,7 @@ class Poll:
     closes_at: datetime | None = None
     closed: bool = False
 
-    def cast_vote(self, voter_user_id: str, option_id: str) -> "Poll":
+    def cast_vote(self, voter_user_id: str, option_id: str) -> Poll:
         """Return a new :class:`Poll` with this voter's choice replaced."""
         if self.closed:
             raise ValueError("Cannot cast a vote on a closed poll")
@@ -308,17 +307,17 @@ class Poll:
         new_vote = PollVote(
             option_id=option_id,
             voter_user_id=voter_user_id,
-            voted_at=datetime.now(timezone.utc),
+            voted_at=datetime.now(UTC),
         )
         return copy.replace(self, votes=(*filtered, new_vote))
 
-    def retract_vote(self, voter_user_id: str) -> "Poll":
+    def retract_vote(self, voter_user_id: str) -> Poll:
         return copy.replace(
             self,
             votes=tuple(v for v in self.votes if v.voter_user_id != voter_user_id),
         )
 
-    def close(self) -> "Poll":
+    def close(self) -> Poll:
         return copy.replace(self, closed=True)
 
     def vote_count(self, option_id: str) -> int:
@@ -408,7 +407,7 @@ class SchedulePoll:
 
     def with_response(
         self, user_id: str, slot_id: str, availability: Availability
-    ) -> "SchedulePoll":
+    ) -> SchedulePoll:
         """Return a new poll with this user's availability for ``slot_id`` set."""
         if self.closed:
             raise ValueError("Cannot respond to a finalized or closed schedule poll")
@@ -423,11 +422,11 @@ class SchedulePoll:
             slot_id=slot_id,
             user_id=user_id,
             availability=availability,
-            responded_at=datetime.now(timezone.utc),
+            responded_at=datetime.now(UTC),
         )
         return copy.replace(self, responses=(*filtered, new_response))
 
-    def retract_response(self, user_id: str, slot_id: str) -> "SchedulePoll":
+    def retract_response(self, user_id: str, slot_id: str) -> SchedulePoll:
         return copy.replace(
             self,
             responses=tuple(
@@ -437,7 +436,7 @@ class SchedulePoll:
             ),
         )
 
-    def finalize(self, slot_id: str) -> "SchedulePoll":
+    def finalize(self, slot_id: str) -> SchedulePoll:
         if not any(s.id == slot_id for s in self.slots):
             raise ValueError(f"Slot {slot_id!r} not found in this schedule poll")
         return copy.replace(self, finalized_slot_id=slot_id, closed=True)
@@ -533,14 +532,14 @@ class Post:
     #: (:attr:`no_link_preview`), or the page had nothing to show.
     link_preview: LinkPreview | None = None
 
-    def with_reaction(self, emoji: str, user_id: str) -> "Post":
+    def with_reaction(self, emoji: str, user_id: str) -> Post:
         current = self.reactions.get(emoji, frozenset())
         return copy.replace(
             self,
             reactions={**self.reactions, emoji: current | {user_id}},
         )
 
-    def without_reaction(self, emoji: str, user_id: str) -> "Post":
+    def without_reaction(self, emoji: str, user_id: str) -> Post:
         current = self.reactions.get(emoji, frozenset()) - {user_id}
         if not current:
             return copy.replace(
@@ -552,13 +551,13 @@ class Post:
             reactions={**self.reactions, emoji: current},
         )
 
-    def increment_comments(self) -> "Post":
+    def increment_comments(self) -> Post:
         return copy.replace(self, comment_count=self.comment_count + 1)
 
-    def decrement_comments(self) -> "Post":
+    def decrement_comments(self) -> Post:
         return copy.replace(self, comment_count=max(0, self.comment_count - 1))
 
-    def soft_delete(self) -> "Post":
+    def soft_delete(self) -> Post:
         """Retain the post node (reactions, comments, pin) but clear content."""
         return copy.replace(
             self,
@@ -569,11 +568,11 @@ class Post:
             deleted=True,
         )
 
-    def edit(self, new_content: str, now: datetime | None = None) -> "Post":
+    def edit(self, new_content: str, now: datetime | None = None) -> Post:
         return copy.replace(
             self,
             content=new_content,
-            edited_at=now or datetime.now(timezone.utc),
+            edited_at=now or datetime.now(UTC),
         )
 
 
@@ -598,8 +597,8 @@ class Comment:
     media_url: str | None = None
     deleted: bool = False
     edited_at: datetime | None = None
-    children: tuple["Comment", ...] = ()
+    children: tuple[Comment, ...] = ()
 
-    def soft_delete(self) -> "Comment":
+    def soft_delete(self) -> Comment:
         """Clear content but keep the node in the tree (children remain)."""
         return copy.replace(self, content=None, media_url=None, deleted=True)

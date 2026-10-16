@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..domain.space import normalize_join_mode
-from .base import rows_to_dicts
 
 # Domain dataclass lives in ``socialhome/domain/public_space.py``;
 # re-exported here so existing repo-level imports keep working.
-from ..domain.public_space import PublicSpaceListing  # noqa: F401,E402
+from ..domain.public_space import PublicSpaceListing
+from ..domain.space import normalize_join_mode
+from .base import rows_to_dicts
 
 
 @runtime_checkable
@@ -41,7 +41,7 @@ class SqlitePublicSpaceRepo:
         self._db = db
 
     async def upsert(self, listing: PublicSpaceListing) -> None:
-        cached = listing.cached_at or datetime.now(timezone.utc).isoformat()
+        cached = listing.cached_at or datetime.now(UTC).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO public_space_cache(

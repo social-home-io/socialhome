@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 
 from socialhome.domain.federation import FederationEventType
 from socialhome.infrastructure.outbox_processor import (
@@ -13,13 +14,12 @@ from socialhome.infrastructure.outbox_processor import (
 )
 from socialhome.repositories.outbox_repo import OutboxEntry
 
-
 # ─── Constants ───────────────────────────────────────────────────────────
 
 
 def test_backoff_schedule_monotonic():
     """Backoff intervals must be non-decreasing."""
-    for prev, curr in zip(BACKOFF_SECONDS, BACKOFF_SECONDS[1:]):
+    for prev, curr in itertools.pairwise(BACKOFF_SECONDS):
         assert curr >= prev
 
 

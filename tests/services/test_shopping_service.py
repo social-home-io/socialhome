@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.repositories.shopping_repo import SqliteShoppingRepo
 from socialhome.repositories.sticky_repo import SqliteStickyRepo

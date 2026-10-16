@@ -86,6 +86,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
+from ..domain.federation import FederationEvent, FederationEventType
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     MODERATION_BLOCK_KEY,
@@ -97,26 +99,23 @@ from ..domain.space import (
     SpaceFeatureAccess,
     SpaceRole,
 )
-from ..domain.federation_capabilities import FederationCapability
 from ..domain.user import SYSTEM_AUTHOR
+from .host_equivalence import acts_as_host
 from .moderation_approval import (
     FEATURE_OF_EVENT,
     item_matches_event,
     needs_held_row,
 )
 
-from ..domain.federation import FederationEvent, FederationEventType
-from .host_equivalence import acts_as_host
-
 if TYPE_CHECKING:
     from ..domain.space import Space, SpaceModerationItem
-    from .pending_seat_buffer import PendingSeatBuffer
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.space_remote_member_repo import (
         AbstractSpaceRemoteMemberRepo,
     )
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .pending_seat_buffer import PendingSeatBuffer
 
 log = logging.getLogger(__name__)
 
@@ -149,7 +148,7 @@ _RELEASABLE: frozenset[ModerationStatus] = frozenset(
 )
 
 
-def payload_actor(event: "FederationEvent") -> str | None:
+def payload_actor(event: FederationEvent) -> str | None:
     """The payload's ``actor_user_id`` (v_42) — the user who made the write
     — or ``None`` from an older sender. For :meth:`SpaceAuthorship.access_admits`."""
     actor = event.payload.get("actor_user_id")
@@ -164,23 +163,23 @@ class SpaceAuthorship:
     """Bind the users a space-content payload names to the sending household."""
 
     __slots__ = (
-        "_spaces",
-        "_seats",
-        "_users",
-        "_pending",
-        "_instances",
         "_held_rows",
+        "_instances",
         "_on_release",
+        "_pending",
+        "_seats",
+        "_spaces",
+        "_users",
     )
 
     def __init__(
         self,
         *,
-        space_repo: "AbstractSpaceRepo",
-        remote_member_repo: "AbstractSpaceRemoteMemberRepo",
-        user_repo: "AbstractUserRepo",
-        pending: "PendingSeatBuffer | None" = None,
-        federation_repo: "AbstractFederationRepo | None" = None,
+        space_repo: AbstractSpaceRepo,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo,
+        user_repo: AbstractUserRepo,
+        pending: PendingSeatBuffer | None = None,
+        federation_repo: AbstractFederationRepo | None = None,
     ) -> None:
         self._spaces = space_repo
         #: The senders' advertised ``proto_version`` — whether a missing
@@ -201,7 +200,7 @@ class SpaceAuthorship:
         self._on_release: ReleaseSeen | None = None
 
     def attach_moderation(
-        self, *, held_rows: "HeldRows", on_release: "ReleaseSeen"
+        self, *, held_rows: HeldRows, on_release: ReleaseSeen
     ) -> None:
         """Wire the moderation queue's read of our rows and its release
         hook (``app._build_space_moderation``)."""
@@ -210,7 +209,7 @@ class SpaceAuthorship:
 
     async def acts_for(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         user_id: str,
         *,
@@ -300,7 +299,7 @@ class SpaceAuthorship:
             return True
         return subscriber_ok and seat.role == SpaceRole.SUBSCRIBER.value
 
-    async def is_host(self, event: "FederationEvent", space_id: str) -> bool:
+    async def is_host(self, event: FederationEvent, space_id: str) -> bool:
         """The sender hosts ``space_id`` here: its owner, or the delegated
         admin household that invited us while delegation is on
         (:mod:`socialhome.federation.host_equivalence`)."""
@@ -311,16 +310,16 @@ class SpaceAuthorship:
         return await self.acts_as_host(space, sender)
 
     @property
-    def seat_repo(self) -> "AbstractSpaceRemoteMemberRepo":
+    def seat_repo(self) -> AbstractSpaceRemoteMemberRepo:
         """The roster mirror this binder reads."""
         return self._seats
 
-    async def acts_as_host(self, space: "Space | None", sender: str) -> bool:
+    async def acts_as_host(self, space: Space | None, sender: str) -> bool:
         """:func:`~socialhome.federation.host_equivalence.acts_as_host` with
         this binder's repos."""
         return await acts_as_host(self._spaces, self._seats, space, sender)
 
-    async def is_admin_household(self, event: "FederationEvent", space_id: str) -> bool:
+    async def is_admin_household(self, event: FederationEvent, space_id: str) -> bool:
         """The host, or a household holding a live ``admin`` seat here.
 
         Settings authority (zones, timetables): a ``moderator`` seat does
@@ -329,7 +328,7 @@ class SpaceAuthorship:
         return await self._sender_holds(event, space_id, _ADMIN_SEATS)
 
     async def has_content_authority(
-        self, event: "FederationEvent", space_id: str
+        self, event: FederationEvent, space_id: str
     ) -> bool:
         """The host, or a household holding a live ``admin`` or
         ``moderator`` seat here — may act on other people's content."""
@@ -337,7 +336,7 @@ class SpaceAuthorship:
 
     async def _sender_holds(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         roles: frozenset[str],
     ) -> bool:
@@ -353,7 +352,7 @@ class SpaceAuthorship:
 
     async def admin_as(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         user_id: str,
     ) -> bool:
@@ -367,7 +366,7 @@ class SpaceAuthorship:
 
     async def moderates_as(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         user_id: str,
     ) -> bool:
@@ -380,7 +379,7 @@ class SpaceAuthorship:
 
     async def _seated_as(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         user_id: str,
         roles: frozenset[str],
@@ -438,7 +437,7 @@ class SpaceAuthorship:
 
     async def approver_holds(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         user_id: str,
         *,
@@ -461,7 +460,7 @@ class SpaceAuthorship:
             return await self.admin_as(event, space_id, user_id)
         return await self.moderates_as(event, space_id, user_id)
 
-    async def writes_here(self, event: "FederationEvent", space_id: str) -> bool:
+    async def writes_here(self, event: FederationEvent, space_id: str) -> bool:
         """The host, or a household holding a live writer seat (``member`` /
         ``moderator`` / ``admin``).
 
@@ -492,7 +491,7 @@ class SpaceAuthorship:
 
     async def may_author(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         user_id: str,
         *,
@@ -526,7 +525,7 @@ class SpaceAuthorship:
 
     async def may_author_writer(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         user_id: str,
     ) -> bool:
@@ -560,7 +559,7 @@ class SpaceAuthorship:
         )
 
     async def _subscriber_may_comment(
-        self, event: "FederationEvent", space_id: str, user_id: str
+        self, event: FederationEvent, space_id: str, user_id: str
     ) -> bool:
         seat = await self._seats.get(space_id, str(event.from_instance or ""), user_id)
         if seat is None or seat.role != SpaceRole.SUBSCRIBER.value:
@@ -570,7 +569,7 @@ class SpaceAuthorship:
 
     async def may_author_approved(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         author: str,
     ) -> bool:
@@ -617,8 +616,8 @@ class SpaceAuthorship:
         return False
 
     async def _release_refusal(
-        self, event: "FederationEvent", space_id: str, author: str
-    ) -> tuple[str | None, "SpaceModerationItem | None"]:
+        self, event: FederationEvent, space_id: str, author: str
+    ) -> tuple[str | None, SpaceModerationItem | None]:
         """``(reason, item)``: why the release is refused (``None``: it is
         not), and the held queue item it releases, if any."""
         approval = ModerationApproval.from_wire(event.payload.get(MODERATION_BLOCK_KEY))
@@ -682,7 +681,7 @@ class SpaceAuthorship:
 
     async def may_mutate(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         owner_user_id: str,
         *,
@@ -705,7 +704,7 @@ class SpaceAuthorship:
 
     async def access_admits(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         feature: str,
         action: ContentAction,
@@ -863,7 +862,7 @@ class SpaceAuthorship:
 
     async def _release_admitted(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         feature: str,
         action: ContentAction,
@@ -901,7 +900,7 @@ class SpaceAuthorship:
             return False
         return True
 
-    async def _sender_names_actors(self, event: "FederationEvent") -> bool:
+    async def _sender_names_actors(self, event: FederationEvent) -> bool:
         """The sender advertised v_42+ — it names ``actor_user_id`` on every
         collaborative write. Without a federation repo, assume it does
         (strict). A peer that never advertised reads as old."""
@@ -909,7 +908,7 @@ class SpaceAuthorship:
             event, FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT
         )
 
-    async def _sender_supports(self, event: "FederationEvent", version: int) -> bool:
+    async def _sender_supports(self, event: FederationEvent, version: int) -> bool:
         """The sender advertised at least ``version``. Without a federation
         repo, assume it did (strict). A peer that never advertised reads as
         old."""
@@ -918,12 +917,16 @@ class SpaceAuthorship:
         try:
             peer = await self._instances.get_instance(str(event.from_instance or ""))
         except Exception:  # pragma: no cover — defensive
+            log.debug(
+                "SpaceAuthorship._sender_supports: fail-soft error ignored",
+                exc_info=True,
+            )
             return True
         return peer is not None and peer.proto_version >= version
 
     @staticmethod
     def _log_access_refusal(
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         feature: str,
         action: ContentAction,
@@ -959,7 +962,7 @@ class SpaceAuthorship:
 
     async def hold_or_refuse(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         *,
         space_id: str,
         what: str,
@@ -997,7 +1000,7 @@ class SpaceAuthorship:
 
     @staticmethod
     def log_refusal(
-        event: "FederationEvent",
+        event: FederationEvent,
         *,
         space_id: str,
         what: str,

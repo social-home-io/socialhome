@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
-from dataclasses import replace
-
 from socialhome.app_keys import (
     config_key,
-    db_key as _db_key,
     platform_adapter_key,
+)
+from socialhome.app_keys import (
+    db_key as _db_key,
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config

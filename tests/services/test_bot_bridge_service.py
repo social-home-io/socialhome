@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
@@ -28,9 +30,9 @@ from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.bot_bridge_service import (
+    MAX_MESSAGE_LEN,
     BotBridgeInvalidError,
     BotBridgeService,
-    MAX_MESSAGE_LEN,
 )
 from socialhome.services.space_mentions import SpaceMentionResolver
 
@@ -80,7 +82,7 @@ async def stack(tmp_dir):
     class Stack:
         pass
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     s = Stack()
     s.db = db
@@ -89,7 +91,7 @@ async def stack(tmp_dir):
     s.space_repo = space_repo
     s.space_post_repo = space_post_repo
     s.conv_repo = conv_repo
-    s.iso_now = datetime.now(timezone.utc)
+    s.iso_now = datetime.now(UTC)
     yield s
     await db.shutdown()
 
@@ -128,12 +130,12 @@ async def test_payload_validation(stack):
 
 async def test_notify_conversation(stack):
     """DM bot posts land with SYSTEM_AUTHOR as sender and rely on bot_enabled."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     conv = Conversation(
         id="c1",
         type=ConversationType.DM,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         bot_enabled=True,
     )
     await stack.conv_repo.create(conv)
@@ -149,7 +151,7 @@ async def test_notify_conversation(stack):
     conv_off = Conversation(
         id="c2",
         type=ConversationType.DM,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         bot_enabled=False,
     )
     await stack.conv_repo.create(conv_off)

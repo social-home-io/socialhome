@@ -40,7 +40,6 @@ from socialhome.services.space_crypto_service import (
     strip_authority_sig_fields,
 )
 
-
 OWNER = "owner-instance"
 RELAY = "some-relay-instance"
 SPACE_ID = "sp-roster"
@@ -444,7 +443,7 @@ async def test_unsigned_left_evicts_nobody_through_any_handler(tmp_dir):
     seated member through ANY handler. Seat a member via the verified path,
     then dispatch an unsigned LEFT — the member must remain.
     """
-    registry, space_repo, rm, db, _own = await _wire_both_handlers(tmp_dir)
+    registry, _space_repo, rm, db, _own = await _wire_both_handlers(tmp_dir)
     try:
         # Seat a real member directly so there is something to (illegitimately)
         # try to evict.

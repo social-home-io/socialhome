@@ -22,26 +22,26 @@ import asyncio
 import logging
 import pathlib
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.conversation import (
-    DmSelfError,
-    DmTooLongError,
-    GroupTooSmallError,
+    CONVERSATION_NOTIF_LEVELS,
+    MESSAGE_TYPES,
     Conversation,
     ConversationMember,
     ConversationMessage,
-    CONVERSATION_NOTIF_LEVELS,
     ConversationType,
-    MESSAGE_TYPES,
+    DmSelfError,
+    DmTooLongError,
+    GroupTooSmallError,
     MessageReaction,
     RemoteConversationMember,
     SystemChatScope,
     mute_until_for,
 )
-from ..domain.errors import CodedError, InvalidMediaRefError
 from ..domain.dm_location import normalise_location_content
+from ..domain.errors import CodedError, InvalidMediaRefError
 from ..domain.events import (
     DmConversationCreated,
     DmMessageCreated,
@@ -55,8 +55,8 @@ from ..federation import compat
 from ..federation.owner_bound_id import SPACE_CHAT_MESSAGE_KIND, mint_owner_bound_id
 from ..infrastructure.event_bus import EventBus
 from ..media.cleanup import unlink_unreferenced
-from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.conversation_repo import AbstractConversationRepo
+from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .dm_audience import local_audience
 from .dm_group_service import DmGroupService, clean_group_name
@@ -66,15 +66,15 @@ from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
-    from .audio_transcription_service import AudioTranscriptionService  # noqa: F401
-    from .dm_media_sync_service import DmMediaSyncService  # noqa: F401
-    from .system_chat_policy import SystemChatPolicy
     from ..federation.federation_service import FederationService
     from ..repositories.dm_routing_repo import AbstractDmRoutingRepo
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.peer_user_visibility_repo import (
         AbstractPeerUserVisibilityRepo,
     )
+    from .audio_transcription_service import AudioTranscriptionService
+    from .dm_media_sync_service import DmMediaSyncService
+    from .system_chat_policy import SystemChatPolicy
 
 
 log = logging.getLogger(__name__)
@@ -171,21 +171,21 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
     """
 
     __slots__ = (
+        "_audio_transcription",
+        "_bus",
         "_child_protection",
         "_convos",
-        "_users",
-        "_bus",
+        "_dm_routing_repo",
         "_federation",
         "_federation_repo",
-        "_dm_routing_repo",
-        "_media_sync",
-        "_audio_transcription",
+        "_groups",
         "_media_dir",
         "_media_refs",
-        "_pending_transcribe_tasks",
+        "_media_sync",
         "_own_instance_id",
-        "_groups",
+        "_pending_transcribe_tasks",
         "_system_chats",
+        "_users",
     )
 
     def __init__(
@@ -194,15 +194,15 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         user_repo: AbstractUserRepo,
         bus: EventBus,
         *,
-        federation_service: "FederationService | None" = None,
-        federation_repo: "AbstractFederationRepo | None" = None,
-        dm_routing_repo: "AbstractDmRoutingRepo | None" = None,
-        media_sync: "DmMediaSyncService | None" = None,
-        audio_transcription: "AudioTranscriptionService | None" = None,
+        federation_service: FederationService | None = None,
+        federation_repo: AbstractFederationRepo | None = None,
+        dm_routing_repo: AbstractDmRoutingRepo | None = None,
+        media_sync: DmMediaSyncService | None = None,
+        audio_transcription: AudioTranscriptionService | None = None,
         media_dir: pathlib.Path | None = None,
         media_refs: AbstractMediaReferenceRepo | None = None,
         own_instance_id: str = "",
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
     ) -> None:
         self._convos = conversation_repo
         self._users = user_repo
@@ -235,7 +235,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         self._child_protection = None
         #: Live access rules for system chats (household / space); without
         #: it every system chat is refused (fail closed).
-        self._system_chats: "SystemChatPolicy | None" = None
+        self._system_chats: SystemChatPolicy | None = None
         #: Group-conversation membership authority (v_37). Always present —
         #: a local-only group needs it too; federation is attached later.
         self._groups = DmGroupService(
@@ -251,7 +251,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
 
     def attach_audio_transcription(
         self,
-        service: "AudioTranscriptionService",
+        service: AudioTranscriptionService,
     ) -> None:
         """Wire voice-note STT after construction.
 
@@ -262,7 +262,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         """
         self._audio_transcription = service
 
-    def attach_system_chats(self, policy: "SystemChatPolicy") -> None:
+    def attach_system_chats(self, policy: SystemChatPolicy) -> None:
         """Wire the access rules of system chats (household / space chat).
 
         Every membership check on a conversation with ``system_scope`` set
@@ -272,8 +272,8 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
 
     def attach_federation(
         self,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
         own_instance_id: str,
     ) -> None:
         """Wire federation after construction (breaks the DM ↔ federation cycle)."""
@@ -326,10 +326,10 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             conv = Conversation(
                 id=uuid.uuid4().hex,
                 type=ConversationType.DM,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
             await self._convos.create(conv)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             await self._convos.add_member(
                 ConversationMember(
                     conversation_id=conv.id,
@@ -385,10 +385,10 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         conv = Conversation(
             id=uuid.uuid4().hex,
             type=ConversationType.DM,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         await self._convos.create(conv)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._convos.add_member(
             ConversationMember(
                 conversation_id=conv.id,
@@ -446,7 +446,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             id=conv_id,
             type=ConversationType.GROUP_DM,
             name=clean_group_name(name),
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             membership_version=1,
         )
         await self._groups.commit(
@@ -623,6 +623,10 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             try:
                 u = await self._users.get(uname)
             except Exception:  # pragma: no cover - defensive
+                log.debug(
+                    "DmService._publish_conversation_created: fail-soft error ignored",
+                    exc_info=True,
+                )
                 u = None
             if u is not None:
                 member_ids.append(u.user_id)
@@ -783,7 +787,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             reply_to_id=reply_to_id,
             reply_to_highlight_frame_id=reply_to_highlight_frame_id,
             reply_to_highlight_frame_snapshot=reply_to_highlight_frame_snapshot,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         await self._convos.save_message(msg)
 
@@ -920,6 +924,9 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                     conversation_id,
                 )
             except Exception:  # pragma: no cover
+                log.debug(
+                    "DmService.send_message: fail-soft error ignored", exc_info=True
+                )
                 remote_members = []
             seen: set[str] = set()
             for rm in remote_members:
@@ -1016,6 +1023,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                 "dm audio: cannot read blob %s for transcription: %s",
                 media_url,
                 exc,
+                exc_info=True,
             )
             return
 
@@ -1026,10 +1034,12 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         try:
             await self._convos.edit_message(message_id, transcript)
         except Exception as exc:
-            log.warning("dm audio: failed to persist transcript: %s", exc)
+            log.warning(
+                "dm audio: failed to persist transcript: %s", exc, exc_info=True
+            )
             return
 
-        edited_at = datetime.now(timezone.utc)
+        edited_at = datetime.now(UTC)
         await self._bus.publish(
             DmMessageUpdated(
                 conversation_id=conversation_id,
@@ -1093,7 +1103,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         if msg.type == "location":
             new_content = normalise_location_content(new_content)
         await self._convos.edit_message(message_id, new_content)
-        edited_at = datetime.now(timezone.utc)
+        edited_at = datetime.now(UTC)
         # Every open thread tab swaps the bubble in place; the members an
         # edit newly @-mentions (never those already mentioned) get a
         # mention bell (NotificationService). §CP.F2: never to someone a
@@ -1308,7 +1318,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         # message created_at (also Python ISO). SQLite's datetime('now')
         # omits the 'T' and timezone suffix, causing string-comparison
         # mismatches against Python isoformat() values.
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._convos.set_last_read(conversation_id, username, at=now)
         if not receipt:
             return 0
@@ -1398,7 +1408,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         bell row and the push. Local only: nothing is federated.
         """
         await self._require_membership(conversation_id, username)
-        until = mute_until_for(duration, now=now or datetime.now(timezone.utc))
+        until = mute_until_for(duration, now=now or datetime.now(UTC))
         await self._convos.set_muted_until(conversation_id, username, until)
         return until
 
@@ -1775,7 +1785,9 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             except Exception as exc:
                 # Keep going; the account still can't post there and never
                 # sees the blocked person's messages (read-side filter).
-                log.warning("§CP.F2 leave of group %s failed: %s", conv.id, exc)
+                log.warning(
+                    "§CP.F2 leave of group %s failed: %s", conv.id, exc, exc_info=True
+                )
                 failed.append(conv.id)
         if failed:
             raise RuntimeError(f"could not leave {len(failed)} group(s)")
@@ -1929,6 +1941,9 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                 conversation_id,
             )
         except Exception:  # pragma: no cover
+            log.debug(
+                "DmService._fan_to_remote: fail-soft error ignored", exc_info=True
+            )
             return
         is_group = conv is not None and conv.type is ConversationType.GROUP_DM
         seen: set[str] = set()
@@ -2015,6 +2030,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                     inst,
                     event_type.value,
                     exc,
+                    exc_info=True,
                 )
 
     async def _compat_transform_payload(
@@ -2041,6 +2057,10 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                     peer_instance_id,
                 )
             except Exception:  # pragma: no cover
+                log.debug(
+                    "DmService._compat_transform_payload: fail-soft error ignored",
+                    exc_info=True,
+                )
                 instance = None
             if instance is not None:
                 peer_version = int(
@@ -2129,6 +2149,9 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         try:
             instance = await self._federation_repo.get_instance(instance_id)
         except Exception:  # pragma: no cover
+            log.debug(
+                "DmService._peer_is_confirmed: fail-soft error ignored", exc_info=True
+            )
             return False
         if instance is None:
             return False

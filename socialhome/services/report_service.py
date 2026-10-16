@@ -62,7 +62,7 @@ import asyncio
 import dataclasses
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -138,17 +138,17 @@ class _Drop(Exception):
 
 class ReportService:
     __slots__ = (
-        "_reports",
-        "_users",
         "_bus",
         "_federation",
-        "_own_instance_id",
-        "_space_repo",
-        "_space_post_repo",
-        "_seats",
-        "_scope",
         "_gfs_connection_service",
+        "_own_instance_id",
+        "_reports",
+        "_scope",
+        "_seats",
         "_signing_key",
+        "_space_post_repo",
+        "_space_repo",
+        "_users",
     )
 
     def __init__(
@@ -157,9 +157,9 @@ class ReportService:
         report_repo: AbstractReportRepo,
         user_repo: AbstractUserRepo,
         bus: EventBus,
-        space_repo: "AbstractSpaceRepo | None" = None,
-        space_post_repo: "AbstractSpacePostRepo | None" = None,
-        remote_member_repo: "AbstractSpaceRemoteMemberRepo | None" = None,
+        space_repo: AbstractSpaceRepo | None = None,
+        space_post_repo: AbstractSpacePostRepo | None = None,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo | None = None,
         scope: ReportScope | None = None,
     ) -> None:
         self._reports = report_repo
@@ -169,14 +169,14 @@ class ReportService:
         self._space_post_repo = space_post_repo
         self._seats = remote_member_repo
         self._scope = scope or ReportScope(space_post_repo=space_post_repo)
-        self._federation: "FederationService | None" = None
+        self._federation: FederationService | None = None
         self._own_instance_id: str = ""
         self._gfs_connection_service = None
         self._signing_key: bytes | None = None
 
     def attach_federation(
         self,
-        federation_service: "FederationService",
+        federation_service: FederationService,
         own_instance_id: str,
     ) -> None:
         """Wire federation after construction (breaks the service ↔
@@ -295,16 +295,15 @@ class ReportService:
         scope_id, subject = await self._local_scope(
             tt, target_id, requested=space_id or None, reporter=reporter_user_id
         )
-        if scope_id is not None:
-            if (
-                await self._reports.count_pending_in_space(
-                    scope_id, reporter_user_id=reporter_user_id
-                )
-                >= MAX_PENDING_PER_REPORTER
-                or await self._reports.count_pending_in_space(scope_id)
-                >= MAX_PENDING_PER_SPACE
-            ):
-                raise ReportRateLimitedError("this space's report queue is full")
+        if scope_id is not None and (
+            await self._reports.count_pending_in_space(
+                scope_id, reporter_user_id=reporter_user_id
+            )
+            >= MAX_PENDING_PER_REPORTER
+            or await self._reports.count_pending_in_space(scope_id)
+            >= MAX_PENDING_PER_SPACE
+        ):
+            raise ReportRateLimitedError("this space's report queue is full")
         report = ContentReport(
             id=uuid.uuid4().hex,
             target_type=tt,
@@ -313,7 +312,7 @@ class ReportService:
             category=cat,
             notes=clean_notes,
             status=ReportStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             space_id=scope_id,
             sole_reviewer_user_id=await self._sole_reviewer(scope_id, subject),
         )
@@ -386,7 +385,7 @@ class ReportService:
             category=cat,
             notes=clean,
             status=ReportStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             space_id=scope_id,
             sole_reviewer_user_id=await self._sole_reviewer(scope_id, subject),
         )
@@ -706,6 +705,7 @@ class ReportService:
                     report.target_id,
                     peer,
                     exc,
+                    exc_info=True,
                 )
         return dispatched
 
@@ -829,7 +829,7 @@ class ReportService:
                 ReportStatus.DISMISSED if dismissed else ReportStatus.RESOLVED
             ).value,
             "decided_by": decided_by,
-            "decided_at": datetime.now(timezone.utc).isoformat(),
+            "decided_at": datetime.now(UTC).isoformat(),
         }
         for iid in await self._v45_reviewers(report.space_id):
             result = await self._federation.send_with_mesh_fallback(
@@ -908,6 +908,9 @@ class ReportService:
         try:
             connections = await self._gfs_connection_service.list_connections()
         except Exception:  # pragma: no cover
+            log.debug(
+                "ReportService.forward_to_gfs: fail-soft error ignored", exc_info=True
+            )
             return False
         # ``list_connections`` also returns pending/suspended connections
         # (so the UI can surface them) — only forward to GFS that have
@@ -956,7 +959,7 @@ class ReportService:
                     signing_key=self._signing_key,
                 )
             except Exception as exc:  # pragma: no cover
-                log.debug("GFS forward to %s failed: %s", conn.id, exc)
+                log.debug("GFS forward to %s failed: %s", conn.id, exc, exc_info=True)
 
     async def _is_public_space(self, space_id: str) -> bool:
         if self._space_repo is None:
@@ -983,7 +986,11 @@ class ReportService:
                 try:
                     out.extend(await self._space_repo.list_member_instances(target_id))
                 except Exception:
-                    log.warning("report: member households of %s unknown", target_id)
+                    log.warning(
+                        "report: member households of %s unknown",
+                        target_id,
+                        exc_info=True,
+                    )
         seen: set[str] = set()
         deduped: list[str] = []
         for inst in out:
@@ -1151,11 +1158,10 @@ class ReportService:
             m.role in CONTENT_AUTHORITY_ROLES and m.user_id != user_id for m in members
         ):
             return False
-        if self._seats is not None and await self._seats.list_instances_with_roles(
-            space_id, REVIEWER_SEATS
-        ):
-            return False
-        return True
+        return not (
+            self._seats is not None
+            and await self._seats.list_instances_with_roles(space_id, REVIEWER_SEATS)
+        )
 
     async def _require_content_authority(self, space_id: str, user_id: str) -> None:
         space = await self._live_space(space_id)

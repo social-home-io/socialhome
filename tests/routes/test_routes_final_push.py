@@ -1,8 +1,8 @@
 """Final push to 90% — targets uncovered route branches."""
 
-from datetime import datetime, timezone, timedelta
-from .conftest import _auth
+from datetime import UTC, datetime, timedelta
 
+from .conftest import _auth
 
 # ── Users route — 64% → 90%+ ─────────────────────────────────────────────
 
@@ -116,7 +116,7 @@ async def test_calendar_create_event_and_list(client):
     h = _auth(client._tok)
     r = await client.post("/api/calendars", json={"name": "C"}, headers=h)
     cid = (await r.json())["id"]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r2 = await client.post(
         f"/api/calendars/{cid}/events",
         json={

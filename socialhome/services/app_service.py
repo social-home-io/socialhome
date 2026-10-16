@@ -27,13 +27,14 @@ import logging
 import shutil
 import tarfile
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiofiles.os
 
 from ..domain.apps import (
+    _VALID_MIN_AGES,
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
     AppCatalogEntry,
@@ -43,7 +44,6 @@ from ..domain.apps import (
     AppNotFoundError,
     AppQuotaExceededError,
     InstalledApp,
-    _VALID_MIN_AGES,
 )
 from ..domain.events import AppInstalled, AppUninstalled, AppUpdated
 from ..domain.space import SpacePermissionError
@@ -90,7 +90,7 @@ class AppService(BusPublisherMixin):
     # in PR1 (it maps correctly to HTTP 403 via BaseView._map_exc and matches
     # the PR1 plan).  A dedicated AppPermissionError is deferred to PR2.
 
-    __slots__ = ("_repo", "_catalog", "_apps_path", "_downloader", "_bus", "_cp_repo")
+    __slots__ = ("_apps_path", "_bus", "_catalog", "_cp_repo", "_downloader", "_repo")
 
     def __init__(
         self,
@@ -99,7 +99,7 @@ class AppService(BusPublisherMixin):
         catalog: AppCatalogService | None,
         apps_path: Path,
         downloader: Callable[[str], bytes | Awaitable[bytes]],
-        bus: "EventBus | None" = None,
+        bus: EventBus | None = None,
         cp_repo: AbstractCpRepo | None = None,
     ) -> None:
         self._repo = repo
@@ -291,7 +291,7 @@ class AppService(BusPublisherMixin):
             bundle_sha256=actual_sha,
             source_url=entry.bundle_url,
             installed_by=actor_user_id,
-            installed_at=datetime.now(timezone.utc).isoformat(),
+            installed_at=datetime.now(UTC).isoformat(),
             min_age=manifest.min_age,
         )
         await self._repo.install(app)
@@ -624,14 +624,16 @@ class AppService(BusPublisherMixin):
             )
 
         # Only check the key count when inserting a NEW key
-        if await self._repo.kv_get(app_id, user_id, key) is None:
-            if await self._repo.kv_count(app_id, user_id) >= APP_KV_MAX_KEYS:
-                raise AppQuotaExceededError(
-                    f"Per-user key count limit {APP_KV_MAX_KEYS} reached for app {app_id!r}"
-                )
+        if (
+            await self._repo.kv_get(app_id, user_id, key) is None
+            and await self._repo.kv_count(app_id, user_id) >= APP_KV_MAX_KEYS
+        ):
+            raise AppQuotaExceededError(
+                f"Per-user key count limit {APP_KV_MAX_KEYS} reached for app {app_id!r}"
+            )
 
         await self._repo.kv_set(
-            app_id, user_id, key, value_json, datetime.now(timezone.utc).isoformat()
+            app_id, user_id, key, value_json, datetime.now(UTC).isoformat()
         )
 
     async def store_delete(self, app_id: str, user_id: str, key: str) -> None:

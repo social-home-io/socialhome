@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import UTC, datetime
 from urllib.parse import unquote
 
 from aiohttp import web
@@ -17,17 +18,19 @@ from ..app_keys import (
     online_status_service_key,
     user_repo_key,
 )
-from ..domain.conversation import Conversation, ConversationType, mute_active
 from ..domain.child_protection import name_only
+from ..domain.conversation import Conversation, ConversationType, mute_active
 from ..domain.user import _picture_url
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
-from ..services.inbound_media_store import local_media_ref
 from ..security import error_response, sanitise_for_api
 from ..services.dm_service import DmService
+from ..services.inbound_media_store import local_media_ref
 from .base import BaseView
 from .media_status import READY, media_filename, video_poster_path
+
+log = logging.getLogger(__name__)
 
 
 async def _conversation_row(
@@ -171,7 +174,7 @@ class ConversationCollectionView(BaseView):
         repo = self.svc(conversation_repo_key)
         user_repo = self.svc(user_repo_key)
         convos = await svc.list_conversations(ctx.username)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         withheld = await self.guardian_block_counterparts()
         rows: list[dict] = []
         for c in convos:
@@ -280,7 +283,7 @@ class ConversationItemView(BaseView):
             svc=svc,
             repo=self.svc(conversation_repo_key),
             user_repo=self.svc(user_repo_key),
-            now=datetime.now(timezone.utc),
+            now=datetime.now(UTC),
             withheld=await self.guardian_block_counterparts(),
         )
         if row is None:
@@ -723,7 +726,10 @@ class ConversationReadView(BaseView):
                 await notif_svc.mark_read_for_dm(ctx.user_id, conv_id)
             except Exception:
                 # Best-effort — never block the read receipt on this.
-                pass
+                log.debug(
+                    "conversations: marking DM notifications read failed",
+                    exc_info=True,
+                )
         return web.json_response({"ok": True, "marked": int(marked or 0)})
 
 

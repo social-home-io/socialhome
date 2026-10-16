@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -30,26 +30,9 @@ from socialhome.crypto import (
     generate_space_keypair,
     sign_ed25519,
 )
-from socialhome.services.space_public_author import (
-    author_signing_bytes,
-    build_signed_author_inner,
-    link_preview_signing_bytes,
-)
-from socialhome.federation.owner_bound_id import (
-    SPACE_COMMENT_KIND,
-    SPACE_POST_KIND,
-    mint_owner_bound_id,
-)
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import CommentDeleted, PostDeleted, SpacePostCreated
 from socialhome.domain.post import Comment, CommentType, Post, PostType
-from socialhome.domain.space_item import (
-    AUTHORITY_KIND_APPROVED_POST,
-    AUTHORITY_KIND_FIELD,
-    AUTHORITY_KIND_REMOVAL,
-    AuthorityRemoval,
-    pad_json_object,
-)
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -57,6 +40,19 @@ from socialhome.domain.space import (
     SpaceMember,
     SpaceType,
 )
+from socialhome.domain.space_item import (
+    AUTHORITY_KIND_APPROVED_POST,
+    AUTHORITY_KIND_FIELD,
+    AUTHORITY_KIND_REMOVAL,
+    AuthorityRemoval,
+    pad_json_object,
+)
+from socialhome.federation.owner_bound_id import (
+    SPACE_COMMENT_KIND,
+    SPACE_POST_KIND,
+    mint_owner_bound_id,
+)
+from socialhome.federation.pending_parent_buffer import PendingParentBuffer
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
@@ -66,10 +62,14 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
-from socialhome.services.space_mentions import SpaceMentionResolver
 from socialhome.services.space_crypto_service import SpaceContentEncryption
-from socialhome.federation.pending_parent_buffer import PendingParentBuffer
 from socialhome.services.space_item_author import build_signed_item_inner
+from socialhome.services.space_mentions import SpaceMentionResolver
+from socialhome.services.space_public_author import (
+    author_signing_bytes,
+    build_signed_author_inner,
+    link_preview_signing_bytes,
+)
 from socialhome.services.space_public_inbound import SpacePublicInbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
@@ -182,7 +182,7 @@ async def _make_envelope(
         "author_username": "bob",
         "type": "text",
         "content": content,
-        "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
+        "created_at": datetime(2026, 6, 10, tzinfo=UTC).isoformat(),
         "origin_instance_id": env["author_origin"],
     }
     if identity_anchor is not None:
@@ -409,7 +409,7 @@ async def test_malformed_author_sig_dropped(env):
         "author_username": "bob",
         "type": "text",
         "content": "secret space content",
-        "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
+        "created_at": datetime(2026, 6, 10, tzinfo=UTC).isoformat(),
         "origin_instance_id": env["author_origin"],
         "author_sig": "!!!not base64!!!",
     }
@@ -523,7 +523,7 @@ async def test_cross_space_inner_dropped(env):
         "author_username": "bob",
         "type": "text",
         "content": "secret space content",
-        "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
+        "created_at": datetime(2026, 6, 10, tzinfo=UTC).isoformat(),
         "origin_instance_id": env["author_origin"],
     }
     inner["author_sig"] = b64url_encode(
@@ -616,7 +616,7 @@ async def test_self_echo_dropped_before_any_write(env, caplog):
         "author_username": "bob",
         "type": "text",
         "content": "our own post, echoed back",
-        "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
+        "created_at": datetime(2026, 6, 10, tzinfo=UTC).isoformat(),
         "origin_instance_id": env["own_iid"],
     }
     inner["author_sig"] = b64url_encode(
@@ -744,13 +744,13 @@ async def test_old_key_post_is_refused_after_the_heal(env):
 async def _cert(env, *, users: object = "author", **over):
     """A cert for the author household — v2 (user-bound to the author) by
     default; ``users=None`` gives a v1 cert, a list binds those users."""
-    kw = dict(
-        space_seed=env["space_kp"].private_key,
-        space_id="sp-1",
-        epoch=await env["crypto"].get_current_epoch("sp-1"),
-        instance_pk=env["author_kp"].public_key,
-        scope="write",
-    )
+    kw = {
+        "space_seed": env["space_kp"].private_key,
+        "space_id": "sp-1",
+        "epoch": await env["crypto"].get_current_epoch("sp-1"),
+        "instance_pk": env["author_kp"].public_key,
+        "scope": "write",
+    }
     kw.update(over)
     cert = sign_writer_cert(**kw)
     if users is not None:
@@ -840,7 +840,7 @@ def _signed_inner(
         "author_username": "bob",
         "type": "text",
         "content": "member-published content",
-        "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
+        "created_at": datetime(2026, 6, 10, tzinfo=UTC).isoformat(),
         "origin_instance_id": origin,
     }
     if item_type is not None:
@@ -1164,7 +1164,7 @@ async def test_a_follower_household_relies_on_the_cert_alone(item_env):
 def _now_iso(seconds: float = 0) -> str:
     from datetime import timedelta
 
-    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
 
 
 def _signed_edit(env, *, content: str, edited_at: str, post_id: str = "post-1"):
@@ -1246,7 +1246,7 @@ async def test_a_post_edit_by_someone_else_is_refused(item_env):
             id="post-1",
             author="someone-else",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="theirs",
         ),
     )
@@ -1587,7 +1587,7 @@ async def _held_post(env, post_id: str = "post-held", *, space_id: str = "sp-1")
             author=env["author_user_id"],
             type=PostType.TEXT,
             content="visible words",
-            created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 10, tzinfo=UTC),
         ),
     )
 
@@ -1735,7 +1735,7 @@ async def _held_comment(env, comment_id="c-1", post_id="post-held"):
             author=env["author_user_id"],
             type=CommentType.TEXT,
             content="a comment",
-            created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 10, tzinfo=UTC),
         ),
         space_id="sp-1",
     )
@@ -1855,7 +1855,7 @@ def _approved_post_obj(env, *, post_id=None, content="released words") -> Post:
         author=env["author_user_id"],
         type=PostType.TEXT,
         content=content,
-        created_at=datetime(2026, 6, 11, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 11, tzinfo=UTC),
     )
 
 
@@ -1976,7 +1976,7 @@ def _early_comment(env, post_id: str = "post-late") -> dict:
         author_pk=env["author_kp"].public_key,
         author_identity_seed=env["author_kp"].private_key,
         origin_instance_id=env["author_origin"],
-        ts=datetime.now(timezone.utc).isoformat(),
+        ts=datetime.now(UTC).isoformat(),
         comment_type="text",
         content="early",
     )

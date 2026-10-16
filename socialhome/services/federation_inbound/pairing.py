@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from ...crypto import derive_instance_id
 from ...domain.events import (
     DmContactRequested,
     PairingAborted,
@@ -30,7 +31,6 @@ from ...domain.events import (
     PeerCapabilitiesAdvertised,
     PeerProtoVersionRaised,
 )
-from ...crypto import derive_instance_id
 from ...domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -38,8 +38,8 @@ from ...domain.federation import (
     PairingStatus,
 )
 from ...federation.pairing_gfs_reach import verified_peer_keywrap
-from ...peer_url import InvalidPeerUrlError, validate_peer_url
 from ...infrastructure.event_bus import EventBus
+from ...peer_url import InvalidPeerUrlError, validate_peer_url
 from ..protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
@@ -64,22 +64,22 @@ class PairingInboundHandlers(ProtectionGateMixin):
 
     __slots__ = (
         "_bus",
-        "_repo",
-        "_dm_contact_repo",
-        "_peer_unpair",
-        "_user_repo",
         "_child_protection",
+        "_dm_contact_repo",
         "_federation",
+        "_peer_unpair",
+        "_repo",
+        "_user_repo",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation_repo: "AbstractFederationRepo",
-        peer_unpair: "PeerUnpairService",
-        dm_contact_repo: "AbstractDmContactRepo | None" = None,
-        user_repo: "AbstractUserRepo | None" = None,
+        federation_repo: AbstractFederationRepo,
+        peer_unpair: PeerUnpairService,
+        dm_contact_repo: AbstractDmContactRepo | None = None,
+        user_repo: AbstractUserRepo | None = None,
     ) -> None:
         self._bus = bus
         self._repo = federation_repo
@@ -90,9 +90,9 @@ class PairingInboundHandlers(ProtectionGateMixin):
         self._user_repo = user_repo
         self._child_protection = None
         #: Set by :meth:`attach_to` — records a mesh-only member's claim.
-        self._federation: "FederationService | None" = None
+        self._federation: FederationService | None = None
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         """Register every handler on the service's event registry."""
         self._federation = federation_service
         registry = federation_service._event_registry
@@ -112,7 +112,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
                 self._on_contact_request,
             )
 
-    async def _on_intro(self, event: "FederationEvent") -> None:
+    async def _on_intro(self, event: FederationEvent) -> None:
         """Target side of §11.9: a peer introduced us to a new instance."""
         via = str(event.payload.get("via_instance_id") or "")
         message = str(event.payload.get("message") or "")[:500]
@@ -132,7 +132,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
             )
         )
 
-    async def _on_accept(self, event: "FederationEvent") -> None:
+    async def _on_accept(self, event: FederationEvent) -> None:
         """Initiator side — peer accepted our QR invite."""
         token = str(event.payload.get("token") or "")
         code = str(event.payload.get("verification_code") or "")
@@ -157,7 +157,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
             )
         )
 
-    async def _on_confirm(self, event: "FederationEvent") -> None:
+    async def _on_confirm(self, event: FederationEvent) -> None:
         """Refuse an inbox ``PAIRING_CONFIRM`` — it never confirms a pairing.
 
         A pairing only becomes ``CONFIRMED`` through this household's own
@@ -182,7 +182,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
             instance.status.value,
         )
 
-    async def _on_abort(self, event: "FederationEvent") -> None:
+    async def _on_abort(self, event: FederationEvent) -> None:
         """Peer cancelled the handshake — delete pending_pairings + surface.
 
         The ``token`` in the payload is bound to the sender: a pending
@@ -217,7 +217,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
         )
 
     @staticmethod
-    def _session_peer_id(session: "PairingSession") -> str | None:
+    def _session_peer_id(session: PairingSession) -> str | None:
         """Instance id of the peer a pending session is with, or ``None``
         when the peer's identity isn't known yet (or is malformed)."""
         if not session.peer_identity_pk:
@@ -227,7 +227,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
         except ValueError:
             return None
 
-    async def _on_unpair(self, event: "FederationEvent") -> None:
+    async def _on_unpair(self, event: FederationEvent) -> None:
         """Peer tore down the pairing — forget it exactly as a local unpair
         does (:meth:`PeerUnpairService.forget`).
 
@@ -247,7 +247,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
             return
         await self._peer_unpair.forget(instance.id)
 
-    async def _on_url_updated(self, event: "FederationEvent") -> None:
+    async def _on_url_updated(self, event: FederationEvent) -> None:
         """Peer advertised a new inbox URL — update ``remote_inbox_url``.
 
         The envelope is already signed + origin-verified by the inbound
@@ -279,7 +279,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
             new_url,
         )
 
-    async def _on_capabilities_updated(self, event: "FederationEvent") -> None:
+    async def _on_capabilities_updated(self, event: FederationEvent) -> None:
         """Peer advertised a new ``proto_version``.
 
         Persisted onto the ``remote_instances`` row so outbound senders
@@ -379,7 +379,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
 
     async def _apply_peer_keywrap(
         self,
-        instance: "RemoteInstance",
+        instance: RemoteInstance,
         payload: dict,
     ) -> bool:
         """Store a paired peer's key-wrap key from its capabilities (v_54).
@@ -431,7 +431,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
         return True
 
     @staticmethod
-    def _peer_relay_marker(instance: "RemoteInstance", payload: dict) -> bool | None:
+    def _peer_relay_marker(instance: RemoteInstance, payload: dict) -> bool | None:
         """The peer's own GFS fallback switch as it announced it (v_54).
 
         ``False`` means its §24.11 relay opt-in gate now refuses our relayed
@@ -445,7 +445,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
         marker = payload.get("gfs_relay")
         return marker if isinstance(marker, bool) else None
 
-    async def _on_contact_request(self, event: "FederationEvent") -> None:
+    async def _on_contact_request(self, event: FederationEvent) -> None:
         """§23.47: pre-pairing DM handshake — a remote user wants to start
         a conversation with a local user they haven't exchanged keys with
         yet. Persist a pending row + publish :class:`DmContactRequested`
@@ -502,6 +502,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
                 requester_user_id,
                 recipient_user_id,
                 exc,
+                exc_info=True,
             )
             return
         await self._bus.publish(

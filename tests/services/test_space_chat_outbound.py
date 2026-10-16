@@ -3,7 +3,7 @@ messages go to its writer households only, version-gated, never echoed."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -118,7 +118,7 @@ async def test_nothing_is_sent_without_a_writer_household(stack):
 
 async def test_inbound_events_are_never_echoed(stack):
     chat_id = await _chat(stack)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for event in (
         DmMessageCreated(
             conversation_id=chat_id,
@@ -163,7 +163,7 @@ async def test_inbound_events_are_never_echoed(stack):
 
 async def test_dms_household_chat_and_transcripts_are_not_space_chat(stack):
     await stack.db.enqueue("INSERT INTO conversations(id, type) VALUES('dm-1', 'dm')")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for event in (
         # A DM or the household chat: not a space.
         DmMessageCreated(

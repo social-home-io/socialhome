@@ -17,13 +17,13 @@ The bridge is deliberately small — one handler, one clear side effect
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import SchedulePollFinalized
-from ..infrastructure.event_bus import EventBus
 from ..domain.preferences import FeatureDisabledError
 from ..domain.space import AccessAdminOnlyError
+from ..infrastructure.event_bus import EventBus
 from ..services.preferences_service import PreferencesService
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ class ScheduleCalendarBridge:
         self,
         *,
         bus: EventBus,
-        space_calendar_service: "SpaceCalendarService",
+        space_calendar_service: SpaceCalendarService,
         household_features: PreferencesService,
     ) -> None:
         self._bus = bus
@@ -95,6 +95,7 @@ class ScheduleCalendarBridge:
                 "schedule→calendar: create_event failed for %s: %s",
                 event.post_id,
                 exc,
+                exc_info=True,
             )
 
 
@@ -121,5 +122,5 @@ def _event_window(event: SchedulePollFinalized) -> tuple[str, str]:
             hour=(start_dt.hour + 1) % 24,
         )
         if end_dt <= start_dt:
-            end_dt = start_dt.replace(tzinfo=timezone.utc)
+            end_dt = start_dt.replace(tzinfo=UTC)
     return start_dt.isoformat(), end_dt.isoformat()

@@ -35,13 +35,13 @@ class GfsAddressee:
     """This server's public id plus the transitional aliases it answers to."""
 
     __slots__ = (
-        "_primary",
         "_aliases",
-        "_key",
-        "_node_id",
-        "_hits",
-        "_logged_at",
         "_clock",
+        "_hits",
+        "_key",
+        "_logged_at",
+        "_node_id",
+        "_primary",
         "_stop",
         "_task",
     )
@@ -142,7 +142,7 @@ class GfsAddressee:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
         self.flush()
@@ -152,5 +152,5 @@ class GfsAddressee:
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=ALIAS_LOG_INTERVAL_S)
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self.flush()

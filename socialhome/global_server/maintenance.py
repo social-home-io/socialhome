@@ -40,23 +40,23 @@ class GfsMaintenanceScheduler:
 
     __slots__ = (
         "_admin_repo",
-        "_highlight_repo",
-        "_envelope_queue_repo",
-        "_invite_repo",
         "_channel_repo",
+        "_envelope_queue_repo",
+        "_highlight_repo",
         "_interval",
-        "_task",
+        "_invite_repo",
         "_stop",
+        "_task",
     )
 
     def __init__(
         self,
         *,
-        admin_repo: "AbstractGfsAdminRepo",
-        highlight_repo: "AbstractGfsHighlightPublicationRepo",
-        envelope_queue_repo: "AbstractGfsEnvelopeQueueRepo | None" = None,
-        invite_repo: "AbstractGfsInviteRepo | None" = None,
-        channel_repo: "AbstractGfsChannelRepo | None" = None,
+        admin_repo: AbstractGfsAdminRepo,
+        highlight_repo: AbstractGfsHighlightPublicationRepo,
+        envelope_queue_repo: AbstractGfsEnvelopeQueueRepo | None = None,
+        invite_repo: AbstractGfsInviteRepo | None = None,
+        channel_repo: AbstractGfsChannelRepo | None = None,
         interval_seconds: float = 3600.0,  # once per hour
     ) -> None:
         self._admin_repo = admin_repo
@@ -83,7 +83,7 @@ class GfsMaintenanceScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -95,7 +95,7 @@ class GfsMaintenanceScheduler:
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _maintain_once(self) -> None:
@@ -108,19 +108,27 @@ class GfsMaintenanceScheduler:
         try:
             await self._admin_repo.purge_expired_sessions(now)
         except Exception as exc:
-            log.warning("gfs maintenance: purge_expired_sessions failed: %s", exc)
+            log.warning(
+                "gfs maintenance: purge_expired_sessions failed: %s", exc, exc_info=True
+            )
         highlights = 0
         try:
             highlights = await self._highlight_repo.prune_expired(now)
         except Exception as exc:
-            log.warning("gfs maintenance: prune_expired highlights failed: %s", exc)
+            log.warning(
+                "gfs maintenance: prune_expired highlights failed: %s",
+                exc,
+                exc_info=True,
+            )
         tokens = 0
         try:
             tokens = await self._admin_repo.prune_old_pair_tokens(
                 now - PAIR_TOKEN_RETENTION_SECONDS,
             )
         except Exception as exc:
-            log.warning("gfs maintenance: prune_old_pair_tokens failed: %s", exc)
+            log.warning(
+                "gfs maintenance: prune_old_pair_tokens failed: %s", exc, exc_info=True
+            )
         envelopes = 0
         if self._envelope_queue_repo is not None:
             try:
@@ -129,6 +137,7 @@ class GfsMaintenanceScheduler:
                 log.warning(
                     "gfs maintenance: prune_expired envelopes failed: %s",
                     exc,
+                    exc_info=True,
                 )
         invites = 0
         if self._invite_repo is not None:
@@ -138,6 +147,7 @@ class GfsMaintenanceScheduler:
                 log.warning(
                     "gfs maintenance: prune_expired invites failed: %s",
                     exc,
+                    exc_info=True,
                 )
         channels = 0
         if self._channel_repo is not None:
@@ -149,7 +159,11 @@ class GfsMaintenanceScheduler:
                     older_than=now - CHANNEL_UNUSED_TTL_SECONDS
                 )
             except Exception as exc:
-                log.warning("gfs maintenance: prune_idle channels failed: %s", exc)
+                log.warning(
+                    "gfs maintenance: prune_idle channels failed: %s",
+                    exc,
+                    exc_info=True,
+                )
         if channels:
             log.debug("gfs maintenance: dropped %d idle channels", channels)
         if highlights or tokens or envelopes or invites:

@@ -8,24 +8,24 @@ outbound targeting and the remote-payload sanitiser over stubs.
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
-from socialhome.domain.federation import DeliveryResult, FederationEventType
 from socialhome.crypto import (
     derive_instance_id,
     derive_user_id,
     generate_identity_keypair,
 )
+from socialhome.domain.federation import DeliveryResult, FederationEventType
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.space import (
     ContentAction,
     HostTooOldError,
-    SpaceType,
     ModerationStatus,
     SpaceModerationItem,
+    SpaceType,
 )
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
 from socialhome.services.space_moderation_federation import (
@@ -39,7 +39,7 @@ from socialhome.services.space_public_author import (
 )
 
 FET = FederationEventType
-NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
+NOW = datetime(2026, 6, 1, tzinfo=UTC)
 
 
 class _Fed:

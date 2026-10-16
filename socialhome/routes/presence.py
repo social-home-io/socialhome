@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from aiohttp import web
 
@@ -64,7 +64,7 @@ class PresenceCollectionView(BaseView):
             persisted = {u.user_id: u.last_seen_at for u in users}
             # Emoji + text status (``PATCH /api/me``); an expired one reads
             # as unset even before the expiry sweep clears it.
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             statuses = {
                 u.user_id: {
                     "emoji": u.status.emoji,

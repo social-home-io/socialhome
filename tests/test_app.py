@@ -14,53 +14,52 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
-from socialhome._version import __version__
 from socialhome import app_keys as K
-from socialhome.app_keys import gfs_connection_service_key, http_session_key
+from socialhome._version import __version__
 from socialhome.app import (
-    _build_gfs_relay_inbound,
-    _build_gfs_route_discovery,
-    _build_gfs_route_resolver,
     MAP_TILE_USER_AGENT,
     SIGNED_MEDIA_GET_LIMIT,
     SIGNED_MEDIA_GET_RULES,
+    _build_gfs_relay_inbound,
+    _build_gfs_route_discovery,
+    _build_gfs_route_resolver,
     _build_link_previews,
     _build_middleware,
     create_app,
     dispatch_gfs_relay_frame,
 )
+from socialhome.app_keys import gfs_connection_service_key, http_session_key
 from socialhome.auth import SIGNED_URL_PRINCIPAL
-from socialhome.rate_limiter import RateLimiter
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
 )
 from socialhome.config import Config
 from socialhome.dashboard.advertiser import DisplayAdvertiser, display_short_id
-from socialhome.platform.adapter import Capability
-from socialhome.platform.standalone.adapter import StandaloneAdapter
-from socialhome.outbound_fetch import open_pinned_session
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    FederationEventType,
     GfsConnection,
     InstanceSource,
     RemoteInstance,
 )
-from socialhome.platform.local_credentials import hash_password
-from socialhome.repositories.federation_repo import SqliteFederationRepo
-from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
-from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
-from socialhome.services.gfs_relay_inbound import GfsRelayInbound
-from socialhome.services.gfs_route_discovery_service import GfsRouteDiscoveryService
-from socialhome.infrastructure.gfs_route_discovery_scheduler import (
-    GfsRouteDiscoveryScheduler,
-)
-from socialhome.domain.federation import FederationEventType
 from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.federation.pairing_gfs_reach import PairingGfsReach
 from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
-from socialhome.outbound_fetch import OutboundFetcher
+from socialhome.infrastructure.gfs_route_discovery_scheduler import (
+    GfsRouteDiscoveryScheduler,
+)
+from socialhome.outbound_fetch import OutboundFetcher, open_pinned_session
+from socialhome.platform.adapter import Capability
+from socialhome.platform.local_credentials import hash_password
+from socialhome.platform.standalone.adapter import StandaloneAdapter
+from socialhome.rate_limiter import RateLimiter
+from socialhome.repositories.federation_repo import SqliteFederationRepo
+from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 from socialhome.services.app_federation_service import AppFederationService
+from socialhome.services.gfs_relay_inbound import GfsRelayInbound
+from socialhome.services.gfs_route_discovery_service import GfsRouteDiscoveryService
 
 
 @pytest.fixture
@@ -166,15 +165,15 @@ async def test_cleanup_stops_the_routed_handler(tmp_dir):
     app = create_app(cfg)
     async with TestClient(TestServer(app)) as tc:
         await tc.get("/healthz")
-        handler = app[federation_service_key]._routed_handler  # noqa: SLF001
+        handler = app[federation_service_key]._routed_handler
         assert handler is not None
         # Park a stand-in for a deferred retransmit sleeping out its delay.
         parked = asyncio.create_task(asyncio.sleep(3600))
-        handler._deferred_retransmits["route-under-test"] = parked  # noqa: SLF001
+        handler._deferred_retransmits["route-under-test"] = parked
 
     # After the TestClient context exits, cleanup hooks have run.
     assert parked.cancelled(), "cleanup did not stop the routed handler"
-    assert handler._deferred_retransmits == {}  # noqa: SLF001
+    assert handler._deferred_retransmits == {}
 
 
 async def test_create_app_without_config_uses_env_defaults():
@@ -224,7 +223,7 @@ async def test_app_federation_service_wired_into_app(tmp_dir):
 
         # 2. federation_service event registry has handlers for both event types.
         fed_svc = app[federation_service_key]
-        registry = fed_svc._event_registry  # noqa: SLF001
+        registry = fed_svc._event_registry
         assert registry.handler_count(FederationEventType.APP_SESSION) >= 1, (
             "APP_SESSION handler not registered — attach_apps() not called"
         )
@@ -234,7 +233,7 @@ async def test_app_federation_service_wired_into_app(tmp_dir):
 
         # 3. The transport was built with the binary inbound handler threaded in.
         fed_transport = app[federation_transport_key]
-        assert fed_transport._app_inbound_handler is not None, (  # noqa: SLF001
+        assert fed_transport._app_inbound_handler is not None, (
             "FederationTransport._app_inbound_handler is None — "
             "app_inbound_handler= kwarg missing from FederationTransport()"
         )
@@ -274,7 +273,7 @@ async def test_federation_service_ice_servers_carry_hmac_credentials(tmp_dir):
 
     turn = [
         s
-        for s in fed._ice_servers  # noqa: SLF001 — asserting wiring
+        for s in fed._ice_servers
         if any(u.startswith(("turn:", "turns:")) for u in s.get("urls", []))
     ]
     assert turn, "no TURN entry in the federation service's ICE list"
@@ -302,7 +301,7 @@ async def test_standalone_boot_releases_the_ice_prime_gate(tmp_dir):
         resp = await tc.get("/healthz")
         assert resp.status == 200
         transport = app[federation_transport_key]
-        assert transport._ice_primed.is_set(), (  # noqa: SLF001 — asserting wiring
+        assert transport._ice_primed.is_set(), (
             "standalone boot left the ICE-prime gate closed"
         )
 
@@ -339,10 +338,10 @@ async def test_gfs_space_mirror_wired_into_space_service(tmp_dir):
     app = create_app(cfg)
     async with TestClient(TestServer(app)):
         space_svc = app[space_service_key]
-        mirror = space_svc._gfs_mirror  # noqa: SLF001
+        mirror = space_svc._gfs_mirror
         assert isinstance(mirror, GfsSpaceMirrorService)
-        assert mirror._http_client is not None  # noqa: SLF001
-        assert mirror._gfs is app[gfs_connection_service_key]  # noqa: SLF001
+        assert mirror._http_client is not None
+        assert mirror._gfs is app[gfs_connection_service_key]
 
 
 async def test_gfs_connect_hook_resubscribes_our_seats(tmp_dir):
@@ -366,7 +365,7 @@ async def test_gfs_connect_hook_resubscribes_our_seats(tmp_dir):
     )
     app = create_app(cfg)
     async with TestClient(TestServer(app)):
-        on_connected = app[gfs_ws_supervisor_key]._on_connected  # noqa: SLF001
+        on_connected = app[gfs_ws_supervisor_key]._on_connected
         assert on_connected is not None
         with patch.object(
             GfsSpaceMirrorService, "resubscribe_all", new_callable=AsyncMock
@@ -554,9 +553,9 @@ async def test_gfs_sends_reach_every_server_on_the_owners_list(tmp_dir):
     )
     app = create_app(cfg)
     svc = app[gfs_connection_service_key]
-    assert svc._member_servers is not None  # noqa: SLF001
-    assert svc._member_servers.__name__ == "member_servers"  # noqa: SLF001
-    assert svc._listing_sessions is open_pinned_session  # noqa: SLF001
+    assert svc._member_servers is not None
+    assert svc._member_servers.__name__ == "member_servers"
+    assert svc._listing_sessions is open_pinned_session
 
 
 # ─── GFS relay tier wiring ───────────────────────────────────────────────
@@ -668,10 +667,7 @@ async def test_a_gfs_connect_triggers_a_route_discovery_round(cfg, monkeypatch):
             GfsRouteDiscoveryScheduler, "trigger", lambda _self: calls.append(None)
         )
         on_connected = app[gfs_ws_supervisor_key]._on_connected
-        try:
-            await on_connected("no-such-gfs")
-        except Exception:  # noqa: BLE001 — the heals may refuse an unknown id
-            pass
+        await on_connected("no-such-gfs")
         assert calls == [None]
 
 
@@ -681,12 +677,12 @@ async def test_pairing_gfs_reach_is_wired_with_our_keywrap_key(cfg):
     freshly confirmed pair to route discovery."""
     app = create_app(cfg)
     async with TestClient(TestServer(app)):
-        reach = app[K.federation_service_key]._pairing._gfs_reach  # noqa: SLF001
+        reach = app[K.federation_service_key]._pairing._gfs_reach
         assert isinstance(reach, PairingGfsReach)
         fields = reach.own_keywrap_fields()
         assert fields["keywrap_pk"] == app[K.instance_keywrap_public_key_key].hex()
         assert fields["keywrap_sig"] == app[K.instance_keywrap_sig_key]
-        assert reach._probe_peer == app[K.gfs_route_discovery_key].probe_peer  # noqa: SLF001
+        assert reach._probe_peer == app[K.gfs_route_discovery_key].probe_peer
 
 
 # ── Household dashboard listener (own port) ─────────────────────────────
@@ -732,10 +728,12 @@ async def test_enabled_dashboard_listens_after_startup_and_stops_on_cleanup(
     app = create_app(cfg)
     async with TestClient(TestServer(app)):
         assert app[K.dashboard_server_key].running_port == port
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
-                assert resp.status == 200
-                assert await resp.text() == "ok"
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(f"http://127.0.0.1:{port}/healthz") as resp,
+        ):
+            assert resp.status == 200
+            assert await resp.text() == "ok"
     assert app[K.dashboard_server_key].running_port is None
     async with aiohttp.ClientSession() as session:
         with pytest.raises(aiohttp.ClientConnectionError):

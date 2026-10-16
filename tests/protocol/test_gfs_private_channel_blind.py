@@ -39,6 +39,7 @@ from socialhome.domain.gfs_channel import CHANNEL_FRAME_KEYS, CHANNEL_ROUTES
 from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.writer_cert import WriterEntitlement
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
@@ -47,7 +48,6 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
-from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.gfs_channel_service import GfsChannelService
 from socialhome.services.gfs_member_publish_service import (
@@ -369,14 +369,14 @@ async def world(tmp_dir, caplog):
         session = _Session(tc.session, requests)
         peers = {a_h.instance_id: a_h.pk, b_h.instance_id: b_h.pk}
         seats = {a_h.instance_id, b_h.instance_id}
-        common = dict(
-            session=session,
-            conn=conn,
-            peers=peers,
-            seats=seats,
-            link={a_h.instance_id},
-            owner_id=owner_h.instance_id,
-        )
+        common = {
+            "session": session,
+            "conn": conn,
+            "peers": peers,
+            "seats": seats,
+            "link": {a_h.instance_id},
+            "owner_id": owner_h.instance_id,
+        }
         owner = _node(owner_h, seed=SPACE_SEED, **common)
         owner.spaces.instances = [a_h.instance_id, b_h.instance_id]
         a = _node(a_h, seed=None, **common)
@@ -452,7 +452,7 @@ async def test_the_gfs_never_learns_the_private_space(world):
         assert row.sealed["channel_id"] == channel_id
         # The ciphertext really holds the item (and its space-scoped cert).
         raw = b64url_decode(row.sealed["payload"])
-        item_type, plain = parse_item_plaintext(
+        _item_type, plain = parse_item_plaintext(
             AESGCM(_Crypto.key).decrypt(raw[:12], raw[12:], None)
         )
         assert plain["writer_cert"]["space_id"] == SPACE_ID

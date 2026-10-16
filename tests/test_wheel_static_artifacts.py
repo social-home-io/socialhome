@@ -65,9 +65,9 @@ def test_gfs_vite_shared_chunks_are_in_wheel_artifacts() -> None:
 def _gfs_vite_entries() -> list[str]:
     """The ``rollupOptions.input`` entry names in ``client/vite.gfs.config.ts``."""
     text = (REPO_ROOT / "client" / "vite.gfs.config.ts").read_text(encoding="utf-8")
-    block = re.search(r"input:\s*\{(.*?)\}", text, re.S)
+    block = re.search(r"input:\s*\{(.*?)\}", text, re.DOTALL)
     assert block is not None, "no rollupOptions.input block in vite.gfs.config.ts"
-    return re.findall(r"^\s*(\w+)\s*:", block.group(1), re.M)
+    return re.findall(r"^\s*(\w+)\s*:", block.group(1), re.MULTILINE)
 
 
 def test_gfs_vite_entry_bundles_are_ignored_and_in_wheel_artifacts() -> None:

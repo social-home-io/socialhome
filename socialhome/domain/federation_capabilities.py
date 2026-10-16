@@ -38,7 +38,6 @@ versions at or below it.
 
 from __future__ import annotations
 
-
 #: The protocol version this build advertises to peers. Bump on every
 #: release that ships a federation surface that older peers cannot
 #: parse fail-soft (or whose missing-default would silently produce a

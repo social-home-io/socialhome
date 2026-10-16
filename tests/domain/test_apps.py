@@ -9,6 +9,7 @@ import pytest
 from socialhome.domain.apps import (
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
+    AppCatalogEntry,
     AppContactNotFoundError,
     AppError,
     AppIntegrityError,
@@ -17,7 +18,6 @@ from socialhome.domain.apps import (
     AppNotEnabledError,
     AppNotFoundError,
     AppQuotaExceededError,
-    AppCatalogEntry,
     InstalledApp,
 )
 

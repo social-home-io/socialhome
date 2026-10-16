@@ -168,7 +168,7 @@ class GfsConfig:
     # ─── Loaders ────────────────────────────────────────────────────────
 
     @classmethod
-    def from_toml(cls, path: str | Path) -> "GfsConfig":
+    def from_toml(cls, path: str | Path) -> GfsConfig:
         """Load a GFS config from a TOML file on disk.
 
         Raises :class:`FileNotFoundError` if the file doesn't exist and
@@ -232,7 +232,7 @@ class GfsConfig:
             )
         return cfg._with_clean_aliases()
 
-    def _with_clean_aliases(self) -> "GfsConfig":
+    def _with_clean_aliases(self) -> GfsConfig:
         """Trim + de-duplicate ``instance_id_aliases``; drop empty entries and
         the ``instance_id`` itself (an alias equal to the id is no alias)."""
         seen: list[str] = []
@@ -278,7 +278,7 @@ class GfsConfig:
         """
         return self.cluster_advertise_url or self.base_url
 
-    def _with_env_overrides(self) -> "GfsConfig":
+    def _with_env_overrides(self) -> GfsConfig:
         """Return a copy with ``GFS_*`` env vars layered on top.
 
         Env wins over the file/defaults this instance was built from
@@ -346,7 +346,7 @@ class GfsConfig:
         )._with_clean_aliases()
 
     @classmethod
-    def from_env_fallback(cls) -> "GfsConfig":
+    def from_env_fallback(cls) -> GfsConfig:
         """Build a GFS config from defaults + the ``GFS_*`` env vars.
 
         Used when no TOML is discoverable (mostly unit tests and the
@@ -360,7 +360,7 @@ class GfsConfig:
         return cfg
 
     @classmethod
-    def load(cls, config_path: str | Path | None = None) -> "GfsConfig":
+    def load(cls, config_path: str | Path | None = None) -> GfsConfig:
         """Discover + load the GFS config, then layer env overrides.
 
         Search order for the TOML:

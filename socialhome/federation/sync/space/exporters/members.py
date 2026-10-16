@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .....domain.space import SpaceRole
 
@@ -27,12 +27,12 @@ class MembersExporter:
 
     resource = "members"
 
-    __slots__ = ("_repo", "_pictures")
+    __slots__ = ("_pictures", "_repo")
 
     def __init__(
         self,
-        space_repo: "AbstractSpaceRepo",
-        profile_picture_repo: "AbstractProfilePictureRepo | None" = None,
+        space_repo: AbstractSpaceRepo,
+        profile_picture_repo: AbstractProfilePictureRepo | None = None,
     ) -> None:
         self._repo = space_repo
         self._pictures = profile_picture_repo
@@ -66,7 +66,7 @@ class PreModeratorMembersExporter:
 
     resource = "members"
 
-    def __init__(self, inner: "ResourceExporter") -> None:
+    def __init__(self, inner: ResourceExporter) -> None:
         self._inner = inner
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:

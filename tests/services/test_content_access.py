@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -173,13 +173,13 @@ class _RecordingSubmitter:
             submitted_by=kw["submitted_by"],
             payload=kw["payload"],
             current_snapshot=None,
-            submitted_at=datetime.now(timezone.utc),
-            expires_at=datetime.now(timezone.utc),
+            submitted_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC),
         )
 
 
 class _QueueConsumer(ContentAccessMixin):
-    __slots__ = ("_spaces", "_moderation")
+    __slots__ = ("_moderation", "_spaces")
 
     def __init__(self, spaces: _Spaces) -> None:
         self._spaces = spaces

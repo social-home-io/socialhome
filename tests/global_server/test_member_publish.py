@@ -14,7 +14,7 @@ import logging
 import os
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import orjson
 import pytest
@@ -36,15 +36,15 @@ from socialhome.crypto import (
 from socialhome.domain.gfs_member_publish import (
     MEMBER_PUBLISH_ANON_FRAME_KEYS,
     MEMBER_PUBLISH_EPOCH_GRACE_S,
-    MemberPublishAnonRequest,
-    owner_epoch_notice_signing_payload,
     SPACE_ITEM_EVENT_TYPE,
+    MemberPublishAnonRequest,
     MemberPublishRequest,
+    owner_epoch_notice_signing_payload,
 )
-from socialhome.global_server import member_publish as mp_mod
+from socialhome.domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server import federation as federation_mod
-from socialhome.global_server.routes import ws as ws_mod
+from socialhome.global_server import member_publish as mp_mod
 from socialhome.global_server.app_keys import (
     gfs_db_key,
     gfs_envelope_queue_repo_key,
@@ -60,7 +60,7 @@ from socialhome.global_server.member_publish import (
     MEMBER_PUBLISH_MAX_PER_MINUTE,
     _is_member_publish_path,
 )
-from socialhome.domain.writer_cert import MAX_WRITER_CERT_EPOCH
+from socialhome.global_server.routes import ws as ws_mod
 from socialhome.global_server.server import create_gfs_app
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 from socialhome.writer_key import (
@@ -92,7 +92,7 @@ class _Household:
         )
 
     def hello(self) -> dict:
-        ts = int(datetime.now(timezone.utc).timestamp())
+        ts = int(datetime.now(UTC).timestamp())
         sig = sign_ed25519(self.seed, f"{self.instance_id}|{ts}".encode())
         return {
             "type": "hello",
@@ -107,7 +107,7 @@ SPACE_PK = ed25519_public_key(SPACE_SEED)
 
 
 def _now_iso(delta_s: int = 0) -> str:
-    return (datetime.now(timezone.utc) + timedelta(seconds=delta_s)).isoformat()
+    return (datetime.now(UTC) + timedelta(seconds=delta_s)).isoformat()
 
 
 def _cert(holder: _Household, *, epoch=3, space_id=SPACE_ID, seed=SPACE_SEED):

@@ -81,7 +81,7 @@ jobs:
       # without a line of code changing. ``.pre-commit-config.yaml``'s
       # ``ruff-pre-commit`` rev is the source of truth — keep this, that
       # rev, and pyproject's ``[dev]`` ``ruff==`` pin in lockstep.
-      - run: pip install ruff==0.15.22
+      - run: pip install ruff==0.17.1
       - name: ruff check
         run: ruff check socialhome/ tests/
       - name: ruff format

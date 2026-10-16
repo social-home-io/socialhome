@@ -32,14 +32,14 @@ class PeerDirectoryHandler:
     def __init__(self, repo: AbstractPeerSpaceDirectoryRepo) -> None:
         self._repo = repo
 
-    def attach_to(self, federation_service: "FederationService") -> None:
-        registry = federation_service._event_registry  # noqa: SLF001
+    def attach_to(self, federation_service: FederationService) -> None:
+        registry = federation_service._event_registry
         registry.register(
             FederationEventType.SPACE_DIRECTORY_SYNC,
             self._on_snapshot,
         )
 
-    async def _on_snapshot(self, event: "FederationEvent") -> None:
+    async def _on_snapshot(self, event: FederationEvent) -> None:
         """Replace the cached directory for the sending instance."""
         items = event.payload.get("spaces")
         if not isinstance(items, list):

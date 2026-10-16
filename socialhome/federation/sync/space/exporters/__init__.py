@@ -35,8 +35,8 @@ from .stickies_deleted import StickiesDeletedExporter
 from .task_lists import TaskListsExporter
 from .task_lists_deleted import TaskListsDeletedExporter
 from .tasks import TasksExporter
-from .tasks_deleted import TasksDeletedExporter
 from .tasks_archived import TasksArchivedExporter
+from .tasks_deleted import TasksDeletedExporter
 from .timetables import TimetablesExporter
 from .zones import ZonesExporter
 from .zones_deleted import ZonesDeletedExporter
@@ -46,11 +46,11 @@ __all__ = [
     "BazaarExporter",
     "CalendarDeletedExporter",
     "CalendarExporter",
-    "ExpandedCalendarExporter",
     "ChatMessagesDeletedExporter",
     "ChatMessagesExporter",
     "CommentsDeletedExporter",
     "CommentsExporter",
+    "ExpandedCalendarExporter",
     "GalleryAlbumsDeletedExporter",
     "GalleryExporter",
     "GalleryItemsDeletedExporter",
@@ -66,9 +66,9 @@ __all__ = [
     "StickiesExporter",
     "TaskListsDeletedExporter",
     "TaskListsExporter",
-    "TasksExporter",
     "TasksArchivedExporter",
     "TasksDeletedExporter",
+    "TasksExporter",
     "TimetablesExporter",
     "ZonesDeletedExporter",
     "ZonesExporter",

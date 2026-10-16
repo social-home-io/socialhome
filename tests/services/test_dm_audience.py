@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -34,7 +34,7 @@ class _Convos:
         return Conversation(
             id="c",
             type=ConversationType.GROUP_DM,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             system_scope=SystemChatScope.HOUSEHOLD if self.system else None,
         )
 

@@ -7,7 +7,7 @@ rules are the production ones.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -34,11 +34,11 @@ from socialhome.services.timetable_service import (
 
 #: A Monday in CEST (Berlin = UTC+2).
 MON = date(2026, 9, 28)
-T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _utc(d: date, hh: int, mm: int = 0) -> datetime:
-    return datetime(d.year, d.month, d.day, hh, mm, tzinfo=timezone.utc)
+    return datetime(d.year, d.month, d.day, hh, mm, tzinfo=UTC)
 
 
 # ─── Stubs ───────────────────────────────────────────────────────────────
@@ -125,22 +125,22 @@ def _entry(eid, weekday, start, end, **kw) -> TimetableEntry:
 
 
 def _tt(tid="tt-1", *, assignees=("u-anna",), **kw) -> Timetable:
-    base = dict(
-        id=tid,
-        name=f"Anna {tid}",
-        created_by="u-anna",
-        created_at=T0,
-        updated_at=T0,
-        tz="Europe/Berlin",
-        assignees=assignees,
-        entries=(
+    base = {
+        "id": tid,
+        "name": f"Anna {tid}",
+        "created_by": "u-anna",
+        "created_at": T0,
+        "updated_at": T0,
+        "tz": "Europe/Berlin",
+        "assignees": assignees,
+        "entries": (
             _entry("m1", 0, time(8, 0), time(8, 45), title="Mathe"),
             _entry("m2", 0, time(8, 50), time(9, 35), title="Deutsch"),
             _entry(
                 "mb", 0, time(9, 35), time(9, 55), kind=EntryKind.BREAK, title="Pause"
             ),
         ),
-    )
+    }
     base.update(kw)
     return Timetable(**base)
 

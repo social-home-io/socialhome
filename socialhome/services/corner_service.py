@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import orjson
@@ -112,36 +112,36 @@ class CornerService(ProtectionGateMixin):
     """Assemble a :class:`CornerBundle` for the caller."""
 
     __slots__ = (
-        "_child_protection",
-        "_notifications",
-        "_conversations",
-        "_calendar",
-        "_presence",
-        "_tasks",
         "_bazaar",
-        "_users",
-        "_spaces",
-        "_space_posts",
-        "_timetables",
-        "_space_timetables",
+        "_calendar",
+        "_child_protection",
+        "_conversations",
+        "_notifications",
         "_preferences",
+        "_presence",
+        "_space_posts",
+        "_space_timetables",
+        "_spaces",
+        "_tasks",
+        "_timetables",
+        "_users",
     )
 
     def __init__(
         self,
         *,
-        notification_repo: "AbstractNotificationRepo",
-        conversation_repo: "AbstractConversationRepo",
-        calendar_repo: "AbstractCalendarRepo",
-        presence_service: "PresenceService",
-        task_repo: "AbstractTaskRepo",
-        bazaar_repo: "AbstractBazaarRepo",
-        user_repo: "AbstractUserRepo",
-        space_repo: "AbstractSpaceRepo",
-        space_post_repo: "AbstractSpacePostRepo",
-        timetable_service: "TimetableService | None" = None,
-        preferences_service: "PreferencesService | None" = None,
-        space_timetable_service: "SpaceTimetableService | None" = None,
+        notification_repo: AbstractNotificationRepo,
+        conversation_repo: AbstractConversationRepo,
+        calendar_repo: AbstractCalendarRepo,
+        presence_service: PresenceService,
+        task_repo: AbstractTaskRepo,
+        bazaar_repo: AbstractBazaarRepo,
+        user_repo: AbstractUserRepo,
+        space_repo: AbstractSpaceRepo,
+        space_post_repo: AbstractSpacePostRepo,
+        timetable_service: TimetableService | None = None,
+        preferences_service: PreferencesService | None = None,
+        space_timetable_service: SpaceTimetableService | None = None,
     ) -> None:
         self._notifications = notification_repo
         self._conversations = conversation_repo
@@ -164,7 +164,7 @@ class CornerService(ProtectionGateMixin):
         username: str,
         now: datetime | None = None,
     ) -> CornerBundle:
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         unread_notifications = await _safe_int(
             "notifications.count_unread",
             self._notifications.count_unread(user_id),
@@ -203,7 +203,7 @@ class CornerService(ProtectionGateMixin):
         try:
             convos = await self._conversations.list_for_user(username)
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("corner: list DMs failed: %s", exc)
+            log.debug("corner: list DMs failed: %s", exc, exc_info=True)
             return 0
         total = 0
         for c in convos:
@@ -213,6 +213,7 @@ class CornerService(ProtectionGateMixin):
                     username,
                 )
             except Exception:  # pragma: no cover — defensive
+                log.debug("corner: unread count for %s failed", c.id, exc_info=True)
                 continue
         return total
 
@@ -229,7 +230,7 @@ class CornerService(ProtectionGateMixin):
                 end=window_end,
             )
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("corner: upcoming events failed: %s", exc)
+            log.debug("corner: upcoming events failed: %s", exc, exc_info=True)
             return ()
         events.sort(key=lambda e: e.start)
         return tuple(events[:MAX_EVENTS])
@@ -240,7 +241,7 @@ class CornerService(ProtectionGateMixin):
         try:
             return (await self._preferences.get_household()).tz
         except Exception as exc:  # defensive — fall back to UTC
-            log.warning("corner: household tz failed: %s", exc)
+            log.warning("corner: household tz failed: %s", exc, exc_info=True)
             return DEFAULT_TZ
 
     async def _today_timetable(
@@ -254,7 +255,7 @@ class CornerService(ProtectionGateMixin):
         try:
             return await self._timetables.today_for_user(user_id, now, extra=pinned)
         except Exception as exc:  # defensive — one widget never fails the page
-            log.warning("corner: today's timetable failed: %s", exc)
+            log.warning("corner: today's timetable failed: %s", exc, exc_info=True)
             return ()
 
     async def _pinned_space_timetables(self, user_id: str) -> list[Timetable]:
@@ -273,7 +274,9 @@ class CornerService(ProtectionGateMixin):
                 return []
             return await self._space_timetables.pinned_for_user(user_id, pins)
         except Exception as exc:  # defensive — pins never fail the page
-            log.warning("corner: pinned space timetables failed: %s", exc)
+            log.warning(
+                "corner: pinned space timetables failed: %s", exc, exc_info=True
+            )
             return []
 
     async def _today_events(
@@ -297,7 +300,7 @@ class CornerService(ProtectionGateMixin):
                 end=end,
             )
         except Exception as exc:  # defensive
-            log.warning("corner: today's events failed: %s", exc)
+            log.warning("corner: today's events failed: %s", exc, exc_info=True)
             return ()
         # An all-day row overlapping the window may still be another
         # day's (an ICS midnight-UTC day seen from Berlin / Bogotá).
@@ -315,7 +318,7 @@ class CornerService(ProtectionGateMixin):
             hidden |= await self._guardian_block_counterparts(user_id)
         except Exception as exc:  # pragma: no cover — defensive
             # Fails closed: no whereabouts rather than unfiltered ones.
-            log.debug("corner: presence failed: %s", exc)
+            log.debug("corner: presence failed: %s", exc, exc_info=True)
             return ()
         return tuple(p for p in rows if p.user_id not in hidden)
 
@@ -326,7 +329,7 @@ class CornerService(ProtectionGateMixin):
         try:
             tasks = await self._tasks.list_by_assignee(user_id)
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("corner: tasks failed: %s", exc)
+            log.debug("corner: tasks failed: %s", exc, exc_info=True)
             return ()
         today = local_date(now, await self._household_tz())
         relevant = [
@@ -352,7 +355,7 @@ class CornerService(ProtectionGateMixin):
         try:
             user = await self._users.get(username)
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("corner: user lookup failed: %s", exc)
+            log.debug("corner: user lookup failed: %s", exc, exc_info=True)
             return (), ()
         if user is None:
             return (), ()
@@ -376,6 +379,10 @@ class CornerService(ProtectionGateMixin):
             try:
                 member = await self._spaces.get_member(space_id, user_id)
             except Exception:  # pragma: no cover — defensive
+                log.debug(
+                    "CornerService._followed_spaces_feed: fail-soft error ignored",
+                    exc_info=True,
+                )
                 member = None
             if member is None:
                 # Stale preference — user left or was removed.
@@ -383,6 +390,10 @@ class CornerService(ProtectionGateMixin):
             try:
                 space = await self._spaces.get(space_id)
             except Exception:  # pragma: no cover — defensive
+                log.debug(
+                    "CornerService._followed_spaces_feed: fail-soft error ignored",
+                    exc_info=True,
+                )
                 space = None
             if space is None:
                 continue
@@ -396,6 +407,7 @@ class CornerService(ProtectionGateMixin):
                     "corner: list_feed(%s) failed: %s",
                     space_id,
                     exc,
+                    exc_info=True,
                 )
                 continue
             for p in posts:
@@ -426,20 +438,20 @@ class CornerService(ProtectionGateMixin):
         try:
             mine = await self._bazaar.list_by_seller(user_id)
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("corner: bazaar list failed: %s", exc)
+            log.debug("corner: bazaar list failed: %s", exc, exc_info=True)
             return BazaarCornerSummary(0, 0, 0)
 
         active = [lst for lst in mine if lst.status is BazaarStatus.ACTIVE]
-        ending_soon_cutoff = datetime.now(timezone.utc) + timedelta(hours=24)
+        ending_soon_cutoff = datetime.now(UTC) + timedelta(hours=24)
         ending_soon = 0
         pending_offers = 0
         for lst in active:
             try:
                 end = datetime.fromisoformat(
-                    lst.end_time.replace("Z", "+00:00"),
+                    lst.end_time,
                 )
                 if end.tzinfo is None:
-                    end = end.replace(tzinfo=timezone.utc)
+                    end = end.replace(tzinfo=UTC)
                 if end <= ending_soon_cutoff:
                     ending_soon += 1
             except ValueError, AttributeError:
@@ -447,6 +459,10 @@ class CornerService(ProtectionGateMixin):
             try:
                 bids = await self._bazaar.list_bids(lst.post_id)
             except Exception:  # pragma: no cover — defensive
+                log.debug(
+                    "CornerService._bazaar_summary: fail-soft error ignored",
+                    exc_info=True,
+                )
                 bids = []
             pending_offers += sum(
                 1 for b in bids if not b.accepted and not b.rejected and not b.withdrawn
@@ -462,7 +478,7 @@ async def _safe_int(label: str, coro) -> int:
     try:
         return int(await coro)
     except Exception as exc:  # pragma: no cover — defensive
-        log.debug("corner: %s failed: %s", label, exc)
+        log.debug("corner: %s failed: %s", label, exc, exc_info=True)
         return 0
 
 

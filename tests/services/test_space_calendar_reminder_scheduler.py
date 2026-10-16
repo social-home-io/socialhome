@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
-from socialhome.repositories.space_repo import SqliteSpaceRepo
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import EventReminderDue
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.calendar_service import SpaceCalendarService
 from socialhome.services.space_calendar_reminder_scheduler import (
     SpaceCalendarReminderScheduler,
@@ -64,7 +63,7 @@ async def env(tmp_dir):
 
 
 async def test_add_reminder_persists(env):
-    now = datetime(2030, 6, 1, 18, 0, tzinfo=timezone.utc)
+    now = datetime(2030, 6, 1, 18, 0, tzinfo=UTC)
     event = await env.svc.create_event(
         space_id="sp-rem",
         summary="Concert",
@@ -86,7 +85,7 @@ async def test_add_reminder_persists(env):
 
 
 async def test_remove_reminder_clears(env):
-    now = datetime(2030, 6, 1, tzinfo=timezone.utc)
+    now = datetime(2030, 6, 1, tzinfo=UTC)
     event = await env.svc.create_event(
         space_id="sp-rem",
         summary="Concert",
@@ -112,7 +111,7 @@ async def test_remove_reminder_clears(env):
 
 
 async def test_negative_minutes_rejected(env):
-    now = datetime(2030, 7, 1, tzinfo=timezone.utc)
+    now = datetime(2030, 7, 1, tzinfo=UTC)
     event = await env.svc.create_event(
         space_id="sp-rem",
         summary="Trip",
@@ -130,7 +129,7 @@ async def test_negative_minutes_rejected(env):
 
 async def test_scheduler_fires_due_reminder(env):
     """A reminder whose fire_at is in the past triggers EventReminderDue."""
-    past = datetime.now(timezone.utc) - timedelta(minutes=5)
+    past = datetime.now(UTC) - timedelta(minutes=5)
     event = await env.svc.create_event(
         space_id="sp-rem",
         summary="Already started",
@@ -160,7 +159,7 @@ async def test_scheduler_fires_due_reminder(env):
 
 async def test_scheduler_skips_already_sent(env):
     """A reminder marked sent doesn't fire again."""
-    past = datetime.now(timezone.utc) - timedelta(minutes=5)
+    past = datetime.now(UTC) - timedelta(minutes=5)
     event = await env.svc.create_event(
         space_id="sp-rem",
         summary="Started",
@@ -184,7 +183,7 @@ async def test_scheduler_skips_already_sent(env):
 
 async def test_scheduler_skips_future_reminder(env):
     """A reminder whose fire_at is in the future is left alone."""
-    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    future = datetime.now(UTC) + timedelta(hours=2)
     event = await env.svc.create_event(
         space_id="sp-rem",
         summary="Later",

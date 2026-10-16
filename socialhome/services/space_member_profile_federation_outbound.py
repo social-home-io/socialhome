@@ -33,8 +33,8 @@ class SpaceMemberProfileFederationOutbound:
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        space_repo: "AbstractSpaceRepo",
+        federation_service: FederationService,
+        space_repo: AbstractSpaceRepo,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -67,7 +67,7 @@ class SpaceMemberProfileFederationOutbound:
                 event.space_id,
             )
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("sm-profile-outbound: list peers failed: %s", exc)
+            log.debug("sm-profile-outbound: list peers failed: %s", exc, exc_info=True)
             return
         own = getattr(self._federation, "_own_instance_id", "")
         for instance_id in peers:
@@ -85,4 +85,5 @@ class SpaceMemberProfileFederationOutbound:
                     "sm-profile-outbound: send to %s failed: %s",
                     instance_id,
                     exc,
+                    exc_info=True,
                 )

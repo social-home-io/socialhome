@@ -41,15 +41,15 @@ def test_valid_urls_are_re_serialised(raw, want):
         "http://h:80\r\nX-Inj: 1",
         "http://h/\x00",
         "http://h/\x7f",
-        "http://q.test/‮evil\r\nX: 1",
+        "http://q.test/\u202eevil\r\nX: 1",
         # Whitespace inside.
         "http://a b.com",
         "http://h/a b",
         "http://h/\tx",
         # Bidi / invisible formatting characters.
-        "http://‮evil.com",
-        "http://ex​ample.com",
-        "http://h/⁦x",
+        "http://\u202eevil.com",
+        "http://ex\u200bample.com",
+        "http://h/\u2066x",
         # Non-ASCII outside the host.
         "http://h/pfad-ä",
         # A host IDNA cannot encode.

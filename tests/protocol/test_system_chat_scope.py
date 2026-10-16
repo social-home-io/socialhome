@@ -17,7 +17,7 @@ Runs against the real application registry and SQLite.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -168,7 +168,7 @@ async def _send(app, event_type, payload) -> None:
                 event_type=event_type,
                 from_instance=PEER,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )

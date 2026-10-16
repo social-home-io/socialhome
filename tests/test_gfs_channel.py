@@ -92,7 +92,12 @@ def test_cert_round_trip_and_refusals() -> None:
     )
     wire = cert.to_wire()
     assert "space_id" not in wire
-    kw = dict(channel_pk=CH_PK, channel_id=CHANNEL_ID, epoch=3, author_pk=OWN_PK)
+    kw = {
+        "channel_pk": CH_PK,
+        "channel_id": CHANNEL_ID,
+        "epoch": 3,
+        "author_pk": OWN_PK,
+    }
     verify_channel_cert(cert, required_scope="comment", **kw)
     # Forged (another key), wrong channel, stale epoch, other household.
     other = derive_channel_seed(os.urandom(32), SPACE_ID, CHANNEL_ID)

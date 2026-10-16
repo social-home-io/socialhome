@@ -8,10 +8,10 @@ from datetime import timedelta
 import pytest
 
 from socialhome.db.database import AsyncDatabase
-from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.infrastructure.replay_cache_scheduler import (
     ReplayCachePruneScheduler,
 )
+from socialhome.repositories.federation_repo import SqliteFederationRepo
 
 
 @pytest.fixture

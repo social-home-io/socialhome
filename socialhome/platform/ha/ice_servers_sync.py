@@ -78,20 +78,20 @@ class HaIceServerSync:
     """
 
     __slots__ = (
-        "_client",
         "_apply",
-        "_on_first_attempt",
+        "_client",
+        "_error_retry_s",
         "_first_attempt_done",
         "_interval_s",
-        "_error_retry_s",
-        "_task",
+        "_on_first_attempt",
         "_stop",
+        "_task",
     )
 
     def __init__(
         self,
         *,
-        client: "HaClient",
+        client: HaClient,
         apply_callback: ApplyCallback,
         interval_s: float = DEFAULT_REFRESH_INTERVAL_S,
         error_retry_s: float = ERROR_RETRY_INTERVAL_S,
@@ -136,7 +136,7 @@ class HaIceServerSync:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -169,6 +169,7 @@ class HaIceServerSync:
             log.warning(
                 "ha-ice-servers-sync: apply callback raised: %s",
                 exc,
+                exc_info=True,
             )
             return False
         log.info(
@@ -241,6 +242,7 @@ class HaIceServerSync:
                 log.warning(
                     "ha-ice-servers-sync: fetch raised: %s",
                     exc,
+                    exc_info=True,
                 )
             if not self._first_attempt_done:
                 self._first_attempt_done = True
@@ -248,7 +250,7 @@ class HaIceServerSync:
             wait = self._interval_s if success else self._error_retry_s
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=wait)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _fire_first_attempt(self) -> None:
@@ -266,4 +268,5 @@ class HaIceServerSync:
             log.warning(
                 "ha-ice-servers-sync: on_first_attempt callback raised: %s",
                 exc,
+                exc_info=True,
             )

@@ -29,7 +29,6 @@ from socialhome.repositories import (
     SqliteOutboxRepo,
 )
 
-
 pytestmark = pytest.mark.security
 
 

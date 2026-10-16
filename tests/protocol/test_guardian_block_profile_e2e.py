@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import io
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from PIL import Image
@@ -101,7 +101,7 @@ async def world(aiohttp_client, tmp_path, monkeypatch):
                     event_type=event_type,
                     from_instance=a_id,
                     to_instance=b_id,
-                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    timestamp=datetime.now(UTC).isoformat(),
                     payload=payload,
                 )
             )
@@ -199,7 +199,7 @@ async def test_a_block_placed_after_a_re_pair_still_takes_them_off(world):
                 event_type=FederationEventType.USERS_SYNC,
                 from_instance=b_id,
                 to_instance=a_id,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload={
                     "users": [
                         {"user_id": rex, "username": "rex", "display_name": "Rex"}

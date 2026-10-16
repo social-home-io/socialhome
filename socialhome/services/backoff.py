@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import random
 
-
 #: Hard floor on any computed backoff, in seconds. ``next_attempt_at``
 #: is stored at one-second granularity, so a sub-second delay rounds to
 #: "due now" and the row retries immediately.

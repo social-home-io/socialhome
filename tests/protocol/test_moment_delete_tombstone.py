@@ -20,7 +20,7 @@ the real application registry and SQLite:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -113,7 +113,7 @@ async def test_delete_before_create_leaves_the_moment_absent(env):  # noqa: F811
     assert tomb is not None and tomb["deleted_at"] is not None
     # Capped at the maximum moment lifetime — the create is unknown here.
     expires = datetime.fromisoformat(tomb["expires_at"])
-    assert expires <= datetime.now(timezone.utc) + timedelta(days=7, minutes=1)
+    assert expires <= datetime.now(UTC) + timedelta(days=7, minutes=1)
     sent.clear()
 
     await _send(app, FET.MOMENT_CREATED, _signed_create())
@@ -166,7 +166,7 @@ async def test_tombstone_survives_a_restart(aiohttp_client, tmp_dir, monkeypatch
 
 async def test_expired_tombstone_is_purged_and_an_expired_replay_is_refused(env):  # noqa: F811
     app, db, sent = env
-    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     await _send(app, FET.MOMENT_DELETED, _signed_delete("m-olga"))
     await db.enqueue("UPDATE moments SET expires_at=? WHERE id='m-olga'", (past,))
 

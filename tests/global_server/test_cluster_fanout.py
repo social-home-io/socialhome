@@ -45,7 +45,6 @@ from socialhome.global_server.domain import (
 )
 from socialhome.global_server.server import create_gfs_app
 
-
 #: Every node advertises this as its own URL in its HELLO, so each also learns
 #: a peer row it can never reach (see ``fast_sync_retry``). A closed loopback
 #: port refuses at once — ``http://gfs.test`` sent each of those posts out for

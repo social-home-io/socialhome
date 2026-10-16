@@ -112,11 +112,11 @@ class PairingGfsReach:
 
     __slots__ = (
         "_gfs_repo",
-        "_relay_supported",
-        "_relay_sender",
         "_keywrap_public_key",
         "_keywrap_sig",
         "_probe_peer",
+        "_relay_sender",
+        "_relay_supported",
     )
 
     def __init__(
@@ -150,7 +150,7 @@ class PairingGfsReach:
             try:
                 if await self._relay_supported(conn):
                     out.append(conn)
-            except Exception:  # noqa: BLE001 — one bad server must not decide
+            except Exception:
                 log.warning(
                     "pairing reach: capability check failed for connection %s",
                     conn.id,
@@ -243,7 +243,7 @@ class PairingGfsReach:
             return
         try:
             await self._probe_peer(instance_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning(
                 "pairing reach: route probe for %s failed",
                 instance_id,

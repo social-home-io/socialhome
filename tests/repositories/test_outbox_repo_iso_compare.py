@@ -14,7 +14,7 @@ retrying after the first failure.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -82,7 +82,7 @@ async def test_list_due_picks_up_rescheduled_iso_timestamp(env):
         payload_json="{}",
     )
     past = (
-        datetime.now(timezone.utc) - timedelta(minutes=5)
+        datetime.now(UTC) - timedelta(minutes=5)
     ).isoformat()  # e.g. '2026-05-09T19:30:00.000000+00:00'
     assert "T" in past and past.endswith("+00:00")
 
@@ -103,7 +103,7 @@ async def test_list_due_excludes_future_iso_timestamp(env):
         event_type=FederationEventType.SPACE_POST_CREATED,
         payload_json="{}",
     )
-    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     await env.outbox_repo.reschedule(entry_id, future, attempts=1)
 
     due = await env.outbox_repo.list_due()
@@ -126,11 +126,11 @@ async def test_purge_terminal_keeps_naive_failure_inside_grace(env):
     )
     await env.db.enqueue(
         "UPDATE federation_outbox SET status='failed', failed_at=? WHERE id=?",
-        (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), entry_id),
+        (datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"), entry_id),
     )
     # Cutoff at the start of today: the failure is far newer, so nothing
     # may be purged.
-    cutoff = f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00+00:00"
+    cutoff = f"{datetime.now(UTC).date().isoformat()}T00:00:00+00:00"
     assert await env.outbox_repo.purge_terminal(cutoff) == 0
     rows = await env.db.fetchall("SELECT id FROM federation_outbox")
     assert [r["id"] for r in rows] == [entry_id]
@@ -147,6 +147,6 @@ async def test_purge_terminal_still_reclaims_genuinely_old_rows(env):
         "UPDATE federation_outbox SET status='failed', failed_at=? WHERE id=?",
         ("2000-01-01 00:00:00", entry_id),
     )
-    cutoff = datetime.now(timezone.utc).isoformat()
+    cutoff = datetime.now(UTC).isoformat()
     assert await env.outbox_repo.purge_terminal(cutoff) == 1
     assert await env.db.fetchall("SELECT id FROM federation_outbox") == []

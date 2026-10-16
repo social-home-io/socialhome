@@ -14,7 +14,6 @@ from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
 
-
 # pytest-homeassistant-custom-component (a transitive dev dep of the
 # ha-integration repo when both repos share a venv) installs a
 # socket-blocking guard. CI doesn't install that plugin, so the

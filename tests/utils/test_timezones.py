@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
@@ -73,8 +73,8 @@ def hm(s: str) -> time:
 
 
 def test_zone_of_and_local_date():
-    assert zone_of("Mars/Base") is timezone.utc
-    late = datetime(2026, 9, 27, 23, 30, tzinfo=timezone.utc)
+    assert zone_of("Mars/Base") is UTC
+    late = datetime(2026, 9, 27, 23, 30, tzinfo=UTC)
     assert local_date(late, "Europe/Berlin") == date(2026, 9, 28)
     assert local_date(late, "UTC") == date(2026, 9, 27)
 
@@ -82,23 +82,23 @@ def test_zone_of_and_local_date():
 class TestLocalInstant:
     def test_berlin_summer_is_utc_plus_two(self):
         got = local_instant(date(2026, 9, 28), hm("08:00"), "Europe/Berlin")
-        assert got == datetime(2026, 9, 28, 6, 0, tzinfo=timezone.utc)
-        assert got.tzinfo is timezone.utc
+        assert got == datetime(2026, 9, 28, 6, 0, tzinfo=UTC)
+        assert got.tzinfo is UTC
 
     def test_unknown_zone_falls_back_to_utc(self):
         got = local_instant(date(2026, 9, 28), hm("08:00"), "Mars/Base")
-        assert got == datetime(2026, 9, 28, 8, 0, tzinfo=timezone.utc)
+        assert got == datetime(2026, 9, 28, 8, 0, tzinfo=UTC)
 
     def test_nonexistent_time_shifts_forward(self):
         # 2026-03-29 02:30 doesn't exist in Berlin (02:00 → 03:00): it
         # lands on 03:30 CEST, i.e. 01:30 UTC.
         got = local_instant(date(2026, 3, 29), hm("02:30"), "Europe/Berlin")
-        assert got == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+        assert got == datetime(2026, 3, 29, 1, 30, tzinfo=UTC)
 
     def test_day_bounds_are_local_midnights(self):
         lo, hi = local_day_bounds(date(2026, 9, 28), "Europe/Berlin")
-        assert lo == datetime(2026, 9, 27, 22, 0, tzinfo=timezone.utc)
-        assert hi == datetime(2026, 9, 28, 22, 0, tzinfo=timezone.utc)
+        assert lo == datetime(2026, 9, 27, 22, 0, tzinfo=UTC)
+        assert hi == datetime(2026, 9, 28, 22, 0, tzinfo=UTC)
 
     def test_day_bounds_follow_dst(self):
         # 2026-10-25 is a 25-hour day in Berlin (CEST → CET).
@@ -107,10 +107,10 @@ class TestLocalInstant:
 
     def test_day_bounds_unknown_zone_is_utc(self):
         lo, hi = local_day_bounds(date(2026, 9, 28), "Mars/Base")
-        assert lo == datetime(2026, 9, 28, tzinfo=timezone.utc)
-        assert hi == datetime(2026, 9, 29, tzinfo=timezone.utc)
+        assert lo == datetime(2026, 9, 28, tzinfo=UTC)
+        assert hi == datetime(2026, 9, 29, tzinfo=UTC)
 
     def test_ambiguous_time_takes_first_occurrence(self):
         # 2026-10-25 02:30 happens twice in Berlin; fold=0 → CEST (+2).
         got = local_instant(date(2026, 10, 25), hm("02:30"), "Europe/Berlin")
-        assert got == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
+        assert got == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)

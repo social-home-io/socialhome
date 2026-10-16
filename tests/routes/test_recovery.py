@@ -24,7 +24,7 @@ async def test_admin_builds_and_downloads_kit(client):
     assert "socialhome-recovery-kit.shrk" in r.headers["Content-Disposition"]
     body = await r.read()
     assert body
-    header, payload = unseal_kit(body, "correct horse staple")
+    header, _payload = unseal_kit(body, "correct horse staple")
     assert isinstance(header["instance_id"], str)
     assert header["instance_id"]
 

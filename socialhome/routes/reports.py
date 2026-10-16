@@ -104,7 +104,8 @@ class AdminReportResolveView(BaseView):
             body = await self.request.json()
             if isinstance(body, dict):
                 dismissed = bool(body.get("dismissed"))
-        except Exception:
+        except ValueError:
+            # No body / not JSON: a plain resolve.
             pass
         await svc.resolve(
             report_id,

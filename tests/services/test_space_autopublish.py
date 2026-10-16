@@ -126,7 +126,7 @@ async def test_create_global_with_no_gfs_connected_is_global_not_listed(stack):
 
 @pytest.mark.parametrize("space_type", [SpaceType.PUBLIC, SpaceType.HOUSEHOLD])
 async def test_only_a_global_space_takes_servers(stack, space_type):
-    svc, gfs = stack
+    svc, _gfs = stack
     with pytest.raises(GfsSelectionInvalidError) as exc_info:
         await svc.create_space(
             owner_username="alice",

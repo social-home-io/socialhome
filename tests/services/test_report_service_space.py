@@ -342,7 +342,7 @@ async def test_stub_report_goes_to_host_and_reviewer_households_only(env):
     await env.remote("spR", "inst-adm", "radm", role="admin")
     await env.remote("spR", "inst-plain", "rplain", role="member")
     await env.remote("spR", "inst-gone", "rgone", role="moderator", tomb=1)
-    report, federated = await env.svc.create_report(
+    _report, federated = await env.svc.create_report(
         reporter_user_id=env.member,
         target_type="post",
         target_id="pR",

@@ -108,7 +108,7 @@ class _Waiting:
 class PendingParentBuffer:
     """Bounded, expiring hold for space items waiting on their parent row."""
 
-    __slots__ = ("_hold", "_queue", "_draining")
+    __slots__ = ("_draining", "_hold", "_queue")
 
     def __init__(
         self,
@@ -145,7 +145,7 @@ class PendingParentBuffer:
         """Drop every expired entry now (also done on each hold / release)."""
         self._hold.purge()
 
-    def attach_bus(self, bus: "EventBus") -> None:
+    def attach_bus(self, bus: EventBus) -> None:
         """Replay held items when their parent lands."""
         bus.subscribe(SpacePostCreated, self._on_post_created)
         bus.subscribe(SpacePostSynced, self._on_post_synced)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -41,7 +41,7 @@ def _post(**over) -> Post:
         author=_USER,
         type=PostType.TEXT,
         content="approved words",
-        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
         location=LocationData(lat=52.1234, lon=13.4321, label="cafe"),
     )
     return dataclasses.replace(base, **over)

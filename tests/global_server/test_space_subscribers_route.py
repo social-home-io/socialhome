@@ -19,7 +19,7 @@ Invariants under test:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -88,7 +88,7 @@ async def _add_subscriber(app, *, space_id, instance_id, with_keywrap):
 
 def _signed_query(skp, *, space_id, ts=None) -> dict[str, str]:
     """Return the query params for a space-authority-signed subscribers query."""
-    ts = ts or datetime.now(timezone.utc).isoformat()
+    ts = ts or datetime.now(UTC).isoformat()
     sig = sign_authority_event(
         event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
         space_id=space_id,
@@ -149,7 +149,7 @@ async def test_forged_signature_is_403(gfs_client):
 async def test_stale_timestamp_is_403(gfs_client):
     app = gfs_client.server.app
     skp = await _seed_space(app, space_id="sp")
-    stale = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+    stale = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
     resp = await gfs_client.get(
         "/gfs/spaces/sp/subscribers",
         params=_signed_query(skp, space_id="sp", ts=stale),

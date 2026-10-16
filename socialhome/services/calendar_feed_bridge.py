@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -77,20 +77,20 @@ class CalendarFeedBridge:
 
     __slots__ = (
         "_bus",
-        "_post_repo",
         "_calendar_repo",
-        "_space_repo",
+        "_post_repo",
         "_remote_members",
+        "_space_repo",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        post_repo: "AbstractSpacePostRepo",
-        calendar_repo: "AbstractSpaceCalendarRepo",
-        space_repo: "AbstractSpaceRepo",
-        remote_member_repo: "AbstractSpaceRemoteMemberRepo",
+        post_repo: AbstractSpacePostRepo,
+        calendar_repo: AbstractSpaceCalendarRepo,
+        space_repo: AbstractSpaceRepo,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo,
     ) -> None:
         self._bus = bus
         self._post_repo = post_repo
@@ -146,7 +146,7 @@ class CalendarFeedBridge:
             id=uuid.uuid4().hex,
             author=event.created_by,
             type=PostType.EVENT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content=event.summary,
             linked_event_id=event.id,
         )

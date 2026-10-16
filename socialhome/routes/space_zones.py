@@ -36,7 +36,7 @@ def _zone_to_dict(z: SpaceZone) -> dict:
     }
 
 
-def _ensure_authenticated(view: "BaseView") -> web.Response | None:
+def _ensure_authenticated(view: BaseView) -> web.Response | None:
     ctx = view.user
     if ctx is None or ctx.user_id is None:
         return error_response(

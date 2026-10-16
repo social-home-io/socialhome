@@ -8,8 +8,8 @@ from socialhome.app import create_app
 from socialhome.app_keys import (
     config_key,
     federation_repo_key,
-    preferences_service_key,
     platform_adapter_key,
+    preferences_service_key,
     setup_service_key,
 )
 from socialhome.app_keys import db_key as _db_key

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -259,7 +259,7 @@ def _parse(value) -> datetime | None:
     if isinstance(value, datetime):
         return value
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return datetime.fromisoformat(str(value))
     except ValueError:
         return None
 
@@ -282,7 +282,7 @@ def _row_to_report(row: dict | None) -> ContentReport | None:
         category=category,
         notes=row.get("notes"),
         status=status,
-        created_at=_parse(row["created_at"]) or datetime.now(timezone.utc),
+        created_at=_parse(row["created_at"]) or datetime.now(UTC),
         resolved_by=row.get("resolved_by"),
         resolved_at=_parse(row.get("resolved_at")),
         space_id=row.get("space_id"),

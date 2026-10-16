@@ -9,7 +9,7 @@ subscribers are 403 — in a non-archived space (403). The household
 calendar rows, never a space event (404).
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from socialhome.auth import sha256_token_hash
 
@@ -45,14 +45,14 @@ async def _add_user(client, username: str, user_id: str) -> dict:
 
 
 def _window() -> str:
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(UTC).replace(tzinfo=None)
     start = (now - timedelta(days=1)).isoformat() + "Z"
     end = (now + timedelta(days=3)).isoformat() + "Z"
     return f"start={start}&end={end}"
 
 
 async def _create_event(client, sid: str, headers: dict, **extra) -> str:
-    start = datetime.now(timezone.utc) + timedelta(hours=2)
+    start = datetime.now(UTC) + timedelta(hours=2)
     r = await client.post(
         f"/api/spaces/{sid}/calendar/events",
         json={
@@ -113,7 +113,7 @@ async def test_space_event_from_another_space_is_404_and_untouched(client):
 
 
 async def test_space_event_listing_is_scoped_to_the_path_space(client):
-    bob, eid = await _cross_space_env(client)
+    bob, _eid = await _cross_space_env(client)
     r = await client.get(f"/api/spaces/sp-a/calendar/events?{_window()}", headers=bob)
     assert r.status == 200
     assert [e["id"] for e in await r.json()] == []
@@ -123,7 +123,7 @@ async def test_space_event_listing_is_scoped_to_the_path_space(client):
 
 
 async def test_space_event_list_non_member_403(client):
-    bob, eid = await _cross_space_env(client)
+    bob, _eid = await _cross_space_env(client)
     r = await client.get(f"/api/spaces/sp-b/calendar/events?{_window()}", headers=bob)
     assert r.status == 403
     assert "Space B party" not in await r.text()
@@ -232,7 +232,7 @@ async def test_space_calendar_subscriber_reads_but_never_writes(client):
     ).status == 200
     events_before = await _event_rows(client, "sp-b")
     rsvps_before = await _rsvp_rows(client)
-    start = datetime.now(timezone.utc) + timedelta(hours=5)
+    start = datetime.now(UTC) + timedelta(hours=5)
     writes = [
         client.post(
             "/api/spaces/sp-b/calendar/events",
@@ -349,7 +349,7 @@ async def test_archived_space_calendar_is_read_only(client):
     await client._db.enqueue("UPDATE spaces SET archived=1 WHERE id='sp-b'")
     events_before = await _event_rows(client, "sp-b")
     rsvps_before = await _rsvp_rows(client)
-    start = datetime.now(timezone.utc) + timedelta(hours=5)
+    start = datetime.now(UTC) + timedelta(hours=5)
     writes = [
         client.post(
             "/api/spaces/sp-b/calendar/events",
@@ -412,7 +412,7 @@ async def test_household_member_may_edit_another_members_personal_event(client):
     bob = await _add_user(client, "bob", "bob-id")
     r = await client.post("/api/calendars", json={"name": "Admin"}, headers=admin)
     cid = (await r.json())["id"]
-    start = datetime.now(timezone.utc) + timedelta(hours=1)
+    start = datetime.now(UTC) + timedelta(hours=1)
     r = await client.post(
         f"/api/calendars/{cid}/events",
         json={

@@ -35,14 +35,15 @@ from __future__ import annotations
 import builtins
 from typing import TYPE_CHECKING, Any
 
+from ..domain.errors import WrongTypeError
 from ..domain.events import StickyCreated, StickyDeleted, StickyUpdated
 from ..domain.space import (
     AccessDecision,
     ContentAction,
     ModerationTargetGoneError,
     Space,
-    SpaceModerationItem,
     SpaceArchivedError,
+    SpaceModerationItem,
     SpacePermissionError,
 )
 from ..domain.sticky import (
@@ -68,7 +69,7 @@ if TYPE_CHECKING:
 
 def _as_text(value: Any, field: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"sticky {field} must be a string")
+        raise WrongTypeError(f"sticky {field} must be a string")
     return value
 
 
@@ -100,7 +101,7 @@ def _coord(value: Any, field: str, limit: float) -> float:
 class StickyService(BusPublisherMixin, ContentAccessMixin):
     """Scoped sticky-note operations for the household and space boards."""
 
-    __slots__ = ("_repo", "_bus", "_spaces", "_moderation")
+    __slots__ = ("_bus", "_moderation", "_repo", "_spaces")
 
     def __init__(
         self,
@@ -112,7 +113,7 @@ class StickyService(BusPublisherMixin, ContentAccessMixin):
         self._repo = sticky_repo
         self._bus = bus
         self._spaces = space_repo
-        self._moderation: "ModerationSubmitter | None" = None
+        self._moderation: ModerationSubmitter | None = None
 
     # ── Writer gate ──────────────────────────────────────────────────────
 

@@ -16,10 +16,10 @@ import os
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft202012Validator
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from jsonschema import Draft202012Validator
 
 import socialhome.dashboard.claim_seal as claim_seal_module
 from socialhome.crypto import b64url_decode, b64url_encode, x25519_exchange
@@ -31,12 +31,12 @@ from socialhome.dashboard.claim_seal import (
     OpenedClaim,
     SealedClaimInvalid,
     UnsupportedPanelClaimSuite,
+    _seal_claim_with,
     claim_aad,
     claim_key,
     open_sealed_claim,
     parse_panel_key,
     seal_claim,
-    _seal_claim_with,
 )
 
 VECTORS_PATH = (

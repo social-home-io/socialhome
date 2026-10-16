@@ -24,7 +24,7 @@ class _StubWs:
         self.sent.append(msg)
 
 
-def _sent_field(ws: "_StubWs", key: str) -> list:
+def _sent_field(ws: _StubWs, key: str) -> list:
     """Decoded values of ``key`` across every frame a stub WS received.
 
     Parses each frame so assertions are robust to JSON formatting

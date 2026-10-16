@@ -12,15 +12,15 @@ returns the ciphertext as-is — service code calls
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from .base import rows_to_dicts
 
 # Domain dataclass lives in ``socialhome/domain/space_key.py``;
 # re-exported here so existing repo-level imports keep working.
-from ..domain.space_key import SpaceKey  # noqa: F401,E402
+from ..domain.space_key import SpaceKey
+from .base import rows_to_dicts
 
 
 @runtime_checkable
@@ -70,7 +70,7 @@ class SqliteSpaceKeyRepo:
         so a rekey verified against a key that a rotation retired in the
         meantime is dropped (``False``) instead of stored as a new-key row.
         """
-        created = key.created_at or datetime.now(timezone.utc).isoformat()
+        created = key.created_at or datetime.now(UTC).isoformat()
         if verified_pin is not None:
             epoch, pk = verified_pin
             changed = await self._db.enqueue_rowcount(
@@ -164,7 +164,7 @@ class SqliteSpaceKeyRepo:
         it written under a newer key (newer owner rekeys that arrived first)
         are kept. Returns how many rows were deleted.
         """
-        created = key.created_at or datetime.now(timezone.utc).isoformat()
+        created = key.created_at or datetime.now(UTC).isoformat()
         cutoff = authority_epoch if older_than is None else older_than
 
         def _run(conn) -> int:
@@ -291,5 +291,5 @@ def _row(row) -> SpaceKey:
         epoch=int(row["epoch"]),
         content_key_hex=row["content_key_hex"],
         created_at=row["created_at"],
-        rotated_by=row["rotated_by"] if "rotated_by" in row.keys() else None,
+        rotated_by=dict(row).get("rotated_by"),
     )

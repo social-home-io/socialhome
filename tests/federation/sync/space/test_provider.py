@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import base64
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC
 from types import SimpleNamespace
-
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
 import pytest
@@ -18,12 +18,12 @@ from socialhome.domain.federation import (
     DELIVERY_ERROR_ROUTE_COOLDOWN,
 )
 from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.sync.space import provider as provider_mod
 from socialhome.federation.sync.space.exporter import (
-    ChunkBuilder,
     SENTINEL_RESOURCE,
+    ChunkBuilder,
     parse_chunk,
 )
-from socialhome.federation.sync.space import provider as provider_mod
 from socialhome.federation.sync.space.provider import (
     SpaceSyncService,
 )
@@ -259,8 +259,8 @@ async def test_stream_initial_enqueues_catchup_media(encoder):
     media URL, targeted at the requesting peer. Without this a
     new member sees the post / gallery rows but the images stay
     broken until someone uploads NEW media."""
-    from unittest.mock import AsyncMock
     from dataclasses import dataclass
+    from unittest.mock import AsyncMock
 
     @dataclass
     class _Post:
@@ -346,8 +346,8 @@ async def test_stream_initial_enqueues_bazaar_catchup_media(encoder):
     too — the wrapper Post's ``image_urls`` is always empty for
     ``PostType.BAZAAR``, the photos live on ``BazaarListing.image_urls``.
     """
-    from unittest.mock import AsyncMock
     from dataclasses import dataclass
+    from unittest.mock import AsyncMock
 
     @dataclass
     class _Listing:
@@ -999,7 +999,7 @@ async def test_the_two_waitable_reasons_keep_separate_budgets(provider):
 
 def test_catchup_media_includes_the_link_preview_image():
     """A joiner catching up receives the card image a synced post carries."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from socialhome.domain.link_preview import LinkPreview
     from socialhome.domain.post import Post, PostType
@@ -1009,7 +1009,7 @@ def test_catchup_media_includes_the_link_preview_image():
         id="p",
         author="u",
         type=PostType.TEXT,
-        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
         link_preview=LinkPreview(
             url="https://example.com/", title="T", thumbnail_url="api/media/lp.webp"
         ),
@@ -1019,7 +1019,7 @@ def test_catchup_media_includes_the_link_preview_image():
         id="q",
         author="u",
         type=PostType.TEXT,
-        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
         link_preview=LinkPreview(url="https://example.com/", title="T"),
     )
     assert SpaceSyncService._post_media_urls(no_image) == []

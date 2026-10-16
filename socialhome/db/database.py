@@ -47,7 +47,7 @@ DEFAULT_WRITE_BATCH_WINDOW_MS = 5
 class _PendingWrite:
     sql: str
     params: tuple[Any, ...]
-    future: "asyncio.Future[int]"  # resolves to cursor.lastrowid
+    future: asyncio.Future[int]  # resolves to cursor.lastrowid
     #: When set, the future resolves to ``cursor.rowcount`` instead of
     #: ``lastrowid``. Scoped mutators (``… WHERE space_id=?``) need to
     #: know whether the predicate actually matched a row so the caller
@@ -415,7 +415,7 @@ class AsyncDatabase:
                         self._write_queue.get(),
                         timeout=remaining,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
                 if nxt is None:
                     # Shutdown requested mid-batch. Finish the batch, then exit.
@@ -435,7 +435,7 @@ class AsyncDatabase:
 
         lock = self._conn_thread_lock
 
-        def _run() -> list[tuple["_PendingWrite", int | BaseException]]:
+        def _run() -> list[tuple[_PendingWrite, int | BaseException]]:
             # Each pending statement is wrapped in its own SAVEPOINT so a
             # constraint violation in one handler doesn't 500 every other
             # handler whose statement happened to be drained into the same

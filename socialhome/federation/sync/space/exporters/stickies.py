@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import asdict
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .....repositories.sticky_repo import AbstractStickyRepo
@@ -15,7 +15,7 @@ class StickiesExporter:
 
     __slots__ = ("_repo",)
 
-    def __init__(self, sticky_repo: "AbstractStickyRepo") -> None:
+    def __init__(self, sticky_repo: AbstractStickyRepo) -> None:
         self._repo = sticky_repo
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:

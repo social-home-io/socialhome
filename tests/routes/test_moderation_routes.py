@@ -91,7 +91,7 @@ async def _seed_moderated_space(client):
     from socialhome.app_keys import space_service_key
 
     app = client.server.app
-    from socialhome.domain.space import SpaceFeatures, SpaceFeatureAccess
+    from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
 
     await app[space_service_key].update_config(
         sid,

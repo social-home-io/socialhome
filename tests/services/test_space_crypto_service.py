@@ -26,7 +26,6 @@ from socialhome.services.space_crypto_service import (
     verify_space_config,
 )
 
-
 # ─── Crypto helpers ──────────────────────────────────────────────────────
 
 
@@ -51,7 +50,7 @@ def test_create_space_identity_returns_consistent_triple():
 
 
 def test_sign_and_verify_space_config_roundtrip():
-    seed, pk, sid = create_space_identity()
+    seed, pk, _sid = create_space_identity()
     payload = b'{"event":"rename","new_name":"Vacation"}'
     sig = sign_space_config(payload, space_seed=seed)
     assert verify_space_config(payload, sig, space_public_key=pk) is True

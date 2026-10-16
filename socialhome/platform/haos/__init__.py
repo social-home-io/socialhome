@@ -21,10 +21,10 @@ from .supervisor import SupervisorClient
 
 __all__ = [
     "BOOTSTRAP_FLAG",
+    "INTEGRATION_TOKEN_FILENAME",
+    "INTEGRATION_TOKEN_LABEL",
     "HaBootstrap",
     "HaIngressAuthProvider",
     "HaosAdapter",
-    "INTEGRATION_TOKEN_FILENAME",
-    "INTEGRATION_TOKEN_LABEL",
     "SupervisorClient",
 ]

@@ -24,11 +24,11 @@ log = logging.getLogger(__name__)
 class UserStatusExpiryScheduler:
     """Background task that clears expired user statuses."""
 
-    __slots__ = ("_users", "_interval", "_task", "_stop")
+    __slots__ = ("_interval", "_stop", "_task", "_users")
 
     def __init__(
         self,
-        user_service: "UserService",
+        user_service: UserService,
         *,
         interval_seconds: float = 60.0,
     ) -> None:
@@ -50,7 +50,7 @@ class UserStatusExpiryScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -61,10 +61,10 @@ class UserStatusExpiryScheduler:
                 if cleared:
                     log.debug("user-status expiry: cleared %d statuses", cleared)
             except Exception as exc:
-                log.warning("user-status expiry sweep failed: %s", exc)
+                log.warning("user-status expiry sweep failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def run_once(self) -> int:

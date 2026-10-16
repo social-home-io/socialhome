@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -55,7 +55,7 @@ def _user(username: str) -> User:
 
 
 def _event(eid: str, offset_minutes: int, duration_min: int = 60) -> CalendarEvent:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return CalendarEvent(
         id=eid,
         calendar_id="c1",

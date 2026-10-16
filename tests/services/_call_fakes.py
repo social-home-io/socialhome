@@ -8,7 +8,7 @@ effects.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.call import CallQualitySample, CallSession
@@ -173,7 +173,7 @@ class FakeConversationRepo:
         return Conversation(
             id=conversation_id,
             type=ConversationType.GROUP_DM,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             system_scope=(
                 SystemChatScope.HOUSEHOLD if conversation_id in self.system else None
             ),
@@ -203,9 +203,7 @@ class FakeCallRepo:
             self._sessions[call.id] = call
         else:
             started = (
-                call.started_at
-                if call.started_at
-                else datetime.now(timezone.utc).isoformat()
+                call.started_at if call.started_at else datetime.now(UTC).isoformat()
             )
             self._sessions[call.id] = CallSession(
                 id=call.id,
@@ -289,12 +287,12 @@ class FakeCallRepo:
                 started = datetime.fromisoformat(c.started_at)
             except ValueError:
                 continue
-            age = (datetime.now(timezone.utc) - started).total_seconds()
+            age = (datetime.now(UTC) - started).total_seconds()
             if age > older_than_seconds:
                 await self.transition(
                     cid,
                     status="missed",
-                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    ended_at=datetime.now(UTC).isoformat(),
                 )
                 missed.append(self._sessions[cid])
         return missed

@@ -19,15 +19,15 @@ import io
 import json
 import logging
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import aiohttp
 import orjson
 import pytest
 from aiohttp import web
-from PIL import Image
 from aiohttp.test_utils import TestServer
+from PIL import Image
 
 from socialhome.app import _build_gfs_route_resolver
 from socialhome.capabilities_sig import sign_capabilities
@@ -40,6 +40,7 @@ from socialhome.crypto import (
     sign_ed25519,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import LocalHomeLocationUpdated
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -48,62 +49,59 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
-from socialhome.domain.events import LocalHomeLocationUpdated
 from socialhome.domain.federation_capabilities import OURS
-from socialhome.domain.space import JoinMode, SpaceType
+from socialhome.domain.space import JoinMode, SpacePermissionError, SpaceType
 from socialhome.domain.user import User
-from socialhome.infrastructure.event_bus import EventBus
-from socialhome.federation.federation_service import FederationService
-from socialhome.domain.space import SpacePermissionError
 from socialhome.federation import invite_token_redeem as redeem_module
+from socialhome.federation.federation_service import FederationService
+from socialhome.federation.gfs_relay_transport import (
+    RELAY_SIZE_BUCKETS,
+    GfsRelayTransport,
+    seal_relay_envelope,
+)
 from socialhome.federation.invite_bootstrap import (
     KIND_REDEEM_ACK,
     BootstrapEnvelopeTooLarge,
     InviteBootstrapHint,
     seal_bootstrap_envelope,
 )
-from socialhome.global_server.envelope_relay import (
-    ENVELOPE_MAX_BODY_BYTES,
-    KeyedLocks,
-)
-from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
-from socialhome.federation.gfs_relay_transport import (
-    RELAY_SIZE_BUCKETS,
-    GfsRelayTransport,
-    seal_relay_envelope,
-)
 from socialhome.federation.invite_token_redeem import (
     BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE,
     SpaceInviteTokenRedeemCoordinator,
 )
+from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.federation.transport import (
     FederationTransport,
     HttpsInboxTransport,
 )
+from socialhome.global_server.envelope_relay import (
+    ENVELOPE_MAX_BODY_BYTES,
+    KeyedLocks,
+)
+from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
-from socialhome.services.gfs_relay_inbound import (
-    RELAY_DELIVERED_VIA,
-    GfsRelayInbound,
-)
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.outbox_repo import SqliteOutboxRepo
+from socialhome.repositories.space_cover_repo import SqliteSpaceCoverRepo
+from socialhome.repositories.space_icon_repo import SqliteSpaceIconRepo
+from socialhome.repositories.space_media_outbox_repo import SqliteSpaceMediaOutboxRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
-from socialhome.repositories.space_cover_repo import SqliteSpaceCoverRepo
-from socialhome.repositories.space_media_outbox_repo import SqliteSpaceMediaOutboxRepo
-from socialhome.repositories.space_icon_repo import SqliteSpaceIconRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_envelope_sender import GfsEnvelopeSender
+from socialhome.services.gfs_relay_inbound import (
+    RELAY_DELIVERED_VIA,
+    GfsRelayInbound,
+)
 from socialhome.services.peer_unpair_service import PeerUnpairService
 from socialhome.services.space_service import SpaceService
-
 
 try:
     import pytest_socket  # noqa: F401
@@ -655,14 +653,16 @@ async def test_a_space_too_big_for_the_relay_is_refused_clearly(
         _ack_overflows(with_images_only=False),
     )
 
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(SpacePermissionError) as exc_info:
-            await a.space_service.redeem_invite_token(
-                TOKEN_MARKER,
-                user_id=a.user_id,
-                issuer_instance_id=b.instance_id,
-                bootstrap=hint,
-            )
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(SpacePermissionError) as exc_info,
+    ):
+        await a.space_service.redeem_invite_token(
+            TOKEN_MARKER,
+            user_id=a.user_id,
+            issuer_instance_id=b.instance_id,
+            bootstrap=hint,
+        )
 
     assert str(exc_info.value) == BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE
     assert await a.space_repo.get(space.id) is None
@@ -1118,7 +1118,7 @@ async def test_an_envelope_from_a_household_that_is_not_this_pair_is_rejected(
         "from_instance": b.instance_id,
         "to_instance": a.instance_id,
         # Fresh, so the rejection is the SIGNATURE and not the clock.
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "encrypted_payload": "nonce:ciphertext",
         "space_id": space.id,
         "proto_version": 1,
@@ -1134,9 +1134,11 @@ async def test_an_envelope_from_a_household_that_is_not_this_pair_is_rejected(
         peer_keywrap_pub=a.keywrap_pub,
     )
 
-    with caplog.at_level(logging.INFO):
-        with pytest.raises(ValueError, match="signature"):
-            await a.relay_inbound.handle_frame({"sealed": sealed})
+    with (
+        caplog.at_level(logging.INFO),
+        pytest.raises(ValueError, match="signature"),
+    ):
+        await a.relay_inbound.handle_frame({"sealed": sealed})
     assert a.received == []
     # A relay envelope that fails validation is dropped — but never
     # silently. The line names the event type, the claimed sender and the
@@ -1430,7 +1432,7 @@ async def test_an_envelope_the_relay_queued_overnight_is_accepted(households, gf
     a, b = households
     space = await _join(a, b, gfs)
 
-    queued_at = (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()
+    queued_at = (datetime.now(UTC) - timedelta(hours=20)).isoformat()
     sealed = await _sealed_envelope_from(
         b,
         a,
@@ -1455,7 +1457,7 @@ async def test_a_queued_envelope_replayed_hours_later_is_still_rejected(
     sealed = await _sealed_envelope_from(
         b,
         a,
-        timestamp=(datetime.now(timezone.utc) - timedelta(hours=10)).isoformat(),
+        timestamp=(datetime.now(UTC) - timedelta(hours=10)).isoformat(),
         msg_id="replay-me",
         space_id=space.id,
     )
@@ -1474,7 +1476,7 @@ async def test_a_wire_envelope_keeps_the_300s_window(households, gfs):
     a, b = households
     space = await _join(a, b, gfs)
 
-    stale = (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()
+    stale = (datetime.now(UTC) - timedelta(hours=20)).isoformat()
     row = await b.federation_repo.get_instance(a.instance_id)
     session_key = b.key_manager.decrypt(row.key_self_to_remote)
     envelope = {
@@ -1750,7 +1752,7 @@ async def _as_paired_over_the_relay(a, b, gfs, *, a_opts_in=True):
     await b.federation_repo.upsert_gfs_route(
         a.instance_id,
         "gfs-1",
-        now=datetime.now(timezone.utc).isoformat(),
+        now=datetime.now(UTC).isoformat(),
     )
     await a.federation_repo.set_gfs_relay(b.instance_id, enabled=a_opts_in)
     return space

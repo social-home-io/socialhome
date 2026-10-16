@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone, time
+from datetime import UTC, date, datetime, time
 
 import pytest
 
@@ -22,7 +22,7 @@ from socialhome.domain.post import (
 
 def test_post_reaction_add_remove():
     """Adding and removing reactions updates the reactions mapping correctly."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     p = Post(id="p1", author="u1", type=PostType.TEXT, created_at=now)
     p2 = p.with_reaction("👍", "u1").with_reaction("👍", "u2")
     assert p2.reactions["👍"] == frozenset({"u1", "u2"})
@@ -34,7 +34,7 @@ def test_post_reaction_add_remove():
 
 def test_post_soft_delete():
     """soft_delete clears content but preserves comment_count and pinned flag."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     p = Post(
         id="p1",
         author="u1",
@@ -50,7 +50,7 @@ def test_post_soft_delete():
 
 def test_post_edit():
     """edit() replaces content and stamps edited_at."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     p = Post(id="p1", author="u1", type=PostType.TEXT, created_at=now, content="v1")
     p2 = p.edit("v2")
     assert p2.content == "v2" and p2.edited_at is not None
@@ -58,7 +58,7 @@ def test_post_edit():
 
 def test_post_increment_decrement_comments():
     """Comment count increments/decrements correctly and is clamped to zero."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     p = Post(id="p", author="u", type=PostType.TEXT, created_at=now)
     p2 = p.increment_comments().increment_comments()
     assert p2.comment_count == 2
@@ -68,7 +68,7 @@ def test_post_increment_decrement_comments():
 
 def test_comment_soft_delete():
     """soft_delete clears content and media_url."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     c = Comment(
         id="c",
         post_id="p",

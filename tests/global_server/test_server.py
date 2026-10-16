@@ -5,25 +5,26 @@ from __future__ import annotations
 import hashlib
 import logging
 import stat
+from datetime import UTC
 
 import aiohttp
 import pytest
 from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
-from aiohttp.test_utils import TestClient, TestServer
 
-from socialhome.csp import build_public_page_csp, build_spa_csp
-from socialhome.global_server import create_gfs_app, server
 from socialhome.capabilities_sig import (
     CAPS_SIG_SUITE_ED25519,
     UnsupportedCapsSigSuite,
     verify_capabilities,
 )
-from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
+from socialhome.csp import build_public_page_csp, build_spa_csp
+from socialhome.global_server import create_gfs_app, server
 from socialhome.global_server.app_keys import gfs_cluster_key, gfs_fed_repo_key
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
 
 
 @pytest.fixture
@@ -403,9 +404,9 @@ def _sign(seed: bytes, payload: dict) -> str:
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 async def _register_and_publish(

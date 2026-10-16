@@ -25,11 +25,11 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 from .emoji import is_single_emoji
-from .errors import CodedError
+from .errors import CodedError, WrongTypeError
 from .gfs_server import SignedGfsServerList
 from .presence import truncate_coord
 
@@ -323,7 +323,7 @@ class AccessDecision(StrEnum):
 
 
 def restricted_access_changes(
-    before: "SpaceFeatures", after: "SpaceFeatures"
+    before: SpaceFeatures, after: SpaceFeatures
 ) -> tuple[str, ...]:
     """The :data:`ACCESS_FEATURES` an edit from ``before`` to ``after`` sets
     to a level other than ``OPEN`` that they did not already have, sorted.
@@ -552,7 +552,7 @@ class SpaceFeatures:
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
-    def allows(self, post_type: "PostType | str") -> bool:
+    def allows(self, post_type: PostType | str) -> bool:
         val = post_type.value if hasattr(post_type, "value") else str(post_type)
         return val in self.allowed_post_types
 
@@ -571,7 +571,7 @@ class SpaceFeatures:
         self,
         feature: str,
         *,
-        role: "SpaceRole | str | None",
+        role: SpaceRole | str | None,
         action: ContentAction,
         owns_target: bool,
     ) -> AccessDecision:
@@ -624,9 +624,7 @@ class SpaceFeatures:
             return AccessDecision.PROCEED
         return AccessDecision.QUEUE
 
-    def with_allowed_post_types(
-        self, types: "set[PostType] | set[str]"
-    ) -> "SpaceFeatures":
+    def with_allowed_post_types(self, types: set[PostType] | set[str]) -> SpaceFeatures:
         if not types:
             raise ValueError("allowed_post_types must contain at least one post type")
         normalised = tuple(
@@ -635,7 +633,7 @@ class SpaceFeatures:
         return copy.replace(self, allowed_post_types=normalised)
 
     @classmethod
-    def from_row(cls, row: dict) -> "SpaceFeatures":
+    def from_row(cls, row: dict) -> SpaceFeatures:
         """Reconstruct from a ``spaces`` table row."""
         allowed = tuple(
             sorted(
@@ -755,8 +753,8 @@ class SpaceFeatures:
         cls,
         raw: dict,
         *,
-        defaults: "SpaceFeatures | None" = None,
-    ) -> "SpaceFeatures":
+        defaults: SpaceFeatures | None = None,
+    ) -> SpaceFeatures:
         """Faithful inverse of :meth:`to_wire_dict`.
 
         The single canonical wire-dict → :class:`SpaceFeatures` parser:
@@ -862,7 +860,7 @@ class HouseholdFeatures:
     allow_bazaar: bool = True
     household_name: str = "Home"
 
-    def allows_post_type(self, pt: "PostType | str") -> bool:
+    def allows_post_type(self, pt: PostType | str) -> bool:
         val = pt.value if hasattr(pt, "value") else str(pt)
         return {
             "text": self.allow_text,
@@ -886,7 +884,7 @@ class HouseholdFeatures:
         }.get(section, True)
 
     @classmethod
-    def from_row(cls, row: dict) -> "HouseholdFeatures":
+    def from_row(cls, row: dict) -> HouseholdFeatures:
         return cls(
             feed=bool(row.get("feat_feed", 1)),
             pages=bool(row.get("feat_pages", 1)),
@@ -1002,7 +1000,7 @@ class ModerationApproval:
         return {"item_id": self.item_id, "approved_by": self.approved_by}
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ModerationApproval | None":
+    def from_wire(cls, raw: object) -> ModerationApproval | None:
         """The block of a payload, ``None`` when absent or malformed."""
         if not isinstance(raw, dict):
             return None
@@ -1046,9 +1044,7 @@ class SpaceConfigEventType(StrEnum):
     GFS_SERVERS_CHANGED = "gfs_servers_changed"
 
 
-def role_change_event_type(
-    old_role: object, new_role: object
-) -> "SpaceConfigEventType":
+def role_change_event_type(old_role: object, new_role: object) -> SpaceConfigEventType:
     """The bus event naming a role change: admin granted / revoked when the
     admin seat moves, else :attr:`SpaceConfigEventType.ROLE_CHANGED`."""
     if str(new_role) == SpaceRole.ADMIN.value:
@@ -1242,7 +1238,7 @@ class PeersTooOldError(Exception):
     (below v_42). The API answers 409 ``PEERS_TOO_OLD`` with the households
     so the admin can upgrade them first or apply anyway (``force``)."""
 
-    def __init__(self, households: "list[dict[str, object]]") -> None:
+    def __init__(self, households: list[dict[str, object]]) -> None:
         super().__init__("some member households cannot enforce access levels yet")
         self.households = households
 
@@ -1255,7 +1251,7 @@ class PrivateGfsLinkMembersError(Exception):
     409 ``PRIVATE_GFS_LINK_MEMBERS`` naming them; the owner removes them
     first."""
 
-    def __init__(self, households: "list[dict[str, object]]") -> None:
+    def __init__(self, households: list[dict[str, object]]) -> None:
         super().__init__(
             "households that joined through an invite link are still members"
         )
@@ -1288,7 +1284,7 @@ class ContentQueuedForReview(Exception):
     ``{queued: true, item_id, feature, action}`` (``BaseView._queued``).
     """
 
-    def __init__(self, item: "SpaceModerationItem") -> None:
+    def __init__(self, item: SpaceModerationItem) -> None:
         super().__init__(f"{item.feature} {item.action} queued for review")
         self.item = item
 
@@ -1393,7 +1389,7 @@ class SpaceType(StrEnum):
 #: HOUSEHOLD spaces are never publicly discoverable, so a post in one must
 #: never leave the member households. Shared by the public-relay producers
 #: (``space_public_outbound`` + ``space_post_outbound``).
-PUBLIC_SPACE_TIERS: frozenset["SpaceType"] = frozenset(
+PUBLIC_SPACE_TIERS: frozenset[SpaceType] = frozenset(
     {SpaceType.PUBLIC, SpaceType.GLOBAL}
 )
 
@@ -1612,7 +1608,7 @@ def validate_zone_name(name: object) -> str:
     what a local admin couldn't. The error never echoes the name.
     """
     if not isinstance(name, str):
-        raise ValueError("zone name must be a string")
+        raise WrongTypeError("zone name must be a string")
     cleaned = name.strip()
     if not cleaned:
         raise ValueError("zone name must not be empty")
@@ -1668,7 +1664,7 @@ def validate_zone_coord(value: object, *, name: str, limit: float) -> float:
     and the ``space_zones`` sync resource alike.
     """
     if isinstance(value, bool):
-        raise ValueError(f"{name} must be a number")
+        raise WrongTypeError(f"{name} must be a number")
     try:
         coerced = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError) as exc:
@@ -1684,7 +1680,7 @@ def validate_zone_radius(value: object) -> int:
     when it is not a finite number between :data:`MIN_ZONE_RADIUS_M` and
     :data:`MAX_ZONE_RADIUS_M`."""
     if isinstance(value, bool):
-        raise ValueError("radius_m must be an integer")
+        raise WrongTypeError("radius_m must be an integer")
     try:
         coerced = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError, OverflowError) as exc:

@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
 import json
+from datetime import UTC, date, datetime
 
 import pytest
 
+from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.conversation import (
+    Conversation,
+    ConversationMember,
+    ConversationType,
+    SystemChatScope,
+)
 from socialhome.domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -49,13 +56,6 @@ from socialhome.domain.events import (
     UserCameOnline,
     UserStatusChanged,
 )
-from socialhome.domain.calendar import CalendarEvent
-from socialhome.domain.conversation import (
-    Conversation,
-    ConversationMember,
-    ConversationType,
-    SystemChatScope,
-)
 from socialhome.domain.mention import Mention, MentionType
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.task import Task, TaskStatus
@@ -65,7 +65,6 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.ws_manager import WebSocketManager
 from socialhome.services.realtime_service import RealtimeService, _safe
 
-
 # ─── _safe serialisation ─────────────────────────────────────────────────
 
 
@@ -74,7 +73,7 @@ def test_safe_handles_none():
 
 
 def test_safe_handles_datetime():
-    out = _safe(datetime(2026, 4, 15, tzinfo=timezone.utc))
+    out = _safe(datetime(2026, 4, 15, tzinfo=UTC))
     assert isinstance(out, str)
     assert out.startswith("2026-04-15")
 
@@ -153,7 +152,7 @@ def _post(pid="p1", content="hi"):
         author="u1",
         type=PostType.TEXT,
         content=content,
-        created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 15, tzinfo=UTC),
     )
 
 
@@ -184,7 +183,7 @@ class _FakeWS:
 
 
 async def test_post_created_fans_to_household(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(PostCreated(post=_post()))
@@ -280,7 +279,7 @@ async def test_post_created_without_transcode_repo_is_back_compat(env):
     a video post broadcasts fine with no ``media_status`` key — no crash."""
     from dataclasses import replace
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     video = replace(_post(), type=PostType.VIDEO, media_url="api/media/v.webm")
@@ -451,7 +450,7 @@ async def test_ws_user_profile_updated_picture_url_null_when_cleared(env):
 
 
 async def test_post_edited_fans_to_household(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(PostEdited(post=_post()))
@@ -459,7 +458,7 @@ async def test_post_edited_fans_to_household(env):
 
 
 async def test_post_deleted_carries_id_only(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(PostDeleted(post_id="p1"))
@@ -467,7 +466,7 @@ async def test_post_deleted_carries_id_only(env):
 
 
 async def test_post_reaction_changed_fans(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(PostReactionChanged(post=_post()))
@@ -477,7 +476,7 @@ async def test_post_reaction_changed_fans(env):
 async def test_a_space_reaction_is_never_framed_to_the_whole_household(env):
     """Space reactions (v_49 publishes them for the member relay) must not
     reach every local socket — non-members included — as a household frame."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(PostReactionChanged(post=_post(), space_id="sp-1"))
@@ -485,7 +484,7 @@ async def test_a_space_reaction_is_never_framed_to_the_whole_household(env):
 
 
 async def test_comment_added_fans(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     comment = Comment(
@@ -494,14 +493,14 @@ async def test_comment_added_fans(env):
         author="u1",
         type=CommentType.TEXT,
         content="hi",
-        created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 15, tzinfo=UTC),
     )
     await bus.publish(CommentAdded(post_id="p1", comment=comment))
     assert any("comment.added" in m for m in sock.sent)
 
 
 async def test_space_post_created_fans_to_space_members(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u3", sock)
     await bus.publish(SpacePostCreated(post=_post(), space_id="sp-1"))
@@ -509,7 +508,7 @@ async def test_space_post_created_fans_to_space_members(env):
 
 
 async def test_space_config_changed_fans(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -526,7 +525,7 @@ async def test_space_config_changed_fans(env):
 async def test_space_zone_upserted_fans_to_space_members(env):
     """SpaceZoneUpserted → ``space_zone_changed`` (action=upsert) WS frame
     on every space-member's session — drives §23.8.7 live admin updates."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -560,7 +559,7 @@ async def test_space_zone_upserted_fans_to_space_members(env):
 async def test_space_zone_deleted_fans_with_action_delete(env):
     import json
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -580,7 +579,7 @@ async def test_space_zone_deleted_fans_with_action_delete(env):
 async def test_household_zones_changed_nudges_every_household_member(env):
     """A household-zone edit sends a content-free ``household_zones_changed``
     frame to every local user so open maps / settings refetch."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     socks = {uid: _FakeWS() for uid in ("u1", "u2")}
     for uid, sock in socks.items():
         await ws.register(uid, sock)
@@ -596,7 +595,7 @@ async def test_page_conflict_frame_says_whether_it_came_from_a_household(
 ):
     """v_48: a conflict recorded from another household's edit carries
     ``federated`` so an open viewer refetches the page."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -616,7 +615,7 @@ async def test_page_conflict_frame_says_whether_it_came_from_a_household(
 
 async def test_page_sequenced_frame_reaches_the_space(env):
     """v_48: the host answered this household's page edit."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -638,7 +637,7 @@ async def test_page_sequenced_frame_reaches_the_space(env):
 
 
 def _task(*, status=TaskStatus.TODO, assignees=()):
-    now = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 15, tzinfo=UTC)
     return Task(
         id="t1",
         list_id="l1",
@@ -653,7 +652,7 @@ def _task(*, status=TaskStatus.TODO, assignees=()):
 
 
 async def test_task_assigned_fans_only_to_assignee(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock_alice = _FakeWS()
     sock_bob = _FakeWS()
     await ws.register("alice", sock_alice)
@@ -664,7 +663,7 @@ async def test_task_assigned_fans_only_to_assignee(env):
 
 
 async def test_task_completed_fans_to_household(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -700,7 +699,7 @@ async def test_space_task_completed_fans_to_space_members_only(env):
 
 
 async def test_space_task_assigned_skips_a_non_member(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     outsider = _FakeWS()
     member = _FakeWS()
     await ws.register("eve", outsider)
@@ -712,7 +711,7 @@ async def test_space_task_assigned_skips_a_non_member(env):
 
 
 async def test_task_deadline_due_fans_to_each_assignee(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock_a = _FakeWS()
     sock_b = _FakeWS()
     await ws.register("alice", sock_a)
@@ -730,7 +729,7 @@ async def test_task_deadline_due_fans_to_each_assignee(env):
 
 
 async def test_calendar_created_updated_deleted_fan(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     e = CalendarEvent(
@@ -738,8 +737,8 @@ async def test_calendar_created_updated_deleted_fan(env):
         calendar_id="c1",
         summary="X",
         created_by="me",
-        start=datetime(2026, 4, 15, tzinfo=timezone.utc),
-        end=datetime(2026, 4, 15, 1, tzinfo=timezone.utc),
+        start=datetime(2026, 4, 15, tzinfo=UTC),
+        end=datetime(2026, 4, 15, 1, tzinfo=UTC),
     )
     await bus.publish(CalendarEventCreated(event=e))
     await bus.publish(CalendarEventUpdated(event=e))
@@ -754,7 +753,7 @@ async def test_space_calendar_event_fans_to_members_only(env):
     """A calendar whose ``calendar_id`` resolves to a space fans out to
     that space's members only — never the whole household — so a
     non-member local user never sees space calendar content."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     member = _FakeWS()
     nonmember = _FakeWS()
     await ws.register("u1", member)  # member of sp-1
@@ -764,8 +763,8 @@ async def test_space_calendar_event_fans_to_members_only(env):
         calendar_id="sp-1",  # known space → members-only routing
         summary="X",
         created_by="me",
-        start=datetime(2026, 4, 15, tzinfo=timezone.utc),
-        end=datetime(2026, 4, 15, 1, tzinfo=timezone.utc),
+        start=datetime(2026, 4, 15, tzinfo=UTC),
+        end=datetime(2026, 4, 15, 1, tzinfo=UTC),
     )
     await bus.publish(CalendarEventCreated(event=e))
     await bus.publish(CalendarEventDeleted(event_id="e1", space_id="sp-1"))
@@ -775,7 +774,7 @@ async def test_space_calendar_event_fans_to_members_only(env):
 
 
 async def test_connection_reachable_unreachable_fan_to_household(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(ConnectionReachable(instance_id="inst-7"))
@@ -790,7 +789,7 @@ async def test_peer_unpaired_emits_connection_removed_to_household(env):
     connections list drops the row without a reload. The list is readable
     by every member, so the frame fans to the whole household — never
     an admin-only subset, never beyond the local users."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     s1, s2, stranger = _FakeWS(), _FakeWS(), _FakeWS()
     await ws.register("u1", s1)
     await ws.register("u2", s2)
@@ -803,7 +802,7 @@ async def test_peer_unpaired_emits_connection_removed_to_household(env):
 
 
 async def test_gallery_household_events_fan_to_household(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -826,7 +825,7 @@ async def test_gallery_household_events_fan_to_household(env):
 
 async def test_gallery_space_album_fans_to_members_only(env):
     """A space-album gallery event reaches that space's members only."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     member = _FakeWS()
     nonmember = _FakeWS()
     await ws.register("u1", member)  # member of sp-1
@@ -849,7 +848,7 @@ async def test_gallery_album_updated_fans_to_space_members_only(env):
     ``gallery.album_updated`` frame to that space's members only — the
     same audience as the other gallery frames. Covers both a local edit
     and an inbound-federated one (``origin_instance_id`` set)."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     member, nonmember = _FakeWS(), _FakeWS()
     await ws.register("u1", member)  # member of sp-1
     await ws.register("u9", nonmember)
@@ -865,7 +864,7 @@ async def test_gallery_album_updated_fans_to_space_members_only(env):
 
 
 async def test_gallery_household_album_updated_fans_to_household(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     s1, stranger = _FakeWS(), _FakeWS()
     await ws.register("u1", s1)
     await ws.register("u9", stranger)  # not an active local user
@@ -877,7 +876,7 @@ async def test_gallery_household_album_updated_fans_to_household(env):
 
 
 async def test_user_status_changed_fans_to_household(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     status = UserStatus(emoji="👍", text="busy")
@@ -886,7 +885,7 @@ async def test_user_status_changed_fans_to_household(env):
 
 
 async def test_user_status_cleared_carries_null_status(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(UserStatusChanged(user_id="u2", status=None))
@@ -894,7 +893,7 @@ async def test_user_status_cleared_carries_null_status(env):
 
 
 async def test_space_post_moderated_fans_to_space_members(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u3", sock)
     await bus.publish(
@@ -913,7 +912,7 @@ async def test_space_post_moderated_fans_to_space_members(env):
 async def test_presence_updated_fans_to_household(env):
     from socialhome.domain.events import PresenceUpdated
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -929,14 +928,15 @@ async def test_presence_updated_fans_to_household(env):
 
 
 async def test_user_came_online_suppresses_self_frame(env):
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from socialhome.domain.events import (
         UserCameOnline,
         UserWentIdle,
         UserWentOffline,
     )
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     self_sock = _FakeWS()
     other_sock = _FakeWS()
     await ws.register("u1", self_sock)
@@ -950,7 +950,7 @@ async def test_user_came_online_suppresses_self_frame(env):
     other_sock.sent.clear()
     self_sock.sent.clear()
     await bus.publish(
-        UserWentIdle(user_id="u1", last_active_at=datetime.now(timezone.utc)),
+        UserWentIdle(user_id="u1", last_active_at=datetime.now(UTC)),
     )
     assert any('"user.idle"' in m for m in other_sock.sent)
     assert not any('"user.idle"' in m for m in self_sock.sent)
@@ -958,7 +958,7 @@ async def test_user_came_online_suppresses_self_frame(env):
     other_sock.sent.clear()
     self_sock.sent.clear()
     await bus.publish(
-        UserWentOffline(user_id="u1", last_seen_at=datetime.now(timezone.utc)),
+        UserWentOffline(user_id="u1", last_seen_at=datetime.now(UTC)),
     )
     assert any('"user.offline"' in m for m in other_sock.sent)
     assert not any('"user.offline"' in m for m in self_sock.sent)
@@ -967,7 +967,7 @@ async def test_user_came_online_suppresses_self_frame(env):
 async def test_notification_new_targets_one_user(env):
     from socialhome.domain.events import NotificationCreated
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     me = _FakeWS()
     other = _FakeWS()
     await ws.register("u1", me)
@@ -987,7 +987,7 @@ async def test_notification_new_targets_one_user(env):
 async def test_notification_unread_count_targets_one_user(env):
     from socialhome.domain.events import NotificationReadChanged
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     me = _FakeWS()
     other = _FakeWS()
     await ws.register("u1", me)
@@ -1000,7 +1000,7 @@ async def test_notification_unread_count_targets_one_user(env):
 async def test_bazaar_bid_placed_broadcast(env):
     from socialhome.domain.events import BazaarBidPlaced
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -1019,7 +1019,7 @@ async def test_bazaar_bid_placed_broadcast(env):
 async def test_bazaar_listing_closed_broadcast(env):
     from socialhome.domain.events import BazaarListingExpired
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -1035,7 +1035,7 @@ async def test_bazaar_listing_closed_broadcast(env):
 async def test_peer_transport_changed_broadcasts_to_household(env):
     """Publishing PeerTransportChanged fans out as the
     ``peer.transport_changed`` WS frame with the right payload."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -1058,7 +1058,7 @@ async def test_remote_space_dissolved_broadcasts_dissolved_frame(env):
 
     from socialhome.domain.events import RemoteSpaceDissolved
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(RemoteSpaceDissolved(space_id="sp-1"))
@@ -1080,7 +1080,7 @@ async def test_media_transcode_ready_pushes_media_ready_to_owner(env):
 
     from socialhome.domain.events import MediaTranscodeReady
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -1136,7 +1136,7 @@ async def test_media_transcode_ready_no_owner_no_broadcast(env):
     resolvable uploader) → no broadcast."""
     from socialhome.domain.events import MediaTranscodeReady
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -1157,7 +1157,7 @@ async def test_media_transcode_failed_pushes_media_failed_to_owner(env):
 
     from socialhome.domain.events import MediaTranscodeFailed
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -1174,7 +1174,7 @@ async def test_media_transcode_failed_no_owner_no_broadcast(env):
     """``owner_user_id=None`` → no broadcast (mirrors the ready path)."""
     from socialhome.domain.events import MediaTranscodeFailed
 
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(
@@ -1187,14 +1187,14 @@ async def test_media_transcode_failed_no_owner_no_broadcast(env):
 
 
 def _timetable():
-    at = datetime(2026, 9, 28, 8, tzinfo=timezone.utc)
+    at = datetime(2026, 9, 28, 8, tzinfo=UTC)
     return Timetable(
         id="tt1", name="Anna", created_by="u1", created_at=at, updated_at=at
     )
 
 
 async def test_timetable_saved_fans_changed_frame_to_household(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u2", sock)
     tt = _timetable()
@@ -1206,7 +1206,7 @@ async def test_timetable_saved_fans_changed_frame_to_household(env):
 
 
 async def test_timetable_deleted_fans_to_household(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(TimetableDeleted(timetable_id="tt1"))
@@ -1217,7 +1217,7 @@ async def test_timetable_deleted_fans_to_household(env):
 
 
 async def test_space_timetable_frames_reach_members_only(env):
-    svc, bus, ws = env
+    _svc, bus, ws = env
     member = _FakeWS()
     nonmember = _FakeWS()
     await ws.register("u3", member)  # member of sp-1, not a household user
@@ -1233,7 +1233,7 @@ async def test_space_timetable_frames_reach_members_only(env):
 async def test_calendar_frames_never_carry_a_non_local_cover(env):
     """A cover stored before the local-only rule is ``null`` on the WS
     frame too, like on every REST read — it never reaches an ``<img>``."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     for i, cover in enumerate(("https://cdn.example/old.jpg", "api/media/ok.webp")):
@@ -1242,8 +1242,8 @@ async def test_calendar_frames_never_carry_a_non_local_cover(env):
             calendar_id="c1",
             summary="X",
             created_by="me",
-            start=datetime(2026, 4, 15, tzinfo=timezone.utc),
-            end=datetime(2026, 4, 15, 1, tzinfo=timezone.utc),
+            start=datetime(2026, 4, 15, tzinfo=UTC),
+            end=datetime(2026, 4, 15, 1, tzinfo=UTC),
             cover_url=cover,
         )
         await bus.publish(CalendarEventCreated(event=e))
@@ -1275,7 +1275,7 @@ class _SysWs:
 
 class _SysConvos:
     def __init__(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self.convs = {
             "hh": Conversation(
                 id="hh",
@@ -1316,7 +1316,7 @@ async def test_dm_frames_carry_system_scope(conv_id, scope):
         conversation_repo=_SysConvos(),
     )
     svc.wire()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await bus.publish(
         DmMessageCreated(
             conversation_id=conv_id,
@@ -1462,7 +1462,7 @@ async def test_space_member_profile_from_another_household_reaches_the_space(env
     """A per-space profile change applied from a peer (``origin_instance_id``
     set — a live inbound or a §25.6 catch-up) is framed to local space
     members like a local one; a cleared picture frames a null URL."""
-    svc, bus, ws = env
+    _svc, bus, ws = env
     sock = _FakeWS()
     await ws.register("u1", sock)
     await bus.publish(

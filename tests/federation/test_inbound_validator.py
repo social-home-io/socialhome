@@ -6,11 +6,10 @@ validation phase.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import orjson
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import orjson
 import pytest
 
 from socialhome.crypto import REPLAY_CACHE_WINDOW, ReplayCache
@@ -33,9 +32,9 @@ from socialhome.federation.inbound_validator import (
     make_check_deprovisioned_author,
     make_check_peer_class,
     make_check_relay_opt_in,
+    make_check_replay,
     make_check_space_archived,
     make_check_space_writer,
-    make_check_replay,
     make_check_timestamp,
     make_check_unpairing,
     make_confirm_relay_approval,
@@ -45,7 +44,6 @@ from socialhome.federation.inbound_validator import (
     make_persist_replay,
     run_post_decrypt_gates,
 )
-
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -60,7 +58,7 @@ def _minimal_envelope(**overrides) -> dict:
         "event_type": "space_post_created",
         "from_instance": "remote-iid",
         "to_instance": "self-iid",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "encrypted_payload": "nonce:ciphertext",
         "sig_suite": "ed25519",
         "signatures": {"ed25519": "sig"},
@@ -384,7 +382,7 @@ def _event(event_type: FederationEventType, payload: dict) -> FederationEvent:
         event_type=event_type,
         from_instance="peer-x",
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
     )
 
@@ -624,9 +622,8 @@ async def test_peer_class_gate_logs_type_and_instance_but_never_payload(caplog):
         ),
         instance=_SourcedInstance(InstanceSource.SPACE_SESSION),
     )
-    with caplog.at_level("INFO"):
-        with pytest.raises(ValueError):
-            await step(ctx)
+    with caplog.at_level("INFO"), pytest.raises(ValueError):
+        await step(ctx)
     text = caplog.text
     assert "dm_message" in text
     assert "remote-iid" in text
@@ -669,9 +666,8 @@ async def test_relay_gate_rejects_a_paired_peer_we_never_opted_in_with(caplog):
         instance=_RelayInstance(InstanceSource.MANUAL, gfs_relay=False),
         transport=TRANSPORT_GFS_RELAY,
     )
-    with caplog.at_level("INFO"):
-        with pytest.raises(ValueError, match="relay"):
-            await step(ctx)
+    with caplog.at_level("INFO"), pytest.raises(ValueError, match="relay"):
+        await step(ctx)
     assert "remote-iid" in caplog.text
     assert "secret-ciphertext-marker" not in caplog.text
 
@@ -1043,7 +1039,7 @@ def _space_event(event_type, payload, *, space_id="sp-1"):
         event_type=event_type,
         from_instance="peer-x",
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=space_id,
     )
@@ -1412,7 +1408,7 @@ async def test_space_writer_fails_soft_on_a_seat_lookup_error():
 
 async def test_timestamp_step_keeps_the_300s_window_on_a_live_wire():
     step = make_check_timestamp()
-    stale = datetime.now(timezone.utc) - timedelta(seconds=400)
+    stale = datetime.now(UTC) - timedelta(seconds=400)
     ctx = InboundContext(envelope=_minimal_envelope(timestamp=stale.isoformat()))
     with pytest.raises(ValueError, match="Timestamp skew too large"):
         await step(ctx)
@@ -1424,7 +1420,7 @@ async def test_timestamp_step_accepts_a_20h_old_relay_queued_envelope():
     used the outbox. Judging the drained bytes against the live-wire
     window loses the event outright."""
     step = make_check_timestamp()
-    queued = datetime.now(timezone.utc) - timedelta(hours=20)
+    queued = datetime.now(UTC) - timedelta(hours=20)
     ctx = InboundContext(
         envelope=_minimal_envelope(timestamp=queued.isoformat()),
         transport=TRANSPORT_GFS_RELAY,
@@ -1434,7 +1430,7 @@ async def test_timestamp_step_accepts_a_20h_old_relay_queued_envelope():
 
 async def test_the_relay_window_still_has_an_upper_bound():
     step = make_check_timestamp()
-    ancient = datetime.now(timezone.utc) - timedelta(hours=30)
+    ancient = datetime.now(UTC) - timedelta(hours=30)
     ctx = InboundContext(
         envelope=_minimal_envelope(timestamp=ancient.isoformat()),
         transport=TRANSPORT_GFS_RELAY,
@@ -1466,7 +1462,7 @@ def test_replay_retention_covers_the_whole_relay_skew_window():
 def test_a_relay_envelope_replayed_10h_later_is_still_remembered():
     """The in-memory cache (sized by the same window) rejects it."""
     cache = ReplayCache(window=REPLAY_CACHE_WINDOW)
-    t0 = datetime.now(timezone.utc) - timedelta(hours=20)
+    t0 = datetime.now(UTC) - timedelta(hours=20)
     assert cache.seen("relayed-msg", from_instance="b", now=t0) is False
     later = t0 + timedelta(hours=10)
     assert cache.seen("relayed-msg", from_instance="b", now=later) is True

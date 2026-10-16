@@ -10,17 +10,18 @@ add-on with Ingress).
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from ..config import Config
 from ..db import AsyncDatabase
 from .adapter import (
+    _PLATFORM_SECTION,
     AbstractPlatformAdapter,
     ExternalUser,
     InstanceConfig,
     PlatformAdapter,
-    _PLATFORM_SECTION,
 )
 from .ha import HaAdapter, HomeAssistantAdapter
 from .haos import HaosAdapter

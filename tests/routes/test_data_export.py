@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import json
 
-
 from socialhome.auth import sha256_token_hash
 
 from .conftest import _auth
-
 
 # ─── Self export ────────────────────────────────────────────────────────
 

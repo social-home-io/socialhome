@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 
 import pytest
 
@@ -26,7 +26,7 @@ from socialhome.repositories.timetable_repo import (
     SqliteTimetableRepo,
 )
 
-T0 = datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 9, 1, 8, 0, tzinfo=UTC)
 MON = date(2026, 9, 28)
 
 
@@ -65,13 +65,13 @@ async def env(tmp_dir):
 
 
 def _tt(tid: str = "tt-1", name: str = "Anna 5b", **kw) -> Timetable:
-    base = dict(
-        id=tid,
-        name=name,
-        created_by="uid-alice",
-        created_at=T0,
-        updated_at=T0,
-    )
+    base = {
+        "id": tid,
+        "name": name,
+        "created_by": "uid-alice",
+        "created_at": T0,
+        "updated_at": T0,
+    }
     base.update(kw)
     return Timetable(**base)
 
@@ -113,24 +113,24 @@ def _rich(tid: str = "tt-1", **kw) -> Timetable:
             icon="⚽",
         ),
     )
-    base = dict(
-        color="moss",
-        week_start=6,
-        tz="Europe/Berlin",
-        days=(0, 1, 2, 3, 4, 6),
-        defaults=TimetableDefaults(
+    base = {
+        "color": "moss",
+        "week_start": 6,
+        "tz": "Europe/Berlin",
+        "days": (0, 1, 2, 3, 4, 6),
+        "defaults": TimetableDefaults(
             lesson_minutes=50, gap_minutes=10, day_start=time(7, 45)
         ),
-        entries=entries,
-        overrides=overrides,
-        validity=TimetableValidity(
+        "entries": entries,
+        "overrides": overrides,
+        "validity": TimetableValidity(
             valid_from=date(2026, 9, 1),
             valid_until=date(2027, 7, 31),
             excluded_weeks=(date(2026, 10, 25), date(2026, 12, 20)),
         ),
-        version=3,
-        updated_by="uid-bob",
-    )
+        "version": 3,
+        "updated_by": "uid-bob",
+    }
     base.update(kw)
     return _tt(tid, **base)
 
@@ -162,8 +162,10 @@ class TestHousehold:
         await env.db.enqueue(
             "UPDATE timetables SET entries_json=? WHERE id=?",
             (
-                '[{"id":"m1","weekday":0,"start":"08:00","end":"08:45",'
-                '"kind":"lesson"}]',
+                (
+                    '[{"id":"m1","weekday":0,"start":"08:00","end":"08:45",'
+                    '"kind":"lesson"}]'
+                ),
                 "tt-1",
             ),
         )
@@ -187,7 +189,7 @@ class TestHousehold:
         naive = datetime(2026, 9, 1, 8, 0)
         await env.repo.insert(_tt(created_at=naive, updated_at=naive))
         got = await env.repo.get("tt-1")
-        assert got.created_at == naive.replace(tzinfo=timezone.utc)
+        assert got.created_at == naive.replace(tzinfo=UTC)
 
     async def test_list_all_ordered_by_name_then_created(self, env):
         await env.repo.insert(_tt("b", "Zoe"))

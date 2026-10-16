@@ -14,6 +14,7 @@ import logging
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ..domain.errors import WrongTypeError
 from ..domain.events import HouseholdConfigChanged, UserPreferencesChanged
 from ..domain.preferences import (
     PREFERENCE_SCOPE,
@@ -23,7 +24,7 @@ from ..domain.preferences import (
     UserPreferences,
 )
 from ..domain.space import SpacePermissionError
-from ..repositories.preferences_repo import AbstractPreferencesRepo, HOUSEHOLD_ROW_ID
+from ..repositories.preferences_repo import HOUSEHOLD_ROW_ID, AbstractPreferencesRepo
 
 if TYPE_CHECKING:
     from ..infrastructure.event_bus import EventBus
@@ -32,12 +33,12 @@ log = logging.getLogger(__name__)
 
 # Re-exports so callers can import everything from one module.
 __all__ = [
-    "HouseholdPreferences",
-    "UserPreferences",
-    "PreferencesService",
-    "FeatureDisabledError",
-    "ScopeMismatchError",
     "SECTIONS",
+    "FeatureDisabledError",
+    "HouseholdPreferences",
+    "PreferencesService",
+    "ScopeMismatchError",
+    "UserPreferences",
 ]
 
 
@@ -47,13 +48,13 @@ class ScopeMismatchError(ValueError):
 
 
 class PreferencesService:
-    __slots__ = ("_repo", "_bus")
+    __slots__ = ("_bus", "_repo")
 
     def __init__(
         self,
         repo: AbstractPreferencesRepo,
         *,
-        bus: "EventBus | None" = None,
+        bus: EventBus | None = None,
     ) -> None:
         self._repo = repo
         self._bus = bus
@@ -114,7 +115,7 @@ class PreferencesService:
                     HouseholdConfigChanged(changed={"tz": tz}),
                 )
             except Exception as exc:  # pragma: no cover
-                log.debug("household tz publish failed: %s", exc)
+                log.debug("household tz publish failed: %s", exc, exc_info=True)
 
     # ── Admin update ───────────────────────────────────────────────
 
@@ -179,7 +180,7 @@ class PreferencesService:
                         f"{key!r} is not a household-scope preference (scope={scope!r})"
                     )
                 if not isinstance(value, bool):
-                    raise ValueError(
+                    raise WrongTypeError(
                         f"toggle {key!r} must be a boolean, got {type(value).__name__}"
                     )
                 if getattr(before, key) == value:
@@ -192,7 +193,9 @@ class PreferencesService:
             try:
                 await self._bus.publish(HouseholdConfigChanged(changed=changed))
             except Exception as exc:  # pragma: no cover
-                log.debug("household config_changed publish failed: %s", exc)
+                log.debug(
+                    "household config_changed publish failed: %s", exc, exc_info=True
+                )
         return after
 
     # ── User scope ───────────────────────────────────────────────────
@@ -224,7 +227,7 @@ class PreferencesService:
                     f"{key!r} is not a user-scope preference (scope={scope!r})"
                 )
             if not isinstance(value, bool):
-                raise ValueError(
+                raise WrongTypeError(
                     f"toggle {key!r} must be a boolean, got {type(value).__name__}"
                 )
             if getattr(before, key) == value:
@@ -238,5 +241,7 @@ class PreferencesService:
                     UserPreferencesChanged(user_id=user_id, changed=changed),
                 )
             except Exception as exc:  # pragma: no cover
-                log.debug("user preferences_changed publish failed: %s", exc)
+                log.debug(
+                    "user preferences_changed publish failed: %s", exc, exc_info=True
+                )
         return await self._repo.get_user(user_id)

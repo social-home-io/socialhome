@@ -28,7 +28,7 @@ class GalleryAlbumsDeletedExporter(RowTombstonesExporter):
 
     __slots__ = ()
 
-    def __init__(self, gallery_repo: "AbstractGalleryRepo") -> None:
+    def __init__(self, gallery_repo: AbstractGalleryRepo) -> None:
         super().__init__(gallery_repo.list_album_tombstones_page)
 
 
@@ -39,5 +39,5 @@ class GalleryItemsDeletedExporter(RowTombstonesExporter):
 
     __slots__ = ()
 
-    def __init__(self, gallery_repo: "AbstractGalleryRepo") -> None:
+    def __init__(self, gallery_repo: AbstractGalleryRepo) -> None:
         super().__init__(gallery_repo.list_item_tombstones_page)

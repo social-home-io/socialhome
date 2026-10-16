@@ -8,7 +8,7 @@ from PIL import Image as _Image
 
 from socialhome.domain.errors import ImageUnreadableError
 from socialhome.media import image_processor
-from socialhome.media.image_processor import ImageProcessor, MAGIC_BYTES
+from socialhome.media.image_processor import MAGIC_BYTES, ImageProcessor
 
 
 def test_image_processor_instantiates():
@@ -24,8 +24,9 @@ def test_magic_bytes_defined():
 
 async def test_process_valid_jpeg():
     """process() on a minimal JPEG returns WebP bytes."""
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     img = Image.new("RGB", (100, 100), color="red")
     buf = io.BytesIO()
@@ -50,8 +51,9 @@ async def test_process_invalid_data():
 
 async def test_generate_thumbnail():
     """generate_thumbnail returns smaller image bytes."""
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     img = Image.new("RGB", (800, 600), color="blue")
     buf = io.BytesIO()
@@ -66,8 +68,9 @@ async def test_generate_thumbnail():
 
 async def test_process_png():
     """process() handles PNG input."""
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     img = Image.new("RGBA", (64, 64), color=(0, 255, 0, 128))
     buf = io.BytesIO()
@@ -85,8 +88,9 @@ async def test_thumbnail_uses_lower_quality_than_main_image():
     Proxy test: save a fixture twice at the same dimensions, once with each
     quality, compare byte sizes.
     """
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     from socialhome.domain.media_constraints import (
         IMAGE_WEBP_QUALITY,

@@ -23,7 +23,6 @@ from pathlib import Path
 
 from aiohttp import web
 
-from ...gfs_proof import PROOF_ROUTE
 from ...domain.gfs_channel import (
     CHANNEL_EPOCH_ROUTE,
     CHANNEL_PUBLISH_ANON_ROUTE,
@@ -33,7 +32,7 @@ from ...domain.gfs_channel import (
     CHANNEL_UNREGISTER_ROUTE,
     CHANNEL_UNSUBSCRIBE_ROUTE,
 )
-
+from ...gfs_proof import PROOF_ROUTE
 from .. import admin as admin_mod
 from ..public import handle_invite_page, handle_landing, handle_space_page
 from .admin import (
@@ -56,7 +55,6 @@ from .admin import (
     AdminSpaceCollectionView,
     AdminUiIndexView,
 )
-from .envelope import EnvelopeRelayView
 from .channels import (
     ChannelEpochView,
     ChannelPublishAnonView,
@@ -66,49 +64,13 @@ from .channels import (
     ChannelUnregisterView,
     ChannelUnsubscribeView,
 )
-from .member_publish import (
-    MemberPublishAnonView,
-    MemberPublishView,
-    SpaceEpochNoticeView,
-)
-from .invites import SpaceInviteTokenView, SpaceInviteView
 from .cluster import (
     ClusterHealthView,
     ClusterSignalingBeginView,
     ClusterSignalingEndView,
     ClusterSyncView,
 )
-from .relay import (
-    AppealView,
-    GfsInfoView,
-    GfsProofView,
-    HealthzView,
-    InstanceUpdateView,
-    PublishView,
-    RegisterView,
-    SignupTokenView,
-    ReportView,
-    SpaceDetailView,
-    SpacePublishView,
-    SpacesListView,
-    SpaceSubscribersView,
-    SpaceUnpublishView,
-    SubscribeView,
-)
-from .rtc import (
-    RtcAnswerView,
-    RtcIceView,
-    RtcOfferView,
-    RtcPingView,
-    RtcSessionView,
-)
-from .highlights import (
-    HighlightPublicLandingView,
-    HighlightPublishView,
-    HighlightTokenMintView,
-    HighlightTokenRevokeView,
-    HighlightUnpublishView,
-)
+from .envelope import EnvelopeRelayView
 from .highlight_rtc import (
     HighlightIceServersView,
     HighlightRelayStreamView,
@@ -118,6 +80,19 @@ from .highlight_rtc import (
     HighlightRtcOfferView,
     HighlightRtcSessionView,
     HighlightRtcViewerIceView,
+)
+from .highlights import (
+    HighlightPublicLandingView,
+    HighlightPublishView,
+    HighlightTokenMintView,
+    HighlightTokenRevokeView,
+    HighlightUnpublishView,
+)
+from .invites import SpaceInviteTokenView, SpaceInviteView
+from .member_publish import (
+    MemberPublishAnonView,
+    MemberPublishView,
+    SpaceEpochNoticeView,
 )
 from .moment_rtc import (
     MomentRelayStreamView,
@@ -140,6 +115,30 @@ from .moments_public import (
     GfsUserPictureView,
     GfsUserRegisterView,
     GfsUserUnfollowView,
+)
+from .relay import (
+    AppealView,
+    GfsInfoView,
+    GfsProofView,
+    HealthzView,
+    InstanceUpdateView,
+    PublishView,
+    RegisterView,
+    ReportView,
+    SignupTokenView,
+    SpaceDetailView,
+    SpacePublishView,
+    SpacesListView,
+    SpaceSubscribersView,
+    SpaceUnpublishView,
+    SubscribeView,
+)
+from .rtc import (
+    RtcAnswerView,
+    RtcIceView,
+    RtcOfferView,
+    RtcPingView,
+    RtcSessionView,
 )
 from .ws import GfsWebSocketView
 

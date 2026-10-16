@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC
 
 import pytest
 
@@ -38,7 +39,7 @@ async def _seed_peer(db, instance_id: str, *, status: str = "confirmed") -> None
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with an outbox repo over a real SQLite database."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
@@ -193,9 +194,9 @@ async def test_enqueue_never_drop_event_has_null_expiry(env):
 
 async def test_enqueue_ordinary_event_gets_seven_day_ttl(env):
     """An ordinary event enqueues with a ~7-day retention deadline."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     eid = await env.outbox_repo.enqueue(
         instance_id="peer",
         event_type=FederationEventType.SPACE_POST_CREATED,

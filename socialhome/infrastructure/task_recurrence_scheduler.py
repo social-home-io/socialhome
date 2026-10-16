@@ -26,11 +26,11 @@ log = logging.getLogger(__name__)
 class TaskRecurrenceScheduler:
     """Background task that spawns overdue recurring-task instances."""
 
-    __slots__ = ("_svc", "_interval", "_task", "_stop")
+    __slots__ = ("_interval", "_stop", "_svc", "_task")
 
     def __init__(
         self,
-        service: "TaskService",
+        service: TaskService,
         *,
         interval_seconds: float = 3600.0,  # hourly
     ) -> None:
@@ -50,7 +50,7 @@ class TaskRecurrenceScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -61,11 +61,11 @@ class TaskRecurrenceScheduler:
                 if spawned:
                     log.debug("task-recurrence: spawned %d", len(spawned))
             except Exception as exc:  # pragma: no cover
-                log.warning("task-recurrence tick failed: %s", exc)
+                log.warning("task-recurrence tick failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue

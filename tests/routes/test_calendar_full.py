@@ -1,6 +1,7 @@
 """Full route coverage for calendar endpoints."""
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
+
 from .conftest import _auth
 
 
@@ -15,7 +16,7 @@ async def test_calendar_full_lifecycle(client):
     assert r.status == 200
     assert len(await r.json()) >= 1
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         f"/api/calendars/{cid}/events",
         json={

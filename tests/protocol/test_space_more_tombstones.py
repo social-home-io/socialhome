@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -83,7 +83,7 @@ SEATS = (
     (MOD, MOLLY, "moderator"),
     (ADMIN, ADAM, "admin"),
 )
-_NOW = datetime.now(timezone.utc)
+_NOW = datetime.now(UTC)
 
 
 def _config(tmp_path, name: str) -> Config:

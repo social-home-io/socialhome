@@ -38,7 +38,6 @@ class _FakeFederationService:
         **kwargs,
     ):
         self.broadcasts.append((space_id, event_type, payload))
-        return None
 
 
 @pytest.fixture

@@ -19,7 +19,7 @@ Two surfaces:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from aiohttp import web
 
@@ -104,7 +104,7 @@ class SpaceCalendarFeedView(BaseView):
             return error_response(401, "UNAUTHORIZED", "no longer a member")
         # The space's calendar tab switched off → no feed either.
         await self.require_space_feature(space_id, "calendar")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         events = await repo.list_events_in_range(
             space_id,
             start=now,

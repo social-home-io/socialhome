@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import logging
 import unicodedata
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..domain.events import (
@@ -93,16 +93,16 @@ from ..domain.space_item import (
     stamp_to_db,
 )
 from ..domain.writer_cert import WRITER_SCOPE_WRITE
-from ..federation.pending_parent_buffer import (
-    PARENT_COMMENT,
-    PARENT_POST,
-    AwaitingParent,
-)
 from ..federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
     OwnerBinding,
     check_owner_bound_id,
+)
+from ..federation.pending_parent_buffer import (
+    PARENT_COMMENT,
+    PARENT_POST,
+    AwaitingParent,
 )
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
@@ -122,28 +122,28 @@ class _Item:
     """One verified item, as the handlers below read it."""
 
     __slots__ = (
-        "space",
-        "inner",
-        "origin",
         "author",
-        "target",
-        "post_id",
-        "stamp",
-        "cert_scope",
-        "member",
         "authorship",
+        "cert_scope",
+        "inner",
+        "member",
+        "origin",
+        "post_id",
+        "space",
+        "stamp",
+        "target",
     )
 
     def __init__(
         self,
         *,
-        space: "Space",
+        space: Space,
         inner: dict[str, Any],
         origin: str,
         stamp: datetime,
         cert_scope: str,
         member: bool,
-        authorship: "SpaceAuthorship | None",
+        authorship: SpaceAuthorship | None,
     ) -> None:
         self.space = space
         self.inner = inner
@@ -160,15 +160,15 @@ class _Item:
 class SpaceItemInbound:
     """Persist member-published generic items (see the module docstring)."""
 
-    __slots__ = ("_bus", "_spaces", "_posts", "_mentions")
+    __slots__ = ("_bus", "_mentions", "_posts", "_spaces")
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        space_repo: "AbstractSpaceRepo",
-        space_post_repo: "AbstractSpacePostRepo",
-        mention_resolver: "SpaceMentionResolver | None" = None,
+        space_repo: AbstractSpaceRepo,
+        space_post_repo: AbstractSpacePostRepo,
+        mention_resolver: SpaceMentionResolver | None = None,
     ) -> None:
         self._bus = bus
         self._spaces = space_repo
@@ -178,13 +178,13 @@ class SpaceItemInbound:
     async def apply(
         self,
         *,
-        space: "Space",
+        space: Space,
         item_type: str,
         inner: dict[str, Any],
         origin_instance_id: str,
         cert_scope: str,
         member_household: bool,
-        authorship: "SpaceAuthorship | None",
+        authorship: SpaceAuthorship | None,
     ) -> bool:
         """Apply one verified generic item. ``True`` when it changed
         something here; every refusal is logged.
@@ -553,7 +553,7 @@ class SpaceItemInbound:
     # ── Authority removals (host relay) ─────────────────────────────────
 
     async def apply_authority_removal(
-        self, *, space: "Space", removal: AuthorityRemoval
+        self, *, space: Space, removal: AuthorityRemoval
     ) -> bool:
         """Apply a space-authority removal notice (its authority signature
         and space already verified by the caller). Unlike a member's
@@ -572,7 +572,7 @@ class SpaceItemInbound:
             return await self._remove_post(space, removal)
         return await self._remove_comment(space, removal)
 
-    async def _remove_post(self, space: "Space", removal: AuthorityRemoval) -> bool:
+    async def _remove_post(self, space: Space, removal: AuthorityRemoval) -> bool:
         pid = removal.item_id
         got = await self._posts.get(pid)
         if got is not None and got[0] != space.id:
@@ -587,7 +587,7 @@ class SpaceItemInbound:
                 id=pid,
                 author=removal.author_user_id,
                 type=PostType.TEXT,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
                 deleted=True,
             )
             return await self._posts.save(space.id, tombstone) is not None
@@ -606,7 +606,7 @@ class SpaceItemInbound:
         )
         return True
 
-    async def _remove_comment(self, space: "Space", removal: AuthorityRemoval) -> bool:
+    async def _remove_comment(self, space: Space, removal: AuthorityRemoval) -> bool:
         cid = removal.item_id
         got = await self._posts.get(removal.post_id)
         if got is None and removal.post_id:
@@ -629,7 +629,7 @@ class SpaceItemInbound:
                 post_id=removal.post_id,
                 author=removal.author_user_id,
                 type=CommentType.TEXT,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
                 deleted=True,
             )
             return await self._posts.add_comment(tombstone, space_id=space.id)
@@ -725,7 +725,7 @@ class SpaceItemInbound:
 
 
 def _bound_here(
-    kind: str, row_id: str, space: "Space", removal: AuthorityRemoval
+    kind: str, row_id: str, space: Space, removal: AuthorityRemoval
 ) -> bool:
     """A removal may leave a tombstone for an id not held here only when the
     id is owner-bound to the named author in THIS space — otherwise a seed

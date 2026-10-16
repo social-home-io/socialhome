@@ -19,8 +19,8 @@ import pytest
 from aiohttp import web
 
 from socialhome.app import create_app
-from socialhome.config import Config
 from socialhome.app_keys import platform_adapter_key
+from socialhome.config import Config
 from socialhome.csp import build_spa_csp
 from socialhome.platform.adapter import Capability
 from socialhome.routes import spa as spa_module
@@ -427,7 +427,9 @@ async def test_api_responses_do_not_carry_the_spa_csp(spa_client):
 
 # ── Inline-script guard ──────────────────────────────────────────────────
 
-_SCRIPT_TAG_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S | re.I)
+_SCRIPT_TAG_RE = re.compile(
+    r"<script\b([^>]*)>(.*?)</script>", re.DOTALL | re.IGNORECASE
+)
 
 
 def _inline_scripts(html: str) -> list[str]:
@@ -436,7 +438,7 @@ def _inline_scripts(html: str) -> list[str]:
     The CSP is ``script-src 'self'`` with no hashes or nonces, so any
     inline script would be blocked in the browser — fail here instead.
     """
-    no_comments = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    no_comments = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
     return [
         body
         for attrs, body in _SCRIPT_TAG_RE.findall(no_comments)
@@ -574,7 +576,7 @@ def _index_local_refs() -> list[str]:
     Vite source entry (``/src/main.tsx``) that the build rewrites into the
     content-hashed ``assets/index-*.js``."""
     html = (_REPO_ROOT / "client" / "index.html").read_text("utf-8")
-    html = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
     refs = re.findall(r'<(?:link|script)\b[^>]*\b(?:href|src)="([^"]+)"', html)
     return [
         r

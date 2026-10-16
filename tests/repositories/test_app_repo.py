@@ -21,7 +21,7 @@ committed row — no extra flush or sleep is needed.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -188,7 +188,7 @@ def _pending(
         from_instance="remote.example",
         from_user=from_user,
         payload=payload if payload is not None else {"kind": "challenge", "color": "w"},
-        created_at=created_at or datetime.now(timezone.utc).isoformat(),
+        created_at=created_at or datetime.now(UTC).isoformat(),
     )
 
 
@@ -223,7 +223,7 @@ async def test_pending_drain_excludes_and_prune_deletes_expired(db):
     repo = SqliteAppRepo(db)
     uid = await _seed_user(db)
     await repo.install(_app())
-    old = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+    old = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
     await repo.add_pending_session(_pending(uid, session_id="old", created_at=old))
     fresh = _pending(uid, session_id="fresh")
     await repo.add_pending_session(fresh)
@@ -241,7 +241,7 @@ async def test_pending_prune_deletes_old_across_users(db):
     repo = SqliteAppRepo(db)
     uid = await _seed_user(db)
     await repo.install(_app())
-    old = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+    old = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
     await repo.add_pending_session(_pending(uid, session_id="old", created_at=old))
     await repo.add_pending_session(_pending(uid, session_id="fresh"))
 
@@ -318,7 +318,7 @@ async def test_pending_per_pair_cap_drops_oldest_on_insert(db):
     overflow = 5
     # Recent timestamps (within the drain TTL) spread by seconds so ordering
     # is deterministic: sess-0 is oldest, sess-(cap+overflow-1) is newest.
-    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    base = datetime.now(UTC) - timedelta(hours=1)
     for i in range(cap + overflow):
         created = (base + timedelta(seconds=i)).isoformat()
         await repo.add_pending_session(
@@ -342,7 +342,7 @@ async def test_pending_cap_is_per_pair_not_global(db):
     await repo.install(_app())
 
     cap = _PENDING_SESSION_MAX_PER_PAIR
-    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    base = datetime.now(UTC) - timedelta(hours=1)
     for i in range(cap + 3):
         created = (base + timedelta(seconds=i)).isoformat()
         await repo.add_pending_session(
@@ -361,7 +361,7 @@ async def test_prune_pending_sessions_returns_deleted_count(db):
     repo = SqliteAppRepo(db)
     uid = await _seed_user(db)
     await repo.install(_app())
-    old = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+    old = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
     await repo.add_pending_session(_pending(uid, session_id="old1", created_at=old))
     await repo.add_pending_session(_pending(uid, session_id="old2", created_at=old))
     await repo.add_pending_session(_pending(uid, session_id="fresh"))

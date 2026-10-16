@@ -18,7 +18,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import TYPE_CHECKING, Any, AsyncIterable
+from collections.abc import AsyncIterable
+from typing import TYPE_CHECKING, Any
 
 from ..adapter import ExternalUser, _extract_bearer
 
@@ -103,7 +104,7 @@ class HaAuthProvider:
 
     async def authenticate(
         self,
-        request: "web.Request",
+        request: web.Request,
     ) -> ExternalUser | None:
         # Only trust ``X-Remote-User-Name`` when HA Core's ingress proxy
         # is in the path — confirmed by ``X-Hass-Source: core.ingress``

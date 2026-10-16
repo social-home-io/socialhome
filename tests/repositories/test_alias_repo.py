@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
@@ -146,9 +148,9 @@ async def test_list_user_aliases_returns_all_for_viewer(env):
 
 async def test_alias_length_constraint_enforced_by_db(env):
     """Repo trusts service-layer validation; DB constraint is the safety net."""
-    db, repo = env
+    db, _repo = env
     huge = "x" * (MAX_ALIAS_LENGTH + 1)
-    with pytest.raises(Exception):  # IntegrityError from CHECK constraint
+    with pytest.raises(sqlite3.IntegrityError):  # CHECK constraint
         await db.enqueue(
             "INSERT INTO user_aliases(viewer_user_id, target_user_id, alias)"
             " VALUES(?, ?, ?)",

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import copy
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -17,12 +16,12 @@ from socialhome.domain.page import Page, PageTombstone
 from socialhome.domain.post import Comment, CommentType, LocationData, Post, PostType
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import (
-    TaskListTombstone,
-    TaskTombstone,
     Task,
     TaskList,
+    TaskListTombstone,
     TaskPriority,
     TaskStatus,
+    TaskTombstone,
 )
 from socialhome.domain.tombstone import SpaceRowTombstone
 from socialhome.federation.sync.space.resume import (
@@ -351,7 +350,7 @@ async def test_handle_request_replays_posts_since(provider_factory):
     ``since`` is exclusive — an equal timestamp is filtered out, matching
     the SQL ``created_at > ?`` clause in ``list_since``.
     """
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     # Three posts strictly after ``base``.
     posts = [_post(i, base + timedelta(minutes=i + 1)) for i in range(3)]
     provider, fed, _ = provider_factory(posts=posts, members=["peer-a"])
@@ -369,7 +368,7 @@ async def test_handle_request_replays_posts_since(provider_factory):
 
 async def test_handle_request_drops_non_member(provider_factory):
     """Spec §S-1 — peer that isn't a space member is silently dropped."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     posts = [_post(0, base + timedelta(minutes=1))]
     provider, fed, _ = provider_factory(
         posts=posts,
@@ -400,7 +399,7 @@ async def test_handle_request_rejects_malformed_since(provider_factory):
 async def test_handle_request_missing_fields(provider_factory):
     """Empty space_id or since → no-op, no replay."""
     provider, fed, _ = provider_factory(
-        posts=[_post(0, datetime(2026, 4, 1, tzinfo=timezone.utc))],
+        posts=[_post(0, datetime(2026, 4, 1, tzinfo=UTC))],
         members=["peer-a"],
     )
     # Both event.space_id and payload['space_id'] absent → drop.
@@ -432,7 +431,7 @@ async def test_handle_request_uses_max_posts_cap(provider_factory):
 
 async def test_handle_request_payload_matches_inbound_shape(provider_factory):
     """Replayed payload keys match what _post_from_payload expects."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     posts = [_post(0, base + timedelta(seconds=1))]
     provider, fed, _ = provider_factory(posts=posts, members=["peer-a"])
     await provider.handle_request(
@@ -482,7 +481,7 @@ async def test_send_request_validates_inputs(provider_factory):
 
 async def test_handle_request_replays_comments(provider_factory):
     """Comments newer than ``since`` go out as SPACE_COMMENT_CREATED."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     comments = [
         ("p-1", _comment(0, "p-1", base + timedelta(minutes=1))),
         ("p-2", _comment(1, "p-2", base + timedelta(minutes=2))),
@@ -500,7 +499,7 @@ async def test_handle_request_replays_comments(provider_factory):
 
 
 async def test_handle_request_replays_tasks(provider_factory):
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     tasks = [_task(i, base + timedelta(minutes=i + 1)) for i in range(2)]
     provider, fed, _ = provider_factory(tasks=tasks, members=["peer-a"])
     sent = await provider.handle_request(
@@ -519,7 +518,7 @@ async def test_handle_request_replays_tasks(provider_factory):
 async def test_handle_request_replays_task_lists_before_tasks():
     """v_40: the lists a peer missed go out (as SPACE_TASK_LIST_CREATED)
     before the tasks filed under them."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     fed = _FakeFederation()
     provider = SpaceSyncResumeProvider(
         federation_service=fed,
@@ -549,7 +548,7 @@ async def test_handle_request_replays_task_lists_before_tasks():
 async def test_handle_request_replays_list_deletes_before_lists_and_tasks():
     """Migration 0069: a list deleted since ``since`` goes out as
     SPACE_TASK_LIST_DELETED ``{id, space_id}`` ahead of the live lists."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     fed = _FakeFederation()
     provider = SpaceSyncResumeProvider(
         federation_service=fed,
@@ -590,7 +589,7 @@ async def test_handle_request_replays_task_deletes_after_lists_before_tasks():
     """Migration 0071: a task deleted since ``since`` goes out as
     SPACE_TASK_DELETED after the lists (its list is held by then) and
     before the live tasks, naming the deleter as ``actor_user_id``."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     fed = _FakeFederation()
     provider = SpaceSyncResumeProvider(
         federation_service=fed,
@@ -643,7 +642,7 @@ async def test_handle_request_replays_page_deletes_before_the_pages():
     """Migration 0073: a page deleted since ``since`` goes out as
     SPACE_PAGE_DELETED before the live pages, naming the deleter as
     ``actor_user_id`` and binding the id with ``created_by``."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     fed = _FakeFederation()
     provider = SpaceSyncResumeProvider(
         federation_service=fed,
@@ -681,7 +680,7 @@ async def test_handle_request_replays_page_deletes_before_the_pages():
 async def test_handle_request_replays_task_due_date_priority_labels(
     provider_factory,
 ):
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     task = copy.replace(
         _task(0, base + timedelta(minutes=1)),
         due_date=date(2026, 5, 2),
@@ -699,7 +698,7 @@ async def test_handle_request_replays_task_due_date_priority_labels(
 
 
 async def test_handle_request_replays_pages(provider_factory):
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     iso = (base + timedelta(minutes=1)).isoformat()
     pages = [_page(0, iso), _page(1, iso)]
     provider, fed, _ = provider_factory(pages=pages, members=["peer-a"])
@@ -711,7 +710,7 @@ async def test_handle_request_replays_pages(provider_factory):
 
 
 async def test_replayed_pages_carry_seq_for_a_v48_peer_only(provider_factory):
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     iso = (base + timedelta(minutes=1)).isoformat()
     page = replace(_page(0, iso), seq=6)
     provider, fed, _ = provider_factory(pages=[page], members=["peer-a", "peer-b"])
@@ -729,7 +728,7 @@ async def test_replayed_pages_carry_seq_for_a_v48_peer_only(provider_factory):
 
 
 async def test_no_page_is_replayed_to_the_v48_host(provider_factory):
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     iso = (base + timedelta(minutes=1)).isoformat()
     provider, fed, _ = provider_factory(pages=[_page(0, iso)], members=["the-host"])
     await provider.handle_request(
@@ -743,7 +742,7 @@ async def test_no_page_is_replayed_to_the_v48_host(provider_factory):
 async def test_a_draft_is_replayed_as_its_canonical_base(provider_factory):
     from socialhome.domain.page_version import DraftBase
 
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     iso = (base + timedelta(minutes=1)).isoformat()
     draft = replace(_page(0, iso), content="my draft", seq=4, pending_base_seq=3)
     create = replace(_page(1, iso), seq=0, pending_base_seq=0)
@@ -764,7 +763,7 @@ async def test_a_draft_is_replayed_as_its_canonical_base(provider_factory):
 
 
 async def test_handle_request_replays_stickies(provider_factory):
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     iso = (base + timedelta(minutes=1)).isoformat()
     stickies = [_sticky(0, iso), _sticky(1, iso)]
     provider, fed, _ = provider_factory(stickies=stickies, members=["peer-a"])
@@ -776,7 +775,7 @@ async def test_handle_request_replays_stickies(provider_factory):
 
 
 async def test_handle_request_replays_calendar_events(provider_factory):
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     events = [
         _cal_event(0, base + timedelta(minutes=1)),
         _cal_event(1, base + timedelta(minutes=2)),
@@ -795,7 +794,7 @@ async def test_handle_request_replays_calendar_events(provider_factory):
 
 async def test_handle_request_replays_gallery_items(provider_factory):
     """Gallery items newer than ``since`` go out as SPACE_GALLERY_ITEM_CREATED."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     iso = (base + timedelta(minutes=1)).isoformat()
     items = [_gallery_item(0, iso), _gallery_item(1, iso)]
     provider, fed, _ = provider_factory(
@@ -820,7 +819,7 @@ async def test_replayed_items_are_preceded_by_their_album(provider_factory):
     album created after it went offline is exactly what it lacks — so each
     replayed item's album goes out first, once. The system album never
     does: every household rebuilds its own from the posts."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     iso = (base + timedelta(minutes=1)).isoformat()
     items = [
         _gallery_item(0, iso),
@@ -880,7 +879,7 @@ async def test_replayed_items_are_preceded_by_their_album(provider_factory):
 
 async def test_handle_request_aggregates_across_resources(provider_factory):
     """The total return value sums every resource type."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     cutoff = base.isoformat()
     iso = (base + timedelta(minutes=1)).isoformat()
     provider, fed, _ = provider_factory(
@@ -910,7 +909,7 @@ async def test_handle_request_aggregates_across_resources(provider_factory):
 
 async def test_handle_request_skips_resources_when_repo_missing(provider_factory):
     """Optional repos default to ``None`` — provider just skips them."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     # Only the post repo is provided; the others stay None on the provider.
     provider, fed, _ = provider_factory(
         posts=[_post(0, base + timedelta(minutes=1))],
@@ -928,7 +927,7 @@ async def test_handle_request_skips_resources_when_repo_missing(provider_factory
 
 async def test_replay_space_to_replays_all_resources(provider_factory):
     """``replay_space_to`` mirrors a full ``handle_request`` for a member."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     iso = (base + timedelta(minutes=1)).isoformat()
     provider, fed, _ = provider_factory(
         posts=[_post(0, base + timedelta(minutes=1))],
@@ -951,7 +950,7 @@ async def test_replay_space_to_replays_all_resources(provider_factory):
 
 async def test_replay_space_to_drops_non_member(provider_factory):
     """Security boundary — a non-member never receives space content."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     provider, fed, _ = provider_factory(
         posts=[_post(0, base + timedelta(minutes=1))],
         members=["someone-else"],
@@ -967,7 +966,7 @@ async def test_replay_space_to_drops_non_member(provider_factory):
 
 async def test_replay_calendar_to_replays_only_calendar(provider_factory):
     """``replay_calendar_to`` re-emits calendar events only."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     iso = (base + timedelta(minutes=1)).isoformat()
     provider, fed, _ = provider_factory(
         posts=[_post(0, base + timedelta(minutes=1))],
@@ -989,7 +988,7 @@ async def test_replay_calendar_to_replays_only_calendar(provider_factory):
 
 async def test_replay_calendar_to_drops_non_member(provider_factory):
     """Security boundary — a non-member never receives the calendar."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     provider, fed, _ = provider_factory(
         cal_events=[_cal_event(0, base + timedelta(minutes=1))],
         members=["someone-else"],
@@ -1012,7 +1011,7 @@ def test_post_to_payload_omits_location_when_unset():
         id="p-1",
         author="alice",
         type=PostType.TEXT,
-        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
         content="hi",
     )
     payload = _post_to_payload(post)
@@ -1026,7 +1025,7 @@ def test_post_to_payload_includes_location_with_label():
         id="p-loc",
         author="alice",
         type=PostType.LOCATION,
-        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
         content="Sunset",
         location=LocationData(lat=52.52, lon=4.06, label="Marina"),
     )
@@ -1041,7 +1040,7 @@ def test_post_to_payload_omits_label_when_none():
         id="p-loc-2",
         author="alice",
         type=PostType.LOCATION,
-        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
         location=LocationData(lat=10.0, lon=20.0),
     )
     payload = _post_to_payload(post)
@@ -1056,7 +1055,7 @@ async def test_resume_replays_every_album_state_the_peer_may_have_missed(
     edited since ``since`` also goes out as an update (a create for an
     album the peer holds is a no-op), and a delete recorded since then is
     replayed first."""
-    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
     since = base.isoformat()
     later = (base + timedelta(minutes=5)).isoformat()
     earlier = (base - timedelta(days=1)).isoformat()
@@ -1130,13 +1129,13 @@ def test_post_to_payload_carries_link_preview_only_when_set():
     catching-up member still never fetches the URL."""
     from socialhome.domain.link_preview import LinkPreview
 
-    base = dict(
-        id="p-lp",
-        author="alice",
-        type=PostType.TEXT,
-        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
-        content="https://example.com/",
-    )
+    base = {
+        "id": "p-lp",
+        "author": "alice",
+        "type": PostType.TEXT,
+        "created_at": datetime(2026, 4, 1, tzinfo=UTC),
+        "content": "https://example.com/",
+    }
     assert "link_preview" not in _post_to_payload(Post(**base))
     card = LinkPreview(url="https://example.com/", title="T")
     payload = _post_to_payload(Post(**base, link_preview=card))

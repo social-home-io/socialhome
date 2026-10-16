@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import orjson
 
@@ -139,14 +139,14 @@ class DataExportService:
                     params,
                 )
             except Exception as exc:  # defensive
-                log.debug("data_export: skipping %s: %s", table, exc)
+                log.debug("data_export: skipping %s: %s", table, exc, exc_info=True)
                 continue
             if not rows:
                 continue
             tables[table] = [_scrub(dict(r), table) for r in rows]
         return DataExport(
             user_id=user_id,
-            exported_at=datetime.now(timezone.utc).isoformat(),
+            exported_at=datetime.now(UTC).isoformat(),
             tables=tables,
         )
 

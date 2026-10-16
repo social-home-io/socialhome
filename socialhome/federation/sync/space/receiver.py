@@ -21,19 +21,35 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections import OrderedDict
-from dataclasses import replace
-from enum import StrEnum
-from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol, TYPE_CHECKING
+from dataclasses import replace
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Protocol
 
 import orjson as _orjson
 
 from ....crypto import derive_instance_id
 from ....domain.calendar import CalendarEvent, coerce_capacity, is_occurrence_id
-from ....domain.events import SpaceSyncComplete
+from ....domain.events import (
+    CalendarEventDeleted,
+    CommentDeleted,
+    GalleryAlbumDeleted,
+    GalleryItemDeleted,
+    PageDeleted,
+    PostDeleted,
+    RemoteSpaceMemberBanned,
+    SpaceCommentSynced,
+    SpaceMemberProfileUpdated,
+    SpacePostSynced,
+    SpaceSyncComplete,
+    TaskDeleted,
+    TaskListDeleted,
+    TimetableSaved,
+)
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.federation_capabilities import FederationCapability
+from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.page import Page
 from ....domain.post import (
     BAZAAR_MAX_IMAGES,
@@ -48,7 +64,6 @@ from ....domain.post import (
     Post,
     PostType,
 )
-from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.space import (
     ContentAction,
     SpaceMember,
@@ -63,21 +78,6 @@ from ....domain.space import (
 )
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
-from ....domain.events import (
-    CalendarEventDeleted,
-    CommentDeleted,
-    GalleryAlbumDeleted,
-    GalleryItemDeleted,
-    PageDeleted,
-    PostDeleted,
-    RemoteSpaceMemberBanned,
-    SpaceMemberProfileUpdated,
-    SpaceCommentSynced,
-    SpacePostSynced,
-    TaskDeleted,
-    TaskListDeleted,
-    TimetableSaved,
-)
 from ....domain.timetable import (
     Timetable,
     drop_invalid_icons,
@@ -86,12 +86,23 @@ from ....domain.timetable import (
     validate,
 )
 from ....infrastructure.event_bus import EventBus
-from ....utils.timezones import coerce_tz
 from ....media.cleanup import unlink_unreferenced
 from ....media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     reencode_peer_picture,
 )
+from ....services.inbound_media_store import (
+    local_media_ref,
+    local_media_refs,
+    verbatim_local_media_ref,
+)
+from ....services.link_preview_service import wire_link_preview
+from ....services.page_conflict_service import PageMode, canonical_from_wire
+from ....services.space_service import (
+    apply_inviter_reproof,
+    apply_owner_statement_from_metadata,
+)
+from ....utils.timezones import coerce_tz
 from ...host_equivalence import touches_owner_household
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
@@ -110,17 +121,6 @@ from ...owner_bound_id import (
     is_owner_bound,
     owner_bound_id_refused,
 )
-from ....services.inbound_media_store import (
-    local_media_ref,
-    local_media_refs,
-    verbatim_local_media_ref,
-)
-from ....services.link_preview_service import wire_link_preview
-from ....services.page_conflict_service import PageMode, canonical_from_wire
-from ....services.space_service import (
-    apply_inviter_reproof,
-    apply_owner_statement_from_metadata,
-)
 from ...space_scope import archive_refusal
 from .exporter import (
     ALLOWED_RESOURCES,
@@ -132,26 +132,26 @@ from .exporter import (
 
 if TYPE_CHECKING:
     from ....federation.space_authorship import SpaceAuthorship
+    from ....repositories.bazaar_repo import AbstractBazaarRepo
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ....repositories.federation_repo import AbstractFederationRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
     from ....repositories.media_reference_repo import AbstractMediaReferenceRepo
-    from ....services.legacy_album_deletes import LegacyAlbumDeletes
     from ....repositories.page_repo import AbstractPageRepo
-    from ....repositories.space_poll_repo import AbstractSpacePollRepo
     from ....repositories.profile_picture_repo import (
         AbstractProfilePictureRepo,
     )
+    from ....repositories.space_poll_repo import AbstractSpacePollRepo
     from ....repositories.space_post_repo import AbstractSpacePostRepo
     from ....repositories.space_repo import AbstractSpaceRepo
     from ....repositories.space_sync_watermark_repo import (
         AbstractSpaceSyncWatermarkRepo,
     )
-    from ....repositories.bazaar_repo import AbstractBazaarRepo
     from ....repositories.space_zone_repo import AbstractSpaceZoneRepo
     from ....repositories.sticky_repo import AbstractStickyRepo
     from ....repositories.task_repo import AbstractSpaceTaskRepo
     from ....repositories.timetable_repo import AbstractSpaceTimetableRepo
+    from ....services.legacy_album_deletes import LegacyAlbumDeletes
     from ....services.page_conflict_service import PageConflictService
     from ....services.pending_decrypts_cache import PendingDecryptsCache
     from ....services.space_crypto_service import SpaceContentEncryption
@@ -232,14 +232,14 @@ class _Stream:
     """One stream's tally (module-local)."""
 
     __slots__ = (
-        "plain",
-        "opaque",
-        "indices",
+        "archived",
         "failed",
         "held",
-        "persist_failed",
+        "indices",
+        "opaque",
         "pending",
-        "archived",
+        "persist_failed",
+        "plain",
     )
 
     def __init__(self) -> None:
@@ -284,7 +284,7 @@ class StreamHealth:
     that persist may yet fail.
     """
 
-    __slots__ = ("_streams", "_finished")
+    __slots__ = ("_finished", "_streams")
 
     def __init__(self) -> None:
         self._streams: OrderedDict[str, _Stream] = OrderedDict()
@@ -460,10 +460,10 @@ class ChatSyncSink(Protocol):
 def _parse_iso(value: Any) -> datetime:
     if isinstance(value, str) and value:
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return datetime.fromisoformat(value)
         except ValueError:
             pass
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _sync_event(space_id: str, resource: str, provider: str) -> FederationEvent:
@@ -485,62 +485,62 @@ class SpaceSyncReceiver:
     """Persist inbound space-sync chunks."""
 
     __slots__ = (
-        "_bus",
-        "_encoder",
-        "_crypto",
-        "_federation_repo",
-        "_space_repo",
-        "_space_post_repo",
-        "_space_task_repo",
-        "_page_repo",
-        "_sticky_repo",
-        "_space_calendar_repo",
-        "_gallery_repo",
-        "_zone_repo",
-        "_bazaar_repo",
-        "_profile_picture_repo",
-        "_poll_repo",
-        "_pending_decrypts",
+        "_applied_seqs",
         "_authorship",
+        "_bazaar_repo",
+        "_bus",
+        "_chat_sink",
+        "_crypto",
+        "_encoder",
+        "_federation_repo",
+        "_foreign_system_albums",
+        "_gallery_repo",
+        "_health",
+        "_legacy_album_deletes",
         "_media_dir",
         "_media_refs",
-        "_legacy_album_deletes",
-        "_timetable_repo",
         "_page_conflicts",
-        "_chat_sink",
-        "_health",
-        "_streaks",
-        "_foreign_system_albums",
-        "_applied_seqs",
+        "_page_repo",
         "_peer_version",
+        "_pending_decrypts",
+        "_poll_repo",
+        "_profile_picture_repo",
+        "_space_calendar_repo",
+        "_space_post_repo",
+        "_space_repo",
+        "_space_task_repo",
+        "_sticky_repo",
+        "_streaks",
+        "_timetable_repo",
+        "_zone_repo",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        encoder: "FederationEncoder",
-        crypto: "SpaceContentEncryption",
-        federation_repo: "AbstractFederationRepo",
-        space_repo: "AbstractSpaceRepo",
-        space_post_repo: "AbstractSpacePostRepo",
-        space_task_repo: "AbstractSpaceTaskRepo",
-        page_repo: "AbstractPageRepo",
-        sticky_repo: "AbstractStickyRepo",
-        space_calendar_repo: "AbstractSpaceCalendarRepo",
-        gallery_repo: "AbstractGalleryRepo",
-        zone_repo: "AbstractSpaceZoneRepo | None" = None,
-        bazaar_repo: "AbstractBazaarRepo | None" = None,
-        profile_picture_repo: "AbstractProfilePictureRepo | None" = None,
-        poll_repo: "AbstractSpacePollRepo | None" = None,
-        pending_decrypts: "PendingDecryptsCache | None" = None,
-        authorship: "SpaceAuthorship | None" = None,
+        encoder: FederationEncoder,
+        crypto: SpaceContentEncryption,
+        federation_repo: AbstractFederationRepo,
+        space_repo: AbstractSpaceRepo,
+        space_post_repo: AbstractSpacePostRepo,
+        space_task_repo: AbstractSpaceTaskRepo,
+        page_repo: AbstractPageRepo,
+        sticky_repo: AbstractStickyRepo,
+        space_calendar_repo: AbstractSpaceCalendarRepo,
+        gallery_repo: AbstractGalleryRepo,
+        zone_repo: AbstractSpaceZoneRepo | None = None,
+        bazaar_repo: AbstractBazaarRepo | None = None,
+        profile_picture_repo: AbstractProfilePictureRepo | None = None,
+        poll_repo: AbstractSpacePollRepo | None = None,
+        pending_decrypts: PendingDecryptsCache | None = None,
+        authorship: SpaceAuthorship | None = None,
         media_dir: pathlib.Path | None = None,
-        media_refs: "AbstractMediaReferenceRepo | None" = None,
-        legacy_album_deletes: "LegacyAlbumDeletes | None" = None,
-        timetable_repo: "AbstractSpaceTimetableRepo | None" = None,
-        page_conflicts: "PageConflictService | None" = None,
-        applied_seqs: "AbstractSpaceSyncWatermarkRepo | None" = None,
+        media_refs: AbstractMediaReferenceRepo | None = None,
+        legacy_album_deletes: LegacyAlbumDeletes | None = None,
+        timetable_repo: AbstractSpaceTimetableRepo | None = None,
+        page_conflicts: PageConflictService | None = None,
+        applied_seqs: AbstractSpaceSyncWatermarkRepo | None = None,
         peer_version: Callable[[str], Awaitable[int]] | None = None,
     ) -> None:
         self._bus = bus
@@ -558,7 +558,7 @@ class SpaceSyncReceiver:
         #: v_55 — where ``chat_messages`` records go: the space-chat inbound
         #: handlers, which run each through the live create rule. ``None``
         #: drops the resource (see :meth:`attach_chat_sink`).
-        self._chat_sink: "ChatSyncSink | None" = None
+        self._chat_sink: ChatSyncSink | None = None
         self._health = StreamHealth()
         self._streaks = HeldBackStreaks()
         #: Ids of other households' system albums seen in a stream — never
@@ -601,7 +601,7 @@ class SpaceSyncReceiver:
         #: chunks log + drop (legacy behaviour).
         self._pending_decrypts = pending_decrypts
 
-    def attach_chat_sink(self, sink: "ChatSyncSink") -> None:
+    def attach_chat_sink(self, sink: ChatSyncSink) -> None:
         """Wire where streamed space-chat messages (v_55) are applied."""
         self._chat_sink = sink
 
@@ -868,6 +868,7 @@ class SpaceSyncReceiver:
                     epoch,
                     sync_id,
                     resource,
+                    exc_info=True,
                 )
 
                 async def _redeliver() -> None:
@@ -908,7 +909,11 @@ class SpaceSyncReceiver:
         except Exception as exc:
             if resource not in ALLOWED_RESOURCES:
                 self._health.opaque(sync_id)
-                log.debug("unknown resource %r in sync chunk (opaque)", resource)
+                log.debug(
+                    "unknown resource %r in sync chunk (opaque)",
+                    resource,
+                    exc_info=True,
+                )
                 return
             self._health.failed(sync_id)
             log.warning("sync chunk plaintext parse failed: %s", exc)
@@ -979,7 +984,7 @@ class SpaceSyncReceiver:
         records: list[dict[str, Any]],
         *,
         provider: str,
-    ) -> "HeldBack":
+    ) -> HeldBack:
         """:meth:`_dispatch`, with what was held back or failed."""
         if not isinstance(records, list):
             records = []
@@ -1179,7 +1184,7 @@ class SpaceSyncReceiver:
         records: list[dict[str, Any]],
         *,
         provider: str,
-        held_back: "HeldBack",
+        held_back: HeldBack,
     ) -> None:
         """Persist admitted records of ``resource``. A record that cannot
         land only for now is counted in ``held_back``."""
@@ -1485,9 +1490,10 @@ class SpaceSyncReceiver:
                         r, space_id, from_host=from_host, held_back=held_back
                     ):
                         recount.add(str(r["id"]))
-                elif kind == "item":
-                    if await self._persist_gallery_item(r, space_id, held_back):
-                        recount.add(str(r.get("album_id") or ""))
+                elif kind == "item" and await self._persist_gallery_item(
+                    r, space_id, held_back
+                ):
+                    recount.add(str(r.get("album_id") or ""))
             # The album's count is what this household holds — the provider's
             # figure counts the provider's rows, and a sync item lands without
             # a bump — so it is recounted, whatever order the album record,
@@ -1539,6 +1545,7 @@ class SpaceSyncReceiver:
                         "schedule catch-up create failed for post=%s: %s",
                         post_id,
                         exc,
+                        exc_info=True,
                     )
         elif resource == "space_zones_deleted":
             await self._persist_zone_tombstones(records, space_id, provider=provider)
@@ -1608,6 +1615,7 @@ class SpaceSyncReceiver:
                             "bazaar catch-up save_listing failed for post_id=%s: %s",
                             listing.post_id,
                             exc,
+                            exc_info=True,
                         )
 
         elif resource == "timetables":
@@ -2558,7 +2566,7 @@ class SpaceSyncReceiver:
         records: list[dict[str, Any]],
         *,
         provider: str,
-        held_back: "HeldBack",
+        held_back: HeldBack,
     ) -> list[dict[str, Any]]:
         """The records of this chunk the ``provider`` may write here.
 
@@ -2637,7 +2645,7 @@ class SpaceSyncReceiver:
         space_id: str,
         r: dict[str, Any],
         event: FederationEvent,
-        held_back: "HeldBack",
+        held_back: HeldBack,
     ) -> bool:
         """The live-event rules for one record: its authorship, then — for
         the access-levelled features — the space's level for its creator
@@ -2666,7 +2674,7 @@ class SpaceSyncReceiver:
         space_id: str,
         r: dict[str, Any],
         event: FederationEvent,
-        held_back: "HeldBack",
+        held_back: HeldBack,
     ) -> bool:
         auth = self._authorship
         assert auth is not None
@@ -2985,7 +2993,7 @@ class SpaceSyncReceiver:
 
     async def _may_author(
         self,
-        held_back: "HeldBack",
+        held_back: HeldBack,
         event: FederationEvent,
         space_id: str,
         user_id: str,
@@ -3587,7 +3595,7 @@ def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent 
 def _bazaar_listing_from_record(
     r: dict[str, Any],
     space_id: str,
-) -> "BazaarListing | None":
+) -> BazaarListing | None:
     """Reconstruct a :class:`BazaarListing` from an exporter chunk record.
 
     Lenient: missing required fields or unknown mode/status → log + skip
@@ -3646,6 +3654,7 @@ def _timetable_from_record(r: dict[str, Any], space_id: str) -> Timetable | None
             "space sync: unusable timetable record for %s — skipped: %.200s",
             space_id,
             exc,
+            exc_info=True,
         )
         return None
     if tt.assignees:

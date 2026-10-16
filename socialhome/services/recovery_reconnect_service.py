@@ -16,15 +16,15 @@ base is configured — retries.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from .backup_service import BACKUP_RESTORED_AT_KEY
 from .recovery_kit_service import RECOVERED_AT_KEY
 
 if TYPE_CHECKING:
-    from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
     from ..platform.adapter import PlatformAdapter
+    from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
     from .space_authority_rotation_service import SpaceAuthorityRotationService
     from .url_update_outbound import UrlUpdateOutbound
 
@@ -41,13 +41,13 @@ AUTHORITY_ROTATED_FOR_KEY = "authority.rotated_after_restore"
 class RecoveryReconnectService:
     """One-shot post-restore peer reconnect (see module docstring)."""
 
-    __slots__ = ("_instance_config", "_url_update", "_adapter")
+    __slots__ = ("_adapter", "_instance_config", "_url_update")
 
     def __init__(
         self,
-        instance_config: "AbstractInstanceConfigRepo",
-        url_update: "UrlUpdateOutbound",
-        adapter: "PlatformAdapter",
+        instance_config: AbstractInstanceConfigRepo,
+        url_update: UrlUpdateOutbound,
+        adapter: PlatformAdapter,
     ) -> None:
         self._instance_config = instance_config
         self._url_update = url_update
@@ -95,11 +95,11 @@ class RecoveryReconnectService:
             )
             # URL_UPDATED is enqueued durably per peer; mark done so we don't
             # re-fan every boot. The outbox retries delivery.
-        await self._set(RECONNECTED_AT_KEY, datetime.now(timezone.utc).isoformat())
+        await self._set(RECONNECTED_AT_KEY, datetime.now(UTC).isoformat())
         return True
 
     async def maybe_rotate_space_authority(
-        self, rotation: "SpaceAuthorityRotationService"
+        self, rotation: SpaceAuthorityRotationService
     ) -> int:
         """Once per restore, rotate every hosted space's authority key (v_44).
 

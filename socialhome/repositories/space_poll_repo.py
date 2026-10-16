@@ -20,7 +20,7 @@ local :class:`PollService`, whose routes authorise the caller first.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -451,7 +451,7 @@ class SqliteSpacePollRepo:
                 slot_id,
                 user_id,
                 response,
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
             ),
         )
 
@@ -603,7 +603,7 @@ class SqliteSpacePollRepo:
                 slot_id,
                 user_id,
                 response,
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
                 slot_id,
                 space_id,
             ),

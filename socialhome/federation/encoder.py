@@ -180,7 +180,7 @@ class FederationEncoder:
         """Ed25519 verify ``signature`` over ``envelope_bytes`` with ``public_key``."""
         try:
             sig_bytes = b64url_decode(signature)
-        except Exception:
+        except ValueError, TypeError:
             return False
         return verify_ed25519(public_key, envelope_bytes, sig_bytes)
 
@@ -215,7 +215,7 @@ class FederationEncoder:
             sig_b64 = signatures[algo]
             try:
                 sig_bytes = b64url_decode(sig_b64)
-            except Exception:
+            except ValueError, TypeError:
                 return False
             if algo == "ed25519":
                 if not verify_ed25519(ed_public_key, envelope_bytes, sig_bytes):

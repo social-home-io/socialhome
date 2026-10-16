@@ -21,7 +21,7 @@ import base64
 import io
 import pathlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from PIL import Image
@@ -34,7 +34,6 @@ from socialhome.domain.federation import (
 )
 from socialhome.repositories.dm_media_outbox_repo import DmMediaOutboxEntry
 from socialhome.services.dm_media_sync_service import DmMediaSyncService
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -64,7 +63,7 @@ class FakeOutboxRepo:
 
     async def enqueue(self, *, blob_id, message_id, target_instance_id, bytes_path):
         key = (blob_id, target_instance_id)
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
         self.rows.setdefault(
             key,
             _Row(
@@ -81,7 +80,7 @@ class FakeOutboxRepo:
         # ``next_attempt_at`` is in the past are due. Empty / default
         # timestamps read as "way past" so freshly-enqueued rows
         # surface immediately.
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
         return [
             DmMediaOutboxEntry(
                 blob_id=r.blob_id,
@@ -136,7 +135,7 @@ class FakeOutboxRepo:
 
     async def reclaim_in_flight(self):
         n = 0
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
         for r in self.rows.values():
             if r.status == "in_flight":
                 r.status = "pending"
@@ -264,7 +263,7 @@ def stack(tmp_path):
         mime_type="image/webp",
         file_size_bytes=4321,
         media_blob_id="m1",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     return {
         "svc": svc,
@@ -303,8 +302,9 @@ async def test_build_preview_video_extracts_first_frame(stack, tmp_path):
     output should be a WebP under the inline-envelope budget so the
     receiver can render a recognisable poster immediately.
     """
-    import av
     import io
+
+    import av
 
     # 3 frames of 320×240 solid colour @ 25 fps — that's about 0.12 s
     # of footage, plenty for ``generate_thumbnail`` to land the first
@@ -675,7 +675,7 @@ async def test_flush_once_chunks_large_files(stack):
         mime_type="application/octet-stream",
         file_size_bytes=target_size,
         media_blob_id="m-big",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     await stack["svc"].enqueue_for_message(
         message_id="m-big",

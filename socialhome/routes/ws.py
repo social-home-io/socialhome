@@ -26,10 +26,10 @@ Anything else is ignored — outbound is the primary direction.
 from __future__ import annotations
 
 import asyncio
-import orjson
 import logging
 from urllib.parse import urlparse
 
+import orjson
 from aiohttp import WSMsgType, web
 
 from .. import app_keys as K
@@ -139,7 +139,7 @@ class WebSocketView(BaseView):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.warning("ws loop error for %s: %s", ctx.user_id, exc)
+            log.warning("ws loop error for %s: %s", ctx.user_id, exc, exc_info=True)
         finally:
             await manager.unregister(ctx.user_id, ws)
             if online_svc is not None:
@@ -206,4 +206,4 @@ class WebSocketView(BaseView):
                         sender_username=ctx.username,
                     )
             except Exception as exc:  # defensive
-                log.debug("typing dispatch failed: %s", exc)
+                log.debug("typing dispatch failed: %s", exc, exc_info=True)

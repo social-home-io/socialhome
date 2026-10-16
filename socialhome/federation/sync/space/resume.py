@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ....domain.federation import FederationEventType
@@ -56,13 +56,13 @@ from ....domain.federation_capabilities import FederationCapability
 from ....domain.link_preview import link_preview_to_dict
 from ....domain.page import page_tombstone_to_wire_dict
 from ....domain.page_version import version_hash
-from ....services.page_conflict_service import side_to_wire
 from ....domain.task import (
     task_list_to_wire_dict,
     task_list_tombstone_to_wire_dict,
     task_to_wire_dict,
     task_tombstone_to_wire_dict,
 )
+from ....services.page_conflict_service import side_to_wire
 
 if TYPE_CHECKING:
     from ....domain.calendar import CalendarEvent
@@ -108,26 +108,26 @@ class SpaceSyncResumeProvider:
 
     __slots__ = (
         "_federation",
-        "_space_repo",
-        "_space_post_repo",
-        "_space_task_repo",
-        "_page_repo",
-        "_sticky_repo",
-        "_space_calendar_repo",
         "_gallery_repo",
+        "_page_repo",
+        "_space_calendar_repo",
+        "_space_post_repo",
+        "_space_repo",
+        "_space_task_repo",
+        "_sticky_repo",
     )
 
     def __init__(
         self,
         *,
-        federation_service: "FederationService",
-        space_repo: "AbstractSpaceRepo",
-        space_post_repo: "AbstractSpacePostRepo",
-        space_task_repo: "AbstractSpaceTaskRepo | None" = None,
-        page_repo: "AbstractPageRepo | None" = None,
-        sticky_repo: "AbstractStickyRepo | None" = None,
-        space_calendar_repo: "AbstractSpaceCalendarRepo | None" = None,
-        gallery_repo: "AbstractGalleryRepo | None" = None,
+        federation_service: FederationService,
+        space_repo: AbstractSpaceRepo,
+        space_post_repo: AbstractSpacePostRepo,
+        space_task_repo: AbstractSpaceTaskRepo | None = None,
+        page_repo: AbstractPageRepo | None = None,
+        sticky_repo: AbstractStickyRepo | None = None,
+        space_calendar_repo: AbstractSpaceCalendarRepo | None = None,
+        gallery_repo: AbstractGalleryRepo | None = None,
     ) -> None:
         self._federation = federation_service
         self._space_repo = space_repo
@@ -165,7 +165,7 @@ class SpaceSyncResumeProvider:
 
     # ── Inbound (provider side) ───────────────────────────────────────
 
-    async def handle_request(self, event: "FederationEvent") -> int:
+    async def handle_request(self, event: FederationEvent) -> int:
         """Replay missed events for one (space, peer) pair.
 
         Returns the total number of events sent across every resource
@@ -184,7 +184,7 @@ class SpaceSyncResumeProvider:
         # Validate ISO-8601 — reject malformed input rather than letting
         # the SQL ``> ?`` comparison silently match nothing.
         try:
-            datetime.fromisoformat(since.replace("Z", "+00:00"))
+            datetime.fromisoformat(since)
         except ValueError:
             log.debug(
                 "SPACE_SYNC_RESUME from %s: bad 'since' %r — dropping",
@@ -303,6 +303,7 @@ class SpaceSyncResumeProvider:
                     "SPACE_SYNC_RESUME comment replay to %s failed: %s",
                     to,
                     exc,
+                    exc_info=True,
                 )
         return sent
 
@@ -631,6 +632,7 @@ class SpaceSyncResumeProvider:
                     event_type,
                     to,
                     exc,
+                    exc_info=True,
                 )
         return sent
 
@@ -638,7 +640,7 @@ class SpaceSyncResumeProvider:
 # ─── Payload shapers ─────────────────────────────────────────────────────
 
 
-def _post_to_payload(post: "Post") -> dict:
+def _post_to_payload(post: Post) -> dict:
     payload: dict = {
         "id": post.id,
         "author": post.author,
@@ -661,7 +663,7 @@ def _post_to_payload(post: "Post") -> dict:
     return payload
 
 
-def _comment_to_payload(post_id: str, comment: "Comment") -> dict:
+def _comment_to_payload(post_id: str, comment: Comment) -> dict:
     return {
         "post_id": post_id,
         "comment_id": comment.id,
@@ -674,7 +676,7 @@ def _comment_to_payload(post_id: str, comment: "Comment") -> dict:
     }
 
 
-def _page_to_payload(page: "Page") -> dict:
+def _page_to_payload(page: Page) -> dict:
     return {
         "id": page.id,
         "title": page.title,
@@ -686,7 +688,7 @@ def _page_to_payload(page: "Page") -> dict:
     }
 
 
-def _sticky_to_payload(sticky: "Sticky") -> dict:
+def _sticky_to_payload(sticky: Sticky) -> dict:
     return {
         "id": sticky.id,
         "author": sticky.author,
@@ -699,7 +701,7 @@ def _sticky_to_payload(sticky: "Sticky") -> dict:
     }
 
 
-def _calendar_to_payload(event: "CalendarEvent") -> dict:
+def _calendar_to_payload(event: CalendarEvent) -> dict:
     return {
         "id": event.id,
         "calendar_id": event.calendar_id,
@@ -715,12 +717,12 @@ def _calendar_to_payload(event: "CalendarEvent") -> dict:
     }
 
 
-def _gallery_album_to_payload(album: "GalleryAlbum") -> dict:
+def _gallery_album_to_payload(album: GalleryAlbum) -> dict:
     """Same shape as the live ``GalleryFederationOutbound`` album push."""
     return album.to_federation_dict()
 
 
-def _gallery_item_to_payload(item: "GalleryItem") -> dict:
+def _gallery_item_to_payload(item: GalleryItem) -> dict:
     """Same shape as the live ``GalleryFederationOutbound`` item push —
     ``GalleryItem.to_federation_dict`` (thumbnail projection + full ``url``)."""
     return item.to_federation_dict()
@@ -729,7 +731,7 @@ def _gallery_item_to_payload(item: "GalleryItem") -> dict:
 def _iso(value) -> str:
     """ISO-format helper that tolerates ``datetime`` and ``str`` inputs."""
     if value is None:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
@@ -742,11 +744,11 @@ def _changed_since(value: str | None, since: str) -> bool:
         return False
     try:
         a = datetime.fromisoformat(value)
-        b = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        b = datetime.fromisoformat(since)
     except ValueError:
         return True
     if a.tzinfo is None:
-        a = a.replace(tzinfo=timezone.utc)
+        a = a.replace(tzinfo=UTC)
     if b.tzinfo is None:
-        b = b.replace(tzinfo=timezone.utc)
+        b = b.replace(tzinfo=UTC)
     return a > b

@@ -48,7 +48,6 @@ from socialhome.services.space_crypto_service import (
     strip_authority_sig_fields,
 )
 
-
 OWNER = "owner-instance"
 RELAY = "some-relay-instance"
 ADMIN = "delegated-admin-instance"

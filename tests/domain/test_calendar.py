@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -55,7 +55,7 @@ def test_calendar_is_frozen():
 
 def test_calendar_event_construction():
     """CalendarEvent can be constructed with required fields and defaults."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     evt = CalendarEvent(
         id="evt-1",
         calendar_id="cal-1",
@@ -74,7 +74,7 @@ def test_calendar_event_construction():
 
 def test_calendar_event_with_optional_fields():
     """CalendarEvent accepts optional fields like description, attendees, mirrored_from."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     evt = CalendarEvent(
         id="evt-2",
         calendar_id="cal-1",
@@ -94,7 +94,7 @@ def test_calendar_event_with_optional_fields():
 
 def test_calendar_event_create_defaults():
     """CalendarEventCreate has sensible defaults for optional fields."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     create = CalendarEventCreate(summary="New", start=now, end=now)
     assert create.all_day is False
     assert create.description is None
@@ -114,7 +114,7 @@ def test_calendar_event_update_all_none():
 
 def test_calendar_event_update_partial():
     """CalendarEventUpdate carries only the fields provided."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     update = CalendarEventUpdate(summary="Updated", start=now)
     assert update.summary == "Updated"
     assert update.start == now

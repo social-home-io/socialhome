@@ -10,7 +10,6 @@ from socialhome.peer_url import (
     validate_peer_url,
 )
 
-
 # ── is_private_host ──
 
 

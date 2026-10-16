@@ -22,7 +22,7 @@ import base64
 import logging
 import re
 import uuid
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from typing import Any
 
 from icalendar import Calendar
@@ -79,7 +79,7 @@ class AICalendarImportParseError(AICalendarImportError):
 class CalendarImportService:
     """Turn files / photos / prompts into draft calendar events."""
 
-    __slots__ = ("_adapter", "_max_image_bytes", "_max_ics_bytes")
+    __slots__ = ("_adapter", "_max_ics_bytes", "_max_image_bytes")
 
     def __init__(
         self,
@@ -310,7 +310,7 @@ def _recurrence_id_text(field: Any) -> str | None:
         return None
     value = field.dt
     if isinstance(value, datetime):
-        return _as_datetime(value).astimezone(timezone.utc).isoformat()
+        return _as_datetime(value).astimezone(UTC).isoformat()
     return value.isoformat()
 
 
@@ -323,5 +323,5 @@ def _as_datetime(value: date | datetime) -> datetime:
     deliberately: the client derives the last inclusive moment from it.
     """
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    return datetime.combine(value, time.min, tzinfo=timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    return datetime.combine(value, time.min, tzinfo=UTC)

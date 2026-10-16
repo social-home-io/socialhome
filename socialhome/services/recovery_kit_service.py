@@ -39,7 +39,7 @@ import asyncio
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiofiles
@@ -80,7 +80,7 @@ class RecoveryRestoreError(RuntimeError):
 class RecoveryKitService:
     """Build and restore passphrase-sealed trust-layer Recovery Kits."""
 
-    __slots__ = ("_db", "_data_dir")
+    __slots__ = ("_data_dir", "_db")
 
     def __init__(self, db: AsyncDatabase, data_dir: str | Path) -> None:
         self._db = db
@@ -121,7 +121,7 @@ class RecoveryKitService:
         payload = orjson.dumps(
             {"kek_salt": b64url_encode(salt), "tables": tables},
         )
-        created_at_now = datetime.now(timezone.utc).isoformat()
+        created_at_now = datetime.now(UTC).isoformat()
         return seal_kit(
             payload, passphrase, instance_id=instance_id, created_at=created_at_now
         )
@@ -169,7 +169,7 @@ class RecoveryKitService:
         await self._db.enqueue(
             "INSERT INTO instance_config(key,value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (RECOVERED_AT_KEY, datetime.now(timezone.utc).isoformat()),
+            (RECOVERED_AT_KEY, datetime.now(UTC).isoformat()),
         )
 
         if self_row is not None and self_row.get("instance_id"):

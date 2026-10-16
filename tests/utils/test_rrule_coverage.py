@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from socialhome.utils.rrule import _parse_until, expand_rrule, parse_rrule
 
 
 def _dt(y, m, d, h=0, mi=0) -> datetime:
-    return datetime(y, m, d, h, mi, tzinfo=timezone.utc)
+    return datetime(y, m, d, h, mi, tzinfo=UTC)
 
 
 # ── _parse_until ──────────────────────────────────────────────────────

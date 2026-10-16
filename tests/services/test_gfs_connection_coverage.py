@@ -22,7 +22,6 @@ from socialhome.services.gfs_connection_service import (
     GfsConnectionService,
 )
 
-
 # ─── stubs (same shape as test_gfs_connection_service) ──────────────────
 
 
@@ -42,7 +41,7 @@ class _Content:
 
 
 class _StubResp:
-    __slots__ = ("status", "_body", "_text", "content", "content_length")
+    __slots__ = ("_body", "_text", "content", "content_length", "status")
 
     def __init__(self, status: int, body: dict | None = None, text: str = ""):
         self.status = status

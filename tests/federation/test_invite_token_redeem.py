@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -34,6 +34,7 @@ from socialhome.crypto import (
     generate_x25519_keypair,
     sign_ed25519,
 )
+from socialhome.domain.events import SpaceRemoteSeatLive
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -51,7 +52,7 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
-from socialhome.domain.events import SpaceRemoteSeatLive
+from socialhome.domain.writer_cert import WRITER_SCOPE_WRITE
 from socialhome.federation import invite_token_redeem as itr
 from socialhome.federation.invite_bootstrap import (
     KIND_REDEEM,
@@ -62,22 +63,20 @@ from socialhome.federation.invite_bootstrap import (
 )
 from socialhome.federation.invite_token_redeem import (
     BOOTSTRAP_DENY_CLIENT_MESSAGE,
-    BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE,
-    REDEEM_DENY_REASON,
     BOOTSTRAP_INBOUND_LIMIT,
     BOOTSTRAP_INBOUND_WINDOW_S,
     BOOTSTRAP_PER_SENDER_LIMIT,
     BOOTSTRAP_PER_SENDER_WINDOW_S,
+    BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE,
+    REDEEM_DENY_REASON,
     SEATABLE_REMOTE_ROLES,
     SpaceInviteTokenRedeemCoordinator,
 )
 from socialhome.federation.keywrap_seal import seal_to_keywrap
-from socialhome.domain.writer_cert import WRITER_SCOPE_WRITE
 from socialhome.rate_limiter import RateLimiter
-from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
+from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
-
 
 # ── Test doubles ──────────────────────────────────────────────────────
 
@@ -737,7 +736,7 @@ async def test_redeem_with_expired_token_sends_deny():
     """An issuer-side ``consume_invite_token`` miss → DENY with a
     user-visible reason → receiver's Future raises
     ``SpacePermissionError`` carrying that reason."""
-    sender, _issuer, _sf, _if, issuer_repo, issuer_members = _wire_pair(
+    sender, _issuer, _sf, _if, _issuer_repo, issuer_members = _wire_pair(
         {
             "space_id": "sp-3",
             "created_by": "owner",
@@ -1879,7 +1878,7 @@ async def test_bootstrap_spoofed_identity_is_rejected():
         "invite_token": "tok-1",
         "space_id": "space-1",
         "redeem_nonce": "n" * 32,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "instance_id": victim.instance_id,  # not ours
         "identity_pk": env.redeemer_party.identity_pk.hex(),
         "keywrap_pk": env.redeemer_party.keywrap_pub.hex(),
@@ -1913,7 +1912,7 @@ async def test_bootstrap_unbound_keywrap_key_is_rejected():
         "invite_token": "tok-1",
         "space_id": "space-1",
         "redeem_nonce": "n" * 32,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "instance_id": env.redeemer_party.instance_id,
         "identity_pk": env.redeemer_party.identity_pk.hex(),
         "keywrap_pk": attacker_kw.public_key.hex(),
@@ -1950,7 +1949,7 @@ async def test_bootstrap_reply_from_another_household_is_dropped():
         "redeem_nonce": "n1",
         "space_id": "space-1",
         "role": "member",
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "instance_id": imposter.instance_id,
         "identity_pk": imposter.identity_pk.hex(),
         "keywrap_pk": imposter.keywrap_pub.hex(),
@@ -2098,7 +2097,7 @@ async def test_bootstrap_inbound_is_rate_limited_per_sender():
             "invite_token": "tok-1",
             "space_id": "space-1",
             "redeem_nonce": "n" * 32,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "instance_id": env.redeemer_party.instance_id,
             "identity_pk": env.redeemer_party.identity_pk.hex(),
             "keywrap_pk": env.redeemer_party.keywrap_pub.hex(),
@@ -3035,7 +3034,7 @@ def _internal_pair(
             "via": "internal",
         },
     )
-    issuer._federation_repo = _FakeFederationRepo(  # noqa: SLF001
+    issuer._federation_repo = _FakeFederationRepo(
         {"sender-1": _FakeInstance("sender-1", source=sender_source)}
     )
     issuer_repo.space_rows_for_get["sp-1"] = replace(
@@ -3048,7 +3047,7 @@ def _internal_pair(
 
 
 async def test_an_internal_link_redeems_for_a_paired_household():
-    sender, issuer_repo, issuer_members = _internal_pair(
+    sender, _issuer_repo, issuer_members = _internal_pair(
         sender_source=InstanceSource.MANUAL, private_gfs=False
     )
     result = await sender.request_redeem(
@@ -3137,7 +3136,7 @@ async def test_a_grandfathered_link_redeemed_directly_does_not_turn_it_on():
 
 
 def _moderator_pair():
-    sender, issuer, sender_fed, issuer_fed, repo, members = _wire_pair(
+    sender, issuer, _sender_fed, issuer_fed, repo, members = _wire_pair(
         {
             "space_id": "sp-mod",
             "created_by": "owner",

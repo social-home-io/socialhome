@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -16,11 +16,11 @@ from socialhome.domain.preferences import FeatureDisabledError, HouseholdPrefere
 from socialhome.domain.space import (
     JoinMode,
     Space,
-    SpaceType,
     SpaceArchivedError,
     SpaceFeatures,
     SpaceMember,
     SpaceRole,
+    SpaceType,
 )
 from socialhome.domain.user import User
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
@@ -54,7 +54,7 @@ def _chat(scope: SystemChatScope | None = SystemChatScope.HOUSEHOLD) -> Conversa
     return Conversation(
         id="hh",
         type=ConversationType.GROUP_DM,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         system_scope=scope,
         space_id="sp" if scope is SystemChatScope.SPACE else None,
     )

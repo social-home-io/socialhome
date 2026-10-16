@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from socialhome.db.database import AsyncDatabase
-from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
-from socialhome.repositories.federation_repo import SqliteFederationRepo
-from socialhome.services.dm_routing_service import DmRoutingService
 from socialhome.infrastructure.dm_relay_seen_scheduler import (
     DmRelaySeenPruneScheduler,
 )
+from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
+from socialhome.repositories.federation_repo import SqliteFederationRepo
+from socialhome.services.dm_routing_service import DmRoutingService
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ async def test_prune_once_deletes_old_rows(env):
     await db.enqueue(
         "INSERT INTO dm_relay_seen(msg_id, seen_at) VALUES('fresh', datetime('now'))",
     )
-    stale_iso = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    stale_iso = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     await db.enqueue(
         "INSERT INTO dm_relay_seen(msg_id, seen_at) VALUES('stale', ?)",
         (stale_iso,),

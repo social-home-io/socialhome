@@ -48,20 +48,20 @@ class DmHistoryProvider(VisibilityMixin):
     """
 
     __slots__ = (
-        "_conversation_repo",
-        "_federation",
         "_acks",
-        "_user_repo",
+        "_conversation_repo",
         "_dm_scope",
+        "_federation",
+        "_user_repo",
     )
 
     def __init__(
         self,
         *,
-        conversation_repo: "AbstractConversationRepo",
-        federation_service: "FederationService",
-        user_repo: "AbstractUserRepo",
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
+        conversation_repo: AbstractConversationRepo,
+        federation_service: FederationService,
+        user_repo: AbstractUserRepo,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
     ) -> None:
         self._conversation_repo = conversation_repo
         self._federation = federation_service
@@ -74,7 +74,7 @@ class DmHistoryProvider(VisibilityMixin):
         # (from_instance, conversation_id) → highest chunk_index ack'd.
         self._acks: dict[tuple[str, str], int] = {}
 
-    async def handle_ack(self, event: "FederationEvent") -> None:
+    async def handle_ack(self, event: FederationEvent) -> None:
         """Record a DM_HISTORY_CHUNK_ACK receipt (spec §12)."""
         payload = event.payload or {}
         conversation_id = str(payload.get("conversation_id") or "")
@@ -95,7 +95,7 @@ class DmHistoryProvider(VisibilityMixin):
     ) -> int:
         return self._acks.get((from_instance, conversation_id), -1)
 
-    async def handle_request(self, event: "FederationEvent") -> int:
+    async def handle_request(self, event: FederationEvent) -> int:
         """Stream messages newer than ``since`` for one conversation.
 
         Returns the number of chunks sent (including the empty one that

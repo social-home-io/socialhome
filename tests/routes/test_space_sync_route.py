@@ -8,6 +8,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from socialhome.app import create_app
 from socialhome.app_keys import (
     db_key as _db_key,
+)
+from socialhome.app_keys import (
     federation_repo_key,
 )
 from socialhome.auth import sha256_token_hash

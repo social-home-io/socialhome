@@ -165,12 +165,14 @@ async def test_the_contextvar_is_reset_when_the_pipeline_rejects(keys, caplog):
     repo = _GfsRepo([_conn("gfs-1", "https://gfs.example.org")])
     inbound = _inbound(keys, federation=fed, repo=repo)
 
-    with caplog.at_level(logging.INFO):
-        with pytest.raises(ValueError, match="signature"):
-            await inbound.handle_frame(
-                _envelope_frame(keys),
-                gfs_url="https://gfs.example.org",
-            )
+    with (
+        caplog.at_level(logging.INFO),
+        pytest.raises(ValueError, match="signature"),
+    ):
+        await inbound.handle_frame(
+            _envelope_frame(keys),
+            gfs_url="https://gfs.example.org",
+        )
 
     assert fed.seen_via == ["gfs-1"]
     assert RELAY_DELIVERED_VIA.get() is None
@@ -418,12 +420,14 @@ async def test_a_rejected_pairing_body_resets_the_contextvar(keys, caplog):
         federation=federation,
         repo=_GfsRepo([_conn("own-g", "https://g.example")]),
     )
-    with caplog.at_level(logging.INFO, logger="socialhome.services.gfs_relay_inbound"):
-        with pytest.raises(ValueError, match="No pending pairing"):
-            await inbound.handle_frame(
-                _pairing_frame(keys, "pairing_peer_confirm"),
-                gfs_url="https://g.example",
-            )
+    with (
+        caplog.at_level(logging.INFO, logger="socialhome.services.gfs_relay_inbound"),
+        pytest.raises(ValueError, match="No pending pairing"),
+    ):
+        await inbound.handle_frame(
+            _pairing_frame(keys, "pairing_peer_confirm"),
+            gfs_url="https://g.example",
+        )
     assert RELAY_DELIVERED_VIA.get() is None
     assert "pairing_peer_confirm" in caplog.text
     assert '"t"' not in caplog.text  # never the body

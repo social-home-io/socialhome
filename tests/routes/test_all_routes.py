@@ -4,7 +4,8 @@ Uses aiohttp_client (pytest-aiohttp) for speed. One client fixture
 covers all route modules in a single test session.
 """
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
+
 from .conftest import _auth
 
 
@@ -338,7 +339,7 @@ async def test_calendar_routes(client):
     cid = (await r.json())["id"]
     r = await client.get("/api/calendars", headers=h)
     assert r.status == 200
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         f"/api/calendars/{cid}/events",
         json={

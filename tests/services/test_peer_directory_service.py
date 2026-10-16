@@ -26,19 +26,19 @@ from socialhome.services.peer_directory_service import PeerDirectoryService
 
 
 def _space(**over) -> Space:
-    base = dict(
-        id="sp-1",
-        name="Garden",
-        owner_instance_id="own-inst",
-        owner_username="alice",
-        identity_public_key="aa" * 32,
-        config_sequence=1,
-        features=SpaceFeatures(),
-        space_type=SpaceType.PUBLIC,
-        join_mode=JoinMode.OPEN,
-        description="hi",
-        emoji="🌱",
-    )
+    base = {
+        "id": "sp-1",
+        "name": "Garden",
+        "owner_instance_id": "own-inst",
+        "owner_username": "alice",
+        "identity_public_key": "aa" * 32,
+        "config_sequence": 1,
+        "features": SpaceFeatures(),
+        "space_type": SpaceType.PUBLIC,
+        "join_mode": JoinMode.OPEN,
+        "description": "hi",
+        "emoji": "🌱",
+    }
     base.update(over)
     return Space(**base)
 
@@ -85,7 +85,6 @@ class _FakeFederationService:
 
     async def send_event(self, *, to_instance_id, event_type, payload):
         self.sent.append((to_instance_id, event_type, payload))
-        return None
 
 
 @pytest.fixture

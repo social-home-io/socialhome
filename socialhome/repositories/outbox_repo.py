@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -37,8 +37,7 @@ log = logging.getLogger(__name__)
 
 # Domain dataclass lives in ``socialhome/domain/outbox.py``;
 # re-exported here so existing repo-level imports keep working.
-from ..domain.outbox import OutboxEntry  # noqa: F401,E402
-
+from ..domain.outbox import OutboxEntry
 
 #: Default batch size for :meth:`SqliteOutboxRepo.purge_terminal`. Exported so
 #: the OutboxProcessor's batch-drain loop compares against the SAME value its
@@ -438,7 +437,7 @@ class SqliteOutboxRepo:
             "UPDATE federation_outbox SET next_attempt_at=? "
             "WHERE instance_id=? AND event_type=? AND status='pending' "
             "AND datetime(next_attempt_at) > datetime('now')",
-            (datetime.now(timezone.utc).isoformat(), instance_id, event_type.value),
+            (datetime.now(UTC).isoformat(), instance_id, event_type.value),
         )
         return True
 

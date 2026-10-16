@@ -51,11 +51,12 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from ..domain.errors import WrongTypeError
 from ..domain.federation import (
     ARCHIVED_ALLOWED_REMOVAL_TYPES,
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
@@ -279,9 +280,9 @@ def make_parse_json(*, loads) -> InboundStep:
             "sig_suite",
         ):
             if not isinstance(ctx.envelope[str_field], str):
-                raise ValueError(f"{str_field} must be a string")
+                raise WrongTypeError(f"{str_field} must be a string")
         if not isinstance(ctx.envelope["signatures"], dict):
-            raise ValueError("signatures must be a dict keyed by algorithm")
+            raise WrongTypeError("signatures must be a dict keyed by algorithm")
 
         # Validate event_type early — reject unknown types before burning
         # CPU on instance lookup / crypto. Matches original §24.11 order.
@@ -362,7 +363,7 @@ def make_check_timestamp() -> InboundStep:
         timestamp_str = ctx.envelope["timestamp"]
         try:
             envelope_ts = datetime.fromisoformat(
-                timestamp_str.replace("Z", "+00:00"),
+                timestamp_str,
             )
         except ValueError as exc:
             raise ValueError(f"Unparseable timestamp: {timestamp_str!r}") from exc
@@ -371,7 +372,7 @@ def make_check_timestamp() -> InboundStep:
             if ctx.transport == TRANSPORT_GFS_RELAY
             else TIMESTAMP_SKEW_SECONDS
         )
-        skew = abs((datetime.now(timezone.utc) - envelope_ts).total_seconds())
+        skew = abs((datetime.now(UTC) - envelope_ts).total_seconds())
         if skew > max_skew:
             raise ValueError(f"Timestamp skew too large: {skew:.1f}s (max {max_skew}s)")
 
@@ -500,7 +501,7 @@ def make_check_unpairing(
         if on_refused is not None and sender:
             try:
                 expedited = await on_refused(sender)
-            except Exception:  # noqa: BLE001 — a nudge must never change the verdict
+            except Exception:
                 log.warning(
                     "inbound: could not expedite the UNPAIR to %s",
                     sender,
@@ -553,7 +554,7 @@ def make_confirm_relay_approval(
         sender = getattr(inst, "from_instance", "")
         try:
             await on_contact(sender)
-        except Exception:  # noqa: BLE001 — never change the verdict
+        except Exception:
             log.warning(
                 "inbound: could not confirm the approved pairing with %s",
                 sender,
@@ -628,7 +629,7 @@ def make_check_replay(*, replay_cache) -> InboundStep:
         if replay_cache.seen(
             msg_id,
             from_instance=from_instance,
-            now=datetime.now(timezone.utc),
+            now=datetime.now(UTC),
         ):
             raise ValueError(
                 f"Replay detected: msg_id={msg_id!r} from={from_instance!r}",
@@ -836,6 +837,7 @@ def make_check_deprovisioned_author(*, user_repo) -> InboundStep:
                 "inbound: deprovisioned-author lookup failed for %s: %s",
                 author_user_id,
                 exc,
+                exc_info=True,
             )
             return
         deprovisioned_at = getattr(user, "deprovisioned_at", None) if user else None
@@ -864,8 +866,8 @@ _WRITER_ROLES: frozenset[str] = frozenset(
 
 def make_check_space_archived(
     *,
-    space_repo: "AbstractSpaceRepo",
-    on_refused: "Callable[[FederationEvent, Any], Awaitable[None]] | None" = None,
+    space_repo: AbstractSpaceRepo,
+    on_refused: Callable[[FederationEvent, Any], Awaitable[None]] | None = None,
 ) -> InboundStep:
     """Step 12a: refuse a space-content write into a locally archived space.
 
@@ -921,7 +923,10 @@ def make_check_space_archived(
             space = await space_repo.get(space_id)
         except Exception as exc:
             log.warning(
-                "inbound: archived-space lookup failed for %s: %s", space_id, exc
+                "inbound: archived-space lookup failed for %s: %s",
+                space_id,
+                exc,
+                exc_info=True,
             )
             return
         reason = archive_refusal(space, event.from_instance)
@@ -940,7 +945,9 @@ def make_check_space_archived(
             try:
                 await on_refused(event, space)
             except Exception as exc:  # pragma: no cover — defensive
-                log.warning("inbound: archived-write listener failed: %s", exc)
+                log.warning(
+                    "inbound: archived-write listener failed: %s", exc, exc_info=True
+                )
 
     return check_space_archived
 
@@ -1072,6 +1079,7 @@ def make_check_space_writer(
                 event.from_instance,
                 space_id,
                 exc,
+                exc_info=True,
             )
             return
         live = [s for s in seats if not s.tombstoned]
@@ -1081,29 +1089,34 @@ def make_check_space_writer(
             space_repo, space_id, event.from_instance, seat_repo=remote_member_repo
         ):
             return
-        if not seats and pending is not None:
-            # No row at all for this household: it may simply have joined
-            # before the roster gossip seating it reached us. Hold the write
-            # (bounded, expiring) and replay it through these same gates
-            # when the seat lands — ``FederationService._on_remote_seat_live``.
-            if pending.hold(event, space_id=space_id, instance_id=event.from_instance):
-                log.info(
-                    "inbound: holding %s in space %s from %s — no seat for that "
-                    "household has reached us yet",
-                    event.event_type.value,
-                    space_id,
-                    event.from_instance,
-                )
-                drop(ctx, DROP_HELD_AWAITING_SEAT)
-                return
-        if event.event_type is FederationEventType.SPACE_COMMENT_CREATED:
-            if await _subscriber_comment_allowed(
+        # No row at all for this household: it may simply have joined
+        # before the roster gossip seating it reached us. Hold the write
+        # (bounded, expiring) and replay it through these same gates
+        # when the seat lands — ``FederationService._on_remote_seat_live``.
+        if (
+            not seats
+            and pending is not None
+            and pending.hold(event, space_id=space_id, instance_id=event.from_instance)
+        ):
+            log.info(
+                "inbound: holding %s in space %s from %s — no seat for that "
+                "household has reached us yet",
+                event.event_type.value,
+                space_id,
+                event.from_instance,
+            )
+            drop(ctx, DROP_HELD_AWAITING_SEAT)
+            return
+        if (
+            event.event_type is FederationEventType.SPACE_COMMENT_CREATED
+            and await _subscriber_comment_allowed(
                 space_repo=space_repo,
                 space_id=space_id,
                 live_seats=live,
                 author_user_id=str(payload.get("author") or ""),
-            ):
-                return
+            )
+        ):
+            return
         log.warning(
             "inbound: refused %s in space %s from %s — that household holds "
             "no writer seat here (%d live, %d tombstoned)",
@@ -1132,7 +1145,10 @@ async def _sender_hosts_space(
         return await acts_as_host(space_repo, seat_repo, space, sender)
     except Exception as exc:
         log.warning(
-            "inbound: space-writer host lookup failed for %s: %s", space_id, exc
+            "inbound: space-writer host lookup failed for %s: %s",
+            space_id,
+            exc,
+            exc_info=True,
         )
         return False
 
@@ -1168,6 +1184,7 @@ async def _subscriber_comment_allowed(
             "inbound: space-writer features lookup failed for %s: %s",
             space_id,
             exc,
+            exc_info=True,
         )
         return False
     return bool(space is not None and space.features.allow_subscriber_comment)

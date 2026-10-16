@@ -54,7 +54,7 @@ class TaskFederationOutbound:
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
+        federation_service: FederationService,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -156,6 +156,7 @@ class TaskFederationOutbound:
                 "task-outbound: broadcast failed for space=%s: %s",
                 space_id,
                 exc,
+                exc_info=True,
             )
 
 

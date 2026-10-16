@@ -8,7 +8,7 @@ state transition.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -17,7 +17,7 @@ from .base import dump_json, load_json, row_to_dict, rows_to_dicts
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @runtime_checkable

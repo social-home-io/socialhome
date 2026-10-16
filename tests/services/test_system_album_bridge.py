@@ -11,9 +11,9 @@ mirror diffed; posts deleted → mirror cleared. Uses real
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 import uuid
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 
@@ -94,7 +94,7 @@ def _post(
         id=pid or uuid.uuid4().hex,
         author="a-id",
         type=type_,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content=content,
         image_urls=image_urls,
         media_url=media_url,

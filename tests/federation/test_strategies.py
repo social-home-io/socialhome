@@ -9,7 +9,6 @@ from socialhome.federation.strategies import (
 )
 from socialhome.federation.transport import HttpsInboxTransport
 
-
 # ─── Transport ───────────────────────────────────────────────────────────
 
 

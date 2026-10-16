@@ -36,8 +36,8 @@ from ..app_keys import (
     config_key,
     db_key,
     federation_repo_key,
-    preferences_service_key,
     platform_adapter_key,
+    preferences_service_key,
     recovery_kit_service_key,
     setup_service_key,
 )
@@ -272,7 +272,7 @@ class HaosCompleteSetupView(BaseView):
                 body = await self.request.json()
                 if not isinstance(body, dict):
                     body = {}
-            except Exception:
+            except ValueError:
                 return error_response(400, "BAD_REQUEST", "Invalid JSON body.")
         else:
             body = {}
@@ -330,7 +330,7 @@ class RecoverySetupRestoreView(BaseView):
             )
         try:
             kit_bytes = base64.b64decode(kit_b64, validate=True)
-        except Exception:
+        except ValueError, TypeError:
             return error_response(422, "UNPROCESSABLE", "kit_b64 is not valid base64.")
         svc: RecoveryKitService = self.svc(recovery_kit_service_key)
         # Validate the kit (passphrase + integrity) BEFORE the destructive wipe.

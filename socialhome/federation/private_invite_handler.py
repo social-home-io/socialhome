@@ -25,17 +25,16 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
+from ..crypto import ed25519_public_key
 from ..domain.events import (
-    SpaceAdminAuthorityRevoked,
-    SpaceRemoteSeatLive,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
     RemoteSpaceInviteReceived,
     RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
+    SpaceAdminAuthorityRevoked,
+    SpaceRemoteSeatLive,
 )
-from ..crypto import ed25519_public_key
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.space import (
     WRITER_ROLES,
@@ -57,13 +56,14 @@ from ..services.space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from .host_equivalence import acts_as_host
 from ..services.space_service import (
     SUPPORTED_SEED_SUITES,
-    apply_space_content_key_from_metadata,
     admit_join,
+    apply_space_content_key_from_metadata,
     seal_join_snapshot,
 )
+from .host_equivalence import acts_as_host
+from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
 
 if TYPE_CHECKING:
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
@@ -128,6 +128,7 @@ def _check_roster_sig(
     except UnsupportedAuthoritySuite:
         return _SIG_SUITE
     except Exception:
+        log.debug("_check_roster_sig: fail-soft error ignored", exc_info=True)
         return _SIG_KEY
     return None if verified else _SIG_FORGED
 
@@ -173,27 +174,27 @@ class PrivateSpaceInviteHandler:
     """Inbound dispatcher for the :data:`SPACE_PRIVATE_INVITE*` family."""
 
     __slots__ = (
-        "_bus",
-        "_space_repo",
-        "_remote_members",
-        "_cover_repo",
-        "_icon_repo",
-        "_space_crypto",
-        "_space_service",
         "_approval_service",
-        "_remote_locations",
-        "_own_instance_id",
-        "_writer_certs",
+        "_bus",
+        "_cover_repo",
         "_federation",
+        "_icon_repo",
+        "_own_instance_id",
+        "_remote_locations",
+        "_remote_members",
+        "_space_crypto",
+        "_space_repo",
+        "_space_service",
+        "_writer_certs",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        space_repo: "AbstractSpaceRepo",
-        remote_member_repo: "AbstractSpaceRemoteMemberRepo",
-        cover_repo: "AbstractSpaceCoverRepo | None" = None,
+        space_repo: AbstractSpaceRepo,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo,
+        cover_repo: AbstractSpaceCoverRepo | None = None,
         icon_repo=None,
         space_crypto_service=None,
         space_service=None,
@@ -234,10 +235,10 @@ class PrivateSpaceInviteHandler:
         self._own_instance_id = ""
         #: v_49 — stores the writer cert a seed holder delivered to us on a
         #: rekey / roster snapshot. ``None`` → certs are ignored.
-        self._writer_certs: "SpaceWriterCertService | None" = None
+        self._writer_certs: SpaceWriterCertService | None = None
         #: Set by :meth:`attach_to` — records a mesh-only accepting
         #: household's version + identity-key claim (migration 0078).
-        self._federation: "FederationService | None" = None
+        self._federation: FederationService | None = None
 
     def attach_space_service(self, space_service) -> None:
         """Wire :class:`SpaceService` post-construction (#114 phase 2).
@@ -249,7 +250,7 @@ class PrivateSpaceInviteHandler:
         """
         self._space_service = space_service
 
-    def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
+    def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert holder (built after this handler)."""
         self._writer_certs = writer_certs
 
@@ -259,12 +260,12 @@ class PrivateSpaceInviteHandler:
         ``SPACE_ADMIN_PROPOSAL_UPDATED`` onto member households."""
         self._approval_service = approval_service
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         self._own_instance_id = str(
             getattr(federation_service, "own_instance_id", "") or ""
         )
         self._federation = federation_service
-        registry = federation_service._event_registry  # noqa: SLF001
+        registry = federation_service._event_registry
         registry.register(
             FederationEventType.SPACE_PRIVATE_INVITE,
             self._on_invite,
@@ -333,7 +334,7 @@ class PrivateSpaceInviteHandler:
 
     # ── Receive ─────────────────────────────────────────────────────────
 
-    async def _on_space_session_cleanup(self, event: "FederationEvent") -> None:
+    async def _on_space_session_cleanup(self, event: FederationEvent) -> None:
         """§D2b — the peer dropped its space-scoped seat for us; drop ours.
 
         Sent when the sender's last shared membership with us ended (kick,
@@ -358,7 +359,7 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
 
-    async def _on_invite(self, event: "FederationEvent") -> None:
+    async def _on_invite(self, event: FederationEvent) -> None:
         """A peer invited one of our users to its private space.
 
         Migration 0093 (owner decision 2026-10-10): **an invitation never
@@ -485,7 +486,7 @@ class PrivateSpaceInviteHandler:
 
     def _accept_matches_invitation(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         *,
         invite: dict,
         invitee_user_id: str,
@@ -537,7 +538,7 @@ class PrivateSpaceInviteHandler:
         # household, the right user, and one seat per invitation.
         return True
 
-    async def _on_accept(self, event: "FederationEvent") -> None:
+    async def _on_accept(self, event: FederationEvent) -> None:
         """Our peer accepted the invite we sent — seat them as a
         :class:`SpaceRemoteMember`.
 
@@ -654,7 +655,7 @@ class PrivateSpaceInviteHandler:
             )
         )
 
-    async def _on_decline(self, event: "FederationEvent") -> None:
+    async def _on_decline(self, event: FederationEvent) -> None:
         """The invitee turned the invitation down.
 
         Bound to the envelope exactly like :meth:`_on_accept`: a token is
@@ -687,7 +688,7 @@ class PrivateSpaceInviteHandler:
             )
         )
 
-    async def _on_member_removed(self, event: "FederationEvent") -> None:
+    async def _on_member_removed(self, event: FederationEvent) -> None:
         """The host removed us (or one of our users) from a private
         space. Cleans up both possible local representations: the
         host-side ``space_remote_members`` row (no-op on the kicked
@@ -794,7 +795,7 @@ class PrivateSpaceInviteHandler:
 
     async def _on_space_location_updated(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
     ) -> None:
         """Remote member's pin for the space map.
 
@@ -931,7 +932,7 @@ class PrivateSpaceInviteHandler:
             )
         )
 
-    async def _on_remote_admin_kick(self, event: "FederationEvent") -> None:
+    async def _on_remote_admin_kick(self, event: FederationEvent) -> None:
         """Cross-household admin kick command (#114 phase 2).
 
         Receiver is the host of the space; sender is the household
@@ -973,7 +974,7 @@ class PrivateSpaceInviteHandler:
             target_user_id=target_user_id,
         )
 
-    async def _on_remote_admin_action(self, event: "FederationEvent") -> None:
+    async def _on_remote_admin_action(self, event: FederationEvent) -> None:
         """Generic cross-household admin action (v_15+).
 
         Receiver is the host of the space; sender is the household of a
@@ -1065,7 +1066,7 @@ class PrivateSpaceInviteHandler:
                 fwd_params=params,
             )
 
-    async def _on_proposal_mirror(self, event: "FederationEvent") -> None:
+    async def _on_proposal_mirror(self, event: FederationEvent) -> None:
         """Member-household side of ``SPACE_ADMIN_PROPOSAL_UPDATED`` (v_16).
 
         The host broadcasts the current proposal view; we mirror it so
@@ -1086,7 +1087,7 @@ class PrivateSpaceInviteHandler:
             return  # only the host (or our trusted inviter) mirrors proposals
         await self._approval_service.apply_mirror_update(space_id, view)
 
-    async def _on_key_exchange_rekey(self, event: "FederationEvent") -> None:
+    async def _on_key_exchange_rekey(self, event: FederationEvent) -> None:
         """Forward-secrecy rekey from the host or a delegated admin (#121).
 
         Triggered every time a member is removed (local kick, ban, or §D1b
@@ -1182,6 +1183,7 @@ class PrivateSpaceInviteHandler:
                     "SPACE_KEY_EXCHANGE_REKEY for %s: malformed space public "
                     "key / signature — dropping",
                     space_id,
+                    exc_info=True,
                 )
                 return
             if not authority_verified:
@@ -1256,7 +1258,7 @@ class PrivateSpaceInviteHandler:
             else:
                 await self._writer_certs.drop_stale_channel(space_id)
 
-    async def _on_admin_key_share(self, event: "FederationEvent") -> None:
+    async def _on_admin_key_share(self, event: FederationEvent) -> None:
         """Delegated-admin signing-seed share from the space owner (v_22).
 
         Receiver is a remote admin household; sender is the space's owner.
@@ -1338,6 +1340,7 @@ class PrivateSpaceInviteHandler:
             log.warning(
                 "SPACE_ADMIN_KEY_SHARE: malformed seed for %s — dropping",
                 space_id,
+                exc_info=True,
             )
             return
         if len(seed) != 32:
@@ -1391,7 +1394,7 @@ class PrivateSpaceInviteHandler:
 
     async def _verify_roster_gossip(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
     ) -> tuple[str, dict, int] | None:
         """Authenticate an inbound roster-gossip event. Returns
         ``(space_id, payload, verified_epoch)`` on success — the last being
@@ -1451,7 +1454,7 @@ class PrivateSpaceInviteHandler:
 
     async def _apply_roster_gossip(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         *,
         tombstoned: bool,
     ) -> None:
@@ -1632,15 +1635,15 @@ class PrivateSpaceInviteHandler:
             # (posts, rekeys, a rotation bundle) still reaches it.
             await self._space_repo.remove_space_instance(space_id, instance_id)
 
-    async def _on_space_member_joined(self, event: "FederationEvent") -> None:
+    async def _on_space_member_joined(self, event: FederationEvent) -> None:
         """Authority-signed roster JOINED (v_23) — apply (upsert) the member."""
         await self._apply_roster_gossip(event, tombstoned=False)
 
-    async def _on_space_member_left(self, event: "FederationEvent") -> None:
+    async def _on_space_member_left(self, event: FederationEvent) -> None:
         """Authority-signed roster LEFT (v_23) — tombstone the member."""
         await self._apply_roster_gossip(event, tombstoned=True)
 
-    async def _on_space_roster_snapshot(self, event: "FederationEvent") -> None:
+    async def _on_space_roster_snapshot(self, event: FederationEvent) -> None:
         """The host's whole roster for one space (v_32).
 
         Each entry is an individually authority-signed ``SPACE_MEMBER_JOINED``

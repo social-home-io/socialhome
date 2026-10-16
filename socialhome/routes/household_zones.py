@@ -26,6 +26,7 @@ from typing import Any
 from aiohttp import web
 
 from ..app_keys import household_zone_service_key, household_zone_sync_key
+from ..domain.errors import WrongTypeError
 from ..domain.household_zone import HouseholdZone, HouseholdZoneSyncStatus
 from ..services.household_zone_service import HouseholdZoneService
 from ..services.household_zone_sync import HouseholdZoneSync
@@ -94,7 +95,7 @@ class _HouseholdZoneView(BaseView):
     async def _object_body(self) -> dict[str, Any]:
         body = await self.body()
         if not isinstance(body, dict):
-            raise ValueError("body must be a JSON object")
+            raise WrongTypeError("body must be a JSON object")
         return body
 
 

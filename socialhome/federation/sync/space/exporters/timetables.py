@@ -29,7 +29,7 @@ class TimetablesExporter:
 
     __slots__ = ("_repo",)
 
-    def __init__(self, space_timetable_repo: "AbstractSpaceTimetableRepo") -> None:
+    def __init__(self, space_timetable_repo: AbstractSpaceTimetableRepo) -> None:
         self._repo = space_timetable_repo
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:

@@ -26,7 +26,7 @@ older edit never lands over a newer one.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -90,7 +90,7 @@ EVE = _Author("eve")
 
 
 def _now(seconds: float = 0) -> str:
-    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
 
 
 @pytest.fixture
@@ -140,7 +140,7 @@ async def env(tmp_dir):
             id=post_id,
             author=BOB.user_id,
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="bob's post",
         ),
     )
@@ -153,7 +153,7 @@ async def env(tmp_dir):
             post_id=post_id,
             author=BOB.user_id,
             type=CommentType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="bob's comment",
         ),
         space_id=SPACE,
@@ -211,7 +211,7 @@ def _post_inner(
             id=post_id,
             author=signer.user_id,
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content=content,
         ),
         space_id=SPACE,
@@ -455,7 +455,7 @@ async def test_a_post_delete_before_its_create_is_never_resurrected(env):
             id=pid,
             author=BOB.user_id,
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="late",
         ),
         space_id=SPACE,

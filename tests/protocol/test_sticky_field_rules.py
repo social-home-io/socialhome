@@ -15,7 +15,7 @@ colour, board-clamped coordinates and capped, sanitised content.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -90,7 +90,7 @@ def _event(event_type, payload) -> FederationEvent:
         event_type=event_type,
         from_instance=SENDER,
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=SPACE,
     )
@@ -117,7 +117,7 @@ def _assert_safe(row: dict) -> None:
     assert 0.0 <= row["position_x"] <= STICKY_BOARD_WIDTH
     assert 0.0 <= row["position_y"] <= STICKY_BOARD_HEIGHT
     assert len(row["content"]) <= MAX_STICKY_CONTENT_LENGTH
-    assert "‮" not in row["content"] and "\x00" not in row["content"]
+    assert "\u202e" not in row["content"] and "\x00" not in row["content"]
 
 
 @pytest.mark.parametrize("color", _HOSTILE_COLORS)
@@ -129,7 +129,7 @@ async def test_inbound_create_never_persists_a_non_hex_color(env, color):
         {
             "id": "st-new",
             "author": AUTHOR,
-            "content": "‮hello\x00 " + "y" * 3000,
+            "content": "\u202ehello\x00 " + "y" * 3000,
             "color": color,
             "position_x": 10**400,
             "position_y": 1e9,

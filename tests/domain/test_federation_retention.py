@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_retention import (
@@ -22,7 +22,7 @@ def test_never_drop_event_has_no_expiry():
 
 def test_ordinary_event_expires_in_seven_days():
     """An ordinary event gets a ~7-day TTL from now (parses, in window)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     iso = retention_expires_at(FederationEventType.SPACE_POST_CREATED)
     assert iso is not None
     parsed = datetime.fromisoformat(iso)
@@ -44,7 +44,7 @@ def test_terminal_grace_is_positive_timedelta():
 
 def test_retention_expires_at_honours_injected_now():
     """The ``now`` kwarg anchors the expiry deterministically."""
-    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
     iso = retention_expires_at(FederationEventType.DM_MESSAGE, now=base)
     assert iso is not None
     assert datetime.fromisoformat(iso) == base + timedelta(days=RETENTION_DAYS)

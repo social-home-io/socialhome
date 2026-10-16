@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC
 
 import pytest
 
@@ -17,7 +18,7 @@ from socialhome.repositories.bazaar_repo import (
 @pytest.fixture
 async def env(tmp_dir):
     """Full repo stack wired to a single in-process SQLite database."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
     from socialhome.infrastructure.event_bus import EventBus
 
@@ -300,12 +301,12 @@ async def test_bazaar_currency_validation(env):
 
 async def test_auction_antisnipe_extends_end_time(env):
     """Bid within 5 min of close pushes the close-time +5 min."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
     # Auction that ends in 60 seconds — squarely inside the snipe window.
-    close_soon = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    close_soon = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
     await env.bazaar_repo.save_listing(
         BazaarListing(
             post_id=pid,
@@ -332,21 +333,21 @@ async def test_auction_antisnipe_extends_end_time(env):
     )
     listing = await env.bazaar_repo.get_listing(pid)
     new_end = datetime.fromisoformat(
-        listing.end_time.replace("Z", "+00:00"),
+        listing.end_time,
     )
     if new_end.tzinfo is None:
-        new_end = new_end.replace(tzinfo=timezone.utc)
+        new_end = new_end.replace(tzinfo=UTC)
     # New end should be ~5 min in the future, well past the original 60 s.
-    assert (new_end - datetime.now(timezone.utc)).total_seconds() > 60
+    assert (new_end - datetime.now(UTC)).total_seconds() > 60
 
 
 async def test_auction_no_extend_outside_snipe_window(env):
     """Bid when >5 min remain leaves ``end_time`` untouched."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
-    original_end = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    original_end = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     await env.bazaar_repo.save_listing(
         BazaarListing(
             post_id=pid,
@@ -377,11 +378,11 @@ async def test_auction_no_extend_outside_snipe_window(env):
 
 async def test_non_auction_modes_do_not_extend(env):
     """Only AUCTION listings snipe-extend. FIXED / OFFER stay put."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
-    close_soon = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    close_soon = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
     await env.bazaar_repo.save_listing(
         BazaarListing(
             post_id=pid,
@@ -565,18 +566,18 @@ _OTHER_SPACE_ID = "space-bazaar-other"
 
 
 def _listing(pid: str, *, space_id: str = _DEFAULT_SPACE_ID, **kw) -> BazaarListing:
-    fields = dict(
-        post_id=pid,
-        space_id=space_id,
-        seller_user_id="u1",
-        mode=BazaarMode.OFFER,
-        title="Item",
-        end_time="2099-01-01T00:00:00",
-        currency="EUR",
-        status=BazaarStatus.ACTIVE,
-        created_at=None,
-        price=100,
-    )
+    fields = {
+        "post_id": pid,
+        "space_id": space_id,
+        "seller_user_id": "u1",
+        "mode": BazaarMode.OFFER,
+        "title": "Item",
+        "end_time": "2099-01-01T00:00:00",
+        "currency": "EUR",
+        "status": BazaarStatus.ACTIVE,
+        "created_at": None,
+        "price": 100,
+    }
     fields.update(kw)
     return BazaarListing(**fields)
 

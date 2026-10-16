@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -49,15 +49,14 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.services.federation_inbound import SpaceMembershipInboundHandlers
 from socialhome.services.federation_inbound_service import FederationInboundService
-from socialhome.space_owner_statement import (
-    sign_inviter_proof,
-    sign_owner_statement,
-)
 from socialhome.services.space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
 )
-
+from socialhome.space_owner_statement import (
+    sign_inviter_proof,
+    sign_owner_statement,
+)
 from tests.invite_accept import accept_invite, accepting_service
 
 pytestmark = pytest.mark.security
@@ -81,7 +80,7 @@ def _event(event_type, sender: str, payload: dict) -> FederationEvent:
         event_type=event_type,
         from_instance=sender,
         to_instance=JOINER,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=SPACE,
     )

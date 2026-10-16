@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ...domain.calendar import (
@@ -69,26 +69,6 @@ from ...domain.events import (
     TimetableSaved,
 )
 from ...domain.federation import FederationEventType
-from ...federation.owner_bound_id import (
-    GALLERY_ALBUM_KIND,
-    GALLERY_ITEM_KIND,
-    SPACE_CALENDAR_EVENT_KIND,
-    SPACE_PAGE_KIND,
-    SPACE_STICKY_KIND,
-    SPACE_TASK_KIND,
-    SPACE_TASK_LIST_KIND,
-    SPACE_TIMETABLE_KIND,
-    OwnerBinding,
-    check_owner_bound_id,
-    is_owner_bound,
-    owner_bound_id_refused,
-)
-from ...federation.space_authorship import payload_actor
-from ...federation.space_scope import (
-    log_cross_space_refusal,
-    log_not_applied,
-    resolve_space_id,
-)
 from ...domain.gallery import GalleryAlbum, GalleryItem
 from ...domain.page import MAX_PAGE_TITLE_LENGTH, Page
 from ...domain.page_version import version_hash
@@ -122,6 +102,26 @@ from ...domain.timetable import (
 )
 from ...domain.timetable import parse_datetime as parse_timetable_datetime
 from ...domain.user import SYSTEM_AUTHOR
+from ...federation.owner_bound_id import (
+    GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
+    SPACE_CALENDAR_EVENT_KIND,
+    SPACE_PAGE_KIND,
+    SPACE_STICKY_KIND,
+    SPACE_TASK_KIND,
+    SPACE_TASK_LIST_KIND,
+    SPACE_TIMETABLE_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+    is_owner_bound,
+    owner_bound_id_refused,
+)
+from ...federation.space_authorship import payload_actor
+from ...federation.space_scope import (
+    log_cross_space_refusal,
+    log_not_applied,
+    resolve_space_id,
+)
 from ...infrastructure.event_bus import EventBus
 from ...media.cleanup import unlink_unreferenced
 from ...utils.datetime import parse_iso8601_optional
@@ -139,24 +139,24 @@ from ..page_conflict_service import (
 )
 
 if TYPE_CHECKING:
+    import pathlib
+
     from ...domain.federation import FederationEvent
     from ...federation.federation_service import FederationService
     from ...federation.space_authorship import SpaceAuthorship
     from ...repositories.bazaar_repo import AbstractBazaarRepo
     from ...repositories.calendar_repo import AbstractSpaceCalendarRepo
-    import pathlib
-
     from ...repositories.gallery_repo import AbstractGalleryRepo
-    from ..legacy_album_deletes import LegacyAlbumDeletes
     from ...repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ...repositories.page_repo import AbstractPageRepo
-    from ..page_conflict_service import PageConflictService
     from ...repositories.space_poll_repo import AbstractSpacePollRepo
     from ...repositories.space_post_repo import AbstractSpacePostRepo
     from ...repositories.space_zone_repo import AbstractSpaceZoneRepo
     from ...repositories.sticky_repo import AbstractStickyRepo
     from ...repositories.task_repo import AbstractSpaceTaskRepo
     from ...repositories.timetable_repo import AbstractSpaceTimetableRepo
+    from ..legacy_album_deletes import LegacyAlbumDeletes
+    from ..page_conflict_service import PageConflictService
 
 log = logging.getLogger(__name__)
 
@@ -167,8 +167,8 @@ def _has_ended(end_time: str | None) -> bool:
     if end is None:
         return False
     if end.tzinfo is None:
-        end = end.replace(tzinfo=timezone.utc)
-    return end <= datetime.now(timezone.utc)
+        end = end.replace(tzinfo=UTC)
+    return end <= datetime.now(UTC)
 
 
 def _payload_hash(p: dict) -> str:
@@ -203,43 +203,43 @@ class SpaceContentInboundHandlers:
     """Register space-content inbound handlers."""
 
     __slots__ = (
-        "_bus",
         "_authorship",
-        "_post_repo",
-        "_page_repo",
-        "_sticky_repo",
-        "_task_repo",
-        "_calendar_repo",
-        "_poll_repo",
-        "_gallery_repo",
-        "_zone_repo",
         "_bazaar_repo",
-        "_timetable_repo",
+        "_bus",
+        "_calendar_repo",
+        "_gallery_repo",
+        "_legacy_album_deletes",
         "_media_dir",
         "_media_refs",
-        "_legacy_album_deletes",
         "_page_conflicts",
+        "_page_repo",
+        "_poll_repo",
+        "_post_repo",
+        "_sticky_repo",
+        "_task_repo",
+        "_timetable_repo",
+        "_zone_repo",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        authorship: "SpaceAuthorship",
-        post_repo: "AbstractSpacePostRepo",
-        page_repo: "AbstractPageRepo",
-        sticky_repo: "AbstractStickyRepo",
-        task_repo: "AbstractSpaceTaskRepo",
-        calendar_repo: "AbstractSpaceCalendarRepo",
-        poll_repo: "AbstractSpacePollRepo | None" = None,
-        gallery_repo: "AbstractGalleryRepo | None" = None,
-        zone_repo: "AbstractSpaceZoneRepo | None" = None,
-        bazaar_repo: "AbstractBazaarRepo | None" = None,
-        timetable_repo: "AbstractSpaceTimetableRepo | None" = None,
-        media_dir: "pathlib.Path | None" = None,
-        media_refs: "AbstractMediaReferenceRepo | None" = None,
-        legacy_album_deletes: "LegacyAlbumDeletes | None" = None,
-        page_conflicts: "PageConflictService | None" = None,
+        authorship: SpaceAuthorship,
+        post_repo: AbstractSpacePostRepo,
+        page_repo: AbstractPageRepo,
+        sticky_repo: AbstractStickyRepo,
+        task_repo: AbstractSpaceTaskRepo,
+        calendar_repo: AbstractSpaceCalendarRepo,
+        poll_repo: AbstractSpacePollRepo | None = None,
+        gallery_repo: AbstractGalleryRepo | None = None,
+        zone_repo: AbstractSpaceZoneRepo | None = None,
+        bazaar_repo: AbstractBazaarRepo | None = None,
+        timetable_repo: AbstractSpaceTimetableRepo | None = None,
+        media_dir: pathlib.Path | None = None,
+        media_refs: AbstractMediaReferenceRepo | None = None,
+        legacy_album_deletes: LegacyAlbumDeletes | None = None,
+        page_conflicts: PageConflictService | None = None,
     ) -> None:
         self._bus = bus
         #: v_48 — applies another household's version of an existing page
@@ -264,7 +264,7 @@ class SpaceContentInboundHandlers:
         #: an owner-less v_33 delete) — restart-scoped, bounded.
         self._legacy_album_deletes = legacy_album_deletes
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         registry = federation_service._event_registry
 
         # Tasks
@@ -433,7 +433,7 @@ class SpaceContentInboundHandlers:
 
     # ─── Tasks ───────────────────────────────────────────────────────────
 
-    async def _on_task_saved(self, event: "FederationEvent") -> None:
+    async def _on_task_saved(self, event: FederationEvent) -> None:
         space_id = resolve_space_id(event)
         if not space_id:
             return
@@ -546,7 +546,7 @@ class SpaceContentInboundHandlers:
                 )
             )
 
-    async def _on_task_deleted(self, event: "FederationEvent") -> None:
+    async def _on_task_deleted(self, event: FederationEvent) -> None:
         space_id = resolve_space_id(event)
         if not space_id:
             return
@@ -598,7 +598,7 @@ class SpaceContentInboundHandlers:
     # rename or delete a space list): a write needs a writer household; a
     # new list's id is owner-bound to its ``created_by``.
 
-    async def _on_task_list_created(self, event: "FederationEvent") -> None:
+    async def _on_task_list_created(self, event: FederationEvent) -> None:
         space_id = resolve_space_id(event)
         if not space_id:
             return
@@ -688,7 +688,7 @@ class SpaceContentInboundHandlers:
                 )
             )
 
-    async def _on_task_list_updated(self, event: "FederationEvent") -> None:
+    async def _on_task_list_updated(self, event: FederationEvent) -> None:
         """A rename. Only a list already held here is renamed — an unseen
         list arrives through its create or the ``task_lists`` sync."""
         space_id = resolve_space_id(event)
@@ -744,7 +744,7 @@ class SpaceContentInboundHandlers:
         stored = await self._task_repo.get_list(fallback.id)
         return stored[1] if stored is not None else fallback
 
-    async def _on_task_list_deleted(self, event: "FederationEvent") -> None:
+    async def _on_task_list_deleted(self, event: FederationEvent) -> None:
         space_id = resolve_space_id(event)
         if not space_id:
             return
@@ -792,7 +792,7 @@ class SpaceContentInboundHandlers:
 
     # ─── Pages ───────────────────────────────────────────────────────────
 
-    async def _on_page_saved(self, event: "FederationEvent") -> None:
+    async def _on_page_saved(self, event: FederationEvent) -> None:
         """A space page from another household (v_48: host-sequenced).
 
         * **Under a pre-v_48 host** (or none wired): mirrored as sent, last
@@ -892,7 +892,7 @@ class SpaceContentInboundHandlers:
 
     async def _page_write_gates(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         page_id: str,
         page: Page,
@@ -917,7 +917,7 @@ class SpaceContentInboundHandlers:
             row_owner=page.created_by if existing is None else existing.created_by,
         )
 
-    async def _on_archived_page_write(self, event: "FederationEvent", space) -> None:
+    async def _on_archived_page_write(self, event: FederationEvent, space) -> None:
         """The archived gate refused a write. Only a household holding a
         live writer seat in the space hears back about a page proposal —
         anyone else gets silence, so the refusal is no oracle — and the
@@ -935,7 +935,7 @@ class SpaceContentInboundHandlers:
 
     async def _on_page_proposal(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         page_id: str,
         existing: Page | None,
@@ -1065,7 +1065,7 @@ class SpaceContentInboundHandlers:
 
     async def _on_host_page_version(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         page_id: str,
         existing: Page | None,
@@ -1132,7 +1132,7 @@ class SpaceContentInboundHandlers:
                 return
         await engine.mirror(space_id=space_id, page_id=page_id, version=version)
 
-    async def _on_page_deleted(self, event: "FederationEvent") -> None:
+    async def _on_page_deleted(self, event: FederationEvent) -> None:
         """A space page delete (migration 0073: tombstoned, not removed).
 
         Deletes are not sequenced, so households may judge one differently;
@@ -1206,7 +1206,7 @@ class SpaceContentInboundHandlers:
 
     async def _page_delete_of_unseen(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         page_id: str,
         from_host: bool,
@@ -1246,7 +1246,7 @@ class SpaceContentInboundHandlers:
 
     # ─── Stickies ────────────────────────────────────────────────────────
 
-    async def _on_sticky_saved(self, event: "FederationEvent") -> None:
+    async def _on_sticky_saved(self, event: FederationEvent) -> None:
         space_id = resolve_space_id(event)
         if not space_id:
             return
@@ -1335,7 +1335,7 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="sticky", row_id=sticky_id
             )
 
-    async def _on_sticky_deleted(self, event: "FederationEvent") -> None:
+    async def _on_sticky_deleted(self, event: FederationEvent) -> None:
         space_id = resolve_space_id(event)
         if not space_id:
             return
@@ -1372,7 +1372,7 @@ class SpaceContentInboundHandlers:
 
     # ─── Calendar events ─────────────────────────────────────────────────
 
-    async def _on_calendar_saved(self, event: "FederationEvent") -> None:
+    async def _on_calendar_saved(self, event: FederationEvent) -> None:
         space_id = resolve_space_id(event)
         if not space_id:
             return
@@ -1484,7 +1484,7 @@ class SpaceContentInboundHandlers:
             # In-memory test fakes may not implement the buffer.
             pass
 
-    async def _on_calendar_deleted(self, event: "FederationEvent") -> None:
+    async def _on_calendar_deleted(self, event: FederationEvent) -> None:
         space_id = resolve_space_id(event)
         if not space_id:
             return
@@ -1532,7 +1532,7 @@ class SpaceContentInboundHandlers:
 
     # ─── RSVPs (per-occurrence) ──────────────────────────────────────────
 
-    async def _on_rsvp_updated(self, event: "FederationEvent") -> None:
+    async def _on_rsvp_updated(self, event: FederationEvent) -> None:
         """Apply a peer's RSVP. If the underlying event hasn't propagated
         yet, buffer the RSVP and let it flush on event arrival."""
         space_id = resolve_space_id(event)
@@ -1596,7 +1596,7 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="RSVP for event", row_id=event_id
             )
 
-    async def _on_rsvp_deleted(self, event: "FederationEvent") -> None:
+    async def _on_rsvp_deleted(self, event: FederationEvent) -> None:
         """Apply a peer's RSVP removal. Like _on_rsvp_updated, buffers
         with status='removed' if the event hasn't propagated yet — so a
         later flush honours the deletion rather than resurrecting the
@@ -1642,7 +1642,7 @@ class SpaceContentInboundHandlers:
 
     # ─── Polls ──────────────────────────────────────────────────────────
 
-    async def _on_poll_vote(self, event: "FederationEvent") -> None:
+    async def _on_poll_vote(self, event: FederationEvent) -> None:
         """Mirror a remote poll vote. Enforces the single-choice invariant
         (the old vote is cleared first) matching the local poll service."""
         if self._poll_repo is None:
@@ -1672,7 +1672,7 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="poll option", row_id=option_id
             )
 
-    async def _on_poll_closed(self, event: "FederationEvent") -> None:
+    async def _on_poll_closed(self, event: FederationEvent) -> None:
         if self._poll_repo is None:
             return
         space_id = resolve_space_id(event)
@@ -1691,7 +1691,7 @@ class SpaceContentInboundHandlers:
 
     async def _on_schedule_created(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
     ) -> None:
         """F5: persist a peer's schedule-poll slot defs locally so the
         remote member's SPA renders the slot picker.
@@ -1748,11 +1748,12 @@ class SpaceContentInboundHandlers:
                 "SPACE_SCHEDULE_CREATED apply failed for post=%s: %s",
                 post_id,
                 exc,
+                exc_info=True,
             )
 
     async def _on_schedule_response_updated(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
     ) -> None:
         """Mirror a peer's schedule-poll vote / retraction locally."""
         if self._poll_repo is None:
@@ -1791,7 +1792,7 @@ class SpaceContentInboundHandlers:
 
     async def _on_schedule_finalized(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
     ) -> None:
         """Mirror a peer's schedule-poll finalisation. The matching
         local calendar entry is produced by
@@ -1822,7 +1823,7 @@ class SpaceContentInboundHandlers:
 
     # ─── Gallery albums (§23.119, v_33) ──────────────────────────────────
 
-    async def _on_gallery_album_created(self, event: "FederationEvent") -> None:
+    async def _on_gallery_album_created(self, event: FederationEvent) -> None:
         """Mirror a member's new album into the gated space.
 
         The album is filed under the space the envelope was gated for and
@@ -1947,7 +1948,7 @@ class SpaceContentInboundHandlers:
         )
 
     async def _gallery_album_mutable(
-        self, event: "FederationEvent", space_id: str, album_id: str
+        self, event: FederationEvent, space_id: str, album_id: str
     ) -> bool:
         """The album is a user album of ``space_id`` the sender may change.
 
@@ -1984,7 +1985,7 @@ class SpaceContentInboundHandlers:
             return False
         return True
 
-    async def _on_gallery_album_updated(self, event: "FederationEvent") -> None:
+    async def _on_gallery_album_updated(self, event: FederationEvent) -> None:
         """Apply a member's rename / description / cover edit.
 
         A ``cover_item_id`` of ``None`` clears the cover; a key that is
@@ -2029,7 +2030,7 @@ class SpaceContentInboundHandlers:
         )
 
     async def _remember_overtaking_delete(
-        self, event: "FederationEvent", space_id: str, album_id: str
+        self, event: FederationEvent, space_id: str, album_id: str
     ) -> None:
         """Remember a delete of an album not held here yet, so the create it
         overtook does not bring the album back.
@@ -2076,7 +2077,7 @@ class SpaceContentInboundHandlers:
             album_id,
         )
 
-    async def _on_gallery_album_deleted(self, event: "FederationEvent") -> None:
+    async def _on_gallery_album_deleted(self, event: FederationEvent) -> None:
         """Remove a member's album — and, by cascade, the items in it, with
         their files unless another row still names them.
 
@@ -2116,7 +2117,7 @@ class SpaceContentInboundHandlers:
 
     # ─── Gallery items (§23.119) ─────────────────────────────────────────
 
-    async def _on_gallery_item_saved(self, event: "FederationEvent") -> None:
+    async def _on_gallery_item_saved(self, event: FederationEvent) -> None:
         """Mirror a remote upload into the local ``gallery_items`` table.
 
         Carries the thumbnail and the full ``url``
@@ -2199,6 +2200,7 @@ class SpaceContentInboundHandlers:
                 "SPACE_GALLERY_ITEM_CREATED apply failed item=%s: %s",
                 item_id,
                 exc,
+                exc_info=True,
             )
             return
         if is_new:
@@ -2213,7 +2215,7 @@ class SpaceContentInboundHandlers:
                 )
             )
 
-    async def _on_gallery_item_deleted(self, event: "FederationEvent") -> None:
+    async def _on_gallery_item_deleted(self, event: FederationEvent) -> None:
         if self._gallery_repo is None:
             return
         space_id = resolve_space_id(event)
@@ -2270,7 +2272,7 @@ class SpaceContentInboundHandlers:
 
     # ─── Space zones (§23.8.7) ─────────────────────────────────────────
 
-    async def _on_zone_upserted(self, event: "FederationEvent") -> None:
+    async def _on_zone_upserted(self, event: FederationEvent) -> None:
         """Mirror a remote ``SPACE_ZONE_UPSERTED`` into ``space_zones``.
 
         Inbound is lenient: a malformed or partial payload is logged
@@ -2375,7 +2377,7 @@ class SpaceContentInboundHandlers:
             )
         )
 
-    async def _on_zone_deleted(self, event: "FederationEvent") -> None:
+    async def _on_zone_deleted(self, event: FederationEvent) -> None:
         if self._zone_repo is None:
             return
         space_id = resolve_space_id(event)
@@ -2407,7 +2409,7 @@ class SpaceContentInboundHandlers:
 
     # ─── Space timetables (v_39) ─────────────────────────────────────────
 
-    async def _on_timetable_upserted(self, event: "FederationEvent") -> None:
+    async def _on_timetable_upserted(self, event: FederationEvent) -> None:
         """Apply a remote ``SPACE_TIMETABLE_UPSERTED`` (the whole timetable).
 
         Checks, in order — each refusal is a WARNING (a replay is DEBUG),
@@ -2498,7 +2500,7 @@ class SpaceContentInboundHandlers:
             )
         )
 
-    async def _on_timetable_deleted(self, event: "FederationEvent") -> None:
+    async def _on_timetable_deleted(self, event: FederationEvent) -> None:
         """Tombstone a timetable a space moderator deleted.
 
         An id this household never saw is tombstoned too, so a create the
@@ -2595,7 +2597,7 @@ class SpaceContentInboundHandlers:
         )
 
     @staticmethod
-    def _parse_timetable(event: "FederationEvent", space_id: str) -> Timetable | None:
+    def _parse_timetable(event: FederationEvent, space_id: str) -> Timetable | None:
         """The payload's timetable, parsed and validated — or ``None``
         (logged at WARNING) for anything malformed or out of bounds."""
         raw = event.payload.get("timetable")
@@ -2611,13 +2613,14 @@ class SpaceContentInboundHandlers:
                 event.from_instance,
                 space_id,
                 exc,
+                exc_info=True,
             )
             return None
         return tt
 
     @staticmethod
     def _timetable_id_bound(
-        event: "FederationEvent", space_id: str, tt: Timetable
+        event: FederationEvent, space_id: str, tt: Timetable
     ) -> bool:
         """Every space timetable id commits to its creator in its space
         (they are owner-bound from their first release): any other shape,
@@ -2639,7 +2642,7 @@ class SpaceContentInboundHandlers:
         return False
 
     async def _creator_named_by_sender(
-        self, event: "FederationEvent", space_id: str, tt: Timetable
+        self, event: FederationEvent, space_id: str, tt: Timetable
     ) -> bool:
         """A timetable new to this household names a creator the sender
         speaks for (its own seated user, or the host relaying a remote one)."""
@@ -2656,7 +2659,7 @@ class SpaceContentInboundHandlers:
 
     # ─── Bazaar listings ─────────────────────────────────────────────────
 
-    async def _on_bazaar_listing_created(self, event: "FederationEvent") -> None:
+    async def _on_bazaar_listing_created(self, event: FederationEvent) -> None:
         """Mirror a remote bazaar listing into the local ``bazaar_listings``
         table.
 
@@ -2763,9 +2766,10 @@ class SpaceContentInboundHandlers:
                 "BAZAAR_LISTING_CREATED apply failed listing=%s: %s",
                 post_id,
                 exc,
+                exc_info=True,
             )
 
-    async def _on_bazaar_listing_updated(self, event: "FederationEvent") -> None:
+    async def _on_bazaar_listing_updated(self, event: FederationEvent) -> None:
         """Apply a status-only mutation (SOLD / EXPIRED / CANCELLED) to an
         existing ``bazaar_listings`` row.
 
@@ -2858,9 +2862,10 @@ class SpaceContentInboundHandlers:
                 "BAZAAR_LISTING_UPDATED apply failed listing=%s: %s",
                 post_id,
                 exc,
+                exc_info=True,
             )
 
-    async def _on_bazaar_bid_placed(self, event: "FederationEvent") -> None:
+    async def _on_bazaar_bid_placed(self, event: FederationEvent) -> None:
         """F7: persist a bid placed on a remote bidder's instance.
 
         The bid lives canonically on the seller's host but every member
@@ -2885,6 +2890,10 @@ class SpaceContentInboundHandlers:
         try:
             existing = await self._bazaar_repo.get_bid(bid_id)
         except Exception:
+            log.debug(
+                "SpaceContentInboundHandlers._on_bazaar_bid_placed: fail-soft error ignored",
+                exc_info=True,
+            )
             existing = None
         if existing is not None:
             return
@@ -2918,11 +2927,12 @@ class SpaceContentInboundHandlers:
                 bid_id,
                 listing_post_id,
                 exc,
+                exc_info=True,
             )
 
     async def _on_bazaar_offer_accepted(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
     ) -> None:
         """F7: mirror an offer acceptance on the bidder + every other
         member's local row.
@@ -2960,11 +2970,12 @@ class SpaceContentInboundHandlers:
                 "BAZAAR_OFFER_ACCEPTED apply failed bid=%s: %s",
                 bid_id,
                 exc,
+                exc_info=True,
             )
 
     async def _listing_in_space(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         post_id: str,
         space_id: str,
     ) -> BazaarListing | None:
@@ -2996,7 +3007,7 @@ class SpaceContentInboundHandlers:
 
     async def _acts_for(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         user_id: str,
         what: str,
@@ -3012,7 +3023,7 @@ class SpaceContentInboundHandlers:
 
     async def _rsvp_allowed(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         event_id: str,
         user_id: str,
@@ -3052,15 +3063,20 @@ class SpaceContentInboundHandlers:
                 ),
                 None,
             )
-            if current == RSVPStatus.REQUESTED and new_status in (
-                RSVPStatus.GOING,
-                RSVPStatus.WAITLIST,
-                "removed",
+            if (
+                current == RSVPStatus.REQUESTED
+                and new_status
+                in (
+                    RSVPStatus.GOING,
+                    RSVPStatus.WAITLIST,
+                    "removed",
+                )
+                and (
+                    await self._authorship.acts_for(event, space_id, cal.created_by)
+                    or await self._authorship.has_content_authority(event, space_id)
+                )
             ):
-                if await self._authorship.acts_for(
-                    event, space_id, cal.created_by
-                ) or await self._authorship.has_content_authority(event, space_id):
-                    return True
+                return True
             if (
                 current == RSVPStatus.WAITLIST
                 and new_status == RSVPStatus.GOING
@@ -3084,7 +3100,7 @@ class SpaceContentInboundHandlers:
 
     async def _post_in_space(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         post_id: str,
         *,
@@ -3106,7 +3122,7 @@ class SpaceContentInboundHandlers:
 
     async def _post_owner_acts(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         post_id: str,
         *,
@@ -3120,7 +3136,7 @@ class SpaceContentInboundHandlers:
 
     @staticmethod
     def _bound_id_refused(
-        event: "FederationEvent",
+        event: FederationEvent,
         kind: str,
         row_id: str,
         space_id: str,
@@ -3141,7 +3157,7 @@ class SpaceContentInboundHandlers:
 
     async def _collaborative_write_allowed(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         *,
         what: str,
@@ -3171,7 +3187,7 @@ class SpaceContentInboundHandlers:
 
     async def _authorship_allows(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         *,
         what: str,
@@ -3204,7 +3220,7 @@ class SpaceContentInboundHandlers:
 
     async def _zone_write_allowed(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         zone_id: str,
     ) -> bool:
@@ -3224,7 +3240,7 @@ class SpaceContentInboundHandlers:
 
     async def _timetable_write_allowed(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         timetable_id: str,
         user_id: str,
@@ -3293,7 +3309,7 @@ def _assignee_owner(existing: Task, incoming: Task, actor: str | None) -> str:
     return existing.created_by
 
 
-def _deleter(event: "FederationEvent") -> str:
+def _deleter(event: FederationEvent) -> str:
     """Who authorised a delete, for a list, task or page tombstone's
     ``deleted_by``: the approver of a reviewed (v_43) delete, else the
     payload's actor (v_42), else nobody. A replay of the tombstone names this user, so it passes

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ....domain.conversation import (
@@ -48,22 +48,22 @@ class DmHistoryReceiver(ProtectionGateMixin):
     """
 
     __slots__ = (
-        "_child_protection",
-        "_user_repo",
-        "_conversation_repo",
         "_bus",
+        "_child_protection",
+        "_conversation_repo",
         "_counts",
-        "_federation",
         "_dm_scope",
+        "_federation",
+        "_user_repo",
     )
 
     def __init__(
         self,
         *,
-        conversation_repo: "AbstractConversationRepo",
-        user_repo: "AbstractUserRepo",
-        bus: "EventBus",
-        federation_service: "FederationService | None" = None,
+        conversation_repo: AbstractConversationRepo,
+        user_repo: AbstractUserRepo,
+        bus: EventBus,
+        federation_service: FederationService | None = None,
     ) -> None:
         self._conversation_repo = conversation_repo
         self._user_repo = user_repo
@@ -82,7 +82,7 @@ class DmHistoryReceiver(ProtectionGateMixin):
         :data:`DM_HISTORY_CHUNK_ACK` frames (§12)."""
         self._federation = federation_service
 
-    async def handle_chunk(self, event: "FederationEvent") -> int:
+    async def handle_chunk(self, event: FederationEvent) -> int:
         """Persist every message in the chunk. Returns the count saved."""
         payload = event.payload or {}
         conversation_id = str(payload.get("conversation_id") or "")
@@ -172,7 +172,7 @@ class DmHistoryReceiver(ProtectionGateMixin):
                     },
                 )
             except Exception as exc:  # pragma: no cover
-                log.debug("DM_HISTORY_CHUNK_ACK send failed: %s", exc)
+                log.debug("DM_HISTORY_CHUNK_ACK send failed: %s", exc, exc_info=True)
         return saved
 
     async def _guardian_blocked_here(
@@ -218,7 +218,7 @@ class DmHistoryReceiver(ProtectionGateMixin):
                 return True
         return False
 
-    async def handle_complete(self, event: "FederationEvent") -> None:
+    async def handle_complete(self, event: FederationEvent) -> None:
         """Publish :class:`DmHistorySyncComplete` — for a seated sender only."""
         payload = event.payload or {}
         conversation_id = str(payload.get("conversation_id") or "")
@@ -287,7 +287,7 @@ def _dict_to_message(raw: dict, conversation_id: str) -> ConversationMessage | N
 def _parse_iso(value) -> datetime:
     if isinstance(value, str) and value:
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return datetime.fromisoformat(value)
         except ValueError:
             pass
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)

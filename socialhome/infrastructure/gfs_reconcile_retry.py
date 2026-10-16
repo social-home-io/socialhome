@@ -40,7 +40,7 @@ RunFn = Callable[[str], Awaitable[str]]
 class GfsReconcileRetry:
     """Per-connection bounded retry of gate + reconcile."""
 
-    __slots__ = ("_run", "_pending", "_tasks", "_stop")
+    __slots__ = ("_pending", "_run", "_stop", "_tasks")
 
     def __init__(self, run: RunFn) -> None:
         self._run = run
@@ -100,7 +100,7 @@ class GfsReconcileRetry:
                 await asyncio.wait_for(
                     asyncio.gather(*tasks, return_exceptions=True), timeout=5.0
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 for t in tasks:
                     t.cancel()
         self._tasks.clear()
@@ -111,7 +111,7 @@ class GfsReconcileRetry:
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             if gfs_id not in self._pending:
                 return
@@ -122,7 +122,7 @@ class GfsReconcileRetry:
         """One gate + reconcile; ``True`` when it is no longer pending."""
         try:
             result = await self._run(gfs_id)
-        except Exception:  # noqa: BLE001 — a background self-heal
+        except Exception:
             log.warning("gfs: reconcile retry failed for %s", gfs_id, exc_info=True)
             return False
         if result in ("done", "skip"):

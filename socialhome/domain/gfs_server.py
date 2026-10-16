@@ -59,6 +59,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from ..peer_url import is_private_host, validate_peer_url
+from .errors import WrongTypeError
 
 #: The algorithm of ``public_key`` — the GFS identity key, Ed25519, hex.
 #: Phase-2 of ``docs/crypto.md`` adds a hybrid sibling.
@@ -120,7 +121,7 @@ def _display_name(value: object) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise ValueError("gfs server: display_name must be text")
+        raise WrongTypeError("gfs server: display_name must be text")
     clean = "".join(ch for ch in value if unicodedata.category(ch)[0] != "C")
     return clean.strip()[:MAX_GFS_DISPLAY_NAME_LENGTH]
 
@@ -145,14 +146,14 @@ class GfsServer:
     display_name: str
 
     @classmethod
-    def from_wire(cls, raw: object) -> "GfsServer":
+    def from_wire(cls, raw: object) -> GfsServer:
         """Parse one entry.
 
         Raises :class:`UnsupportedGfsKeySuite` for an unknown or missing
         suite and :class:`ValueError` for any other bad field.
         """
         if not isinstance(raw, dict):
-            raise ValueError("gfs server: entry is not an object")
+            raise WrongTypeError("gfs server: entry is not an object")
         suite = raw.get("gfs_key_suite")
         if not isinstance(suite, str) or suite not in SUPPORTED_GFS_KEY_SUITES:
             raise UnsupportedGfsKeySuite(
@@ -169,7 +170,7 @@ class GfsServer:
             raise ValueError("gfs server: bad gfs_instance_id")
         public_key = raw.get("public_key")
         if not isinstance(public_key, str):
-            raise ValueError("gfs server: bad public_key")
+            raise WrongTypeError("gfs server: bad public_key")
         public_key = public_key.lower()
         if _ED25519_HEX.fullmatch(public_key) is None:
             raise ValueError("gfs server: bad public_key")
@@ -275,11 +276,11 @@ class SignedGfsServerList:
     gfs_servers_sig: str
 
     @classmethod
-    def from_wire(cls, raw: object) -> "SignedGfsServerList":
+    def from_wire(cls, raw: object) -> SignedGfsServerList:
         """Raises :class:`UnsupportedGfsServersSigSuite` for an unknown or
         missing suite, :class:`ValueError` for any other bad field."""
         if not isinstance(raw, dict):
-            raise ValueError("gfs server list: not an object")
+            raise WrongTypeError("gfs server list: not an object")
         suite = raw.get("gfs_servers_sig_suite")
         if not isinstance(suite, str) or suite not in SUPPORTED_GFS_SERVERS_SIG_SUITES:
             raise UnsupportedGfsServersSigSuite(
@@ -338,9 +339,12 @@ class SignedGfsServerList:
         keys: list[str] = []
         for entry in json.loads(self.servers_json)[:MAX_GFS_SERVERS]:
             key = entry.get("public_key") if isinstance(entry, dict) else None
-            if isinstance(key, str) and _ED25519_HEX.fullmatch(key.lower()):
-                if key.lower() not in keys:
-                    keys.append(key.lower())
+            if (
+                isinstance(key, str)
+                and _ED25519_HEX.fullmatch(key.lower())
+                and key.lower() not in keys
+            ):
+                keys.append(key.lower())
         return tuple(keys)
 
 

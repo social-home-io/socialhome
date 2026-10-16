@@ -14,8 +14,11 @@ from .cluster import ClusterService
 from .config import GfsConfig
 from .envelope_relay import GfsEnvelopeRelay
 from .federation import GfsFederationService
+from .highlight_publications import HighlightPublicationRegistry
 from .invites import GfsInviteService
 from .member_publish import GfsMemberPublishService
+from .moment_public_registry import MomentPublicRegistry
+from .relay_bridge import RelayBridge
 from .repositories import (
     AbstractClusterRepo,
     AbstractGfsAdminRepo,
@@ -31,28 +34,24 @@ from .repositories import (
     AbstractGfsUserRegistrationRepo,
 )
 from .rtc_transport import GfsRtcSession
-from .relay_bridge import RelayBridge
-from .highlight_publications import HighlightPublicationRegistry
-from .moment_public_registry import MomentPublicRegistry
 from .ws_registry import GfsWebSocketRegistry
 
 if TYPE_CHECKING:
     # ``public`` imports this module, so the resolver type is annotation-only.
-    from .public import ClientIpResolver
-
     # ``admin`` reads ``gfs_client_ip_key`` off the app, so it imports this
     # module — the auth type stays annotation-only to keep that one-way.
     from .admin import AdminAuth
+    from .public import ClientIpResolver
 
 gfs_db_key: AppKey[AsyncDatabase] = AppKey("gfs_db")
 gfs_config_key: AppKey[GfsConfig] = AppKey("gfs_config")
 #: Resolves a request's client IP under the configured trusted-proxy policy.
 #: One parsed instance per server — never build one per request.
-gfs_client_ip_key: "AppKey[ClientIpResolver]" = AppKey("gfs_client_ip")
+gfs_client_ip_key: AppKey[ClientIpResolver] = AppKey("gfs_client_ip")
 gfs_federation_key: AppKey[GfsFederationService] = AppKey("gfs_federation")
 gfs_fed_repo_key: AppKey[AbstractGfsFederationRepo] = AppKey("gfs_fed_repo")
 gfs_admin_repo_key: AppKey[AbstractGfsAdminRepo] = AppKey("gfs_admin_repo")
-gfs_admin_auth_key: "AppKey[AdminAuth]" = AppKey("gfs_admin_auth")
+gfs_admin_auth_key: AppKey[AdminAuth] = AppKey("gfs_admin_auth")
 gfs_admin_service_key: AppKey[GfsAdminService] = AppKey("gfs_admin_service")
 gfs_cluster_key: AppKey[ClusterService] = AppKey("gfs_cluster")
 gfs_cluster_repo_key: AppKey[AbstractClusterRepo] = AppKey("gfs_cluster_repo")

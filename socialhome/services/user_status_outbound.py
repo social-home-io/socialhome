@@ -27,7 +27,7 @@ again.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import UserStatusChanged
@@ -56,7 +56,7 @@ class UserStatusOutbound(
 ):
     """Publish local :class:`UserStatusChanged` events as ``USER_STATUS_UPDATED``."""
 
-    _federation: "FederationService"
+    _federation: FederationService
 
     __slots__ = (
         "_bus",
@@ -70,10 +70,10 @@ class UserStatusOutbound(
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
-        user_repo: "AbstractUserRepo",
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
+        user_repo: AbstractUserRepo,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -136,7 +136,7 @@ class UserStatusOutbound(
         user = await self._user_repo.get_by_user_id(minor_user_id)
         if user is None:
             return
-        live = user.status.visible_dict(datetime.now(timezone.utc))
+        live = user.status.visible_dict(datetime.now(UTC))
         if live is None:
             return
         payload = {"user_id": minor_user_id, **live}

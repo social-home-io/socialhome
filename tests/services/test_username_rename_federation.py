@@ -54,7 +54,6 @@ from socialhome.services.profile_federation_outbound import (
 )
 from socialhome.services.user_service import UserService
 
-
 # ── Sender side ──────────────────────────────────────────────────────────
 
 
@@ -85,7 +84,6 @@ class _SenderFederation:
 
     async def send_event(self, *, to_instance_id, event_type, payload):
         self.sent.append((to_instance_id, event_type, payload))
-        return None
 
 
 class _OnePeerRepo:

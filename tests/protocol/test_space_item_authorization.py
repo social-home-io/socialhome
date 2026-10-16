@@ -25,7 +25,6 @@ import pytest
 from socialhome.domain.space import SpaceFeatureAccess
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
-
 from tests.services.test_space_public_inbound import (  # noqa: F401
     _item_frame,
     _signed_inner,

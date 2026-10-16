@@ -210,7 +210,7 @@ async def test_create_report_federates_when_user_target_is_remote(stack):
         {"remote-uid": "peer-a"},
     )
     stack.svc.attach_federation(fed, own_instance_id="self")
-    report, federated = await stack.svc.create_report(
+    _report, federated = await stack.svc.create_report(
         reporter_user_id=reporter.user_id,
         target_type="user",
         target_id="remote-uid",

@@ -46,16 +46,16 @@ class BoundedHold[T]:
 
     __slots__ = (
         "_by_key",
-        "_ttl",
-        "_max_entries",
-        "_max_per_key",
-        "_max_per_sender",
-        "_max_bytes",
-        "_max_bytes_per_sender",
-        "_max_entry_bytes",
         "_bytes",
         "_clock",
+        "_max_bytes",
+        "_max_bytes_per_sender",
+        "_max_entries",
+        "_max_entry_bytes",
+        "_max_per_key",
+        "_max_per_sender",
         "_on_expire",
+        "_ttl",
     )
 
     def __init__(

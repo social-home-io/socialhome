@@ -17,7 +17,7 @@ import logging
 import os
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -33,11 +33,12 @@ from socialhome.crypto import (
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.gfs_member_publish import (
     MEMBER_PUBLISH_FRAME_KEYS,
-    PLAINTEXT_CERT_KEYS,
     MEMBER_PUBLISH_REQUEST_KEYS,
+    PLAINTEXT_CERT_KEYS,
     SPACE_ITEM_EVENT_TYPE,
     MemberPublishRequest,
 )
+from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
 from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
@@ -46,10 +47,7 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
-from socialhome.services.gfs_member_publish_service import (
-    ITEM_SIZE_BUCKETS,
-    GfsMemberPublishService,
-)
+from socialhome.services.gfs_member_publish_service import GfsMemberPublishService
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
 pytestmark = pytest.mark.security
@@ -81,7 +79,7 @@ def _request(publisher: _Household) -> dict:
     req = MemberPublishRequest(
         instance_id=publisher.instance_id,
         gfs_instance_id="gfs-node-a",
-        ts=datetime.now(timezone.utc).isoformat(),
+        ts=datetime.now(UTC).isoformat(),
         signature="",
         target=SPACE_ID,
         epoch=1,

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import copy
 import itertools
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 
 import orjson
 import pytest
 
 from socialhome.domain import timetable as tt_mod
 from socialhome.domain.timetable import (
-    drop_invalid_icons,
     MAX_WIRE_BYTES,
     OVERRIDE_RETENTION_DAYS,
     TIMETABLE_COLORS,
@@ -34,6 +33,7 @@ from socialhome.domain.timetable import (
     copy_day,
     defaults_from_dict,
     defaults_to_dict,
+    drop_invalid_icons,
     entry_from_dict,
     entry_patch,
     entry_to_dict,
@@ -59,8 +59,8 @@ from socialhome.domain.timetable import (
     without_override,
 )
 
-T0 = datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc)
-NOW = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 9, 1, 8, 0, tzinfo=UTC)
+NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 
 # 2026-09-28 is a Monday.
 MON = date(2026, 9, 28)
@@ -87,13 +87,13 @@ def ent(
 
 
 def tt_(**kw) -> Timetable:
-    base = dict(
-        id="tt-1",
-        name="Anna 5b",
-        created_by="uid-alice",
-        created_at=T0,
-        updated_at=T0,
-    )
+    base = {
+        "id": "tt-1",
+        "name": "Anna 5b",
+        "created_by": "uid-alice",
+        "created_at": T0,
+        "updated_at": T0,
+    }
     base.update(kw)
     return Timetable(**base)
 
@@ -2210,8 +2210,8 @@ class TestTodayTimetable:
         assert today.date == MON
         first = today.lessons[0]
         assert first.lesson.title == "Mathe"
-        assert first.start_at == datetime(2026, 9, 28, 6, 0, tzinfo=timezone.utc)
-        assert first.end_at == datetime(2026, 9, 28, 6, 45, tzinfo=timezone.utc)
+        assert first.start_at == datetime(2026, 9, 28, 6, 0, tzinfo=UTC)
+        assert first.end_at == datetime(2026, 9, 28, 6, 45, tzinfo=UTC)
         assert [ls.lesson.source_id for ls in today.lessons] == ["m1", "m2", "mb"]
 
     def test_invalid_day_is_none(self):
@@ -2266,8 +2266,8 @@ class TestTodayTimetable:
         today = tt_mod.today_timetable(tt, date(2026, 3, 29))
         assert today is not None
         ls = today.lessons[0]
-        assert ls.start_at == datetime(2026, 3, 29, 0, 30, tzinfo=timezone.utc)
-        assert ls.end_at == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+        assert ls.start_at == datetime(2026, 3, 29, 0, 30, tzinfo=UTC)
+        assert ls.end_at == datetime(2026, 3, 29, 1, 30, tzinfo=UTC)
         assert ls.end_at > ls.start_at
 
     def test_to_dict_flattens_the_lesson(self):
@@ -2313,7 +2313,7 @@ class TestWireTimestampsAndVersions:
 
     def test_timestamps_are_normalised_to_utc(self):
         got = tt_mod.parse_datetime("2026-06-01T12:00:00+02:00", "at")
-        assert got == datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
+        assert got == datetime(2026, 6, 1, 10, 0, tzinfo=UTC)
         assert got.utcoffset() == timedelta(0)
 
     def test_remote_version_refusal(self):

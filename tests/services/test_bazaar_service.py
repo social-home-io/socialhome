@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
-from socialhome.domain.child_protection import AccountProtectedError
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.child_protection import AccountProtectedError
 from socialhome.domain.events import (
     BazaarBidPlaced,
     BazaarListingExpired,
@@ -82,7 +82,7 @@ async def _seed_post(db, post_id: str, space_id: str = _DEFAULT_SPACE_ID):
 async def _seed_listing(env, *, mode: BazaarMode, end_in: timedelta) -> str:
     pid = uuid.uuid4().hex
     await _seed_post(env.db, pid)
-    end_iso = (datetime.now(timezone.utc) + end_in).isoformat()
+    end_iso = (datetime.now(UTC) + end_in).isoformat()
     await env.repo.save_listing(
         BazaarListing(
             post_id=pid,
@@ -132,12 +132,12 @@ async def test_place_bid_carries_extended_end_time(env):
     )
     placed = [e for e in env.events if isinstance(e, BazaarBidPlaced)]
     new_end = datetime.fromisoformat(
-        placed[0].new_end_time.replace("Z", "+00:00"),
+        placed[0].new_end_time,
     )
     if new_end.tzinfo is None:
-        new_end = new_end.replace(tzinfo=timezone.utc)
+        new_end = new_end.replace(tzinfo=UTC)
     # New end should be ~5 min in the future.
-    assert (new_end - datetime.now(timezone.utc)).total_seconds() > 60
+    assert (new_end - datetime.now(UTC)).total_seconds() > 60
 
 
 async def test_place_bid_unknown_listing_raises(env):
@@ -194,7 +194,7 @@ async def test_expire_due_closes_past_auctions_with_winner(env):
         amount=200,
     )
     # Force the listing into the past.
-    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     await env.db.enqueue(
         "UPDATE bazaar_listings SET end_time=? WHERE post_id=?",
         (past, pid),
@@ -208,7 +208,7 @@ async def test_expire_due_closes_past_auctions_with_winner(env):
 
 async def test_expire_due_closes_no_bid_listing_as_expired(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION, end_in=timedelta(hours=1))
-    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     await env.db.enqueue(
         "UPDATE bazaar_listings SET end_time=? WHERE post_id=?",
         (past, pid),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -18,7 +18,6 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.user_service import UserService
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -132,7 +131,7 @@ async def _insert_audio_message(
     created_at: str | None = None,
 ) -> None:
     """Insert a row directly so we control ``created_at`` precisely."""
-    ts = created_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    ts = created_at or datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     await db.enqueue(
         "INSERT INTO conversation_messages(id, conversation_id, sender_user_id, "
         "content, type, media_url, deleted, created_at) "
@@ -200,9 +199,7 @@ async def test_sweep_skips_messages_older_than_one_hour(stack):
     """Rows past the window are silently skipped."""
     blob_path = stack.media_dir / "voice3.ogg"
     blob_path.write_bytes(b"OggS" + b"\x00" * 64)
-    old_ts = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    old_ts = (datetime.now(UTC) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
     await _insert_audio_message(
         stack.db,
         msg_id="m-old-1",

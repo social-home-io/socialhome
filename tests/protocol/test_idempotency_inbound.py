@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-
+from datetime import UTC
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -29,7 +29,6 @@ from socialhome.repositories import (
     SqliteOutboxRepo,
 )
 
-
 pytestmark = pytest.mark.security
 
 
@@ -45,7 +44,7 @@ def _build_inbound(
 ) -> bytes:
     """Construct a properly-signed + encrypted federation envelope."""
     import os
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     payload_json = json.dumps(payload, separators=(",", ":"))
     aead = AESGCM(session_key)
@@ -58,7 +57,7 @@ def _build_inbound(
         "event_type": event_type.value,
         "from_instance": derive_instance_id(peer_kp.public_key),
         "to_instance": own_iid,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "encrypted_payload": encrypted,
         "space_id": None,
         "proto_version": 1,

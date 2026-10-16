@@ -17,7 +17,7 @@ events live next to the service that publishes them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class DomainEvent:
@@ -45,13 +45,13 @@ class DomainEvent:
 
 @dataclass(slots=True, frozen=True)
 class PostCreated(DomainEvent):
-    post: "Post"
+    post: Post
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class PostEdited(DomainEvent):
-    post: "Post"
+    post: Post
     occurred_at: datetime = field(default_factory=_now)
     #: ``None`` when the post lives in the household feed; the
     #: containing ``space_id`` when it's a space post. The outbound
@@ -73,7 +73,7 @@ class PostEdited(DomainEvent):
     #: content, not in the old — :func:`~socialhome.domain.mention.mentions_added`),
     #: resolved on this household's own member view. Only these people are
     #: notified about an edit. Never on the wire.
-    new_mentions: tuple["Mention", ...] = ()
+    new_mentions: tuple[Mention, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -97,7 +97,7 @@ class PostDeleted(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class PostReactionChanged(DomainEvent):
-    post: "Post"
+    post: Post
     occurred_at: datetime = field(default_factory=_now)
     #: ``None`` for a household-feed post; the space for a space post (v_49:
     #: the member-publish bridge relays a local user's space reaction).
@@ -112,7 +112,7 @@ class PostReactionChanged(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class CommentAdded(DomainEvent):
     post_id: str
-    comment: "Comment"
+    comment: Comment
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
     #: ``None`` when local-origination; set on inbound replay — see
@@ -121,7 +121,7 @@ class CommentAdded(DomainEvent):
     #: Space comments only: @-mentions resolved against the space's members
     #: by :class:`~socialhome.services.space_mentions.SpaceMentionResolver`.
     #: Empty for household-feed comments.
-    mentions: tuple["Mention", ...] = ()
+    mentions: tuple[Mention, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -129,13 +129,13 @@ class CommentUpdated(DomainEvent):
     """Comment body edited. Broadcast as ``comment.updated`` WS frame."""
 
     post_id: str
-    comment: "Comment"
+    comment: Comment
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
     origin_instance_id: str | None = None
     #: Space comments only: the @-mentions this edit newly adds (see
     #: :attr:`PostEdited.new_mentions`).
-    new_mentions: tuple["Mention", ...] = ()
+    new_mentions: tuple[Mention, ...] = ()
     #: The user who made the edit (the author, or a moderator). Empty for an
     #: edit applied from a peer.
     actor_user_id: str = ""
@@ -162,7 +162,7 @@ class CommentDeleted(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class SpacePostCreated(DomainEvent):
-    post: "Post"
+    post: Post
     space_id: str
     #: @-mentions in ``post.content``, resolved against the space's members
     #: by each household on its own member view
@@ -170,7 +170,7 @@ class SpacePostCreated(DomainEvent):
     #: Never on the wire. May include one ``MentionType.HERE`` entry — only
     #: when the space allows @here and the author is owner/admin by this
     #: household's roster (the resolver drops it otherwise).
-    mentions: tuple["Mention", ...] = ()
+    mentions: tuple[Mention, ...] = ()
     approved_by: str | None = None
     occurred_at: datetime = field(default_factory=_now)
     #: ``None`` when the post was created locally (via the SPA's
@@ -202,7 +202,7 @@ class SpacePostSynced(DomainEvent):
     (:class:`~socialhome.services.system_album_bridge.SystemAlbumBridge`),
     as every household rebuilds its own from the posts."""
 
-    post: "Post"
+    post: Post
     space_id: str
     occurred_at: datetime = field(default_factory=_now)
 
@@ -216,7 +216,7 @@ class SpaceCommentSynced(DomainEvent):
     (:class:`~socialhome.federation.pending_parent_buffer.PendingParentBuffer`),
     which replays replies held for this comment."""
 
-    comment: "Comment"
+    comment: Comment
     space_id: str
     occurred_at: datetime = field(default_factory=_now)
 
@@ -231,26 +231,26 @@ class SpacePostModerated(DomainEvent):
     """
 
     space_id: str
-    post: "Post"
+    post: Post
     moderated_by: str
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class SpaceModerationQueued(DomainEvent):
-    item: "SpaceModerationItem"
+    item: SpaceModerationItem
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class SpaceModerationApproved(DomainEvent):
-    item: "SpaceModerationItem"
+    item: SpaceModerationItem
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class SpaceModerationRejected(DomainEvent):
-    item: "SpaceModerationItem"
+    item: SpaceModerationItem
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -258,7 +258,7 @@ class SpaceModerationRejected(DomainEvent):
 class SpaceModerationExpired(DomainEvent):
     """A queued item nobody decided within its review window (7 days)."""
 
-    item: "SpaceModerationItem"
+    item: SpaceModerationItem
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -449,7 +449,7 @@ class HouseholdZonesChanged(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class TaskAssigned(DomainEvent):
-    task: "Task"
+    task: Task
     assigned_to: str  # user_id
     #: Set for a space task — consumers gate delivery on membership.
     space_id: str | None = None
@@ -458,9 +458,9 @@ class TaskAssigned(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class TaskCompleted(DomainEvent):
-    task: "Task"
+    task: Task
     completed_by: str  # user_id
-    spawned_next: "Task | None" = None
+    spawned_next: Task | None = None
     #: Set for a space task — fans out to the space, not the household.
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
@@ -472,7 +472,7 @@ class TaskDeadlineDue(DomainEvent):
     (task, due_date) — the notification service fans out to all assignees.
     """
 
-    task: "Task"
+    task: Task
     due_date: date
     occurred_at: datetime = field(default_factory=_now)
 
@@ -486,7 +486,7 @@ class TaskCreated(DomainEvent):
     ``origin_instance_id`` is set by federation inbound so the outbound
     bridge can skip echoing a peer's own edit back to it."""
 
-    task: "Task"
+    task: Task
     space_id: str | None = None
     origin_instance_id: str | None = None
     #: The user who made this write (v_42) — federated inside the sealed
@@ -502,7 +502,7 @@ class TaskUpdated(DomainEvent):
     / priority / labels change. Broadcast as ``task.updated``.
     ``origin_instance_id`` as on :class:`TaskCreated`."""
 
-    task: "Task"
+    task: Task
     space_id: str | None = None
     origin_instance_id: str | None = None
     #: The user who made this write (v_42) — federated inside the sealed
@@ -538,7 +538,7 @@ class TimetableSaved(DomainEvent):
     bridge can skip echoing a peer's own edit back to it.
     """
 
-    timetable: "Timetable"
+    timetable: Timetable
     space_id: str | None = None
     origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
@@ -712,13 +712,13 @@ class SchedulePollFinalized(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class CalendarEventCreated(DomainEvent):
-    event: "CalendarEvent"
+    event: CalendarEvent
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class CalendarEventUpdated(DomainEvent):
-    event: "CalendarEvent"
+    event: CalendarEvent
     #: Phase D: names of *material* fields that changed in this update
     #: (start / end / summary / capacity-down). Empty tuple means the
     #: update was cosmetic-only (e.g. attendees list reorder) — push
@@ -787,7 +787,7 @@ class EventReminderDue(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class UserStatusChanged(DomainEvent):
     user_id: str
-    status: "UserStatus | None"  # None = status cleared
+    status: UserStatus | None  # None = status cleared
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1685,7 +1685,7 @@ class DmMessageCreated(DomainEvent):
     #: (:class:`~socialhome.services.dm_mentions.DmMentionResolver`).
     #: Drives the ``dm_mention`` bell and the group ``mentions`` level.
     #: Never on the wire; never contains ``@here``.
-    mentions: tuple["Mention", ...] = ()
+    mentions: tuple[Mention, ...] = ()
     #: Set (``"household"`` / ``"space"``) when the conversation is a
     #: system chat — not a DM, so DM-only consumers (the HA
     #: ``socialhome.dm_received`` event) skip it. ``None`` for a DM.
@@ -1730,7 +1730,7 @@ class DmMessageUpdated(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
     #: A sender's edit: the @-mentions it newly adds (see
     #: :attr:`PostEdited.new_mentions`). Empty for transcript patches.
-    new_mentions: tuple["Mention", ...] = ()
+    new_mentions: tuple[Mention, ...] = ()
     #: The sender's name for a mention bell ("{name} mentioned you …").
     sender_display_name: str | None = None
     #: Inbound space-chat edit: the household it came from (echo guard,

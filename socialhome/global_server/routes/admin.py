@@ -14,6 +14,10 @@ from pathlib import Path
 
 from aiohttp import BodyPartReader, web
 
+from ...domain.errors import PayloadTooLargeError
+from ...domain.space import ModerationAlreadyDecidedError
+from ...hardening import read_part_capped
+from ...media.image_processor import ImageProcessor
 from .. import app_keys as K
 from ..cluster import (
     ClusterPeerKeyMismatch,
@@ -22,10 +26,6 @@ from ..cluster import (
     member_url,
 )
 from ..config import GfsConfig
-from ...domain.errors import PayloadTooLargeError
-from ...domain.space import ModerationAlreadyDecidedError
-from ...hardening import read_part_capped
-from ...media.image_processor import ImageProcessor
 from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
@@ -202,6 +202,10 @@ class AdminBrandingHeaderImageView(GfsBaseView):
         try:
             reader = await self.request.multipart()
         except Exception:
+            log.debug(
+                "AdminBrandingHeaderImageView.post: fail-soft error ignored",
+                exc_info=True,
+            )
             return web.json_response(
                 {"error": "invalid_multipart"},
                 status=400,

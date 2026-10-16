@@ -44,7 +44,7 @@ import unicodedata
 import uuid
 import weakref
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ..crypto import (
@@ -52,16 +52,8 @@ from ..crypto import (
     ed25519_public_key,
     generate_identity_keypair,
 )
+from ..domain.errors import WrongTypeError
 from ..federation.host_equivalence import acts_as_host
-from ..infrastructure.key_manager import KeyManagerError
-from ..gfs_server_list_sig import verify_gfs_server_list
-from ..space_owner_statement import (
-    MAX_STATEMENT_FUTURE_SKEW_MS,
-    InvalidOwnerStatement,
-    sign_inviter_proof,
-    verify_inviter_proof,
-    verify_owner_statement,
-)
 from ..federation.invite_code import (
     build_invite_code,
     build_invite_payload,
@@ -73,10 +65,17 @@ from ..federation.owner_bound_id import (
     SPACE_POST_KIND,
     mint_owner_bound_id,
 )
+from ..gfs_server_list_sig import verify_gfs_server_list
+from ..infrastructure.key_manager import KeyManagerError
+from ..space_owner_statement import (
+    MAX_STATEMENT_FUTURE_SKEW_MS,
+    InvalidOwnerStatement,
+    sign_inviter_proof,
+    verify_inviter_proof,
+    verify_owner_statement,
+)
 
 if TYPE_CHECKING:
-    from .space_moderation_service import ModerationSubmitter
-    from .space_writer_cert_service import SpaceWriterCertService
     import pathlib
 
     from ..federation.invite_bootstrap import InviteBootstrapHint
@@ -85,34 +84,37 @@ if TYPE_CHECKING:
     from .link_preview_service import LinkPreviewService
     from .peer_unpair_service import InstancePurger
     from .space_authority_rotation_service import SpaceAuthorityRotationService
+    from .space_moderation_service import ModerationSubmitter
+    from .space_writer_cert_service import SpaceWriterCertService
 from ..domain.child_protection import (
     PROTECTED_OWNER_PUBLISH_DETAIL,
     PROTECTED_OWNER_TRANSFER_DETAIL,
     ProtectedCapability,
 )
+from ..domain.errors import GfsSelectionInvalidError
 from ..domain.events import (
-    SpaceRemoteSeatLive,
     CommentAdded,
-    PeerProtoVersionRaised,
     CommentDeleted,
     CommentUpdated,
     LocalSpaceInviteCreated,
+    PeerProtoVersionRaised,
     PostDeleted,
     PostEdited,
     PostReactionChanged,
     RemoteJoinRequestApproved,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
-    SpaceLocationFeatureEnabled,
-    SpaceLocationModeChanged,
     SpaceJoinApproved,
     SpaceJoinDenied,
     SpaceJoinRequested,
+    SpaceLocationFeatureEnabled,
+    SpaceLocationModeChanged,
     SpaceMemberJoined,
     SpaceMemberLeft,
     SpaceMemberProfileUpdated,
     SpacePostCreated,
     SpacePostModerated,
+    SpaceRemoteSeatLive,
 )
 from ..domain.federation import (
     DELIVERY_ERROR_MESH_DEFERRED,
@@ -131,13 +133,16 @@ from ..domain.federation_capabilities import (
     space_feature_keys_missing_below,
     space_features_missing_below,
 )
-from ..media.cleanup import unlink_unreferenced
-from .inbound_media_store import optional_local_media_ref, require_local_media_refs
-from .space_purge import purge_space_and_media
-from .protection_gate import ProtectionGateMixin
-from .content_access import ContentAccessMixin
+from ..domain.gfs_server import SignedGfsServerList
 from ..domain.link_preview import card_survives_edit
-from ..media.image_processor import ImageProcessor
+from ..domain.media_constraints import (
+    SPACE_COVER_MAX_DIMENSION,
+    SPACE_COVER_SNAPSHOT_MAX_BYTES,
+    SPACE_ICON_MAX_DIMENSION,
+    SPACE_ICON_SNAPSHOT_MAX_BYTES,
+    SPACE_IMAGE_EMBED_MAX_BYTES,
+)
+from ..domain.mention import Mention
 from ..domain.picture_hash import compute_picture_hash
 from ..domain.post import (
     FEED_POST_MAX_IMAGES,
@@ -148,49 +153,39 @@ from ..domain.post import (
     Post,
     PostType,
 )
-from ..domain.mention import Mention
 from ..domain.presence import truncate_coord
-from ..domain.errors import GfsSelectionInvalidError
-from ..domain.gfs_server import SignedGfsServerList
 from ..domain.space import (
     ACCESS_FEATURES,
-    InvitationSnapshot,
-    AgeRestrictedError,
-    owner_seat_from_roster,
-    InvalidSpaceLinkError,
-    validate_space_link_url,
+    CONTENT_AUTHORITY_ROLES,
     INVITE_VIA_GFS,
     INVITE_VIA_GFS_LEGACY,
     INVITE_VIA_INTERNAL,
     INVITE_VIAS,
+    PUBLIC_SPACE_TIERS,
+    SETTINGS_AUTHORITY_ROLES,
+    SPACE_CATEGORIES,
     AccessDecision,
+    AgeRestrictedError,
     AlreadyMemberError,
     BannedFromSpaceError,
-    HostNotPairedError,
-    InviteExpiredError,
-    InviteOnlyError,
-    SpaceArchivedError,
-    SubscribeNotAllowedError,
-    SubscriberReadOnlyError,
-    UserAlreadyMemberError,
-    UserBannedError,
     ContentAction,
-    PeersTooOldError,
-    PrivateGfsLinkMembersError,
-    PrivateGfsOffError,
-    restricted_access_changes,
-    PUBLIC_SPACE_TIERS,
-    SPACE_CATEGORIES,
-    JoinMode,
-    JoinOwner,
-    CONTENT_AUTHORITY_ROLES,
-    SETTINGS_AUTHORITY_ROLES,
+    HostNotPairedError,
     HostTooOldError,
     HostUnreachableError,
     HouseholdUpgradeRequiredError,
+    InvalidSpaceLinkError,
+    InvitationSnapshot,
+    InviteExpiredError,
+    InviteOnlyError,
+    JoinMode,
+    JoinOwner,
+    PeersTooOldError,
+    PrivateGfsLinkMembersError,
+    PrivateGfsOffError,
     PublicSpaceLimitError,
     RemoteAdminOutcome,
     Space,
+    SpaceArchivedError,
     SpaceConfigEventType,
     SpaceFeatureAccess,
     SpaceFeatures,
@@ -198,36 +193,47 @@ from ..domain.space import (
     SpacePermissionError,
     SpaceRole,
     SpaceType,
+    SubscribeNotAllowedError,
+    SubscriberReadOnlyError,
+    UserAlreadyMemberError,
+    UserBannedError,
     mirrorable_remote_role,
     normalize_category,
-    role_change_allowed,
-    role_change_event_type,
     normalize_min_age,
     normalize_retention_exempt_types,
+    owner_seat_from_roster,
+    restricted_access_changes,
+    role_change_allowed,
+    role_change_event_type,
+    validate_space_link_url,
+)
+from ..domain.writer_cert import WriterEntitlement
+from ..federation.invite_link_forward import (
+    FORWARDED_INVITE_LINK_ACTION,
+    LIST_INVITE_LINKS_ACTION,
+    REVOKE_INVITE_LINK_ACTION,
 )
 from ..infrastructure.event_bus import EventBus
+from ..media.cleanup import unlink_unreferenced
+from ..media.image_processor import ImageProcessor
+from ..media.profile_picture import (
+    PROFILE_PICTURE_MAX_DIMENSION,
+    normalize_profile_picture,
+)
 from ..repositories.base import row_to_dict
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_remote_member_repo import SpaceRemoteMember
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
-from ..domain.media_constraints import (
-    SPACE_COVER_MAX_DIMENSION,
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    SPACE_ICON_MAX_DIMENSION,
-    SPACE_IMAGE_EMBED_MAX_BYTES,
-    SPACE_ICON_SNAPSHOT_MAX_BYTES,
-)
-from ..media.profile_picture import (
-    PROFILE_PICTURE_MAX_DIMENSION,
-    normalize_profile_picture,
-)
+from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
-from ..federation.invite_link_forward import (
-    FORWARDED_INVITE_LINK_ACTION,
-    LIST_INVITE_LINKS_ACTION,
-    REVOKE_INVITE_LINK_ACTION,
+from .inbound_media_store import optional_local_media_ref, require_local_media_refs
+from .protection_gate import ProtectionGateMixin
+from .space_authority_pin import (
+    apply_authority_cert,
+    owner_authority_cert_via,
+    owner_statement_via,
 )
 from .space_crypto_service import (
     KEY_SUITE_AESGCM_256,
@@ -236,17 +242,11 @@ from .space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
 )
-from .space_authority_pin import (
-    apply_authority_cert,
-    owner_authority_cert_via,
-    owner_statement_via,
-)
 from .space_member_guard import SpaceMemberGuardMixin
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
+from .space_purge import purge_space_and_media
 from .space_writer_cert_service import scope_weakened, writer_key_min_version
-from ..domain.writer_cert import WriterEntitlement
-
 
 log = logging.getLogger(__name__)
 
@@ -357,7 +357,7 @@ def _invite_expiry_epoch(expires_at: str | None) -> int:
     ``validate_expires_at`` there requires a future instant at most
     :data:`PUBLISHED_INVITE_MAX_TTL_SECONDS` out.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cap = int((now + timedelta(seconds=PUBLISHED_INVITE_MAX_TTL_SECONDS)).timestamp())
     if not expires_at:
         return cap
@@ -372,39 +372,39 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     """Orchestrates space lifecycle + member + post flows."""
 
     __slots__ = (
-        "_mirror_locks",
-        "_spaces",
-        "_posts",
-        "_users",
+        "_authority_rotation",
+        "_bazaar",
         "_bus",
-        "_own_instance_id",
         "_child_protection",
-        "_pictures",
         "_covers",
-        "_icons",
-        "_gfs",
-        "_federation_repo",
-        "_instance_purger",
         "_federation",
-        "_remote_members",
-        "_redeem_coordinator",
-        "_invite_forwarder",
-        "_space_crypto",
+        "_federation_repo",
+        "_gallery",
+        "_gfs",
         "_gfs_mirror",
         "_gfs_selection",
-        "_subscriber_keys",
-        "_member_gfs",
-        "_writer_certs",
-        "_media_dir",
-        "_media_refs",
-        "_gallery",
-        "_bazaar",
+        "_icons",
+        "_instance_purger",
+        "_invite_forwarder",
         "_invite_keywrap_pk",
         "_invite_keywrap_sig",
         "_link_previews",
+        "_media_dir",
+        "_media_refs",
+        "_member_gfs",
+        "_mirror_locks",
         "_moderation",
+        "_own_instance_id",
+        "_pictures",
         "_post_attachments",
-        "_authority_rotation",
+        "_posts",
+        "_redeem_coordinator",
+        "_remote_members",
+        "_space_crypto",
+        "_spaces",
+        "_subscriber_keys",
+        "_users",
+        "_writer_certs",
     )
 
     def __init__(
@@ -415,7 +415,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         bus: EventBus,
         *,
         own_instance_id: str,
-        media_dir: "pathlib.Path | None" = None,
+        media_dir: pathlib.Path | None = None,
         media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._spaces = space_repo
@@ -446,9 +446,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._member_gfs = None
         #: v_49 writer-cert issuer/holder (:class:`SpaceWriterCertService`).
         #: Optional — absent, no cert rides any channel (pre-v_49 behaviour).
-        self._writer_certs: "SpaceWriterCertService | None" = None
+        self._writer_certs: SpaceWriterCertService | None = None
         self._federation_repo = None
-        self._instance_purger: "InstancePurger | None" = None
+        self._instance_purger: InstancePurger | None = None
         self._federation = None
         self._remote_members = None
         self._redeem_coordinator = None
@@ -469,11 +469,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._link_previews: LinkPreviewService | None = None
         # The space moderation queue (``attach_moderation``) and what rides
         # with a post (polls / schedule polls / Bazaar listings).
-        self._moderation: "ModerationSubmitter | None" = None
+        self._moderation: ModerationSubmitter | None = None
         self._post_attachments = SpacePostAttachments()
         # v_44 — re-mints a lost seed of an already-rotated space through a
         # REAL rotation (``attach_authority_rotation``).
-        self._authority_rotation: "SpaceAuthorityRotationService | None" = None
+        self._authority_rotation: SpaceAuthorityRotationService | None = None
 
     def attach_invite_identity(
         self,
@@ -494,7 +494,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._invite_keywrap_pk = keywrap_public_key.hex()
         self._invite_keywrap_sig = keywrap_sig
 
-    def attach_link_previews(self, svc: "LinkPreviewService") -> None:
+    def attach_link_previews(self, svc: LinkPreviewService) -> None:
         """Wire the author-side link preview builder. The preview is built
         here, on the author's household, and federates inside the encrypted
         ``SPACE_POST_CREATED`` payload — member households never fetch the
@@ -574,7 +574,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._gfs_mirror = mirror
 
     def attach_authority_rotation(
-        self, rotation: "SpaceAuthorityRotationService"
+        self, rotation: SpaceAuthorityRotationService
     ) -> None:
         """Wire the v_44 authority rotation, so :meth:`ensure_space_seed`
         re-mints a lost seed of a rotated space by rotating (members get a
@@ -596,7 +596,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """
         self._subscriber_keys = subscriber_key_outbound
 
-    def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
+    def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert service: the roster snapshot and the
         forward-secrecy rekey then carry each household its own cert."""
         self._writer_certs = writer_certs
@@ -651,7 +651,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             self._on_remote_join_request_approved_bus,
         )
 
-    def attach_instance_purger(self, purger: "InstancePurger") -> None:
+    def attach_instance_purger(self, purger: InstancePurger) -> None:
         """Wire the shared ``remote_instances`` teardown
         (:meth:`PeerUnpairService.purge`) the space-session cleanup drops a
         seat through. Unwired, no seat is ever dropped."""
@@ -1022,7 +1022,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 space_id=space.id,
                 user_id=owner.user_id,
                 role=SpaceRole.OWNER,
-                joined_at=datetime.now(timezone.utc).isoformat(),
+                joined_at=datetime.now(UTC).isoformat(),
             )
         )
         await self._spaces.add_space_instance(space.id, self._own_instance_id)
@@ -2743,9 +2743,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             # The turn-on default found no single server: the link's own
             # GFS — the one this household just came through — is the pick.
             try:
-                if await self._gfs_selection.default_channels(space_id, prefer=gfs_id):
-                    if self._member_gfs is not None:
-                        await self._member_gfs.enable_channel(space_id)
+                if (
+                    await self._gfs_selection.default_channels(space_id, prefer=gfs_id)
+                    and self._member_gfs is not None
+                ):
+                    await self._member_gfs.enable_channel(space_id)
             except Exception:
                 log.exception("private gfs: the link's GFS as channel server failed")
         return True
@@ -2831,6 +2833,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     space.id,
                     gfs_id,
                     exc,
+                    exc_info=True,
                 )
         # A relayed redeem that committed between the refusal check and this
         # write would leave a link-joined member behind: say so, the owner
@@ -2944,7 +2947,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             space_id=space_id,
             user_id=user_id,
             role=role,
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         )
         await self._spaces.save_member(member)
         await self._bus.publish(
@@ -3082,7 +3085,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             space_id=space.id,
             user_id=user_id,
             role=SpaceRole.MEMBER,
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         )
         await self._spaces.save_member(member)
         await self._spaces.update_invitation_status(invitation_id, "accepted")
@@ -3447,7 +3450,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self,
         space_id: str,
         instance_id: str,
-        scope_before: "str | WriterEntitlement | None",
+        scope_before: str | WriterEntitlement | None,
     ) -> bool:
         if self._writer_certs is None:
             return False
@@ -3502,7 +3505,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self,
         space_id: str,
         instance_id: str,
-        scope_before: "str | WriterEntitlement | None",
+        scope_before: str | WriterEntitlement | None,
         *,
         authority_rotation_follows: bool = False,
     ) -> bool:
@@ -4600,11 +4603,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # space-authority-signed + the rekey runs for forward secrecy), instead
         # of forwarding to the offline owner. Delegation OFF / no seed → keep
         # the v_15 forward-to-host path (Phase 6 gates that behind approval).
-        if not await self._executes_locally_as_delegated_admin(space):
-            if await self._forward_admin_action_if_remote(
-                space, actor_username, "ban", {"user_id": user_id, "reason": reason}
-            ):
-                return
+        if not await self._executes_locally_as_delegated_admin(
+            space
+        ) and await self._forward_admin_action_if_remote(
+            space, actor_username, "ban", {"user_id": user_id, "reason": reason}
+        ):
+            return
         target = await self._spaces.get_member(space_id, user_id)
         if target is not None and target.role == SpaceRole.OWNER:
             raise SpacePermissionError("cannot ban the owner")
@@ -5102,7 +5106,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         link_via = self._resolve_invite_via(space, via)
         uses = params.get("uses", 1)
         if isinstance(uses, bool) or not isinstance(uses, int):
-            raise ValueError("uses must be an integer")
+            raise WrongTypeError("uses must be an integer")
         ttl = params.get("ttl_seconds", DEFAULT_INVITE_TOKEN_TTL_SECONDS)
         if ttl is not None and (
             isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < 0
@@ -5154,9 +5158,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         expires_at: str | None = None
         if ttl_seconds is not None:
             ttl = max(1, int(ttl_seconds))
-            expires_at = (
-                datetime.now(timezone.utc) + timedelta(seconds=ttl)
-            ).isoformat()
+            expires_at = (datetime.now(UTC) + timedelta(seconds=ttl)).isoformat()
 
         token = uuid.uuid4().hex
         gfs_token: str | None = None
@@ -5205,7 +5207,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 "uses_total": max(1, int(uses)),
                 "expires_at": expires_at,
                 "created_by": created_by,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "gfs_id": publish_to_gfs or None,
                 "gfs_token": gfs_token,
                 "gfs_url": gfs_url,
@@ -5421,6 +5423,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 gfs_id,
                 row.get("gfs_url") or "no url recorded",
                 exc,
+                exc_info=True,
             )
 
     def _invite_payload(
@@ -5781,7 +5784,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # Short-TTL (5 min) single-use token minted by create_invite_token;
         # reusable with the existing POST /api/spaces/join path once the
         # invitee accepts.
-        expires = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
         token = await self._spaces.create_invite_token(
             space_id,
             created_by=actor.user_id,
@@ -6091,7 +6094,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     space_id=space_id,
                     user_id=user_id,
                     role=SpaceRole.MEMBER.value,
-                    joined_at=datetime.now(timezone.utc).isoformat(),
+                    joined_at=datetime.now(UTC).isoformat(),
                 )
             )
         else:
@@ -6247,7 +6250,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         *,
         user_id: str,
         issuer_instance_id: str | None = None,
-        bootstrap: "InviteBootstrapHint | None" = None,
+        bootstrap: InviteBootstrapHint | None = None,
     ) -> dict:
         """Consume an invite token, possibly via a cross-instance round-trip.
 
@@ -6350,7 +6353,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             space_id=space_id,
             user_id=user_id,
             role=seat,
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         )
         await self._spaces.save_member(member)
         await self._bus.publish(
@@ -6630,7 +6633,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     "space_service: federation not attached; "
                     "cannot approve remote join request",
                 )
-            expires = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+            expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
             token = await self._spaces.create_invite_token(
                 row["space_id"],
                 created_by=actor.user_id,
@@ -6661,7 +6664,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             space_id=row["space_id"],
             user_id=row["user_id"],
             role=SpaceRole.MEMBER,
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         )
         await self._spaces.save_member(member)
         await self._bus.publish(
@@ -6918,7 +6921,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             ),
             author=author.user_id,
             type=post_type,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content=content,
             media_url=None if post_type is PostType.IMAGE else media_url,
             image_urls=image_urls_tuple,
@@ -7299,7 +7302,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             post_id=post.id,
             author=author_user_id,
             type=ctype,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             parent_id=parent_id,
             content=content,
             media_url=media_url,
@@ -7533,7 +7536,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             space_id=space_id,
             user_id=user_id,
             role=SpaceRole.SUBSCRIBER,
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         )
         await self._spaces.save_member(member)
         await self._bus.publish(
@@ -7768,7 +7771,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         user_id: str,
         *,
         action: str = "post",
-        space: "Space | None" = None,
+        space: Space | None = None,
     ) -> None:
         """Raise :class:`SpacePermissionError` if ``user_id`` is a
         subscriber of ``space_id`` and the action isn't admin-opted-in
@@ -7793,7 +7796,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         member: SpaceMember,
         *,
         action: str = "post",
-        space: "Space | None" = None,
+        space: Space | None = None,
     ) -> None:
         """Public entry to :meth:`_assert_writable_member` for sibling
         services (e.g. :class:`SpaceTaskService`) that own a space write
@@ -7805,7 +7808,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         member: SpaceMember,
         *,
         action: str = "post",
-        space: "Space | None" = None,
+        space: Space | None = None,
     ) -> None:
         """Raise :class:`SpacePermissionError` if ``member`` is a
         read-only subscriber and the action isn't admin-opted-in for
@@ -8424,6 +8427,7 @@ async def apply_space_content_key_from_metadata(
         log.warning(
             "apply_space_content_key_from_metadata: invalid base64 for %s",
             space_id,
+            exc_info=True,
         )
         return
     if len(raw) != 32:
@@ -9288,7 +9292,7 @@ async def apply_gfs_servers_from_metadata(
             owner_instance_id,
         )
         return False
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     if signed.issued_at > now_ms + MAX_STATEMENT_FUTURE_SKEW_MS:
         # A runaway counter would make every later owner list look older.
         log.warning(
@@ -9487,9 +9491,10 @@ def _validate_space_content(
             raise ValueError(
                 f"location label exceeds {LOCATION_LABEL_MAX} characters",
             )
-    if post_type in (PostType.TEXT, PostType.TRANSCRIPT):
-        if not content or not content.strip():
-            raise ValueError(f"{post_type.value} post requires content")
+    if post_type in (PostType.TEXT, PostType.TRANSCRIPT) and (
+        not content or not content.strip()
+    ):
+        raise ValueError(f"{post_type.value} post requires content")
     if post_type is not PostType.IMAGE and image_urls:
         raise ValueError(
             f"{post_type.value} post must not carry image_urls",

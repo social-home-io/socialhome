@@ -52,11 +52,11 @@ class BazaarOutbound:
     """Bus-event → federation broadcaster for bazaar listings."""
 
     __slots__ = (
+        "_bazaar_repo",
         "_bus",
         "_federation",
-        "_bazaar_repo",
-        "_media_sync",
         "_federation_repo",
+        "_media_sync",
         "_users",
     )
 
@@ -64,11 +64,11 @@ class BazaarOutbound:
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        bazaar_repo: "AbstractBazaarRepo",
-        media_sync: "SpaceMediaSyncService | None" = None,
+        federation_service: FederationService,
+        bazaar_repo: AbstractBazaarRepo,
+        media_sync: SpaceMediaSyncService | None = None,
         federation_repo=None,
-        user_repo: "AbstractUserRepo | None" = None,
+        user_repo: AbstractUserRepo | None = None,
     ) -> None:
         self._bus = bus
         #: Settlement is the seller's household's to announce: every

@@ -41,8 +41,9 @@ import math
 import secrets
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
+from ..domain.errors import WrongTypeError
 from ..domain.events import HouseholdZonesChanged
 from ..domain.household_zone import (
     MAX_HOUSEHOLD_ZONES,
@@ -84,7 +85,7 @@ _UNSET: object = object()
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _require_admin(actor_is_admin: bool) -> None:
@@ -94,7 +95,7 @@ def _require_admin(actor_is_admin: bool) -> None:
 
 def _validate_is_home(value: object) -> bool:
     if not isinstance(value, bool):
-        raise ValueError("is_home must be true or false")
+        raise WrongTypeError("is_home must be true or false")
     return value
 
 
@@ -138,7 +139,7 @@ def _free_name(name: str, taken: set[str]) -> str:
 class HouseholdZoneService(BusPublisherMixin):
     """CRUD + platform mirror + GPS match for household zones."""
 
-    __slots__ = ("_zones", "_bus")
+    __slots__ = ("_bus", "_zones")
 
     def __init__(
         self,
@@ -333,7 +334,7 @@ class HouseholdZoneService(BusPublisherMixin):
             if zone is None or zone.external_id in seen_ids:
                 skipped += 1
                 continue
-            assert zone.external_id is not None  # noqa: S101 — set above
+            assert zone.external_id is not None
             seen_ids.add(zone.external_id)
             if zone.is_home and have_home:
                 log.warning(

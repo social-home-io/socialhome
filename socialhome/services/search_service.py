@@ -54,7 +54,7 @@ MIN_QUERY_CHARS: int = 2
 class SearchService:
     """Domain-event-driven indexing + query API."""
 
-    __slots__ = ("_bus", "_repo", "_space_repo", "_user_repo", "_conv_repo")
+    __slots__ = ("_bus", "_conv_repo", "_repo", "_space_repo", "_user_repo")
 
     def __init__(self, bus: EventBus, repo: AbstractSearchRepo) -> None:
         self._bus = bus
@@ -379,6 +379,10 @@ class SearchService:
             try:
                 uids = await self._space_repo.list_local_member_user_ids(space_id)
             except Exception:
+                log.debug(
+                    "SearchService._apply_access_filter._in_space: fail-soft error ignored",
+                    exc_info=True,
+                )
                 space_member_cache[space_id] = True
                 return True
             allowed = caller_user_id is not None and caller_user_id in uids
@@ -387,9 +391,12 @@ class SearchService:
 
         kept: list[SearchHit] = []
         for hit in hits:
-            if hit.scope in (SCOPE_SPACE_POST, SCOPE_PAGE) and hit.space_id:
-                if not await _in_space(hit.space_id):
-                    continue
+            if (
+                hit.scope in (SCOPE_SPACE_POST, SCOPE_PAGE)
+                and hit.space_id
+                and not await _in_space(hit.space_id)
+            ):
+                continue
             if hit.scope == SCOPE_MESSAGE:
                 # Without a conversation id in the index row, restrict
                 # DM hits to the caller's own messages (conservative).

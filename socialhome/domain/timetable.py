@@ -24,10 +24,11 @@ Doodle-like schedule-poll feature.
 from __future__ import annotations
 
 import copy
+import itertools
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Any, Final
 
@@ -490,7 +491,7 @@ def _check_no_overlap(
 ) -> None:
     """Half-open ``[start, end)`` intervals — touching is fine."""
     ordered = sorted(intervals)
-    for (_, prev_end), (next_start, _) in zip(ordered, ordered[1:]):
+    for (_, prev_end), (next_start, _) in itertools.pairwise(ordered):
         if next_start < prev_end:
             raise TimetableValidationError(f"{where}: slots overlap")
 
@@ -1391,7 +1392,7 @@ def _parse_datetime(value: Any, what: str) -> datetime:
         parsed = datetime.fromisoformat(_as_str(value, what))
         if parsed.tzinfo is None:
             raise TimetableValidationError(f"{what} must carry a timezone")
-        parsed = parsed.astimezone(timezone.utc)
+        parsed = parsed.astimezone(UTC)
     except (ValueError, OverflowError) as exc:
         if isinstance(exc, TimetableValidationError):
             raise

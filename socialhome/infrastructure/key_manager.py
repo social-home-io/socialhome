@@ -28,9 +28,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
 
 from ..crypto import b64url_decode, b64url_encode
 
@@ -61,7 +61,7 @@ class KeyManager:
     # ── Factories ────────────────────────────────────────────────────────
 
     @classmethod
-    def from_data_dir(cls, data_dir: str | Path) -> "KeyManager":
+    def from_data_dir(cls, data_dir: str | Path) -> KeyManager:
         """Build a KEK from a 32-byte salt stored under ``data_dir``.
 
         The salt file is created with mode ``0o600`` on first call. Later
@@ -85,7 +85,7 @@ class KeyManager:
         cls,
         passphrase: str,
         salt: bytes,
-    ) -> "KeyManager":
+    ) -> KeyManager:
         """Derive a KEK from a passphrase and a stable 32-byte salt."""
         if len(salt) != cls.KEK_BYTES:
             raise KeyManagerError("Passphrase salt must be 32 bytes")

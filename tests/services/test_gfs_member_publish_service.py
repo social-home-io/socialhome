@@ -12,10 +12,9 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime
-from dataclasses import dataclass, field, replace
-
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 
 import aiohttp
 import pytest
@@ -43,6 +42,7 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
+from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
 from socialhome.domain.writer_cert import WriterCert
 from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
@@ -193,6 +193,10 @@ class _Gfs:
     def __init__(self, session: aiohttp.ClientSession, *, capable: bool = True):
         self.session = session
         self.capable = capable
+        #: The session a listing target is reached through, and every target
+        #: an anonymous session was opened for.
+        self.listing_session: object = None
+        self.listing_opened: list = []
         self.strict_capable = True
         self.subscribed: list[tuple[str, str]] = []
         #: Every request that went over the IDENTIFIED session (``client``),
@@ -229,10 +233,6 @@ class _Gfs:
 
     #: v_57 — what ``server_targets`` answers (``None`` = no owner list).
     targets: list | None = None
-    #: The session a listing target is reached through, and every target an
-    #: anonymous session was opened for.
-    listing_session: object = None
-    listing_opened: list = []
 
     async def server_targets(self, space_id):
         return self.targets
@@ -892,8 +892,6 @@ async def test_schedule_item_publishes_in_the_background(world):
 
 @pytest.mark.parametrize("size", [0, 10, 900, 1100, 5000, 20000, 70000])
 def test_the_item_plaintext_is_padded_to_a_size_bucket(size):
-    from socialhome.services.gfs_member_publish_service import ITEM_SIZE_BUCKETS
-
     pt = build_item_plaintext("comment", {"content": "x" * size})
     assert len(pt) in ITEM_SIZE_BUCKETS
     assert parse_item_plaintext(pt) == ("comment", {"content": "x" * size})
@@ -914,8 +912,6 @@ def test_the_padding_rides_a_field_a_pr2_receiver_ignores():
 
 
 def test_an_item_past_the_largest_bucket_is_left_unpadded():
-    from socialhome.services.gfs_member_publish_service import ITEM_SIZE_BUCKETS
-
     pt = build_item_plaintext("post", {"content": "x" * (ITEM_SIZE_BUCKETS[-1] + 1)})
     assert len(pt) > ITEM_SIZE_BUCKETS[-1]
     assert parse_item_plaintext(pt) is not None
@@ -980,7 +976,9 @@ async def test_strict_publishes_anonymously_over_the_cookie_less_session(world):
     # Nothing went over the identified session — no publish, no subscribe.
     assert identified.posts == []
     assert world["gfs"].subscribed == []
-    [(url, body)] = [p for p in anon.posts if p[0].endswith("/gfs/member-publish-anon")]
+    [(_url, body)] = [
+        p for p in anon.posts if p[0].endswith("/gfs/member-publish-anon")
+    ]
     for forbidden in ("instance_id", "signature", "writer_cert"):
         assert forbidden not in body
     assert world["me"].instance_id not in json.dumps(body)
@@ -1107,7 +1105,7 @@ async def test_a_held_writer_key_goes_anonymous_even_before_the_mode_arrives(wor
 
 async def test_strict_comments_go_anonymous_too(world):
     await _gfs_strict(world)
-    identified, anon = _strict_world(world)
+    identified, _anon = _strict_world(world)
     svc = world["svc"]
     svc._writer_certs.scope = "comment"
     targets = await svc.plan_item(SPACE_ID, AUTHOR, "comment")

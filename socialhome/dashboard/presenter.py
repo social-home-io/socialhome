@@ -63,10 +63,10 @@ __all__ = [
     "SHOPPING_SHOWN",
     "STICKIES_SHOWN",
     "ColorBook",
-    "SchoolSpan",
     "Fmt",
     "Lane",
     "LaneBlock",
+    "SchoolSpan",
     "Tick",
     "Timeline",
     "avatar_url",
@@ -262,7 +262,7 @@ def avatar_url(person: DashboardPerson) -> str | None:
 class Fmt:
     """What templates call to spell times, titles and people."""
 
-    __slots__ = ("now", "today", "t", "colors", "own_color", "_people")
+    __slots__ = ("_people", "colors", "now", "own_color", "t", "today")
 
     def __init__(
         self,

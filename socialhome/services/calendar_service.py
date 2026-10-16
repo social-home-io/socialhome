@@ -17,34 +17,22 @@ import sqlite3
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from ..domain.calendar import (
-    validate_capacity,
     Calendar,
     CalendarEvent,
     CalendarEventCopy,
-    RsvpPastError,
     CalendarEventCreate,
     CalendarRSVP,
     EventReminder,
+    RsvpPastError,
     RSVPStatus,
+    validate_capacity,
 )
 from ..domain.child_protection import ProtectedCapability
-from ..domain.federation_capabilities import FederationCapability
-from ..domain.space import (
-    MODERATION_BLOCK_KEY,
-    HostTooOldError,
-    AccessDecision,
-    ContentAction,
-    ModerationQueueFullError,
-    ModerationTargetGoneError,
-    Space,
-    SpaceModerationItem,
-    SpaceArchivedError,
-    SpacePermissionError,
-)
+from ..domain.errors import WrongTypeError
 from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -54,6 +42,19 @@ from ..domain.events import (
     UserProvisioned,
 )
 from ..domain.federation import FederationEventType
+from ..domain.federation_capabilities import FederationCapability
+from ..domain.space import (
+    MODERATION_BLOCK_KEY,
+    AccessDecision,
+    ContentAction,
+    HostTooOldError,
+    ModerationQueueFullError,
+    ModerationTargetGoneError,
+    Space,
+    SpaceArchivedError,
+    SpaceModerationItem,
+    SpacePermissionError,
+)
 from ..federation.owner_bound_id import (
     SPACE_CALENDAR_EVENT_KIND,
     SPACE_POST_KIND,
@@ -65,18 +66,18 @@ from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCale
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..utils.rrule import expand_rrule
 from ..utils.timezones import is_valid_tz
-from .inbound_media_store import require_local_media_ref
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
+from .inbound_media_store import require_local_media_ref
 from .moderation_release import with_release
 from .protection_gate import ProtectionGateMixin
 from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
 
 if TYPE_CHECKING:
-    from .space_moderation_service import ModerationSubmitter
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .space_moderation_service import ModerationSubmitter
 
 log = logging.getLogger(__name__)
 
@@ -229,11 +230,11 @@ class CalendarService(BusPublisherMixin):
     """Personal calendar operations."""
 
     __slots__ = (
-        "_repo",
         "_bus",
-        "_household",
-        "_federation",
         "_fed_repo",
+        "_federation",
+        "_household",
+        "_repo",
         "_user_repo",
     )
 
@@ -627,7 +628,7 @@ class CalendarService(BusPublisherMixin):
 
         def _parse_dt(value: str) -> datetime:
             try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return datetime.fromisoformat(value)
             except ValueError as exc:
                 raise ValueError(f"invalid datetime: {value!r}") from exc
 
@@ -644,19 +645,19 @@ class CalendarService(BusPublisherMixin):
 
         group_uuid = _clean_client_event_uuid(client_event_uuid)
 
-        fields = dict(
-            summary=summary,
-            start=start_dt,
-            end=end_dt,
-            all_day=all_day,
-            description=description,
-            attendees=attendee_tuple,
-            rrule=rrule,
-            rsvp_enabled=rsvp_enabled,
-            cover_url=_clean_cover_url(cover_url),
-            location=_clean_location(location),
-            tz=event_tz,
-        )
+        fields = {
+            "summary": summary,
+            "start": start_dt,
+            "end": end_dt,
+            "all_day": all_day,
+            "description": description,
+            "attendees": attendee_tuple,
+            "rrule": rrule,
+            "rsvp_enabled": rsvp_enabled,
+            "cover_url": _clean_cover_url(cover_url),
+            "location": _clean_location(location),
+            "tz": event_tz,
+        }
 
         # Idempotent fan-out: the SPA mints one ``client_event_uuid`` per
         # shared event and POSTs once per target calendar. A re-POST of
@@ -812,7 +813,7 @@ class CalendarService(BusPublisherMixin):
     ) -> list[CalendarEvent]:
         def _parse_dt(value: str) -> datetime:
             try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return datetime.fromisoformat(value)
             except ValueError as exc:
                 raise ValueError(f"invalid datetime: {value!r}") from exc
 
@@ -1009,7 +1010,7 @@ class CalendarService(BusPublisherMixin):
                 "RSVPs only apply to inbound invites — local events have "
                 "no organiser to reply to",
             )
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         await self._repo.upsert_rsvp(
             CalendarRSVP(
                 event_id=event_id,
@@ -1043,7 +1044,7 @@ class CalendarService(BusPublisherMixin):
             event=existing,
             user_id=user_id,
             status=None,
-            updated_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(UTC).isoformat(),
         )
 
     # ── Federation helpers ──────────────────────────────────────────────
@@ -1103,7 +1104,7 @@ class CalendarService(BusPublisherMixin):
                     event_type=event_type,
                     payload=payload,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # Don't fail the whole create on a transient peer
                 # outage — the outbox retry loop will redeliver.
                 log.exception(
@@ -1143,7 +1144,7 @@ class CalendarService(BusPublisherMixin):
                 event_type=evt_type,
                 payload=payload,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "personal calendar RSVP outbound failed: %s → %s",
                 evt_type,
@@ -1196,13 +1197,13 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
     """
 
     __slots__ = (
-        "_repo",
         "_bus",
-        "_federation",
-        "_space_repo",
-        "_household",
         "_child_protection",
+        "_federation",
+        "_household",
         "_moderation",
+        "_repo",
+        "_space_repo",
     )
 
     def __init__(
@@ -1218,7 +1219,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         self._space_repo: AbstractSpaceRepo | None = None
         self._household = None
         self._child_protection = None
-        self._moderation: "ModerationSubmitter | None" = None
+        self._moderation: ModerationSubmitter | None = None
 
     # ── Subscription feed tokens (Phase F) ───────────────────────────────
 
@@ -1324,8 +1325,8 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         """
         events = await self._repo.list_events_in_range(
             event.space_id,
-            start=datetime.now(timezone.utc) - timedelta(days=1),
-            end=datetime.now(timezone.utc) + timedelta(days=365),
+            start=datetime.now(UTC) - timedelta(days=1),
+            end=datetime.now(UTC) + timedelta(days=365),
         )
         # `list_events_in_range` may return virtual occurrences (id
         # suffixed with ``@<iso>``) for recurring events; canonical
@@ -1367,7 +1368,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
     ) -> list[CalendarEvent]:
         def _parse_dt(value: str) -> datetime:
             try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return datetime.fromisoformat(value)
             except ValueError as exc:
                 raise ValueError(f"invalid datetime: {value!r}") from exc
 
@@ -1413,8 +1414,8 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             raise ValueError("summary must not be empty")
         capacity = validate_capacity(capacity)
         try:
-            start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-            end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+            start_dt = datetime.fromisoformat(start)
+            end_dt = datetime.fromisoformat(end)
         except ValueError as exc:
             raise ValueError(f"invalid datetime: {exc}") from exc
         if end_dt < start_dt:
@@ -1519,7 +1520,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
                 event_id=saved.id,
                 user_id=created_by,
                 status=RSVPStatus.GOING,
-                updated_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=datetime.now(UTC).isoformat(),
                 occurrence_at=start_dt.isoformat(),
             ),
             space_id=space_id,
@@ -1987,10 +1988,10 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         # The creator's auto-RSVP at create_event time goes through a
         # different code path so this guard doesn't block it.
         duration = event.end - event.start
-        if occ_dt + duration < datetime.now(timezone.utc):
+        if occ_dt + duration < datetime.now(UTC):
             raise RsvpPastError()
         occ_iso = occ_dt.isoformat()
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         # Phase C: capacity-aware "going" routing. Only "going" is
         # affected — "maybe" never counts toward capacity, "declined"
         # frees a slot (which then auto-promotes the waitlist below).
@@ -2067,7 +2068,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             user_id=user_id,
             occurrence_at=occ_iso,
             status=None,  # signals delete
-            updated_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(UTC).isoformat(),
         )
         await self._publish_rsvp_changed(
             space_id=space_id,
@@ -2234,7 +2235,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             or await self._going_count(event_id, occ_iso) < event.capacity
             else RSVPStatus.WAITLIST
         )
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         await self._repo.upsert_rsvp(
             CalendarRSVP(
                 event_id=event_id,
@@ -2346,7 +2347,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             return
         candidates.sort(key=lambda r: r.updated_at)
         promoted = candidates[0]
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         await self._repo.upsert_rsvp(
             CalendarRSVP(
                 event_id=promoted.event_id,
@@ -2399,7 +2400,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         occ_dt = (
             occurrence_at
             if isinstance(occurrence_at, datetime)
-            else datetime.fromisoformat(str(occurrence_at).replace("Z", "+00:00"))
+            else datetime.fromisoformat(str(occurrence_at))
         )
         if not is_recurring:
             if occ_dt != event.start:
@@ -2584,7 +2585,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
 def _parse_iso(value: str) -> datetime:
     """Parse an ISO 8601 string, tolerating the trailing ``Z`` form."""
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"invalid datetime: {value!r}") from exc
 
@@ -2654,7 +2655,7 @@ def _normalised_capacity_patch(patch: dict[str, Any]) -> dict[str, Any]:
     Raises :class:`ValueError`."""
     clear = patch.pop("clear_capacity", False)
     if not isinstance(clear, bool):
-        raise ValueError("clear_capacity must be a boolean")
+        raise WrongTypeError("clear_capacity must be a boolean")
     capacity = validate_capacity(patch.pop("capacity", None))
     if clear:
         patch["clear_capacity"] = True

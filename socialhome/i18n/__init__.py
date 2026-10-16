@@ -40,7 +40,7 @@ class Catalog:
     :meth:`load_locale` directly (useful in tests).
     """
 
-    __slots__ = ("_messages", "_default")
+    __slots__ = ("_default", "_messages")
 
     def __init__(self, default_locale: str = _DEFAULT_LOCALE) -> None:
         self._messages: dict[str, dict[str, str]] = {default_locale: {}}
@@ -51,7 +51,7 @@ class Catalog:
     @classmethod
     def from_directory(
         cls, path: str | Path, *, default_locale: str = _DEFAULT_LOCALE
-    ) -> "Catalog":
+    ) -> Catalog:
         """Load every ``{locale}.json`` file under ``path``."""
         # Cold path: called once during app startup wiring before any
         # request is in flight, so sync filesystem reads are acceptable.

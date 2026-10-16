@@ -44,7 +44,7 @@ import secrets
 import uuid
 import weakref
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..domain.events import SpaceRemoteSeatLive
@@ -76,8 +76,8 @@ from ..services.space_authority_pin import (
 )
 from ..services.space_service import (
     _coerce_min_age,
-    build_space_snapshot_for_federation,
     admit_join,
+    build_space_snapshot_for_federation,
     can_seat_remote_stub,
     expire_superseded_invitations,
     seat_join_stub,
@@ -96,16 +96,16 @@ from .invite_bootstrap import (
 from .mesh_member_claim import mesh_member_claim, parse_mesh_member_claim
 
 if TYPE_CHECKING:
-    from ..infrastructure.key_manager import KeyManager
     from ..domain.federation import FederationEvent
     from ..infrastructure.event_bus import EventBus
+    from ..infrastructure.key_manager import KeyManager
+    from ..rate_limiter import RateLimiter
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
     from ..repositories.space_remote_member_repo import (
         AbstractSpaceRemoteMemberRepo,
     )
     from ..repositories.space_repo import AbstractSpaceRepo
-    from ..rate_limiter import RateLimiter
     from ..repositories.user_repo import AbstractUserRepo
     from ..services.space_writer_cert_service import SpaceWriterCertService
     from .federation_service import FederationService
@@ -266,47 +266,47 @@ class SpaceInviteTokenRedeemCoordinator:
     """
 
     __slots__ = (
+        "_bootstrap_hints",
         "_bus",
-        "_federation",
-        "_spaces",
-        "_remote_members",
-        "_users",
-        "_federation_repo",
-        "_cover_repo",
-        "_icon_repo",
-        "_space_crypto",
         "_child_protection",
-        "_pending",
-        "_pending_issuer",
-        "_timeout",
-        "_route_service",
-        "_routed_handler",
-        "_relay_sender",
+        "_cover_repo",
+        "_federation",
+        "_federation_repo",
+        "_icon_repo",
+        "_key_manager",
         "_keywrap_private_key",
         "_keywrap_public_key",
         "_keywrap_sig",
-        "_key_manager",
-        "_bootstrap_hints",
+        "_pending",
+        "_pending_issuer",
         "_rate_limiter",
-        "_space_service",
-        "_seat_locks",
         "_redeem_locks",
+        "_relay_sender",
+        "_remote_members",
+        "_route_service",
+        "_routed_handler",
+        "_seat_locks",
+        "_space_crypto",
+        "_space_service",
+        "_spaces",
+        "_timeout",
+        "_users",
         "_writer_certs",
     )
 
     def __init__(
         self,
         *,
-        bus: "EventBus",
-        federation_service: "FederationService",
-        space_repo: "AbstractSpaceRepo",
-        space_remote_member_repo: "AbstractSpaceRemoteMemberRepo",
-        user_repo: "AbstractUserRepo",
-        federation_repo: "AbstractFederationRepo",
+        bus: EventBus,
+        federation_service: FederationService,
+        space_repo: AbstractSpaceRepo,
+        space_remote_member_repo: AbstractSpaceRemoteMemberRepo,
+        user_repo: AbstractUserRepo,
+        federation_repo: AbstractFederationRepo,
         timeout: float = REDEEM_TIMEOUT_SECONDS,
-        route_service: "RouteDiscoveryService | None" = None,
-        routed_handler: "SpaceRoutedHandler | None" = None,
-        cover_repo: "AbstractSpaceCoverRepo | None" = None,
+        route_service: RouteDiscoveryService | None = None,
+        routed_handler: SpaceRoutedHandler | None = None,
+        cover_repo: AbstractSpaceCoverRepo | None = None,
         icon_repo=None,
         space_crypto_service=None,
         child_protection_service=None,
@@ -352,16 +352,16 @@ class SpaceInviteTokenRedeemCoordinator:
         #: :meth:`attach_bootstrap`. Absent → the bootstrap path is not
         #: offered and an unreachable issuer still fails with "pair
         #: first" / "no route to issuer".
-        self._relay_sender: "RelayEnvelopeSender | None" = None
+        self._relay_sender: RelayEnvelopeSender | None = None
         self._keywrap_private_key: bytes = b""
         self._keywrap_public_key: bytes = b""
         self._keywrap_sig: str = ""
-        self._key_manager: "KeyManager | None" = None
+        self._key_manager: KeyManager | None = None
         #: ``redeem_nonce`` → the hint we sealed the request under, so
         #: the reply leg can be pinned to the issuer identity the invite
         #: blob advertised rather than trusting whatever comes back.
         self._bootstrap_hints: dict[str, InviteBootstrapHint] = {}
-        self._rate_limiter: "RateLimiter | None" = None
+        self._rate_limiter: RateLimiter | None = None
         #: Set by :meth:`attach_space_service` — the seed-holder that
         #: signs roster gossip. Optional so legacy fixtures still build a
         #: coordinator; unset simply means today's host-only seating.
@@ -381,7 +381,7 @@ class SpaceInviteTokenRedeemCoordinator:
         )
         #: v_49 writer certs: the issuer puts the redeemer's own cert in the
         #: ACK ``space_meta``; the redeemer stores it. ``None`` → no cert.
-        self._writer_certs: "SpaceWriterCertService | None" = None
+        self._writer_certs: SpaceWriterCertService | None = None
 
     def _redeem_lock(self, instance_id: str) -> asyncio.Lock:
         lock = self._redeem_locks.get(instance_id)
@@ -404,7 +404,7 @@ class SpaceInviteTokenRedeemCoordinator:
         """
         self._space_service = space_service
 
-    def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
+    def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert service (issuer and redeemer sides)."""
         self._writer_certs = writer_certs
 
@@ -456,12 +456,12 @@ class SpaceInviteTokenRedeemCoordinator:
     def attach_bootstrap(
         self,
         *,
-        relay_sender: "RelayEnvelopeSender",
+        relay_sender: RelayEnvelopeSender,
         keywrap_private_key: bytes,
         keywrap_public_key: bytes,
         keywrap_sig: str,
-        key_manager: "KeyManager",
-        rate_limiter: "RateLimiter | None" = None,
+        key_manager: KeyManager,
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         """Enable the §D2b bootstrap path.
 
@@ -493,9 +493,9 @@ class SpaceInviteTokenRedeemCoordinator:
             and bool(self._keywrap_sig)
         )
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         """Wire the three inbound event-type handlers into the registry."""
-        registry = federation_service._event_registry  # noqa: SLF001
+        registry = federation_service._event_registry
         registry.register(
             FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
             self._on_redeem,
@@ -583,15 +583,14 @@ class SpaceInviteTokenRedeemCoordinator:
         # Pre-v_6 issuers don't know SPACE_INVITE_TOKEN_REDEEM. Don't
         # ship the envelope into a 10 s timeout — fail fast with a
         # message naming the right next step.
-        if direct_peer:
-            if not await self._federation.peer_supports(
-                issuer_instance_id,
-                min_version=FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM,
-            ):
-                raise SpacePermissionError(
-                    "issuer instance is on an older protocol version — "
-                    "ask them to upgrade before redeeming this code",
-                )
+        if direct_peer and not await self._federation.peer_supports(
+            issuer_instance_id,
+            min_version=FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM,
+        ):
+            raise SpacePermissionError(
+                "issuer instance is on an older protocol version — "
+                "ask them to upgrade before redeeming this code",
+            )
 
         route_path: list[str] | None = None
         target_eph_pk: str | None = None
@@ -678,7 +677,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 )
             try:
                 result = await asyncio.wait_for(fut, timeout=self._timeout)
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise TimeoutError(
                     "issuer did not respond to invite-token redeem",
                 ) from exc
@@ -890,7 +889,7 @@ class SpaceInviteTokenRedeemCoordinator:
                         space_id=space_id,
                         user_id=viewer_user_id,
                         role=role_str,
-                        joined_at=datetime.now(timezone.utc).isoformat(),
+                        joined_at=datetime.now(UTC).isoformat(),
                     )
                 )
                 # A pending private invitation from another household for
@@ -912,7 +911,7 @@ class SpaceInviteTokenRedeemCoordinator:
 
     # ── Receiver side (the issuer in this exchange) ────────────────────
 
-    async def _on_redeem(self, event: "FederationEvent") -> None:
+    async def _on_redeem(self, event: FederationEvent) -> None:
         """Issuer-side: validate the token, seat the remote redeemer,
         send ACK. On any failure ship a DENY with a ``reason``.
         """
@@ -1029,7 +1028,7 @@ class SpaceInviteTokenRedeemCoordinator:
 
     async def _redeemer_may_moderate(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         sender: RemoteInstance | None,
     ) -> bool:
         """Whether the household behind a §D2 REDEEM can store a
@@ -1575,7 +1574,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 space_id,
             )
 
-    async def _on_redeem_ack(self, event: "FederationEvent") -> None:
+    async def _on_redeem_ack(self, event: FederationEvent) -> None:
         """Receiver-side: resolve the in-flight Future with the issuer's
         payload. No-op if the nonce isn't ours (late ACK after timeout)
         or if the answer came from a household we did not address.
@@ -1610,7 +1609,7 @@ class SpaceInviteTokenRedeemCoordinator:
             }
         )
 
-    async def _on_redeem_deny(self, event: "FederationEvent") -> None:
+    async def _on_redeem_deny(self, event: FederationEvent) -> None:
         """Receiver-side: resolve the in-flight Future with a
         :class:`SpacePermissionError` carrying the issuer's reason.
         """
@@ -1626,7 +1625,7 @@ class SpaceInviteTokenRedeemCoordinator:
         reason = str(p.get("reason") or "invite redeem denied by issuer")
         fut.set_exception(SpacePermissionError(reason))
 
-    def _is_addressed_issuer(self, nonce: str, event: "FederationEvent") -> bool:
+    def _is_addressed_issuer(self, nonce: str, event: FederationEvent) -> bool:
         """True when ``event`` answers the household we sent ``nonce`` to.
 
         Without it, a ``redeem_nonce`` is an address anybody may answer:
@@ -1694,7 +1693,7 @@ class SpaceInviteTokenRedeemCoordinator:
             "invite_token": token,
             "space_id": hint.space_id,
             "redeem_nonce": nonce,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "instance_id": self._federation.own_instance_id,
             "identity_pk": self._federation.own_identity_pk.hex(),
             "keywrap_pk": self._keywrap_public_key.hex(),
@@ -1744,7 +1743,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 )
             try:
                 return await asyncio.wait_for(fut, timeout=self._timeout)
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise TimeoutError(
                     "issuer did not respond to invite-token redeem",
                 ) from exc
@@ -2156,7 +2155,7 @@ class SpaceInviteTokenRedeemCoordinator:
         envelope = seal_bootstrap_envelope(
             body={
                 **reply,
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": datetime.now(UTC).isoformat(),
                 "instance_id": self._federation.own_instance_id,
                 "identity_pk": self._federation.own_identity_pk.hex(),
                 "keywrap_pk": self._keywrap_public_key.hex(),
@@ -2259,7 +2258,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 existing.status.value,
                 instance_id,
             )
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._federation_repo.save_instance(
             RemoteInstance(
                 id=instance_id,

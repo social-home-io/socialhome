@@ -13,7 +13,6 @@ import pytest
 from socialhome.crypto import b64url_decode, b64url_encode
 from socialhome.services import recovery_crypto as rc
 
-
 PAYLOAD = b"trust-layer-blob: SECRET-MARKER-12345 \x00\x01\x02 binary"
 PASSPHRASE = "correct horse battery staple"
 INSTANCE_ID = "qbfdx7k2n3p6r8t1v4w9"

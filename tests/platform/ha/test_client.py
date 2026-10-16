@@ -9,7 +9,6 @@ from aiohttp import web
 
 from socialhome.platform.ha.client import HaClient, build_ha_client
 
-
 # pytest-homeassistant-custom-component (transitive when the venv is
 # shared with ha-integration) blocks sockets; aiohttp_server needs a
 # real port. CI doesn't install the plugin so this fixture is a no-op

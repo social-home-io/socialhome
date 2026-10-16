@@ -34,11 +34,11 @@ from datetime import tzinfo
 from typing import Final
 
 from ..domain.household_dashboard import (
+    SECTION_CALENDAR,
     SECTION_PRESENCE,
     SECTION_STICKIES,
     SECTION_TASKS,
     SECTION_TIMETABLE,
-    SECTION_CALENDAR,
     DashboardAgendaItem,
     DashboardLesson,
     DashboardPerson,
@@ -51,7 +51,7 @@ from .boards import BoardBase, HomeBoard, PersonBoard
 from .clock import WallClock, household_clock
 from .contrast import hex_color, ink_on, note_colors, readable_on
 from .emoji import emoji_code
-from .map_view import HOME_ICON, PLACE_ICON, AWAY_ICON, MapView
+from .map_view import AWAY_ICON, HOME_ICON, PLACE_ICON, MapView
 from .messages import ChatDay, MentionCard, MessageRow
 from .picture import (
     PictureJob,
@@ -72,13 +72,13 @@ from .render import text_direction
 from .tabs import TAB_MESSAGES, TAB_OVERVIEW, HomeTab
 
 __all__ = [
-    "API_VERSION",
     "API_PATH",
+    "API_VERSION",
     "CSS_PALETTES",
     "EMPTY_DAY_ICON",
     "STRING_KEYS",
-    "board_header",
     "board_colors",
+    "board_header",
     "css_palettes",
     "display_clock",
     "emoji",

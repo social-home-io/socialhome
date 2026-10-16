@@ -25,8 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Callable
-from typing import Any, Protocol, runtime_checkable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import orjson as _orjson
 
@@ -259,12 +258,12 @@ class ChunkBuilder:
     defers to the injected exporter for reads.
     """
 
-    __slots__ = ("_encoder", "_crypto")
+    __slots__ = ("_crypto", "_encoder")
 
     def __init__(
         self,
         encoder: FederationEncoder,
-        crypto: "SpaceContentEncryption",
+        crypto: SpaceContentEncryption,
     ) -> None:
         self._encoder = encoder
         self._crypto = crypto

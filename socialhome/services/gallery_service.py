@@ -27,7 +27,7 @@ import logging
 import pathlib
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiofiles
 import aiofiles.os
@@ -88,6 +88,7 @@ def _extract_exif_date_sync(data: bytes) -> str | None:
                 parts = str(val).split(" ", 1)[0].replace(":", "-")
                 return parts
     except Exception:
+        log.debug("_extract_exif_date_sync: fail-soft error ignored", exc_info=True)
         return None
     return None
 
@@ -99,6 +100,7 @@ def _read_dims_sync(path: pathlib.Path) -> tuple[int, int]:
         with Image.open(path) as img:
             return int(img.width), int(img.height)
     except Exception:  # pragma: no cover
+        log.debug("_read_dims_sync: fail-soft error ignored", exc_info=True)
         return 0, 0
 
 
@@ -131,12 +133,12 @@ class GalleryService:
     """CRUD + upload pipeline for gallery albums and items."""
 
     __slots__ = (
-        "_repo",
-        "_space_repo",
         "_bus",
         "_config",
         "_media_dir",
         "_media_refs",
+        "_repo",
+        "_space_repo",
         "_transcode_repo",
         "_transcode_service",
     )
@@ -231,7 +233,7 @@ class GalleryService:
                     f"Space has reached the {ALBUMS_PER_SPACE}-album limit"
                 )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         album = GalleryAlbum(
             # A space album federates, so its id commits to its creator —
             # no other household can announce it first as theirs. A
@@ -525,7 +527,7 @@ class GalleryService:
             caption=caption,
             taken_at=taken_at,
             sort_order=0,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
         )
 
     async def _upload_video(
@@ -585,7 +587,7 @@ class GalleryService:
             caption=caption,
             taken_at=None,
             sort_order=0,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
         )
 
     async def _stash_transcode_source(self, data: bytes) -> pathlib.Path:
@@ -685,7 +687,7 @@ class GalleryService:
         existing = await self._repo.get_system_album(space_id)
         if existing is not None:
             return existing
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         album = GalleryAlbum(
             id=uuid.uuid4().hex,
             space_id=space_id,
@@ -760,7 +762,7 @@ class GalleryService:
         # batch into one transaction).
         if existing_urls:
             await self._repo.delete_items_by_source_post(post.id)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         for url, item_type in urls:
             item = GalleryItem(
                 id=uuid.uuid4().hex,

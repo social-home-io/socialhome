@@ -23,7 +23,7 @@ class _FakeRequest:
 @pytest.fixture
 async def env(tmp_dir):
     """Auth-focused env: real DB + UserService + a provisioned user with a token."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
     from socialhome.infrastructure.event_bus import EventBus
     from socialhome.repositories.user_repo import SqliteUserRepo
@@ -170,8 +170,9 @@ async def test_chained_strategy(env):
 
 async def test_require_auth_blocks_unauthenticated():
     """require_auth middleware returns 401 for unauthenticated requests."""
-    from socialhome.auth import require_auth
     from unittest.mock import AsyncMock, MagicMock
+
+    from socialhome.auth import require_auth
 
     class NullStrategy:
         async def authenticate(self, request):
@@ -190,9 +191,10 @@ async def test_require_auth_blocks_unauthenticated():
 
 async def test_require_auth_passes_authenticated():
     """require_auth attaches AuthContext and calls handler."""
-    from socialhome.auth import require_auth, AuthContext
-    from socialhome.domain.user import User
     from unittest.mock import AsyncMock, MagicMock
+
+    from socialhome.auth import AuthContext, require_auth
+    from socialhome.domain.user import User
 
     user = User(user_id="u1", username="admin", display_name="Admin", is_admin=True)
     ctx = AuthContext.from_user(user, auth_method="test")
@@ -214,8 +216,9 @@ async def test_require_auth_passes_authenticated():
 
 async def test_require_auth_skips_public_paths():
     """Public paths bypass authentication entirely."""
-    from socialhome.auth import require_auth
     from unittest.mock import AsyncMock, MagicMock
+
+    from socialhome.auth import require_auth
 
     class NullStrategy:
         async def authenticate(self, request):
@@ -232,8 +235,9 @@ async def test_require_auth_skips_public_paths():
 
 def test_current_user_raises_without_context():
     """current_user raises RuntimeError if no auth context attached."""
-    from socialhome.auth import current_user
     from unittest.mock import MagicMock
+
+    from socialhome.auth import current_user
 
     req = MagicMock()
     req.get.return_value = None
@@ -245,9 +249,10 @@ def test_current_user_raises_without_context():
 
 def test_current_user_returns_context():
     """current_user returns the attached AuthContext."""
-    from socialhome.auth import current_user, AuthContext
-    from socialhome.domain.user import User
     from unittest.mock import MagicMock
+
+    from socialhome.auth import AuthContext, current_user
+    from socialhome.domain.user import User
 
     user = User(user_id="u1", username="a", display_name="A", is_admin=False)
     ctx = AuthContext.from_user(user, auth_method="test")
@@ -258,10 +263,12 @@ def test_current_user_returns_context():
 
 def test_require_admin_non_admin_raises():
     """require_admin raises HTTPForbidden for non-admin user."""
-    from socialhome.auth import require_admin, AuthContext
-    from socialhome.domain.user import User
     from unittest.mock import MagicMock
+
     from aiohttp import web
+
+    from socialhome.auth import AuthContext, require_admin
+    from socialhome.domain.user import User
 
     user = User(user_id="u1", username="a", display_name="A", is_admin=False)
     ctx = AuthContext.from_user(user, auth_method="test")
@@ -273,9 +280,10 @@ def test_require_admin_non_admin_raises():
 
 def test_require_admin_admin_ok():
     """require_admin returns context for admin user."""
-    from socialhome.auth import require_admin, AuthContext
-    from socialhome.domain.user import User
     from unittest.mock import MagicMock
+
+    from socialhome.auth import AuthContext, require_admin
+    from socialhome.domain.user import User
 
     user = User(user_id="u1", username="a", display_name="A", is_admin=True)
     ctx = AuthContext.from_user(user, auth_method="test")

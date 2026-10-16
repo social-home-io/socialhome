@@ -72,7 +72,7 @@ def address_hosts(settings: DashboardSettings) -> frozenset[str]:
 class DashboardController:
     """Settings + listener, changed together."""
 
-    __slots__ = ("_settings", "_server", "_local_hostnames", "_lock")
+    __slots__ = ("_local_hostnames", "_lock", "_server", "_settings")
 
     def __init__(
         self,

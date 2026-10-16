@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-
 import logging
 
 from socialhome.app_keys import (
     db_key as _db_key,
+)
+from socialhome.app_keys import (
     federation_repo_key,
     instance_config_repo_key,
     platform_adapter_key,

@@ -38,7 +38,6 @@ from typing import Protocol
 
 from ...domain.federation import FederationEventType
 
-
 log = logging.getLogger(__name__)
 
 

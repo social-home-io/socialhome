@@ -6,7 +6,7 @@ import asyncio
 import base64
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import aiohttp
 import pytest
@@ -17,7 +17,6 @@ from socialhome.global_server import federation as federation_mod
 from socialhome.global_server.domain import GfsSubscriber
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.repositories import SqliteGfsFederationRepo
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -48,7 +47,7 @@ def _sign(seed: bytes, payload: dict) -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
@@ -239,7 +238,7 @@ async def test_subscribe_cannot_sign_for_another_instance(svc):
     inst-a's key fails because the signature is checked against the
     instance_id in the body (inst-b's registered key)."""
     seed_a, pk_a = _make_keypair()
-    seed_b, pk_b = _make_keypair()
+    _seed_b, pk_b = _make_keypair()
     await svc.register_instance("inst-a2", pk_a.hex(), auto_accept=True)
     await svc.register_instance("inst-b2", pk_b.hex())
     await _publish_known_space(
@@ -268,7 +267,7 @@ async def test_subscribe_stale_timestamp_rejected(svc):
     await _publish_known_space(
         svc, seed, owning_instance="inst-stale-sub", space_id="space-stale"
     )
-    ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    ts = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     sig = _sign(
         seed,
         {
@@ -1438,7 +1437,7 @@ async def test_update_instance_stale_timestamp_raises_permission_error(svc):
     """A ts older than the 300s replay window is rejected."""
     seed, pk = _make_keypair()
     await svc.register_instance("inst-stale", pk.hex())
-    ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    ts = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     sig = _sign(
         seed,
         {"instance_id": "inst-stale", "display_name": "Late", "ts": ts},
@@ -1614,7 +1613,7 @@ async def test_unsubscribe_stale_timestamp_rejected_and_row_survives(svc):
         ),
     )
 
-    ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    ts = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     sig = _sign(
         seed,
         {
@@ -1653,7 +1652,7 @@ async def test_unsubscribe_naive_timestamp_rejected_and_row_survives(svc):
         ),
     )
 
-    ts = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    ts = datetime.now(UTC).replace(tzinfo=None).isoformat()
     sig = _sign(
         seed,
         {
@@ -1775,7 +1774,7 @@ async def test_hide_space_stale_timestamp_rejected(svc):
     await _publish_known_space(
         svc, seed, owning_instance="inst-h4", space_id="space-h4"
     )
-    ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    ts = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     with pytest.raises(PermissionError, match="Stale timestamp"):
         await svc.hide_space(
             "space-h4",
@@ -3006,8 +3005,8 @@ async def _rotation_world(svc, space_id: str = "sp-rot"):
 
 
 async def test_publish_with_owner_cert_repins_the_authority_key(svc):
-    seed, pk, owner_id, _k1s, k1_pk = await _rotation_world(svc)
-    k2_seed, k2_pk = _make_keypair()
+    seed, pk, owner_id, _k1s, _k1_pk = await _rotation_world(svc)
+    _k2_seed, k2_pk = _make_keypair()
     cert = _rot_cert(
         seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
     )
@@ -3174,7 +3173,7 @@ async def test_cert_requires_a_signed_fresh_ts(svc):
             authority_cert=cert,
             ts="",
         )
-    stale = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    stale = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     with pytest.raises(PermissionError):
         await _publish_with_cert(
             svc,

@@ -25,8 +25,8 @@ Security audit findings addressed here (§25.6.2):
 from __future__ import annotations
 
 import asyncio
-import time
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -106,22 +106,22 @@ class SyncRtcSession:
     """
 
     __slots__ = (
-        "sync_id",
-        "space_id",
-        "requester_instance_id",
-        "provider_instance_id",
-        "sync_mode",
-        "role",
-        "_ice_servers",
-        "_pc",
         "_channel",
+        "_closed",
+        "_ice_candidates",
+        "_ice_servers",
+        "_local_sdp",
+        "_loop",
+        "_on_local_ice",
+        "_pc",
         "_ready",
         "_remote_sdp",
-        "_local_sdp",
-        "_ice_candidates",
-        "_loop",
-        "_closed",
-        "_on_local_ice",
+        "provider_instance_id",
+        "requester_instance_id",
+        "role",
+        "space_id",
+        "sync_id",
+        "sync_mode",
     )
 
     def __init__(
@@ -337,7 +337,7 @@ class SyncRtcSession:
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=timeout)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
 
     async def recv_chunk(self) -> bytes | str:

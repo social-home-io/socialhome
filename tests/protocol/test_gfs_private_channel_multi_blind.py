@@ -407,9 +407,13 @@ async def world(tmp_dir):
         log: list = []
         peers = {a_h.instance_id: a_h.pk, b_h.instance_id: b_h.pk}
         seats = {a_h.instance_id, b_h.instance_id}
-        common = dict(
-            session=tca.session, log=log, space=space, peers=peers, seats=seats
-        )
+        common = {
+            "session": tca.session,
+            "log": log,
+            "space": space,
+            "peers": peers,
+            "seats": seats,
+        }
         owner = _node(
             owner_h, seed=SPACE_SEED, conns=[conn_a, conn_b, conn_c], **common
         )

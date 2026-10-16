@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -12,7 +12,7 @@ from socialhome.repositories.moment_repo import SqliteMomentRepo
 
 
 def _now_iso(offset_minutes: int = 0) -> str:
-    return (datetime.now(timezone.utc) + timedelta(minutes=offset_minutes)).isoformat()
+    return (datetime.now(UTC) + timedelta(minutes=offset_minutes)).isoformat()
 
 
 def _moment(
@@ -34,9 +34,7 @@ def _moment(
         parent_moment_id=parent_moment_id,
         origin_instance_id="self",
         created_at=_now_iso(created_offset_min),
-        expires_at=(
-            datetime.now(timezone.utc) + timedelta(days=expires_days)
-        ).isoformat(),
+        expires_at=(datetime.now(UTC) + timedelta(days=expires_days)).isoformat(),
     )
 
 
@@ -105,7 +103,7 @@ async def test_list_visible_drops_past_absolute_expiry(db, repo):
         parent_moment_id=None,
         origin_instance_id="self",
         created_at=_now_iso(-9 * 24 * 60),
-        expires_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+        expires_at=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
     )
     await repo.save(expired)
     await db.enqueue(
@@ -127,7 +125,7 @@ async def test_count_recent_for_author_excludes_replies(db, repo):
     """The 15-min rate-limit ignores replies — they're spam-free."""
     await repo.save(_moment(id="m-top", author="u-bob"))
     await repo.save(_moment(id="m-r", author="u-bob", parent_moment_id="m-top"))
-    since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    since = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     n = await repo.count_recent_for_author("u-bob", since_iso=since)
     assert n == 1
 
@@ -231,7 +229,7 @@ async def test_prune_expired_drops_past_cap(db, repo):
         parent_moment_id=None,
         origin_instance_id="self",
         created_at=_now_iso(-9 * 24 * 60),
-        expires_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+        expires_at=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
     )
     await repo.save(fresh)
     await repo.save(expired)
@@ -262,9 +260,7 @@ def _public_moment(
         parent_moment_id=None,
         origin_instance_id="self",
         created_at=_now_iso(created_offset_min),
-        expires_at=(
-            datetime.now(timezone.utc) + timedelta(days=expires_days)
-        ).isoformat(),
+        expires_at=(datetime.now(UTC) + timedelta(days=expires_days)).isoformat(),
         is_public=is_public,
     )
 
@@ -298,7 +294,7 @@ async def test_list_public_for_excludes_expired(db, repo):
         parent_moment_id=None,
         origin_instance_id="self",
         created_at=_now_iso(-9 * 24 * 60),
-        expires_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+        expires_at=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
         is_public=True,
     )
     await repo.save(expired)
@@ -348,7 +344,7 @@ def _expired_today_iso() -> str:
     the regression fires deterministically rather than only when the wall
     clock happens to cooperate.
     """
-    return f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00.000001+00:00"
+    return f"{datetime.now(UTC).date().isoformat()}T00:00:00.000001+00:00"
 
 
 def _expiring(id: str, *, expired: bool) -> Moment:
@@ -358,7 +354,7 @@ def _expiring(id: str, *, expired: bool) -> Moment:
         expires_at=(
             _expired_today_iso()
             if expired
-            else (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+            else (datetime.now(UTC) + timedelta(days=1)).isoformat()
         ),
     )
 
@@ -444,7 +440,7 @@ async def test_save_never_overwrites_a_tombstone(db, repo):
 
 
 async def test_tombstone_an_unknown_id_holds_the_delete(db, repo):
-    expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    expires = (datetime.now(UTC) + timedelta(days=7)).isoformat()
     removed = await repo.tombstone(
         "m-later",
         author_user_id="u-remote",

@@ -69,7 +69,7 @@ class RateLimiter:
     bucket — a user hammering either still hits the same quota.
     """
 
-    __slots__ = ("_windows", "_monotonic")
+    __slots__ = ("_monotonic", "_windows")
 
     def __init__(
         self,
@@ -245,16 +245,19 @@ def build_rate_limit_middleware(
                 return pattern, limit, window_s
         best: str | None = None
         for pattern in limits:
-            if "*" not in pattern and path.startswith(pattern):
-                if best is None or len(pattern) > len(best):
-                    best = pattern
+            if (
+                "*" not in pattern
+                and path.startswith(pattern)
+                and (best is None or len(pattern) > len(best))
+            ):
+                best = pattern
         if best is not None:
             limit, window_s = limits[best]
             return best, limit, window_s
         return None, default_limit, default_window_s
 
     @web.middleware
-    async def middleware(request: "web.Request", handler) -> "web.StreamResponse":
+    async def middleware(request: web.Request, handler) -> web.StreamResponse:
         user = request.get("user")
         # Unauthenticated requests bypass per-user limits; the
         # authentication middleware will reject them before they reach a

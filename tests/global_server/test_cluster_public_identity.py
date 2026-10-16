@@ -15,7 +15,7 @@ import os
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -108,7 +108,7 @@ def _publish_body(gfs_instance_id: str, payload: str) -> dict:
     req = MemberPublishRequest(
         instance_id=HOUSEHOLD_ID,
         gfs_instance_id=gfs_instance_id,
-        ts=datetime.now(timezone.utc).isoformat(),
+        ts=datetime.now(UTC).isoformat(),
         signature="",
         target=SPACE_ID,
         epoch=3,
@@ -126,25 +126,28 @@ def _publish_body(gfs_instance_id: str, payload: str) -> dict:
 
 
 async def _info(server: TestServer) -> dict:
-    async with ClientSession() as http:
-        async with http.get(f"{_url(server)}/gfs/info") as resp:
-            assert resp.status == 200
-            return await resp.json()
+    async with (
+        ClientSession() as http,
+        http.get(f"{_url(server)}/gfs/info") as resp,
+    ):
+        assert resp.status == 200
+        return await resp.json()
 
 
 async def _publish(server: TestServer, gfs_instance_id: str, payload: str) -> int:
-    async with ClientSession() as http:
-        async with http.post(
+    async with (
+        ClientSession() as http,
+        http.post(
             f"{_url(server)}/gfs/member-publish",
             json=_publish_body(gfs_instance_id, payload),
-        ) as resp:
-            return resp.status
+        ) as resp,
+    ):
+        return resp.status
 
 
 async def _healthz(server: TestServer) -> int:
-    async with ClientSession() as http:
-        async with http.get(f"{_url(server)}/healthz") as resp:
-            return resp.status
+    async with ClientSession() as http, http.get(f"{_url(server)}/healthz") as resp:
+        return resp.status
 
 
 @pytest.fixture

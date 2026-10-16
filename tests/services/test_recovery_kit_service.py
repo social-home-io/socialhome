@@ -136,7 +136,7 @@ def test_trust_tables_constant():
 
 async def test_reset_trust_layer_empties_all_tables(populated):
     """After reset, every trust table is empty (auto-minted rows wiped)."""
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, _iid, _seed = populated
     # Sanity: all four tables are populated before the reset.
     for table in TRUST_TABLES:
         assert (await src_db.fetchone(f"SELECT 1 FROM {table} LIMIT 1")) is not None
@@ -150,7 +150,7 @@ async def test_reset_trust_layer_empties_all_tables(populated):
 async def test_build_reset_restore_round_trip(populated, empty_target):
     """A build→reset→restore round-trip on the SAME box: reset makes it empty
     so restore_kit proceeds, restoring the original instance_id."""
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, iid, _seed = populated
 
     kit = await RecoveryKitService(src_db, src_dir).build_kit(PASS)
 
@@ -212,7 +212,7 @@ async def test_round_trip(populated, empty_target):
 
 
 async def test_refuse_non_empty_target(populated):
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, _iid, _seed = populated
     kit = await RecoveryKitService(src_db, src_dir).build_kit(PASS)
     # Restore back into the SAME (already-populated) instance must refuse.
     with pytest.raises(RecoveryRestoreError, match="not empty"):
@@ -222,7 +222,7 @@ async def test_refuse_non_empty_target(populated):
 async def test_refuse_box_with_peers_but_no_identity(populated, empty_target):
     # A partially-provisioned box (a peer row, no identity) must still refuse —
     # else the salt overwrite would orphan the peer's undecryptable wrapped keys.
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, _iid, _seed = populated
     dst_dir, dst_db = empty_target
     km = KeyManager.from_data_dir(dst_dir)
     await _seed_remote_instance(dst_db, km)
@@ -250,7 +250,7 @@ async def test_malformed_payload_rejected(empty_target):
 
 
 async def test_wrong_passphrase_no_rows(populated, empty_target):
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, _iid, _seed = populated
     dst_dir, dst_db = empty_target
     kit = await RecoveryKitService(src_db, src_dir).build_kit(PASS)
 
@@ -265,7 +265,7 @@ async def test_wrong_passphrase_no_rows(populated, empty_target):
 
 
 async def test_kek_self_test_failure_before_insert(populated, empty_target):
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, _iid, _seed = populated
     dst_dir, dst_db = empty_target
 
     kit = await RecoveryKitService(src_db, src_dir).build_kit(PASS)
@@ -293,7 +293,7 @@ async def test_kek_self_test_failure_before_insert(populated, empty_target):
 
 
 async def test_bad_salt_length_rejected(populated, empty_target):
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, _iid, _seed = populated
     dst_dir, dst_db = empty_target
 
     kit = await RecoveryKitService(src_db, src_dir).build_kit(PASS)
@@ -350,7 +350,7 @@ async def test_space_keys_restore_without_fk_error(populated, empty_target):
     TRUST_TABLES ahead of ``space_keys``, the child FK resolves naturally and
     restore completes with FK enforcement ON the whole time — no PRAGMA OFF, no
     orphaned space_keys row."""
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, _iid, _seed = populated
     dst_dir, dst_db = empty_target
 
     kit = await RecoveryKitService(src_db, src_dir).build_kit(PASS)
@@ -370,11 +370,11 @@ async def test_space_keys_restore_without_fk_error(populated, empty_target):
 async def test_insert_failure_rolls_back(populated, empty_target):
     """A hard SQL error mid-insert rolls back the whole insert (no partial
     trust layer); FK enforcement is unaffected (it was never toggled)."""
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, _iid, _seed = populated
     dst_dir, dst_db = empty_target
     kit = await RecoveryKitService(src_db, src_dir).build_kit(PASS)
 
-    header, payload = unseal_kit(kit, PASS)
+    _header, payload = unseal_kit(kit, PASS)
     data = orjson.loads(payload)
     # Add a row referencing a column that does not exist → OperationalError,
     # which INSERT OR IGNORE does NOT swallow → rollback path.
@@ -396,11 +396,11 @@ async def test_insert_failure_rolls_back(populated, empty_target):
 
 async def test_header_instance_id_fallback(populated, empty_target):
     """When the self row carries no instance_id, the header value is returned."""
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, iid, _seed = populated
     dst_dir, dst_db = empty_target
     kit = await RecoveryKitService(src_db, src_dir).build_kit(PASS)
 
-    header, payload = unseal_kit(kit, PASS)
+    _header, payload = unseal_kit(kit, PASS)
     data = orjson.loads(payload)
     # Drop instance_id from the self row but keep the (decryptable) seed so the
     # self-test still passes; the returned id falls back to the header.
@@ -414,11 +414,11 @@ async def test_header_instance_id_fallback(populated, empty_target):
 
 
 async def test_no_self_row_rejected(populated, empty_target):
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, _iid, _seed = populated
     dst_dir, dst_db = empty_target
     kit = await RecoveryKitService(src_db, src_dir).build_kit(PASS)
 
-    header, payload = unseal_kit(kit, PASS)
+    _header, payload = unseal_kit(kit, PASS)
     data = orjson.loads(payload)
     data["tables"]["instance_identity"] = []  # no self row
     tampered = await _reseal_with_payload(kit, data)
@@ -429,7 +429,7 @@ async def test_no_self_row_rejected(populated, empty_target):
 
 async def test_restored_salt_matches_source(populated, empty_target):
     """Restore overwrites any startup-minted salt with the kit's salt."""
-    src_dir, src_db, iid, seed = populated
+    src_dir, src_db, _iid, _seed = populated
     dst_dir, dst_db = empty_target
 
     # Pre-mint a different random salt in the target (simulating startup).

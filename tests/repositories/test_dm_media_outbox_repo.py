@@ -17,7 +17,6 @@ from socialhome.repositories.dm_media_outbox_repo import (
     SqliteDmMediaOutboxRepo,
 )
 
-
 pytestmark = pytest.mark.asyncio
 
 

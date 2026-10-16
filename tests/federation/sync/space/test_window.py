@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.federation.sync.space.window import (
@@ -16,7 +16,7 @@ from socialhome.federation.sync.space.window import (
     window_for_space,
 )
 
-_NOW = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
 _SPACE = Space(
     id="sp-1",
     name="S",

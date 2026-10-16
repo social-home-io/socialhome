@@ -47,11 +47,13 @@ async def gfs_db(tmp_dir):
 
 # ── Strict-CSP guard for the server-rendered public pages ──────────────
 
-_SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.S | re.I)
-_STYLE_RE = re.compile(r"<style\b[^>]*>(.*?)</style\s*>", re.S | re.I)
+_SCRIPT_RE = re.compile(
+    r"<script\b([^>]*)>(.*?)</script\s*>", re.DOTALL | re.IGNORECASE
+)
+_STYLE_RE = re.compile(r"<style\b[^>]*>(.*?)</style\s*>", re.DOTALL | re.IGNORECASE)
 _TAG_RE = re.compile(r"<[a-zA-Z][^>]*>")
-_EVENT_ATTR_RE = re.compile(r"\son[a-z]+\s*=", re.I)
-_STYLE_ATTR_RE = re.compile(r"\sstyle\s*=", re.I)
+_EVENT_ATTR_RE = re.compile(r"\son[a-z]+\s*=", re.IGNORECASE)
+_STYLE_ATTR_RE = re.compile(r"\sstyle\s*=", re.IGNORECASE)
 
 
 def assert_strict_public_page(resp, text: str) -> None:

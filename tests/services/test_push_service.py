@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from socialhome.repositories.push_subscription_repo import PushSubscription
 from socialhome.services.push_service import (
     PushPayload,
@@ -10,7 +9,6 @@ from socialhome.services.push_service import (
     VapidKeyPair,
     load_or_create_vapid,
 )
-
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
 

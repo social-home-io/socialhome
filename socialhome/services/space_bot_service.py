@@ -23,7 +23,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..domain.events import DomainEvent
 from ..domain.space import SETTINGS_AUTHORITY_ROLES, SpacePermissionError
@@ -56,7 +56,7 @@ _SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$")
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(slots=True, frozen=True)
@@ -99,7 +99,7 @@ class SpaceBotTokenRotated(DomainEvent):
 class SpaceBotService(SpaceMemberGuardMixin):
     """Owner/admin + member CRUD for :class:`SpaceBot` rows."""
 
-    __slots__ = ("_bots", "_spaces", "_users", "_bus")
+    __slots__ = ("_bots", "_bus", "_spaces", "_users")
 
     def __init__(
         self,

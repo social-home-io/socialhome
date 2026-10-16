@@ -25,12 +25,12 @@ from .client import HaClient, build_ha_client
 
 __all__ = [
     "BOOTSTRAP_FLAG",
+    "INTEGRATION_TOKEN_FILENAME",
+    "INTEGRATION_TOKEN_LABEL",
     "HaAdapter",
     "HaBootstrap",
     "HaClient",
     "HomeAssistantAdapter",
-    "INTEGRATION_TOKEN_FILENAME",
-    "INTEGRATION_TOKEN_LABEL",
     "SupervisorClient",
     "build_ha_client",
 ]

@@ -45,7 +45,6 @@ from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_service import SpaceService
 from socialhome.services.user_service import UserService
 
-
 # ─── Method classification ────────────────────────────────────────────────
 
 #: Public async methods that MUST refuse non-members (or non-owners).

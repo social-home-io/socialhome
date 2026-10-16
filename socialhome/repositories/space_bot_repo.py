@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -133,7 +133,7 @@ class SqliteSpaceBotRepo:
     ) -> tuple[SpaceBot, str]:
         raw_token = _generate_token()
         token_hash = _hash_token(raw_token)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             await self._db.enqueue(
                 """
@@ -231,6 +231,5 @@ def _row_to_bot(row: dict | None) -> SpaceBot | None:
         icon=row["icon"],
         created_by=row["created_by"],
         token_hash=row["token_hash"],
-        created_at=parse_iso8601_optional(row.get("created_at"))
-        or datetime.now(timezone.utc),
+        created_at=parse_iso8601_optional(row.get("created_at")) or datetime.now(UTC),
     )

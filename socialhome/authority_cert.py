@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .crypto import (
     b64url_decode,
@@ -51,6 +51,7 @@ from .crypto import (
     sign_ed25519,
     verify_ed25519,
 )
+from .domain.errors import WrongTypeError
 
 #: Suite of the owner-household signature over the cert. Phase-2 of
 #: ``docs/crypto.md`` adds ``"ed25519+mldsa65"`` as a sibling.
@@ -140,7 +141,7 @@ def sign_authority_cert(
     TOFU-pinned and never needs a cert.
     """
     if isinstance(key_epoch, bool) or not isinstance(key_epoch, int):
-        raise ValueError("key_epoch must be an int")
+        raise WrongTypeError("key_epoch must be an int")
     if key_epoch < 1 or key_epoch > MAX_AUTHORITY_KEY_EPOCH:
         raise ValueError("key_epoch must be in 1..2**63-1")
     cert: dict = {
@@ -150,7 +151,7 @@ def sign_authority_cert(
         "authority_pk": authority_pk_hex,
         "authority_key_suite": AUTHORITY_KEY_SUITE_ED25519,
         "key_epoch": key_epoch,
-        "issued_at": issued_at or datetime.now(timezone.utc).isoformat(),
+        "issued_at": issued_at or datetime.now(UTC).isoformat(),
         "cert_sig_suite": AUTHORITY_CERT_SUITE_ED25519,
     }
     cert["cert_sig"] = b64url_encode(

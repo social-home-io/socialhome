@@ -34,7 +34,6 @@ from socialhome.domain.events import AppInstalled, AppUninstalled, AppUpdated
 from socialhome.domain.space import SpacePermissionError
 from socialhome.services.app_service import AppService
 
-
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -49,12 +48,14 @@ def chess_tarball() -> tuple[bytes, str]:
     manifest = json.dumps({"entry": "index.html", "capabilities": ["storage"]}).encode()
     html = b"<html><body>Chess</body></html>"
 
-    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
-        with tarfile.open(fileobj=gz, mode="w|") as tar:
-            for name, data in [("manifest.json", manifest), ("index.html", html)]:
-                info = tarfile.TarInfo(name=name)
-                info.size = len(data)
-                tar.addfile(info, io.BytesIO(data))
+    with (
+        gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w|") as tar,
+    ):
+        for name, data in [("manifest.json", manifest), ("index.html", html)]:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
 
     data = buf.getvalue()
     digest = hashlib.sha256(data).hexdigest()
@@ -67,20 +68,22 @@ def make_tarball_with_member(name: str, data: bytes = b"evil") -> tuple[bytes, s
     manifest = json.dumps({"entry": "index.html", "capabilities": []}).encode()
     html = b"ok"
 
-    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
-        with tarfile.open(fileobj=gz, mode="w|") as tar:
-            # valid manifest
-            info = tarfile.TarInfo(name="manifest.json")
-            info.size = len(manifest)
-            tar.addfile(info, io.BytesIO(manifest))
-            # valid index.html
-            info2 = tarfile.TarInfo(name="index.html")
-            info2.size = len(html)
-            tar.addfile(info2, io.BytesIO(html))
-            # the adversarial member
-            info3 = tarfile.TarInfo(name=name)
-            info3.size = len(data)
-            tar.addfile(info3, io.BytesIO(data))
+    with (
+        gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w|") as tar,
+    ):
+        # valid manifest
+        info = tarfile.TarInfo(name="manifest.json")
+        info.size = len(manifest)
+        tar.addfile(info, io.BytesIO(manifest))
+        # valid index.html
+        info2 = tarfile.TarInfo(name="index.html")
+        info2.size = len(html)
+        tar.addfile(info2, io.BytesIO(html))
+        # the adversarial member
+        info3 = tarfile.TarInfo(name=name)
+        info3.size = len(data)
+        tar.addfile(info3, io.BytesIO(data))
 
     raw = buf.getvalue()
     return raw, hashlib.sha256(raw).hexdigest()
@@ -92,20 +95,22 @@ def make_symlink_tarball() -> tuple[bytes, str]:
     manifest = json.dumps({"entry": "index.html", "capabilities": []}).encode()
     html = b"ok"
 
-    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
-        with tarfile.open(fileobj=gz, mode="w|") as tar:
-            info = tarfile.TarInfo(name="manifest.json")
-            info.size = len(manifest)
-            tar.addfile(info, io.BytesIO(manifest))
-            info2 = tarfile.TarInfo(name="index.html")
-            info2.size = len(html)
-            tar.addfile(info2, io.BytesIO(html))
-            # symlink member
-            sym = tarfile.TarInfo(name="evil_link")
-            sym.type = tarfile.SYMTYPE
-            sym.linkname = "/etc/passwd"
-            sym.size = 0
-            tar.addfile(sym, io.BytesIO(b""))
+    with (
+        gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w|") as tar,
+    ):
+        info = tarfile.TarInfo(name="manifest.json")
+        info.size = len(manifest)
+        tar.addfile(info, io.BytesIO(manifest))
+        info2 = tarfile.TarInfo(name="index.html")
+        info2.size = len(html)
+        tar.addfile(info2, io.BytesIO(html))
+        # symlink member
+        sym = tarfile.TarInfo(name="evil_link")
+        sym.type = tarfile.SYMTYPE
+        sym.linkname = "/etc/passwd"
+        sym.size = 0
+        tar.addfile(sym, io.BytesIO(b""))
 
     raw = buf.getvalue()
     return raw, hashlib.sha256(raw).hexdigest()
@@ -674,7 +679,7 @@ async def test_list_installed_passthrough(
 ) -> None:
     """list_installed() returns the repo's list."""
     bundle_bytes, _ = chess_bundle
-    svc, repo = make_service(tmp_path, [catalog_entry], bundle_bytes)
+    svc, _repo = make_service(tmp_path, [catalog_entry], bundle_bytes)
 
     assert await svc.list_installed() == []
     await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
@@ -913,7 +918,7 @@ async def test_store_value_too_large_raises_quota(
 ) -> None:
     """A value whose JSON exceeds 64 KiB raises AppQuotaExceededError; nothing stored."""
     bundle_bytes, _ = chess_bundle
-    svc, repo = make_service(tmp_path, [catalog_entry], bundle_bytes)
+    svc, _repo = make_service(tmp_path, [catalog_entry], bundle_bytes)
 
     await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
 
@@ -1035,10 +1040,10 @@ async def test_list_updates_returns_updatable_app(
     chess_bundle: tuple[bytes, str],
 ) -> None:
     """list_updates() returns apps whose catalog version is newer than installed."""
-    bundle_bytes, sha = chess_bundle
+    bundle_bytes, _sha = chess_bundle
     # Catalog has version 2.0.0 but we install 1.0.0
     entry_v2 = chess_catalog_entry_v2(chess_bundle)
-    svc, _ = make_service(tmp_path, [entry_v2], bundle_bytes)
+    _svc, _ = make_service(tmp_path, [entry_v2], bundle_bytes)
 
     # Install via the v1 entry so the installed version is 1.0.0
     svc_v1, _ = make_service(tmp_path, [catalog_entry], bundle_bytes)
@@ -1074,7 +1079,7 @@ async def test_list_updates_returns_empty_when_up_to_date(
 ) -> None:
     """list_updates() returns [] when all installed apps are at the latest version."""
     bundle_bytes, _ = chess_bundle
-    svc, repo = make_service(tmp_path, [catalog_entry], bundle_bytes)
+    svc, _repo = make_service(tmp_path, [catalog_entry], bundle_bytes)
     await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
 
     updates = await svc.list_updates()
@@ -1150,7 +1155,7 @@ async def test_update_app_raises_not_found_when_not_installed(
     chess_bundle: tuple[bytes, str],
 ) -> None:
     """update_app() on a non-installed app raises AppNotFoundError."""
-    bundle_bytes, sha = chess_bundle
+    bundle_bytes, _sha = chess_bundle
     entry_v2 = chess_catalog_entry_v2(chess_bundle)
     repo = _FakeAppRepo()
 
@@ -1234,7 +1239,7 @@ async def test_update_app_returns_existing_when_already_latest(
 ) -> None:
     """update_app() returns existing app unchanged when already at latest version."""
     bundle_bytes, _ = chess_bundle
-    svc, repo = make_service(tmp_path, [catalog_entry], bundle_bytes)
+    svc, _repo = make_service(tmp_path, [catalog_entry], bundle_bytes)
     await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
 
     result = await svc.update_app("chess", actor_is_admin=True)
@@ -1268,7 +1273,7 @@ async def test_assert_age_allowed_min_age_zero_always_passes(tmp_path: Path) -> 
     """min_age=0 means no restriction — always allowed."""
     cp = _FakeCpRepo()
     cp.add("user1", enabled=True, declared_age=0)
-    svc, repo = make_service(tmp_path, [], b"", cp_repo=cp)
+    svc, _repo = make_service(tmp_path, [], b"", cp_repo=cp)
     app = _make_age_gated_app(min_age=0)
     await svc.assert_age_allowed(app, "user1")  # must not raise
 
@@ -1521,12 +1526,14 @@ async def test_install_sets_min_age_from_manifest(
         {"entry": "index.html", "capabilities": ["storage"], "min_age": 13}
     ).encode()
     html = b"<html><body>Chess</body></html>"
-    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
-        with tarfile.open(fileobj=gz, mode="w|") as tar:
-            for name, data in [("manifest.json", manifest), ("index.html", html)]:
-                info = tarfile.TarInfo(name=name)
-                info.size = len(data)
-                tar.addfile(info, io.BytesIO(data))
+    with (
+        gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w|") as tar,
+    ):
+        for name, data in [("manifest.json", manifest), ("index.html", html)]:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
     bundle_bytes = buf.getvalue()
     import hashlib
 
@@ -1557,7 +1564,7 @@ async def test_update_app_preserves_enabled_and_installed_by(
     chess_bundle: tuple[bytes, str],
 ) -> None:
     """update_app() preserves the enabled flag and installed_by from the existing row."""
-    bundle_bytes, sha = chess_bundle
+    bundle_bytes, _sha = chess_bundle
     entry_v2 = chess_catalog_entry_v2(chess_bundle)
 
     # Install v1 as admin1 and then disable the app
@@ -1643,12 +1650,14 @@ def _make_bundle_with_min_age(min_age: int) -> tuple[bytes, str]:
         {"entry": "index.html", "capabilities": [], "min_age": min_age}
     ).encode()
     html = b"<html><body>App</body></html>"
-    with _gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
-        with _tarfile.open(fileobj=gz, mode="w|") as tar:
-            for name, data in [("manifest.json", manifest), ("index.html", html)]:
-                info = _tarfile.TarInfo(name=name)
-                info.size = len(data)
-                tar.addfile(info, _io.BytesIO(data))
+    with (
+        _gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
+        _tarfile.open(fileobj=gz, mode="w|") as tar,
+    ):
+        for name, data in [("manifest.json", manifest), ("index.html", html)]:
+            info = _tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, _io.BytesIO(data))
     raw = buf.getvalue()
     import hashlib as _hashlib
 

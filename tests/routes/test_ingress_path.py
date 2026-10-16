@@ -5,7 +5,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 

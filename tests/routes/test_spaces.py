@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import aiohttp
 import pytest
@@ -11,13 +11,13 @@ from aiohttp.test_utils import TestClient, TestServer
 from socialhome.app import create_app
 from socialhome.app_keys import db_key as _db_key
 from socialhome.app_keys import gfs_connection_service_key, space_service_key
-from socialhome.domain.federation import GfsConnection
-from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
-from socialhome.csp import MEDIA_CSP
 from socialhome.crypto import derive_user_id
+from socialhome.csp import MEDIA_CSP
+from socialhome.domain.federation import GfsConnection
 from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
+from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.routes.spaces import _features_from_body
 
 
@@ -2575,7 +2575,7 @@ async def test_invite_token_gets_default_ttl(client):
     assert resp.status == 201
     raw = await _token_expiry(client, (await resp.json())["token"])
     assert raw is not None
-    delta = datetime.fromisoformat(raw) - datetime.now(timezone.utc)
+    delta = datetime.fromisoformat(raw) - datetime.now(UTC)
     assert timedelta(days=6) < delta <= timedelta(days=7)
 
 
@@ -2589,7 +2589,7 @@ async def test_invite_token_honours_ttl_seconds(client):
     )
     assert resp.status == 201
     raw = await _token_expiry(client, (await resp.json())["token"])
-    delta = datetime.fromisoformat(raw) - datetime.now(timezone.utc)
+    delta = datetime.fromisoformat(raw) - datetime.now(UTC)
     assert timedelta(seconds=0) < delta <= timedelta(seconds=60)
 
 
@@ -2641,7 +2641,7 @@ async def test_expired_invite_token_cannot_be_redeemed(client):
     # Pinned to the start of the current UTC day: expired for certain, and
     # on the same calendar date as SQLite's ``datetime('now')`` — the only
     # window where the old raw TEXT compare went wrong.
-    expired = f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00.000001+00:00"
+    expired = f"{datetime.now(UTC).date().isoformat()}T00:00:00.000001+00:00"
     await client.app[_db_key].enqueue(
         "UPDATE space_invite_tokens SET expires_at=? WHERE token=?",
         (expired, token),
