@@ -24,3 +24,12 @@ allowBuilds:
 
 onlyBuiltDependencies:
   - esbuild
+
+# madge (lint:circular) is a dev-only CLI whose latest release (8.0.0,
+# 2024) still declares ``typescript: ^5.4.4``. It only uses the compiler
+# API to read tsconfig paths, which TypeScript 6 serves fine. No newer
+# madge exists; accept TS 6 here rather than carry a standing peer
+# warning on every install.
+peerDependencyRules:
+  allowedVersions:
+    madge>typescript: "6"
