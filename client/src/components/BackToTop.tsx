@@ -97,7 +97,7 @@ function checkModal() {
 }
 
 export function BackToTop() {
-  const ref = useRef<HTMLButtonElement>(null)
+  const ref = useRef<HTMLButtonElement | null>(null)
   const frame = useRef(0)
   const pending = useRef(false)
 

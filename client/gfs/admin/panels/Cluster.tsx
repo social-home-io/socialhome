@@ -132,7 +132,7 @@ function CopyableValue({ label, value, onDone }: {
   value: string
   onDone: (msg: string) => void
 }) {
-  const ref = useRef<HTMLElement>(null)
+  const ref = useRef<HTMLElement | null>(null)
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(value)
@@ -188,7 +188,7 @@ function RemoveConfirm({ node, onConfirm, onCancel }: {
   onConfirm: () => void
   onCancel: () => void
 }) {
-  const cancelRef = useRef<HTMLButtonElement>(null)
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
   useEffect(() => { cancelRef.current?.focus() }, [node.node_id])
   /* A ``none`` row may be a shared-key sibling (comes back by itself) or a
      node with its own key (needs approving) — say both, as the row does. */

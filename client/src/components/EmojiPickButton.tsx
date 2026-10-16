@@ -79,7 +79,7 @@ export type EmojiPickButtonProps = SignalTargetProps | CallbackTargetProps
 
 export function EmojiPickButton(props: EmojiPickButtonProps) {
   const isOpen = openFor.value === props.openKey
-  const wrapRef = useRef<HTMLDivElement>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
   // Keep the open picker on screen (see ``fitPicker``). It is laid out
   // end-aligned above the button by CSS; measured once on open.
   useLayoutEffect(() => {

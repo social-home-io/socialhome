@@ -202,7 +202,7 @@ export function ProfileTab() {
   const errors = profileErrors.value
   const dirty = dirtyFields.value.length > 0
   const busy = saving.value
-  const formRef = useRef<HTMLFormElement>(null)
+  const formRef = useRef<HTMLFormElement | null>(null)
 
   const onSubmit = async (e: Event) => {
     e.preventDefault()
@@ -314,7 +314,7 @@ export function ProfileTab() {
 /** "How others see you": the saved profile, as the person sheet shows
  *  it, plus the photo actions (Change first; Remove stays quiet — P6). */
 function ProfileGlance({ user }: { user: User | null }) {
-  const fileRef = useRef<HTMLInputElement>(null)
+  const fileRef = useRef<HTMLInputElement | null>(null)
   const name = user?.display_name || '—'
   const status = liveStatus(user?.status)
   const isHaUser = user?.source === 'ha'

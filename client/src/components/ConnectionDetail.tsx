@@ -170,8 +170,8 @@ export function ConnectionDetail({ conn, compat, ours = 0, relayGfs = false, onC
   const [recheckBusy, setRecheckBusy] = useState(false)
   const [confirmUnpair, setConfirmUnpair] = useState(false)
   const [techOpen, setTechOpen] = useState(false)
-  const pencil = useRef<HTMLButtonElement>(null)
-  const input = useRef<HTMLInputElement>(null)
+  const pencil = useRef<HTMLButtonElement | null>(null)
+  const input = useRef<HTMLInputElement | null>(null)
   const refocusPencil = useRef(false)
 
   useEffect(() => {

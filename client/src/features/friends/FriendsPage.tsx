@@ -157,7 +157,7 @@ function ViewSwitch({ value, withMap, onChange }: {
 }
 
 function FindBox({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const input = useRef<HTMLInputElement>(null)
+  const input = useRef<HTMLInputElement | null>(null)
   return (
     <div class="sh-friends-find">
       <ConnIcon name="search" />

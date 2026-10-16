@@ -35,7 +35,7 @@ export function AppHostInner({ appId }: { appId: string }) {
   const [runtime, setRuntime]         = useState<AppRuntime | null>(null)
   const [error, setError]             = useState<string | null>(null)
   const [ageRestricted, setAgeRestricted] = useState(false)
-  const iframeRef                     = useRef<HTMLIFrameElement>(null)
+  const iframeRef                     = useRef<HTMLIFrameElement | null>(null)
 
   // Fetch the signed runtime descriptor on mount / appId change.
   useEffect(() => {

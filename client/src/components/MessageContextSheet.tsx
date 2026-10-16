@@ -31,7 +31,7 @@ interface Props {
 }
 
 export function MessageContextSheet(props: Props) {
-  const sheetRef = useRef<HTMLDivElement>(null)
+  const sheetRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') props.onClose()

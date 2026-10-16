@@ -102,7 +102,7 @@ function OwnerGfsListing({ spaceId }: { spaceId: string }): JSX.Element {
   // The last listed GFS awaiting a confirm (removing it leaves the space
   // "global, not listed").
   const [confirmLast, setConfirmLast] = useState<Listing | null>(null)
-  const rootRef = useRef<HTMLDivElement>(null)
+  const rootRef = useRef<HTMLDivElement | null>(null)
 
   const load = async () => {
     try {

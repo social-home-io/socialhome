@@ -23,8 +23,8 @@ interface Props {
 
 export function OverflowMenu({ label, actions }: Props) {
   const [open, setOpen] = useState(false)
-  const wrap = useRef<HTMLSpanElement>(null)
-  const trigger = useRef<HTMLButtonElement>(null)
+  const wrap = useRef<HTMLSpanElement | null>(null)
+  const trigger = useRef<HTMLButtonElement | null>(null)
 
   const items = (): HTMLElement[] =>
     Array.from(wrap.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])

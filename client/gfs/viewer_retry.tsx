@@ -51,7 +51,7 @@ export function ViewerError({
   retry: RetryControl
   className?: string
 }) {
-  const button = useRef<HTMLButtonElement>(null)
+  const button = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
     // ``preventScroll``: the alert is already announced; don't yank the
