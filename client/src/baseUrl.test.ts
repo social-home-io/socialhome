@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 // directly; the prefixed path is exercised by the helpers'
 // own logic (``addBase`` / ``stripBase`` are pure functions that
 // don't read from ``document``).
-import { basePath, addBase, stripBase, appHref } from './baseUrl'
+import { basePath, addBase, stripBase, appHref, wsUrl } from './baseUrl'
 
 describe('baseUrl', () => {
   describe('basePath (no-prefix, JSDOM default)', () => {
@@ -38,6 +38,28 @@ describe('appHref (no-prefix, JSDOM default)', () => {
   })
 })
 
+describe('wsUrl (no-prefix, JSDOM default)', () => {
+  // Firefox resolves a relative ``new WebSocket('api/ws')`` against the
+  // page URL, not ``<base href>`` — on a cold load of ``/dms/<id>`` it
+  // dialled ``/dms/api/ws``. ``wsUrl`` hands the constructor an absolute
+  // URL so no engine resolves it at all.
+  it('is absolute, rooted at the document base, with the ws scheme', () => {
+    expect(wsUrl('api/ws')).toBe(`ws://${location.host}/api/ws`)
+    expect(wsUrl('/api/ws')).toBe(`ws://${location.host}/api/ws`)
+    expect(wsUrl('api/ws?token=a%2Fb')).toBe(`ws://${location.host}/api/ws?token=a%2Fb`)
+  })
+
+  it('ignores the current page path (cold load of a nested route)', () => {
+    const before = location.pathname
+    history.replaceState(null, '', '/dms/conv-1')
+    try {
+      expect(wsUrl('api/ws')).toBe(`ws://${location.host}/api/ws`)
+    } finally {
+      history.replaceState(null, '', before)
+    }
+  })
+})
+
 describe('under the HA ingress prefix (/api/hassio_ingress/<token>/)', () => {
   let baseEl: HTMLBaseElement
   beforeEach(() => {
@@ -60,6 +82,39 @@ describe('under the HA ingress prefix (/api/hassio_ingress/<token>/)', () => {
     expect(mod.appHref('//cdn.example/x')).toBe('//cdn.example/x')
     expect(mod.appHref('#frag')).toBe('#frag')
     expect(mod.appHref('api/calendars/x.ics')).toBe('api/calendars/x.ics')
+  })
+
+  it('wsUrl keeps the ingress prefix, even on a nested in-app route', async () => {
+    const before = location.pathname
+    history.replaceState(null, '', '/api/hassio_ingress/tok/dms/conv-1')
+    try {
+      const mod = await import('./baseUrl')
+      expect(mod.wsUrl('api/ws')).toBe(`ws://${location.host}/api/hassio_ingress/tok/api/ws`)
+      expect(mod.wsUrl('/api/stt/stream')).toBe(
+        `ws://${location.host}/api/hassio_ingress/tok/api/stt/stream`,
+      )
+    } finally {
+      history.replaceState(null, '', before)
+    }
+  })
+})
+
+describe('wsUrl picks wss for an https document base', () => {
+  let baseEl: HTMLBaseElement
+  beforeEach(() => {
+    baseEl = document.createElement('base')
+    baseEl.href = 'https://home.example/api/hassio_ingress/tok/'
+    document.head.prepend(baseEl)
+    vi.resetModules()
+  })
+  afterEach(() => {
+    baseEl.remove()
+    vi.resetModules()
+  })
+
+  it('maps https to wss under the ingress prefix', async () => {
+    const mod = await import('./baseUrl')
+    expect(mod.wsUrl('api/ws')).toBe('wss://home.example/api/hassio_ingress/tok/api/ws')
   })
 })
 
@@ -85,5 +140,27 @@ describe('in-app links keep the ingress prefix (source guard)', () => {
         .map(([line, n]) => `${file}:${n}: ${line.trim()}`),
     )
     expect(offenders).toEqual([])
+  })
+})
+
+describe('WebSockets keep the ingress prefix (source guard)', () => {
+  // Firefox resolves a relative ``new WebSocket(url)`` against the page
+  // URL, not ``<base href>`` — a nested route (or the ingress prefix)
+  // breaks the socket. Every socket URL goes through ``wsUrl``.
+  const sources = import.meta.glob(
+    ['./**/*.ts', './**/*.tsx', '!./**/*.test.ts', '!./**/*.test.tsx'],
+    { query: '?raw', import: 'default', eager: true },
+  ) as Record<string, string>
+
+  it('every new WebSocket(...) is built with wsUrl', () => {
+    const offenders = Object.entries(sources).flatMap(([file, src]) =>
+      src.split('\n')
+        .map((line, i) => [line, i + 1] as const)
+        .filter(([line]) => /new WebSocket\(/.test(line) && !/new WebSocket\(wsUrl\(/.test(line))
+        .filter(([line]) => !/^\s*(\*|\/\/)/.test(line))
+        .map(([line, n]) => `${file}:${n}: ${line.trim()}`),
+    )
+    expect(offenders).toEqual([])
+    expect(Object.values(sources).some(s => s.includes('new WebSocket(wsUrl('))).toBe(true)
   })
 })
