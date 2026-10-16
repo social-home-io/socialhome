@@ -897,6 +897,98 @@ describe('ShoppingPage', () => {
     expect(document.activeElement).toBe(pill)
   })
 
+  /** The row's store pill, wherever (whichever section) it renders now. */
+  const pillOf = (text: string) =>
+    [...document.querySelectorAll<HTMLElement>('.sh-shopping-item')]
+      .find(li => li.textContent?.includes(text))
+      ?.querySelector<HTMLElement>('.sh-shopping-store-pill') ?? null
+
+  it('grouped: picking another store keeps focus on the moved row’s pill', async () => {
+    // In the grouped view the row re-mounts under its new store's
+    // section, so the old pill the menu handed focus back to is gone —
+    // focus used to fall to <body>.
+    const t = await mount({
+      items: [{ ...MILK, store: 'Aldi' }],
+      stores: [{ name: 'Aldi', sort_order: 0 }, { name: 'Migros', sort_order: 1 }],
+    })
+    apiPatch.mockImplementation(async (_u: string, patch: object) => ({ ...MILK, ...patch }))
+    await t.waitFor(() => expect(pillOf('Milk')).not.toBeNull())
+    t.fireEvent.click(pillOf('Milk')!)
+    const migros = await t.findByRole('menuitemradio', { name: /Migros/ })
+    t.fireEvent.click(migros) // Enter on a menu button = click
+    await t.waitFor(() => {
+      const section = pillOf('Milk')?.closest('.sh-shopping-group')
+      expect(section?.textContent).toContain('Migros')
+      expect(document.activeElement).toBe(pillOf('Milk'))
+    })
+  })
+
+  it('grouped: "+ New store…" + Enter lands focus on the row’s pill in the new store', async () => {
+    // The new store's section only exists once the catalogue reloads,
+    // so the row is briefly in no section at all: focus waits for it.
+    const stores = [{ name: 'Aldi', sort_order: 0 }, { name: 'Migros', sort_order: 1 }]
+    const t = await mount({ items: [{ ...MILK, store: 'Aldi' }], stores })
+    apiPatch.mockImplementation(async (_u: string, patch: { store: string }) => {
+      stores.push({ name: patch.store, sort_order: 2 })
+      return { ...MILK, ...patch }
+    })
+    await t.waitFor(() => expect(pillOf('Milk')).not.toBeNull())
+    t.fireEvent.click(pillOf('Milk')!)
+    const add = await t.findByRole('menuitem', { name: /New store/ })
+    t.fireEvent.click(add)
+    const input = await t.findByRole('textbox', { name: /store/i })
+    t.fireEvent.input(input, { target: { value: 'Coop' } })
+    t.fireEvent.keyDown(input, { key: 'Enter' })
+    await t.waitFor(() => {
+      const section = pillOf('Milk')?.closest('.sh-shopping-group')
+      expect(section?.textContent).toContain('Coop')
+      expect(document.activeElement).toBe(pillOf('Milk'))
+    })
+  })
+
+  it('grouped: a slow save does not steal focus back once the user moved on', async () => {
+    const stores = [{ name: 'Aldi', sort_order: 0 }, { name: 'Migros', sort_order: 1 }]
+    const t = await mount({ items: [{ ...MILK, store: 'Aldi' }], stores })
+    let release!: () => void
+    apiPatch.mockImplementation(async (_u: string, patch: { store: string }) => {
+      await new Promise<void>(r => { release = r })
+      stores.push({ name: patch.store, sort_order: 2 })
+      return { ...MILK, ...patch }
+    })
+    await t.waitFor(() => expect(pillOf('Milk')).not.toBeNull())
+    t.fireEvent.click(pillOf('Milk')!)
+    t.fireEvent.click(await t.findByRole('menuitem', { name: /New store/ }))
+    const input = await t.findByRole('textbox', { name: /store/i })
+    t.fireEvent.input(input, { target: { value: 'Coop' } })
+    t.fireEvent.keyDown(input, { key: 'Enter' })
+    await t.waitFor(() => expect(apiPatch).toHaveBeenCalled())
+    // Meanwhile the user goes on adding items.
+    const add = document.querySelector<HTMLInputElement>('.sh-shopping-add input')!
+    add.focus()
+    release()
+    await t.waitFor(() => expect(pillOf('Milk')?.closest('.sh-shopping-group')?.textContent).toContain('Coop'))
+    await new Promise(r => setTimeout(r, 30))
+    expect(document.activeElement).toBe(add)
+  })
+
+  it('grouped: a failed reassign puts focus back on the row’s pill in its old store', async () => {
+    const t = await mount({
+      items: [{ ...MILK, store: 'Aldi' }],
+      stores: [{ name: 'Aldi', sort_order: 0 }, { name: 'Migros', sort_order: 1 }],
+    })
+    apiPatch.mockRejectedValue(new Error('offline'))
+    await t.waitFor(() => expect(pillOf('Milk')).not.toBeNull())
+    t.fireEvent.click(pillOf('Milk')!)
+    const migros = await t.findByRole('menuitemradio', { name: /Migros/ })
+    t.fireEvent.click(migros) // Enter on a menu button = click
+    await t.waitFor(() => expect(apiPatch).toHaveBeenCalled())
+    await t.waitFor(() => {
+      const section = pillOf('Milk')?.closest('.sh-shopping-group')
+      expect(section?.textContent).toContain('Aldi')
+      expect(document.activeElement).toBe(pillOf('Milk'))
+    })
+  })
+
   it('the suggestion rows are button groups, not listboxes', async () => {
     const t = await mount({ items: [OLD_EGGS], stores: [] })
     const input = await t.findByRole('textbox', { name: 'New shopping item' })
