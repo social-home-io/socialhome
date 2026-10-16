@@ -22,8 +22,12 @@ from typing import Any
 
 from aiohttp import web
 
-from ..app_keys import preferences_service_key, space_repo_key
-from ..auth import current_user
+from ..app_keys import (
+    child_protection_service_key,
+    preferences_service_key,
+    space_repo_key,
+)
+from ..auth import SIGNED_URL_PRINCIPAL, current_user
 from ..domain.child_protection import AccountProtectedError
 from ..domain.errors import CodedError
 from ..domain.preferences import FeatureDisabledError
@@ -165,6 +169,22 @@ class BaseView(web.View):
             return
         if not getattr(space.features, feature, True):
             raise FeatureDisabledError(f"space:{feature}")
+
+    async def guardian_block_counterparts(self) -> frozenset[str]:
+        """Everyone a guardian block (§CP.F2) separates from the caller,
+        either way — they see each other by name only (picture and bio
+        withheld, :func:`~socialhome.domain.child_protection.name_only`).
+
+        Empty for a signed media URL: that is a capability for one file,
+        not a person, so there is no caller to separate.
+        """
+        cp = self.request.app.get(child_protection_service_key)
+        ctx = self.user
+        if cp is None or ctx is None or not ctx.user_id:
+            return frozenset()
+        if ctx.user_id == SIGNED_URL_PRINCIPAL:
+            return frozenset()
+        return await cp.guardian_block_counterparts(ctx.user_id)
 
     async def body(self) -> dict:
         """Parse JSON request body; returns 400 on bad input."""

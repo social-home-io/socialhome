@@ -15,7 +15,10 @@ from datetime import datetime, timezone
 import pytest
 
 from socialhome.domain.events import (
+    CpBlockAdded,
+    CpBlockRemoved,
     PresenceUpdated,
+    SpaceMemberProfileUpdated,
     UserCameOnline,
     UserProfileUpdated,
     UserStatusChanged,
@@ -28,8 +31,14 @@ from socialhome.infrastructure.ws_manager import WebSocketManager
 from socialhome.services.realtime_service import RealtimeService
 
 _USERS = [
-    User(user_id="kid", username="kid", display_name="K"),
-    User(user_id="bob", username="bob", display_name="B"),
+    User(
+        user_id="kid",
+        username="kid",
+        display_name="K",
+        bio="trains",
+        picture_hash="0123456789abcdef",
+    ),
+    User(user_id="bob", username="bob", display_name="B", bio="hi"),
     User(user_id="carol", username="carol", display_name="C"),
 ]
 #: bob is blocked for kid; ``rex`` (a remote person) is blocked for kid too.
@@ -43,10 +52,13 @@ class _FakeUserRepo:
     async def get(self, username):
         return next((u for u in _USERS if u.username == username), None)
 
+    async def get_by_user_id(self, user_id):
+        return next((u for u in _USERS if u.user_id == user_id), None)
+
 
 class _FakeSpaceRepo:
     async def list_local_member_user_ids(self, space_id):
-        return []
+        return [u.user_id for u in _USERS]
 
 
 class _FakeCpRepo:
@@ -129,6 +141,15 @@ _NOW = datetime.now(timezone.utc)
             PresenceUpdated(username="kid", state="home", user_id="kid"),
             "presence.updated",
         ),
+        (
+            SpaceMemberProfileUpdated(
+                space_id="sp",
+                user_id="kid",
+                space_display_name="K",
+                picture_hash="0123456789abcdef",
+            ),
+            "space.member.profile_updated",
+        ),
         (UserCameOnline(user_id="kid"), "user.online"),
         (UserWentIdle(user_id="kid", last_active_at=_NOW), "user.idle"),
         (UserWentOffline(user_id="kid", last_seen_at=_NOW), "user.offline"),
@@ -167,3 +188,44 @@ async def test_without_child_protection_everyone_gets_the_frame():
     bus, socks = await _env(None)
     await bus.publish(UserStatusChanged(user_id="kid", status=UserStatus(text="x")))
     assert _got(socks, "user.status_changed") == {"kid", "bob", "carol"}
+
+
+def _profile_frames(socks, uid) -> list[dict]:
+    return [
+        f
+        for f in (json.loads(m) for m in socks[uid].sent)
+        if f.get("type") == "user.profile_updated"
+    ]
+
+
+async def test_block_tells_each_open_session_the_other_is_name_only(env):
+    """An open SPA drops the other side's picture and bio at once, not on
+    its next reload — and nobody else hears anything."""
+    bus, socks = env
+    await bus.publish(CpBlockAdded(minor_user_id="kid", blocked_user_id="bob"))
+    (to_bob,) = _profile_frames(socks, "bob")
+    assert to_bob["user_id"] == "kid"
+    assert to_bob["display_name"] == "K"
+    assert to_bob["bio"] is None and to_bob["picture_url"] is None
+    (to_kid,) = _profile_frames(socks, "kid")
+    assert to_kid["user_id"] == "bob" and to_kid["bio"] is None
+    assert _profile_frames(socks, "carol") == []
+
+
+async def test_lifting_the_block_restores_the_profile_in_open_sessions():
+    bus, socks = await _env(_LiftedCpRepo())
+    await bus.publish(CpBlockRemoved(minor_user_id="kid", blocked_user_id="bob"))
+    (to_bob,) = _profile_frames(socks, "bob")
+    assert to_bob["bio"] == "trains"
+    assert to_bob["picture_url"].startswith("api/users/kid/picture?v=")
+
+
+async def test_a_remote_blocked_person_gets_no_local_frame(env):
+    bus, socks = env
+    await bus.publish(CpBlockAdded(minor_user_id="kid", blocked_user_id="rex"))
+    assert all(_profile_frames(socks, uid) == [] for uid in socks)
+
+
+class _LiftedCpRepo(_FakeCpRepo):
+    async def list_block_counterparts(self, user_id):
+        return frozenset()

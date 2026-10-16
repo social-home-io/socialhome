@@ -3103,7 +3103,8 @@ def create_app(config: Config | None = None) -> web.Application:
     # use (bazaar, public spaces, public moments / links, API tokens,
     # calendar feeds) checks it through ChildProtectionService.
     # DMs and notifications enforce guardian blocks (§CP.F2) through the
-    # same wiring (the inbound + history-sync halves attach at startup).
+    # same wiring (the inbound + history-sync halves attach at startup);
+    # people lists show the other side of one by name only.
     for gated in (
         user_service,
         space_service,
@@ -3116,6 +3117,7 @@ def create_app(config: Config | None = None) -> web.Application:
         moment_public_signaling_handler,
         dm_service,
         notification_service,
+        person_summary_service,
     ):
         gated.attach_child_protection(child_protection_service)
     # Public space-content relay (Phase 5a2) is constructed in
@@ -3154,6 +3156,8 @@ def create_app(config: Config | None = None) -> web.Application:
         preferences_service=preferences_service,
         space_timetable_service=space_timetable_service,
     )
+    # §CP.F2: the dashboard's presence slice follows ``/api/presence``.
+    corner_service.attach_child_protection(child_protection_service)
 
     # ── Typing service (relay typing indicators) ────────────────────────
     typing_service = TypingService(

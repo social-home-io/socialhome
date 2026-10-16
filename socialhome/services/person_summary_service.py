@@ -17,16 +17,21 @@ from ..domain.user import PersonSummary, _picture_url
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .alias_service import AliasResolver
+from .protection_gate import ProtectionGateMixin
 
 #: Own-household label when the instance identity row has no name yet —
 #: the same fallback ``GET /api/friends`` uses.
 _OWN_HOUSEHOLD_FALLBACK = "Home"
 
 
-class PersonSummaryService:
-    """Resolve user ids into :class:`PersonSummary` rows for one viewer."""
+class PersonSummaryService(ProtectionGateMixin):
+    """Resolve user ids into :class:`PersonSummary` rows for one viewer.
 
-    __slots__ = ("_users", "_federation", "_aliases")
+    Someone a guardian block (§CP.F2) separates from the viewer, either
+    way, comes back by name only — no picture.
+    """
+
+    __slots__ = ("_users", "_federation", "_aliases", "_child_protection")
 
     def __init__(
         self,
@@ -37,6 +42,7 @@ class PersonSummaryService:
         self._users = user_repo
         self._federation = federation_repo
         self._aliases = alias_resolver
+        self._child_protection = None
 
     async def summarize(
         self,
@@ -73,6 +79,7 @@ class PersonSummaryService:
                 inst.id: inst.effective_display_name
                 for inst in await self._federation.list_instances()
             }
+        withheld = await self._guardian_block_counterparts(viewer_user_id)
         out: dict[str, PersonSummary] = {}
         for uid in ids:
             alias = aliases.get(uid)
@@ -81,7 +88,11 @@ class PersonSummaryService:
                     user_id=uid,
                     display_name=user.display_name,
                     personal_alias=alias,
-                    picture_url=_picture_url(uid, user.picture_hash),
+                    picture_url=(
+                        None
+                        if uid in withheld
+                        else _picture_url(uid, user.picture_hash)
+                    ),
                     household=own_household,
                 )
             elif (ru := remote.get(uid)) is not None:
@@ -89,7 +100,9 @@ class PersonSummaryService:
                     user_id=uid,
                     display_name=ru.display_name,
                     personal_alias=alias,
-                    picture_url=_picture_url(uid, ru.picture_hash),
+                    picture_url=(
+                        None if uid in withheld else _picture_url(uid, ru.picture_hash)
+                    ),
                     household=households.get(ru.instance_id),
                 )
             else:

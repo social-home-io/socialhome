@@ -143,6 +143,7 @@ from ..domain.space import (
     SpaceModerationItem,
 )
 from ..domain.timetable import to_wire_dict as timetable_to_wire_dict
+from ..domain.user import _picture_url
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
 from ..media_signer import MediaUrlSigner, sign_media_urls_in
@@ -652,6 +653,9 @@ class RealtimeService:
                 "picture_hash": event.picture_hash,
                 "picture_url": picture_url,
             },
+            # §CP.F2: a guardian-block counterpart sees this member by
+            # name only (``GET /api/spaces/{id}/members`` does the same).
+            withheld=await self._guardian_block_counterparts(event.user_id),
         )
 
     async def _on_pairing_accept_received(
@@ -1520,6 +1524,13 @@ class RealtimeService:
                 "blocked_user_id": event.blocked_user_id,
             },
         )
+        # §CP.F2: an open session on either side drops the other's picture
+        # and bio now, not on its next reload — the same name-only row
+        # ``GET /api/users`` answers from here on.
+        if event.blocked_user_id in await self._guardian_block_counterparts(
+            event.minor_user_id
+        ):
+            await self._send_profile_pair(event, name_only=True)
 
     async def _on_cp_block_removed(self, event: CpBlockRemoved) -> None:
         await self._broadcast_cp(
@@ -1530,6 +1541,39 @@ class RealtimeService:
                 "blocked_user_id": event.blocked_user_id,
             },
         )
+        if event.blocked_user_id not in await self._guardian_block_counterparts(
+            event.minor_user_id
+        ):
+            await self._send_profile_pair(event, name_only=False)
+
+    async def _send_profile_pair(
+        self, event: CpBlockAdded | CpBlockRemoved, *, name_only: bool
+    ) -> None:
+        """One ``user.profile_updated`` to each local side of a guardian
+        block about the other — name only while the block holds, the full
+        profile once it is lifted."""
+        pair = (event.minor_user_id, event.blocked_user_id)
+        for subject_id, viewer_id in (pair, pair[::-1]):
+            subject = await self._user_repo.get_by_user_id(subject_id)
+            viewer = await self._user_repo.get_by_user_id(viewer_id)
+            if subject is None or viewer is None:
+                continue  # a remote side: its own household renders it
+            payload = {
+                "type": "user.profile_updated",
+                "user_id": subject.user_id,
+                "username": subject.username,
+                "display_name": subject.display_name,
+                "bio": None if name_only else subject.bio,
+                "picture_hash": None if name_only else subject.picture_hash,
+                "picture_url": (
+                    None
+                    if name_only
+                    else _picture_url(subject.user_id, subject.picture_hash)
+                ),
+            }
+            if self._media_signer is not None:
+                sign_media_urls_in(payload, self._media_signer)
+            await self._ws.broadcast_to_users([viewer.user_id], payload)
 
     async def _broadcast_cp(
         self,
@@ -1793,11 +1837,19 @@ class RealtimeService:
             return frozenset()
         return await self._cp_repo.list_block_counterparts(user_id)
 
-    async def _broadcast_space(self, space_id: str, payload: dict) -> int:
+    async def _broadcast_space(
+        self,
+        space_id: str,
+        payload: dict,
+        *,
+        withheld: frozenset[str] = frozenset(),
+    ) -> int:
         if self._media_signer is not None:
             sign_media_urls_in(payload, self._media_signer, extra_fields=("url",))
         ids = await self._space_repo.list_local_member_user_ids(space_id)
-        return await self._ws.broadcast_to_users(ids, payload)
+        return await self._ws.broadcast_to_users(
+            [uid for uid in ids if uid not in withheld], payload
+        )
 
     async def _broadcast_household_admins(self, payload: dict) -> int:
         """Household fan-out narrowed to admins — for frames about

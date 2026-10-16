@@ -241,3 +241,39 @@ async def test_enrich_merges_summary_and_keeps_row_order_and_keys():
 async def test_enrich_empty_rows():
     svc, *_ = _svc()
     assert await svc.enrich("uid-me", []) == []
+
+
+class _Cp:
+    def register_gate(self, gate):
+        pass
+
+    async def guardian_block_counterparts(self, user_id):
+        return (
+            frozenset({"uid-kid", "ru-ruth"}) if user_id == "uid-bob" else frozenset()
+        )
+
+
+async def test_guardian_block_counterpart_is_named_without_a_picture():
+    """§CP.F2: across a guardian block (either way) a person reads by name
+    only — the picture is withheld, local or remote."""
+    svc, *_ = _svc(
+        local=[
+            User(
+                username="kid",
+                user_id="uid-kid",
+                display_name="Kid",
+                picture_hash="0123456789abcdef",
+            )
+        ],
+        remote=[_ruth(picture_hash="fedcba9876543210")],
+        instances=[_Inst("peer-v", "Grandma's")],
+    )
+    svc.attach_child_protection(_Cp())  # type: ignore[arg-type]
+    out = await svc.summarize("uid-bob", ["uid-kid", "ru-ruth"])
+    assert out["uid-kid"].display_name == "Kid"
+    assert out["uid-kid"].picture_url is None
+    assert out["ru-ruth"].display_name == "Grandma Ruth"
+    assert out["ru-ruth"].picture_url is None
+    other = await svc.summarize("uid-carol", ["uid-kid", "ru-ruth"])
+    assert other["uid-kid"].picture_url
+    assert other["ru-ruth"].picture_url
