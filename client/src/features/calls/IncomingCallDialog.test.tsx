@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent } from '@testing-library/preact'
+import { render, fireEvent, act } from '@testing-library/preact'
 
 const apiPost = vi.fn().mockResolvedValue({})
 vi.mock('@/api', () => ({
@@ -77,16 +77,71 @@ describe('IncomingCallDialog', () => {
     expect(getByText('Decline')).toBeTruthy()
   })
 
-  it('an unmount before the focus tick cancels it', () => {
+  it('focuses Accept once it starts ringing', () => {
     vi.useFakeTimers()
     try {
       incoming.value = { ...RINGING, signed_sdp: null }
+      const { getByText } = render(<IncomingCallDialog />)
+      act(() => { vi.advanceTimersByTime(50) })
+      expect(document.activeElement).toBe(getByText('Accept'))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('Tab and Shift+Tab stay on Accept and Decline', () => {
+    vi.useFakeTimers()
+    try {
+      incoming.value = { ...RINGING, signed_sdp: null }
+      const { getByText } = render(<IncomingCallDialog />)
+      act(() => { vi.advanceTimersByTime(50) })
+      const accept = getByText('Accept')
+      const decline = getByText('Decline')
+      decline.focus()
+      fireEvent.keyDown(window, { key: 'Tab' })
+      expect(document.activeElement).toBe(accept)
+      fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+      expect(document.activeElement).toBe(decline)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('focuses its own Accept, not a look-alike elsewhere on the page', () => {
+    vi.useFakeTimers()
+    try {
+      incoming.value = { ...RINGING, signed_sdp: null }
+      const { getByText } = render(
+        <>
+          <div class="sh-incoming-actions">
+            <button class="sh-accept">Elsewhere</button>
+            <button class="sh-decline">Elsewhere too</button>
+          </div>
+          <IncomingCallDialog />
+        </>,
+      )
+      act(() => { vi.advanceTimersByTime(50) })
+      expect(document.activeElement).toBe(getByText('Accept'))
+      getByText('Decline').focus()
+      fireEvent.keyDown(window, { key: 'Tab' })
+      expect(document.activeElement).toBe(getByText('Accept'))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an unmount before the focus tick moves no focus', () => {
+    vi.useFakeTimers()
+    try {
+      const before = document.createElement('button')
+      document.body.appendChild(before)
+      before.focus()
+      incoming.value = { ...RINGING, signed_sdp: null }
       const { unmount } = render(<IncomingCallDialog />)
-      unmount()
-      const query = vi.spyOn(document, 'querySelector')
-      vi.advanceTimersByTime(50)
-      expect(query).not.toHaveBeenCalled()
-      query.mockRestore()
+      act(() => { unmount() })
+      act(() => { vi.advanceTimersByTime(50) })
+      expect(document.activeElement).toBe(before)
+      before.remove()
     } finally {
       vi.useRealTimers()
     }

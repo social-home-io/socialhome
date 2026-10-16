@@ -12,7 +12,7 @@
  * * ``Enter``  — accept the call
  * * ``Esc``    — decline
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { Button } from '@/components/Button'
@@ -82,6 +82,10 @@ export default function IncomingCallDialog() {
   // while the request flies; the spinner says "we heard your tap".
   const [accepting, setAccepting] = useState(false)
   const [declining, setDeclining] = useState(false)
+  // Preact 11 forwards ``ref`` to function components, so the refs land
+  // on ``Button``'s own <button> elements.
+  const acceptRef = useRef<HTMLButtonElement | null>(null)
+  const declineRef = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
     if (!incoming.value) return
@@ -96,14 +100,10 @@ export default function IncomingCallDialog() {
     // when the call resolves — keyboard / screen-reader users land
     // back where they were.
     const previouslyFocused = document.activeElement as HTMLElement | null
-    const findActions = (): [HTMLButtonElement | null, HTMLButtonElement | null] => [
-      document.querySelector<HTMLButtonElement>('.sh-incoming-actions .sh-accept'),
-      document.querySelector<HTMLButtonElement>('.sh-incoming-actions .sh-decline'),
-    ]
     // Focus Accept on mount so Enter activates the primary action
     // without the user having to tab to it.
     // Cleared on cleanup: the dialog can close before the tick fires.
-    const focusTimer = setTimeout(() => findActions()[0]?.focus(), 10)
+    const focusTimer = setTimeout(() => acceptRef.current?.focus(), 10)
 
     const timer = setTimeout(() => {
       if (incoming.value) {
@@ -120,7 +120,8 @@ export default function IncomingCallDialog() {
       else if (e.key === 'Tab') {
         // Trap focus between the two action buttons — Tab can't
         // wander into the dimmed page behind a ringing call.
-        const [first, last] = findActions()
+        const first = acceptRef.current
+        const last = declineRef.current
         if (!first || !last) return
         if (e.shiftKey && document.activeElement === first) {
           e.preventDefault(); last.focus()
@@ -185,9 +186,9 @@ export default function IncomingCallDialog() {
         <strong class="sh-incoming-name">{t('calls.is_calling', { name: fromName })}</strong>
         <span class="sh-incoming-type">{call.call_type === 'video' ? t('calls.video_call') : t('calls.audio_call')}</span>
         <div class="sh-incoming-actions">
-          <Button class="sh-accept" onClick={accept}
+          <Button ref={acceptRef} class="sh-accept" onClick={accept}
                   loading={accepting} disabled={declining}>{t('calls.accept')}</Button>
-          <Button class="sh-decline" variant="danger" onClick={decline}
+          <Button ref={declineRef} class="sh-decline" variant="danger" onClick={decline}
                   loading={declining} disabled={accepting}>{t('calls.decline')}</Button>
         </div>
       </div>
