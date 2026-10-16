@@ -198,8 +198,12 @@ Rules that keep this working:
   the `client/src/baseUrl.ts` helpers:
   - API fetches: call `api.get/post/patch/delete` — the client strips the
     leading slash so `fetch` resolves against `<base href>`. Never
-    `fetch('/api/...')` directly. Same for WebSockets — the `ws` manager
-    passes `'api/ws'` (no leading slash).
+    `fetch('/api/...')` directly.
+  - WebSockets: always `new WebSocket(wsUrl('api/ws'))`. Firefox resolves a
+    relative WebSocket URL against the page URL and ignores `<base href>`,
+    so a relative path breaks on nested routes; `wsUrl()` builds the
+    absolute `ws:`/`wss:` URL from the base (a `baseUrl.test.ts` guard
+    rejects any other `new WebSocket(`).
   - `window.location.href` / `.assign` to the app root: use `basePath`.
     Hard-coding `'/'` skips the ingress prefix and bounces the iframe to HA
     Core's frontend.
@@ -232,7 +236,7 @@ Rules that keep this working:
 
 Refs: `client/src/baseUrl.ts` (`basePath`, `addBase`, `stripBase`),
 `client/src/api.ts` (`_rel` strips leading slashes), `client/src/ws.ts`
-(relative WS path resolves against `document.baseURI`),
+(absolute WS URL via `wsUrl()`),
 `client/src/router/IngressLocationProvider.tsx` (preact-iso glue),
 `socialhome/routes/spa.py` (`SpaIndexView` rewrites `<base href>`),
 `socialhome/auth.py` (`HaIngressStrategy` accepts the ingress headers).
