@@ -222,6 +222,13 @@ Rules that keep this working:
   helpers) and `IngressLocationProvider.test.tsx` (router). New URL surfaces
   (redirect, fetch target, icon/manifest ref) extend these — the test names
   mention the ingress prefix so a future contributor sees the invariant first.
+- **End-to-end: the `haos-ingress-ui` skill.** Any change to SPA URLs,
+  routing, fetch / XHR / WebSocket paths, auth or the cold-start probe,
+  setup, iframe / embed or `<base href>` must pass
+  `python .claude/skills/haos-ingress-ui/harness.py verify` — the built SPA
+  in Chrome behind a fake Supervisor + ingress proxy, failing on any request
+  or navigation outside the prefix. CI runs it on every PR (job
+  `haos-ingress-ui`); add a check there for a new URL surface.
 
 Refs: `client/src/baseUrl.ts` (`basePath`, `addBase`, `stripBase`),
 `client/src/api.ts` (`_rel` strips leading slashes), `client/src/ws.ts`
