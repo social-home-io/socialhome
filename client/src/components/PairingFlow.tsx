@@ -698,7 +698,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
   const loc = useLocation()
   const sasAutofilledRef = useRef(false)
   const [scanMethod, setScanMethod] = useState<ScanMethod>('qr')
-  const failedPanelRef = useRef<HTMLDivElement | null>(null)
+  const retryRef = useRef<HTMLButtonElement | null>(null)
   const startPanelRef = useRef<HTMLDivElement | null>(null)
 
   // ── Failure panel focus ───────────────────────────────────────────
@@ -710,7 +710,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
   const isFailed = step.value === 'failed'
   useEffect(() => {
     if (!isFailed) return
-    failedPanelRef.current?.querySelector('button')?.focus()
+    retryRef.current?.focus()
   }, [isFailed])
 
   // ── Start-step focus after Retry / Back / Cancel ───────────────────
@@ -1172,7 +1172,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
         )}
 
         {step.value === 'failed' && (
-          <div class="sh-pairing-failed" role="alert" ref={failedPanelRef}>
+          <div class="sh-pairing-failed" role="alert">
             <div class="sh-pairing-fail-mark" aria-hidden="true">⚠</div>
             <h3 style={{ margin: 0 }}>
               {mode.value === 'gfs' ? t('gfs.pair_failed') : t('pairing.failed')}
@@ -1180,7 +1180,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
             <p class="sh-muted">
               {peerHint.value ?? t('pairing.failed_message')}
             </p>
-            <Button onClick={resetAll}>{t('pairing.retry')}</Button>
+            <Button ref={retryRef} onClick={resetAll}>{t('pairing.retry')}</Button>
           </div>
         )}
 
