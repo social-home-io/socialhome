@@ -139,6 +139,13 @@ export default function ShoppingPage() {
    *  commit leaves focus wherever the user moved it. */
   const [refocusId, setRefocusId] = useState<string | null>(null)
   const clearRefocus = useCallback(() => setRefocusId(null), [])
+  /** Row whose store pill should take focus once it has (re-)rendered
+   *  after a reassign from that pill. In the grouped view the row moves
+   *  to another store's section and re-mounts, so the pill that held
+   *  focus is gone; for a brand-new store the row only reappears once
+   *  the catalogue reloads. Pending until the row mounts. */
+  const [storeRefocusId, setStoreRefocusId] = useState<string | null>(null)
+  const clearStoreRefocus = useCallback(() => setStoreRefocusId(null), [])
   /** Whether the store-catalogue manager dialog is open. */
   const [storesOpen, setStoresOpen] = useState(false)
 
@@ -342,14 +349,20 @@ export default function ShoppingPage() {
 
   /** Reassign an item to a different store (or clear the store).
    *  Drives both the StorePicker popover and the drag-and-drop path
-   *  in GroupedView. ``null`` clears the store ("No store"). */
+   *  in GroupedView. ``null`` clears the store ("No store").
+   *  ``refocus`` (the picker path) keeps focus on the item's store pill
+   *  wherever the row lands — and again if a failed save moves it back.
+   *  A drag leaves focus alone. */
   const handleReassignStore = async (
     id: string,
     nextStore: string | null,
+    refocus = false,
   ) => {
+    if (refocus) setStoreRefocusId(id)
     try {
       await updateItem(id, { store: nextStore })
     } catch (err: unknown) {
+      if (refocus) setStoreRefocusId(id)
       showToast(t('shopping.error.reassign', { error: errText(err) }), 'error')
     }
   }
@@ -481,6 +494,8 @@ export default function ShoppingPage() {
     editingId,
     refocusId,
     onRefocused: clearRefocus,
+    storeRefocusId,
+    onStoreRefocused: clearStoreRefocus,
     onEditStart: setEditingId,
     onEditCancel: handleEditCancel,
     onEditSave: handleEditSave,
@@ -639,13 +654,15 @@ interface ViewProps {
   editingId: string | null
   refocusId: string | null
   onRefocused: () => void
+  storeRefocusId: string | null
+  onStoreRefocused: () => void
   onEditStart: (id: string) => void
   onEditCancel: (item: ShoppingItem, refocus: boolean) => void
   onEditSave: (item: ShoppingItem, text: string, refocus: boolean) => void
   onToggle: (id: string, completed: boolean) => void
   onDelete: (item: ShoppingItem) => void
   onClearCompleted: () => void
-  onReassignStore: (id: string, nextStore: string | null) => void
+  onReassignStore: (id: string, nextStore: string | null, refocus?: boolean) => void
   userNameById: (uid: string) => string
   storeNames: string[]
 }
@@ -657,12 +674,14 @@ function rowProps(props: ViewProps, item: ShoppingItem, done: boolean) {
     isEditing: props.editingId === item.id,
     refocus: props.refocusId === item.id,
     onRefocused: props.onRefocused,
+    refocusStore: props.storeRefocusId === item.id,
+    onStoreRefocused: props.onStoreRefocused,
     onEditStart: () => props.onEditStart(item.id),
     onEditCancel: (refocus: boolean) => props.onEditCancel(item, refocus),
     onEditSave: (text: string, refocus: boolean) => props.onEditSave(item, text, refocus),
     onToggle: () => props.onToggle(item.id, item.completed),
     onDelete: () => props.onDelete(item),
-    onReassignStore: (s: string | null) => props.onReassignStore(item.id, s),
+    onReassignStore: (s: string | null) => props.onReassignStore(item.id, s, true),
     userNameById: props.userNameById,
     storeNames: props.storeNames,
   }
@@ -837,6 +856,9 @@ interface RowProps {
   /** Focus the rename trigger now (its editor just closed by key). */
   refocus: boolean
   onRefocused: () => void
+  /** Focus the store pill now (a reassign from it just moved the row). */
+  refocusStore: boolean
+  onStoreRefocused: () => void
   onEditStart: () => void
   onEditCancel: (refocus: boolean) => void
   onEditSave: (text: string, refocus: boolean) => void
@@ -887,6 +909,18 @@ function ItemRow(props: RowProps) {
     textRef.current?.focus()
     onRefocused()
   }, [refocus, isEditing, onRefocused])
+
+  const { refocusStore, onStoreRefocused } = props
+  useEffect(() => {
+    if (!refocusStore || isEditing) return
+    // Only reclaim focus that was lost with the old row (or still sits in
+    // this one): if the user moved on during a slow save, leave them be.
+    // A row ticked off meanwhile has no pill — just drop the request.
+    const active = document.activeElement
+    const lost = !active || active === document.body || !!rowRef.current?.contains(active)
+    if (!done && lost) rowRef.current?.querySelector<HTMLElement>('.sh-shopping-store-pill')?.focus()
+    onStoreRefocused()
+  }, [refocusStore, isEditing, done, onStoreRefocused])
 
   if (isEditing) return (
     <li class="sh-shopping-item sh-shopping-item--edit">
