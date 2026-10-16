@@ -306,8 +306,9 @@ class SqliteConversationRepo:
         (``conversation_members.deleted_at IS NOT NULL``). Ordered by
         ``last_message_at DESC`` so the most active chats come first.
 
-        DM threads (``type='dm'``) where the other participant is on the
-        viewer's personal block list are filtered out (§Privacy).
+        DM threads (``type='dm'``) where the other participant — a local
+        member or a remote seat — is on the viewer's personal block list
+        are filtered out (§Privacy).
         Group threads (``type='group_dm'``) are not filtered here — a
         per-message hide would be the right call there, and group-level
         gating is out of scope for the v1 block. The blocker can leave
@@ -334,6 +335,23 @@ class SqliteConversationRepo:
                         WHERE peer.conversation_id = c.id
                           AND peer.username <> m.username
                           AND peer.deleted_at IS NULL
+                   )
+               )
+               AND NOT (
+                   c.type = 'dm'
+                   AND EXISTS (
+                       SELECT 1
+                         FROM conversation_remote_members rpeer
+                         LEFT JOIN remote_users ru
+                           ON ru.instance_id = rpeer.instance_id
+                          AND ru.remote_username = rpeer.remote_username
+                         JOIN users self_user
+                           ON self_user.username = m.username
+                         JOIN user_blocks ub
+                           ON ub.blocker_user_id = self_user.user_id
+                          AND ub.blocked_user_id
+                              = COALESCE(rpeer.user_id, ru.user_id)
+                        WHERE rpeer.conversation_id = c.id
                    )
                )
              ORDER BY COALESCE(c.last_message_at, c.created_at) DESC

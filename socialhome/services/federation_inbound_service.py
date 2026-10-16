@@ -630,7 +630,7 @@ class FederationInboundService(ProtectionGateMixin):
                     exc,
                 )
                 return
-        recipients = tuple(p.get("recipient_user_ids") or ())
+        recipients = tuple(str(r) for r in p.get("recipient_user_ids") or ())
         if not await self._dm_message_in_scope(
             event, conv_id, message_id, sender_user_id, recipients
         ):
@@ -643,6 +643,18 @@ class FederationInboundService(ProtectionGateMixin):
             refuse(
                 event,
                 "guardian block",
+                conversation=conv_id,
+                message=message_id,
+                sender=sender_user_id,
+            )
+            return
+        if await self._personally_blocked_dm(conv_id, sender_user_id, recipients):
+            # §Privacy — a 1:1 from someone the local party blocked. The
+            # block never leaves this household, so it is enforced here:
+            # nothing is stored and no conversation is opened.
+            refuse(
+                event,
+                "personal block",
                 conversation=conv_id,
                 message=message_id,
                 sender=sender_user_id,
@@ -1109,6 +1121,31 @@ class FederationInboundService(ProtectionGateMixin):
                 ids.append(user.user_id)
         return tuple(ids)
 
+    async def _personally_blocked_dm(
+        self,
+        conv_id: str,
+        sender_user_id: str,
+        recipients: tuple[str, ...],
+    ) -> bool:
+        """§Privacy: whether an inbound message is a 1:1 to someone here who
+        blocked its sender — a 1:1 already here, or a first message whose
+        conversation isn't (a 1:1 by construction; a group's first message
+        always follows its roster). Groups ignore personal blocks, as on a
+        local send."""
+        conv = await self._conversation_repo.get(conv_id)
+        if conv is not None:
+            if conv.type is not ConversationType.DM:
+                return False
+            parties: tuple[str, ...] = await self._local_member_ids(conv_id)
+        else:
+            parties = tuple(str(r) for r in recipients)
+        for uid in parties:
+            if uid != sender_user_id and await self._user_repo.is_blocked(
+                uid, sender_user_id
+            ):
+                return True
+        return False
+
     async def _guardian_withheld(
         self,
         conv_id: str,
@@ -1151,7 +1188,8 @@ class FederationInboundService(ProtectionGateMixin):
         restart. The sender is one of ``from_instance``'s users:
 
         * the conversation is here → refused when any of its seats on
-          ``from_instance`` would have its message refused (fail closed);
+          ``from_instance`` would have its message refused — by a guardian
+          block, or a 1:1 personal block (fail closed);
         * it isn't → refused when a protected account here has a guardian
           block on someone homed on ``from_instance``.
         """
@@ -1167,9 +1205,10 @@ class FederationInboundService(ProtectionGateMixin):
                     seat.instance_id, seat.remote_username
                 )
                 seat_uid = remote.user_id if remote is not None else None
-            if (
-                seat_uid
-                and await self._guardian_withheld(conv_id, seat_uid, ()) is None
+            if seat_uid and (
+                await self._guardian_withheld(conv_id, seat_uid, ()) is None
+                # §Privacy: a 1:1 whose local party blocked the seat.
+                or await self._personally_blocked_dm(conv_id, seat_uid, ())
             ):
                 return True
         return False
@@ -1682,6 +1721,13 @@ class FederationInboundService(ProtectionGateMixin):
         if withheld is None:
             # §CP.F2 — same rule as the message itself.
             refuse(event, "guardian block", message=message_id, user=user_id)
+            return
+        if action != "remove" and await self._personally_blocked_dm(
+            msg.conversation_id, user_id, ()
+        ):
+            # §Privacy — a 1:1 whose local party blocked the reactor: nothing
+            # new from them lands (taking a reaction back still does).
+            refuse(event, "personal block", message=message_id, user=user_id)
             return
         if action == "remove":
             await self._conversation_repo.remove_reaction(message_id, user_id, emoji)

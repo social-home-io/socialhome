@@ -34,6 +34,7 @@ from socialhome.domain.events import (
     PostDeleted,
     PostEdited,
     PostReactionChanged,
+    PresenceUpdated,
     SpaceConfigChanged,
     SpaceMemberProfileUpdated,
     SpacePostCreated,
@@ -45,6 +46,7 @@ from socialhome.domain.events import (
     TaskDeadlineDue,
     TimetableDeleted,
     TimetableSaved,
+    UserCameOnline,
     UserStatusChanged,
 )
 from socialhome.domain.calendar import CalendarEvent
@@ -100,11 +102,19 @@ def test_safe_handles_frozenset():
 
 
 class _FakeUserRepo:
-    def __init__(self, users):
+    def __init__(self, users, blocks=()):
         self._users = users
+        #: ``(blocker, blocked)`` personal blocks.
+        self._blocks = set(blocks)
 
     async def list_active(self):
         return self._users
+
+    async def get(self, username):
+        return next((u for u in self._users if u.username == username), None)
+
+    async def list_blockers(self, blocked_user_id):
+        return frozenset(a for a, b in self._blocks if b == blocked_user_id)
 
 
 class _FakeSpaceRepo:
@@ -1470,3 +1480,57 @@ async def test_space_member_profile_from_another_household_reaches_the_space(env
     assert frame["user_id"] == "u-remote"
     assert frame["picture_hash"] is None
     assert frame["picture_url"] is None
+
+
+# ─── Personal blocks (§Privacy) ──────────────────────────────────────────
+
+
+async def _blocked_env():
+    """u2 blocked u1 — the REST views (feed, presence) already hide u1 from
+    u2, so u1's live frames must not put u1 back."""
+    bus = EventBus()
+    ws = WebSocketManager()
+    users = [_user("u1", "anna"), _user("u2", "ben"), _user("u3", "cleo")]
+    RealtimeService(
+        bus,
+        ws,
+        user_repo=_FakeUserRepo(users, blocks={("u2", "u1")}),
+        space_repo=_FakeSpaceRepo({}),
+    ).wire()
+    socks = {u.user_id: _FakeWS() for u in users}
+    for uid, sock in socks.items():
+        await ws.register(uid, sock)
+    return bus, socks
+
+
+@pytest.mark.parametrize(
+    ("event", "frame_type"),
+    [
+        (PostCreated(post=_post()), "post.created"),
+        (PostEdited(post=_post()), "post.edited"),
+        (PostReactionChanged(post=_post()), "post.reaction_changed"),
+        (
+            UserStatusChanged(user_id="u1", status=UserStatus(text="x")),
+            "user.status_changed",
+        ),
+        (PresenceUpdated(username="anna", state="home"), "presence.updated"),
+        (UserCameOnline(user_id="u1"), "user.online"),
+    ],
+)
+async def test_blocked_persons_live_frames_skip_the_blocker(event, frame_type):
+    bus, socks = await _blocked_env()
+    await bus.publish(event)
+    got = {
+        uid
+        for uid, s in socks.items()
+        if any(json.loads(m).get("type") == frame_type for m in s.sent)
+    }
+    assert "u2" not in got
+    assert "u3" in got
+
+
+async def test_the_blockers_own_frames_still_reach_the_blocked_person():
+    """A personal block hides the blocked person from the blocker only."""
+    bus, socks = await _blocked_env()
+    await bus.publish(UserStatusChanged(user_id="u2", status=UserStatus(text="y")))
+    assert any("user.status_changed" in m for m in socks["u1"].sent)

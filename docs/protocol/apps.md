@@ -234,6 +234,9 @@ error.
   local user who blocked the named initiator. A binary frame names no
   initiator, so blocks can't be applied to it (known limitation of the v1
   frame format).
+- Locally, a session can't be opened with — or a message sent to — a
+  household member who blocked the initiator (403 `FORBIDDEN`, the
+  same answer as a non-contact), matching what a remote receiver does.
 - User-visible effect: an invite from a household user this household
   hasn't synced (or one hidden from it) is not shown.
 

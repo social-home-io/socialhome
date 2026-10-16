@@ -2505,6 +2505,7 @@
   "settings.blocked.unblocked": "Débloqué",
   "settings.blocked.unblock_failed": "Impossible de débloquer : {error}",
   "settings.blocked.title": "Comptes bloqués",
+  "settings.blocked.blurb": "Bloquer quelqu'un masque ses publications du foyer, temps forts, moments, sa localisation et la plupart des notifications le concernant, et bloque les messages privés, les appels et les jeux d'applis entre vous. Les espaces partagés et les discussions de groupe ne changent pas, et cette personne voit toujours ce que vous partagez.",
   "settings.blocked.empty": "Vous n'avez bloqué personne. Ouvrez un temps fort ou un profil et touchez le menu ⋯ pour bloquer quelqu'un.",
   "settings.person.unknown": "Personne inconnue",
   "settings.person.no_longer_connected": "Foyer plus connecté",

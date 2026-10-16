@@ -113,6 +113,30 @@ household and the conversation's remote seats
   user's old household keep that seat, so messages from the new home are
   refused there until the conversation is re-seated.
 
+### Personal blocks (§Privacy)
+
+A personal block (`POST /api/blocks`) is never sent anywhere — the blocked
+person's household learns nothing — so for a remote person it is enforced
+where the message lands (WARNING `personal block`, ids only). Like the local
+rule, it covers 1:1s only; groups ignore personal blocks:
+
+- **`DM_MESSAGE`** from someone the local party of a 1:1 blocked (a 1:1
+  already here, or a first message whose conversation isn't): refused
+  outright — nothing stored, no conversation opened.
+- **`DM_MEDIA_BLOB`** whose message isn't here, for a 1:1 that is here and
+  whose local party blocked the sending seat: refused. Bytes for a
+  conversation that isn't here yet are kept write-once as for any message
+  that hasn't landed — the message itself is refused, so they are never
+  shown.
+- **`DM_HISTORY_CHUNK`** rows from such a sender in such a 1:1 are not
+  stored either, so history sync never puts back what was refused live.
+- **`DM_MESSAGE_REACTION`** adds from such a sender in such a 1:1 are not
+  stored (a removal still applies).
+- **`CALL_OFFER`** for a 1:1 from a caller the callee blocked never rings.
+
+Locally the blocker can't send into a 1:1 with a remote person they blocked
+either, and that 1:1 drops out of their list.
+
 ### Guardian blocks (§CP.F2)
 
 A guardian can block a person (local or on another household) for a

@@ -2510,6 +2510,7 @@
   "settings.blocked.unblocked": "Entsperrt",
   "settings.blocked.unblock_failed": "Entsperren fehlgeschlagen: {error}",
   "settings.blocked.title": "Blockierte Konten",
+  "settings.blocked.blurb": "Wenn du jemanden blockierst, siehst du seine Haushaltsbeiträge, Highlights, Momente, seinen Aufenthaltsort und die meisten Benachrichtigungen über ihn nicht mehr, und Einzelnachrichten, Anrufe und App-Spiele zwischen euch sind gesperrt. Gemeinsame Spaces und Gruppenchats sind nicht betroffen, und diese Person sieht weiterhin, was du teilst.",
   "settings.blocked.empty": "Du hast niemanden blockiert. Öffne ein Highlight oder Profil und tippe auf das ⋯-Menü, um jemanden zu blockieren.",
   "settings.person.unknown": "Unbekannte Person",
   "settings.person.no_longer_connected": "Haushalt nicht mehr verbunden",

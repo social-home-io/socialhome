@@ -704,18 +704,15 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         # §CP.F2 guardian blocks — every seat, local or remote, 1:1 or group.
         # ``withheld`` are the local members this message must not reach.
         withheld = await self._guard_guardian_blocks(conv, sender.user_id)
-        # 1:1 DM block gate (§Privacy). Group DMs ignore personal blocks
-        # in v1 — see ``conversation_repo.list_for_user`` for the
-        # matching read-side note.
+        # 1:1 DM block gate (§Privacy) — the peer may be local or on
+        # another household (a remote seat): the sender can't message
+        # someone they blocked either way. Group DMs ignore personal blocks
+        # in v1 — see ``conversation_repo.list_for_user`` for the matching
+        # read-side note.
         if conv.type is ConversationType.DM:
-            members = await self._convos.list_members(conversation_id)
-            for m in members:
-                if m.username == sender_username:
-                    continue
-                peer = await self._users.get(m.username)
-                if peer is None:
-                    continue
-                await self._guard_block_pair(sender.user_id, peer.user_id)
+            for peer_id in await self._dm_party_ids(conversation_id):
+                if peer_id != sender.user_id:
+                    await self._guard_block_pair(sender.user_id, peer_id)
         if type not in MESSAGE_TYPES:
             raise ValueError(f"invalid message type {type!r}")
         space_chat = conv.system_scope is SystemChatScope.SPACE
@@ -1673,6 +1670,19 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             raise RecipientBlockedError(RECIPIENT_BLOCKED_DETAIL)
         if await self._users.is_blocked(sender_id, recipient_id):
             raise RecipientBlockedError(YOU_BLOCKED_DETAIL)
+
+    async def _dm_party_ids(self, conversation_id: str) -> list[str]:
+        """``user_id`` of both parties of a 1:1 — a member who hid it is
+        still one (they still receive it), and so is a remote seat."""
+        ids: list[str] = []
+        for m in await self._convos.list_members(conversation_id):
+            u = await self._users.get(m.username)
+            if u is not None:
+                ids.append(u.user_id)
+        for uid in await self._seat_user_ids(conversation_id):
+            if uid not in ids:
+                ids.append(uid)
+        return ids
 
     async def _seat_user_ids(self, conversation_id: str) -> list[str]:
         """``user_id`` of every active seat — local members and remote seats."""

@@ -644,8 +644,20 @@ class AppFederationService:
         )
         for c in contacts:
             if (c["instance_id"], c["user_ref"], c["is_local"]) == key:
-                return
-        raise AppContactNotFoundError("target is not a contact of the requesting user")
+                break
+        else:
+            raise AppContactNotFoundError(
+                "target is not a contact of the requesting user"
+            )
+        # A local person who blocked the actor — as a remote recipient's
+        # household drops a blocked initiator's frames on receipt. Same
+        # answer as a non-contact, so the block isn't revealed.
+        if target.get("is_local") and await self._user_repo.is_blocked(
+            str(target["user_ref"]), actor_user_id
+        ):
+            raise AppContactNotFoundError(
+                "target is not a contact of the requesting user"
+            )
 
     async def _emit_frame(
         self,

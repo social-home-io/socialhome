@@ -2816,6 +2816,7 @@
   "settings.blocked.unblocked": "Unblocked",
   "settings.blocked.unblock_failed": "Couldn't unblock: {error}",
   "settings.blocked.title": "Blocked accounts",
+  "settings.blocked.blurb": "Blocking someone hides their household posts, highlights, moments, whereabouts and most notifications about them from you, and stops one-to-one messages, calls and app games between you. Shared spaces and group chats aren't affected, and they can still see what you share.",
   "settings.blocked.empty": "You haven't blocked anyone. Open a highlight or profile and tap the ⋯ menu to block someone.",
   "settings.person.unknown": "Unknown person",
   "settings.person.no_longer_connected": "Household no longer connected",

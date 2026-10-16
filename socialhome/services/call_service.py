@@ -41,7 +41,7 @@ from typing import Any
 import orjson
 
 from ..domain.call import CallQualitySample, CallSession
-from ..domain.conversation import ConversationMessage
+from ..domain.conversation import ConversationMessage, ConversationType
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..federation.sdp_signing import (
@@ -143,6 +143,10 @@ class CallRecord:
 #: account hears it. The person it blocks hears a personal block's words.
 GUARDIAN_BLOCK_CALL_DETAIL = "You can't call this person."
 BLOCKED_CALL_DETAIL = "Recipient has you blocked."
+#: A 1:1 call to someone the caller blocked (§Privacy) — as a DM send.
+YOU_BLOCKED_CALL_DETAIL = (
+    "You have blocked this user — unblock them in Settings to call them."
+)
 
 
 class CallSignalingService(ProtectionGateMixin):
@@ -283,6 +287,22 @@ class CallSignalingService(ProtectionGateMixin):
                 )
             local_callees = [u for u in local_callees if u.user_id not in blocked]
             remote_callees = [r for r in remote_callees if r[1] not in blocked]
+        # §Privacy: a 1:1 call follows the 1:1 DM rule — neither side of a
+        # personal block rings the other (group calls ignore personal
+        # blocks, as group DMs do).
+        conv = await self._conv_repo.get(conversation_id)
+        if (
+            conv is not None
+            and conv.type is ConversationType.DM
+            and len(local_callees) + len(remote_callees) == 1
+        ):
+            peer_id = (
+                local_callees[0].user_id if local_callees else remote_callees[0][1]
+            )
+            if await self._user_repo.is_blocked(caller_user_id, peer_id):
+                raise PermissionError(YOU_BLOCKED_CALL_DETAIL)
+            if await self._user_repo.is_blocked(peer_id, caller_user_id):
+                raise PermissionError(BLOCKED_CALL_DETAIL)
         # A callee we hold no offer for can't be connected — don't ring them.
         local_callees = [u for u in local_callees if offers.get(u.user_id) or sdp_offer]
         remote_callees = [r for r in remote_callees if offers.get(r[1]) or sdp_offer]
@@ -1500,6 +1520,15 @@ class CallSignalingService(ProtectionGateMixin):
             return "guardian block"
         if not conversation_id:
             return "missing conversation_id"
+        conv = await self._conv_repo.get(conversation_id)
+        if (
+            conv is not None
+            and conv.type is ConversationType.DM
+            and await self._user_repo.is_blocked(callee_user_id, caller_user_id)
+        ):
+            # §Privacy — the block never leaves this household, so a 1:1
+            # call from someone the callee blocked is refused here.
+            return "personal block"
         if await self._is_system_chat(conversation_id):
             return "system conversation"
         members = await self._conv_repo.list_members(conversation_id)
