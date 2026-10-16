@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { render, waitFor, act } from '@testing-library/preact'
 
 const apiGet = vi.fn()
 vi.mock('@/api', () => ({
@@ -83,7 +83,7 @@ describe('SpaceBotsTab live bot frames', () => {
 
   it('stops listening after unmount', async () => {
     const view = await renderTab()
-    view.unmount()
+    act(() => { view.unmount() })
     emit('space.bot.created', { space_id: 'sp-1', bot_id: 'b2' })
     expect(apiGet).toHaveBeenCalledTimes(1)
   })

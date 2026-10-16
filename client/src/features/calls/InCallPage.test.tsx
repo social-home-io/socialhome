@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent, waitFor } from '@testing-library/preact'
+import { render, fireEvent, waitFor, act } from '@testing-library/preact'
 
 const apiPost = vi.fn().mockResolvedValue({})
 vi.mock('@/api', () => ({
@@ -159,7 +159,7 @@ describe('InCallPage', () => {
   it('leaving the page mid-call hangs up', () => {
     session('connected')
     const { unmount } = render(<InCallPage />)
-    unmount()
+    act(() => { unmount() })
     expect(s.hangupCall).toHaveBeenCalledTimes(1)
   })
 

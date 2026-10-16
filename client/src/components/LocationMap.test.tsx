@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
+import { act as flushAct } from 'preact/test-utils'
 
 // jsdom doesn't ship ResizeObserver; LocationMap uses it to
 // invalidate Leaflet's size when a hidden tab becomes visible.
@@ -264,7 +265,7 @@ describe('LocationMap', () => {
     await waitFor(() => { expect(captured).toBeTypeOf('function') })
     expect(captured!()).toBe(false)
 
-    unmount()
+    flushAct(() => { unmount() })
     expect(captured!()).toBe(true)
 
     // Resolving after unmount must be a no-op — no render, no state.

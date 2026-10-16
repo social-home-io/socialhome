@@ -448,7 +448,7 @@ describe('useKeyboardOpen', () => {
     act(() => { field('<input>').focus() })
     act(() => { vv.resizeTo(500) })
     expect(getByTestId('kbd').textContent).toBe('open')
-    unmount()
+    act(() => { unmount() })
     expect(keyboardOpen.value).toBe(false)
   })
 })

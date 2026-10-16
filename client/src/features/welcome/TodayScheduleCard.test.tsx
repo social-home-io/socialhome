@@ -104,7 +104,7 @@ describe('TodayScheduleCard', () => {
   it('cleans up its timer on unmount', () => {
     const { unmount } = renderAt(at(8), { timetables: [EMMA] })
     expect(vi.getTimerCount()).toBeGreaterThan(0)
-    unmount()
+    act(() => { unmount() })
     expect(vi.getTimerCount()).toBe(0)
   })
 

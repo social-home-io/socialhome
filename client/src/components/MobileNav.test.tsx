@@ -190,7 +190,7 @@ describe('MobileNav — steps aside while the on-screen keyboard is up', () => {
     const { container, unmount } = render(wrap(<><MobileNav /><input id="f" /></>))
     openKeyboard(container.querySelector('#f') as HTMLInputElement)
     expect(keyboardOpen.value).toBe(true)
-    unmount()
+    act(() => { unmount() })
     expect(keyboardOpen.value).toBe(false)
     expect(document.documentElement.classList.contains(KBD_OPEN_CLASS)).toBe(false)
   })

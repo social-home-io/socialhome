@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { act as flushAct } from 'preact/test-utils'
 import type { JSX } from 'preact'
 
 // The heavy DmThreadPage cold render (fresh ``import()`` + mocked-API
@@ -503,7 +504,7 @@ describe('DmThreadPage — jump-down chip integration', () => {
         expect(sendMock).toHaveBeenCalledWith('dm.active', { conversation_id: 'conv-test' })
       }, { timeout: RENDER_WAIT })
       sendMock.mockClear()
-      unmount()
+      flushAct(() => { unmount() })
       // Cleanup effect must clear the marker so backgrounded threads
       // start emitting notifications again.
       expect(sendMock).toHaveBeenCalledWith('dm.active', { conversation_id: null })
@@ -960,7 +961,7 @@ describe('DmThreadPage — older-history staleness', () => {
       }, { timeout: RENDER_WAIT })
 
       // Leave the thread entirely (the /dms hop), then open B fresh.
-      first.unmount()
+      flushAct(() => { first.unmount() })
       routeState.convId = 'conv-b'
       const second = render(<Page tick={1} />)
       await waitFor(() => {

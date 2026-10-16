@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { renderHook } from '@testing-library/preact'
+import { renderHook, act } from '@testing-library/preact'
 import { pageTitle, useTitle } from './pageTitle'
 
 describe('useTitle', () => {
@@ -17,7 +17,7 @@ describe('useTitle', () => {
   it('resets pageTitle + document.title on unmount', () => {
     const { unmount } = renderHook(() => useTitle('Calendar'))
     expect(document.title).toBe('Calendar · Social Home')
-    unmount()
+    act(() => { unmount() })
     expect(pageTitle.value).toBe('')
     expect(document.title).toBe('Social Home')
   })
