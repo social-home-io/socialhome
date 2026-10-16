@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent } from '@testing-library/preact'
+import { render, fireEvent, act } from '@testing-library/preact'
 
 const apiPost = vi.fn().mockResolvedValue({})
 vi.mock('@/api', () => ({
@@ -110,5 +110,141 @@ describe('IncomingCallDialog', () => {
     expect(link.href).toBe(window.location.href)
     fireEvent.click(getByText('Not now'))
     expect(queryByText('Open in a new tab')).toBeNull()
+  })
+
+  // The dialog stays mounted at the app root across calls: busy state
+  // from one call must never carry over to the next ring.
+  describe('a later call after the first one resolved', () => {
+    const NEXT: IncomingCall = { ...RINGING, call_id: 'c2', from_user: 'bob' }
+    const flush = () => act(() => new Promise<void>(r => setTimeout(r, 0)))
+    const btn = (q: (t: string) => HTMLElement, label: string) =>
+      q(label).closest('button') as HTMLButtonElement
+
+    it('after declining, the next call can be accepted and declined', async () => {
+      incoming.value = RINGING
+      const { getByText } = render(<IncomingCallDialog />)
+      fireEvent.click(getByText('Decline'))
+      await flush()
+      expect(apiPost).toHaveBeenCalledWith('/api/calls/c1/decline', {})
+      expect(incoming.value).toBeNull()
+
+      act(() => { incoming.value = NEXT })
+      expect(getByText(/bob is calling/)).toBeTruthy()
+      expect(btn(getByText, 'Accept').disabled).toBe(false)
+      expect(btn(getByText, 'Decline').disabled).toBe(false)
+      expect(document.querySelector('.sh-incoming-actions .sh-spinner-sm')).toBeNull()
+
+      // Escape declines the new call.
+      fireEvent.keyDown(window, { key: 'Escape' })
+      await flush()
+      expect(apiPost).toHaveBeenLastCalledWith('/api/calls/c2/decline', {})
+      expect(incoming.value).toBeNull()
+    })
+
+    it('after declining, Enter accepts the next call', async () => {
+      acceptCall.mockResolvedValueOnce(undefined)
+      incoming.value = RINGING
+      render(<IncomingCallDialog />)
+      fireEvent.keyDown(window, { key: 'Escape' })
+      await flush()
+      act(() => { incoming.value = NEXT })
+      fireEvent.keyDown(window, { key: 'Enter' })
+      await flush()
+      expect(acceptCall).toHaveBeenCalledWith(NEXT)
+      expect(route).toHaveBeenCalledWith('/calls/c2')
+    })
+
+    it('after accepting, the next call rings with idle buttons', async () => {
+      acceptCall.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined)
+      incoming.value = RINGING
+      const { getByText } = render(<IncomingCallDialog />)
+      fireEvent.click(getByText('Accept'))
+      await flush()
+      expect(incoming.value).toBeNull()
+
+      act(() => { incoming.value = NEXT })
+      expect(btn(getByText, 'Accept').disabled).toBe(false)
+      expect(btn(getByText, 'Decline').disabled).toBe(false)
+      fireEvent.click(getByText('Accept'))
+      await flush()
+      expect(acceptCall).toHaveBeenLastCalledWith(NEXT)
+      expect(route).toHaveBeenLastCalledWith('/calls/c2')
+    })
+
+    it('a failed accept leaves both buttons usable for a retry', async () => {
+      acceptCall.mockRejectedValueOnce(new Error('Microphone access is blocked.'))
+        .mockResolvedValueOnce(undefined)
+      incoming.value = RINGING
+      const { getByText } = render(<IncomingCallDialog />)
+      fireEvent.click(getByText('Accept'))
+      await flush()
+      expect(btn(getByText, 'Accept').disabled).toBe(false)
+      expect(btn(getByText, 'Decline').disabled).toBe(false)
+      fireEvent.keyDown(window, { key: 'Enter' })
+      await flush()
+      expect(acceptCall).toHaveBeenCalledTimes(2)
+      expect(route).toHaveBeenCalledWith('/calls/c1')
+    })
+
+    it('a failed decline still stops the ring and the next call works', async () => {
+      apiPost.mockRejectedValueOnce(new Error('offline'))
+      incoming.value = RINGING
+      const { getByText } = render(<IncomingCallDialog />)
+      fireEvent.click(getByText('Decline'))
+      await flush()
+      expect(incoming.value).toBeNull()
+      act(() => { incoming.value = NEXT })
+      expect(btn(getByText, 'Accept').disabled).toBe(false)
+      expect(btn(getByText, 'Decline').disabled).toBe(false)
+    })
+
+    it('a decline still in flight never dismisses a newer call', async () => {
+      let resolve!: () => void
+      apiPost.mockImplementationOnce(() => new Promise<void>(r => { resolve = r }))
+      incoming.value = RINGING
+      const { getByText } = render(<IncomingCallDialog />)
+      fireEvent.click(getByText('Decline'))
+      // The caller hangs up and someone else calls before the POST lands.
+      act(() => { incoming.value = null })
+      act(() => { incoming.value = NEXT })
+      await act(async () => { resolve() })
+      await flush()
+      expect(incoming.value).toEqual(NEXT)
+      expect(getByText(/bob is calling/)).toBeTruthy()
+      expect(btn(getByText, 'Accept').disabled).toBe(false)
+    })
+
+    it('a second call replacing the first mid-decline starts idle', async () => {
+      apiPost.mockImplementationOnce(() => new Promise(() => {}))
+      incoming.value = RINGING
+      const { getByText } = render(<IncomingCallDialog />)
+      fireEvent.click(getByText('Decline'))
+      act(() => { incoming.value = NEXT })
+      expect(getByText(/bob is calling/)).toBeTruthy()
+      expect(btn(getByText, 'Accept').disabled).toBe(false)
+      expect(btn(getByText, 'Decline').disabled).toBe(false)
+    })
+
+    it('an accept that resolves after the call was replaced keeps the new ring', async () => {
+      let resolve!: () => void
+      acceptCall.mockImplementationOnce(() => new Promise<void>(r => { resolve = r }))
+      incoming.value = RINGING
+      render(<IncomingCallDialog />)
+      fireEvent.keyDown(window, { key: 'Enter' })
+      act(() => { incoming.value = NEXT })
+      await act(async () => { resolve() })
+      await flush()
+      expect(incoming.value).toEqual(NEXT)
+    })
+  })
+
+  it('a repeated Enter answers only once', async () => {
+    acceptCall.mockImplementation(() => new Promise(() => {}))
+    incoming.value = RINGING
+    render(<IncomingCallDialog />)
+    fireEvent.keyDown(window, { key: 'Enter' })
+    fireEvent.keyDown(window, { key: 'Enter' })
+    await act(() => new Promise<void>(r => setTimeout(r, 0)))
+    expect(acceptCall).toHaveBeenCalledTimes(1)
   })
 })
