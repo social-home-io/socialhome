@@ -24,12 +24,12 @@ echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox --disable-dev-shm-usag
 #    Python on PATH (whichever 3.14 the image ships).
 uv venv .venv --seed
 
-# 3. Install the Python project in editable mode + dev extras. uv
-#    auto-detects the in-tree venv and installs there. ``--refresh``
-#    re-checks PyPI for the latest matching version (defeats uv's
-#    metadata cache, which can hold a stale view of versions across
-#    container rebuilds).
-uv pip install --refresh -e '.[dev]'
+# 3. Install the Python project in editable mode + dev extras at exactly
+#    the versions in ``uv.lock`` — the same set CI tests and the images
+#    ship. ``--locked`` fails if the lock is stale (run
+#    ``scripts/lock.sh``); ``--inexact`` keeps the pip/setuptools that
+#    ``--seed`` put in the venv.
+uv sync --locked --inexact --extra dev
 
 # 4. Wire up the pre-commit hooks so ``git commit`` runs ruff + mypy +
 #    frontend ESLint + tsc on staged files.

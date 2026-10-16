@@ -11,7 +11,8 @@ add-on or a standalone Docker container.
 
 The repo ships a Dev Container (`.devcontainer/devcontainer.json`)
 that installs everything for you on first open: the Python project
-in editable mode (`pip install -e .[dev]`), the pre-commit hooks,
+in editable mode at the locked versions (`uv sync --locked --extra dev`),
+the pre-commit hooks,
 pnpm, and the frontend deps under `client/`.
 
 1. Open the repo in VS Code with the **Dev Containers** extension
@@ -43,8 +44,11 @@ the Python package manager and provisions a project venv at
 local venv keeps installs writable). VS Code is wired to use
 `${workspaceFolder}/.venv/bin/python` as the default
 interpreter. Reinstall deps with
-`uv pip install -e .[dev]` (uv auto-detects the in-tree venv);
-pin a single package with `uv pip install <pkg>`.
+`uv sync --locked --inexact --extra dev` — every Python package,
+transitive ones included, is pinned in `uv.lock`. To change a version,
+edit the pin in `pyproject.toml` (or move a transitive one with
+`scripts/lock.sh --upgrade-package <pkg>`) and run `scripts/lock.sh`;
+see [Dependency lock](docs/testing.md#dependency-lock).
 
 ### Manual setup
 
@@ -52,9 +56,12 @@ If you're not using the Dev Container, do the same one-time
 setup:
 
 ```sh
-pip install -e .[dev] && pre-commit install
+uv sync --locked --extra dev && .venv/bin/pre-commit install
 cd client && pnpm install
 ```
+
+(Without uv, `pip install -e .[dev]` works too, but resolves transitive
+dependencies freshly instead of using the lock.)
 
 Run the backend in standalone mode with a throwaway data dir under
 `/tmp`. The first request lands on `/setup` so you can pick the admin
