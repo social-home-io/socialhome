@@ -1082,15 +1082,13 @@ function StorePicker({
   const [adding, setAdding] = useState(false)
   const [newName, setNewName] = useState('')
   const wrapRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
   const newInputRef = useRef<HTMLInputElement | null>(null)
-
-  const trigger = () =>
-    wrapRef.current?.querySelector<HTMLElement>('button[aria-haspopup="menu"]')
 
   const closeAdding = (refocus: boolean) => {
     setAdding(false)
     setNewName('')
-    if (refocus) trigger()?.focus()
+    if (refocus) triggerRef.current?.focus()
   }
 
   const backToList = () => {
@@ -1161,6 +1159,7 @@ function StorePicker({
   return (
     <div class="sh-shopping-store-picker" ref={wrapRef}>
       <OverflowMenu
+        ref={triggerRef}
         label={ariaLabel}
         title={currentStore
           ? t('shopping.picker.title_current', { name: currentStore })

@@ -756,7 +756,7 @@ function ListPicker({
   const [draft, setDraft] = useState('')
   const [open, setOpen] = useState(false)
   const [scrim, setScrim] = useState(false)
-  const rootRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
   const renameRef = useRef<HTMLInputElement | null>(null)
   /** The rename / new-list edit already ended (Enter, Escape or blur). */
   const doneRef = useRef(false)
@@ -772,7 +772,7 @@ function ListPicker({
     if (mode === 'rename') { renameRef.current?.focus(); renameRef.current?.select() }
     if (mode === 'idle' && refocusRef.current) {
       refocusRef.current = false
-      rootRef.current?.querySelector<HTMLElement>('.sh-tasks-picker__trigger')?.focus()
+      triggerRef.current?.focus()
     }
   }, [mode, newListRef])
 
@@ -807,7 +807,7 @@ function ListPicker({
   }
 
   return (
-    <div class="sh-tasks-picker" ref={rootRef}>
+    <div class="sh-tasks-picker">
       {scrim && (
         <div
           class="sh-tasks-picker__scrim"
@@ -844,6 +844,7 @@ function ListPicker({
       ) : active && (
         <div class="sh-tasks-picker__row">
         <OverflowMenu
+          ref={triggerRef}
           label={t('tasks.picker.label', { name: active.name })}
           bareTrigger
           open={open}
