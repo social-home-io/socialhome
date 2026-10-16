@@ -25,7 +25,7 @@ import {
   isSpaceChatFrame,
   loadSpaceChat,
   patchSpaceChat,
-  resetSpaceChat,
+  claimSpaceChat,
   spaceChatError,
   spaceChatOf,
 } from '@/store/spaceChat'
@@ -131,10 +131,7 @@ export function useSpaceChatSummary(spaceId: string, eligible: boolean, chatOpen
   const eligibleRef = useRef(eligible)
   eligibleRef.current = eligible
 
-  useEffect(() => {
-    resetSpaceChat(spaceId)
-    return () => resetSpaceChat(null)
-  }, [spaceId])
+  useEffect(() => claimSpaceChat(spaceId), [spaceId])
 
   useEffect(() => {
     if (eligible) void loadSpaceChat(spaceId)

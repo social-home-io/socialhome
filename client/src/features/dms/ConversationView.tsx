@@ -581,6 +581,12 @@ function createThreadState(): ThreadState {
  *  one per WS connection, shared by every view on the page. */
 let activeOwner: symbol | null = null
 
+/** Routed (non-embedded) views currently mounted. The body class is
+ *  dropped only when the last one goes: Preact runs a removed view's
+ *  effect cleanup after paint, so a view replaced by a fresh one (thread
+ *  → thread) cleans up *after* its successor added the class. */
+let threadChromeViews = 0
+
 /** Refetch the roster. Resolves ``false`` when the viewer is no longer a
  *  member (403) — they were removed from a group, or left it elsewhere. */
 async function fetchRoster(s: ThreadState, convId: string): Promise<boolean> {
@@ -864,8 +870,12 @@ export function ConversationView({
   // host surface's layout alone.
   useEffect(() => {
     if (embedded) return
+    threadChromeViews += 1
     document.body.classList.add('sh-dm-thread-open')
-    return () => document.body.classList.remove('sh-dm-thread-open')
+    return () => {
+      threadChromeViews -= 1
+      if (threadChromeViews === 0) document.body.classList.remove('sh-dm-thread-open')
+    }
   }, [embedded])
 
   // Tell the backend "I have this thread open right now" so inbound

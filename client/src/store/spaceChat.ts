@@ -34,6 +34,24 @@ export function resetSpaceChat(spaceId: string | null): void {
   spaceChatError.value = null
 }
 
+let claimant: object | null = null
+
+/** A space page takes the store for ``spaceId``; the returned release
+ *  resets it only while that page is still the claimant. Preact runs a
+ *  removed page's effect cleanup after paint, which can be after the page
+ *  that replaced it (space → space) already claimed — a blind reset there
+ *  would drop the new space's summary. */
+export function claimSpaceChat(spaceId: string): () => void {
+  const me = {}
+  claimant = me
+  resetSpaceChat(spaceId)
+  return () => {
+    if (claimant !== me) return
+    claimant = null
+    resetSpaceChat(null)
+  }
+}
+
 /** The summary when it belongs to ``spaceId``, else ``null`` — the page
  *  never shows another space's chat for the render before its reset. */
 export function spaceChatOf(spaceId: string): SystemChatSummary | null {

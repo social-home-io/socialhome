@@ -31,6 +31,26 @@ describe('useSpaceTheme', () => {
     expect(root.style.getPropertyValue('--sh-accent')).toBe('')
   })
 
+  it('a replaced space view unmounting late keeps the new space theme', async () => {
+    // Space → space: Preact 11 runs the old view's cleanup after paint,
+    // possibly after the new view applied its theme.
+    get.mockImplementation(async (url: string) => url.includes('sp-old')
+      ? { primary_color: '#aa0000', accent_color: '#00aa00' }
+      : { primary_color: '#0000aa' })
+    const old = render(<Probe id="sp-old" />)
+    await waitFor(() => expect(root.getAttribute('data-space-theme')).toBe('sp-old'))
+    const next = render(<Probe id="sp-new" />)
+    await waitFor(() => expect(root.getAttribute('data-space-theme')).toBe('sp-new'))
+    // The successor cleared the old space's own overrides when it applied.
+    expect(root.style.getPropertyValue('--sh-accent')).toBe('')
+    act(() => { old.unmount() })
+    expect(root.getAttribute('data-space-theme')).toBe('sp-new')
+    expect(root.style.getPropertyValue('--sh-primary')).toBe('#0000aa')
+    act(() => { next.unmount() })
+    expect(root.hasAttribute('data-space-theme')).toBe(false)
+    expect(root.style.getPropertyValue('--sh-primary')).toBe('')
+  })
+
   it('applies a colour the space admin actually picked, and rolls it back', async () => {
     get.mockResolvedValue({ primary_color: '#3366ff', accent_color: '#C8902F' })
     const { unmount } = render(<Probe id="sp-2" />)

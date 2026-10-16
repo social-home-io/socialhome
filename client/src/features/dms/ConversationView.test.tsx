@@ -202,6 +202,21 @@ describe('ConversationView', () => {
     expect(b.querySelector('.sh-composer-reply')).toBeNull()
   })
 
+  it('a replaced routed view unmounting late keeps the thread chrome class', async () => {
+    // Preact 11 runs the old view's effect cleanup after paint, i.e. after
+    // the view that replaced it added the class (thread → thread swap).
+    const { render, waitFor, ConversationView } = await setup()
+    const first = render(<ConversationView conversationId="conv-a" />)
+    const second = render(<ConversationView conversationId="conv-b" />)
+    await waitFor(() => {
+      expect(second.container.textContent ?? '').toContain('BOB-conv-b')
+    }, { timeout: RENDER_WAIT })
+    flushAct(() => { first.unmount() })
+    expect(document.body.classList.contains('sh-dm-thread-open')).toBe(true)
+    flushAct(() => { second.unmount() })
+    expect(document.body.classList.contains('sh-dm-thread-open')).toBe(false)
+  })
+
   it('the routed (default) view carries the page chrome', async () => {
     const { render, waitFor, ConversationView, pageTitle } = await setup()
     const { container } = render(<ConversationView conversationId="conv-a" />)
