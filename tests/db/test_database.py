@@ -582,15 +582,21 @@ async def test_writer_does_not_hold_the_write_lock_while_it_waits(tmp_dir):
     node's short flush, never the window.
 
     ``timeout=0`` on the other connection makes any held lock an instant
-    ``database is locked`` instead of a silent wait.
+    ``database is locked`` instead of a silent wait. The window is far
+    longer than any runner hiccup and the batch is still pending after the
+    other write, so the other write provably ran inside the window — no
+    wall-clock bound needed (a 0.3 s bound flaked on a loaded CI runner).
     """
     path = tmp_dir / "nolock.db"
-    db = AsyncDatabase(path, batch_timeout_ms=300)
+    setup = sqlite3.connect(str(path))
+    try:
+        setup.execute("CREATE TABLE t(x INTEGER)")
+        setup.commit()
+    finally:
+        setup.close()
+    db = AsyncDatabase(path, batch_timeout_ms=30_000)
     await db.startup()
     try:
-        await db.enqueue("CREATE TABLE t(x INTEGER)")
-        loop = asyncio.get_running_loop()
-        started = loop.time()
         pending = asyncio.create_task(db.enqueue("INSERT INTO t VALUES(1)"))
         await asyncio.sleep(0.05)  # the writer is now inside its window
         assert not pending.done()
@@ -604,9 +610,20 @@ async def test_writer_does_not_hold_the_write_lock_while_it_waits(tmp_dir):
             finally:
                 other.close()
 
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, other_node_writes)
-        assert loop.time() - started < 0.3, "other write waited out the window"
+        assert not pending.done(), "the window ended before the other write"
+        # Shutdown flushes the open batch without waiting out the window.
+        await db.shutdown()
         await pending
-        assert await db.fetchval("SELECT COUNT(*) FROM t") == 2
     finally:
         await db.shutdown()
+
+    def count_rows() -> int:
+        check = sqlite3.connect(str(path))
+        try:
+            return check.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+        finally:
+            check.close()
+
+    assert count_rows() == 2

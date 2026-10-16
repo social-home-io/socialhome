@@ -15,9 +15,9 @@ license-files = ["LICENSE"]
 # images and the Home Assistant App. After editing a pin here, run
 # ``scripts/lock.sh`` (see docs/testing.md, "Dependency lock").
 dependencies = [
-    "aiohttp==3.14.3",
+    "aiohttp==3.14.5",
     "aiosqlite==0.22.1",
-    "orjson==3.12.0",
+    "orjson==3.13.0",
     "cryptography==50.0.2",
     "aiofiles==25.1.0",
     "pillow==12.3.0",
@@ -27,8 +27,8 @@ dependencies = [
     # byte check accepts ``image/heic`` (it's in :data:`IMAGE_ACCEPTED_MIMES`)
     # but the ``Image.open`` call inside :class:`ImageProcessor` raises
     # ``cannot identify image file`` and the upload 422s.
-    "pillow-heif==1.8.0",
-    "av==19.0.0",
+    "pillow-heif==1.8.1",
+    "av==19.0.1",
     "python-multipart==0.0.32",
     "jinja2==3.1.6",
     "icalendar==7.3.0",
@@ -62,7 +62,7 @@ dependencies = [
     # "never block the loop" rule this project applies to its own code.
     # It also vendors libdatachannel v0.24.5
     # (social-home-io/aiolibdatachannel#21).
-    "aiolibdatachannel==2026.9.8",
+    "aiolibdatachannel==2026.10.15",
     # mDNS announcement of the household dashboard to wall panels
     # (``socialhome/dashboard/advertiser.py``). LGPL-2.1-or-later, used as
     # an unmodified, dynamically imported library — compatible with
@@ -84,7 +84,7 @@ dev = [
     # opt in, so ``pytest tests/`` is parallel without extra flags —
     # CI and local runs share the same speed.
     "pytest-xdist==3.8.0",
-    "aiohttp[speedups]==3.14.3",
+    "aiohttp[speedups]==3.14.5",
     "freezegun==1.5.5",
     # Validates the wall-panel API payloads against their published JSON
     # Schemas (``docs/display-api/v1/``).
@@ -99,7 +99,7 @@ dev = [
     # too, so a newer ruff reports thousands of findings the pinned hook
     # and CI don't gate on. Bump all three together.
     "ruff==0.15.22",
-    "pre-commit==4.6.2",
+    "pre-commit==4.7.0",
     # Pulled in so ``tests/global_server/*`` can import the GFS admin
     # modules without a separate ``pip install .[global-server]`` step.
     # Keep these two pins identical to the ``global-server`` group below.

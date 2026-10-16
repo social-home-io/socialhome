@@ -94,9 +94,9 @@ describe('SttButton', () => {
     fireEvent.mouseDown(btn)
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1))
     const ws = FakeWebSocket.instances[0]
-    // Relative URL — modern browsers resolve it against the document
-    // base (and auto-rewrite ``http``/``https`` → ``ws``/``wss``).
-    expect(ws.url).toContain('api/stt/stream')
+    // Absolute URL built from the document base — Firefox resolves a
+    // relative WebSocket URL against the page URL, ignoring ``<base>``.
+    expect(ws.url.split('?')[0]).toBe(`ws://${location.host}/api/stt/stream`)
 
     await waitFor(() => {
       const starts = ws.sent.filter(s => typeof s === 'string') as string[]

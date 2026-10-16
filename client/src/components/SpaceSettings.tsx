@@ -644,7 +644,7 @@ export function SpaceSettings({
 
   return (
     <div class="sh-space-settings">
-      <h3>{t('space.settings.title')}</h3>
+      <h2 class="sh-settings-section-heading">{t('space.settings.title')}</h2>
       <div class="sh-form">
         <label>{t('space.settings.name')} <input value={name.value} onInput={(e) => name.value = (e.target as HTMLInputElement).value} /></label>
         <label>{t('space.settings.description')} <textarea value={description.value} onInput={(e) => description.value = (e.target as HTMLTextAreaElement).value} rows={2} /></label>
@@ -1129,7 +1129,7 @@ export function SpaceSettings({
       </div>
 
       <hr />
-      <h3>{t('space.tier.heading')}</h3>
+      <h2 class="sh-settings-section-heading">{t('space.tier.heading')}</h2>
       <p class="sh-muted" style={{ marginTop: 0 }}>{t('space.tier.intro')}</p>
       <div class="sh-form">
         <label>{t('space.tier.label')}
@@ -1222,7 +1222,7 @@ export function SpaceSettings({
       )}
 
       <hr />
-      <h3>{t('space.archive.heading')}</h3>
+      <h2 class="sh-settings-section-heading">{t('space.archive.heading')}</h2>
       {space.archived ? (
         space.archived_reason === 'dissolved' ? (
           // Remote-terminated: the owner host dissolved the space. The
@@ -1255,7 +1255,7 @@ export function SpaceSettings({
       )}
 
       <hr />
-      <h3>{t('space.dissolve.heading')}</h3>
+      <h2 class="sh-settings-section-heading">{t('space.dissolve.heading')}</h2>
       <p class="sh-muted">{t('space.dissolve.intro')}</p>
       <Button variant="danger" onClick={() => showDissolve.value = true}>{t('space.dissolve.button')}</Button>
       <ConfirmDialog

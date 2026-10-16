@@ -112,7 +112,7 @@ function closeAutocompletes(): void {
  *  only claims the picker it opened). */
 function mentionAria(id: string, spaceId?: string | null) {
   if (!spaceId) return {}
-  return mentionInputAria(document.getElementById(id))
+  return mentionInputAria(document.getElementById(id), 'input')
 }
 
 export function CommentThread(

@@ -51,8 +51,11 @@
      ~22% toward ink — ≥ 4.7:1, same hue. Follows a space's own
      --sh-primary override. Fills keep --sh-primary. */
   --sh-primary-text: color-mix(in srgb, var(--sh-primary) 78%, #000);
-  /* …and one notch deeper where that text sits on a hearth-tinted chip
-     (--sh-primary-soft or a 12% primary mix): ≥ 4.8:1 there. */
+  /* …and one notch deeper wherever that text sits on a hearth tint
+     (--sh-primary-soft or any color-mix of --sh-primary — active chips,
+     pills, badges, selected nav): plain --sh-primary-text falls to
+     ~4.2:1 on a 12% tint over --sh-bg-secondary. ≥ 4.5:1 on tints up
+     to 15% over every surface. tokens.test.ts enforces the pairing. */
   --sh-primary-on-soft: color-mix(in srgb, var(--sh-primary-text) 92%, #000);
   /* Hearth as a FILLED SURFACE THAT CARRIES TEXT (primary buttons,
      selected chips, count badges): paper text on the plain hearth is

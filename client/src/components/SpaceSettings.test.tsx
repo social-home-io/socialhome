@@ -78,7 +78,7 @@ describe('SpaceSettings', () => {
     ]) {
       expect(legends.some(l => l.includes(key)), key).toBe(true)
     }
-    const headings = [...container.querySelectorAll('h3')].map(h => h.textContent)
+    const headings = [...container.querySelectorAll('h2')].map(h => h.textContent)
     expect(headings).toEqual(expect.arrayContaining([
       'space.settings.title', 'space.tier.heading', 'space.archive.heading',
       'space.dissolve.heading',

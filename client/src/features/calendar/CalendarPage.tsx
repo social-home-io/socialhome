@@ -496,7 +496,7 @@ function CalendarAgenda() {
         <div class="sh-empty-state">
           <div aria-hidden="true">📅</div>
           {/* Keys: calendar.empty_{month,week,day} */}
-          <h3>{t(`calendar.empty_${viewMode.value}`)}</h3>
+          <h2>{t(`calendar.empty_${viewMode.value}`)}</h2>
           <p>{t('calendar.page.empty_body')}</p>
           <div class="sh-empty-state__cta-row">
             <Button onClick={handleNewEvent}>
@@ -513,7 +513,7 @@ function CalendarAgenda() {
         const friendly = formatDayLabel(dayKey)
         return (
         <div key={dayKey} class="sh-calendar-day-group">
-          <h3
+          <h2
             class={
               friendly.isToday
                 ? 'sh-calendar-day-heading sh-calendar-day-heading--today'
@@ -524,7 +524,7 @@ function CalendarAgenda() {
             {friendly.relative && (
               <span class="sh-calendar-day-heading__rel">{friendly.relative}</span>
             )}
-          </h3>
+          </h2>
           {grouped[dayKey].map(entry => {
             // ``e`` stays bound to the underlying event row so
             // everything below (owner chips, RSVP gating, edit /

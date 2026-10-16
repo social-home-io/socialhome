@@ -711,7 +711,7 @@ export default function SpaceFeedPage() {
           {posts.value.length === 0 && (
             <div class="sh-empty-state">
               <div aria-hidden="true">{spaceDetail.value?.archived ? '🗄️' : '💬'}</div>
-              <h3>{t('spaces.no_posts')}</h3>
+              <h2>{t('spaces.no_posts')}</h2>
               {spaceDetail.value?.archived ? (
                 <p class="sh-muted">
                   {archivedCopy(
@@ -861,7 +861,7 @@ export default function SpaceFeedPage() {
               <div class="sh-empty-state">
                 <div aria-hidden="true">📅</div>
                 {/* Keys: calendar.empty_{month,week,day} */}
-                <h3>{t(`calendar.empty_${spaceCalView.value}`)}</h3>
+                <h2>{t(`calendar.empty_${spaceCalView.value}`)}</h2>
                 {canWrite('calendar') && (
                   <p>{t('calendar.empty_space_hint')}</p>
                 )}
@@ -872,7 +872,7 @@ export default function SpaceFeedPage() {
               const friendly = formatDayLabel(dayKey)
               return (
               <div key={dayKey} class="sh-calendar-day-group">
-                <h3
+                <h2
                   class={
                     friendly.isToday
                       ? 'sh-calendar-day-heading sh-calendar-day-heading--today'
@@ -883,7 +883,7 @@ export default function SpaceFeedPage() {
                   {friendly.relative && (
                     <span class="sh-calendar-day-heading__rel">{friendly.relative}</span>
                   )}
-                </h3>
+                </h2>
                 {grouped[dayKey].map(entry => {
                   // ``e`` stays bound to the underlying event row;
                   // ``entry`` only carries this day card's place in the

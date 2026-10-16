@@ -127,4 +127,20 @@ describe('SpaceFeedPage ?tab=', () => {
     await new Promise(res => setTimeout(res, 50))
     expect(r.queryByTestId('tasks-tab')).toBeNull()
   }, 20000)
+
+  it('empty feed and empty calendar headings sit right under the space h1', async () => {
+    // An h3 straight under the space-name h1 skipped a level (axe
+    // heading-order) on the feed and the calendar tab.
+    for (const tab of [undefined, 'calendar']) {
+      vi.resetModules()
+      route.query = tab ? { tab } : {}
+      wire({ calendar: true }, 'member')
+      const tl = await import('@testing-library/preact')
+      const { default: Page } = await import('./SpaceFeedPage')
+      const r = tl.render(<Page />)
+      await tl.waitFor(() => expect(r.container.querySelector('.sh-empty-state h2')).toBeTruthy())
+      expect(r.container.querySelector('.sh-empty-state h3')).toBeNull()
+      r.unmount()
+    }
+  }, 20000)
 })
