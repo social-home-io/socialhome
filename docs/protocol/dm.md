@@ -128,6 +128,10 @@ rule, it covers 1:1s only; groups ignore personal blocks:
   conversation that isn't here yet are kept write-once as for any message
   that hasn't landed — the message itself is refused, so they are never
   shown.
+- **`DM_HISTORY_CHUNK`** rows from such a sender in such a 1:1 are not
+  stored either, so history sync never puts back what was refused live.
+- **`DM_MESSAGE_REACTION`** adds from such a sender in such a 1:1 are not
+  stored (a removal still applies).
 - **`CALL_OFFER`** for a 1:1 from a caller the callee blocked never rings.
 
 Locally the blocker can't send into a 1:1 with a remote person they blocked

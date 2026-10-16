@@ -630,7 +630,7 @@ class FederationInboundService(ProtectionGateMixin):
                     exc,
                 )
                 return
-        recipients = tuple(p.get("recipient_user_ids") or ())
+        recipients = tuple(str(r) for r in p.get("recipient_user_ids") or ())
         if not await self._dm_message_in_scope(
             event, conv_id, message_id, sender_user_id, recipients
         ):
@@ -1125,7 +1125,7 @@ class FederationInboundService(ProtectionGateMixin):
         self,
         conv_id: str,
         sender_user_id: str,
-        recipients: tuple,
+        recipients: tuple[str, ...],
     ) -> bool:
         """§Privacy: whether an inbound message is a 1:1 to someone here who
         blocked its sender — a 1:1 already here, or a first message whose
@@ -1721,6 +1721,13 @@ class FederationInboundService(ProtectionGateMixin):
         if withheld is None:
             # §CP.F2 — same rule as the message itself.
             refuse(event, "guardian block", message=message_id, user=user_id)
+            return
+        if action != "remove" and await self._personally_blocked_dm(
+            msg.conversation_id, user_id, ()
+        ):
+            # §Privacy — a 1:1 whose local party blocked the reactor: nothing
+            # new from them lands (taking a reaction back still does).
+            refuse(event, "personal block", message=message_id, user=user_id)
             return
         if action == "remove":
             await self._conversation_repo.remove_reaction(message_id, user_id, emoji)

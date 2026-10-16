@@ -124,6 +124,14 @@ class DmHistoryReceiver(ProtectionGateMixin):
                     message=msg.id,
                 )
                 continue
+            if await self._personally_blocked_here(conversation_id, msg.sender_user_id):
+                refuse(
+                    event,
+                    "personal block",
+                    conversation=conversation_id,
+                    message=msg.id,
+                )
+                continue
             if await self._conversation_repo.insert_message_if_absent(msg):
                 saved += 1
                 continue
@@ -190,6 +198,25 @@ class DmHistoryReceiver(ProtectionGateMixin):
             or conv.type is not ConversationType.GROUP_DM
             or audience <= blocked
         )
+
+    async def _personally_blocked_here(
+        self, conversation_id: str, sender_user_id: str
+    ) -> bool:
+        """§Privacy: whether this is a 1:1 whose local party blocked
+        *sender_user_id* — history sync never puts back what the live
+        ``DM_MESSAGE`` gate refused. Groups ignore personal blocks."""
+        conv = await self._conversation_repo.get(conversation_id)
+        if conv is None or conv.type is not ConversationType.DM:
+            return False
+        for m in await self._conversation_repo.list_members(conversation_id):
+            user = await self._user_repo.get(m.username)
+            if (
+                user is not None
+                and user.user_id != sender_user_id
+                and await self._user_repo.is_blocked(user.user_id, sender_user_id)
+            ):
+                return True
+        return False
 
     async def handle_complete(self, event: "FederationEvent") -> None:
         """Publish :class:`DmHistorySyncComplete` — for a seated sender only."""

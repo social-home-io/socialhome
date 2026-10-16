@@ -228,6 +228,93 @@ async def test_earlier_remote_dm_drops_out_of_the_blockers_list(env):
     assert "c-cr" in {c["id"] for c in await r.json()}
 
 
+def _history(conv_id: str, message_id: str) -> dict:
+    return {
+        "conversation_id": conv_id,
+        "chunk_index": 0,
+        "messages": [
+            {
+                "id": message_id,
+                "sender_user_id": REX,
+                "content": "earlier",
+                "type": "text",
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        ],
+    }
+
+
+async def test_history_sync_never_puts_back_a_refused_dm(env):
+    await _dispatch(env._app, FET.DM_HISTORY_CHUNK, _history("c-ar", "m-hist"))
+    assert await _messages(env._db, "c-ar") == []
+    await _dispatch(env._app, FET.DM_HISTORY_CHUNK, _history("c-cr", "m-ok"))
+    assert await _messages(env._db, "c-cr") == ["m-ok"]
+
+
+async def test_inbound_reaction_in_a_blocked_one_to_one_is_not_stored(env):
+    await env._db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content) VALUES('m-ann', 'c-ar', 'u-ann', 'earlier')"
+    )
+    await _dispatch(
+        env._app,
+        FET.DM_MESSAGE_REACTION,
+        {
+            "conversation_id": "c-ar",
+            "message_id": "m-ann",
+            "user_id": REX,
+            "emoji": "👍",
+            "action": "add",
+        },
+    )
+    assert (
+        await env._db.fetchone(
+            "SELECT 1 FROM message_reactions WHERE message_id='m-ann'"
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("hider", ["ann", "bob"])
+async def test_a_hidden_one_to_one_still_refuses_both_sides(env, hider):
+    """Hiding a 1:1 (``deleted_at`` on a 1:1 seat) doesn't stop delivery to
+    that member, so it can't switch the block gate off either."""
+    await env._db.enqueue(
+        "UPDATE conversation_members SET deleted_at=datetime('now')"
+        " WHERE conversation_id='c-ab' AND username=?",
+        (hider,),
+    )
+    for actor in ("ann", "bob"):
+        r = await env.post(
+            "/api/conversations/c-ab/messages",
+            json={"content": "hello"},
+            headers=_h(actor),
+        )
+        assert r.status in (403, 404), (actor, r.status, await r.text())
+    assert await _messages(env._db, "c-ab") == []
+
+
+async def test_groups_ignore_personal_blocks(env):
+    """A group with the blocked person still works — for messages from a
+    remote member and for calls."""
+    db = env._db
+    await db.enqueue("INSERT INTO conversations(id, type) VALUES('g-abr', 'group_dm')")
+    await _seat(db, "g-abr", locals_=("ann", "bob"), rex=True)
+    msg = _dm("g-abr", "m-grp", "u-ann")
+    await _dispatch(env._app, FET.DM_MESSAGE, msg)
+    assert await _messages(db, "g-abr") == ["m-grp"]
+    # bob calls a two-seat group with ann (who blocked him): one callee,
+    # but a group — personal blocks don't apply.
+    await db.enqueue("INSERT INTO conversations(id, type) VALUES('g-ab', 'group_dm')")
+    await _seat(db, "g-ab", locals_=("ann", "bob"), rex=False)
+    r = await env.post(
+        "/api/calls",
+        json={"conversation_id": "g-ab", "sdp_offer": "v=0", "call_type": "audio"},
+        headers=_h("bob"),
+    )
+    assert r.status in (200, 201), await r.text()
+
+
 # ── 1:1 calls ────────────────────────────────────────────────────────────
 
 

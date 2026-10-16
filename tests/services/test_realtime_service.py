@@ -1507,6 +1507,8 @@ async def _blocked_env():
     ("event", "frame_type"),
     [
         (PostCreated(post=_post()), "post.created"),
+        (PostEdited(post=_post()), "post.edited"),
+        (PostReactionChanged(post=_post()), "post.reaction_changed"),
         (
             UserStatusChanged(user_id="u1", status=UserStatus(text="x")),
             "user.status_changed",

@@ -2505,7 +2505,7 @@
   "settings.blocked.unblocked": "Gedeblokkeerd",
   "settings.blocked.unblock_failed": "Deblokkeren mislukt: {error}",
   "settings.blocked.title": "Geblokkeerde accounts",
-  "settings.blocked.blurb": "Als je iemand blokkeert, zie je hun berichten, hoogtepunten, momenten, locatie en meldingen niet meer, en kunnen jullie elkaar niet meer berichten, bellen of samen apps spelen. Wat jij deelt blijft zichtbaar: die persoon ziet je berichten en aanwezigheid nog steeds.",
+  "settings.blocked.blurb": "Als je iemand blokkeert, zie je hun huishoudberichten, hoogtepunten, momenten, locatie en de meeste meldingen over hen niet meer, en zijn privéberichten, gesprekken en app-spellen tussen jullie geblokkeerd. Gedeelde spaces en groepschats veranderen niet, en die persoon ziet nog steeds wat jij deelt.",
   "settings.blocked.empty": "Je hebt niemand geblokkeerd. Open een hoogtepunt of profiel en tik op het ⋯-menu om iemand te blokkeren.",
   "settings.person.unknown": "Onbekende persoon",
   "settings.person.no_longer_connected": "Huishouden niet meer verbonden",

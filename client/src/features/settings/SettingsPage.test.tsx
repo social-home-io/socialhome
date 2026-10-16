@@ -694,8 +694,8 @@ describe('BlockedAccountsPanel', () => {
   it('says what a block does — and that it does not hide what you share', async () => {
     const { findByText } = await renderPrivacyTab()
     // Shown with or without blocks: a block is the blocker's own, so the
-    // blocked person still sees the blocker's posts and presence.
-    expect(await findByText(/they can still see your posts and presence/)).toBeTruthy()
-    expect(await findByText(/stops you messaging, calling or playing apps/)).toBeTruthy()
+    // blocked person still sees what the blocker shares.
+    expect(await findByText(/they can still see what you share/)).toBeTruthy()
+    expect(await findByText(/stops one-to-one messages, calls and app games/)).toBeTruthy()
   })
 })

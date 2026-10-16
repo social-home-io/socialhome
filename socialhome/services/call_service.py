@@ -290,7 +290,12 @@ class CallSignalingService(ProtectionGateMixin):
         # §Privacy: a 1:1 call follows the 1:1 DM rule — neither side of a
         # personal block rings the other (group calls ignore personal
         # blocks, as group DMs do).
-        if len(local_callees) + len(remote_callees) == 1:
+        conv = await self._conv_repo.get(conversation_id)
+        if (
+            conv is not None
+            and conv.type is ConversationType.DM
+            and len(local_callees) + len(remote_callees) == 1
+        ):
             peer_id = (
                 local_callees[0].user_id if local_callees else remote_callees[0][1]
             )

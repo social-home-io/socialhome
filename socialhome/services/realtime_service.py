@@ -547,7 +547,8 @@ class RealtimeService:
             {
                 "type": "post.edited",
                 "post": post,
-            }
+            },
+            withheld=await self._user_repo.list_blockers(event.post.author),
         )
 
     async def _on_post_deleted(self, event: PostDeleted) -> None:
@@ -567,7 +568,8 @@ class RealtimeService:
             {
                 "type": "post.reaction_changed",
                 "post": _safe(event.post),
-            }
+            },
+            withheld=await self._user_repo.list_blockers(event.post.author),
         )
 
     async def _on_comment_added(self, event: CommentAdded) -> None:
