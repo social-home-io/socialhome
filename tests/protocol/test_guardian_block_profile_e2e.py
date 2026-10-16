@@ -231,4 +231,4 @@ async def test_an_older_receiver_keeps_only_a_grey_placeholder(world, monkeypatc
     assert resp.status == 200
     grey = Image.open(io.BytesIO(await resp.read())).convert("RGB")
     assert await resp.read() != child_bytes
-    assert set(grey.getdata()) == {(204, 204, 204)}
+    assert set(grey.get_flattened_data()) == {(204, 204, 204)}
