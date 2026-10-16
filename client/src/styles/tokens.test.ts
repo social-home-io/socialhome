@@ -172,6 +172,26 @@ describe('design tokens', () => {
     expect(offenders).toEqual([])
   })
 
+  it('hearth text on a hearth-tinted background uses --sh-primary-on-soft', () => {
+    // --sh-primary-text clears 4.5:1 on the plain surfaces only. Under a
+    // color-mix tint of --sh-primary it drops below AA — 4.2:1 on a 12%
+    // tint over --sh-bg-secondary (light), 3.8:1 on a 14% tint over
+    // --sh-bg-tertiary (dark) — which axe flagged on the active chip,
+    // the segmented control and the "you" badge. The deeper on-soft
+    // ink keeps the same hue and clears AA on those tints in both themes.
+    const offenders: string[] = []
+    for (const m of sheets['app.css'].matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const [, sel, body] = m
+      const bg = /(?:^|[\s;])background(?:-color)?\s*:\s*([^;]+)/.exec(body)?.[1] ?? ''
+      const color = /(?:^|[\s;])color\s*:\s*([^;]+)/.exec(body)?.[1]?.trim() ?? ''
+      const tint = /color-mix\(\s*in srgb,\s*var\(--sh-primary\)\s+\d+%/.test(bg)
+      if (tint && color.includes('var(--sh-primary-text)')) {
+        offenders.push(`${sel.trim().split('\n').pop()} → ${color}`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
   it('the on-fill ink and the filled hover default per theme, overridable per space', () => {
     const tokens = sheets['tokens.css']
     const values = (prop: string) => [...tokens.matchAll(new RegExp(`${prop}\\s*:\\s*([^;]+);`, 'g'))].map(m => m[1].trim())

@@ -59,7 +59,14 @@ describe('MentionAutocomplete in the space composer', () => {
       'ANAnna Smith@anna@k3f9x2 · The Smiths',
     ])
     expect(listbox()!.textContent).not.toContain('Pascal')
-    // Combobox wiring on the textarea.
+    // Popup wiring on the textarea. It keeps its implicit textbox role:
+    // a <textarea> can't be a combobox, and aria-expanded is not allowed
+    // on a textbox (axe aria-allowed-attr), so the open state is carried
+    // by aria-controls + aria-activedescendant, present only while open.
+    expect(ta.getAttribute('role')).toBeNull()
+    expect(ta.hasAttribute('aria-expanded')).toBe(false)
+    expect(ta.getAttribute('aria-haspopup')).toBe('listbox')
+    expect(ta.getAttribute('aria-autocomplete')).toBe('list')
     expect(ta.getAttribute('aria-controls')).toBe('sh-mention-listbox')
     expect(ta.getAttribute('aria-activedescendant')).toBe('sh-mention-opt-0')
     expect(options[0].getAttribute('aria-selected')).toBe('true')
@@ -117,7 +124,9 @@ describe('MentionAutocomplete in the space composer', () => {
     await waitFor(() =>
       expect(document.body.textContent).toContain('No member of this space matches'))
     expect(listbox()).toBeNull()
-    expect(ta.getAttribute('aria-expanded')).toBe('false')
+    expect(ta.hasAttribute('aria-expanded')).toBe(false)
+    expect(ta.hasAttribute('aria-controls')).toBe(false)
+    expect(ta.hasAttribute('aria-activedescendant')).toBe(false)
   })
 
   it('never opens outside a space (household feed)', async () => {
@@ -159,10 +168,15 @@ describe('MentionAutocomplete in the space comment input', () => {
     expect(spans[1].classList.contains('sh-mention--self')).toBe(true)
 
     const input = getByLabelText('New comment') as HTMLInputElement
+    // A single-line input is a real ARIA 1.2 combobox.
+    expect(input.getAttribute('role')).toBe('combobox')
+    expect(input.getAttribute('aria-expanded')).toBe('false')
     input.value = '@bo'
     input.setSelectionRange(3, 3)
     fireEvent.input(input)
     await waitFor(() => expect(listbox()).toBeTruthy())
+    expect(input.getAttribute('aria-expanded')).toBe('true')
+    expect(input.getAttribute('aria-controls')).toBe('sh-mention-listbox')
     expect(input.getAttribute('aria-activedescendant')).toBe('sh-mention-opt-0')
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(input.value).toBe('@bob '))

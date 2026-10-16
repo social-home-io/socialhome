@@ -154,7 +154,7 @@ export function SpaceThemeStudio({ spaceId, onSaved }: Props) {
 
   return (
     <div class="sh-theme-studio sh-space-theme-studio">
-      <h3 style={{ margin: 0 }}>{t('theme.space.title')}</h3>
+      <h2 class="sh-settings-section-heading" style={{ margin: 0 }}>{t('theme.space.title')}</h2>
       <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
         {t('theme.space.intro')}
       </p>
