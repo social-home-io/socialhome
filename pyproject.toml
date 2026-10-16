@@ -264,7 +264,8 @@ disable_error_code = ["union-attr", "attr-defined", "arg-type"]
 # ``required-environments`` makes ``uv lock`` fail if any locked package has
 # no wheel for the Linux arches we ship: x86_64 + aarch64 (glibc). Markers
 # can't tell glibc from musl, so the Alpine-based Home Assistant App is
-# covered by its own CI build — today every runtime package ships a
+# covered by CI's ``images`` job (hash-checked ``pip3 wheel`` on the App's
+# musl base image, amd64 + aarch64) — today every runtime package ships a
 # musllinux cp314 wheel except ``aiolibdatachannel``, which the App's
 # builder stage compiles from the locked (hashed) sdist.
 required-environments = [

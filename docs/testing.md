@@ -204,7 +204,7 @@ a missing file. `client/src/styles/fonts.test.ts` (Vitest) and
 
 ## CI
 
-`.github/workflows/ci.yml` runs five jobs in parallel. `test` and
+`.github/workflows/ci.yml` runs six jobs in parallel. `test` and
 `typecheck` install with `uv sync --locked --extra dev`, i.e. exactly the
 versions in `uv.lock` (see [Dependency lock](#dependency-lock)).
 
@@ -217,7 +217,14 @@ versions in `uv.lock` (see [Dependency lock](#dependency-lock)).
 4. **`lock`** — `scripts/lock.sh --check`: fails when `uv.lock` no
    longer matches `pyproject.toml` (`uv lock --check`) or when
    `requirements/constraints*.txt` differ from a fresh export of the lock
-5. **`frontend`** — `pnpm build`, `pnpm fonts:check`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:circular`, `pnpm i18n:check`, `pnpm test`
+5. **`images (amd64)` / `images (aarch64)`** — installs the locked set the
+   way every shipped image does, natively on both arches: builds
+   `Dockerfile.sh` and `Dockerfile.gfs` from a freshly built wheel and
+   imports the native deps, then runs the Home Assistant App's builder
+   step (`pip3 wheel --require-hashes -r requirements/constraints.txt`
+   on the App's Alpine/musl base image). A lock bump that loses a wheel
+   or hash for one of those platforms fails here, before a release
+6. **`frontend`** — `pnpm build`, `pnpm fonts:check`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:circular`, `pnpm i18n:check`, `pnpm test`
 
 Pre-commit hooks (`.pre-commit-config.yaml`) run a strict subset of
 the same on every commit, plus `pnpm build` at pre-push. **Never
@@ -248,6 +255,13 @@ so a lock that disagrees with the wheel's own requirements fails the
 image build. The App's builder runs the same two steps with `pip wheel`
 on Alpine (musl); everything there has a musllinux wheel except
 `aiolibdatachannel`, which it compiles from the locked, hashed sdist.
+The App fetches `requirements/constraints.txt` from the git tag equal to
+its `SOCIALHOME_VERSION` (the tag *is* the PyPI version, so the file at
+the tag is exactly the set that release was tested and imaged with);
+releases that predate the lock fall back to an unlocked
+build there, and any newer release without the file fails the App build.
+CI's `images` job runs that same musl step on every PR, so the lock can't
+reach a release with a platform the App can't install.
 
 How to change the set (run with [uv](https://docs.astral.sh/uv/) on
 `PATH`; the dev container has it):
