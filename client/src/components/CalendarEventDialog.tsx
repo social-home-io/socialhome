@@ -832,7 +832,7 @@ export function CalendarEventDialog({ onCreated }: {
                     onChange={() => (rsvpEnabled.value = !rsvpEnabled.value)}
                   />{' '}
                   {t('event.dialog.ask_rsvp')}
-                  <small class="sh-form-help" style={{ display: 'block', marginLeft: 24 }}>
+                  <small class="sh-form-help" style={{ display: 'block', marginLeft: '24px' }}>
                     {t('event.dialog.ask_rsvp_help')}
                   </small>
                 </label>

@@ -20,6 +20,13 @@ describe('QrCodeImg', () => {
     expect(skeleton).not.toBeNull()
   })
 
+  it('sizes the skeleton in px (Preact 11 core no longer appends px to numbers)', () => {
+    const { container } = render(<QrCodeImg data="payload" size={160} />)
+    const skeleton = container.querySelector('.sh-qr-skeleton') as HTMLElement
+    expect(skeleton.style.width).toBe('160px')
+    expect(skeleton.style.height).toBe('160px')
+  })
+
   it('renders the img once qrcode resolves', async () => {
     const { container } = render(<QrCodeImg data="socialhome://invite#abc" />)
     await waitFor(() => {

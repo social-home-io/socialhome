@@ -37,7 +37,7 @@ export function QrCodeImg({
   if (!src) {
     return (
       <div class="sh-qr-skeleton"
-           style={{ width: size, height: size }}
+           style={{ width: `${size}px`, height: `${size}px` }}
            aria-label={t('qr.generating', { name: alt })} />
     )
   }
