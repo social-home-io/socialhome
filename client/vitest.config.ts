@@ -13,7 +13,9 @@ import { cpus } from 'os'
 // more sustained CPU keeps those chains under budget. Half the reported CPUs
 // is a safe approximation of the physical-core count; local runs are left at
 // the vitest default (fast multi-core boxes don't have the problem).
-const ciMaxForks = Math.max(1, Math.floor(cpus().length / 2))
+// Vitest 4 dropped ``poolOptions.forks.maxForks`` (silently ignored since);
+// the top-level ``maxWorkers`` is the knob now.
+const ciMaxWorkers = Math.max(1, Math.floor(cpus().length / 2))
 
 export default defineConfig({
   plugins: [preact()],
@@ -22,11 +24,9 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./vitest.setup.ts'],
     include: ['src/**/*.test.{ts,tsx}', 'gfs/**/*.test.{ts,tsx}'],
-    ...(process.env.CI
-      ? { poolOptions: { forks: { maxForks: ciMaxForks, minForks: 1 } } }
-      : {}),
+    ...(process.env.CI ? { maxWorkers: ciMaxWorkers } : {}),
   },
   resolve: {
-    alias: { '@': resolve(__dirname, 'src') },
+    alias: { '@': resolve(import.meta.dirname, 'src') },
   },
 })
