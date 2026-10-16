@@ -33,6 +33,7 @@ import { t, isOne } from '@/i18n/i18n'
 import { posts as feedPosts } from '@/store/feed'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import { personHint } from '@/utils/personHint'
+import { restoreFocus } from '@/utils/focus'
 import { PersonButton } from './PersonButton'
 import { isBotPost } from './PostCard'
 import type { Comment, FeedPost } from '@/types'
@@ -162,6 +163,7 @@ export function CommentOverlay() {
     // Focus the dialog so the close-button + composer are reachable
     // by keyboard immediately.
     const previouslyFocused = document.activeElement as HTMLElement | null
+    const dialog = dialogRef.current
     requestAnimationFrame(() => dialogRef.current?.focus())
 
     // Live-merge — same scope filter the inline path used.
@@ -194,7 +196,7 @@ export function CommentOverlay() {
       offAdded(); offUpdated(); offDeleted()
       document.removeEventListener('keydown', onKey)
       document.body.style.overflow = prev
-      previouslyFocused?.focus?.()
+      restoreFocus(previouslyFocused, dialog)
     }
   // ``state`` identity changes when openCommentOverlay reopens for a
   // different post — re-running the effect is exactly what we want.

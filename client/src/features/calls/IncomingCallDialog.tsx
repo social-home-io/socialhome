@@ -26,6 +26,7 @@ import {
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { t } from '@/i18n/i18n'
+import { restoreFocus } from '@/utils/focus'
 
 const RING_TTL_MS = 90_000
 
@@ -135,7 +136,7 @@ export default function IncomingCallDialog() {
       clearTimeout(timer)
       window.removeEventListener('keydown', onKey)
       if (_ringStop) { _ringStop(); _ringStop = null }
-      previouslyFocused?.focus?.()
+      restoreFocus(previouslyFocused)
     }
   }, [incoming.value?.call_id])
 

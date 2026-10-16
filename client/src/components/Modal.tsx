@@ -1,6 +1,7 @@
 import type { ComponentChildren } from 'preact'
 import { useEffect, useRef } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
+import { restoreFocus } from '@/utils/focus'
 
 interface ModalProps {
   open: boolean
@@ -109,8 +110,9 @@ export function Modal({ open, onClose, title, children, class: extraClass, role 
       document.removeEventListener('keydown', onKeyDown)
       const at = _stack.indexOf(token)
       if (at !== -1) _stack.splice(at, 1)
-      // Restore focus to whatever triggered the dialog.
-      previouslyFocused?.focus?.()
+      // Restore focus to whatever triggered the dialog — unless a
+      // surface that replaced it already took focus.
+      restoreFocus(previouslyFocused, dialog)
     }
   }, [open])
 

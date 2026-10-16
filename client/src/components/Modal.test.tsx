@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
-import { useState } from 'preact/hooks'
+import { useLayoutEffect, useState } from 'preact/hooks'
 import { Modal } from './Modal'
 
 describe('Modal', () => {
@@ -82,6 +82,45 @@ describe('Modal', () => {
     rerender(<Host open={false} />)
     // On close, focus returns to the element that had it before open.
     expect(document.activeElement).toBe(trigger)
+  })
+
+  it('a dialog replaced by another does not pull focus out of its successor', () => {
+    // Preact 11 runs a removed dialog's effect cleanup after paint. A
+    // successor that re-renders before paint (here: a layout-effect
+    // state update) has already focused its own control by then, so
+    // the old dialog's "return focus to the trigger" must stand down.
+    function Successor() {
+      const [n, setN] = useState(0)
+      useLayoutEffect(() => { if (n === 0) setN(1) }, [n])
+      return (
+        <Modal open={true} title="B" onClose={() => {}}>
+          <button data-testid="b-inside">b</button>
+        </Modal>
+      )
+    }
+    function Host({ which }: { which: 'none' | 'a' | 'b' }) {
+      return (
+        <>
+          <button data-testid="trigger">open</button>
+          {which === 'a' && (
+            <Modal open={true} title="A" onClose={() => {}}>
+              <button data-testid="a-inside">a</button>
+            </Modal>
+          )}
+          {which === 'b' && <Successor />}
+        </>
+      )
+    }
+    const { getByTestId, rerender } = render(<Host which="none" />)
+    const trigger = getByTestId('trigger') as HTMLButtonElement
+    trigger.focus()
+    rerender(<Host which="a" />)
+    const inDialog = (id: string) =>
+      getByTestId(id).closest('[role=dialog]')!.contains(document.activeElement)
+    expect(inDialog('a-inside')).toBe(true)
+    rerender(<Host which="b" />)
+    expect(inDialog('b-inside')).toBe(true)
+    expect(document.activeElement).not.toBe(trigger)
   })
 
   it('renders the bottom-sheet drag-grabber affordance when open', () => {
