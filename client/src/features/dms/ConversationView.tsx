@@ -3022,7 +3022,7 @@ export function ConversationView({
             openKey={`dm-composer-${convId}`}
             onInsert={insertEmojiAtCursor}
             ariaLabel={t('dms.insert_emoji')}
-            className="sh-composer-emoji-inline"
+            class="sh-composer-emoji-inline"
           />
         </div>
         {/* Mic⇄Send slot. Mutually exclusive primary actions occupy
@@ -3063,7 +3063,7 @@ export function ConversationView({
           </Button>
         ) : (
           <VoiceRecordButton
-            className="sh-composer-mic"
+            class="sh-composer-mic"
             onCapture={handleVoiceNote}
           />
         )}

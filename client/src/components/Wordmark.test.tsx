@@ -28,6 +28,11 @@ describe('Wordmark', () => {
     expect(link?.getAttribute('aria-label')).toBe('Social Home — home')
   })
 
+  it('appends the class prop to its own class', () => {
+    const { container } = render(<Wordmark class="sh-setup-brand" />)
+    expect(container.firstElementChild?.className).toBe('sh-wordmark sh-setup-brand')
+  })
+
   it('passes the size prop through to the logo mark', () => {
     const { container } = render(<Wordmark size={48} />)
     const svg = container.querySelector('svg')

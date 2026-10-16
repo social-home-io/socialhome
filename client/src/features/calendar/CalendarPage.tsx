@@ -691,7 +691,7 @@ function CalendarAgenda() {
                     <p class="sh-event-location-row">
                       <LocationLink
                         value={e.location}
-                        className="sh-event-location"
+                        class="sh-event-location"
                       />
                     </p>
                   )}

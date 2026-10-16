@@ -26,7 +26,7 @@ interface SttButtonProps {
   onText: (text: string) => void
   language?: string
   disabled?: boolean
-  className?: string
+  class?: string
 }
 
 interface ActiveRecording {
@@ -37,7 +37,7 @@ interface ActiveRecording {
   source: MediaStreamAudioSourceNode
 }
 
-export function SttButton({ onText, language = 'en', disabled, className }: SttButtonProps) {
+export function SttButton({ onText, language = 'en', disabled, class: className }: SttButtonProps) {
   const state = useSignal<State>('idle')
   const error = useSignal<string | null>(null)
   let active: ActiveRecording | null = null

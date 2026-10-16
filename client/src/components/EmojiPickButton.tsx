@@ -60,7 +60,7 @@ interface BaseProps {
    *  when toggling so a second click on the same button closes it. */
   openKey: string
   /** Optional CSS class on the trigger button. */
-  className?: string
+  class?: string
   /** Optional ARIA label override. Defaults to ``"Insert emoji"``. */
   ariaLabel?: string
 }
@@ -113,7 +113,7 @@ export function EmojiPickButton(props: EmojiPickButtonProps) {
     <div class="sh-emoji-pick-wrap" ref={wrapRef}>
       <button
         type="button"
-        class={`sh-emoji-pick-btn ${props.className ?? ''}`}
+        class={`sh-emoji-pick-btn ${props.class ?? ''}`}
         aria-label={props.ariaLabel ?? t('reaction.insert')}
         aria-haspopup="dialog"
         aria-expanded={isOpen}

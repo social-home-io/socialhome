@@ -31,11 +31,11 @@ function locationHref(value: string): string {
 
 export function LocationLink({
   value,
-  className,
+  class: className,
   label,
 }: {
   value: string
-  className?: string
+  class?: string
   /** Optional override for the accessible name; defaults to ``Location: <value>``. */
   label?: string
 }) {
