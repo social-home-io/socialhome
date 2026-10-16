@@ -14,8 +14,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
+from socialhome import __version__
 from socialhome import app_keys as K
-from socialhome._version import __version__
 from socialhome.app import (
     MAP_TILE_USER_AGENT,
     SIGNED_MEDIA_GET_LIMIT,
