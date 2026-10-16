@@ -242,6 +242,30 @@ describe('SideNav', () => {
     expect(strip?.querySelector('a, button')).toBeNull()
   })
 
+  it('keeps the identity strip outside the scrolling nav region (it never covers a nav item)', () => {
+    instanceConfig.value = {
+      mode: 'standalone',
+      instance_name: 'Hearth', instance_id: null,
+      capabilities: [],
+      setup_required: false,
+    }
+    setUser({ display_name: 'Pascal Vizeli', is_admin: true })
+    const { container } = renderAt('/')
+    const aside = container.querySelector('aside.sh-sidenav')!
+    const scroll = aside.querySelector(':scope > .sh-sidenav-scroll')
+    const strip = aside.querySelector(':scope > .sh-sidenav-identity')
+    expect(scroll).toBeTruthy()
+    expect(strip).toBeTruthy()
+    // The region holds the brand + every nav group; the strip comes
+    // after it as a sibling footer, not inside the scroller (where a
+    // sticky strip painted over Corner / Apps at 1280x720).
+    expect(scroll!.querySelector('.sh-sidenav-brand')).toBeTruthy()
+    expect(scroll!.querySelectorAll('nav.sh-sidenav-group').length)
+      .toBe(aside.querySelectorAll('nav.sh-sidenav-group').length)
+    expect(scroll!.contains(strip)).toBe(false)
+    expect(aside.lastElementChild).toBe(strip)
+  })
+
   it('also renders the identity strip in ha mode (SH is the primary UI surface)', () => {
     instanceConfig.value = {
       mode: 'ha',

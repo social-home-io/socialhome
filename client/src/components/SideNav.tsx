@@ -331,28 +331,33 @@ export function SideNav() {
 
   return (
     <aside class="sh-sidenav" aria-label={t('nav.sidebar')}>
-      <Wordmark as="a" href={addBase('/')} size={28} className="sh-sidenav-brand" />
-      {main.map(({ group, items }) => renderGroup(group, items))}
-      {local.items.length > 0 && (
-        <>
-          <hr class="sh-sidenav-divider" />
-          {renderGroup(
-            local.group,
-            local.items,
-            // Discoverability for the ``?`` help sheet — a button, not
-            // a link: it opens a dialog, it doesn't navigate.
-            <button
-              type="button"
-              class="sh-sidenav-action"
-              aria-haspopup="dialog"
-              onClick={openShortcutsHelp}
-            >
-              <SideNavIcon name="keyboard" />
-              <span class="sh-sidenav-link-label">{t('shortcuts.menu_entry')}</span>
-            </button>,
-          )}
-        </>
-      )}
+      {/* The brand + nav groups scroll in their own region; the
+       *  identity strip below sits outside it, in normal flow, so it
+       *  can never paint over a nav item at a short window height. */}
+      <div class="sh-sidenav-scroll">
+        <Wordmark as="a" href={addBase('/')} size={28} className="sh-sidenav-brand" />
+        {main.map(({ group, items }) => renderGroup(group, items))}
+        {local.items.length > 0 && (
+          <>
+            <hr class="sh-sidenav-divider" />
+            {renderGroup(
+              local.group,
+              local.items,
+              // Discoverability for the ``?`` help sheet — a button, not
+              // a link: it opens a dialog, it doesn't navigate.
+              <button
+                type="button"
+                class="sh-sidenav-action"
+                aria-haspopup="dialog"
+                onClick={openShortcutsHelp}
+              >
+                <SideNavIcon name="keyboard" />
+                <span class="sh-sidenav-link-label">{t('shortcuts.menu_entry')}</span>
+              </button>,
+            )}
+          </>
+        )}
+      </div>
       {user && !isHaos && (
         <a
           href={addBase('/settings')}

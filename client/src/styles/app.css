@@ -196,29 +196,55 @@ a:focus:not(:focus-visible) { outline: none; }
 }
 .sh-topbar > .sh-notif-bell { margin-left: auto; }
 
+/* The sidebar is a viewport-tall column: a scrolling region (brand +
+ * nav groups) over the identity strip. The strip is a plain flex
+ * footer in normal flow — NOT ``position: sticky`` inside the
+ * scroller, which painted it over whichever nav items happened to sit
+ * behind it (Apps / Corner at 1280×720, Spaces / Friends at 600 px). */
 .sh-sidenav {
   grid-area: nav;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: var(--sh-space-lg) var(--sh-space-md) 0;
   background: var(--sh-bg);
   border-right: 1px solid var(--sh-border);
-  min-height: 100vh;
   height: 100vh;
+  height: 100dvh;
   position: sticky;
   top: 0;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
+  overflow: hidden;
 }
-.sh-sidenav::-webkit-scrollbar {
+.sh-sidenav-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* ``min-height: 0`` lets the region shrink below its content so it
+   * scrolls instead of pushing the identity strip off the bottom. */
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--sh-space-lg) var(--sh-space-md) var(--sh-space-md);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  /* Scroll-edge shadows: a soft shade at whichever edge has more nav
+   * behind it, so an item cut off above the identity strip reads as
+   * "scroll for more", not as covered. The ``local`` covers travel with
+   * the content and hide the ``scroll``-attached shades once the
+   * region is scrolled to that end. */
+  background:
+    linear-gradient(var(--sh-bg) 30%, transparent) top / 100% 40px no-repeat local,
+    linear-gradient(transparent, var(--sh-bg) 70%) bottom / 100% 40px no-repeat local,
+    linear-gradient(color-mix(in srgb, var(--sh-text) 12%, transparent), transparent) top / 100% 12px no-repeat scroll,
+    linear-gradient(transparent, color-mix(in srgb, var(--sh-text) 12%, transparent)) bottom / 100% 12px no-repeat scroll,
+    var(--sh-bg);
+}
+.sh-sidenav-scroll::-webkit-scrollbar {
   width: 6px;
 }
-.sh-sidenav::-webkit-scrollbar-thumb {
+.sh-sidenav-scroll::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--sh-text-muted) 30%, transparent);
   border-radius: 3px;
 }
-.sh-sidenav::-webkit-scrollbar-thumb:hover {
+.sh-sidenav-scroll::-webkit-scrollbar-thumb:hover {
   background: color-mix(in srgb, var(--sh-text-muted) 55%, transparent);
 }
 /* Wordmark — the canonical "Social Home" lockup, mirroring the
@@ -445,13 +471,11 @@ a:focus:not(:focus-visible) { outline: none; }
 
 .sh-sidenav-identity {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: var(--sh-space-sm);
-  margin: auto calc(var(--sh-space-md) * -1) 0;
   padding: var(--sh-space-md);
   border-top: 1px solid var(--sh-border);
-  position: sticky;
-  bottom: 0;
   background: var(--sh-bg);
   text-decoration: none;
   color: inherit;
@@ -642,7 +666,10 @@ html.sh-kbd-open .sh-comment-overlay {
    * drawer so the drawer owns scroll, not the sidebar. */
   .sh-mobile-drawer .sh-sidenav {
     display: flex;
-    height: auto;
+    /* Fill the drawer so the same scroll-region-over-footer split
+     * applies: nav scrolls, identity strip stays put above the tab
+     * bar. */
+    height: 100%;
     min-height: 0;
     position: static;
     border-right: none;
@@ -9714,6 +9741,63 @@ button.sh-presence-card:hover strong { text-decoration: underline; text-underlin
   transition: background var(--sh-transition-fast);
 }
 .sh-search-result:last-child { border-bottom: none; }
+
+/* The TopBar's search results: a popover anchored under the search
+ * field, out of the bar's flex flow (an in-flow list grew the sticky
+ * bar and pushed the page title down). The sticky bar is the stacking
+ * context (``--sh-z-dropdown``), so the popover overlays page content
+ * and stays below modals / toasts. The list scrolls inside it so the
+ * tape strip above the card isn't clipped. */
+.sh-search { position: relative; }
+.sh-search-popover {
+  position: absolute;
+  top: 100%;
+  inset-inline: 0;
+  z-index: var(--sh-z-dropdown);
+  padding: 0;
+}
+.sh-search-popover__list {
+  display: flex;
+  flex-direction: column;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: inherit;
+}
+/* Rows: display name, a visible gap, then the @handle — both truncate
+ * on one line instead of running together ("Lina@lina") or wrapping
+ * a long name over three lines. */
+.sh-search-popover .sh-search-result {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  width: 100%;
+  min-width: 0;
+  min-height: var(--sh-tap-target-compact);
+  text-align: start;
+  color: var(--sh-text);
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-search-result__name,
+.sh-search-result__handle {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The handle is short and disambiguates two "Lina"s, so the name
+ * gives way first; the handle only truncates past 45% of the row. */
+.sh-search-result__handle { flex-shrink: 0; max-width: 45%; }
+@media (max-width: 768px) {
+  /* Phones: the field is narrow, so anchor the popover to the whole
+   * sticky TopBar (its containing block once the field drops
+   * ``position: relative``) with the page gutter on each side. */
+  .sh-topbar > .sh-search { position: static; }
+  .sh-topbar .sh-search-popover { inset-inline: var(--sh-space-md); }
+}
 .sh-search-result:hover {
   background: color-mix(in srgb, var(--sh-bg) 60%, transparent);
 }
