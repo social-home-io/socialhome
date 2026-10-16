@@ -179,6 +179,8 @@ describe('design tokens', () => {
     // --sh-bg-tertiary (dark) — which axe flagged on the active chip,
     // the segmented control and the "you" badge. The deeper on-soft
     // ink keeps the same hue and clears AA on those tints in both themes.
+    // (Only a rule that declares both the tint and the colour is checked;
+    // text inheriting a parent's tint is out of this guard's reach.)
     const offenders: string[] = []
     for (const m of sheets['app.css'].matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
       const [, sel, body] = m

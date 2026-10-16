@@ -30,9 +30,14 @@ describe('calendar filter strip pins', () => {
     expect(faded.map(([sel]) => sel)).toEqual([])
   })
 
-  it('fades only the decoration, never the name', () => {
-    const dim = rules().find(([sel]) => sel === '.sh-cal-strip-pin > :not(.sh-cal-strip-name)')
-    expect(dim?.[1]).toMatch(/opacity\s*:\s*var\(--sh-pin-dim\)/)
+  it('fades only the tape and greys the avatar, never fading text', () => {
+    // Opacity is for the tape alone; the avatar may carry initials
+    // (text), so it is greyed (luminance-preserving), not faded.
+    const tape = rules().find(([sel]) => sel === '.sh-cal-strip-pin > .sh-cal-strip-tape')
+    expect(tape?.[1]).toMatch(/opacity\s*:\s*var\(--sh-pin-dim\)/)
+    const rest = rules().find(([sel]) => sel === '.sh-cal-strip-pin > :not(.sh-cal-strip-tape, .sh-cal-strip-name)')
+    expect(rest?.[1]).toMatch(/filter\s*:\s*grayscale\(/)
+    expect(rest?.[1]).not.toMatch(/(?:^|[\s;])opacity\s*:/)
     const nameRules = rules().filter(([sel]) => /\.sh-cal-strip-name$/.test(sel.split(',').pop()!.trim()))
     for (const [, body] of nameRules) {
       expect(body).not.toMatch(/(?:^|[\s;])opacity\s*:/)
@@ -50,10 +55,11 @@ describe('system album card', () => {
   })
 })
 
-describe('space theme preview chip', () => {
-  it('mixes the picked accent toward the theme ink', () => {
+describe('theme preview chip', () => {
+  it('labels the chip in the theme ink, not the picked accent', () => {
+    // A bright preset accent (#FFD447) as text on its own tint is ~1.5:1.
     const rule = rules().find(([sel]) => sel === '.sh-theme-preview-chip')
     const color = /(?:^|[\s;])color\s*:\s*([^;]+)/.exec(rule?.[1] ?? '')?.[1]
-    expect(color).toMatch(/^color-mix\(in srgb, var\(--preview-accent.*\) 55%, var\(--sh-text\)\)$/)
+    expect(color).toBe('var(--sh-text)')
   })
 })
