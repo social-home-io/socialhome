@@ -699,7 +699,9 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
   const sasAutofilledRef = useRef(false)
   const [scanMethod, setScanMethod] = useState<ScanMethod>('qr')
   const retryRef = useRef<HTMLButtonElement | null>(null)
-  const startPanelRef = useRef<HTMLDivElement | null>(null)
+  // The start step's first control: "Add GFS" (a ``Button``, which takes
+  // ``ref`` as a prop in Preact 11) or the first household role card.
+  const startFocusRef = useRef<HTMLButtonElement | null>(null)
 
   // ── Failure panel focus ───────────────────────────────────────────
   // The Modal focuses its first control on open only; when the flow
@@ -731,7 +733,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
     const prev = prevStepRef.current
     prevStepRef.current = isOpen ? step.value : null
     if (!isOpen || !isIdle || prev === null || prev === 'idle') return
-    startPanelRef.current?.querySelector('button')?.focus()
+    startFocusRef.current?.focus()
   }, [isIdle, isOpen])
 
   // ── Per-state timeout ─────────────────────────────────────────────
@@ -972,7 +974,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
         )}
 
         {mode.value === 'household' && step.value === 'idle' && (
-          <div class="sh-pairing-start" ref={startPanelRef}>
+          <div class="sh-pairing-start">
             {/* With the picker shown the hero yields its height, so the
                 choice and both cards stay within a phone's first screen. */}
             {relayGfs.value.length === 0 && (
@@ -984,6 +986,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
             {relayGfs.value.length > 0 && <ReachPicker />}
             <div class="sh-pairing-role-grid">
               <button
+                ref={startFocusRef}
                 type="button"
                 class={`sh-pairing-role-card${reachLoading.value ? ' is-loading' : ''}`}
                 onClick={initiate}
@@ -1186,10 +1189,10 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
 
         {/* ── GFS mode ─────────────────────────────────────────── */}
         {mode.value === 'gfs' && step.value === 'idle' && (
-          <div class="sh-pairing-start" ref={startPanelRef}>
+          <div class="sh-pairing-start">
             <p class="sh-gfs-url-intro sh-muted">{t('gfs.modal_intro')}</p>
             <div class="sh-pairing-actions">
-              <Button onClick={startGfs}>{t('gfs.add')}</Button>
+              <Button ref={startFocusRef} onClick={startGfs}>{t('gfs.add')}</Button>
             </div>
           </div>
         )}
