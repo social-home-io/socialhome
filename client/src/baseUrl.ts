@@ -36,6 +36,30 @@
  *  the router to strip the prefix before matching. */
 export const basePath: string = new URL('./', document.baseURI).pathname
 
+/** Absolute document base (origin + ``basePath``), e.g.
+ *  ``"https://ha.local/api/hassio_ingress/abc/"``. Read once at module
+ *  load, like ``basePath``. */
+const baseHref: string = new URL('./', document.baseURI).href
+
+/** Absolute ``ws:`` / ``wss:`` URL for a backend WebSocket path.
+ *
+ *  Never hand ``new WebSocket()`` a relative URL: Firefox (checked on
+ *  141) resolves it against the *page* URL and ignores ``<base href>``,
+ *  so a cold load of ``/dms/<id>`` dialled ``/dms/api/ws`` (and, under
+ *  ingress, ``/api/hassio_ingress/<token>/dms/api/ws``). Chrome and
+ *  WebKit honour the base. Every other relative-URL API the SPA uses
+ *  (``fetch``, ``EventSource``, ``Worker``, ``serviceWorker.register``,
+ *  ``Audio`` / ``Image`` src) honours ``<base href>`` in all three
+ *  engines — only the WebSocket constructor differs.
+ *
+ *  ``path`` may carry a leading ``/`` and a query string; it is anchored
+ *  on the document base either way, so the ingress prefix is kept. */
+export function wsUrl(path: string): string {
+  const url = new URL(path.replace(/^\/+/, ''), baseHref)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.href
+}
+
 /** Strip ``basePath`` from a pathname for client-side router matching.
  *
  *  ``preact-iso``'s ``<Router>`` matches against

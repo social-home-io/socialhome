@@ -382,6 +382,58 @@ await check('ws-under-prefix-and-live', async () => {
   return { problems, wsPaths: [...new Set(ws.map(e => e.path.split('?')[0]))] }
 })
 
+// 3b. Cold load of a *nested* route (``<prefix>/dms/<id>``): the socket
+//     still opens at ``<prefix>/api/ws`` and a DM arrives live. The SPA
+//     must hand ``new WebSocket`` an absolute URL — Firefox resolves a
+//     relative one against the page URL (``<prefix>/dms/api/ws``),
+//     ignoring ``<base href>``. Chrome honours the base, so the raw
+//     constructor argument is recorded and asserted directly: a
+//     relative URL fails here even though Chrome would have connected.
+await check('ws-nested-route-cold-load', async () => {
+  const problems = []
+  const { ctx, page: p } = await newPage('desktop')
+  try {
+    await p.evaluateOnNewDocument(() => {
+      const Native = window.WebSocket
+      window.__shWsArgs = []
+      window.WebSocket = class extends Native {
+        constructor(url, protocols) {
+          window.__shWsArgs.push(String(url))
+          super(url, protocols)
+        }
+      }
+    })
+    const logBefore = (await proxyCtl('/_proxy/log')).length
+    const before = wsConnectedCount()
+    await p.goto(APP + `dms/${ids.dmId}`, { waitUntil: 'load' })
+    await settled(p)
+    await waitFor('the SPA WebSocket to register with the backend', () => wsConnectedCount() > before)
+    const args = await p.evaluate(() => window.__shWsArgs)
+    if (!args.length) problems.push('the SPA never constructed a WebSocket')
+    for (const a of args) {
+      if (!/^wss?:\/\//.test(a)) problems.push(`new WebSocket(${JSON.stringify(a.split('?')[0])}) got a relative URL — Firefox resolves it against the page, not <base href>`)
+      else if (!new URL(a).pathname.startsWith(PREFIX + '/api/')) problems.push(`new WebSocket(${a.split('?')[0]}) is outside ${PREFIX}/api/`)
+    }
+    const text = `INGRESS-NESTED-${Date.now().toString(36)}`
+    await asUser('bob', 'POST', `/api/conversations/${ids.dmId}/messages`, { json: { content: text } })
+    try {
+      await p.waitForFunction(t => document.body.innerText.includes(t), {}, text)
+    } catch {
+      problems.push(`bob's DM "${text}" never appeared live on alice's cold-loaded thread`)
+    }
+    const ws = (await proxyCtl('/_proxy/log')).slice(logBefore).filter(e => e.ws)
+    if (!ws.length) problems.push('no WebSocket upgrade reached the ingress proxy')
+    for (const e of ws) {
+      if (!e.path.startsWith(PREFIX + '/api/ws')) problems.push(`WebSocket opened at ${e.path}, not ${PREFIX}/api/ws`)
+    }
+    await p.screenshot({ path: path.join(SHOTS, problems.length ? 'FAIL-ws-nested-route-cold-load.png' : 'ws-nested-route-cold-load.png') })
+    return { problems, wsArgs: args.map(a => a.split('?')[0]) }
+  } finally {
+    await ctx.close()
+    activePage = page
+  }
+})
+
 // 4. In-app navigation, reload, back and forward keep the prefix.
 await check('router-keeps-prefix', async () => {
   await page.goto(APP, { waitUntil: 'load' })

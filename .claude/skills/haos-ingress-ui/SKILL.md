@@ -100,6 +100,7 @@ python .claude/skills/haos-ingress-ui/harness.py up --out /tmp/haos-ingress-ui
 | `setup-seed-content` | seeding (posts, an image, a DM, a space, an album; bob + carol provisioned from HA) fails — setup, not a UI finding |
 | `walk-routes-desktop` / `-mobile` | any route in `client/src/router.ts` (params filled from the seed; unfillable ones listed in the report) loaded cold at 1280×720 / 390×844: `document.baseURI` or `location` leaves the prefix, IngressAuthFailed or the error boundary shows, `#main` is missing, or the page throws |
 | `ws-under-prefix-and-live` | the WebSocket doesn't open at `<prefix>/api/ws` through the proxy, or bob's new post doesn't appear live on alice's feed |
+| `ws-nested-route-cold-load` | a cold load of `<prefix>/dms/<id>` hands `new WebSocket` a relative URL (Firefox resolves it against the page, `<prefix>/dms/api/ws`, ignoring `<base href>` — Chrome doesn't, so the raw constructor argument is asserted), the socket opens outside `<prefix>/api/ws`, or bob's DM doesn't appear live |
 | `router-keeps-prefix` | in-app link clicks, reload, back, back, forward don't land on `<prefix>/spaces`, `/calendar`, `/calendar`, `/spaces`, `/`, `/spaces` |
 | `media-load-and-upload` | feed images aren't loaded from under the prefix, or the gallery's raw-XHR upload posts elsewhere / fails |
 | `iframe-embed` | the app doesn't boot inside the HA-like iframe, or in-iframe navigation moves the top frame |

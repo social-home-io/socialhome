@@ -1,5 +1,6 @@
 import { signal } from '@preact/signals'
 import { token } from '@/store/auth'
+import { wsUrl } from '@/baseUrl'
 
 export interface WsEvent {
   type: string
@@ -35,19 +36,18 @@ export class WsManager {
 
   connect() {
     this.clearRetry()
-    // Relative URL — modern browsers (Chrome 116+, Firefox 124+,
-    // Safari 17+) resolve it against ``document.baseURI`` and
-    // auto-rewrite ``http`` → ``ws`` / ``https`` → ``wss``. Under HA
-    // Supervisor ingress the document base is
-    // ``/api/hassio_ingress/<token>/``, so the socket reaches the
-    // add-on through the same prefix without any string surgery here.
+    // Absolute URL anchored on the document base (``wsUrl``) — never a
+    // relative one: Firefox resolves ``new WebSocket('api/ws')`` against
+    // the page URL, not ``<base href>``, so a cold load of a nested route
+    // (``/dms/<id>``) dialled ``/dms/api/ws``. Under HA Supervisor ingress
+    // the base is ``/api/hassio_ingress/<token>/``, which ``wsUrl`` keeps.
     const path = token.value
       ? `api/ws?token=${encodeURIComponent(token.value)}`
       : 'api/ws'
     if (connectionState.value !== 'reconnecting') {
       connectionState.value = 'connecting'
     }
-    const sock = new WebSocket(path)
+    const sock = new WebSocket(wsUrl(path))
     this.ws = sock
 
     // Every handler checks ``this.ws === sock`` so a socket we already

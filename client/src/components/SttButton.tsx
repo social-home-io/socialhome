@@ -14,6 +14,7 @@
 import type preact from 'preact'
 import { signal, useSignal } from '@preact/signals'
 import { token } from '@/store/auth'
+import { wsUrl } from '@/baseUrl'
 import { t } from '@/i18n/i18n'
 
 const TARGET_SAMPLE_RATE = 16000
@@ -96,10 +97,10 @@ export function SttButton({ onText, language = 'en', disabled, className }: SttB
     })
 
     const tok = token.value ? `?token=${encodeURIComponent(token.value)}` : ''
-    // Relative URL — resolves against ``document.baseURI`` so the
-    // ingress prefix is honoured. Modern browsers auto-convert
-    // ``http``/``https`` → ``ws``/``wss``.
-    const ws = new WebSocket(`api/stt/stream${tok}`)
+    // Absolute URL anchored on the document base — Firefox resolves a
+    // relative WebSocket URL against the page URL, ignoring ``<base>``
+    // (and so the ingress prefix). See ``wsUrl``.
+    const ws = new WebSocket(wsUrl(`api/stt/stream${tok}`))
     ws.binaryType = 'arraybuffer'
 
     active = { ws, ctx, stream, worklet, source }

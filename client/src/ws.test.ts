@@ -54,6 +54,20 @@ describe('WsManager connection state', () => {
     connectionState.value = 'closed'
   })
 
+  it('dials an absolute URL at the document base, not relative to a nested page (ingress prefix safe)', () => {
+    // Firefox resolves a relative WebSocket URL against the page URL and
+    // ignores ``<base href>``: a cold load of ``/dms/<id>`` dialled
+    // ``/dms/api/ws``. The manager must never hand it a relative URL.
+    const before = location.pathname
+    history.replaceState(null, '', '/dms/conv-1')
+    try {
+      mgr.connect()
+      expect(latest().url).toBe(`ws://${location.host}/api/ws`)
+    } finally {
+      history.replaceState(null, '', before)
+    }
+  })
+
   it('goes connecting on connect() and open on the open event', () => {
     connectionState.value = 'closed'
     mgr.connect()
@@ -143,5 +157,45 @@ describe('WsManager connection state', () => {
       data: { type: 'post.created', id: 'p1' },
     })
     expect(any).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('WsManager under the HA ingress prefix (/api/hassio_ingress/<token>/)', () => {
+  let baseEl: HTMLBaseElement
+  const before = location.pathname
+  beforeEach(() => {
+    baseEl = document.createElement('base')
+    baseEl.href = '/api/hassio_ingress/tok/'
+    document.head.prepend(baseEl)
+    // A cold load of a nested in-app route behind ingress.
+    history.replaceState(null, '', '/api/hassio_ingress/tok/dms/conv-1')
+    FakeSocket.instances = []
+    vi.stubGlobal('WebSocket', FakeSocket)
+    vi.resetModules()
+  })
+  afterEach(() => {
+    baseEl.remove()
+    history.replaceState(null, '', before)
+    vi.unstubAllGlobals()
+    vi.resetModules()
+  })
+
+  it('dials the socket through the ingress prefix, carrying the bearer token when one is stashed', async () => {
+    const auth = await import('@/store/auth')
+    const mod = await import('./ws')
+    const mgr = new mod.WsManager()
+    mgr.connect()
+    expect(latest().url).toBe(`ws://${location.host}/api/hassio_ingress/tok/api/ws`)
+    mgr.disconnect()
+    auth.token.value = 'a/b c'
+    try {
+      mgr.connect()
+      expect(latest().url).toBe(
+        `ws://${location.host}/api/hassio_ingress/tok/api/ws?token=a%2Fb%20c`,
+      )
+    } finally {
+      mgr.disconnect()
+      auth.token.value = null
+    }
   })
 })
