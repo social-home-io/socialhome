@@ -81,6 +81,58 @@ describe('SearchBar', () => {
   })
 })
 
+describe('SearchBar results popover', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    apiGet.mockReset()
+    apiGet.mockResolvedValue([
+      { user_id: 'u-lina', username: 'lina', display_name: 'Lina' },
+      { user_id: 'u-long', username: 'linnea',
+        display_name: 'Linnea Maximiliane Wilhelmina von Hohenzollern-Sigmaringen' },
+    ])
+  })
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+  })
+
+  it('renders the results as a popover inside the search field wrapper, not as a TopBar flow child', async () => {
+    const { container } = render(
+      <header class="sh-topbar"><h1 class="sh-topbar-title">Home</h1><SearchBar /></header>,
+    )
+    const input = container.querySelector('input') as HTMLInputElement
+    await typeAndWait(input, 'lin')
+    const popover = container.querySelector('.sh-search-popover')
+    expect(popover).toBeTruthy()
+    // Anchored to the ``.sh-search`` wrapper (position: relative) — the
+    // TopBar's own children are still just title + search.
+    expect(popover!.parentElement?.classList.contains('sh-search')).toBe(true)
+    const bar = container.querySelector('.sh-topbar')!
+    expect([...bar.children].map(c => c.className)).toEqual(['sh-topbar-title', 'sh-search'])
+    // The rows live in the scrolling list inside the popover.
+    expect(popover!.querySelectorAll('.sh-search-popover__list > .sh-search-result').length).toBe(2)
+  })
+
+  it('separates the display name from the @handle, in text and in the accessible name', async () => {
+    const { container, getByRole } = render(<SearchBar />)
+    const input = container.querySelector('input') as HTMLInputElement
+    await typeAndWait(input, 'lin')
+    const row = getByRole('button', { name: 'Lina @lina' })
+    expect(row.textContent).toBe('Lina @lina')
+    expect(row.querySelector('.sh-search-result__name')?.textContent).toBe('Lina')
+    expect(row.querySelector('.sh-search-result__handle')?.textContent).toBe('@lina')
+  })
+
+  it('a long name keeps its full text in a tooltip (the row truncates it visually)', async () => {
+    const { container } = render(<SearchBar />)
+    const input = container.querySelector('input') as HTMLInputElement
+    await typeAndWait(input, 'lin')
+    const rows = container.querySelectorAll('.sh-search-result')
+    expect(rows[1].getAttribute('title'))
+      .toBe('Linnea Maximiliane Wilhelmina von Hohenzollern-Sigmaringen @linnea')
+  })
+})
+
 describe('openSearchResult (the app shell onSelect)', () => {
   beforeEach(() => { openPersonSpy.mockReset() })
 

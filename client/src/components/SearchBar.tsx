@@ -99,15 +99,27 @@ export function SearchBar({ onSelect }: SearchBarProps) {
         value={query.value} onInput={handleInput}
         onFocus={() => open.value = true}
         onBlur={onBlur} />
+      {/* A popover anchored under the bar (absolutely positioned, see
+        * ``.sh-search-popover``) — never a flow child of the TopBar, or
+        * opening it grows the bar and shoves the page title down. */}
       {open.value && results.value.length > 0 && (
-        <div class="sh-search-results">
-          {results.value.map(r => (
-            <button key={r.user_id} type="button" class="sh-search-result"
-              onClick={() => pick(r)} onBlur={onBlur}>
-              <strong>{r.display_name || r.username}</strong>
-              <span class="sh-muted">@{r.username}</span>
-            </button>
-          ))}
+        <div class="sh-search-results sh-search-popover">
+          <div class="sh-search-popover__list">
+            {results.value.map(r => {
+              const name = r.display_name || r.username
+              return (
+                <button key={r.user_id} type="button" class="sh-search-result"
+                  title={`${name} @${r.username}`}
+                  onClick={() => pick(r)} onBlur={onBlur}>
+                  <strong class="sh-search-result__name">{name}</strong>
+                  {/* The space keeps the accessible name "Lina @lina",
+                    * not "Lina@lina"; the flex gap does the visual work. */}
+                  {' '}
+                  <span class="sh-search-result__handle sh-muted">@{r.username}</span>
+                </button>
+              )
+            })}
+          </div>
         </div>
       )}
     </div>
