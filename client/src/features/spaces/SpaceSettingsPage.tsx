@@ -190,7 +190,7 @@ export default function SpaceSettingsPage() {
       {!canAdmin && hasGfsServersToShow(space) && (
         <section class="sh-gfs-listing-section sh-gfs-listing-section--member"
                  data-testid="member-gfs-servers">
-          <h3>{t('space.federation')}</h3>
+          <h2 class="sh-settings-section-heading">{t('space.federation')}</h2>
           <SpaceGfsServersReadOnly space={space} />
         </section>
       )}
@@ -355,7 +355,7 @@ function AboutTab({
   return (
     <div class="sh-form sh-about-editor">
       <section>
-        <h3 style={{ margin: 0 }}>{t('space.about.cover_title')}</h3>
+        <h2 class="sh-settings-section-heading" style={{ margin: 0 }}>{t('space.about.cover_title')}</h2>
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
           {t('space.about.cover_hint')}
         </p>
@@ -381,7 +381,7 @@ function AboutTab({
       </section>
 
       <section>
-        <h3 style={{ margin: 0 }}>{t('space.about.icon_title')}</h3>
+        <h2 class="sh-settings-section-heading" style={{ margin: 0 }}>{t('space.about.icon_title')}</h2>
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
           {t('space.about.icon_hint')}
         </p>
@@ -406,7 +406,7 @@ function AboutTab({
       </section>
 
       <section>
-        <h3 style={{ margin: 0 }}>{t('space.about.text_title')}</h3>
+        <h2 class="sh-settings-section-heading" style={{ margin: 0 }}>{t('space.about.text_title')}</h2>
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
           {t('space.about.text_hint')}
         </p>

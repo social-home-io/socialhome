@@ -3006,7 +3006,7 @@ export function ConversationView({
               closeEmojiAutocomplete()
               closeMentionAutocomplete()
             }}
-            {...(isGroupThread ? mentionInputAria(composerInputRef.current) : {})}
+            {...(isGroupThread ? mentionInputAria(composerInputRef.current, 'textarea') : {})}
           />
           <EmojiPickButton
             openKey={`dm-composer-${convId}`}

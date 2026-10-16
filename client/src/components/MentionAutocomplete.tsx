@@ -196,23 +196,35 @@ export function handleMentionAutocompleteKey(e: KeyboardEvent): boolean {
   return false
 }
 
-/** Combobox ARIA for the owning input — spread onto it so screen readers
- *  follow the highlighted option while focus stays in the text field. */
+/** Autocomplete ARIA for the owning field — spread onto it so screen
+ *  readers follow the highlighted option while focus stays in the text
+ *  field.
+ *
+ *  A single-line ``<input>`` becomes an ARIA 1.2 ``combobox`` (whose
+ *  ``aria-expanded`` carries the popup state). A ``<textarea>`` may not
+ *  take the combobox role (ARIA in HTML allows it no role), and its
+ *  implicit ``textbox`` role does not support ``aria-expanded`` — so a
+ *  multi-line composer announces the popup with ``aria-haspopup`` and
+ *  exposes it only while open, through ``aria-controls`` +
+ *  ``aria-activedescendant`` (both valid on a textbox). */
 export function mentionInputAria(
   anchor: HTMLElement | null,
+  field: 'input' | 'textarea',
 ): Record<string, string | boolean | undefined> {
   const s = state.value
   const open = s !== null && anchor !== null && s.anchor === anchor
   const matches = open ? matchesFor(s) : null
   const hasOptions = !!matches && matches.length > 0
-  return {
+  const live = {
     'aria-autocomplete': 'list',
-    'aria-expanded': open && hasOptions,
     'aria-controls': open && hasOptions ? MENTION_LISTBOX_ID : undefined,
     'aria-activedescendant': open && hasOptions
       ? optionId(Math.min(s.active, matches.length - 1))
       : undefined,
   }
+  return field === 'input'
+    ? { role: 'combobox', 'aria-expanded': open && hasOptions, ...live }
+    : { 'aria-haspopup': 'listbox', ...live }
 }
 
 export function MentionAutocomplete() {

@@ -579,7 +579,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
               closeEmojiAutocomplete()
               closeMentionAutocomplete()
             }}
-            {...(spaceId ? mentionInputAria(textareaRef.current) : {})}
+            {...(spaceId ? mentionInputAria(textareaRef.current, 'textarea') : {})}
             rows={3}
             maxLength={MAX_LENGTH}
           />

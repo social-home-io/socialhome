@@ -87,7 +87,7 @@ export function SpaceAgeGating({ spaceId }: { spaceId: string }) {
 
   return (
     <div class="sh-age-gating sh-card">
-      <h4>{t('space.settings_page.tab_age')}</h4>
+      <h2 class="sh-settings-section-heading">{t('space.settings_page.tab_age')}</h2>
       <p class="sh-muted">
         {t('space.age.intro')}
       </p>

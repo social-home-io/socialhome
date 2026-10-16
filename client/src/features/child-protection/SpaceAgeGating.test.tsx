@@ -40,6 +40,13 @@ beforeEach(() => {
 })
 
 describe('SpaceAgeGating', () => {
+  it('titles the tab with an h2 — one level under the settings page h1', async () => {
+    const { findByText, container } = render(<SpaceAgeGating spaceId={SPACE_ID} />)
+    await findByText('Minimum age')
+    expect(container.querySelector('h2.sh-settings-section-heading')).not.toBeNull()
+    expect(container.querySelector('h3, h4')).toBeNull()
+  })
+
   it('does not render the old audience age-band options', async () => {
     const { findByText, queryByText } = render(<SpaceAgeGating spaceId={SPACE_ID} />)
     await findByText('Minimum age')

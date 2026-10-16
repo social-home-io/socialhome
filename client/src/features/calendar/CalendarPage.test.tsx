@@ -133,6 +133,10 @@ describe('CalendarPage', () => {
     expect(eventTitles).toEqual([
       'On the 14th', 'On the 19th', 'On the 21st',
     ])
+    // Day headings sit one level under the page title (the TopBar h1):
+    // an h3 there skipped a level (axe heading-order).
+    const dayHeadings = container.querySelectorAll('.sh-calendar-day-heading')
+    expect([...dayHeadings].map(h => h.tagName)).toEqual(['H2', 'H2', 'H2'])
   })
 
   it('spreads a multi-day event across one day card per day, expanding only the clicked row', async () => {
