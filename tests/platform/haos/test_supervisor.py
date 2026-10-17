@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import aiohttp
 import pytest
 from aiohttp import web
 
-from socialhome.platform.haos.supervisor import AddonInfo, SupervisorClient
+from socialhome.platform.haos.supervisor import (
+    AddonInfo,
+    SupervisorClient,
+    primary_lan_ipv4,
+)
 
 # pytest-homeassistant-custom-component (a transitive dev dep when this
 # repo's venv is shared with the ha-integration repo) installs a
@@ -50,9 +55,19 @@ async def sv_server(aiohttp_server):
             }
         )
 
+    async def network_info(request: web.Request) -> web.Response:
+        captured["network_info_header"] = request.headers.get("Authorization")
+        status = captured.get("network_info_status", 200)
+        return web.json_response(
+            captured.get("network_info_response")
+            or {"result": "ok", "data": {"interfaces": [_iface()]}},
+            status=status,
+        )
+
     app = web.Application()
     app.router.add_post("/discovery", discovery)
     app.router.add_get("/addons/self/info", self_info)
+    app.router.add_get("/network/info", network_info)
     server = await aiohttp_server(app)
     return server, captured
 
@@ -210,3 +225,191 @@ async def test_get_self_info_none_on_a_malformed_ingress_port(
     with caplog.at_level("WARNING"):
         assert await client.get_self_info() is None
     assert "malformed" in caplog.text
+
+
+# ─── /network/info + primary_lan_ipv4 ───────────────────────────────────────
+
+
+def _iface(
+    *,
+    name: str = "eth0",
+    primary: bool = True,
+    connected: bool = True,
+    enabled: bool = True,
+    address: list | None = None,
+) -> dict:
+    """One ``interfaces[]`` entry shaped like Supervisor's
+    ``interface_struct_v1`` / ``ip4config_struct``."""
+    return {
+        "interface": name,
+        "type": "ethernet",
+        "enabled": enabled,
+        "connected": connected,
+        "primary": primary,
+        "ipv4": {
+            "method": "auto",
+            "address": ["192.168.1.10/24"] if address is None else address,
+            "gateway": "192.168.1.1",
+            "nameservers": ["192.168.1.1"],
+            "ready": True,
+        },
+        "ipv6": {"method": "auto", "address": ["fd00::10/64"]},
+    }
+
+
+def test_primary_lan_ipv4_reads_the_primary_interface():
+    data = {
+        "interfaces": [
+            _iface(name="wlan0", primary=False, address=["10.0.0.7/24"]),
+            _iface(name="eth0", primary=True, address=["192.168.1.10/24"]),
+        ]
+    }
+    assert primary_lan_ipv4(data) == "192.168.1.10"
+
+
+def test_primary_lan_ipv4_falls_back_to_a_connected_non_primary():
+    data = {
+        "interfaces": [
+            _iface(name="eth0", primary=True, connected=False),
+            _iface(name="wlan0", primary=False, address=["10.0.0.7/24"]),
+        ]
+    }
+    assert primary_lan_ipv4(data) == "10.0.0.7"
+
+
+def test_primary_lan_ipv4_skips_disconnected_and_disabled():
+    data = {
+        "interfaces": [
+            _iface(name="eth0", connected=False),
+            _iface(name="eth1", primary=False, enabled=False),
+        ]
+    }
+    assert primary_lan_ipv4(data) is None
+
+
+def test_primary_lan_ipv4_skips_loopback_link_local_and_public():
+    data = {
+        "interfaces": [
+            _iface(
+                address=[
+                    "127.0.0.1/8",
+                    "169.254.3.4/16",
+                    "8.8.8.8/24",
+                    "not-an-ip",
+                    17,
+                    "172.16.5.9/16",
+                ]
+            )
+        ]
+    }
+    assert primary_lan_ipv4(data) == "172.16.5.9"
+
+
+def test_primary_lan_ipv4_skips_private_but_non_lan_ranges():
+    """``is_private`` ranges no tablet can reach are not a LAN address."""
+    data = {
+        "interfaces": [
+            _iface(
+                address=[
+                    "0.0.0.1/8",
+                    "198.18.0.5/15",
+                    "192.0.2.7/24",
+                    "240.0.0.9/4",
+                    "100.64.1.2/10",
+                    "10.1.2.3/8",
+                ]
+            )
+        ]
+    }
+    assert primary_lan_ipv4(data) == "10.1.2.3"
+
+
+def test_primary_lan_ipv4_public_only_is_none():
+    assert primary_lan_ipv4({"interfaces": [_iface(address=["8.8.8.8/24"])]}) is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        None,
+        {},
+        {"interfaces": None},
+        {"interfaces": "eth0"},
+        {"interfaces": ["eth0", None]},
+        {"interfaces": [{"primary": True, "connected": True, "enabled": True}]},
+        {
+            "interfaces": [
+                {"primary": True, "connected": True, "enabled": True, "ipv4": None}
+            ]
+        },
+        {
+            "interfaces": [
+                {
+                    "primary": True,
+                    "connected": True,
+                    "enabled": True,
+                    "ipv4": {"address": "192.168.1.10/24"},
+                }
+            ]
+        },
+        {"interfaces": [_iface(address=[])]},
+    ],
+    ids=[
+        "none",
+        "empty",
+        "interfaces-null",
+        "interfaces-str",
+        "entries-not-dicts",
+        "no-ipv4",
+        "ipv4-null",
+        "address-not-list",
+        "no-address",
+    ],
+)
+def test_primary_lan_ipv4_tolerates_malformed_payloads(data):
+    assert primary_lan_ipv4(data) is None
+
+
+def test_primary_lan_ipv4_connected_must_be_true_not_truthy():
+    """A string ``"false"`` must not count as connected."""
+    iface = _iface()
+    iface["connected"] = "false"
+    assert primary_lan_ipv4({"interfaces": [iface]}) is None
+
+
+async def test_get_network_info_unwraps_the_data_object(client, sv_server):
+    _, captured = sv_server
+    data = await client.get_network_info()
+    assert data == {"interfaces": [_iface()]}
+    assert captured["network_info_header"] == "Bearer sv-token"
+    assert primary_lan_ipv4(data) == "192.168.1.10"
+
+
+async def test_get_network_info_none_on_http_error(client, sv_server, caplog):
+    _, captured = sv_server
+    captured["network_info_status"] = 403
+    captured["network_info_response"] = {"result": "error", "message": "no"}
+    with caplog.at_level("WARNING"):
+        assert await client.get_network_info() is None
+    assert "/network/info failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "body", [{"result": "ok"}, {"result": "ok", "data": "x"}, {"data": []}]
+)
+async def test_get_network_info_none_without_a_data_object(
+    client, sv_server, body, caplog
+):
+    _, captured = sv_server
+    captured["network_info_response"] = body
+    with caplog.at_level("WARNING"):
+        assert await client.get_network_info() is None
+    assert "no data object" in caplog.text
+
+
+async def test_get_network_info_none_when_supervisor_unreachable(caplog):
+    async with aiohttp.ClientSession() as session:
+        sv = SupervisorClient(session, "http://127.0.0.1:1", "sv-token")
+        with caplog.at_level("WARNING"):
+            assert await sv.get_network_info() is None
+    assert "/network/info failed" in caplog.text

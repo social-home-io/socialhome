@@ -43,9 +43,10 @@ startup, Social Home starts anyway and logs a warning; the tab shows
 ## The address tablets use
 
 Social Home guesses the address from the host name you reached it under
-plus the dashboard port (for example `http://homeassistant.local:8100`).
-(Under the Home Assistant App the host name comes from the
-`X-Forwarded-Host` header HA's ingress proxy sets.) When the tab warns
+plus the dashboard port (for example `http://box.lan:8100`). Under the
+Home Assistant App it uses your Home Assistant host's LAN IP address
+instead (see below), so the address is right even when you opened Home
+Assistant through a remote URL such as Nabu Casa's. When the tab warns
 "This address won't open the dashboard" (*headless:*
 `url_host_allowed: false`) or the guess is otherwise wrong (a reverse
 proxy, a different host name, TLS in front), choose **Edit address**
@@ -63,8 +64,17 @@ HA Supervisor owns the host port mapping). The App publishes it on host
 port `8100` by default — nothing listens there until you switch the
 dashboard on, so there is nothing to set up in Home Assistant.
 
-Social Home reads the mapped port from Supervisor and shows the right
-address automatically (for example `http://homeassistant.local:8100`).
+Social Home reads the mapped port and the Home Assistant host's LAN IP
+address from Supervisor (`GET /addons/self/info` and `GET /network/info`;
+the IP comes from the primary connected interface, private addresses
+only) and shows the right address automatically (for example
+`http://192.168.1.10:8100`) — whether you opened Home Assistant on the
+LAN or through a remote URL such as Nabu Casa's. The IP is read fresh
+each time you open **Admin › Dashboard**, so a new DHCP lease shows up
+on the next visit (give Home Assistant a fixed IP, or set the address,
+if tablets keep the old one). If Supervisor doesn't report one, the
+address falls back to the host name you reached Home Assistant under
+(logged as a warning).
 If port `8100` is already used on your Home Assistant host, pick another
 host port under **Settings › Apps › Social Home › Network**, save, and
 restart the App when Home Assistant asks — the address follows. If you
@@ -369,7 +379,7 @@ changes (e.g. a new DHCP lease).
   Home Assistant's internal network, where multicast doesn't reach your
   home network. Connect the panel from Home Assistant (below), or enter
   the address shown in **Admin › Dashboard** on the panel (for example
-  `homeassistant.local:8100`).
+  `192.168.1.10:8100`).
 - **Bound to one address:** if `listen_host` is a specific address only
   that address is announced; `127.0.0.1` announces nothing.
 - **Changed IP address:** the addresses are read when the dashboard

@@ -50,7 +50,7 @@ from ..ha.providers import (
 from ..ha.zones import HaZoneSource
 from ..ha_home_location import persist_home_location_from_ha
 from .bootstrap import HaBootstrap
-from .supervisor import SupervisorClient
+from .supervisor import SupervisorClient, primary_lan_ipv4
 
 if TYPE_CHECKING:
     from aiohttp import web
@@ -273,6 +273,44 @@ class HaosAdapter(PlatformAdapter):
                 info.host_port(container_port)
             )
         return self._dashboard_host_port
+
+    async def dashboard_lan_host(self) -> str | None:
+        """The Home Assistant host's primary LAN IPv4, read from
+        Supervisor's ``GET /network/info`` (contract:
+        :func:`~socialhome.platform.haos.supervisor.primary_lan_ipv4`).
+
+        Not cached: a DHCP lease can move the host, and only the admin
+        dashboard page asks. Any failure — Supervisor unreachable, no
+        private address on a connected interface — logs a WARNING and
+        answers ``None`` (the admin page then guesses from the browser's
+        host, and the admin can set the address by hand).
+        """
+        if self._supervisor_client is None:
+            log.warning(
+                "haos_adapter: dashboard LAN host asked before on_startup"
+                " — no Supervisor client",
+            )
+            return None
+        try:
+            data = await self._supervisor_client.get_network_info()
+        except Exception as exc:  # defensive — never break the admin page
+            log.warning(
+                "haos_adapter: dashboard LAN host lookup failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return None
+        if data is None:
+            # ``get_network_info`` already logged why Supervisor gave no answer.
+            return None
+        address = primary_lan_ipv4(data)
+        if address is None:
+            log.warning(
+                "haos_adapter: Supervisor reported no private LAN IPv4 on a"
+                " connected interface — the dashboard URL falls back to the"
+                " admin's browser host",
+            )
+        return address
 
     @property
     def _client(self) -> HaClient:

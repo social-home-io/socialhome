@@ -632,6 +632,21 @@ class PlatformAdapter(abc.ABC):
         """
         return None
 
+    async def dashboard_lan_host(self) -> str | None:
+        """The LAN address (an IP literal) wall tablets should reach the
+        dashboard under, or ``None`` when the platform doesn't know one.
+
+        Pairs with :meth:`dashboard_host_port`: together they build the
+        tablet URL when the admin hasn't set an address. ``None`` (the
+        default) leaves the admin page guessing from the host the admin's
+        browser used. The Home Assistant App returns the HA host's primary
+        LAN IPv4 from Supervisor's ``GET /network/info`` — the admin may
+        be browsing through a Nabu Casa remote URL no tablet can use — and
+        degrades to ``None`` (logged at WARNING) when Supervisor can't
+        answer.
+        """
+        return None
+
 
 # ── Back-compat alias ────────────────────────────────────────────────────────
 

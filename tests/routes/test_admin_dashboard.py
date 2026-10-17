@@ -102,6 +102,23 @@ def test_dashboard_base_url(address, host, port, expected):
     assert dashboard_base_url(address, host, port) == expected
 
 
+@pytest.mark.parametrize(
+    ("address", "lan_host", "expected"),
+    [
+        # The admin-set address wins over everything.
+        ("https://dash.example.com", "192.168.1.10", "https://dash.example.com"),
+        # The platform's LAN address wins over the browser's host.
+        (None, "192.168.1.10", "http://192.168.1.10:8100"),
+        (None, "fd00::10", "http://[fd00::10]:8100"),
+        # No LAN address known: the request-host guess stands.
+        (None, None, "http://abcd.ui.nabu.casa:8100"),
+    ],
+)
+def test_dashboard_base_url_prefers_the_lan_host(address, lan_host, expected):
+    got = dashboard_base_url(address, "abcd.ui.nabu.casa", 8100, lan_host=lan_host)
+    assert got == expected
+
+
 # ── Access control ──────────────────────────────────────────────────────
 
 
@@ -230,6 +247,52 @@ def _host_port(monkeypatch, client, result: DashboardHostPort | None) -> None:
 
     adapter = client.app[platform_adapter_key]
     monkeypatch.setattr(type(adapter), "dashboard_host_port", fake)
+
+
+def _lan_host(monkeypatch, client, result: str | None) -> list[int]:
+    """Make the platform adapter report ``result`` as the host's LAN
+    address (the Home Assistant App asks Supervisor's ``/network/info``);
+    the returned list counts the calls."""
+    calls: list[int] = []
+
+    async def fake(self):
+        calls.append(1)
+        return result
+
+    adapter = client.app[platform_adapter_key]
+    monkeypatch.setattr(type(adapter), "dashboard_lan_host", fake)
+    return calls
+
+
+async def test_get_url_uses_the_lan_host_not_the_remote_url(client, monkeypatch):
+    """An admin on Nabu Casa remote UI: the tablet URL is the HA host's
+    LAN address on the published port, not ``…ui.nabu.casa``."""
+    _host_port(monkeypatch, client, DashboardHostPort(18100))
+    _lan_host(monkeypatch, client, "192.168.1.10")
+    resp = await client.get(
+        "/api/admin/dashboard",
+        headers={**_auth(client._tok), "X-Forwarded-Host": "abcd.ui.nabu.casa"},
+    )
+    body = await resp.json()
+    assert body["url"] == "http://192.168.1.10:18100"
+    assert body["url_host_allowed"] is True
+
+
+async def test_get_url_falls_back_to_request_host_without_lan_host(client, monkeypatch):
+    _lan_host(monkeypatch, client, None)
+    resp = await client.get(
+        "/api/admin/dashboard",
+        headers={**_auth(client._tok), "X-Forwarded-Host": "homeassistant.local:8123"},
+    )
+    assert (await resp.json())["url"] == "http://homeassistant.local:8100"
+
+
+async def test_address_wins_over_the_lan_host(client, monkeypatch):
+    calls = _lan_host(monkeypatch, client, "192.168.1.10")
+    body = await (await _put(client, {"address": "https://dash.example.com"})).json()
+    assert body["url"] == "https://dash.example.com"
+    # With an address set Supervisor isn't asked at all.
+    assert calls == []
 
 
 async def test_get_url_uses_the_mapped_host_port(client, monkeypatch):
@@ -579,6 +642,22 @@ async def test_setup_link_uses_the_mapped_host_port(client, monkeypatch):
     assert resp.status == 200
     parts = urlsplit((await resp.json())["url"])
     assert parts.netloc == "homeassistant.local:18100"
+    assert parts.path == "/enter"
+
+
+async def test_setup_link_uses_the_lan_host(client, monkeypatch):
+    await _set_password(client)
+    port = _free_port()
+    assert (await _put(client, {"enabled": True, "port": port})).status == 200
+    _host_port(monkeypatch, client, DashboardHostPort(18100))
+    _lan_host(monkeypatch, client, "192.168.1.10")
+    resp = await client.post(
+        "/api/admin/dashboard/setup-link",
+        headers={**_auth(client._tok), "X-Forwarded-Host": "abcd.ui.nabu.casa"},
+    )
+    assert resp.status == 200
+    parts = urlsplit((await resp.json())["url"])
+    assert parts.netloc == "192.168.1.10:18100"
     assert parts.path == "/enter"
 
 
@@ -1288,6 +1367,20 @@ async def test_connect_without_a_usable_address(client, ha):
     assert body["error"]["code"] == "DASHBOARD_ADDRESS_REQUIRED"
     assert body["error"]["params"] == {"reason": "no_address"}
     assert ha.sent == []
+
+
+async def test_connect_uses_the_lan_host(client, ha, monkeypatch):
+    """No address set, admin on 127.0.0.1 — but the platform knows the
+    host's LAN IP, so the panel is sent there."""
+    origin = await _running(client)
+    _lan_host(monkeypatch, client, "192.168.1.10")
+    resp = await client.post(
+        f"{HA_PANELS}/dev-kitchen/connect", headers=_auth(client._tok)
+    )
+    assert resp.status == 202, await resp.text()
+    ((panel_id, url, _claim),) = ha.sent
+    assert panel_id == "dev-kitchen"
+    assert url == f"http://192.168.1.10:{urlsplit(origin).port}"
 
 
 async def test_connect_refusals(client, ha):
