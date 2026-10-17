@@ -55,8 +55,14 @@ class ProductionLikeTestServer(TestServer):
     — stranding the open file until GC (an unclosed-file
     ``ResourceWarning``). With production's setting the handler finishes
     and teardown's graceful shutdown waits for it.
+
+    ``lingering_time=0``: after a handler refuses a body it never read (a
+    413 on an oversized upload) aiohttp keeps draining the rest for up to
+    10 s, and a graceful shutdown waits that out — 10 s of teardown per
+    upload-cap test. The 413 itself is unaffected.
     """
 
     async def _make_runner(self, **kwargs: Any) -> AppRunner:
         kwargs["handler_cancellation"] = False
+        kwargs.setdefault("lingering_time", 0)
         return AppRunner(self.app, **kwargs)

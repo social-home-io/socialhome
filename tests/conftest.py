@@ -373,6 +373,7 @@ from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.feed_service import FeedService
 from socialhome.services.space_service import SpaceService
 from socialhome.services.user_service import UserService
+from tests import migration_chain
 from tests.migration_template import MigrationTemplateCache
 
 #: Release-blocker guard for ``security``-marked tests — see the module.
@@ -477,6 +478,7 @@ def _fast_test_databases():
         mp.setattr(AsyncDatabase, "__init__", _init)
         yield cache
     cache.close()
+    migration_chain.clear()
 
 
 @pytest.fixture

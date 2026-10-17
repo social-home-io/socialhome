@@ -34,6 +34,13 @@ async def ha_client(aiohttp_client, tmp_dir):
         db_path=str(tmp_dir / "test.db"),
         media_path=str(tmp_dir / "media"),
         mode="ha",
+        # No Home Assistant runs in the suite. The default
+        # ``homeassistant.local`` is an mDNS name: a resolver with
+        # nss-mdns waits ~5 s per lookup before failing, and app startup
+        # makes several (ICE servers, config, states) — ~18 s of setup per
+        # test. A refused loopback port is the same "HA unreachable" path,
+        # answered at once with no name lookup.
+        ha_url="http://127.0.0.1:9",
         log_level="WARNING",
         db_write_batch_timeout_ms=10,
     )

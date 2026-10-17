@@ -15,7 +15,9 @@ import socialhome.i18n as i18n_pkg
 from socialhome.dashboard.clock import WallClock
 from socialhome.dashboard.render import (
     STATIC_DIR,
+    TEMPLATE_DIR,
     DashboardRenderer,
+    compiled_environment,
     load_static_assets,
     text_direction,
 )
@@ -304,3 +306,18 @@ def test_picture_clock_hands_turn_by_attribute_never_by_style(renderer):
     for selector, body in re.findall(r"([^{}]+)\{([^}]*)\}", css):
         if "dash-pv-hand" in selector:
             assert "transform" not in body, selector
+
+
+def test_renderers_share_one_environment_with_every_template_compiled(renderer):
+    """Templates compile once per process (every ``create_app`` builds a
+    renderer); the shared environment already holds all of them."""
+    other = DashboardRenderer(Catalog.from_directory(MESSAGES))
+    env = compiled_environment()
+    assert renderer._env is env and other._env is env
+    names = {p.name for p in TEMPLATE_DIR.glob("*.j2")}
+    assert names
+    with patch.object(
+        jinja2.FileSystemLoader, "get_source", side_effect=AssertionError("disk")
+    ):
+        for name in names:
+            env.get_template(name)

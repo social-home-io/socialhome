@@ -546,8 +546,7 @@ async def test_relay_failure_is_uniform_and_immediate(
     letting anonymous callers pin a task for 30 s)."""
 
     # Wide enough that a loaded CI runner (coverage, parallel workers) can't
-    # push an immediate reply past half of it, still short enough that the
-    # reference request below — which waits the whole budget — stays cheap.
+    # push an immediate reply past half of it.
     budget = 4.0
     monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", budget)
     instance_id = override.get("instance_id", "inst-author")
@@ -565,6 +564,11 @@ async def test_relay_failure_is_uniform_and_immediate(
     got = _shape(resp, await resp.read())
 
     # Reference: author online, valid token, author never starts streaming.
+    # Only its *shape* is compared, so it waits out a tiny budget instead of
+    # the 4 s one — the failure request above already ran under the wide
+    # budget, which is what proves it answered without waiting.
+    ref_budget = 0.05
+    monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", ref_budget)
     client._app[gfs_ws_registry_key]._by_instance["inst-author"] = client._author_ws
     tok, _ = await client._app[gfs_highlight_pub_service_key].record_publish(
         highlight_id="s-ref",
@@ -583,7 +587,7 @@ async def test_relay_failure_is_uniform_and_immediate(
     assert want[0] == 503
     assert json.loads(want[1]) == {"error": "unavailable"}
     assert elapsed < budget / 2, (label, elapsed)
-    assert ref_elapsed >= budget
+    assert ref_elapsed >= ref_budget
 
 
 @pytest.mark.security
