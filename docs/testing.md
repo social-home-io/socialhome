@@ -70,11 +70,32 @@ Two `pytest.ini_options` markers are registered:
 | `security` | Spec §27 release-blocker protocol / security test. Failure blocks deployment regardless of overall coverage. |
 | `integration` | Touches a real SQLite (in `tmp_path`) and a real `aiohttp` `TestClient` (§27.5). |
 
-Run only the release-blockers:
+Run only the release-blockers (the fast local pre-commit check):
 
 ```sh
 pytest tests/protocol/ -m security
 ```
+
+### Release-blocker guard
+
+`tests/security_guard.py` (registered from `tests/conftest.py`) makes it
+impossible for a `security` test to drop out of a run silently:
+
+1. **Every test under `tests/protocol/` must carry the mark.** A module
+   without `pytestmark = pytest.mark.security` is a collection error, so
+   `-m security` always selects the whole directory.
+2. **A skipped, xfailed or xpassed `security` test fails the run** — any
+   run, the local `-m security` one included. A release blocker that
+   can't run is a failure, not a yellow `s`.
+3. **Deselected / never run** is caught in CI: the test run writes the
+   outcome of every `security` test it ran (`--security-manifest=PATH`),
+   and `pytest --collect-only -qq -n 0 --security-verify=DIR` then
+   collects the whole tree and fails unless every collected `security`
+   test is `passed` in the union of the manifests under `DIR` — a `-m` /
+   `-k` / `--deselect` in the CI command, a crashed worker or a CI shard
+   that never ran all show up as missing.
+
+`tests/test_security_guard.py` pins each of these.
 
 Run with coverage and the 90 % gate:
 
@@ -232,9 +253,11 @@ failure or add a check are in the skill's `SKILL.md`. Not part of
 versions in `uv.lock` (see [Dependency lock](#dependency-lock)).
 
 1. **`test (3.14)`** — `pytest --cov=socialhome --cov-branch
-   --cov-fail-under=90 --durations=25` (the whole suite, `tests/protocol/`
-   included, parallel via xdist), then `pytest tests/protocol/ -m security`
-   again as the explicit release-blocker gate
+   --cov-fail-under=90 --durations=25 --security-manifest=…` (the whole
+   suite, `tests/protocol/` included, parallel via xdist), then
+   `pytest --collect-only --security-verify=…`: the release-blocker gate
+   checks that every `security` test passed in that run instead of running
+   them a second time (see [Release-blocker guard](#release-blocker-guard))
 2. **`lint`** — `ruff check .` + `ruff format --check .`
 3. **`typecheck`** — `mypy socialhome/`
 4. **`lock`** — `scripts/lock.sh --check`: fails when `uv.lock` no

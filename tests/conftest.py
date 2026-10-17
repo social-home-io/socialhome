@@ -375,6 +375,9 @@ from socialhome.services.space_service import SpaceService
 from socialhome.services.user_service import UserService
 from tests.migration_template import MigrationTemplateCache
 
+#: Release-blocker guard for ``security``-marked tests — see the module.
+pytest_plugins = ["pytester", "tests.security_guard"]
+
 #: Write-coalescing window every test database runs with; see
 #: ``_fast_test_databases``.
 TEST_WRITE_WINDOW_MS = 1

@@ -35,6 +35,8 @@ from socialhome.services.highlight_public_framing import (
     stream_end,
 )
 
+pytestmark = pytest.mark.security
+
 # ─── Wire constants ──────────────────────────────────────────────────────
 
 

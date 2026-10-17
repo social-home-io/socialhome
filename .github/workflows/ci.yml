@@ -60,12 +60,24 @@ jobs:
         # test that waits out a real timeout shows up in review instead of
         # quietly adding minutes (see docs/testing.md, "Keeping the suite
         # fast").
+        #
+        # ``--security-manifest`` records the outcome of every
+        # ``security``-marked test (the §27 release blockers, all of
+        # ``tests/protocol/`` included); the next step checks it. The run
+        # itself already fails if one of them is skipped or xfailed
+        # (``tests/security_guard.py``).
         run: |
-          pytest --cov=socialhome --cov-branch --cov-fail-under=90 --tb=short -q --durations=25
+          pytest --cov=socialhome --cov-branch --cov-fail-under=90 --tb=short -q --durations=25 \
+            --security-manifest=security-manifest/full.json
 
-      - name: Run protocol/security tests (release blocker)
+      - name: Release blockers all ran and passed
+        # Replaces re-running ``pytest tests/protocol/ -m security`` (~3 100
+        # tests, ~7 min) after the full run had already run them: collect
+        # the tree and fail unless every collected ``security`` test is
+        # ``passed`` in the manifest — a deselected, skipped or never-run
+        # release blocker fails here.
         run: |
-          pytest tests/protocol/ -m security --tb=short -q
+          pytest --collect-only -qq -n 0 --security-verify=security-manifest
 
   lint:
     runs-on: ubuntu-latest
