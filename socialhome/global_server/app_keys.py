@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     # ``admin`` reads ``gfs_client_ip_key`` off the app, so it imports this
     # module — the auth type stays annotation-only to keep that one-way.
     from .admin import AdminAuth
-    from .public import ClientIpResolver
+    from .public import ClientIpResolver, PairingTokenService
 
 gfs_db_key: AppKey[AsyncDatabase] = AppKey("gfs_db")
 gfs_config_key: AppKey[GfsConfig] = AppKey("gfs_config")
@@ -52,6 +52,8 @@ gfs_federation_key: AppKey[GfsFederationService] = AppKey("gfs_federation")
 gfs_fed_repo_key: AppKey[AbstractGfsFederationRepo] = AppKey("gfs_fed_repo")
 gfs_admin_repo_key: AppKey[AbstractGfsAdminRepo] = AppKey("gfs_admin_repo")
 gfs_admin_auth_key: AppKey[AdminAuth] = AppKey("gfs_admin_auth")
+#: One-time pairing tokens (``/gfs/register`` / the public pair page).
+gfs_token_service_key: AppKey[PairingTokenService] = AppKey("gfs_token_service")
 gfs_admin_service_key: AppKey[GfsAdminService] = AppKey("gfs_admin_service")
 gfs_cluster_key: AppKey[ClusterService] = AppKey("gfs_cluster")
 gfs_cluster_repo_key: AppKey[AbstractClusterRepo] = AppKey("gfs_cluster_repo")

@@ -1157,7 +1157,7 @@ async def handle_landing(request: web.Request) -> web.Response:
     cfg = request.app[K.gfs_config_key]
     admin_repo = request.app[K.gfs_admin_repo_key]
     fed_repo = request.app[K.gfs_fed_repo_key]
-    token_svc: PairingTokenService = request.app["gfs_token_service"]
+    token_svc: PairingTokenService = request.app[K.gfs_token_service_key]
 
     # Settings pulled fresh (admin portal may have changed them).
     server_name = (await admin_repo.get_config("server_name")) or cfg.server_name

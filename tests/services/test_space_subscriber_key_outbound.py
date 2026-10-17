@@ -134,7 +134,7 @@ async def env(tmp_dir):
         gfs_service=gfs,
     )
     svc.attach_identity(own_instance_id=own_iid)
-    return {
+    yield {
         "db": db,
         "gfs": gfs,
         "crypto": crypto,
@@ -142,6 +142,7 @@ async def env(tmp_dir):
         "make_space": _make_space,
         "svc": svc,
     }
+    await db.shutdown()
 
 
 async def test_valid_binding_relays_sealed_key_handoff(env):

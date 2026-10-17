@@ -193,7 +193,7 @@ async def test_require_auth_passes_authenticated():
     """require_auth attaches AuthContext and calls handler."""
     from unittest.mock import AsyncMock, MagicMock
 
-    from socialhome.auth import AuthContext, require_auth
+    from socialhome.auth import USER_KEY, AuthContext, require_auth
     from socialhome.domain.user import User
 
     user = User(user_id="u1", username="admin", display_name="Admin", is_admin=True)
@@ -211,7 +211,7 @@ async def test_require_auth_passes_authenticated():
 
     _resp = await middleware(req, handler)
     handler.assert_called_once()
-    req.__setitem__.assert_called_with("user", ctx)
+    req.__setitem__.assert_called_with(USER_KEY, ctx)
 
 
 async def test_require_auth_skips_public_paths():

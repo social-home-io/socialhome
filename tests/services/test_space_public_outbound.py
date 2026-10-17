@@ -152,7 +152,7 @@ async def env(tmp_dir):
         own_identity_seed=own_kp.private_key,
     )
     sub.wire()
-    return {
+    yield {
         "db": db,
         "bus": bus,
         "gfs": gfs,
@@ -165,6 +165,7 @@ async def env(tmp_dir):
         "own_seed": own_kp.private_key,
         "sub": sub,
     }
+    await db.shutdown()
 
 
 def _post(author: str) -> Post:

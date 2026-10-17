@@ -253,7 +253,7 @@ class SignupTokenView(GfsBaseView):
         cfg = self.svc(K.gfs_config_key)
         if not cfg.open_signup:
             return web.json_response({"error": "not_found"}, status=404)
-        token_svc = self.request.app["gfs_token_service"]
+        token_svc = self.request.app[K.gfs_token_service_key]
         token, wait = await token_svc.generate(self.client_bucket())
         if token is None:
             resp = web.json_response({"error": "rate_limited"}, status=429)
@@ -285,7 +285,7 @@ class RegisterView(GfsBaseView):
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_federation_key)
         admin_repo = self.svc(K.gfs_admin_repo_key)
-        token_svc = self.request.app["gfs_token_service"]
+        token_svc = self.request.app[K.gfs_token_service_key]
         body = await self.body_or_400()
         try:
             instance_id = body["instance_id"]

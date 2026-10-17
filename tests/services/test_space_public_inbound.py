@@ -125,7 +125,7 @@ async def env(tmp_dir):
         space_post_repo=post_repo,
     )
     inbound.attach_identity(own_instance_id="us.home")
-    return {
+    yield {
         "db": db,
         "space_repo": space_repo,
         "crypto_obj": crypto,
@@ -140,6 +140,7 @@ async def env(tmp_dir):
         "space_kp": space_kp,
         "events": events,
     }
+    await db.shutdown()
 
 
 async def _make_envelope(

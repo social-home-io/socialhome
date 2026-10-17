@@ -24,7 +24,7 @@ from socialhome.repositories.app_repo import SqliteAppRepo
 from socialhome.services.app_federation_service import AppFederationService
 from socialhome.services.app_service import AppService
 
-from .conftest import _auth
+from .conftest import _auth, client_with_stubs
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -752,11 +752,18 @@ async def test_store_key_too_long_413(client):
 
 
 @pytest.fixture
-def fed_svc(client):
-    """Inject a stub AppFederationService into the test app and return it."""
-    stub = AsyncMock(spec=AppFederationService)
-    client.app[app_federation_service_key] = stub
-    return stub
+def fed_svc():
+    """A stub AppFederationService; see the module's ``client``."""
+    return AsyncMock(spec=AppFederationService)
+
+
+@pytest.fixture
+async def client(request, make_client):
+    """``client`` starts with :func:`fed_svc` swapped in when a test asks
+    for it."""
+    return await client_with_stubs(
+        request, make_client, {"fed_svc": app_federation_service_key}
+    )
 
 
 # ── GET /api/apps/{app_id}/peers ──────────────────────────────────────────

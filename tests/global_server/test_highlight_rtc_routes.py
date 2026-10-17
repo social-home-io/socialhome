@@ -31,6 +31,7 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
+from tests.app_overrides import override_app_on_startup
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -474,7 +475,7 @@ async def test_author_ice_wrong_instance_returns_403(client):
     assert r.status == 403
 
 
-async def test_ice_servers_includes_turn_when_configured(client):
+async def test_ice_servers_includes_turn_when_configured(tmp_dir):
     """The /gfs/highlights/ice-servers helper passes a TURN server through
     when the operator set it on the GFS config — GfsConfig is a frozen
     dataclass so we swap in a tiny ``SimpleNamespace`` that satisfies
@@ -483,14 +484,21 @@ async def test_ice_servers_includes_turn_when_configured(client):
 
     from socialhome.global_server.app_keys import gfs_config_key
 
-    client._app[gfs_config_key] = SimpleNamespace(  # type: ignore[assignment]
-        ice_stun_url="stun:stun.l.google.com:19302",
-        ice_turn_url="turn:turn.example:3478",
-        ice_turn_user="alice",
-        ice_turn_credential="secret",
+    app = create_gfs_app(_config(tmp_dir))
+    override_app_on_startup(
+        app,
+        {
+            gfs_config_key: SimpleNamespace(
+                ice_stun_url="stun:stun.l.google.com:19302",
+                ice_turn_url="turn:turn.example:3478",
+                ice_turn_user="alice",
+                ice_turn_credential="secret",
+            )
+        },
     )
-    resp = await client.get("/gfs/highlights/ice-servers")
-    data = await resp.json()
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/gfs/highlights/ice-servers")
+        data = await resp.json()
     urls = [s["urls"][0] for s in data["servers"]]
     assert any("turn:" in u for u in urls)
 

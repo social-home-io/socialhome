@@ -47,7 +47,11 @@ from socialhome.domain.space import SpaceType
 from socialhome.gfs_proof import sign_possession_proof
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server import create_gfs_app
-from socialhome.global_server.app_keys import gfs_fed_repo_key, gfs_ws_registry_key
+from socialhome.global_server.app_keys import (
+    gfs_fed_repo_key,
+    gfs_token_service_key,
+    gfs_ws_registry_key,
+)
 from socialhome.global_server.domain import ClientInstance
 from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
@@ -2911,7 +2915,9 @@ async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
     ``verify_capabilities`` (household side) against each other over the wire,
     so it is what catches canonicalisation drift between the two packages.
     """
-    token, _wait = await real_gfs.server.app["gfs_token_service"].generate("127.0.0.55")
+    token, _wait = await real_gfs.server.app[gfs_token_service_key].generate(
+        "127.0.0.55"
+    )
     assert token is not None
     gfs_base = str(real_gfs.make_url("")).rstrip("/")
 

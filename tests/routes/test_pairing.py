@@ -257,13 +257,13 @@ async def test_initiate_non_object_body_is_the_classic_code(client):
     assert "reach" not in await r.json()
 
 
-async def test_initiate_without_a_url_only_the_gfs_reach_works(client):
+async def test_initiate_without_a_url_only_the_gfs_reach_works(make_client):
     class _NoBase:
         async def get_federation_base(self):
             return None
 
+    client = await make_client({platform_adapter_key: _NoBase()})
     await _connect_gfs(client, "g1", "https://gfs-1.example")
-    client.app[platform_adapter_key] = _NoBase()
     for reach in ("url", "url_gfs"):
         r = await _initiate(client, {"reach": reach})
         assert r.status == 422
@@ -492,16 +492,16 @@ class _SendRecorder:
         return _R()
 
 
-def _record_sends(client) -> _SendRecorder:
+async def _record_sends(make_client):
+    """A client whose federation service is a :class:`_SendRecorder`."""
     rec = _SendRecorder()
-    client.app[federation_service_key] = rec
-    return rec
+    return await make_client({federation_service_key: rec}), rec
 
 
-async def test_introduce_requires_admin(client):
+async def test_introduce_requires_admin(make_client):
     """Asking a peer to introduce this household is a trust decision."""
+    client, rec = await _record_sends(make_client)
     await client.app[federation_repo_key].save_instance(_fake_instance("via-1"))
-    rec = _record_sends(client)
     member_tok = await _seed_member(client._db)
     r = await client.post(
         "/api/pairing/introduce",
@@ -512,9 +512,9 @@ async def test_introduce_requires_admin(client):
     assert rec.sent == []
 
 
-async def test_introduce_as_admin_sends_intro_relay(client):
+async def test_introduce_as_admin_sends_intro_relay(make_client):
+    client, rec = await _record_sends(make_client)
     await client.app[federation_repo_key].save_instance(_fake_instance("via-2"))
-    rec = _record_sends(client)
     r = await client.post(
         "/api/pairing/introduce",
         json={
@@ -853,11 +853,7 @@ async def test_visible_users_get_returns_default_visible(client):
     assert extra_uid in rows and rows[extra_uid]["visible"] is True
 
 
-async def test_visible_users_patch_hides_user_and_sends_user_removed(client):
-    fed_repo = client.app[federation_repo_key]
-    await fed_repo.save_instance(_fake_instance("peer-vis-2"))
-    extra_uid = await _seed_extra_user(client, "kai")
-
+async def test_visible_users_patch_hides_user_and_sends_user_removed(make_client):
     captured: list[dict] = []
 
     class _Recorder:
@@ -871,7 +867,10 @@ async def test_visible_users_patch_hides_user_and_sends_user_removed(client):
 
     from socialhome.app_keys import federation_service_key
 
-    client.app[federation_service_key] = _Recorder()
+    client = await make_client({federation_service_key: _Recorder()})
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-vis-2"))
+    extra_uid = await _seed_extra_user(client, "kai")
 
     r = await client.patch(
         "/api/pairing/connections/peer-vis-2/visible-users",
@@ -939,12 +938,8 @@ async def test_visible_users_patch_unhide_sends_user_updated(client, monkeypatch
     assert captured[0]["payload"]["user_id"] == extra_uid
 
 
-async def test_visible_users_patch_no_op_when_already_in_target_state(client):
+async def test_visible_users_patch_no_op_when_already_in_target_state(make_client):
     """Visible-→visible flip is a no-op (already-visible default)."""
-    fed_repo = client.app[federation_repo_key]
-    await fed_repo.save_instance(_fake_instance("peer-vis-4"))
-    extra_uid = await _seed_extra_user(client, "noop")
-
     captured: list[dict] = []
 
     class _Recorder:
@@ -956,7 +951,10 @@ async def test_visible_users_patch_no_op_when_already_in_target_state(client):
 
     from socialhome.app_keys import federation_service_key
 
-    client.app[federation_service_key] = _Recorder()
+    client = await make_client({federation_service_key: _Recorder()})
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_fake_instance("peer-vis-4"))
+    extra_uid = await _seed_extra_user(client, "noop")
 
     r = await client.patch(
         "/api/pairing/connections/peer-vis-4/visible-users",
@@ -1170,7 +1168,7 @@ async def test_alias_patch_requires_admin(client):
     assert r.status == 403
 
 
-async def test_connections_response_carries_transport_rtc(client):
+async def test_connections_response_carries_transport_rtc(make_client):
     """A confirmed peer whose DataChannel is open reports transport='rtc'."""
     kp = generate_identity_keypair()
     peer = RemoteInstance(
@@ -1184,14 +1182,14 @@ async def test_connections_response_carries_transport_rtc(client):
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
-    fed_repo = client.app[federation_repo_key]
-    await fed_repo.save_instance(peer)
 
     class _AlwaysOpenTransport:
         def is_ready(self, instance_id):
             return True
 
-    client.app[federation_transport_key] = _AlwaysOpenTransport()
+    client = await make_client({federation_transport_key: _AlwaysOpenTransport()})
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(peer)
 
     r = await client.get(
         "/api/connections",
@@ -1204,7 +1202,7 @@ async def test_connections_response_carries_transport_rtc(client):
 
 
 async def test_connections_response_reports_the_relay_for_a_link_joined_peer(
-    client,
+    make_client,
 ):
     """A household seated from an invite link has NO address and no RTC
     path — its envelopes ride the connection-server relay. Reporting it
@@ -1226,14 +1224,14 @@ async def test_connections_response_reports_the_relay_for_a_link_joined_peer(
         relay_via="https://gfs.example.org",
         remote_keywrap_pk="cc" * 32,
     )
-    fed_repo = client.app[federation_repo_key]
-    await fed_repo.save_instance(peer)
 
     class _NeverOpenTransport:
         def is_ready(self, instance_id):
             return False
 
-    client.app[federation_transport_key] = _NeverOpenTransport()
+    client = await make_client({federation_transport_key: _NeverOpenTransport()})
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(peer)
 
     r = await client.get("/api/connections", headers=_auth(client._tok))
     rows = await r.json()
@@ -1298,7 +1296,7 @@ async def test_connections_without_relay_traffic_report_no_relay_state(client):
     assert row["last_relay_accepted_at"] is None
 
 
-async def test_connections_response_transport_https_when_channel_down(client):
+async def test_connections_response_transport_https_when_channel_down(make_client):
     """Same peer, transport service reports not-ready → transport='https'."""
     kp = generate_identity_keypair()
     peer = RemoteInstance(
@@ -1312,14 +1310,14 @@ async def test_connections_response_transport_https_when_channel_down(client):
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
-    fed_repo = client.app[federation_repo_key]
-    await fed_repo.save_instance(peer)
 
     class _NeverOpenTransport:
         def is_ready(self, instance_id):
             return False
 
-    client.app[federation_transport_key] = _NeverOpenTransport()
+    client = await make_client({federation_transport_key: _NeverOpenTransport()})
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(peer)
 
     r = await client.get(
         "/api/connections",
@@ -1330,7 +1328,7 @@ async def test_connections_response_transport_https_when_channel_down(client):
     assert row["transport"] == "https"
 
 
-async def test_connections_response_transport_null_when_unreachable(client):
+async def test_connections_response_transport_null_when_unreachable(make_client):
     """An unreachable confirmed peer has transport=null — we don't claim
     a transport for a peer we can't reach."""
     kp = generate_identity_keypair()
@@ -1345,15 +1343,15 @@ async def test_connections_response_transport_null_when_unreachable(client):
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
-    fed_repo = client.app[federation_repo_key]
-    await fed_repo.save_instance(peer)
-    await fed_repo.mark_unreachable(peer.id)
 
     class _NeverOpenTransport:
         def is_ready(self, instance_id):
             return False
 
-    client.app[federation_transport_key] = _NeverOpenTransport()
+    client = await make_client({federation_transport_key: _NeverOpenTransport()})
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(peer)
+    await fed_repo.mark_unreachable(peer.id)
 
     r = await client.get(
         "/api/connections",
@@ -1364,7 +1362,7 @@ async def test_connections_response_transport_null_when_unreachable(client):
     assert row["transport"] is None
 
 
-async def test_connections_response_transport_https_when_no_rtc_wired(client):
+async def test_connections_response_transport_https_when_no_rtc_wired(make_client):
     """No federation_transport_key in app → confirmed peer still gets
     transport='https'. Models a deployment without RTC wiring (e.g. a
     stripped harness) where federation has to fall back to HTTPS-only.
@@ -1381,11 +1379,10 @@ async def test_connections_response_transport_https_when_no_rtc_wired(client):
         status=PairingStatus.CONFIRMED,
         source=InstanceSource.MANUAL,
     )
+    # Deliberately drop the transport key — simulate a no-RTC build.
+    client = await make_client({federation_transport_key: None})
     fed_repo = client.app[federation_repo_key]
     await fed_repo.save_instance(peer)
-
-    # Deliberately drop the transport key — simulate a no-RTC build.
-    client.app[federation_transport_key] = None
 
     r = await client.get(
         "/api/connections",
@@ -1528,14 +1525,13 @@ class _CapturingShareHomeSvc:
         self.calls.append((instance_id, value, set_by))
 
 
-async def test_patch_share_home_false_persists_and_calls_service(client):
+async def test_patch_share_home_false_persists_and_calls_service(make_client):
     """PATCH {share_home: false} returns 200 and the service sets the value."""
+    stub = _CapturingShareHomeSvc()
+    client = await make_client({peer_home_sharing_service_key: stub})
     fed_repo = client.app[federation_repo_key]
     inst = _fake_instance("peer-sh-1")
     await fed_repo.save_instance(inst)
-
-    stub = _CapturingShareHomeSvc()
-    client.app[peer_home_sharing_service_key] = stub
 
     r = await client.patch(
         "/api/pairing/connections/peer-sh-1",
@@ -1548,14 +1544,13 @@ async def test_patch_share_home_false_persists_and_calls_service(client):
     assert stub.calls == [("peer-sh-1", False, client._uid)]
 
 
-async def test_patch_share_home_true_persists_and_calls_service(client):
+async def test_patch_share_home_true_persists_and_calls_service(make_client):
     """PATCH {share_home: true} returns 200 and the service sets the value."""
+    stub = _CapturingShareHomeSvc()
+    client = await make_client({peer_home_sharing_service_key: stub})
     fed_repo = client.app[federation_repo_key]
     inst = _fake_instance("peer-sh-2")
     await fed_repo.save_instance(inst)
-
-    stub = _CapturingShareHomeSvc()
-    client.app[peer_home_sharing_service_key] = stub
 
     r = await client.patch(
         "/api/pairing/connections/peer-sh-2",
@@ -1758,12 +1753,14 @@ async def test_get_connections_reports_zero_dropped_envelopes(client):
     assert row["dropped_envelopes"] == 0
 
 
-async def test_patch_connection_reports_real_envelope_counts(client):
+async def test_patch_connection_reports_real_envelope_counts(make_client):
     """PATCH returns the peer's real backlog, not a placeholder ``0``."""
+    client = await make_client(
+        {peer_home_sharing_service_key: _CapturingShareHomeSvc()}
+    )
     fed_repo = client.app[federation_repo_key]
     await fed_repo.save_instance(_fake_instance("peer-patch-counts"))
     await _seed_backlog(client, "peer-patch-counts", pending=2, failed=3)
-    client.app[peer_home_sharing_service_key] = _CapturingShareHomeSvc()
 
     r = await client.patch(
         "/api/pairing/connections/peer-patch-counts",
@@ -1792,17 +1789,17 @@ class _StubConfirmSvc:
         return None
 
 
-async def test_confirm_pairing_reports_real_envelope_counts(client):
+async def test_confirm_pairing_reports_real_envelope_counts(make_client):
     """The confirm response carries the peer's real backlog, not ``0``.
 
     A re-confirm of a household that has been dark is exactly when the
     admin needs to see what piled up and what was dropped.
     """
     inst = _fake_instance("peer-confirm-counts")
+    client = await make_client({federation_service_key: _StubConfirmSvc(inst)})
     fed_repo = client.app[federation_repo_key]
     await fed_repo.save_instance(inst)
     await _seed_backlog(client, "peer-confirm-counts", pending=2, failed=3)
-    client.app[federation_service_key] = _StubConfirmSvc(inst)
 
     r = await client.post(
         "/api/pairing/confirm",
@@ -2131,10 +2128,10 @@ async def test_patch_both_fields_a_bad_share_home_applies_neither(client):
     assert calls.keywrap_to == [] and calls.probed == []
 
 
-async def test_patch_both_fields_a_bad_gfs_relay_applies_neither(client):
-    await _seed_peer(client, "peer-both-2", proto_version=54)
+async def test_patch_both_fields_a_bad_gfs_relay_applies_neither(make_client):
     stub = _CapturingShareHomeSvc()
-    client.app[peer_home_sharing_service_key] = stub
+    client = await make_client({peer_home_sharing_service_key: stub})
+    await _seed_peer(client, "peer-both-2", proto_version=54)
 
     r = await _patch_both(
         client, "peer-both-2", {"share_home": False, "gfs_relay": "yes"}
@@ -2144,16 +2141,16 @@ async def test_patch_both_fields_a_bad_gfs_relay_applies_neither(client):
     assert stub.calls == []
 
 
-async def test_patch_both_fields_a_refused_switch_applies_neither(client):
+async def test_patch_both_fields_a_refused_switch_applies_neither(make_client):
     """409 for a link-joined household must not leave home sharing flipped."""
+    stub = _CapturingShareHomeSvc()
+    client = await make_client({peer_home_sharing_service_key: stub})
     await _seed_peer(
         client,
         "peer-both-3",
         source=InstanceSource.SPACE_SESSION,
         remote_inbox_url="",
     )
-    stub = _CapturingShareHomeSvc()
-    client.app[peer_home_sharing_service_key] = stub
 
     r = await _patch_both(
         client, "peer-both-3", {"share_home": False, "gfs_relay": True}

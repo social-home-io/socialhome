@@ -8,7 +8,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
-from socialhome.auth import SIGNED_URL_PRINCIPAL
+from socialhome.auth import SIGNED_URL_PRINCIPAL, USER_KEY
 from socialhome.rate_limiter import (
     RateLimiter,
     build_rate_limit_middleware,
@@ -106,7 +106,7 @@ async def test_check_uses_first_two_path_segments_as_bucket():
 
 async def _hit(mw, path: str, user: str = "u1", method: str = "POST") -> int:
     request = make_mocked_request(method, path)
-    request["user"] = SimpleNamespace(user_id=user)
+    request[USER_KEY] = SimpleNamespace(user_id=user)
 
     async def handler(_req):
         return web.Response(status=204)
@@ -258,7 +258,7 @@ async def _hit_signed(mw, path: str, remote: str) -> int:
     """A signed-URL ``<img>`` fetch: the principal is the constant
     ``SIGNED_URL_PRINCIPAL`` whoever the browser belongs to."""
     request = make_mocked_request("GET", path, transport=_FakeTransport(remote))
-    request["user"] = SimpleNamespace(user_id=SIGNED_URL_PRINCIPAL)
+    request[USER_KEY] = SimpleNamespace(user_id=SIGNED_URL_PRINCIPAL)
 
     async def handler(_req):
         return web.Response(status=200)

@@ -42,25 +42,21 @@ async def test_healthz_returns_ok_body(client):
     assert "outbox_depth" in subs
 
 
-async def test_healthz_db_failure_returns_503(client):
+async def test_healthz_db_failure_returns_503(client, monkeypatch):
     """A broken DB probe surfaces as 503."""
     from socialhome.app_keys import db_key
 
-    real_db = client.app[db_key]
+    async def _outage(*_a, **_kw):
+        raise RuntimeError("simulated DB outage")
 
-    class _BrokenDb:
-        async def fetchone(self, *_a, **_kw):
-            raise RuntimeError("simulated DB outage")
-
-    client.app[db_key] = _BrokenDb()
-    try:
-        resp = await client.get("/healthz")
-        assert resp.status == 503
-        body = await resp.json()
-        assert body["status"] == "fail"
-        assert body["subsystems"]["db"] == "fail"
-    finally:
-        client.app[db_key] = real_db
+    # Break the started app's own database object rather than swapping the
+    # app key: a started aiohttp app is frozen.
+    monkeypatch.setattr(client.app[db_key], "fetchone", _outage)
+    resp = await client.get("/healthz")
+    assert resp.status == 503
+    body = await resp.json()
+    assert body["status"] == "fail"
+    assert body["subsystems"]["db"] == "fail"
 
 
 async def test_healthz_no_auth_required(client):

@@ -53,9 +53,9 @@ async def test_requires_auth(client):
     assert r.status == 401
 
 
-async def test_unsupported_closes_with_error_frame(client):
+async def test_unsupported_closes_with_error_frame(make_client):
     """When the adapter does not support STT, server sends error and closes."""
-    client.server.app[stt_service_key] = _FakeSttService(supported=False)
+    client = await make_client({stt_service_key: _FakeSttService(supported=False)})
     ws = await client.ws_connect(f"/api/stt/stream?token={client._tok}")
     try:
         msg = await asyncio.wait_for(ws.receive(), timeout=2.0)
@@ -66,10 +66,10 @@ async def test_unsupported_closes_with_error_frame(client):
         await ws.close()
 
 
-async def test_happy_path_streams_audio_and_returns_final(client):
+async def test_happy_path_streams_audio_and_returns_final(make_client):
     """Full start → binary → end → final exchange."""
     fake = _FakeSttService(text="transcribed sentence")
-    client.server.app[stt_service_key] = fake
+    client = await make_client({stt_service_key: fake})
 
     ws = await client.ws_connect(f"/api/stt/stream?token={client._tok}")
     try:
@@ -97,9 +97,9 @@ async def test_happy_path_streams_audio_and_returns_final(client):
     assert fake.kwargs == {"language": "de", "sample_rate": 22050, "channels": 1}
 
 
-async def test_missing_start_frame_errors(client):
+async def test_missing_start_frame_errors(make_client):
     """An initial binary frame (not start JSON) is rejected."""
-    client.server.app[stt_service_key] = _FakeSttService()
+    client = await make_client({stt_service_key: _FakeSttService()})
     ws = await client.ws_connect(f"/api/stt/stream?token={client._tok}")
     try:
         await ws.send_bytes(b"bytes-before-start")
@@ -110,9 +110,9 @@ async def test_missing_start_frame_errors(client):
         await ws.close()
 
 
-async def test_bad_start_json_errors(client):
+async def test_bad_start_json_errors(make_client):
     """Malformed start frame closes with error."""
-    client.server.app[stt_service_key] = _FakeSttService()
+    client = await make_client({stt_service_key: _FakeSttService()})
     ws = await client.ws_connect(f"/api/stt/stream?token={client._tok}")
     try:
         await ws.send_str("not json at all")
@@ -123,10 +123,10 @@ async def test_bad_start_json_errors(client):
         await ws.close()
 
 
-async def test_adapter_failure_sends_error_frame(client):
+async def test_adapter_failure_sends_error_frame(make_client):
     """An exception from the adapter surfaces as an error frame."""
     fake = _FakeSttService(raise_exc=RuntimeError("engine crashed"))
-    client.server.app[stt_service_key] = fake
+    client = await make_client({stt_service_key: fake})
 
     ws = await client.ws_connect(f"/api/stt/stream?token={client._tok}")
     try:

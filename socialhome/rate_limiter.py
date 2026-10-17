@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 from aiohttp import web
 
-from .auth import SIGNED_URL_PRINCIPAL
+from .auth import SIGNED_URL_PRINCIPAL, USER_KEY
 from .security import error_response
 
 #: Prefix length an IPv6 client is bucketed by. One subscriber (a home, a
@@ -258,7 +258,7 @@ def build_rate_limit_middleware(
 
     @web.middleware
     async def middleware(request: web.Request, handler) -> web.StreamResponse:
-        user = request.get("user")
+        user = request.get(USER_KEY)
         # Unauthenticated requests bypass per-user limits; the
         # authentication middleware will reject them before they reach a
         # protected handler anyway.

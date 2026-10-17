@@ -165,7 +165,7 @@ def build_admin_middleware(auth: AdminAuth):
 
 async def handle_login(request: web.Request) -> web.Response:
     """``POST /admin/login`` — body ``{"password": "..."}``. Sets the cookie."""
-    auth: AdminAuth = request.app["admin_auth"]
+    auth: AdminAuth = request.app[K.gfs_admin_auth_key]
     try:
         body = await request.json()
         password = str(body.get("password") or "")
@@ -211,7 +211,7 @@ async def handle_login(request: web.Request) -> web.Response:
 
 
 async def handle_logout(request: web.Request) -> web.Response:
-    auth: AdminAuth = request.app["admin_auth"]
+    auth: AdminAuth = request.app[K.gfs_admin_auth_key]
     token = request.cookies.get(SESSION_COOKIE)
     await auth.logout(token)
     resp = web.json_response({"status": "ok"})

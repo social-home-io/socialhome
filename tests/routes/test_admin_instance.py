@@ -72,10 +72,10 @@ async def test_renames_and_persists(client):
     assert identity["display_name"] == "Casa Vizeli"
 
 
-async def test_triggers_broadcast(client):
+async def test_triggers_broadcast(make_client):
     """A successful rename re-broadcasts capabilities exactly once."""
     stub = _RecordingOutbound()
-    client.app[capabilities_outbound_key] = stub
+    client = await make_client({capabilities_outbound_key: stub})
     resp = await client.patch(
         "/api/admin/instance",
         headers=_auth(client._tok),
@@ -85,10 +85,10 @@ async def test_triggers_broadcast(client):
     assert stub.calls == 1
 
 
-async def test_pushes_rename_to_gfs(client):
+async def test_pushes_rename_to_gfs(make_client):
     """A successful rename pushes the new name to every paired GFS."""
     stub = _RecordingGfs()
-    client.app[gfs_connection_service_key] = stub
+    client = await make_client({gfs_connection_service_key: stub})
     resp = await client.patch(
         "/api/admin/instance",
         headers=_auth(client._tok),
@@ -98,10 +98,10 @@ async def test_pushes_rename_to_gfs(client):
     assert stub.names == ["Casa Vizeli"]
 
 
-async def test_rename_succeeds_when_no_gfs_reachable(client):
+async def test_rename_succeeds_when_no_gfs_reachable(make_client):
     """The GFS push is best-effort — when every paired GFS is down
     (result 0), the rename still persists and returns 200."""
-    client.app[gfs_connection_service_key] = _RecordingGfs(result=0)
+    client = await make_client({gfs_connection_service_key: _RecordingGfs(result=0)})
     resp = await client.patch(
         "/api/admin/instance",
         headers=_auth(client._tok),

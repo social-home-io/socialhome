@@ -92,7 +92,7 @@ async def env(tmp_dir):
         own_instance_id=own_iid,
         keywrap_private_key=kw_kp.private_key,
     )
-    return {
+    yield {
         "db": db,
         "crypto": crypto,
         "space_repo": space_repo,
@@ -102,6 +102,7 @@ async def env(tmp_dir):
         "kw_kp": kw_kp,
         "skp": skp,
     }
+    await db.shutdown()
 
 
 def _content_key_meta(epoch, raw_key):

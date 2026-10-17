@@ -1016,25 +1016,31 @@ class _RecordingFederation:
         self.applied.append(servers)
 
 
-async def _ha_adapter_app(tmp_path, db_key_, bus_key_, session):
-    from socialhome.db.database import AsyncDatabase
-
+@pytest.fixture
+async def ice_db(tmp_path):
     db = AsyncDatabase(str(tmp_path / "t.db"))
     await db.startup()
+    yield db
+    await db.shutdown()
+
+
+def _ha_adapter_app(db, db_key_, bus_key_, session):
     app = web.Application()
     app[db_key_] = db
     app[instance_config_repo_key] = SqliteInstanceConfigRepo(db)
     app[bus_key_] = EventBus()
     app[http_session_key] = session
-    return app, db
+    return app
 
 
-async def test_on_startup_wires_the_ice_sync_and_applies_to_federation(tmp_path):
+async def test_on_startup_wires_the_ice_sync_and_applies_to_federation(
+    tmp_path, ice_db
+):
     """``on_startup`` must start the pull and route it to the federation
     service — the ``_apply`` closure had no test at all, so nothing pinned
     that the fetched list actually lands anywhere."""
     async with aiohttp.ClientSession() as session:
-        app, _db = await _ha_adapter_app(tmp_path, db_key, event_bus_key, session)
+        app = _ha_adapter_app(ice_db, db_key, event_bus_key, session)
         fed = _RecordingFederation()
         app[federation_service_key] = fed
         adapter = HomeAssistantAdapter(
@@ -1056,10 +1062,10 @@ async def test_on_startup_wires_the_ice_sync_and_applies_to_federation(tmp_path)
         assert adapter._ice_sync is None, "on_cleanup left the sync running"
 
 
-async def test_on_startup_tolerates_no_federation_service(tmp_path):
+async def test_on_startup_tolerates_no_federation_service(tmp_path, ice_db):
     """Federation unwired (or wired later) must not break adapter startup."""
     async with aiohttp.ClientSession() as session:
-        app, _db = await _ha_adapter_app(tmp_path, db_key, event_bus_key, session)
+        app = _ha_adapter_app(ice_db, db_key, event_bus_key, session)
         adapter = HomeAssistantAdapter(
             ha_url="http://ha.local:8123",
             ha_token="",
@@ -1071,11 +1077,11 @@ async def test_on_startup_tolerates_no_federation_service(tmp_path):
         await adapter.on_cleanup(app)
 
 
-async def test_empty_ha_reply_leaves_federation_untouched(tmp_path):
+async def test_empty_ha_reply_leaves_federation_untouched(tmp_path, ice_db):
     """The #1 finding, at the wiring level: HA with nothing to offer must
     not blank out the operator's configured ICE servers."""
     async with aiohttp.ClientSession() as session:
-        app, _db = await _ha_adapter_app(tmp_path, db_key, event_bus_key, session)
+        app = _ha_adapter_app(ice_db, db_key, event_bus_key, session)
         fed = _RecordingFederation()
         app[federation_service_key] = fed
         adapter = HomeAssistantAdapter(
@@ -1126,12 +1132,14 @@ class _PrimingFederation(_RecordingFederation):
         self.primed += 1
 
 
-async def test_on_startup_releases_the_ice_gate_after_the_first_attempt(tmp_path):
+async def test_on_startup_releases_the_ice_gate_after_the_first_attempt(
+    tmp_path, ice_db
+):
     """Even when HA has nothing usable to offer, the first fetch attempt must
     release the transport's ICE gate — otherwise every haos/ha boot pays the
     full prime timeout on its first outbound federation send."""
     async with aiohttp.ClientSession() as session:
-        app, _db = await _ha_adapter_app(tmp_path, db_key, event_bus_key, session)
+        app = _ha_adapter_app(ice_db, db_key, event_bus_key, session)
         fed = _PrimingFederation()
         app[federation_service_key] = fed
         adapter = HomeAssistantAdapter(

@@ -32,7 +32,7 @@ from socialhome.crypto import generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
 from socialhome.gfs_proof import PROOF_CAPABILITY, PROOF_ROUTE, sign_possession_proof
-from socialhome.global_server.app_keys import gfs_fed_repo_key
+from socialhome.global_server.app_keys import gfs_fed_repo_key, gfs_token_service_key
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.server import create_gfs_app
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
@@ -92,7 +92,7 @@ def _url(server) -> str:
 
 
 async def _token(tc: TestClient) -> str:
-    token_svc = tc.server.app["gfs_token_service"]
+    token_svc = tc.server.app[gfs_token_service_key]
     token, _wait = await token_svc.generate("203.0.113.1")
     assert token
     return token

@@ -114,12 +114,12 @@ async def test_create_user_non_admin_403(client):
     assert r.status == 403
 
 
-async def test_create_user_405_when_directory_is_ha_person_registry(client):
+async def test_create_user_405_when_directory_is_ha_person_registry(make_client):
     """Adapters that declare ``HA_PERSON_DIRECTORY`` route provisioning
     through ``/api/admin/ha-users/.../provision`` instead of this
     endpoint, so the view should refuse with 405 ``WRONG_MODE``.
     """
-    client.server.app[platform_adapter_key] = _HaLikeAdapter()
+    client = await make_client({platform_adapter_key: _HaLikeAdapter()})
     r = await client.post(
         "/api/admin/users",
         headers=_auth(client._tok),

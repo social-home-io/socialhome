@@ -29,9 +29,6 @@ from socialhome.services.federation_inbound_service import (
     _mime_to_ext,
 )
 
-pytestmark = pytest.mark.asyncio
-
-
 _WEBP_HEADER = b"\x52\x49\x46\x46\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 32
 
 

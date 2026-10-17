@@ -183,6 +183,13 @@ def test_retention_window_sql_cutoff_and_exempt_types():
 
 def test_retention_window_sql_runs_in_sqlite():
     conn = sqlite3.connect(":memory:")
+    try:
+        _check_retention_window_sql(conn)
+    finally:
+        conn.close()
+
+
+def _check_retention_window_sql(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE t(id TEXT, created_at TEXT, type TEXT)")
     conn.executemany(
         "INSERT INTO t VALUES(?,?,?)",

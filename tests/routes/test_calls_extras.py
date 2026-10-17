@@ -112,19 +112,21 @@ async def test_calls_hangup_non_participant_403(client):
 # ─── ice_servers with TURN configured ────────────────────────────────────
 
 
-async def test_ice_servers_includes_turn_when_configured(client):
+async def test_ice_servers_includes_turn_when_configured(make_client):
     import dataclasses as _dc
 
     from socialhome.app_keys import config_key
 
-    cfg = client.server.app[config_key]
-    new_cfg = _dc.replace(
-        cfg,
-        webrtc_turn_url="turn:turn.example.com:3478",
-        webrtc_turn_user="alice",
-        webrtc_turn_cred="s3cret",
+    client = await make_client(
+        lambda app: {
+            config_key: _dc.replace(
+                app[config_key],
+                webrtc_turn_url="turn:turn.example.com:3478",
+                webrtc_turn_user="alice",
+                webrtc_turn_cred="s3cret",
+            )
+        }
     )
-    client.server.app[config_key] = new_cfg
     r = await client.get("/api/webrtc/ice_servers", headers=_auth(client._tok))
     body = await r.json()
     has_turn = any(

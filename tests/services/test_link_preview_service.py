@@ -111,7 +111,8 @@ async def test_builds_preview_with_local_image(tmp_path):
     assert p.thumbnail_url is not None
     assert p.thumbnail_url.startswith("api/media/")
     stored = tmp_path / p.thumbnail_url.removeprefix("api/media/")
-    assert Image.open(stored).format == "WEBP"
+    with Image.open(stored) as img:
+        assert img.format == "WEBP"
     assert fetcher.calls == [
         "https://example.com/story",
         "https://example.com/card.png",

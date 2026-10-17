@@ -138,24 +138,28 @@ class _RecordingOutbound:
         return 2
 
 
-def _ha_mode(client, tmp_path) -> _RecordingOutbound:
-    """Swap in the real HA adapter (reading this app's ``instance_config``)
-    and a recording outbound."""
-    adapter = HaAdapter(ha_url="http://ha.local", ha_token="t", data_dir=str(tmp_path))
-    adapter._instance_config = client.app[instance_config_repo_key]
-    client.app[platform_adapter_key] = adapter
+async def _ha_mode(make_client, tmp_path):
+    """A client whose app runs the real HA adapter (reading this app's
+    ``instance_config``) and a recording outbound."""
     outbound = _RecordingOutbound()
-    client.app[url_update_outbound_key] = outbound
-    return outbound
+
+    def _overrides(app):
+        adapter = HaAdapter(
+            ha_url="http://ha.local", ha_token="t", data_dir=str(tmp_path)
+        )
+        adapter._instance_config = app[instance_config_repo_key]
+        return {platform_adapter_key: adapter, url_update_outbound_key: outbound}
+
+    return await make_client(_overrides), outbound
 
 
-async def test_put_base_fans_out_the_full_inbox_base(client, tmp_path):
+async def test_put_base_fans_out_the_full_inbox_base(make_client, tmp_path):
     """Peers get the adapter's EFFECTIVE base — the pushed URL plus the
     HA-hosted forwarder path — never the bare pushed URL."""
+    client, outbound = await _ha_mode(make_client, tmp_path)
     fed_repo = client.app[federation_repo_key]
     await fed_repo.save_instance(_peer("peer-a", "wh-a"))
     await fed_repo.save_instance(_peer("peer-b", "wh-b"))
-    outbound = _ha_mode(client, tmp_path)
 
     r = await client.put(
         "/api/ha/integration/federation-base",
@@ -176,16 +180,16 @@ async def test_put_base_fans_out_the_full_inbox_base(client, tmp_path):
 
 
 async def test_put_base_publishes_nothing_while_an_admin_override_wins(
-    client, tmp_path
+    make_client, tmp_path
 ):
     """An admin-set base wins over the pushed one: a new push does not
     change where peers reach us, so nobody is told a wrong address."""
+    client, outbound = await _ha_mode(make_client, tmp_path)
     db = client.app[_db_key]
     await db.enqueue(
         "INSERT INTO instance_config(key, value) VALUES(?,?)",
         (MANUAL_BASE_KEY, "https://direct.example"),
     )
-    outbound = _ha_mode(client, tmp_path)
 
     r = await client.put(
         "/api/ha/integration/federation-base",
@@ -198,14 +202,17 @@ async def test_put_base_publishes_nothing_while_an_admin_override_wins(
     assert outbound.captured == []
 
 
-async def test_put_base_logs_a_warning_when_the_base_cannot_resolve(client, caplog):
+async def test_put_base_logs_a_warning_when_the_base_cannot_resolve(
+    make_client, caplog
+):
     class _Broken:
         async def get_federation_base(self):
             raise RuntimeError("db gone")
 
-    client.app[platform_adapter_key] = _Broken()
     outbound = _RecordingOutbound()
-    client.app[url_update_outbound_key] = outbound
+    client = await make_client(
+        {platform_adapter_key: _Broken(), url_update_outbound_key: outbound}
+    )
     with caplog.at_level(logging.WARNING, logger="socialhome.routes.ha_integration"):
         r = await client.put(
             "/api/ha/integration/federation-base",
@@ -246,7 +253,9 @@ async def test_outbound_service_wired_on_app(client):
     assert client.app.get(url_update_outbound_key) is not None
 
 
-async def test_put_base_when_the_base_fails_to_resolve_after_the_write(client, caplog):
+async def test_put_base_when_the_base_fails_to_resolve_after_the_write(
+    make_client, caplog
+):
     """The push is stored, but the effective base can't be read back:
     WARNING, no fan-out (never publish a guess), and a normal answer."""
 
@@ -259,9 +268,10 @@ async def test_put_base_when_the_base_fails_to_resolve_after_the_write(client, c
                 return "https://old.example/api/socialhome/inbox"
             raise RuntimeError("db gone")
 
-    client.app[platform_adapter_key] = _FailsAfterWrite()
     outbound = _RecordingOutbound()
-    client.app[url_update_outbound_key] = outbound
+    client = await make_client(
+        {platform_adapter_key: _FailsAfterWrite(), url_update_outbound_key: outbound}
+    )
     with caplog.at_level(logging.WARNING, logger="socialhome.routes.ha_integration"):
         r = await client.put(
             "/api/ha/integration/federation-base",
