@@ -684,6 +684,33 @@ html.sh-kbd-open .sh-comment-overlay {
     padding-bottom: calc(84px + env(safe-area-inset-bottom, 0));
   }
   .sh-mobile-drawer--open { transform: translateX(0); }
+  /* The drawer's own close control (the bottom bar's ✕ is outside the
+   * aria-modal dialog). Pinned top-right over the brand row's empty
+   * end, so the SideNav below keeps its layout. */
+  .sh-mobile-drawer__close {
+    position: absolute;
+    top: var(--sh-space-md);
+    right: var(--sh-space-sm);
+    z-index: 1;
+    width: 44px;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: var(--sh-radius-full);
+    color: var(--sh-text-muted);
+    font-size: var(--sh-font-size-lg);
+    line-height: 1;
+    cursor: pointer;
+  }
+  .sh-mobile-drawer__close:hover { color: var(--sh-text); background: var(--sh-bg-secondary); }
+  .sh-mobile-drawer__close:focus-visible {
+    outline: 2px solid var(--sh-primary);
+    outline-offset: -2px;
+  }
   .sh-mobile-drawer-scrim {
     display: block;
     position: fixed;

@@ -33,6 +33,7 @@ import { dmUnreadTotal } from '@/store/dms'
 import { shortcutsHelpOpen } from '@/lib/shortcuts'
 import { addBase } from '@/baseUrl'
 import { useKeyboardOpen } from '@/hooks/useKeyboardOpen'
+import { focusableWithin } from '@/components/Modal'
 import { t } from '@/i18n/i18n'
 
 interface Tab {
@@ -96,16 +97,37 @@ export function MobileNav() {
   // Esc closes the drawer. Opening moves focus onto the drawer (as
   // Modal does on touch) so Tab walks its links; the closed drawer is
   // inert, so Esc from inside it hands focus back to the More button
-  // instead of dropping it on <body>.
+  // instead of dropping it on <body>. The drawer is aria-modal, so Tab
+  // is trapped inside it the way Modal traps it: the bottom bar behind
+  // the scrim is outside the dialog, and the drawer's own close button
+  // is the way out.
   useEffect(() => {
     if (!mobileSidebarOpen.value) return
     drawerRef.current?.focus({ preventScroll: true })
     const onKey = (e: KeyboardEvent) => {
+      const drawer = drawerRef.current
       if (e.key === 'Escape') {
         e.preventDefault()
-        const hadFocus = drawerRef.current?.contains(document.activeElement)
+        const hadFocus = drawer?.contains(document.activeElement)
         mobileSidebarOpen.value = false
         if (hadFocus) moreRef.current?.focus()
+        return
+      }
+      if (e.key !== 'Tab' || !drawer) return
+      const items = focusableWithin(drawer)
+      if (items.length === 0) return
+      const first = items[0]
+      const last = items[items.length - 1]
+      const active = document.activeElement
+      // Only while focus is in the drawer: a dialog opened on top of
+      // it (from the identity strip) runs its own trap.
+      if (!drawer.contains(active)) return
+      if (e.shiftKey && (active === first || active === drawer)) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
       }
     }
     document.addEventListener('keydown', onKey)
@@ -120,6 +142,13 @@ export function MobileNav() {
     else html.classList.remove('sh-no-scroll')
     return () => html.classList.remove('sh-no-scroll')
   }, [mobileSidebarOpen.value])
+
+  // The drawer is inert once closed, so whatever had focus inside it
+  // (this button) would drop to <body>: hand it back to More.
+  const closeDrawer = () => {
+    mobileSidebarOpen.value = false
+    moreRef.current?.focus()
+  }
 
   const moreActive = mobileSidebarOpen.value
   return (
@@ -150,6 +179,17 @@ export function MobileNav() {
         inert={!mobileSidebarOpen.value}
         aria-hidden={mobileSidebarOpen.value ? undefined : 'true'}
       >
+        {/* The bottom bar's ✕ sits outside this aria-modal dialog, so
+            screen readers in browse mode can't reach it: the dialog
+            carries its own close control, top-right beside the brand. */}
+        <button
+          type="button"
+          class="sh-mobile-drawer__close"
+          aria-label={t('nav.drawer_close')}
+          onClick={closeDrawer}
+        >
+          <span aria-hidden="true">✕</span>
+        </button>
         <SideNav />
       </div>
       <nav

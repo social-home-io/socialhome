@@ -2162,6 +2162,7 @@
   "nav.sidebar": "Zijbalk",
   "nav.signed_in_as": "Ingelogd als {name}, instellingen openen",
   "nav.drawer": "Navigatie",
+  "nav.drawer_close": "Navigatie sluiten",
   "nav.mobile": "Hoofdtabbladen",
   "nav.go_to": "Ga naar…",
   "nav.section.home": "Thuis",

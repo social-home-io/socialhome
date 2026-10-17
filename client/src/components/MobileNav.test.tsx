@@ -71,6 +71,63 @@ describe('MobileNav', () => {
     container.remove()
   })
 
+  it('the drawer has its own named close button inside the role=dialog', () => {
+    // aria-modal hides everything outside the dialog from screen
+    // readers' browse mode, so the bottom bar's ✕ toggle alone left
+    // the modal with no reachable close control.
+    mobileSidebarOpen.value = false
+    const { container } = render(wrap(<MobileNav />), { container: document.body.appendChild(document.createElement('div')) })
+    const more = container.querySelector<HTMLButtonElement>('button.sh-mobile-tab--more')!
+    more.focus()
+    act(() => { more.click() })
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    const close = dialog.querySelector<HTMLButtonElement>('button.sh-mobile-drawer__close')
+    expect(close).not.toBeNull()
+    expect(dialog.contains(close)).toBe(true)
+    expect(close!.getAttribute('aria-label')).toBe('Close navigation')
+    expect(close!.getAttribute('type')).toBe('button')
+    act(() => { close!.focus(); close!.click() })
+    expect(mobileSidebarOpen.value).toBe(false)
+    // The drawer goes inert, so focus must land back on More, not <body>.
+    expect(document.activeElement).toBe(more)
+    container.remove()
+  })
+
+  it('Tab stays inside the open drawer (wraps last → first, Shift+Tab first → last)', () => {
+    mobileSidebarOpen.value = false
+    const { container } = render(wrap(<MobileNav />), { container: document.body.appendChild(document.createElement('div')) })
+    act(() => { mobileSidebarOpen.value = true })
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!
+    const items = [...dialog.querySelectorAll<HTMLElement>('a[href], button:not([disabled])')]
+    expect(items.length).toBeGreaterThan(2)
+    const first = items[0]
+    const last = items[items.length - 1]
+    expect(first.classList.contains('sh-mobile-drawer__close')).toBe(true)
+
+    last.focus()
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    act(() => { last.dispatchEvent(tab) })
+    expect(tab.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(first)
+
+    const back = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })
+    act(() => { first.dispatchEvent(back) })
+    expect(back.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(last)
+
+    // From the drawer container itself (where focus lands on open),
+    // Shift+Tab must not escape to the page behind either.
+    dialog.focus()
+    const fromDialog = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })
+    act(() => { dialog.dispatchEvent(fromDialog) })
+    expect(fromDialog.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(last)
+
+    act(() => { mobileSidebarOpen.value = false })
+    container.remove()
+  })
+
   it('closes the drawer when the keyboard-shortcuts dialog opens', () => {
     render(wrap(<MobileNav />))
     act(() => { mobileSidebarOpen.value = true })

@@ -2189,6 +2189,7 @@
   "nav.sidebar": "Barra lateral",
   "nav.signed_in_as": "Has iniciado sesión como {name}, abrir ajustes",
   "nav.drawer": "Navegación",
+  "nav.drawer_close": "Cerrar la navegación",
   "nav.mobile": "Pestañas principales",
   "nav.go_to": "Ir a…",
   "nav.section.home": "En casa",
