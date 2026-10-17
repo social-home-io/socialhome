@@ -423,7 +423,12 @@ async def test_relay_failure_is_uniform_and_immediate(
     elapsed = loop.time() - t0
     got = _shape(resp, await resp.read())
 
-    # Reference: author online + registered, never starts streaming.
+    # Reference: author online + registered, never starts streaming. Only
+    # its *shape* is compared, so it waits out a tiny budget; the failure
+    # request above ran under the wide one, which is what proves it
+    # answered without waiting.
+    ref_budget = 0.05
+    monkeypatch.setattr(mr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", ref_budget)
     client._app[gfs_ws_registry_key]._by_instance["inst-author"] = client._author_ws
     await client._app[gfs_moment_public_registry_key].register_user(
         user_id="u-ref",
@@ -441,7 +446,7 @@ async def test_relay_failure_is_uniform_and_immediate(
     assert want[0] == 503
     assert json.loads(want[1]) == {"error": "unavailable"}
     assert elapsed < budget / 2, (label, elapsed)
-    assert ref_elapsed >= budget
+    assert ref_elapsed >= ref_budget
 
 
 @pytest.mark.security

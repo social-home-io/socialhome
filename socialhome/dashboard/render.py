@@ -11,6 +11,7 @@ call ``t("dashboard.…", name=value)``.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import mimetypes
@@ -30,6 +31,7 @@ __all__ = [
     "TEMPLATE_DIR",
     "DashboardRenderer",
     "StaticAsset",
+    "compiled_environment",
     "load_static_assets",
     "text_direction",
 ]
@@ -74,6 +76,31 @@ def load_static_assets(directory: Path) -> dict[str, StaticAsset]:
     return assets
 
 
+@functools.cache
+def compiled_environment() -> jinja2.Environment:
+    """The template environment, every template compiled — once per process.
+
+    The templates are package data and ``auto_reload`` is off, so a
+    compiled environment never goes stale; renderers share it (the locale
+    and translator are per-render arguments, not environment state).
+    Compiling all of them here keeps the fail-fast: a broken template fails
+    the first renderer built, at startup, and no request ever touches the
+    filesystem for one. Compiling is ~20 templates' worth of Jinja codegen,
+    which every ``create_app`` used to pay again.
+    """
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(TEMPLATE_DIR),
+        autoescape=True,
+        undefined=jinja2.StrictUndefined,
+        trim_blocks=True,
+        lstrip_blocks=True,
+        auto_reload=False,
+    )
+    for name in env.list_templates(extensions=["j2"]):
+        env.get_template(name)
+    return env
+
+
 class DashboardRenderer:
     """Renders dashboard pages in a given locale."""
 
@@ -81,18 +108,7 @@ class DashboardRenderer:
 
     def __init__(self, catalog: Catalog, *, static_dir: Path = STATIC_DIR) -> None:
         self._catalog = catalog
-        self._env = jinja2.Environment(
-            loader=jinja2.FileSystemLoader(TEMPLATE_DIR),
-            autoescape=True,
-            undefined=jinja2.StrictUndefined,
-            trim_blocks=True,
-            lstrip_blocks=True,
-            auto_reload=False,
-        )
-        # Compile every template now — a broken template fails at startup,
-        # and no request ever touches the filesystem for one.
-        for name in self._env.list_templates(extensions=["j2"]):
-            self._env.get_template(name)
+        self._env = compiled_environment()
         self._static: Mapping[str, StaticAsset] = load_static_assets(static_dir)
 
     def static_asset(self, name: str) -> StaticAsset | None:

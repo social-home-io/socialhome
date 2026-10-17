@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from socialhome.db.migrations import discover_migrations
+from tests.migration_chain import apply_through
 
 _GFS_MIGRATIONS = (
     Path(__file__).resolve().parent.parent.parent
@@ -23,17 +24,7 @@ _VERSION = 18
 
 
 def _apply_through(conn: sqlite3.Connection, last: int) -> None:
-    done = {r[0] for r in conn.execute("SELECT version FROM schema_version")}
-    for mig in discover_migrations(_GFS_MIGRATIONS):
-        if mig.version in done:
-            continue
-        if mig.version > last:
-            break
-        mig.apply(conn)
-        conn.execute(
-            "INSERT INTO schema_version(version, description) VALUES (?,?)",
-            (mig.version, mig.description),
-        )
+    apply_through(conn, last, directory=_GFS_MIGRATIONS)
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> list[str]:

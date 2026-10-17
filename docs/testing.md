@@ -394,6 +394,21 @@ test boundary — production code is untouched:
   `Config(...)`; 5 ms, formerly 500 ms) — run with 1 ms instead. A window a test sets on purpose (the batching
   tests' 200 ms) is kept.
 
+- **Migration-chain snapshots** (`tests/migration_chain.py`). The
+  per-migration tests (`tests/db/test_migration_00NN_*.py`, the GFS ones)
+  build "every migration through N" on a fresh file before seeding rows —
+  ~100 migrations, one commit each, per test. `apply_through` serves a
+  database that holds only an empty `schema_version` from a per-process
+  in-memory snapshot of that same replay (keyed by N, the migrations
+  directory's fingerprint, the `schema_version` DDL, `foreign_keys` and
+  transaction mode); anything already seeded or partially migrated takes
+  the real replay. `tests/test_migration_chain.py` pins that a restored
+  database matches a replayed one.
+
+The app itself compiles the household-dashboard templates once per process
+(`socialhome.dashboard.render.compiled_environment`) rather than once per
+`create_app` — that compile was half of every app-backed test's setup.
+
 Rules for new tests, from the root causes fixed so far:
 
 - **Never wait out a production timeout or back-off.** Shrink the module
@@ -405,7 +420,15 @@ Rules for new tests, from the root causes fixed so far:
 - **Never touch the real network.** A hostname like `ha.local` or
   `gfs.test` that reaches a real client waits out DNS; inject the fake
   client (`ha_client=_FakeHaClient()`) or swap the factory at the
-  boundary.
+  boundary. `.local` names are mDNS: a resolver with nss-mdns waits ~5 s
+  per lookup — an HA-mode app built from a bare `Config(mode="ha")` tries
+  `homeassistant.local` several times at startup (18 s per backup-route
+  test). Point `ha_url` at a refused loopback port
+  (`http://127.0.0.1:9`) for "HA unreachable".
+- **A reference request only needs the shape, not the full wait.** A test
+  that proves "fails at once instead of waiting the budget" by comparing
+  with a request that *does* wait can give that reference a tiny budget
+  (`test_relay_failure_is_uniform_and_immediate`).
 - **A fake server must behave like the real one at shutdown** — e.g. read
   its WebSocket so it answers the client's CLOSE, or the client's close
   handshake waits out aiohttp's timeout.

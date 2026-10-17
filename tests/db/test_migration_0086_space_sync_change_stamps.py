@@ -16,8 +16,8 @@ import sqlite3
 
 import pytest
 
-from socialhome.db.migrations import discover_migrations
 from tests.db.connections import connect
+from tests.migration_chain import apply_through
 
 _VERSION = 86
 
@@ -45,17 +45,7 @@ TOUCHING: dict[str, frozenset[str]] = {
 
 
 def _apply_through(conn: sqlite3.Connection, last: int) -> None:
-    done = {r[0] for r in conn.execute("SELECT version FROM schema_version")}
-    for mig in discover_migrations():
-        if mig.version in done:
-            continue
-        if mig.version > last:
-            break
-        mig.apply(conn)
-        conn.execute(
-            "INSERT INTO schema_version(version, description) VALUES (?,?)",
-            (mig.version, mig.description),
-        )
+    apply_through(conn, last)
 
 
 def _fresh(tmp_path, name: str) -> sqlite3.Connection:

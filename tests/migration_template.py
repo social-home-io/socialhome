@@ -37,7 +37,7 @@ RunMigrations = Callable[..., list[Migration]]
 _DirKey = tuple[str, tuple[tuple[str, int, int], ...]]
 
 
-def _dir_key(directory: Path | None) -> _DirKey:
+def dir_key(directory: Path | None) -> _DirKey:
     """Identify a migrations directory by its path AND its file contents'
     fingerprint, so a test that writes extra files into a temp directory can
     never be served a stale snapshot."""
@@ -74,7 +74,7 @@ class MigrationTemplateCache:
     ) -> list[Migration]:
         if not _is_empty(conn):
             return self._real(conn, directory=directory)
-        key = _dir_key(directory)
+        key = dir_key(directory)
         with self._lock:
             cached = self._templates.get(key)
             if cached is None:
