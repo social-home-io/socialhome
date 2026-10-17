@@ -229,7 +229,7 @@ export function mentionInputAria(
 
 export function MentionAutocomplete() {
   const s = state.value
-  const ref = useRef<HTMLDivElement>(null)
+  const ref = useRef<HTMLDivElement | null>(null)
   // ``position: fixed`` resolves against the nearest transformed /
   // filtered ancestor, not the viewport (the comment overlay's backdrop
   // uses ``backdrop-filter``). Measure where the popover actually landed

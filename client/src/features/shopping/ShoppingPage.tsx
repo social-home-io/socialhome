@@ -1,3 +1,4 @@
+import type { Ref } from 'preact'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { useTitle } from '@/store/pageTitle'
 import {
@@ -24,6 +25,7 @@ import { ListSkeleton } from '@/components/Skeleton'
 import { LoadErrorState } from '@/components/LoadErrorState'
 import { ChipRadioGroup } from '@/components/ChipRadioGroup'
 import { OverflowMenu, type MenuItem } from '@/components/OverflowMenu'
+import { assignRef } from '@/utils/refs'
 import { currentUser } from '@/store/auth'
 import {
   householdDisplayName,
@@ -519,7 +521,7 @@ export default function ShoppingPage() {
       <QuickAddBar
         class="sh-shopping-add"
         value={draft}
-        inputRef={inputRef}
+        ref={inputRef}
         placeholder={t('shopping.placeholder')}
         inputLabel={t('shopping.input_label')}
         submitLabel={t('shopping.add')}
@@ -903,6 +905,8 @@ function ItemRow(props: RowProps) {
   const { item, done, refocus, isEditing, onRefocused } = props
   const textRef = useRef<HTMLButtonElement | null>(null)
   const rowRef = useRef<HTMLLIElement | null>(null)
+  /** The store pill (``StorePicker`` forwards ``ref`` to it). */
+  const pillRef = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
     if (!refocus || isEditing) return
@@ -918,7 +922,7 @@ function ItemRow(props: RowProps) {
     // A row ticked off meanwhile has no pill — just drop the request.
     const active = document.activeElement
     const lost = !active || active === document.body || !!rowRef.current?.contains(active)
-    if (!done && lost) rowRef.current?.querySelector<HTMLElement>('.sh-shopping-store-pill')?.focus()
+    if (!done && lost) pillRef.current?.focus()
     onStoreRefocused()
   }, [refocusStore, isEditing, done, onStoreRefocused])
 
@@ -965,6 +969,7 @@ function ItemRow(props: RowProps) {
       )}
       {!done && (
         <StorePicker
+          ref={pillRef}
           currentStore={item.store ?? null}
           storeNames={props.storeNames}
           compact={props.compact}
@@ -1095,6 +1100,9 @@ interface StorePickerProps {
   /** Icon-only pill (no store-name label) — used in the grouped view
    *  where the section header already names the store. */
   compact?: boolean
+  /** Lands on the store pill (the ``OverflowMenu`` trigger), the element
+   *  the row refocuses after a reassign moves it. */
+  ref?: Ref<HTMLButtonElement>
 }
 
 /** One-tap reassign affordance on the item row.
@@ -1111,20 +1119,23 @@ function StorePicker({
   storeNames,
   onPick,
   compact,
+  ref,
 }: StorePickerProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [adding, setAdding] = useState(false)
   const [newName, setNewName] = useState('')
   const wrapRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const setTrigger = useCallback((el: HTMLButtonElement | null) => {
+    triggerRef.current = el
+    assignRef(ref, el)
+  }, [ref])
   const newInputRef = useRef<HTMLInputElement | null>(null)
-
-  const trigger = () =>
-    wrapRef.current?.querySelector<HTMLElement>('button[aria-haspopup="menu"]')
 
   const closeAdding = (refocus: boolean) => {
     setAdding(false)
     setNewName('')
-    if (refocus) trigger()?.focus()
+    if (refocus) triggerRef.current?.focus()
   }
 
   const backToList = () => {
@@ -1195,6 +1206,7 @@ function StorePicker({
   return (
     <div class="sh-shopping-store-picker" ref={wrapRef}>
       <OverflowMenu
+        ref={setTrigger}
         label={ariaLabel}
         title={currentStore
           ? t('shopping.picker.title_current', { name: currentStore })

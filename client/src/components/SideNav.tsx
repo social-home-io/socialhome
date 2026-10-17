@@ -335,7 +335,7 @@ export function SideNav() {
        *  identity strip below sits outside it, in normal flow, so it
        *  can never paint over a nav item at a short window height. */}
       <div class="sh-sidenav-scroll">
-        <Wordmark as="a" href={addBase('/')} size={28} className="sh-sidenav-brand" />
+        <Wordmark as="a" href={addBase('/')} size={28} class="sh-sidenav-brand" />
         {main.map(({ group, items }) => renderGroup(group, items))}
         {local.items.length > 0 && (
           <>

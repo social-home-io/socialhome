@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { act as flushAct } from 'preact/test-utils'
 
 const apiGet = vi.fn()
 const apiPost = vi.fn()
@@ -269,7 +270,7 @@ describe('StickyBoardPage', () => {
     const grip = await t.findByRole('button', { name: 'Move note: Note a' })
     t.fireEvent.keyDown(grip, { key: 'ArrowDown' })
     expect(apiPatch).not.toHaveBeenCalled()
-    t.unmount()
+    flushAct(() => { t.unmount() })
     expect(apiPatch).toHaveBeenCalledWith('/api/stickies/a', { position_x: 100, position_y: 110 })
   })
 

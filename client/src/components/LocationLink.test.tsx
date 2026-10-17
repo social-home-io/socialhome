@@ -13,6 +13,11 @@ describe('LocationLink', () => {
     expect(a.getAttribute('rel')).toBe('noopener noreferrer')
   })
 
+  it('puts the class prop on the link', () => {
+    const { container } = render(<LocationLink value="Library" class="sh-event-location" />)
+    expect(container.querySelector('a')!.className).toBe('sh-event-location')
+  })
+
   it('upgrades a bare www.example URL to https://', () => {
     const { container } = render(<LocationLink value="www.example.com/x" />)
     expect(container.querySelector('a')!.getAttribute('href')).toBe(

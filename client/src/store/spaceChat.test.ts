@@ -14,6 +14,8 @@ import {
   loadSpaceChat,
   patchSpaceChat,
   resetSpaceChat,
+  claimSpaceChat,
+  spaceChatSpace,
   spaceChat,
   spaceChatError,
   spaceChatOf,
@@ -53,6 +55,20 @@ describe('loadSpaceChat', () => {
     await pending
     expect(spaceChat.value).toBeNull()
     expect(spaceChatOf('s1')).toBeNull()
+  })
+
+  it('a replaced space page releasing late keeps the new space', async () => {
+    // Space → space: Preact 11 runs the old page's cleanup after paint,
+    // after the new page claimed the store.
+    apiGet.mockResolvedValue(SUMMARY)
+    const releaseOld = claimSpaceChat('s1')
+    const releaseNew = claimSpaceChat('s2')
+    await loadSpaceChat('s2')
+    releaseOld()
+    expect(spaceChatOf('s2')).toEqual(SUMMARY)
+    releaseNew()
+    expect(spaceChat.value).toBeNull()
+    expect(spaceChatSpace.value).toBeNull()
   })
 
   it('a failure names the space and keeps the previous summary', async () => {

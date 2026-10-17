@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render } from '@testing-library/preact'
+import { render, act } from '@testing-library/preact'
 
 type Handler = (e: { type: string; data: Record<string, unknown> }) => void
 const handlers = new Map<string, Set<Handler>>()
@@ -79,7 +79,7 @@ describe('useSpaceConfigWs', () => {
   it('unsubscribes on unmount', () => {
     const onChanged = vi.fn()
     const view = render(<Probe spaceId="sp-1" onChanged={onChanged} />)
-    view.unmount()
+    act(() => { view.unmount() })
     emit('space.config.changed', { space_id: 'sp-1', event_type: 'rename' })
     expect(onChanged).not.toHaveBeenCalled()
   })

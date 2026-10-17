@@ -61,11 +61,25 @@ function setDocTitle(label: string): void {
  *  Cleans up on unmount so navigating away resets the signal even
  *  when the next route hasn't mounted yet.
  */
+// The last ``useTitle`` / ``useTitleAvatar`` effect to run owns the
+// signal; a cleanup only resets it while it is still the owner. Preact
+// runs a removed component's effect cleanup after paint, so the cleanup
+// of a title the page just replaced (e.g. ConversationView swapping its
+// loading frame for the thread, each with its own ``ThreadPageTitle``)
+// can land *after* the replacement set its title — without the owner
+// check it blanked the TopBar.
+let titleOwner: object | null = null
+let avatarOwner: object | null = null
+
 export function useTitle(title: string): void {
   useEffect(() => {
+    const owner = {}
+    titleOwner = owner
     pageTitle.value = title
     setDocTitle(title)
     return () => {
+      if (titleOwner !== owner) return
+      titleOwner = null
       // Reset to empty so the topbar doesn't show a stale title from
       // the page we just left during the brief gap before the new
       // page's ``useTitle`` runs.
@@ -82,7 +96,13 @@ export function useTitleAvatar(avatar: PageAvatar | null): void {
   const name = avatar?.name ?? ''
   const personId = avatar?.personId ?? null
   useEffect(() => {
+    const owner = {}
+    avatarOwner = owner
     pageTitleAvatar.value = avatar
-    return () => { pageTitleAvatar.value = null }
+    return () => {
+      if (avatarOwner !== owner) return
+      avatarOwner = null
+      pageTitleAvatar.value = null
+    }
   }, [src, name, personId])
 }

@@ -1,8 +1,15 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
+import { createRef } from 'preact'
 import { ReactionPicker } from './ReactionPicker'
 
 describe('ReactionPicker', () => {
+  it('puts its ref on the picker root', () => {
+    const ref = createRef<HTMLDivElement>()
+    const { container } = render(<ReactionPicker ref={ref} onSelect={() => {}} onClose={() => {}} />)
+    expect(ref.current).toBe(container.querySelector('.sh-reaction-picker'))
+  })
+
   it('renders frequent emoji', () => {
     const { container } = render(<ReactionPicker onSelect={() => {}} onClose={() => {}} />)
     expect(container.textContent).toContain('👍')

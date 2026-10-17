@@ -280,6 +280,9 @@ describe('TaskBoard', () => {
     const more = t.container.querySelector('.sh-board-filters__more')!
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(more.getAttribute('data-open')).toBe('false')
+    // The toggle controls the folded group by its useId-derived id.
+    expect(more.id).not.toBe('')
+    expect(toggle.getAttribute('aria-controls')).toBe(more.id)
     t.fireEvent.click(toggle)
     await t.waitFor(() => expect(more.getAttribute('data-open')).toBe('true'))
     t.fireEvent.click(t.getByRole('button', { name: 'Assigned to me' }))

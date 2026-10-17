@@ -7,7 +7,7 @@
  * real ``<input type="checkbox">`` inside its ``<label>`` so keyboard and
  * screen-reader use come for free. Controlled: ``selected`` + ``onChange``.
  */
-import type { JSX } from 'preact'
+import type { JSX, Ref, RefObject } from 'preact'
 import { useRef } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 
@@ -37,12 +37,12 @@ export function defaultGfsSelection(choices: GfsChoice[]): string[] {
   return choices.length === 1 ? [choices[0].id] : []
 }
 
-/** Bring the checklist named *name* into view and focus its first box —
- *  its error may sit below the fold (a long dialog on a phone). Runs after
- *  the error has rendered. */
-export function revealGfsChecklist(name: string): void {
+/** Bring a checklist into view and focus its first box — its error may
+ *  sit below the fold (a long dialog on a phone). Pass the ref given to
+ *  that :func:`GfsChecklist`; read after the error has rendered. */
+export function revealGfsChecklist(checklist: RefObject<HTMLElement | null>): void {
   setTimeout(() => {
-    const fs = document.querySelector<HTMLElement>(`[data-testid="${name}-checklist"]`)
+    const fs = checklist.current
     if (!fs) return
     fs.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
     fs.querySelector<HTMLInputElement>('input:not(:disabled)')?.focus({ preventScroll: true })
@@ -59,6 +59,7 @@ export function GfsChecklist({
   intro,
   legend,
   icon = '🌐',
+  ref,
 }: {
   /** Prefix for element ids (two checklists may share a page). */
   name: string
@@ -74,6 +75,9 @@ export function GfsChecklist({
   legend?: string
   /** The legend's icon (a private channel isn't the public globe). */
   icon?: string
+  /** Lands on the ``<fieldset>`` (Preact 11 passes ``ref`` as a prop), for
+   *  :func:`revealGfsChecklist`. */
+  ref?: Ref<HTMLFieldSetElement>
 }): JSX.Element {
   const errorId = `${name}-error`
   const atMax = selected.length >= max
@@ -92,6 +96,7 @@ export function GfsChecklist({
   }
   return (
     <fieldset
+      ref={ref}
       class="sh-form-fieldset sh-gfs-checklist"
       data-testid={`${name}-checklist`}
       aria-describedby={error ? errorId : undefined}

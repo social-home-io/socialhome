@@ -4,7 +4,8 @@
  * "met through a shared space" subgroups — or the map, the skeleton, the
  * LoadError, or (no households yet) PairingSteps.
  */
-import { lazy, Suspense, useMemo } from 'preact/compat'
+import type { ComponentProps } from 'preact'
+import { useEffect, useMemo, useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import type { Connection } from '@/store/connections'
 import type { CompatPeer } from '@/store/federationCompat'
@@ -21,7 +22,38 @@ import { isHousehold, type Household } from './model'
 import { defaultPinStatus } from './MapPin'
 import type { AvatarStatus } from './ConnAvatar'
 
-const FederationMap = lazy(() => import('./FederationMap'))
+type FederationMapComponent = typeof import('./FederationMap').default
+
+/** The map chunk (Leaflet) once it has loaded, so a later visit renders it
+ *  straight away. */
+let federationMap: FederationMapComponent | null = null
+
+/** Loads the map chunk on first use. Plain hooks rather than
+ *  ``preact/compat``'s ``lazy``/``Suspense``: importing compat patches
+ *  Preact's ``options.vnode`` for the whole app (``onChange`` on text
+ *  inputs turns into ``oninput``, ``onFocus``/``onBlur`` bubble, numeric
+ *  styles gain ``px``), so a first visit to this page would change how
+ *  every other page behaves. A load error is rethrown during render so the
+ *  app's ``ErrorBoundary`` handles it, as ``lazy`` did. */
+function LazyFederationMap(props: ComponentProps<FederationMapComponent>) {
+  const [Loaded, setLoaded] = useState<FederationMapComponent | null>(() => federationMap)
+  const [failure, setFailure] = useState<{ error: unknown } | null>(null)
+  useEffect(() => {
+    if (Loaded) return
+    let live = true
+    import('./FederationMap').then(
+      (m) => {
+        federationMap = m.default
+        if (live) setLoaded(() => m.default)
+      },
+      (error: unknown) => { if (live) setFailure({ error }) },
+    )
+    return () => { live = false }
+  }, [Loaded])
+  if (failure) throw failure.error
+  if (!Loaded) return <div class="sh-federation-map__loading">{t('connections.loading_map')}</div>
+  return <Loaded {...props} />
+}
 
 interface Props {
   view: ConnView
@@ -118,15 +150,13 @@ export function HouseholdsSection(p: Props) {
     return wrap(
       <>
         <div class="sh-conn-map">
-          <Suspense fallback={<div class="sh-federation-map__loading">{t('connections.loading_map')}</div>}>
-            <FederationMap
-              onManage={p.onManage}
-              canManage={isHousehold}
-              showOffMapFooter={false}
-              statusOf={statusOf}
-              rows={rows}
-            />
-          </Suspense>
+          <LazyFederationMap
+            onManage={p.onManage}
+            canManage={isHousehold}
+            showOffMapFooter={false}
+            statusOf={statusOf}
+            rows={rows}
+          />
         </div>
         <MapFoot isAdmin={p.isAdmin} hidden={hidden} onShowList={() => p.onView('list')} />
       </>,

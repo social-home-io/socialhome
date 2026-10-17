@@ -266,7 +266,7 @@ function PublicMomentsViewer({ boot, retry }: { boot: BootPayload; retry: RetryC
   if (state.status === 'error') {
     return (
       <ViewerError
-        className="moments-error"
+        class="moments-error"
         message={state.message || 'Couldn’t connect.'}
         retry={retry}
       />

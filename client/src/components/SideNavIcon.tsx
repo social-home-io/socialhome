@@ -6,7 +6,7 @@
  * key matches the sidebar item's `key`; the name → glyph map lives
  * here so the SideNav data array stays pure.
  */
-import type { JSX } from 'preact'
+import type { JSX, SVGAttributes } from 'preact'
 
 export type SideNavIconName =
   | 'feed' | 'calendar' | 'tasks' | 'shopping' | 'presence'
@@ -19,7 +19,7 @@ interface Props {
   name: SideNavIconName
 }
 
-const COMMON: JSX.SVGAttributes<SVGSVGElement> = {
+const COMMON: SVGAttributes<SVGSVGElement> = {
   width: 20,
   height: 20,
   viewBox: '0 0 24 24',

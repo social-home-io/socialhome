@@ -175,7 +175,7 @@ export function EventPostCard({ eventId }: EventPostCardProps) {
         <div class="sh-event-card-location">
           <LocationLink
             value={event.location}
-            className="sh-event-card-location-link"
+            class="sh-event-card-location-link"
           />
         </div>
       )}

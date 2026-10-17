@@ -1,6 +1,7 @@
 /**
  * ReactionPicker — emoji reaction selection (§23.45).
  */
+import type { Ref } from 'preact'
 import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
@@ -19,11 +20,14 @@ interface ReactionPickerProps {
    *  scroll-clipping containers (the create-space modal, settings form)
    *  where an absolute popover would be clipped by ``overflow: auto``. */
   inline?: boolean
+  /** Lands on the picker's root (Preact 11 passes ``ref`` as a prop), so
+   *  :class:`EmojiPickButton` can measure it. */
+  ref?: Ref<HTMLDivElement>
 }
 
 const search = signal('')
 
-export function ReactionPicker({ onSelect, onClose, inline = false }: ReactionPickerProps) {
+export function ReactionPicker({ onSelect, onClose, inline = false, ref }: ReactionPickerProps) {
   const filtered = search.value
     ? ALL_EMOJI_WITH_KEYWORDS.filter(e => emojiMatches(e, search.value)).map(e => e.emoji)
     : ALL_EMOJI
@@ -56,7 +60,7 @@ export function ReactionPicker({ onSelect, onClose, inline = false }: ReactionPi
   }, [onClose])
 
   return (
-    <div class={`sh-reaction-picker${inline ? ' sh-reaction-picker--inline' : ''}`}
+    <div ref={ref} class={`sh-reaction-picker${inline ? ' sh-reaction-picker--inline' : ''}`}
       onClick={(e) => e.stopPropagation()}>
       <div class="sh-reaction-picker-header">
         <input class="sh-reaction-search" placeholder={t('reaction.search')}

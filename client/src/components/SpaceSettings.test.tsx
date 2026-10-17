@@ -1403,6 +1403,9 @@ describe('SpaceSettings — private space GFS (owner-only)', () => {
     fireEvent.click(getByText('space.settings.save'))
     expect(await findByText('space.private_gfs.channels_required')).toBeTruthy()
     expect(apiMock.patch).not.toHaveBeenCalled()
+    // The list is brought into view and its first box takes focus.
+    const firstBox = getByTestId('private-channel-checklist').querySelector('input')
+    await vi.waitFor(() => expect(document.activeElement).toBe(firstBox))
   })
 
   it('with the option on, a new channel GFS pick saves without a config PATCH', async () => {
@@ -1592,6 +1595,7 @@ describe('SpaceSettings — proposing Global names the GFSs', () => {
     expect(apiMock.post).not.toHaveBeenCalled()
     expect(container.querySelector('#space-tier-error')!.textContent)
       .toBe('error.gfs_selection_required')
+    await vi.waitFor(() => expect(document.activeElement).toBe(boxes(container)[0]))
     fireEvent.click(boxes(container)[1])
     expect(container.querySelector('#space-tier-error')).toBeNull()
     fireEvent.click(getByText('space.tier.propose'))

@@ -99,7 +99,7 @@ export default function SettingsPage() {
   useTitle(t('nav.settings'))
   // Unsaved profile edits ask before Settings is left (in-app or reload).
   useProfileLeaveGuard('/settings')
-  const stripRef = useRef<HTMLElement>(null)
+  const stripRef = useRef<HTMLElement | null>(null)
   // One scrollable row (P8): fade the edge that hides tabs, keep the
   // active one in view — German labels no longer wrap to three rows.
   useTabStripOverflow(stripRef, [locale.value])

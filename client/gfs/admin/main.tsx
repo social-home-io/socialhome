@@ -165,7 +165,7 @@ function App() {
   }
 
   if (phase === 'probing') {
-    return <p class="muted" style={{ padding: 22 }}>Loading…</p>
+    return <p class="muted" style={{ padding: '22px' }}>Loading…</p>
   }
   if (phase === 'login') {
     return <LoginGate onSuccess={() => {

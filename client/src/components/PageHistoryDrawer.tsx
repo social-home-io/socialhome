@@ -105,7 +105,10 @@ export function PageHistoryDrawer(
   const rows = selected ? diffLines(selected.content, currentContent) : []
 
   return (
-    <aside class="sh-history-drawer" role="dialog" aria-label={t('pages.history.title')}>
+    // A <div>, not <aside>: ARIA-in-HTML doesn't allow role="dialog" on
+    // <aside> (Preact 11's typings enforce it); the role already replaced
+    // the landmark, so the accessibility tree is unchanged.
+    <div class="sh-history-drawer" role="dialog" aria-label={t('pages.history.title')}>
       <div class="sh-history-drawer-header">
         <h3 style={{ margin: 0 }}>{t('pages.history.title')}</h3>
         <button
@@ -169,6 +172,6 @@ export function PageHistoryDrawer(
           </>
         )}
       </div>
-    </aside>
+    </div>
   )
 }

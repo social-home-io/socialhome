@@ -24,7 +24,7 @@
     "dompurify": "^3.4.17",
     "leaflet": "^1.9.4",
     "marked": "^18.1.1",
-    "preact": "^10.29.8",
+    "preact": "^11.0.1",
     "preact-iso": "^2.12.2",
     "qrcode": "^1.5.4"
   },

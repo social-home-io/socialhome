@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { render, waitFor, act } from '@testing-library/preact'
 
 const get = vi.fn()
 vi.mock('@/api', () => ({ api: { get: (...a: unknown[]) => get(...a) } }))
@@ -31,12 +31,32 @@ describe('useSpaceTheme', () => {
     expect(root.style.getPropertyValue('--sh-accent')).toBe('')
   })
 
+  it('a replaced space view unmounting late keeps the new space theme', async () => {
+    // Space → space: Preact 11 runs the old view's cleanup after paint,
+    // possibly after the new view applied its theme.
+    get.mockImplementation(async (url: string) => url.includes('sp-old')
+      ? { primary_color: '#aa0000', accent_color: '#00aa00' }
+      : { primary_color: '#0000aa' })
+    const old = render(<Probe id="sp-old" />)
+    await waitFor(() => expect(root.getAttribute('data-space-theme')).toBe('sp-old'))
+    const next = render(<Probe id="sp-new" />)
+    await waitFor(() => expect(root.getAttribute('data-space-theme')).toBe('sp-new'))
+    // The successor cleared the old space's own overrides when it applied.
+    expect(root.style.getPropertyValue('--sh-accent')).toBe('')
+    act(() => { old.unmount() })
+    expect(root.getAttribute('data-space-theme')).toBe('sp-new')
+    expect(root.style.getPropertyValue('--sh-primary')).toBe('#0000aa')
+    act(() => { next.unmount() })
+    expect(root.hasAttribute('data-space-theme')).toBe(false)
+    expect(root.style.getPropertyValue('--sh-primary')).toBe('')
+  })
+
   it('applies a colour the space admin actually picked, and rolls it back', async () => {
     get.mockResolvedValue({ primary_color: '#3366ff', accent_color: '#C8902F' })
     const { unmount } = render(<Probe id="sp-2" />)
     await waitFor(() => expect(root.style.getPropertyValue('--sh-primary')).toBe('#3366ff'))
     expect(root.style.getPropertyValue('--sh-accent')).toBe('')
-    unmount()
+    act(() => { unmount() })
     expect(root.style.getPropertyValue('--sh-primary')).toBe('')
     expect(root.hasAttribute('data-space-theme')).toBe(false)
   })
@@ -51,7 +71,7 @@ describe('useSpaceTheme', () => {
     expect(root.style.getPropertyValue('--sh-on-primary-fill-dark')).toBe('#fff')
     expect(root.style.getPropertyValue('--sh-primary-fill-hover-dark'))
       .toBe('color-mix(in srgb, var(--sh-primary-fill) 85%, #000)')
-    unmount()
+    act(() => { unmount() })
     for (const p of ['--sh-on-primary-fill-light', '--sh-on-primary-fill-dark',
       '--sh-primary-fill-hover-light', '--sh-primary-fill-hover-dark']) {
       expect(root.style.getPropertyValue(p)).toBe('')
@@ -72,12 +92,11 @@ describe('useSpaceTheme', () => {
     const first = render(<Probe id="sp-5" />)
     await waitFor(() => expect(root.getAttribute('data-space-theme')).toBe('sp-5'))
     expect(root.style.getPropertyValue('--sh-space-font')).toBe('')
-    first.unmount()
-
+    act(() => { first.unmount() })
     get.mockResolvedValue({ font_family: 'serif' })
     const { unmount } = render(<Probe id="sp-6" />)
     await waitFor(() => expect(root.style.getPropertyValue('--sh-space-font')).toContain('Georgia'))
-    unmount()
+    act(() => { unmount() })
     expect(root.style.getPropertyValue('--sh-space-font')).toBe('')
 
     get.mockResolvedValue({ font_family: 'Comic Sans' })
@@ -95,7 +114,7 @@ describe('useSpaceTheme post layout', () => {
       get.mockResolvedValue({ post_layout: layout })
       const { unmount } = render(<Probe id={`sp-l-${layout}`} />)
       await waitFor(() => expect(root.getAttribute('data-post-layout')).toBe(layout))
-      unmount()
+      act(() => { unmount() })
       expect(root.hasAttribute('data-post-layout')).toBe(false)
     }
   })
@@ -107,7 +126,7 @@ describe('useSpaceTheme post layout', () => {
       await waitFor(() => expect(root.getAttribute('data-space-theme')).toBe(`sp-u-${String(layout)}`))
       expect(root.hasAttribute('data-post-layout')).toBe(false)
       expect(root.style.getPropertyValue('--sh-post-layout-gap')).toBe('')
-      unmount()
+      act(() => { unmount() })
     }
   })
 })
@@ -118,7 +137,7 @@ describe('useSpaceTheme font vs household font', () => {
     get.mockResolvedValue({ font_family: 'mono' })
     const { unmount } = render(<Probe id="sp-hh" />)
     await waitFor(() => expect(root.style.getPropertyValue('--sh-space-font')).toContain('monospace'))
-    unmount()
+    act(() => { unmount() })
     expect(root.style.getPropertyValue('--sh-space-font')).toBe('')
     expect(root.style.getPropertyValue('--hh-font')).toBe('Georgia, serif')
     expect(root.style.getPropertyValue('--sh-font-family')).toBe('')

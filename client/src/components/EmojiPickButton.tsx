@@ -60,7 +60,7 @@ interface BaseProps {
    *  when toggling so a second click on the same button closes it. */
   openKey: string
   /** Optional CSS class on the trigger button. */
-  className?: string
+  class?: string
   /** Optional ARIA label override. Defaults to ``"Insert emoji"``. */
   ariaLabel?: string
 }
@@ -79,14 +79,14 @@ export type EmojiPickButtonProps = SignalTargetProps | CallbackTargetProps
 
 export function EmojiPickButton(props: EmojiPickButtonProps) {
   const isOpen = openFor.value === props.openKey
-  const wrapRef = useRef<HTMLDivElement>(null)
+  const buttonRef = useRef<HTMLButtonElement | null>(null)
+  const pickerRef = useRef<HTMLDivElement | null>(null)
   // Keep the open picker on screen (see ``fitPicker``). It is laid out
   // end-aligned above the button by CSS; measured once on open.
   useLayoutEffect(() => {
     if (!isOpen) return
-    const wrap = wrapRef.current
-    const picker = wrap?.querySelector<HTMLElement>('.sh-reaction-picker')
-    const button = wrap?.querySelector('.sh-emoji-pick-btn')
+    const picker = pickerRef.current
+    const button = buttonRef.current
     if (!picker || !button) return
     const fit = fitPicker(
       picker.getBoundingClientRect(), button.getBoundingClientRect(), visibleArea(),
@@ -110,10 +110,11 @@ export function EmojiPickButton(props: EmojiPickButtonProps) {
     }
   }
   return (
-    <div class="sh-emoji-pick-wrap" ref={wrapRef}>
+    <div class="sh-emoji-pick-wrap">
       <button
+        ref={buttonRef}
         type="button"
-        class={`sh-emoji-pick-btn ${props.className ?? ''}`}
+        class={`sh-emoji-pick-btn ${props.class ?? ''}`}
         aria-label={props.ariaLabel ?? t('reaction.insert')}
         aria-haspopup="dialog"
         aria-expanded={isOpen}
@@ -125,6 +126,7 @@ export function EmojiPickButton(props: EmojiPickButtonProps) {
       </button>
       {isOpen && (
         <ReactionPicker
+          ref={pickerRef}
           onSelect={(emoji) => insert(emoji)}
           onClose={() => { openFor.value = null }}
         />

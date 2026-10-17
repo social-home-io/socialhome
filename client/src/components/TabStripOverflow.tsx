@@ -67,7 +67,7 @@ function edgeState(el: HTMLElement): { moreLeft: boolean; moreRight: boolean } {
 }
 
 export function useTabStripOverflow(
-  stripRef: RefObject<HTMLElement>,
+  stripRef: RefObject<HTMLElement | null>,
   // The deps that should re-trigger an overflow re-measure (e.g. the
   // tab list itself — adding a tab can flip overflow on or off).
   deps: ReadonlyArray<unknown>,
@@ -124,7 +124,7 @@ export function useTabStripOverflow(
  * which would also scroll every scrollable ancestor (the page).
  */
 export function useScrollActiveTabIntoView(
-  stripRef: RefObject<HTMLElement>,
+  stripRef: RefObject<HTMLElement | null>,
   activeKey: string,
   deps: ReadonlyArray<unknown> = [],
 ): void {

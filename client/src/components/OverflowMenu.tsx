@@ -15,8 +15,9 @@
  * button chrome so the trigger can look like a pill; ``open`` /
  * ``onOpenChange`` make the open state controllable.
  */
-import type { ComponentChildren } from 'preact'
-import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
+import type { ComponentChildren, Ref } from 'preact'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
+import { assignRef } from '@/utils/refs'
 
 export interface MenuItem {
   label: string
@@ -53,13 +54,16 @@ interface Props {
   /** Controlled open state (pair with ``onOpenChange``). */
   open?: boolean
   onOpenChange?: (open: boolean) => void
+  /** Lands on the trigger button (Preact 11 passes ``ref`` as a prop), the
+   *  control a caller hands focus back to. */
+  ref?: Ref<HTMLButtonElement>
 }
 
 const MENU_W = 200
 
 export function OverflowMenu({
   label, items, triggerClass = '', wrapClass = '', children, floating = false,
-  menuClass = '', bareTrigger = false, title, open: openProp, onOpenChange,
+  menuClass = '', bareTrigger = false, title, open: openProp, onOpenChange, ref,
 }: Props) {
   const [openState, setOpenState] = useState(false)
   const open = openProp ?? openState
@@ -73,6 +77,10 @@ export function OverflowMenu({
   setOpenRef.current = setOpen
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const setTrigger = useCallback((el: HTMLButtonElement | null) => {
+    triggerRef.current = el
+    assignRef(ref, el)
+  }, [ref])
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -169,7 +177,7 @@ export function OverflowMenu({
       onKeyDown={onKey}
     >
       <button
-        ref={triggerRef}
+        ref={setTrigger}
         type="button"
         class={bareTrigger ? triggerClass : `sh-post-overflow ${triggerClass}`.trim()}
         aria-label={label}

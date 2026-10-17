@@ -172,7 +172,7 @@ export function handleEmojiAutocompleteKey(e: KeyboardEvent): boolean {
  *  triggering input registered via :func:`checkForEmojiTrigger`. */
 export function EmojiAutocomplete() {
   const s = state.value
-  const ref = useRef<HTMLDivElement>(null)
+  const ref = useRef<HTMLDivElement | null>(null)
   // Cancel the offset of a transformed / filtered ancestor (the comment
   // sheet) so ``position: fixed`` really means the viewport.
   useLayoutEffect(() => {

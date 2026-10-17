@@ -229,8 +229,13 @@ export function SpaceCard({
     onCardTap(entry)
   }
 
+  // A tappable card is a link; ARIA-in-HTML doesn't allow role="link" on
+  // <article> (Preact 11's typings enforce it), so it renders as a <div>.
+  // The role already replaced the article semantics, so assistive tech
+  // sees the same tree. Static cards stay <article>.
+  const Card = (tappable ? 'div' : 'article') as 'div'
   return (
-    <article
+    <Card
       class={
         `sh-browser-card sh-browser-card--${entry.scope}`
         + (tappable ? ' sh-browser-card--tappable' : '')
@@ -341,6 +346,6 @@ export function SpaceCard({
           </button>
         )}
       </div>
-    </article>
+    </Card>
   )
 }

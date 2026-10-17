@@ -42,7 +42,7 @@ export function ChipRadioGroup<T extends string>({
 }: ChipRadioGroupProps<T>) {
   const base = variant === 'segmented' ? 'sh-segmented' : 'sh-locale-options'
   const opt = variant === 'segmented' ? 'sh-segmented__opt' : 'sh-locale-option'
-  const group = useRef<HTMLDivElement>(null)
+  const group = useRef<HTMLDivElement | null>(null)
 
   const radioAt = (idx: number): HTMLElement | undefined =>
     group.current?.querySelectorAll<HTMLElement>('[role="radio"]')[idx]

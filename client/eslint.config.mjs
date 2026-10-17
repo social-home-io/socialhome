@@ -111,6 +111,16 @@ export default [
       'react-hooks/exhaustive-deps': 'warn',
       // Guard the render-body signal() footgun (state-loss bug). See above.
       'local/no-signal-in-component': 'error',
+      // Importing preact/compat patches Preact's `options.vnode` for the whole
+      // app the moment its chunk loads: `onChange` on text inputs becomes
+      // `oninput`, `onFocus`/`onBlur` bubble, numeric styles gain `px`. The SPA
+      // is core-only (hooks from preact/hooks, `createPortal` from preact).
+      'no-restricted-imports': ['error', {
+        paths: ['preact/compat', 'react', 'react-dom'].map((name) => ({
+          name,
+          message: 'preact/compat changes event and style handling app-wide once loaded; use preact, preact/hooks or a core-only helper instead.',
+        })),
+      }],
       'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': [
         'error',

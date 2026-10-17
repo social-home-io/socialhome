@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
 import { useState } from 'preact/hooks'
+import { createRef } from 'preact'
 import { OverflowMenu, type MenuItem } from './OverflowMenu'
 
 const items = (onSelect = vi.fn()): MenuItem[] => [
@@ -10,6 +11,22 @@ const items = (onSelect = vi.fn()): MenuItem[] => [
 ]
 
 describe('OverflowMenu', () => {
+  it('puts a ref on its trigger and still returns focus there on Escape', () => {
+    const ref = createRef<HTMLButtonElement>()
+    const seen: (HTMLButtonElement | null)[] = []
+    const { getByRole, rerender } = render(
+      <OverflowMenu ref={ref} label="More" items={items()}>⋯</OverflowMenu>,
+    )
+    const trigger = getByRole('button', { name: 'More' })
+    expect(ref.current).toBe(trigger)
+    // A callback ref works too.
+    rerender(<OverflowMenu ref={(el) => { seen.push(el) }} label="More" items={items()}>⋯</OverflowMenu>)
+    expect(seen.at(-1)).toBe(trigger)
+    fireEvent.click(trigger)
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(document.activeElement).toBe(trigger)
+  })
+
   it('opens on click, focuses the checked item, and moves with the arrow keys', () => {
     const { getByRole, getAllByRole } = render(
       <OverflowMenu label="More" items={items()}>⋯</OverflowMenu>,

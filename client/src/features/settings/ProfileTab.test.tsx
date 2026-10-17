@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, fireEvent, waitFor, cleanup } from '@testing-library/preact'
+import { render, fireEvent, waitFor, cleanup, act } from '@testing-library/preact'
 
 const { apiMock, FakeApiError, confirmMock } = vi.hoisted(() => {
   class FakeApiError extends Error {
@@ -311,7 +311,7 @@ describe('ProfileTab — unsaved-change guard', () => {
   it('stops guarding once unmounted', () => {
     const { getByLabelText, unmount } = render(<Guarded />)
     input(getByLabelText('Name'), 'Pascal V.')
-    unmount()
+    act(() => { unmount() })
     expect(shouldConfirmLeave('/feed')).toBe(false)
   })
 })

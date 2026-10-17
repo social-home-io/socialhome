@@ -2,6 +2,7 @@
  * SpaceCreateDialog — space creation flow (§23.50).
  */
 import { signal } from '@preact/signals'
+import { useRef } from 'preact/hooks'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { currentUser } from '@/store/auth'
@@ -105,13 +106,14 @@ function useMyLocation() {
 }
 
 export function SpaceCreateDialog() {
+  const gfsChecklistRef = useRef<HTMLFieldSetElement | null>(null)
   const handleSubmit = async () => {
     if (!name.value.trim() || submitting.value) return
     // A global space must be listed somewhere: the server refuses an empty
     // choice (GFS_SELECTION_REQUIRED), so say it beside the list instead.
     if (isGlobal() && gfsSelected.value.length === 0) {
       gfsError.value = t('error.gfs_selection_required')
-      revealGfsChecklist('space-create')
+      revealGfsChecklist(gfsChecklistRef)
       return
     }
     submitting.value = true
@@ -221,6 +223,7 @@ export function SpaceCreateDialog() {
         )}
         {isGlobal() && hasActiveGfs && (
           <GfsChecklist
+            ref={gfsChecklistRef}
             name="space-create"
             choices={gfsChoices.value}
             selected={gfsSelected.value}

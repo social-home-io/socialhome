@@ -75,7 +75,7 @@ function SetupShell({ step, children }: SetupShellProps) {
   return (
     <div class="sh-setup" role="main">
       <div class="sh-setup-card">
-        <Wordmark size={32} className="sh-setup-brand" />
+        <Wordmark size={32} class="sh-setup-brand" />
         {step && (
           <ol class="sh-setup-steps" aria-label={t('setup.step_aria', { current: String(step.current), total: String(step.total) })}>
             {Array.from({ length: step.total }, (_, i) => (
@@ -169,7 +169,7 @@ function PasswordField({
       <span class="sh-setup-label">{label}</span>
       <span class="sh-setup-pw">
         <input
-          type={shown ? 'text' : 'password'}
+          {...(shown ? { type: 'text' as const } : { type: 'password' as const })}
           autoComplete={autoComplete}
           required
           value={value}

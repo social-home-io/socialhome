@@ -54,7 +54,7 @@ describe('QuickAddBar', () => {
     render(
       <QuickAddBar value="" onValueChange={() => {}} onSubmit={() => {}}
                    inputLabel="New" submitLabel="Add"
-                   inputRef={(r) => { el = r }}
+                   ref={(r) => { el = r }}
                    inputProps={{ onFocus, name: 'text' }} />,
     )
     expect(el).not.toBeNull()

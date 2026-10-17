@@ -77,16 +77,71 @@ describe('IncomingCallDialog', () => {
     expect(getByText('Decline')).toBeTruthy()
   })
 
-  it('an unmount before the focus tick cancels it', () => {
+  it('focuses Accept once it starts ringing', () => {
     vi.useFakeTimers()
     try {
       incoming.value = { ...RINGING, signed_sdp: null }
+      const { getByText } = render(<IncomingCallDialog />)
+      act(() => { vi.advanceTimersByTime(50) })
+      expect(document.activeElement).toBe(getByText('Accept'))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('Tab and Shift+Tab stay on Accept and Decline', () => {
+    vi.useFakeTimers()
+    try {
+      incoming.value = { ...RINGING, signed_sdp: null }
+      const { getByText } = render(<IncomingCallDialog />)
+      act(() => { vi.advanceTimersByTime(50) })
+      const accept = getByText('Accept')
+      const decline = getByText('Decline')
+      decline.focus()
+      fireEvent.keyDown(window, { key: 'Tab' })
+      expect(document.activeElement).toBe(accept)
+      fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+      expect(document.activeElement).toBe(decline)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('focuses its own Accept, not a look-alike elsewhere on the page', () => {
+    vi.useFakeTimers()
+    try {
+      incoming.value = { ...RINGING, signed_sdp: null }
+      const { getByText } = render(
+        <>
+          <div class="sh-incoming-actions">
+            <button class="sh-accept">Elsewhere</button>
+            <button class="sh-decline">Elsewhere too</button>
+          </div>
+          <IncomingCallDialog />
+        </>,
+      )
+      act(() => { vi.advanceTimersByTime(50) })
+      expect(document.activeElement).toBe(getByText('Accept'))
+      getByText('Decline').focus()
+      fireEvent.keyDown(window, { key: 'Tab' })
+      expect(document.activeElement).toBe(getByText('Accept'))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an unmount before the focus tick moves no focus', () => {
+    vi.useFakeTimers()
+    try {
+      const before = document.createElement('button')
+      document.body.appendChild(before)
+      before.focus()
+      incoming.value = { ...RINGING, signed_sdp: null }
       const { unmount } = render(<IncomingCallDialog />)
-      unmount()
-      const query = vi.spyOn(document, 'querySelector')
-      vi.advanceTimersByTime(50)
-      expect(query).not.toHaveBeenCalled()
-      query.mockRestore()
+      act(() => { unmount() })
+      act(() => { vi.advanceTimersByTime(50) })
+      expect(document.activeElement).toBe(before)
+      before.remove()
     } finally {
       vi.useRealTimers()
     }
@@ -236,6 +291,47 @@ describe('IncomingCallDialog', () => {
       await flush()
       expect(incoming.value).toEqual(NEXT)
     })
+  })
+
+  it('a call replacing a ringing one keeps its own ringtone', async () => {
+    // Each card stops only its own ring. Preact 11 runs the replaced
+    // card's cleanup after paint; when the new card re-renders before
+    // then, its effect (start ringing) runs first, and a shared "current
+    // ring" slot let the old cleanup silence the new call.
+    const rings: { closed: boolean }[] = []
+    class FakeAudioContext {
+      currentTime = 0
+      destination = {}
+      ring = { closed: false }
+      constructor() { rings.push(this.ring) }
+      createOscillator() {
+        return { connect() {}, start() {}, stop() {}, type: '', frequency: { value: 0, setValueAtTime() {} } }
+      }
+      createGain() {
+        return { connect() {}, gain: { value: 0, setValueAtTime() {}, linearRampToValueAtTime() {} } }
+      }
+      close() { this.ring.closed = true }
+    }
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    try {
+      const next: IncomingCall = { ...RINGING, call_id: 'c2', from_user: 'bob' }
+      incoming.value = RINGING
+      render(<IncomingCallDialog />)
+      await act(async () => {})
+      expect(rings).toHaveLength(1)
+      // The new card renders, then re-renders before the first paint.
+      incoming.value = next
+      await Promise.resolve(); await Promise.resolve()
+      incoming.value = { ...next }
+      await act(async () => { await new Promise(r => setTimeout(r, 20)) })
+      expect(rings).toHaveLength(2)
+      expect(rings[0].closed).toBe(true)
+      expect(rings[1].closed).toBe(false)
+      act(() => { incoming.value = null })
+      expect(rings[1].closed).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('a repeated Enter answers only once', async () => {

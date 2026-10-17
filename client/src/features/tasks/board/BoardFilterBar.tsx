@@ -4,7 +4,7 @@
  * filters". Client-side; the board remembers them for the session.
  * When any filter is on, a status line says how many tasks show.
  */
-import { useState } from 'preact/hooks'
+import { useId, useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import type { Person } from '@/components/PeoplePicker'
 import type { TaskPriority } from '@/types'
@@ -23,12 +23,10 @@ interface Props {
   canBeAssigned: boolean
 }
 
-let seq = 0
-
 export function BoardFilterBar({
   value, onChange, people, labels, shown, total, canBeAssigned,
 }: Props) {
-  const [id] = useState(() => `sh-board-filters-${++seq}`)
+  const id = useId()
   const [open, setOpen] = useState(false)
   const active = filtersActive(value)
   const set = (patch: Partial<BoardFilters>) => onChange({ ...value, ...patch })

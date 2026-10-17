@@ -17,7 +17,7 @@ interface WordmarkProps {
   tagline?: string
   as?: 'div' | 'a'
   href?: string
-  className?: string
+  class?: string
 }
 
 export function Wordmark({
@@ -25,7 +25,7 @@ export function Wordmark({
   tagline,
   as = 'div',
   href,
-  className,
+  class: className,
 }: WordmarkProps) {
   const classes = ['sh-wordmark', className].filter(Boolean).join(' ')
 

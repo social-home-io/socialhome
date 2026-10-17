@@ -39,6 +39,13 @@ function isDefault(prop: string, value: string): boolean {
   return DEFAULT_COLORS[prop] === value.trim().toLowerCase()
 }
 
+/** The mounted space view whose theme is on ``<html>``. A view
+ *  replacing it (space → space) clears it before applying its own, and a
+ *  cleanup only rolls back while it is still the owner: Preact runs a
+ *  removed view's effect cleanup after paint, which can be after the
+ *  successor already applied its theme. */
+let themeOwner: { unapply: () => void } | null = null
+
 export function useSpaceTheme(spaceId: string | undefined | null): void {
   useEffect(() => {
     if (!spaceId) return
@@ -58,6 +65,7 @@ export function useSpaceTheme(spaceId: string | undefined | null): void {
       root.removeAttribute('data-space-theme')
       root.removeAttribute('data-post-layout')
     }
+    const owner = { unapply }
 
     void (async () => {
       try {
@@ -65,6 +73,8 @@ export function useSpaceTheme(spaceId: string | undefined | null): void {
           `/api/spaces/${spaceId}/theme`,
         ) as SpaceTheme
         if (stopped) return
+        if (themeOwner && themeOwner !== owner) themeOwner.unapply()
+        themeOwner = owner
         // Checked here, not only inside apply(): the brand default means
         // "no override", so the per-theme on-fill props below must not be
         // pinned either — the CSS defaults already pair the brand hearth.
@@ -100,6 +110,8 @@ export function useSpaceTheme(spaceId: string | undefined | null): void {
 
     return () => {
       stopped = true
+      if (themeOwner !== owner) return
+      themeOwner = null
       unapply()
     }
   }, [spaceId])

@@ -197,6 +197,8 @@ describe('ShoppingPage', () => {
         { store: 'Migros' },
       )
     })
+    // The name field is gone: focus goes back to the row's store pill.
+    expect(document.activeElement).toBe(container.querySelector('.sh-shopping-store-pill'))
   })
 
   it('"← Back" returns from new-store input to the store list', async () => {

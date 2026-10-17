@@ -3,7 +3,8 @@ import { render, fireEvent } from '@testing-library/preact'
 
 vi.mock('@/i18n/i18n', () => ({ t: (k: string) => k }))
 
-import { GfsChecklist, defaultGfsSelection, gfsHost } from './GfsChecklist'
+import { createRef } from 'preact'
+import { GfsChecklist, defaultGfsSelection, gfsHost, revealGfsChecklist } from './GfsChecklist'
 
 const A = { id: 'a', display_name: 'Town GFS', inbox_url: 'https://town.example/' }
 const B = { id: 'b', display_name: 'Club GFS', inbox_url: 'https://club.example:8443' }
@@ -105,5 +106,42 @@ describe('GfsChecklist', () => {
     expect(fs.getAttribute('aria-describedby')).toBe('t-error')
     expect(container.querySelector('#t-error')!.textContent).toBe('pick one')
     expect(container.querySelector('input')!.getAttribute('aria-invalid')).toBe('true')
+  })
+})
+
+describe('revealGfsChecklist', () => {
+  it('focuses the first free box of the checklist its ref points at, not a namesake', () => {
+    vi.useFakeTimers()
+    try {
+      const own = createRef<HTMLFieldSetElement>()
+      const { getAllByRole } = render(
+        <>
+          {/* Same name earlier in the page (e.g. a second dialog). */}
+          <GfsChecklist name="space-tier" choices={[A]} selected={[]} onChange={() => {}} />
+          <GfsChecklist ref={own} name="space-tier" choices={[A, B]} selected={['a']}
+                        max={1} onChange={() => {}} />
+        </>,
+      )
+      expect(own.current?.tagName).toBe('FIELDSET')
+      const boxes = getAllByRole('checkbox') as HTMLInputElement[]
+      revealGfsChecklist(own)
+      vi.advanceTimersByTime(0)
+      // Box 2 ("a", ticked) is the first enabled one: "b" is greyed at max.
+      expect(document.activeElement).toBe(boxes[1])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does nothing while the checklist is not shown', () => {
+    vi.useFakeTimers()
+    try {
+      const before = document.activeElement
+      revealGfsChecklist(createRef<HTMLFieldSetElement>())
+      vi.advanceTimersByTime(0)
+      expect(document.activeElement).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

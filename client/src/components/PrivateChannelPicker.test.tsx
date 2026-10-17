@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent, cleanup } from '@testing-library/preact'
+import { createRef } from 'preact'
 
 vi.mock('@/i18n/i18n', () => ({ t: (k: string) => k }))
 vi.mock('@/api', async (importOriginal) => ({
@@ -82,6 +83,19 @@ describe('sameGfsSet', () => {
 })
 
 describe('PrivateChannelPicker', () => {
+  it('puts its ref on the checklist once the choices are shown', async () => {
+    apiMock.get.mockResolvedValue(view())
+    const ref = createRef<HTMLFieldSetElement>()
+    const { findByTestId } = render(
+      <PrivateChannelPicker ref={ref} spaceId="s-1" selected={null}
+                            onChange={() => {}} onLoaded={() => {}} />,
+    )
+    // While loading a status line stands in: nothing to point at.
+    expect(ref.current).toBeNull()
+    const list = await findByTestId('private-channel-checklist')
+    expect(ref.current).toBe(list)
+  })
+
   it('loads the choices, reports them and renders the channel checklist', async () => {
     apiMock.get.mockResolvedValue(view())
     const onLoaded = vi.fn()

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { act as flushAct } from 'preact/test-utils'
 
 // Same ceilings as DmThreadPage.test.tsx — the cold render of the thread
 // (fresh ``import()`` + mocked-API microtask chain) can be slow under the
@@ -201,6 +202,21 @@ describe('ConversationView', () => {
     expect(b.querySelector('.sh-composer-reply')).toBeNull()
   })
 
+  it('a replaced routed view unmounting late keeps the thread chrome class', async () => {
+    // Preact 11 runs the old view's effect cleanup after paint, i.e. after
+    // the view that replaced it added the class (thread → thread swap).
+    const { render, waitFor, ConversationView } = await setup()
+    const first = render(<ConversationView conversationId="conv-a" />)
+    const second = render(<ConversationView conversationId="conv-b" />)
+    await waitFor(() => {
+      expect(second.container.textContent ?? '').toContain('BOB-conv-b')
+    }, { timeout: RENDER_WAIT })
+    flushAct(() => { first.unmount() })
+    expect(document.body.classList.contains('sh-dm-thread-open')).toBe(true)
+    flushAct(() => { second.unmount() })
+    expect(document.body.classList.contains('sh-dm-thread-open')).toBe(false)
+  })
+
   it('the routed (default) view carries the page chrome', async () => {
     const { render, waitFor, ConversationView, pageTitle } = await setup()
     const { container } = render(<ConversationView conversationId="conv-a" />)
@@ -384,11 +400,11 @@ describe('ConversationView — dm.active ownership', () => {
     expect(activeCalls(send).at(-1)).toEqual({ conversation_id: 'conv-b' })
 
     send.mockClear()
-    first.unmount()
+    flushAct(() => { first.unmount() })
     // conv-b is still on screen — the backend must keep suppressing it.
     expect(activeCalls(send)).toEqual([])
 
-    second.unmount()
+    flushAct(() => { second.unmount() })
     expect(activeCalls(send)).toEqual([{ conversation_id: null }])
   })
 
@@ -400,7 +416,7 @@ describe('ConversationView — dm.active ownership', () => {
     const only = render(<ConversationView conversationId="conv-a" />)
     expect(activeCalls(send)).toEqual([{ conversation_id: 'conv-a' }])
     send.mockClear()
-    only.unmount()
+    flushAct(() => { only.unmount() })
     expect(activeCalls(send)).toEqual([{ conversation_id: null }])
   })
 })
@@ -439,8 +455,7 @@ describe('ConversationView — composer emoji picker', () => {
     }, { timeout: RENDER_WAIT })
     fireEvent.click(first.container.querySelector('.sh-composer-emoji-inline')!)
     await waitFor(() => { expect(pickerOpen(first.container)).toBe(true) })
-    first.unmount()
-
+    flushAct(() => { first.unmount() })
     const second = render(<ConversationView conversationId="conv-a" embedded />)
     await waitFor(() => {
       expect(second.container.textContent ?? '').toContain('BOB-conv-a')

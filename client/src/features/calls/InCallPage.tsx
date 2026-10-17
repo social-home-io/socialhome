@@ -61,7 +61,7 @@ function videoOn(stream: MediaStream | null): boolean {
 /** One remote participant of a group call: their video (or initial when
  *  they send none), name and connection state. */
 function PeerTile({ peer, muted }: { peer: CallPeer, muted: boolean }) {
-  const ref = useRef<HTMLVideoElement>(null)
+  const ref = useRef<HTMLVideoElement | null>(null)
   useEffect(() => {
     if (ref.current) ref.current.srcObject = peer.stream
   }, [peer.stream])
@@ -89,8 +89,8 @@ export default function InCallPage() {
   const { params } = useRoute()
   const loc = useLocation()
   const callId = params.callId
-  const remoteRef = useRef<HTMLVideoElement>(null)
-  const selfRef   = useRef<HTMLVideoElement>(null)
+  const remoteRef = useRef<HTMLVideoElement | null>(null)
+  const selfRef   = useRef<HTMLVideoElement | null>(null)
   const convRef   = useRef<string | null>(null)
 
   const ours = sessionCallId.value === callId

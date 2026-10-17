@@ -1,6 +1,7 @@
 import type { ComponentChildren } from 'preact'
-import { useEffect, useRef } from 'preact/hooks'
+import { useEffect, useId, useRef } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
+import { restoreFocus } from '@/utils/focus'
 
 interface ModalProps {
   open: boolean
@@ -41,7 +42,7 @@ interface ModalProps {
 const _stack: object[] = []
 export function Modal({ open, onClose, title, children, class: extraClass, role = 'dialog', header }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null)
-  const titleId = useRef<string>(`sh-modal-title-${Math.random().toString(36).slice(2, 8)}`)
+  const titleId = useId()
   // Stash ``onClose`` in a ref so the focus-trap effect only depends on
   // ``open``. Callers usually pass an inline arrow (``onClose={() =>
   // open.value = false}``) — without this ref, every parent re-render
@@ -109,8 +110,9 @@ export function Modal({ open, onClose, title, children, class: extraClass, role 
       document.removeEventListener('keydown', onKeyDown)
       const at = _stack.indexOf(token)
       if (at !== -1) _stack.splice(at, 1)
-      // Restore focus to whatever triggered the dialog.
-      previouslyFocused?.focus?.()
+      // Restore focus to whatever triggered the dialog — unless a
+      // surface that replaced it already took focus.
+      restoreFocus(previouslyFocused, dialog)
     }
   }, [open])
 
@@ -122,7 +124,7 @@ export function Modal({ open, onClose, title, children, class: extraClass, role 
         class={extraClass ? `sh-modal ${extraClass}` : 'sh-modal'}
         role={role}
         aria-modal="true"
-        aria-labelledby={titleId.current}
+        aria-labelledby={titleId}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
@@ -131,9 +133,9 @@ export function Modal({ open, onClose, title, children, class: extraClass, role 
          *  this is a dismissible sheet. Hidden via CSS on ≥640px. */}
         <div class="sh-modal-grabber" aria-hidden="true" />
         <div class="sh-modal-header">
-          {header ? header(titleId.current) : (
+          {header ? header(titleId) : (
             <>
-              <h2 id={titleId.current}>{title}</h2>
+              <h2 id={titleId}>{title}</h2>
               <button class="sh-modal-close" onClick={onClose} aria-label={t('modal.close')}>
                 &times;
               </button>

@@ -16,10 +16,10 @@
  * Name it with ``aria-label``, ``aria-labelledby`` or a ``<label for>`` /
  * wrapping ``<label>``; put hints in ``aria-describedby``.
  */
-import type { JSX } from 'preact'
+import type { InputHTMLAttributes } from 'preact'
 
 export interface SwitchProps extends Omit<
-  JSX.InputHTMLAttributes<HTMLInputElement>,
+  InputHTMLAttributes<HTMLInputElement>,
   'type' | 'role' | 'checked' | 'onChange' | 'onKeyDown' | 'class' | 'className' | 'children'
 > {
   checked: boolean

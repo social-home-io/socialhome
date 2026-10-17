@@ -44,7 +44,7 @@ type State = 'idle' | 'recording' | 'locked' | 'unsupported'
 interface VoiceRecordButtonProps {
   onCapture: (blob: Blob) => void
   disabled?: boolean
-  className?: string
+  class?: string
 }
 
 interface ActiveCapture {
@@ -78,7 +78,7 @@ const recorderSupported = (): boolean => pickRecorderMime() !== null
 export function VoiceRecordButton({
   onCapture,
   disabled,
-  className,
+  class: className,
 }: VoiceRecordButtonProps): preact.JSX.Element | null {
   const state = useSignal<State>(recorderSupported() ? 'idle' : 'unsupported')
   const error = useSignal<string | null>(null)

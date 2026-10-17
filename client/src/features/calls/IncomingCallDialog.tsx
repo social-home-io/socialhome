@@ -26,10 +26,9 @@ import {
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { t } from '@/i18n/i18n'
+import { restoreFocus } from '@/utils/focus'
 
 const RING_TTL_MS = 90_000
-
-let _ringStop: (() => void) | null = null
 
 function startRingtone(): () => void {
   // Synthesise a soft two-note ring using WebAudio. Returns a stop fn.
@@ -101,6 +100,10 @@ function IncomingCallCard({ call }: { call: IncomingCall }) {
   // it can't read fresh state — a ref stops a double Enter/tap from
   // firing two requests.
   const busy = useRef(false)
+  // Preact 11 forwards ``ref`` to function components, so the refs land
+  // on ``Button``'s own <button> elements.
+  const acceptRef = useRef<HTMLButtonElement | null>(null)
+  const declineRef = useRef<HTMLButtonElement | null>(null)
 
   const accept = async () => {
     if (busy.current) return
@@ -134,24 +137,20 @@ function IncomingCallCard({ call }: { call: IncomingCall }) {
 
   useEffect(() => {
     void loadHouseholdUsers()  // resolve "from" line + missed-call toast
-    _ringStop = (() => {
-      const stopSnd = startRingtone()
-      const stopVib = startVibration()
-      return () => { stopSnd(); stopVib() }
-    })()
+    // This card's own ring. Not a module-level slot: Preact 11 runs a
+    // replaced card's cleanup after paint, possibly after the next call's
+    // card started ringing, and must not silence that one.
+    const stopSnd = startRingtone()
+    const stopVib = startVibration()
 
     // Remember the element that had focus pre-ring so we can restore
     // when the call resolves — keyboard / screen-reader users land
     // back where they were.
     const previouslyFocused = document.activeElement as HTMLElement | null
-    const findActions = (): [HTMLButtonElement | null, HTMLButtonElement | null] => [
-      document.querySelector<HTMLButtonElement>('.sh-incoming-actions .sh-accept'),
-      document.querySelector<HTMLButtonElement>('.sh-incoming-actions .sh-decline'),
-    ]
     // Focus Accept on mount so Enter activates the primary action
     // without the user having to tab to it.
     // Cleared on cleanup: the dialog can close before the tick fires.
-    const focusTimer = setTimeout(() => findActions()[0]?.focus(), 10)
+    const focusTimer = setTimeout(() => acceptRef.current?.focus(), 10)
 
     const timer = setTimeout(() => {
       if (incoming.value?.call_id === call.call_id) {
@@ -168,7 +167,8 @@ function IncomingCallCard({ call }: { call: IncomingCall }) {
       else if (e.key === 'Tab') {
         // Trap focus between the two action buttons — Tab can't
         // wander into the dimmed page behind a ringing call.
-        const [first, last] = findActions()
+        const first = acceptRef.current
+        const last = declineRef.current
         if (!first || !last) return
         if (e.shiftKey && document.activeElement === first) {
           e.preventDefault(); last.focus()
@@ -183,8 +183,8 @@ function IncomingCallCard({ call }: { call: IncomingCall }) {
       clearTimeout(focusTimer)
       clearTimeout(timer)
       window.removeEventListener('keydown', onKey)
-      if (_ringStop) { _ringStop(); _ringStop = null }
-      previouslyFocused?.focus?.()
+      stopSnd(); stopVib()
+      restoreFocus(previouslyFocused)
     }
     // Once per card — the card is keyed on the call id, and accept /
     // decline guard on the ``busy`` ref, not on render state.
@@ -207,9 +207,9 @@ function IncomingCallCard({ call }: { call: IncomingCall }) {
         <strong class="sh-incoming-name">{t('calls.is_calling', { name: fromName })}</strong>
         <span class="sh-incoming-type">{call.call_type === 'video' ? t('calls.video_call') : t('calls.audio_call')}</span>
         <div class="sh-incoming-actions">
-          <Button class="sh-accept" onClick={accept}
+          <Button ref={acceptRef} class="sh-accept" onClick={accept}
                   loading={accepting} disabled={declining}>{t('calls.accept')}</Button>
-          <Button class="sh-decline" variant="danger" onClick={decline}
+          <Button ref={declineRef} class="sh-decline" variant="danger" onClick={decline}
                   loading={declining} disabled={accepting}>{t('calls.decline')}</Button>
         </div>
       </div>

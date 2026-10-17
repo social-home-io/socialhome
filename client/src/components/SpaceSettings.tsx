@@ -3,7 +3,7 @@
  * Includes the space's GFS listing (``SpaceGfsListing``) and, for a move
  * into the global tier, the owner household's choice of GFSs.
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { signal, useSignal } from '@preact/signals'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
@@ -143,6 +143,8 @@ export function SpaceSettings({
    *  else with 403. */
   isOwner?: boolean
 }) {
+  const channelChecklistRef = useRef<HTMLFieldSetElement | null>(null)
+  const tierChecklistRef = useRef<HTMLFieldSetElement | null>(null)
   // ``useSignal`` (not ``signal()``) so the underlying signal instance
   // is stable across renders. Plain ``signal(initial)`` inside a
   // component body recreates a fresh signal on every render, which
@@ -358,7 +360,7 @@ export function SpaceSettings({
       && (channelPick.value ?? loadedChannels.initial).length === 0
     ) {
       channelError.value = t('space.private_gfs.channels_required')
-      revealGfsChecklist('private-channel')
+      revealGfsChecklist(channelChecklistRef)
       return
     }
     const channels = channelChange()
@@ -601,7 +603,7 @@ export function SpaceSettings({
     if (tierChoice.value === space.space_type) return
     if (choosesGfs && tierGfsSelected.value.length === 0) {
       tierGfsError.value = t('error.gfs_selection_required')
-      revealGfsChecklist('space-tier')
+      revealGfsChecklist(tierChecklistRef)
       return
     }
     try {
@@ -986,6 +988,7 @@ export function SpaceSettings({
             </dl>
             {showChannelPicker && (
               <PrivateChannelPicker
+                ref={channelChecklistRef}
                 spaceId={space.id}
                 selected={channelPick.value}
                 reloadKey={channelReload.value}
@@ -1154,6 +1157,7 @@ export function SpaceSettings({
         )}
         {choosesGfs && tierGfsChoices.value.length > 0 && (
           <GfsChecklist
+            ref={tierChecklistRef}
             name="space-tier"
             choices={tierGfsChoices.value}
             selected={tierGfsSelected.value}
