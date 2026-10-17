@@ -43,8 +43,10 @@ jobs:
       - name: Run this shard with branch coverage
         # Coverage data only (``--cov-report=``) — the gate runs on the
         # merged data in ``test (3.14)``; a single shard covers a fraction
-        # of the code. ``coverage`` is ``parallel = true`` so the xdist
-        # workers' files merge into ``.coverage`` when pytest-cov finalises.
+        # of the code, so ``--cov-fail-under=0`` overrides pyproject's
+        # ``fail_under`` here. ``coverage`` is ``parallel = true`` so the
+        # xdist workers' files merge into ``.coverage`` when pytest-cov
+        # finalises.
         #
         # ``--durations=25`` prints the shard's slowest tests every run, so
         # a new test that waits out a real timeout shows up in review (see
@@ -59,7 +61,7 @@ jobs:
         # ``shard-durations`` artifact used to rebalance the split.
         run: |
           pytest --shard=${{ matrix.shard }}/6 \
-            --cov=socialhome --cov-branch --cov-report= \
+            --cov=socialhome --cov-branch --cov-report= --cov-fail-under=0 \
             --tb=short -q --durations=25 \
             --security-manifest=shard-out/security-manifest/shard-${{ matrix.shard }}.json \
             --store-shard-durations=shard-out/durations/shard-${{ matrix.shard }}.json

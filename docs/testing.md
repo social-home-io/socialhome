@@ -254,7 +254,7 @@ fan in to `test (3.14)`). The test jobs and `typecheck` install with
 (see [Dependency lock](#dependency-lock)).
 
 1. **`test shard 1/6` … `test shard 6/6`** — the Python suite split
-   across six runners (`pytest --shard=K/6 --cov=socialhome --cov-branch
+   across six runners (`pytest --shard=K/6 --cov=socialhome --cov-branch --cov-fail-under=0
    --durations=25 --security-manifest=… --store-shard-durations=…`), xdist
    inside each. `tests/sharding.py` assigns whole test files to shards by
    longest-first bin packing on the per-file seconds in
