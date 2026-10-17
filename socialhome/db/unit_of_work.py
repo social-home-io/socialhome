@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import AbstractAsyncContextManager
-from typing import Any
+from typing import Any, Self
 
 from .database import AsyncDatabase
 
@@ -40,11 +40,11 @@ class UnitOfWork(AbstractAsyncContextManager["UnitOfWork"]):
     """Single-transaction write batch + buffered event dispatch."""
 
     __slots__ = (
-        "_db",
         "_bus",
+        "_closed",
+        "_db",
         "_pending_events",
         "_writes",
-        "_closed",
     )
 
     def __init__(self, db: AsyncDatabase, *, bus=None) -> None:
@@ -72,7 +72,7 @@ class UnitOfWork(AbstractAsyncContextManager["UnitOfWork"]):
 
     # ── Context manager ────────────────────────────────────────────────
 
-    async def __aenter__(self) -> "UnitOfWork":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -81,7 +81,7 @@ class UnitOfWork(AbstractAsyncContextManager["UnitOfWork"]):
             # Body raised → drop both buffers, no commit, no events.
             self._writes.clear()
             self._pending_events.clear()
-            return None
+            return
 
         # Replay buffered writes inside ONE transaction so the whole
         # batch is atomic. Empty batch is a no-op — we still publish
@@ -111,4 +111,4 @@ class UnitOfWork(AbstractAsyncContextManager["UnitOfWork"]):
                         event,
                     )
         self._pending_events.clear()
-        return None
+        return

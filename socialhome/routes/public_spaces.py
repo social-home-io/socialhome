@@ -33,14 +33,14 @@ class PublicSpaceCollectionView(BaseView):
         # just keeps the listings out of their browser.
         cp_svc = self.svc(K.child_protection_service_key)
         max_min_age: int | None = None
-        protection = await cp_svc._repo.get_user_protection(  # noqa: SLF001
+        protection = await cp_svc._repo.get_user_protection(
             ctx.user_id,
         )
         if protection and protection.get("child_protection_enabled"):
             max_min_age = int(protection.get("declared_age") or 0)
 
         discovery = self.svc(K.public_space_discovery_key)
-        listings = await discovery._repo.list_visible_for_user(  # noqa: SLF001
+        listings = await discovery._repo.list_visible_for_user(
             ctx.user_id,
             limit=limit,
             max_min_age=max_min_age,
@@ -108,7 +108,7 @@ class PublicSpaceJoinRequestView(BaseView):
         space_id = self.match("space_id")
         try:
             body = await self.request.json()
-        except Exception:
+        except ValueError:
             body = {}
         host_instance_id = body.get("host_instance_id")
         if not host_instance_id:
@@ -138,7 +138,7 @@ class PublicSpaceHideView(BaseView):
             return web.json_response({"error": "unauthenticated"}, status=401)
         space_id = self.match("space_id")
         discovery = self.svc(K.public_space_discovery_key)
-        await discovery._repo.hide_for_user(ctx.user_id, space_id)  # noqa: SLF001
+        await discovery._repo.hide_for_user(ctx.user_id, space_id)
         return web.Response(status=204)
 
 
@@ -171,10 +171,10 @@ class PublicSpaceBlockInstanceView(BaseView):
         instance_id = self.match("instance_id")
         try:
             data = await self.request.json()
-        except Exception:
+        except ValueError:
             data = {}
         discovery = self.svc(K.public_space_discovery_key)
-        await discovery._repo.block_instance(  # noqa: SLF001
+        await discovery._repo.block_instance(
             instance_id,
             blocked_by=ctx.user_id,
             reason=data.get("reason"),

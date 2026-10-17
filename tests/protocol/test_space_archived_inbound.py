@@ -54,24 +54,25 @@ from socialhome.federation.inbound_validator import (
     InboundContext,
     make_check_space_archived,
 )
+from socialhome.federation.routed_envelope import SpaceRoutedHandler
 from socialhome.federation.sync.space.exporter import (
     ALLOWED_RESOURCES,
     REMOVAL_RESOURCES,
     ROSTER_RESOURCES,
 )
-from socialhome.federation.routed_envelope import SpaceRoutedHandler
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
 )
 
+from .test_media_blob_scope import WEBP
 from .test_space_content_authorship import (
     _SEED,
-    _SYNC_TABLES,
     _SYNC_NOT_WRITTEN,
-    CASES,
+    _SYNC_TABLES,
     AUTHOR,
+    CASES,
     HOST,
     OTHER,
     SP,
@@ -81,7 +82,6 @@ from .test_space_content_authorship import (
     _snapshot,
     _sync_snapshot,
 )
-from .test_media_blob_scope import WEBP
 from .test_space_content_scope import NOT_ROW_SCOPED
 from .test_space_routed_security import (
     INNER_EVENT,

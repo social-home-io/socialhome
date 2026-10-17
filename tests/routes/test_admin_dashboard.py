@@ -72,9 +72,11 @@ async def _put(client, patch: dict):
 
 
 async def _get_status(port: int, path: str = "/healthz") -> int:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"http://127.0.0.1:{port}{path}") as resp:
-            return resp.status
+    async with (
+        aiohttp.ClientSession() as session,
+        session.get(f"http://127.0.0.1:{port}{path}") as resp,
+    ):
+        return resp.status
 
 
 # ── Pure helper ─────────────────────────────────────────────────────────
@@ -551,16 +553,18 @@ async def test_setup_link_signs_a_tablet_in(client):
     token = parse_qs(parts.query)["t"][0]
 
     origin = f"http://127.0.0.1:{port}"
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
+    async with (
+        aiohttp.ClientSession() as session,
+        session.post(
             f"{origin}/enter",
             data={"t": token},
             headers={"Origin": origin},
             allow_redirects=False,
-        ) as enter:
-            assert enter.status in (302, 303)
-            assert enter.headers["Location"] == "/"
-            assert COOKIE_NAME in enter.cookies
+        ) as enter,
+    ):
+        assert enter.status in (302, 303)
+        assert enter.headers["Location"] == "/"
+        assert COOKIE_NAME in enter.cookies
 
 
 async def test_setup_link_uses_the_mapped_host_port(client, monkeypatch):
@@ -732,21 +736,25 @@ async def _running(client) -> str:
 
 async def _panel_start(origin: str) -> dict:
     """What a wall panel does first: ask the dashboard for a code."""
-    async with aiohttp.ClientSession() as panel:
-        async with panel.post(
+    async with (
+        aiohttp.ClientSession() as panel,
+        panel.post(
             f"{origin}/api/display/v1/pair",
             json={"model": "esp32-s3-box", "firmware": "0.1.0"},
-        ) as resp:
-            assert resp.status == 201
-            return await resp.json()
+        ) as resp,
+    ):
+        assert resp.status == 201
+        return await resp.json()
 
 
 async def _panel_get(origin: str, path: str, token: str | None = None):
     headers = {} if token is None else {"Authorization": f"Bearer {token}"}
-    async with aiohttp.ClientSession() as panel:
-        async with panel.get(f"{origin}{path}", headers=headers) as resp:
-            body = await resp.json() if resp.status != 405 else None
-            return resp.status, body
+    async with (
+        aiohttp.ClientSession() as panel,
+        panel.get(f"{origin}{path}", headers=headers) as resp,
+    ):
+        body = await resp.json() if resp.status != 405 else None
+        return resp.status, body
 
 
 async def _add(client, code: str, name: str = "Kitchen"):
@@ -894,13 +902,15 @@ async def test_remove_unknown_display(client):
 
 
 async def _panel_post(origin: str, path: str, token: str, body: object = None):
-    async with aiohttp.ClientSession() as panel:
-        async with panel.post(
+    async with (
+        aiohttp.ClientSession() as panel,
+        panel.post(
             f"{origin}{path}",
             json=body,
             headers={"Authorization": f"Bearer {token}"},
-        ) as resp:
-            return resp.status, await resp.json()
+        ) as resp,
+    ):
+        return resp.status, await resp.json()
 
 
 async def _paired_panel(client) -> tuple[str, str, str]:
@@ -988,7 +998,7 @@ async def test_admin_patch_renames_and_unlocks_together(client):
     ],
 )
 async def test_admin_patch_refuses_anything_but_unlock(client, body, field):
-    origin, display_id, token = await _paired_panel(client)
+    _origin, display_id, _token = await _paired_panel(client)
     resp = await client.patch(
         f"{DISPLAYS}/{display_id}", headers=_auth(client._tok), json=body
     )
@@ -1410,14 +1420,16 @@ async def test_connect_through_home_assistant_end_to_end(client, monkeypatch):
     )
     assert opened.url == origin
     assert opened.claim not in sealed
-    async with aiohttp.ClientSession() as panel:
-        # The claim without the key it was sealed to: refused (and burnt).
-        async with panel.post(
+    # The claim without the key it was sealed to: refused (and burnt).
+    async with (
+        aiohttp.ClientSession() as panel,
+        panel.post(
             f"{opened.url}/api/display/v1/pair/claim",
             json={"claim": opened.claim},
             headers={"X-Display-Mac": KITCHEN_MAC},
-        ) as r:
-            assert r.status == 404
+        ) as r,
+    ):
+        assert r.status == 404
     resp = await client.post(
         f"{HA_PANELS}/{_HaApi.DEVICE}/connect", headers=_auth(client._tok)
     )
@@ -1427,14 +1439,16 @@ async def test_connect_through_home_assistant_end_to_end(client, monkeypatch):
         panel_private=KITCHEN_KP.private_key,
         panel_pub=KITCHEN_KP.public_key,
     )
-    async with aiohttp.ClientSession() as panel:
-        async with panel.post(
+    async with (
+        aiohttp.ClientSession() as panel,
+        panel.post(
             f"{opened.url}/api/display/v1/pair/claim",
             json={"claim": opened.claim, "firmware": "2026.10.14"},
             headers={"X-Display-Mac": KITCHEN_MAC, "X-Display-Key": KITCHEN_KEY},
-        ) as r:
-            assert r.status == 200, await r.text()
-            paired = await r.json()
+        ) as r,
+    ):
+        assert r.status == 200, await r.text()
+        paired = await r.json()
     status, who = await _panel_get(origin, "/api/display/v1/whoami", paired["token"])
     assert (status, who) == (
         200,

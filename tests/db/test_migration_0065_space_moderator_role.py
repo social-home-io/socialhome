@@ -115,14 +115,18 @@ def test_both_checks_admit_moderator(conn):
             ("u-x", "overlord"),
         ),
         (
-            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
-            " VALUES('sp1','peer',?,?)",
+            (
+                "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+                " VALUES('sp1','peer',?,?)"
+            ),
             ("r-x", "overlord"),
         ),
         # Ownership stays local-only — a remote seat is never an owner.
         (
-            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
-            " VALUES('sp1','peer',?,?)",
+            (
+                "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+                " VALUES('sp1','peer',?,?)"
+            ),
             ("r-y", "owner"),
         ),
     ],

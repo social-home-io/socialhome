@@ -4,40 +4,23 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from socialhome.repositories.space_repo import SqliteSpaceRepo
-
-from socialhome.crypto import generate_identity_keypair, derive_instance_id
-from socialhome.domain.errors import InvalidMediaRefError
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import (
-    RsvpPastError,
     CalendarEvent,
     CalendarEventCreate,
     CalendarRSVP,
+    RsvpPastError,
     RSVPStatus,
 )
-from socialhome.federation.owner_bound_id import (
-    SPACE_CALENDAR_EVENT_KIND,
-    SPACE_POST_KIND,
-    OwnerBinding,
-    check_owner_bound_id,
-)
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.events import (
     CalendarEventCreated,
     CalendarEventUpdated,
-)
-from socialhome.repositories.calendar_repo import (
-    SqliteCalendarRepo,
-    SqliteSpaceCalendarRepo,
-)
-from socialhome.services import calendar_service as calendar_service_module
-from socialhome.services.calendar_service import (
-    CalendarModerationHandler,
-    CalendarService,
 )
 from socialhome.domain.space import (
     ContentAction,
@@ -45,10 +28,25 @@ from socialhome.domain.space import (
     ModerationStatus,
     ModerationTargetGoneError,
 )
+from socialhome.federation.owner_bound_id import (
+    SPACE_CALENDAR_EVENT_KIND,
+    SPACE_POST_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+)
+from socialhome.repositories.calendar_repo import (
+    SqliteCalendarRepo,
+    SqliteSpaceCalendarRepo,
+)
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
-from socialhome.services.space_moderation_service import SpaceModerationService
+from socialhome.services import calendar_service as calendar_service_module
+from socialhome.services.calendar_service import (
+    CalendarModerationHandler,
+    CalendarService,
+)
 from socialhome.services.moderation_release import release_scope
-
+from socialhome.services.space_moderation_service import SpaceModerationService
 
 # Event seeds are anchored in the near future so the service's
 # past-occurrence RSVP lock (``cannot RSVP to an occurrence that has
@@ -56,7 +54,7 @@ from socialhome.services.moderation_release import release_scope
 # calendar literal silently rots into the past and flakes the suite on
 # that date. Each test runs against its own isolated env, so a single
 # shared anchor is safe; within-test offsets stay relative to it.
-_SEED = (datetime.now(timezone.utc) + timedelta(days=30)).replace(
+_SEED = (datetime.now(UTC) + timedelta(days=30)).replace(
     hour=9, minute=0, second=0, microsecond=0
 )
 
@@ -98,7 +96,7 @@ async def test_personal_calendar_crud(env):
     )
     assert cal.name == "Personal"
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     event = await env.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Lunch",
@@ -133,7 +131,7 @@ async def test_personal_calendar_crud(env):
 
 async def test_space_calendar_with_rsvps(env):
     """Space calendar event with RSVP going/decline/remove flow."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     kp = generate_identity_keypair()
     await env.db.enqueue(
@@ -200,7 +198,7 @@ async def test_list_events_in_range(env):
     cal = await env.cal_svc.create_calendar(
         name="W", owner_username="anna", color="#00F"
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await env.cal_svc.create_event(
         calendar_id=cal.id,
         summary="E",
@@ -350,7 +348,7 @@ async def test_create_event_rejects_local_attendee(federated_cal_env):
         "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
         ("lina", "uid-lina-local", "Lina"),
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with pytest.raises(ValueError, match="household member"):
         await e.cal_svc.create_event(
             calendar_id=cal.id,
@@ -368,7 +366,7 @@ async def test_create_event_rejects_unknown_user(federated_cal_env):
     drop the event."""
     e = federated_cal_env
     cal = await e.cal_svc.create_calendar(name="Anna", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with pytest.raises(ValueError, match="unknown attendee"):
         await e.cal_svc.create_event(
             calendar_id=cal.id,
@@ -393,7 +391,7 @@ async def test_create_event_accepts_paired_remote_attendee(federated_cal_env):
         username="bob",
         display_name="Bob",
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await e.cal_svc.create_event(
         calendar_id=cal.id,
         summary="BBQ",
@@ -426,7 +424,7 @@ async def test_import_event_update_keeps_app_only_fields(federated_cal_env):
         username="bob",
         display_name="Bob",
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     key = uuid.uuid4().hex
     imported, _ = await e.cal_svc.import_event(
         calendar_id=cal.id,
@@ -497,7 +495,7 @@ async def test_create_event_groups_envelopes_per_instance(federated_cal_env):
         username="b1",
         display_name="B1",
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await e.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Mixer",
@@ -517,7 +515,7 @@ async def test_create_event_no_attendees_no_envelope(federated_cal_env):
     federation wired."""
     e = federated_cal_env
     cal = await e.cal_svc.create_calendar(name="Anna", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await e.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Solo",
@@ -533,7 +531,7 @@ async def _seed_remote_invite(env, *, organiser_instance: str = "i_org"):
     would write on receipt of a cross-household invite — gives
     set_rsvp / clear_rsvp something to operate on."""
     cal = await env.cal_svc.create_calendar(name="Anna", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     invite = CalendarEvent(
         id="ri_anna_invite",
         calendar_id=cal.id,
@@ -590,7 +588,7 @@ async def test_set_rsvp_rejects_local_event(federated_cal_env):
     meaningless and the service rejects it."""
     e = federated_cal_env
     cal = await e.cal_svc.create_calendar(name="Anna", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await e.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Local",
@@ -647,7 +645,7 @@ async def test_clear_rsvp_unknown_event_is_noop(federated_cal_env):
 async def test_clear_rsvp_rejects_local_event(federated_cal_env):
     e = federated_cal_env
     cal = await e.cal_svc.create_calendar(name="Anna", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await e.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Local",
@@ -664,7 +662,7 @@ async def test_update_event_with_attendees_revalidates(federated_cal_env):
     is rejected with the same 422 as POST."""
     e = federated_cal_env
     cal = await e.cal_svc.create_calendar(name="Anna", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await e.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Picnic",
@@ -696,7 +694,7 @@ async def test_update_event_without_attendees_keeps_existing(federated_cal_env):
         username="bob",
         display_name="Bob",
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await e.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Picnic",
@@ -719,7 +717,7 @@ async def test_update_event_promotes_legacy_to_group(federated_cal_env):
     one via ``update_event`` so all copies share the group id (#327)."""
     e = federated_cal_env
     cal = await e.cal_svc.create_calendar(name="Anna", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await e.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Picnic",
@@ -739,7 +737,7 @@ async def test_update_event_does_not_clear_existing_group(federated_cal_env):
     existing group id — None means "no change", never "clear"."""
     e = federated_cal_env
     cal = await e.cal_svc.create_calendar(name="Anna", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = uuid.uuid4().hex
     ev = await e.cal_svc.create_event(
         calendar_id=cal.id,
@@ -792,7 +790,7 @@ async def test_attendee_on_unconfirmed_instance_rejected(federated_cal_env):
         " display_name) VALUES(?,?,?,?)",
         ("u-pending", "i_pending", "p", "Pending"),
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with pytest.raises(ValueError, match="confirmed paired"):
         await e.cal_svc.create_event(
             calendar_id=cal.id,
@@ -825,7 +823,7 @@ async def test_publish_federation_event_swallows_outbound_error(federated_cal_en
             raise RuntimeError("peer down")
 
     e.cal_svc._federation = _Boom()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await e.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Resilient",
@@ -886,7 +884,7 @@ async def test_publish_rsvp_skips_when_remote_pointers_missing(federated_cal_env
     data), the RSVP outbound silently skips instead of raising."""
     e = federated_cal_env
     cal = await e.cal_svc.create_calendar(name="Anna", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # Invite WITHOUT remote pointers — exercises the guard.
     bad = CalendarEvent(
         id="ri_legacy",
@@ -922,7 +920,7 @@ async def test_delete_event_with_attendees_fans_envelope(federated_cal_env):
         username="bob",
         display_name="Bob",
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await e.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Cancelled",
@@ -972,7 +970,7 @@ async def test_rsvp_non_recurring_defaults_occurrence_to_event_start(space_cal_e
     env = space_cal_env
     # Future-relative (not a hardcoded date) — rsvp() rejects an occurrence
     # that has already ended, so a fixed past start makes this a time-bomb.
-    now = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
+    now = (datetime.now(UTC) + timedelta(days=1)).replace(microsecond=0)
     event = await env.space_cal_svc.create_event(
         space_id="sp-cal",
         summary="Birthday",
@@ -995,7 +993,7 @@ async def test_a_space_event_id_commits_to_its_creator(space_cal_env):
     """v_36: a space event federates, so its id is owner-bound to its
     creator in its space — no other household can announce it first."""
     env = space_cal_env
-    start = datetime.now(timezone.utc) + timedelta(days=1)
+    start = datetime.now(UTC) + timedelta(days=1)
     event = await env.space_cal_svc.create_event(
         space_id="sp-cal",
         summary="Party",
@@ -1151,7 +1149,7 @@ async def test_capped_event_member_rsvp_becomes_requested(space_cal_env):
         status=RSVPStatus.GOING,
     )
     rsvps = await env.space_cal_svc.list_rsvps(event.id)
-    bob = [r for r in rsvps if r.user_id == "uid-bob"][0]
+    bob = next(r for r in rsvps if r.user_id == "uid-bob")
     assert bob.status == RSVPStatus.REQUESTED
 
 
@@ -1168,7 +1166,7 @@ async def test_creator_skips_approval_even_when_capped(space_cal_env):
     )
     # Creator's auto-RSVP from create_event lands as GOING.
     rsvps = await env.space_cal_svc.list_rsvps(event.id)
-    alice = [r for r in rsvps if r.user_id == "uid-alice"][0]
+    alice = next(r for r in rsvps if r.user_id == "uid-alice")
     assert alice.status == RSVPStatus.GOING
 
 
@@ -1198,7 +1196,7 @@ async def test_approve_promotes_requested_to_going(space_cal_env):
     )
     assert new_status == RSVPStatus.GOING
     rsvps = await env.space_cal_svc.list_rsvps(event.id)
-    bob = [r for r in rsvps if r.user_id == "uid-bob"][0]
+    bob = next(r for r in rsvps if r.user_id == "uid-bob")
     assert bob.status == RSVPStatus.GOING
 
 
@@ -1261,7 +1259,7 @@ async def test_decline_promotes_waitlist(space_cal_env):
         status=RSVPStatus.DECLINED,
     )
     rsvps = await env.space_cal_svc.list_rsvps(event.id)
-    bob = [r for r in rsvps if r.user_id == "uid-bob"][0]
+    bob = next(r for r in rsvps if r.user_id == "uid-bob")
     assert bob.status == RSVPStatus.GOING
 
 
@@ -1349,7 +1347,7 @@ async def test_capacity_raise_promotes_waitlist(space_cal_env):
         event.id, actor_user_id="u-test", space_id=event.calendar_id, capacity=2
     )
     rsvps2 = await env.space_cal_svc.list_rsvps(event.id)
-    bob = [r for r in rsvps2 if r.user_id == "uid-bob"][0]
+    bob = next(r for r in rsvps2 if r.user_id == "uid-bob")
     assert bob.status == RSVPStatus.GOING
 
 
@@ -1374,7 +1372,7 @@ async def test_uncapped_event_keeps_old_behaviour(space_cal_env):
         status=RSVPStatus.GOING,
     )
     rsvps = await env.space_cal_svc.list_rsvps(event.id)
-    bob = [r for r in rsvps if r.user_id == "uid-bob"][0]
+    bob = next(r for r in rsvps if r.user_id == "uid-bob")
     assert bob.status == RSVPStatus.GOING
 
 
@@ -1382,7 +1380,7 @@ async def test_rsvp_to_ended_event_rejected(space_cal_env):
     """Phase E: RSVPs to occurrences whose window is fully in the past
     are rejected at the service layer."""
     env = space_cal_env
-    past = datetime.now(timezone.utc) - timedelta(days=1)
+    past = datetime.now(UTC) - timedelta(days=1)
     event = await env.space_cal_svc.create_event(
         space_id="sp-cal",
         summary="Past event",
@@ -1405,7 +1403,7 @@ async def test_rsvp_to_ended_event_rejected(space_cal_env):
 async def test_rsvp_during_event_window_allowed(space_cal_env):
     """While an event is happening (started but not ended), RSVPs go through."""
     env = space_cal_env
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # Event that started 30 min ago and lasts 2 h.
     started = now - timedelta(minutes=30)
     event = await env.space_cal_svc.create_event(
@@ -1451,7 +1449,7 @@ async def test_member_left_cleans_up_rsvps(space_cal_env):
         "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
         ("bob", "uid-bob", "Bob"),
     )
-    future = datetime.now(timezone.utc) + timedelta(days=10)
+    future = datetime.now(UTC) + timedelta(days=10)
     event = await env.space_cal_svc.create_event(
         space_id="sp-cal",
         summary="Anniversary",
@@ -1490,7 +1488,7 @@ async def test_rsvp_publishes_federation_event(space_cal_env):
     # Future-relative so the RSVP isn't rejected by the past-occurrence
     # lock — a fixed calendar date silently rots into the past and flakes
     # once the wall clock catches up to it (hit on 2026-06-01).
-    now = datetime.now(timezone.utc) + timedelta(days=1)
+    now = datetime.now(UTC) + timedelta(days=1)
     event = await env.space_cal_svc.create_event(
         space_id="sp-cal",
         summary="Anniversary",
@@ -1559,7 +1557,7 @@ async def test_create_event_publishes_federation_event(space_cal_env):
         c for c in fed.calls if c[1].value == "space_calendar_event_created"
     ]
     assert len(created_calls) == 1
-    space_id, evt_type, payload = created_calls[0]
+    space_id, _evt_type, payload = created_calls[0]
     assert space_id == "sp-cal"
     assert payload["event_id"] == event.id
     assert payload["calendar_id"] == "sp-cal"
@@ -1670,7 +1668,7 @@ async def test_create_event_empty_summary(env):
         ("bob", "u2", "B"),
     )
     cal = await env.cal_svc.create_calendar(name="C", owner_username="bob")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with pytest.raises(ValueError, match="empty"):
         await env.cal_svc.create_event(
             calendar_id=cal.id,
@@ -1683,7 +1681,7 @@ async def test_create_event_empty_summary(env):
 
 async def test_create_event_nonexistent_calendar(env):
     """Creating an event in a nonexistent calendar raises KeyError."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with pytest.raises(KeyError):
         await env.cal_svc.create_event(
             calendar_id="nonexistent",
@@ -1701,7 +1699,7 @@ async def test_create_event_end_before_start(env):
         ("carl", "u3", "C"),
     )
     cal = await env.cal_svc.create_calendar(name="C", owner_username="carl")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with pytest.raises(ValueError, match="before start"):
         await env.cal_svc.create_event(
             calendar_id=cal.id,
@@ -1771,7 +1769,7 @@ async def test_space_calendar_service_list(env):
            VALUES(?,?,?,?,?,0,'private','invite_only')""",
         (sid, "SpCal", env.iid, "spown", kp2.public_key.hex()),
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     events = await svc.list_events_in_range(
         sid,
         start=(now - timedelta(hours=1)).isoformat(),
@@ -1808,7 +1806,7 @@ async def test_create_event_publishes_calendar_event_created(env):
     bus = _RecordingBus()
     svc = CalendarService(env.cal_repo, bus=bus)
     cal = await svc.create_calendar(name="Test", owner_username="owner")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await svc.create_event(
         calendar_id=cal.id,
         summary="Dinner",
@@ -1837,7 +1835,7 @@ async def test_delete_event_publishes_calendar_event_deleted(env):
     bus = _RecordingBus()
     svc = CalendarService(env.cal_repo, bus=bus)
     cal = await svc.create_calendar(name="Del", owner_username="deleter")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     event = await svc.create_event(
         calendar_id=cal.id,
         summary="To delete",
@@ -1957,7 +1955,7 @@ async def test_create_event_persists_client_event_uuid(env):
         ("uli", "u-uli", "Uli"),
     )
     cal = await env.cal_svc.create_calendar(name="C", owner_username="uli")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await env.cal_svc.create_event(
         calendar_id=cal.id,
         summary="UUID test",
@@ -1979,7 +1977,7 @@ async def test_create_event_normalises_uuid_with_dashes(env):
         ("vera", "u-vera", "Vera"),
     )
     cal = await env.cal_svc.create_calendar(name="C", owner_username="vera")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await env.cal_svc.create_event(
         calendar_id=cal.id,
         summary="dashed",
@@ -2000,7 +1998,7 @@ async def test_create_event_rejects_malformed_uuid(env):
         ("walt", "u-walt", "Walt"),
     )
     cal = await env.cal_svc.create_calendar(name="C", owner_username="walt")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for bad in (
         "",
         "not-a-uuid-yo",
@@ -2027,7 +2025,7 @@ async def test_create_event_default_is_none(env):
         ("xena", "u-xena", "Xena"),
     )
     cal = await env.cal_svc.create_calendar(name="C", owner_username="xena")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await env.cal_svc.create_event(
         calendar_id=cal.id,
         summary="no uuid",
@@ -2068,7 +2066,7 @@ async def test_list_event_copies_batches_distinct_uuids(env):
 
     await _seed_user(env.db, "copyowner")
     cal = await env.cal_svc.create_calendar(name="C", owner_username="copyowner")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = uuid.uuid4().hex
     ev = await env.cal_svc.create_event(
         calendar_id=cal.id,
@@ -2106,7 +2104,7 @@ async def test_list_event_copies_empty_input_skips_repo(env):
 
     await _seed_user(env.db, "emptyowner")
     cal = await env.cal_svc.create_calendar(name="C", owner_username="emptyowner")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     plain = await env.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Solo",
@@ -2127,7 +2125,7 @@ async def test_create_event_twice_with_same_uuid_updates_in_place(env):
     bus = _CopyRecordingBus()
     svc = CalendarService(env.cal_repo, bus=bus)
     cal = await svc.create_calendar(name="C", owner_username="dup")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = uuid.uuid4().hex
     first = await svc.create_event(
         calendar_id=cal.id,
@@ -2178,7 +2176,7 @@ async def test_create_event_resolve_to_update_federates_updated(federated_cal_en
         username="bob",
         display_name="Bob",
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = uuid.uuid4().hex
     await e.cal_svc.create_event(
         calendar_id=cal.id,
@@ -2212,7 +2210,7 @@ async def test_create_event_resolve_to_update_applies_resolved_tz(federated_cal_
         "UPDATE users SET tz=? WHERE username=?", ("Europe/Berlin", "anna")
     )
     cal = await env.cal_svc.create_calendar(name="C", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = uuid.uuid4().hex
     first = await env.cal_svc.create_event(
         calendar_id=cal.id,
@@ -2243,7 +2241,7 @@ async def test_create_event_different_uuid_still_creates_second_row(env):
     legacy insert behaviour."""
     await _seed_user(env.db, "multi")
     cal = await env.cal_svc.create_calendar(name="C", owner_username="multi")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     a = await env.cal_svc.create_event(
         calendar_id=cal.id,
         summary="A",
@@ -2282,7 +2280,7 @@ async def test_import_event_reports_created_then_updated(env):
     same row (file wins: cleared fields clear) on the next one."""
     await _seed_user(env.db, "imp")
     cal = await env.cal_svc.create_calendar(name="C", owner_username="imp")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     key = uuid.uuid4().hex
     first_in = CalendarEventCreate(
         summary="Dentist",
@@ -2316,7 +2314,7 @@ async def test_import_event_reports_created_then_updated(env):
 async def test_import_event_without_key_always_creates(env):
     await _seed_user(env.db, "imp2")
     cal = await env.cal_svc.create_calendar(name="C", owner_username="imp2")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = CalendarEventCreate(summary="X", start=now, end=now + timedelta(hours=1))
     a, ca = await env.cal_svc.import_event(
         calendar_id=cal.id, created_by="uid-imp2", event=ev
@@ -2332,7 +2330,7 @@ async def test_import_event_race_reports_updated(env):
     """The concurrent-insert retry path of an import counts as an update."""
     await _seed_user(env.db, "imprace")
     cal = await env.cal_svc.create_calendar(name="C", owner_username="imprace")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = CalendarEventCreate(
         summary="Race",
         start=now,
@@ -2364,7 +2362,7 @@ async def test_create_event_integrity_error_retries_as_update(env):
     between the lookup and the INSERT surfaces as an update, not a 500."""
     await _seed_user(env.db, "racer")
     cal = await env.cal_svc.create_calendar(name="C", owner_username="racer")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = uuid.uuid4().hex
     first = await env.cal_svc.create_event(
         calendar_id=cal.id,
@@ -2423,7 +2421,7 @@ async def test_update_event_rejects_uuid_already_used_on_calendar(env):
     """
     await _seed_user(env.db, "clash")
     cal = await env.cal_svc.create_calendar(name="C", owner_username="clash")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = uuid.uuid4().hex
     taken = await env.cal_svc.create_event(
         calendar_id=cal.id,
@@ -2452,7 +2450,7 @@ async def test_update_event_keeps_own_uuid_without_clashing(env):
     a self-collision against ``ux_calendar_events_fanout``."""
     await _seed_user(env.db, "selfsame")
     cal = await env.cal_svc.create_calendar(name="C", owner_username="selfsame")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = uuid.uuid4().hex
     ev = await env.cal_svc.create_event(
         calendar_id=cal.id,
@@ -2480,7 +2478,7 @@ async def test_update_event_reraises_unrelated_integrity_error(env):
     """
     await _seed_user(env.db, "otherint")
     cal = await env.cal_svc.create_calendar(name="C", owner_username="otherint")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await env.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Mine",
@@ -2527,7 +2525,7 @@ async def _admin_only_calendar(env, *, posts_admin_only: bool = False):
         )
     svc = SpaceCalendarService(env.space_cal_repo)
     svc.attach_space_repo(SqliteSpaceRepo(env.db))
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await svc.create_event(
         space_id="cal-ao",
         summary="Picnic",
@@ -2596,7 +2594,7 @@ async def test_admin_only_calendar_lets_admins_write(env, actor):
 
 async def test_admin_only_calendar_still_takes_rsvps(env):
     """RSVPs are never gated by the calendar level."""
-    svc, ev, now = await _admin_only_calendar(env)
+    svc, ev, _now = await _admin_only_calendar(env)
     await svc.rsvp(
         event_id=ev.id,
         user_id="u-mod",
@@ -2958,7 +2956,7 @@ async def test_a_released_event_carries_the_approval_block(space_cal_env):
     env = space_cal_env
     fed = _RecordingFed()
     env.space_cal_svc.attach_federation(fed)
-    start = datetime.now(timezone.utc) + timedelta(days=1)
+    start = datetime.now(UTC) + timedelta(days=1)
     with release_scope("item-9", "uid-alice"):
         event = await env.space_cal_svc.create_event(
             space_id="sp-cal",
@@ -2998,7 +2996,7 @@ async def test_an_event_released_for_a_remote_creator_rsvps_nobody(space_cal_env
     env = space_cal_env
     fed = _RecordingFed()
     env.space_cal_svc.attach_federation(fed)
-    start = datetime.now(timezone.utc) + timedelta(days=1)
+    start = datetime.now(UTC) + timedelta(days=1)
     with release_scope("item-9", "uid-alice"):
         event = await env.space_cal_svc.create_event(
             space_id="sp-cal",
@@ -3056,7 +3054,7 @@ async def test_event_cover_must_be_local_media(env):
         ("anna", "uid-anna", "Anna"),
     )
     cal = await env.cal_svc.create_calendar(name="Personal", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with pytest.raises(InvalidMediaRefError) as ei:
         await env.cal_svc.create_event(
             calendar_id=cal.id,
@@ -3093,7 +3091,7 @@ async def _personal_event_with_legacy_cover(env):
         ("anna", "uid-anna", "Anna"),
     )
     cal = await env.cal_svc.create_calendar(name="Personal", owner_username="anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await env.cal_svc.create_event(
         calendar_id=cal.id,
         summary="Lunch",

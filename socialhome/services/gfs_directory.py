@@ -75,7 +75,7 @@ class GfsDirectoryCache:
     does not linger.
     """
 
-    __slots__ = ("_client", "_entries", "_owners", "_inflight", "_generation")
+    __slots__ = ("_client", "_entries", "_generation", "_inflight", "_owners")
 
     def __init__(self, client: Callable[[], aiohttp.ClientSession | None]) -> None:
         # A getter, not a session: the cookie-less publish session is
@@ -219,7 +219,7 @@ class GfsDirectoryCache:
                 raw = await read_body_capped(
                     resp, url=url, limit=MAX_DIRECTORY_BODY_BYTES
                 )
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        except (TimeoutError, aiohttp.ClientError, OSError) as exc:
             log.warning("gfs_directory: fetch from %s failed: %s", url, exc)
             return None
         if raw is None:

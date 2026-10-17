@@ -15,8 +15,9 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -93,7 +94,7 @@ async def owner(client):
 
 
 def _now_iso(*, minutes: int = 0) -> str:
-    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+    return (datetime.now(UTC) + timedelta(minutes=minutes)).isoformat()
 
 
 def _sign(payload: dict, seed: bytes) -> str:
@@ -159,7 +160,7 @@ async def _mint(client, seed, **kw) -> tuple[int, dict]:
     )
     try:
         body = await resp.json()
-    except Exception:
+    except aiohttp.ClientError, ValueError:
         body = {}
     return resp.status, body
 

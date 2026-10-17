@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -23,7 +23,7 @@ from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with a federation repo over a real SQLite database."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
@@ -49,7 +49,7 @@ async def env(tmp_dir):
 
 async def test_federation_pairing_lifecycle(env):
     """Create, read, update, then delete a pairing session."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     session = PairingSession(
         token="tok-abc",
         own_identity_pk="aa" * 32,
@@ -58,7 +58,7 @@ async def test_federation_pairing_lifecycle(env):
         inbox_url="https://local/inbox/own-id",
         own_local_inbox_id="own-id",
         issued_at=now,
-        expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         status=PairingStatus.PENDING_SENT,
     )
     await env.fed_repo.create_pairing(session)
@@ -99,7 +99,7 @@ async def test_cleanup_expired_pairings_no_rows(env):
 
 async def test_cleanup_expired_pairings_keeps_fresh_rows(env):
     """A session whose ``expires_at`` is in the future is left alone."""
-    future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    future = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
     session = PairingSession(
         token="tok-fresh",
         own_identity_pk="aa" * 32,
@@ -107,7 +107,7 @@ async def test_cleanup_expired_pairings_keeps_fresh_rows(env):
         own_dh_sk="cc" * 32,
         inbox_url="https://local/inbox/own-fresh",
         own_local_inbox_id="own-fresh",
-        issued_at=datetime.now(timezone.utc).isoformat(),
+        issued_at=datetime.now(UTC).isoformat(),
         expires_at=future,
         status=PairingStatus.PENDING_SENT,
     )
@@ -121,7 +121,7 @@ async def test_cleanup_expired_pairings_deletes_session_and_orphan_instance(env)
     """An expired session plus its PENDING_RECEIVED orphan instance both
     get pruned. A CONFIRMED instance sharing the local_inbox_id (should
     never happen — defensive guard) is left alone."""
-    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     session = PairingSession(
         token="tok-expired",
         own_identity_pk="aa" * 32,
@@ -158,7 +158,7 @@ async def test_cleanup_expired_pairings_preserves_confirmed_instance(env):
     delete the session before flipping the instance to CONFIRMED, so
     this scenario shouldn't arise — but the status filter is the belt
     that protects against a future bug.)"""
-    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     session = PairingSession(
         token="tok-x",
         own_identity_pk="aa" * 32,
@@ -233,7 +233,7 @@ async def test_cleanup_expired_pairings_handles_session_without_instance(env):
     """``initiate()`` creates a session but no RemoteInstance row. The
     cleanup must still prune the orphan session even with no peer
     instance to delete."""
-    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     session = PairingSession(
         token="tok-initiate",
         own_identity_pk="aa" * 32,
@@ -263,11 +263,11 @@ async def test_federation_replay_cache(env):
 
     await env.fed_repo.insert_replay_id("msg-001")
 
-    yesterday = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    yesterday = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
     removed = await env.fed_repo.prune_replay_cache(yesterday)
     assert removed == 0
 
-    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     removed_all = await env.fed_repo.prune_replay_cache(future)
     assert removed_all >= 2
 
@@ -953,7 +953,7 @@ async def test_cleanup_expired_pairings_purges_what_the_half_pair_queued(env):
     """An expired half-paired row goes like any other removed pairing: its
     outbox envelopes, DM / space media and announced mesh hints go in the
     same transaction. A confirmed peer's rows are untouched."""
-    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     await env.fed_repo.create_pairing(
         PairingSession(
             token="tok-p",
@@ -1077,16 +1077,16 @@ async def test_member_version_survives_a_new_seat(env):
 
 
 def _peer(peer_id: str = "peer-gfs", **kw) -> RemoteInstance:
-    base = dict(
-        id=peer_id,
-        display_name="Peer",
-        remote_identity_pk="aa" * 32,
-        key_self_to_remote="k1",
-        key_remote_to_self="k2",
-        remote_inbox_url="",
-        local_inbox_id=f"inbox-{peer_id}",
-        source=InstanceSource.MANUAL,
-    )
+    base = {
+        "id": peer_id,
+        "display_name": "Peer",
+        "remote_identity_pk": "aa" * 32,
+        "key_self_to_remote": "k1",
+        "key_remote_to_self": "k2",
+        "remote_inbox_url": "",
+        "local_inbox_id": f"inbox-{peer_id}",
+        "source": InstanceSource.MANUAL,
+    }
     base.update(kw)
     return RemoteInstance(**base)
 
@@ -1247,7 +1247,7 @@ async def test_save_instance_with_a_new_keywrap_key_replaces_it(env):
 def _session(
     token: str, inbox: str, *, peer_pk: str | None = None, minutes: int = 5
 ) -> PairingSession:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return PairingSession(
         token=token,
         own_identity_pk="aa" * 32,

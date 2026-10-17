@@ -43,16 +43,16 @@ if TYPE_CHECKING:
 
 
 def _iter_chat_pages(
-    convos: "AbstractConversationRepo",
+    convos: AbstractConversationRepo,
     conversation_id: str,
     cutoff: str | None,
     *,
     deleted: bool,
     since: int | None = None,
-) -> AsyncIterator[list["ConversationMessage"]]:
+) -> AsyncIterator[list[ConversationMessage]]:
     async def fetch(
         cursor: int | None,
-    ) -> tuple[list["ConversationMessage"], int | None]:
+    ) -> tuple[list[ConversationMessage], int | None]:
         return await convos.list_messages_sync_page(
             conversation_id,
             deleted=deleted,
@@ -65,7 +65,7 @@ def _iter_chat_pages(
     return iter_pages(fetch)
 
 
-def _chat_on(space: "Space | None") -> bool:
+def _chat_on(space: Space | None) -> bool:
     return space is not None and not space.dissolved and space.features.chat
 
 
@@ -76,8 +76,8 @@ class ChatMessagesExporter(PagedExporterMixin):
 
     def __init__(
         self,
-        conversation_repo: "AbstractConversationRepo",
-        space_repo: "AbstractSpaceRepo",
+        conversation_repo: AbstractConversationRepo,
+        space_repo: AbstractSpaceRepo,
     ) -> None:
         self._convos = conversation_repo
         self._spaces = space_repo
@@ -137,8 +137,8 @@ class ChatMessagesDeletedExporter(PagedExporterMixin):
 
     def __init__(
         self,
-        conversation_repo: "AbstractConversationRepo",
-        space_repo: "AbstractSpaceRepo",
+        conversation_repo: AbstractConversationRepo,
+        space_repo: AbstractSpaceRepo,
     ) -> None:
         self._convos = conversation_repo
         self._spaces = space_repo

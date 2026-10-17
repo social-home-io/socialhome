@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import pathlib
 import urllib.parse
-
 from unittest.mock import AsyncMock
 
 import pytest

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
-from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.conversation import (
     MUTED_FOREVER,
@@ -16,18 +16,18 @@ from socialhome.domain.conversation import (
     ConversationType,
     SystemChatScope,
 )
-from socialhome.domain.federation import FederationEventType
-from socialhome.domain.household_dashboard import ACK_EMOJI
 from socialhome.domain.errors import InvalidMediaRefError
-from socialhome.domain.user import DASHBOARD_AUTHOR
 from socialhome.domain.events import (
     DmMessageCreated,
     DmMessageReactionChanged,
     DmMessageUpdated,
 )
+from socialhome.domain.federation import FederationEventType
+from socialhome.domain.household_dashboard import ACK_EMOJI
+from socialhome.domain.user import DASHBOARD_AUTHOR
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.dm_service import DmService
 from socialhome.services.user_service import UserService
@@ -128,7 +128,7 @@ async def test_mute_and_unmute_own_seat_only(stack):
     await stack.provision_user("anna")
     await stack.provision_user("bob")
     dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
-    now = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 29, 10, 0, tzinfo=UTC)
     until = await stack.dm_svc.mute(dm.id, username="bob", duration="8h", now=now)
     assert until == "2026-09-29T18:00:00+00:00"
     assert await _mute_of(stack, dm.id, "bob") == until
@@ -666,16 +666,16 @@ def _space_session_peer(instance_id: str):
 
 
 async def _attach_remote_member(stack, *, conversation_id, instance_id, username):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from socialhome.domain.conversation import RemoteConversationMember
 
-    await stack.dm_svc._convos.add_remote_member(  # noqa: SLF001
+    await stack.dm_svc._convos.add_remote_member(
         RemoteConversationMember(
             conversation_id=conversation_id,
             instance_id=instance_id,
             remote_username=username,
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         ),
     )
 
@@ -947,9 +947,9 @@ async def test_dm_message_outbound_skips_peers_where_sender_is_hidden(stack):
     from socialhome.services.dm_service import DmService
 
     stack.dm_svc = DmService(
-        stack.dm_svc._convos,  # noqa: SLF001
-        stack.dm_svc._users,  # noqa: SLF001
-        stack.dm_svc._bus,  # noqa: SLF001
+        stack.dm_svc._convos,
+        stack.dm_svc._users,
+        stack.dm_svc._bus,
         visibility_repo=vis_repo,
     )
     stack.dm_svc.attach_federation(fed, fed_repo, own_instance_id="self")
@@ -1170,14 +1170,14 @@ async def _household_chat_with_message(stack, *, content="@here dinner!"):
         conversation_id=chat.id,
         sender_user_id=anna.user_id,
         content=content,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     await convos.save_message(msg)
     return convos, chat, msg, anna
 
 
 async def test_dashboard_ack_reacts_publishes_and_never_federates(stack):
-    convos, chat, msg, anna = await _household_chat_with_message(stack)
+    convos, _chat, msg, anna = await _household_chat_with_message(stack)
     fed = _FakeFederationService()
     repo = _FakeFederationRepo({"peer-a": _confirmed_peer("peer-a")})
     stack.dm_svc.attach_federation(fed, repo, own_instance_id="self")

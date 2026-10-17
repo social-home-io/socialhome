@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -89,7 +89,7 @@ def _redeem_body(redeemer: _Household, **over) -> dict:
         "invite_token": "a" * 32,
         "space_id": "space-1",
         "redeem_nonce": "b" * 32,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "instance_id": redeemer.instance_id,
         "identity_pk": redeemer.identity_pk_hex,
         "keywrap_pk": redeemer.keywrap_pk_hex,
@@ -315,7 +315,7 @@ def test_signature_by_a_different_key_rejected(redeemer, issuer):
 
 @pytest.mark.parametrize("delta_s", [-3600, 3600])
 def test_timestamp_outside_window_rejected(redeemer, issuer, delta_s):
-    stale = (datetime.now(timezone.utc) + timedelta(seconds=delta_s)).isoformat()
+    stale = (datetime.now(UTC) + timedelta(seconds=delta_s)).isoformat()
     envelope = _seal(redeemer, issuer, _redeem_body(redeemer, ts=stale))
     with pytest.raises(ValueError, match="skew too large"):
         open_bootstrap_envelope(

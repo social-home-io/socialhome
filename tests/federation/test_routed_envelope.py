@@ -65,7 +65,6 @@ from socialhome.federation.routed_envelope import (
     _PendingRouted,
 )
 
-
 # ── Test doubles ──────────────────────────────────────────────────────
 
 
@@ -1013,11 +1012,13 @@ async def test_forward_unwrap_non_json_drops(caplog):
         position=0,
         sealed=sealed,
     )
-    with patch.object(routed_crypto, "unseal_inner_payload", return_value="not json"):
-        with caplog.at_level(
+    with (
+        patch.object(routed_crypto, "unseal_inner_payload", return_value="not json"),
+        caplog.at_level(
             logging.WARNING, logger="socialhome.federation.routed_envelope"
-        ):
-            await nodes["b"].handler._on_routed(ev)
+        ),
+    ):
+        await nodes["b"].handler._on_routed(ev)
     assert nodes["b"].dispatched == []
     assert any("JSON parse failed" in r.message for r in caplog.records)
 
@@ -1040,11 +1041,13 @@ async def test_forward_unwrap_non_dict_json_drops(caplog):
         position=0,
         sealed=sealed,
     )
-    with patch.object(routed_crypto, "unseal_inner_payload", return_value="[]"):
-        with caplog.at_level(
+    with (
+        patch.object(routed_crypto, "unseal_inner_payload", return_value="[]"),
+        caplog.at_level(
             logging.WARNING, logger="socialhome.federation.routed_envelope"
-        ):
-            await nodes["b"].handler._on_routed(ev)
+        ),
+    ):
+        await nodes["b"].handler._on_routed(ev)
     assert nodes["b"].dispatched == []
     assert any("decoded inner_payload is not a" in r.message for r in caplog.records)
 
@@ -1153,11 +1156,13 @@ async def test_reply_unwrap_non_json_drops(caplog):
             "sealed": sealed,
         },
     )
-    with patch.object(routed_crypto, "unseal_reply_payload", return_value="not json"):
-        with caplog.at_level(
+    with (
+        patch.object(routed_crypto, "unseal_reply_payload", return_value="not json"),
+        caplog.at_level(
             logging.WARNING, logger="socialhome.federation.routed_envelope"
-        ):
-            await handler_a._on_routed(ev)
+        ),
+    ):
+        await handler_a._on_routed(ev)
     assert nodes["a"].dispatched == []
     assert any(
         "reply inner_payload JSON parse failed" in r.message for r in caplog.records
@@ -1192,11 +1197,13 @@ async def test_reply_unwrap_non_dict_json_drops(caplog):
             "sealed": sealed,
         },
     )
-    with patch.object(routed_crypto, "unseal_reply_payload", return_value="[]"):
-        with caplog.at_level(
+    with (
+        patch.object(routed_crypto, "unseal_reply_payload", return_value="[]"),
+        caplog.at_level(
             logging.WARNING, logger="socialhome.federation.routed_envelope"
-        ):
-            await handler_a._on_routed(ev)
+        ),
+    ):
+        await handler_a._on_routed(ev)
     assert nodes["a"].dispatched == []
     assert any("reply inner_payload is not a dict" in r.message for r in caplog.records)
 
@@ -2139,15 +2146,17 @@ async def test_route_stale_at_origin_replay_is_a_noop():
         a, path, pin=c.fed.own_identity_pk.hex()
     )
     nack = _origin_nack(target=c, path=path, route_id=route_id, stale_pub=dead_pub)
-    kwargs = dict(
-        event=_nack_event(nack, from_instance=b.instance_id, to_instance=a.instance_id),
-        route_id=route_id,
-        path=path,
-        target_identity_pk=nack["target_identity_pk"],
-        stale_eph_pk=dead_pub,
-        sig=nack["sig"],
-        sig_suite=nack["sig_suite"],
-    )
+    kwargs = {
+        "event": _nack_event(
+            nack, from_instance=b.instance_id, to_instance=a.instance_id
+        ),
+        "route_id": route_id,
+        "path": path,
+        "target_identity_pk": nack["target_identity_pk"],
+        "stale_eph_pk": dead_pub,
+        "sig": nack["sig"],
+        "sig_suite": nack["sig_suite"],
+    }
     await a.handler._on_route_stale_at_origin(**kwargs)
     await a.handler._on_route_stale_at_origin(**kwargs)
     assert rs.invalidated == [c.instance_id]
@@ -2164,7 +2173,7 @@ async def test_route_stale_at_origin_nacked_retry_gives_up(caplog):
     _dead2_priv, dead2_pub = routed_crypto.generate_ephemeral_keypair()
     rs.discovery = (list(path), dead2_pub)
     with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
-        route_id, _dead, _ = await _send_under_dead_key(
+        _route_id, _dead, _ = await _send_under_dead_key(
             a, path, pin=c.fed.own_identity_pk.hex()
         )
         await _settle()
@@ -3373,7 +3382,7 @@ async def test_genuine_origin_is_dispatched_with_signature():
     assert nodes["v"].dispatched[0].from_instance == "h"
     # The signature rides inside the sealed blob's sibling fields and is
     # relayed untouched.
-    wire = [s for s in nodes["h"].fed.sent if s["to"] == "f"][0]["payload"]
+    wire = next(s for s in nodes["h"].fed.sent if s["to"] == "f")["payload"]
     assert wire["sealed"]["origin_sig_suite"] == (
         routed_crypto.ROUTED_ORIGIN_SIG_SUITE_ED25519
     )
@@ -3517,7 +3526,7 @@ async def test_tampered_ciphertext_under_a_replayed_signature_is_dropped(caplog)
     )
     for _ in range(8):
         await asyncio.sleep(0)
-    genuine = [s for s in nodes["h"].fed.sent if s["to"] == "f"][0]["payload"]
+    genuine = next(s for s in nodes["h"].fed.sent if s["to"] == "f")["payload"]
     nodes["v"].dispatched.clear()
     swapped = _seal_as(
         target_eph_pk=target_eph_pk,
@@ -3589,7 +3598,7 @@ async def test_reply_leg_forged_origin_is_dropped(caplog):
     for _ in range(8):
         await asyncio.sleep(0)
     route_id = nodes["c"].dispatched[0].routed_route_id
-    origin_eph_pub = [s for s in nodes["a"].fed.sent if s["to"] == "b"][0]["payload"][
+    origin_eph_pub = next(s for s in nodes["a"].fed.sent if s["to"] == "b")["payload"][
         "sealed"
     ]["origin_eph_pk"]
     # b forges a reply: it holds no target→origin key, but it can mint a

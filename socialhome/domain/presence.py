@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-
 #: The four possible presence states reported by Home Assistant.
 PresenceState = Literal["home", "zone", "away", "unavailable"]
 

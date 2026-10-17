@@ -12,7 +12,7 @@ class StorageUsageView(BaseView):
     """``GET /api/storage/usage`` — current storage quota info."""
 
     async def get(self) -> web.Response:
-        self.user
+        self.require_user()
         svc = self.svc(K.storage_quota_service_key)
         u = await svc.usage()
         return self._json(

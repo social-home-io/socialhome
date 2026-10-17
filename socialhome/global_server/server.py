@@ -44,17 +44,19 @@ from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
 from .channels import GfsChannelService, build_channel_rate_limit
 from .cluster import ClusterService
-from .envelope_relay import GfsEnvelopeRelay, build_envelope_rate_limit
 from .config import (
     DEFAULT_CONFIG_FILENAME,
     GfsConfig,
     set_password_in_toml,
     write_example_config,
 )
+from .envelope_relay import GfsEnvelopeRelay, build_envelope_rate_limit
 from .federation import GfsFederationService
+from .highlight_publications import HighlightPublicationRegistry
 from .invites import INVITE_MINT_MAX_PER_MINUTE, GfsInviteService
 from .maintenance import GfsMaintenanceScheduler
 from .member_publish import GfsMemberPublishService, build_member_publish_rate_limit
+from .moment_public_registry import MomentPublicRegistry
 from .public import (
     ClientIpResolver,
     PairingTokenService,
@@ -66,25 +68,23 @@ from .public import (
     build_register_rate_limit,
     build_signup_rate_limit,
 )
+from .relay_bridge import RelayBridge
 from .repositories import (
     SqliteClusterRepo,
     SqliteGfsAdminRepo,
-    SqliteGfsEnvelopeQueueRepo,
     SqliteGfsChannelRepo,
-    SqliteGfsSpaceEpochRepo,
-    SqliteGfsInviteRepo,
+    SqliteGfsEnvelopeQueueRepo,
     SqliteGfsFederationRepo,
     SqliteGfsHighlightPublicationRepo,
     SqliteGfsHighlightTokenRepo,
+    SqliteGfsInviteRepo,
     SqliteGfsMomentFollowRepo,
+    SqliteGfsSpaceEpochRepo,
     SqliteGfsUserPictureRepo,
     SqliteGfsUserRegistrationRepo,
 )
 from .routes import register_routes
 from .rtc_transport import GfsRtcSession
-from .relay_bridge import RelayBridge
-from .highlight_publications import HighlightPublicationRegistry
-from .moment_public_registry import MomentPublicRegistry
 from .ws_registry import GfsWebSocketRegistry
 
 log = logging.getLogger(__name__)
@@ -220,14 +220,14 @@ class GfsApp:
     """
 
     __slots__ = (
+        "app",
+        "client_ip",
         "config",
         "data_dir",
         "db",
-        "signing_seed",
         "repos",
         "services",
-        "client_ip",
-        "app",
+        "signing_seed",
     )
 
     def __init__(

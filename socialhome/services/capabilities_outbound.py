@@ -66,9 +66,9 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
     """Fan out ``INSTANCE_CAPABILITIES_UPDATED`` to every confirmed peer."""
 
     __slots__ = (
+        "_bus",
         "_federation",
         "_federation_repo",
-        "_bus",
         "_keywrap_public_key",
         "_keywrap_sig",
     )
@@ -76,15 +76,15 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
     # Narrow the broadcaster's optional ``_federation`` / ``_federation_repo``
     # — both required at construction, so the direct ``send_event`` and
     # ``get_local_identity`` accesses below are non-None.
-    _federation: "FederationService"
-    _federation_repo: "AbstractFederationRepo"
+    _federation: FederationService
+    _federation_repo: AbstractFederationRepo
 
     def __init__(
         self,
         *,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
-        bus: "EventBus | None" = None,
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
+        bus: EventBus | None = None,
         keywrap_public_key: bytes = b"",
         keywrap_sig: str = "",
     ) -> None:
@@ -124,7 +124,9 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         try:
             peers = await repo.list_instances(status=PairingStatus.CONFIRMED.value)
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("capabilities-outbound: list peers failed: %s", exc)
+            log.debug(
+                "capabilities-outbound: list peers failed: %s", exc, exc_info=True
+            )
             return []
         own = getattr(self._federation, "own_instance_id", "")
         return [p for p in peers if getattr(p, "id", None) and p.id != own]
@@ -156,6 +158,7 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
                 "capabilities-outbound: on-pair send to %s failed: %s",
                 event.instance_id,
                 exc,
+                exc_info=True,
             )
 
     async def resend_to(self, instance_id: str) -> bool:
@@ -275,6 +278,7 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
                     "capabilities-outbound: send to %s failed: %s",
                     instance_id,
                     exc,
+                    exc_info=True,
                 )
         log.info(
             "capabilities-outbound: notified %d peer(s), proto_version=%d",

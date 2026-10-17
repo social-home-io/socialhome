@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 
+import aiofiles
 import pytest
 
 from socialhome.app import create_app
@@ -21,7 +22,6 @@ from socialhome.config import Config
 from socialhome.crypto import derive_user_id
 
 from .conftest import _auth
-
 
 # ─── HA-mode client fixture ──────────────────────────────────────────────
 
@@ -200,8 +200,8 @@ async def _export_over_1mib(ha_client) -> bytes:
     by planting a 2 MiB random (incompressible) media file first."""
     media_dir = ha_client.app[_config_key].media_path
     os.makedirs(media_dir, exist_ok=True)
-    with open(os.path.join(media_dir, "big.bin"), "wb") as f:
-        f.write(os.urandom(2 * 1024 * 1024))
+    async with aiofiles.open(os.path.join(media_dir, "big.bin"), "wb") as f:
+        await f.write(os.urandom(2 * 1024 * 1024))
     r = await ha_client.get("/api/backup/export", headers=_auth(ha_client._tok))
     assert r.status == 200
     blob = await r.read()

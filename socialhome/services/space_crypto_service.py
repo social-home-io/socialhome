@@ -111,10 +111,10 @@ class SpaceContentEncryption(BusPublisherMixin):
     """
 
     __slots__ = (
-        "_repo",
-        "_kek",
         "_bus",
+        "_kek",
         "_own_instance_id",
+        "_repo",
     )
 
     def __init__(
@@ -458,7 +458,7 @@ class SpaceContentEncryption(BusPublisherMixin):
             associated_data=space_id.encode("utf-8"),
         )
         nonce = os.urandom(_GCM_NONCE_BYTES)
-        aad = f"{space_id}:{latest.epoch}:{sync_id}".encode("utf-8")
+        aad = f"{space_id}:{latest.epoch}:{sync_id}".encode()
         aead = AESGCM(raw)
         ct = aead.encrypt(nonce, plaintext, aad)
         wire = b64url_encode(nonce) + ":" + b64url_encode(ct)
@@ -490,7 +490,7 @@ class SpaceContentEncryption(BusPublisherMixin):
             raise ValueError("Malformed space ciphertext") from exc
         nonce = b64url_decode(nonce_b64)
         ct = b64url_decode(ct_b64)
-        aad = f"{space_id}:{epoch}:{sync_id}".encode("utf-8")
+        aad = f"{space_id}:{epoch}:{sync_id}".encode()
         aead = AESGCM(raw)
         return aead.decrypt(nonce, ct, aad)
 
@@ -523,7 +523,7 @@ def verify_space_config(
     """Verify a config event's Ed25519 signature."""
     try:
         sig = b64url_decode(signature_b64)
-    except Exception:
+    except ValueError, TypeError:
         return False
     return verify_ed25519(space_public_key, payload, sig)
 
@@ -539,8 +539,8 @@ __all__ = [
     "AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF",
     "AUTHORITY_RELAY_EVENT_TYPES",
     "AUTHORITY_SIG_SUITE_ED25519",
-    "SUPPORTED_AUTHORITY_SIG_SUITES",
     "KEY_SUITE_AESGCM_256",
+    "SUPPORTED_AUTHORITY_SIG_SUITES",
     "SUPPORTED_KEY_SUITES",
     "SpaceContentEncryption",
     "UnsupportedAuthoritySuite",

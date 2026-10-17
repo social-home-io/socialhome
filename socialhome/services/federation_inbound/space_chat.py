@@ -44,7 +44,7 @@ above, with the providing household as the sender.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from ...domain.conversation import ConversationMessage, SystemChatScope
@@ -138,22 +138,22 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
     """Register and run the ``SPACE_CHAT_*`` inbound handlers."""
 
     __slots__ = (
-        "_bus",
         "_authorship",
-        "_spaces",
-        "_seats",
-        "_convos",
-        "_users",
+        "_bus",
         "_chats",
-        "_policy",
         "_child_protection",
+        "_convos",
+        "_policy",
+        "_seats",
+        "_spaces",
+        "_users",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        authorship: "SpaceAuthorship | None",
+        authorship: SpaceAuthorship | None,
         space_repo: AbstractSpaceRepo,
         remote_member_repo: AbstractSpaceRemoteMemberRepo,
         conversation_repo: AbstractConversationRepo,
@@ -174,7 +174,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         self._policy = policy
         self._child_protection = None
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         """Register the four handlers on the event registry."""
         registry = federation_service._event_registry
         registry.register(
@@ -197,7 +197,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         what: str,
         row_id: str,
         removal: bool = False,
-    ) -> "tuple[str, Conversation | None, SpaceAuthorship] | None":
+    ) -> tuple[str, Conversation | None, SpaceAuthorship] | None:
         """The space id, this household's chat for it (``None`` before it
         was first created) and the authorship binder — or ``None`` (logged)
         when the event must be dropped. Nothing is created here: a refused
@@ -238,7 +238,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
     async def _message_in(
         self,
         event: FederationEvent,
-        chat: "Conversation | None",
+        chat: Conversation | None,
         message_id: str,
         *,
         what: str,
@@ -349,9 +349,9 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
             )
         created_at = parse_iso8601_lenient(p.get("created_at"))
         if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
+            created_at = created_at.replace(tzinfo=UTC)
         # A message from the future would sit atop the chat forever.
-        created_at = min(created_at, datetime.now(timezone.utc))
+        created_at = min(created_at, datetime.now(UTC))
         if chat is None:
             # The first message for the space here: create the chat with
             # every local reader seated just before it, so it reads as new.
@@ -577,7 +577,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         self,
         event: FederationEvent,
         space_id: str,
-        chat: "Conversation | None",
+        chat: Conversation | None,
         message_id: str,
         *,
         author: str,

@@ -20,19 +20,24 @@ import functools
 import logging
 import pathlib
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import aiofiles
 import aiofiles.os
 import orjson
 
+from ..crypto import (
+    UnsupportedUserSigSuite,
+    derive_user_id,
+    verify_user_identity_assertion,
+)
 from ..domain.conversation import (
+    MESSAGE_TYPES,
     Conversation,
     ConversationMember,
     ConversationMessage,
     ConversationType,
-    MESSAGE_TYPES,
     RemoteConversationMember,
 )
 from ..domain.dm_location import normalise_location_content
@@ -44,6 +49,11 @@ from ..domain.events import (
     DmMessageDeleted,
     DmMessageReactionChanged,
     DmMessageUpdated,
+    HighlightFrameAdded,
+    HighlightFrameReactionChanged,
+    HighlightFrameRemoved,
+    HighlightFrameViewed,
+    HighlightRemoved,
     MomentCreated,
     MomentDeleted,
     MomentReactionChanged,
@@ -53,13 +63,19 @@ from ..domain.events import (
     SpaceFeaturesApplied,
     SpaceMemberProfileUpdated,
     SpacePostCreated,
-    HighlightFrameAdded,
-    HighlightFrameReactionChanged,
-    HighlightFrameRemoved,
-    HighlightFrameViewed,
-    HighlightRemoved,
     UserStatusChanged,
 )
+from ..domain.federation_capabilities import FederationCapability
+from ..domain.highlight import (
+    Highlight,
+    HighlightAudience,
+    HighlightFrame,
+    HighlightFrameType,
+)
+from ..domain.link_preview import card_survives_edit
+from ..domain.mention import Mention
+from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
+from ..domain.picture_hash import clean_picture_hash
 from ..domain.post import (
     FEED_POST_MAX_IMAGES,
     Comment,
@@ -68,26 +84,14 @@ from ..domain.post import (
     Post,
     PostType,
 )
-from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..domain.presence import truncate_coord
-from ..domain.space_item import item_stamp, stamp_to_db
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
     ContentAction,
     SpaceRole,
     role_change_event_type,
 )
-from ..domain.highlight import (
-    Highlight,
-    HighlightAudience,
-    HighlightFrame,
-    HighlightFrameType,
-)
-from ..crypto import (
-    UnsupportedUserSigSuite,
-    derive_user_id,
-    verify_user_identity_assertion,
-)
+from ..domain.space_item import item_stamp, stamp_to_db
 from ..domain.user import (
     RemoteUser,
     UserIdentityAssertion,
@@ -95,8 +99,11 @@ from ..domain.user import (
     clean_status_emoji,
     clean_status_text,
 )
-from ..domain.federation_capabilities import FederationCapability
 from ..federation.dm_scope import DM_HOLD_SCOPE, DmScope, refuse
+from ..federation.host_equivalence import (
+    acts_as_host,
+    touches_owner_household,
+)
 from ..federation.moment_origin import carries_no_relay, check_relayed_moment_origin
 from ..federation.owner_bound_id import (
     MOMENT_KIND,
@@ -118,66 +125,59 @@ from ..federation.space_scope import (
 )
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.hlc import HLC, HLC_MAX_DRIFT_MS
-from ..domain.picture_hash import clean_picture_hash
 from ..media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     reencode_peer_picture,
 )
-from ..domain.link_preview import card_survives_edit
-from ..domain.mention import Mention
-from .link_preview_service import wire_link_preview
+from ..utils.datetime import parse_iso8601_lenient
+from .dm_audience import local_audience
+from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .inbound_media_store import (
     is_safe_media_name,
     local_media_ref,
     local_media_refs,
-    media_file_path,
     media_basename,
-    verbatim_local_media_ref,
+    media_file_path,
     note_existing,
     parse_chunk_meta,
     partial_key,
     publish_once,
     remove_quietly,
+    verbatim_local_media_ref,
 )
+from .link_preview_service import wire_link_preview
 from .protection_gate import ProtectionGateMixin
-from .dm_audience import local_audience
-from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
-from .space_mentions import SpaceMentionResolver
 from .space_authority_pin import AuthorityCertOutcome, apply_authority_cert
 from .space_crypto_service import (
     UnsupportedAuthoritySuite,
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from ..federation.host_equivalence import (
-    acts_as_host,
-    touches_owner_household,
-)
+from .space_mentions import SpaceMentionResolver
 from .space_service import (
-    apply_space_images_from_config_change,
     apply_gfs_servers_from_metadata,
     apply_owner_statement_from_metadata,
+    apply_space_images_from_config_change,
     keep_local_space_state,
     stub_space_from_metadata,
 )
-from ..utils.datetime import parse_iso8601_lenient
 
 if TYPE_CHECKING:
-    from ..repositories.calendar_repo import AbstractSpaceCalendarRepo
-    from .dm_group_service import DmGroupService
-    from ..federation.pending_seat_buffer import PendingSeatBuffer
     from ..domain.federation import FederationEvent
+    from ..federation.pending_seat_buffer import PendingSeatBuffer
     from ..repositories.bazaar_repo import AbstractBazaarRepo
-    from ..repositories.federation_repo import AbstractFederationRepo
+    from ..repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ..repositories.conversation_repo import AbstractConversationRepo
+    from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.gallery_repo import AbstractGalleryRepo
+    from ..repositories.highlight_repo import AbstractHighlightRepo
     from ..repositories.moment_repo import AbstractMomentRepo
-    from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
     from ..repositories.space_icon_repo import AbstractSpaceIconRepo
+    from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
-    from ..repositories.highlight_repo import AbstractHighlightRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .dm_group_service import DmGroupService
     from .moment_federation_outbound import MomentFederationOutbound
     from .relay_policy import RelayPolicy
 
@@ -196,16 +196,16 @@ def _moment_expired(expires_at: object) -> bool:
     if not isinstance(expires_at, str) or not expires_at:
         return False
     try:
-        when = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        when = datetime.fromisoformat(expires_at)
     except ValueError:
         return False
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return when <= datetime.now(timezone.utc)
+        when = when.replace(tzinfo=UTC)
+    return when <= datetime.now(UTC)
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _status_from_wire(p: dict) -> UserStatus | None:
@@ -332,11 +332,7 @@ def _bytes_match_mime(data: bytes, mime_type: str) -> bool | None:
         # flag as suspicious. Everything else (``application/*``,
         # ``text/*``, the ``file`` passthrough) just trusts the
         # direct-pairing safety net.
-        if (
-            lower.startswith("image/")
-            or lower.startswith("video/")
-            or lower.startswith("audio/")
-        ):
+        if lower.startswith(("image/", "video/", "audio/")):
             return False
         return None
     offset, pattern = sig
@@ -357,63 +353,63 @@ class FederationInboundService(ProtectionGateMixin):
     """
 
     __slots__ = (
-        "_child_protection",
-        "_bus",
-        "_conversation_repo",
-        "_space_post_repo",
-        "_space_repo",
-        "_user_repo",
-        "_highlight_repo",
-        "_moment_repo",
-        "_moment_outbound",
-        "_profile_picture_repo",
-        "_report_service",
-        "_dm_routing_repo",
-        "_relay_policy",
-        "_media_dir",
-        "_realtime",
-        "_space_remote_member_repo",
-        "_gallery_repo",
-        "_bazaar_repo",
         "_authorship",
+        "_bazaar_repo",
+        "_bus",
+        "_child_protection",
+        "_conversation_repo",
+        "_dm_mentions",
+        "_dm_routing_repo",
         "_dm_scope",
+        "_federation_service",
+        "_gallery_repo",
+        "_groups",
+        "_highlight_repo",
+        "_media_dir",
+        "_mentions",
+        "_moment_outbound",
+        "_moment_repo",
         "_pending",
         "_pending_parents",
-        "_federation_service",
+        "_profile_picture_repo",
+        "_realtime",
+        "_relay_policy",
+        "_report_service",
+        "_space_calendar_repo",
         "_space_cover_repo",
         "_space_icon_repo",
-        "_space_calendar_repo",
-        "_groups",
-        "_mentions",
-        "_dm_mentions",
+        "_space_post_repo",
+        "_space_remote_member_repo",
+        "_space_repo",
+        "_user_repo",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        conversation_repo: "AbstractConversationRepo",
-        space_post_repo: "AbstractSpacePostRepo",
-        space_repo: "AbstractSpaceRepo",
-        user_repo: "AbstractUserRepo",
-        highlight_repo: "AbstractHighlightRepo | None" = None,
-        moment_repo: "AbstractMomentRepo | None" = None,
-        moment_outbound: "MomentFederationOutbound | None" = None,
+        conversation_repo: AbstractConversationRepo,
+        space_post_repo: AbstractSpacePostRepo,
+        space_repo: AbstractSpaceRepo,
+        user_repo: AbstractUserRepo,
+        highlight_repo: AbstractHighlightRepo | None = None,
+        moment_repo: AbstractMomentRepo | None = None,
+        moment_outbound: MomentFederationOutbound | None = None,
         profile_picture_repo=None,
         report_service=None,
         dm_routing_repo=None,
-        relay_policy: "RelayPolicy | None" = None,
-        media_dir: "pathlib.Path | None" = None,
-        realtime: "object | None" = None,
+        relay_policy: RelayPolicy | None = None,
+        media_dir: pathlib.Path | None = None,
+        realtime: object | None = None,
         space_remote_member_repo=None,
-        gallery_repo: "AbstractGalleryRepo | None" = None,
-        bazaar_repo: "AbstractBazaarRepo | None" = None,
-        pending_seat_buffer: "PendingSeatBuffer | None" = None,
+        gallery_repo: AbstractGalleryRepo | None = None,
+        bazaar_repo: AbstractBazaarRepo | None = None,
+        pending_seat_buffer: PendingSeatBuffer | None = None,
         pending_parent_buffer: PendingParentBuffer | None = None,
-        authorship_federation_repo: "AbstractFederationRepo | None" = None,
-        space_cover_repo: "AbstractSpaceCoverRepo | None" = None,
-        space_icon_repo: "AbstractSpaceIconRepo | None" = None,
-        space_calendar_repo: "AbstractSpaceCalendarRepo | None" = None,
+        authorship_federation_repo: AbstractFederationRepo | None = None,
+        space_cover_repo: AbstractSpaceCoverRepo | None = None,
+        space_icon_repo: AbstractSpaceIconRepo | None = None,
+        space_calendar_repo: AbstractSpaceCalendarRepo | None = None,
     ) -> None:
         self._bus = bus
         self._conversation_repo = conversation_repo
@@ -495,14 +491,14 @@ class FederationInboundService(ProtectionGateMixin):
         self._space_calendar_repo = space_calendar_repo
         #: Group-conversation authority (v_37) — a deprovisioned member of a
         #: cross-household group leaves it instead of taking it down.
-        self._groups: "DmGroupService | None" = None
+        self._groups: DmGroupService | None = None
         self._child_protection = None
 
-    def attach_groups(self, groups: "DmGroupService") -> None:
+    def attach_groups(self, groups: DmGroupService) -> None:
         """Wire the group-membership authority (built with the DM stack)."""
         self._groups = groups
 
-    def attach_realtime(self, realtime: "object") -> None:
+    def attach_realtime(self, realtime: object) -> None:
         """Wire the realtime broadcaster after construction.
 
         :class:`RealtimeService` is constructed downstream of this
@@ -595,7 +591,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── DM handlers ────────────────────────────────────────────────────
 
-    async def _on_dm_message(self, event: "FederationEvent") -> None:
+    async def _on_dm_message(self, event: FederationEvent) -> None:
         p = event.payload
         conv_id = str(p.get("conversation_id") or "")
         message_id = str(p.get("message_id") or "")
@@ -893,7 +889,7 @@ class FederationInboundService(ProtectionGateMixin):
         now_iso = (
             occurred_at
             if isinstance(occurred_at, str) and occurred_at
-            else datetime.now(timezone.utc).isoformat()
+            else datetime.now(UTC).isoformat()
         )
         try:
             await self._conversation_repo.create(
@@ -907,9 +903,10 @@ class FederationInboundService(ProtectionGateMixin):
             log.debug(
                 "_ensure_remote_dm_conversation: create skipped (%s)",
                 exc,
+                exc_info=True,
             )
 
-        joined_at = datetime.now(timezone.utc).isoformat()
+        joined_at = datetime.now(UTC).isoformat()
 
         # Seat each local recipient as a ConversationMember so
         # list_for_user(username) finds the conv.
@@ -933,6 +930,7 @@ class FederationInboundService(ProtectionGateMixin):
                     "_ensure_remote_dm_conversation: add_member %s skipped (%s)",
                     local.username,
                     exc,
+                    exc_info=True,
                 )
 
         # Seat the sender as a remote member so the conversation
@@ -957,11 +955,12 @@ class FederationInboundService(ProtectionGateMixin):
                         sender_instance_id,
                         remote.remote_username,
                         exc,
+                        exc_info=True,
                     )
 
     async def _dm_message_in_scope(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         conv_id: str,
         message_id: str,
         sender_user_id: str,
@@ -1003,22 +1002,23 @@ class FederationInboundService(ProtectionGateMixin):
             if conv is not None
             else None
         )
+        # Not a refusal yet: the sender's user row can trail their first
+        # DM. Hold it until that user syncs (bounded; see
+        # :meth:`_release_held_dms`), refuse only when it can't be held.
         if (
             seat is None
             and await self._user_repo.get_instance_for_user(sender_user_id) is None
-        ):
-            # Not a refusal yet: the sender's user row can trail their first
-            # DM. Hold it until that user syncs (bounded; see
-            # :meth:`_release_held_dms`), refuse only when it can't be held.
-            if self._pending is not None and self._pending.hold(
+            and self._pending is not None
+            and self._pending.hold(
                 event, space_id=_DM_HOLD_SCOPE, user_id=sender_user_id
-            ):
-                log.info(
-                    "DM_MESSAGE from %s: sender %s not synced yet — holding",
-                    event.from_instance,
-                    sender_user_id,
-                )
-                return False
+            )
+        ):
+            log.info(
+                "DM_MESSAGE from %s: sender %s not synced yet — holding",
+                event.from_instance,
+                sender_user_id,
+            )
+            return False
         existing = await self._conversation_repo.get_message(message_id)
         if existing is not None and await self._in_system_chat(
             existing.conversation_id
@@ -1065,7 +1065,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _heal_legacy_seat(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         conv: Conversation,
         sender_user_id: str,
     ) -> bool:
@@ -1095,7 +1095,7 @@ class FederationInboundService(ProtectionGateMixin):
                 conversation_id=conv.id,
                 instance_id=event.from_instance,
                 remote_username=remote.remote_username,
-                joined_at=datetime.now(timezone.utc).isoformat(),
+                joined_at=datetime.now(UTC).isoformat(),
             ),
         )
         log.info(
@@ -1181,7 +1181,7 @@ class FederationInboundService(ProtectionGateMixin):
         return frozenset(withheld)
 
     async def _media_blob_guardian_refused(
-        self, event: "FederationEvent", conv_id: str
+        self, event: FederationEvent, conv_id: str
     ) -> bool:
         """§CP.F2 for bytes whose message isn't here (never stored, or not
         arrived yet) — decided from what is stored, so it holds across a
@@ -1310,6 +1310,7 @@ class FederationInboundService(ProtectionGateMixin):
                 "DM_MESSAGE: malformed preview_bytes_b64 for %s: %s",
                 message_id,
                 exc,
+                exc_info=True,
             )
             return None, "pending"
         # Preview file is short-lived — it'll be overwritten when
@@ -1335,7 +1336,7 @@ class FederationInboundService(ProtectionGateMixin):
         return f"api/media/{dest.name}", "pending"
 
     @staticmethod
-    def _media_chunk_bytes(event: "FederationEvent") -> bytes | None:
+    def _media_chunk_bytes(event: FederationEvent) -> bytes | None:
         """Return the decoded chunk bytes for a media blob event.
 
         Prefers :attr:`FederationEvent.media_bytes` — the
@@ -1356,7 +1357,7 @@ class FederationInboundService(ProtectionGateMixin):
         except binascii.Error, ValueError:
             return None
 
-    async def _on_dm_media_blob(self, event: "FederationEvent") -> None:
+    async def _on_dm_media_blob(self, event: FederationEvent) -> None:
         """Land the full bytes for a previously-arrived ``DM_MESSAGE``.
 
         Decodes the bytes from one chunk of the blob, writes them
@@ -1432,7 +1433,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _dm_media_in_scope(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         message_id: str,
         blob_id: str,
     ) -> bool:
@@ -1652,9 +1653,10 @@ class FederationInboundService(ProtectionGateMixin):
                     log.debug(
                         "DM_MEDIA_BLOB: realtime broadcast failed: %s",
                         exc,
+                        exc_info=True,
                     )
 
-    async def _on_dm_deleted(self, event: "FederationEvent") -> None:
+    async def _on_dm_deleted(self, event: FederationEvent) -> None:
         """Soft-delete a message — only its own sender's household may."""
         message_id = str(event.payload.get("message_id") or "")
         conv_id = str(event.payload.get("conversation_id") or "")
@@ -1693,7 +1695,7 @@ class FederationInboundService(ProtectionGateMixin):
             )
         )
 
-    async def _on_dm_reaction(self, event: "FederationEvent") -> None:
+    async def _on_dm_reaction(self, event: FederationEvent) -> None:
         p = event.payload
         message_id = str(p.get("message_id") or "")
         user_id = str(p.get("user_id") or "")
@@ -1754,7 +1756,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── Space content handlers ─────────────────────────────────────────
 
-    async def _on_space_post_created(self, event: "FederationEvent") -> None:
+    async def _on_space_post_created(self, event: FederationEvent) -> None:
         space_id = resolve_space_id(event)
         if not space_id:
             return
@@ -1892,7 +1894,7 @@ class FederationInboundService(ProtectionGateMixin):
         )
 
     async def _approved_card_link(
-        self, event: "FederationEvent", space_id: str, post: Post
+        self, event: FederationEvent, space_id: str, post: Post
     ) -> tuple[bool, str | None]:
         """``(admitted, link)``: the event link of an approved announce card
         (v_43), ``None`` for any other post; ``admitted`` False (logged)
@@ -1928,7 +1930,7 @@ class FederationInboundService(ProtectionGateMixin):
             return False, None
         return True, linked
 
-    async def _on_space_media_blob(self, event: "FederationEvent") -> None:
+    async def _on_space_media_blob(self, event: FederationEvent) -> None:
         """Persist a chunked space-post media blob to local media path.
 
         Mirrors :meth:`_on_dm_media_blob`. The sender's
@@ -2187,7 +2189,7 @@ class FederationInboundService(ProtectionGateMixin):
         except OSError:
             pass
 
-    async def _on_space_post_updated(self, event: "FederationEvent") -> None:
+    async def _on_space_post_updated(self, event: FederationEvent) -> None:
         p = event.payload
         post_id = str(p.get("id") or p.get("post_id") or "")
         new_content = str(p.get("content") or "")
@@ -2246,7 +2248,7 @@ class FederationInboundService(ProtectionGateMixin):
             )
         )
 
-    async def _on_space_post_deleted(self, event: "FederationEvent") -> None:
+    async def _on_space_post_deleted(self, event: FederationEvent) -> None:
         post_id = str(event.payload.get("post_id") or event.payload.get("id") or "")
         if not post_id:
             return
@@ -2287,7 +2289,7 @@ class FederationInboundService(ProtectionGateMixin):
             )
         )
 
-    async def _on_space_comment_added(self, event: "FederationEvent") -> None:
+    async def _on_space_comment_added(self, event: FederationEvent) -> None:
         p = event.payload
         post_id = str(p.get("post_id") or "")
         comment_id = str(p.get("comment_id") or p.get("id") or "")
@@ -2415,7 +2417,7 @@ class FederationInboundService(ProtectionGateMixin):
             ),
         )
 
-    async def _on_space_comment_updated(self, event: "FederationEvent") -> None:
+    async def _on_space_comment_updated(self, event: FederationEvent) -> None:
         p = event.payload
         comment_id = str(p.get("id") or p.get("comment_id") or "")
         content = p.get("content")
@@ -2463,7 +2465,7 @@ class FederationInboundService(ProtectionGateMixin):
             ),
         )
 
-    async def _on_space_comment_deleted(self, event: "FederationEvent") -> None:
+    async def _on_space_comment_deleted(self, event: FederationEvent) -> None:
         p = event.payload
         comment_id = str(p.get("comment_id") or p.get("id") or "")
         post_id = str(p.get("post_id") or "")
@@ -2504,7 +2506,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── Space content authorship (§24.11) ──────────────────────────────
 
-    def _space_authorship(self, event: "FederationEvent") -> SpaceAuthorship | None:
+    def _space_authorship(self, event: FederationEvent) -> SpaceAuthorship | None:
         """The authorship binder, or ``None`` (logged) to refuse the write.
 
         Fail closed: a stack wired without the roster mirror cannot tell
@@ -2521,7 +2523,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _edit_mentions(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         before: str | None,
         after: str | None,
@@ -2541,7 +2543,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     def _hold_for_parent(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         kind: str,
         parent_id: str,
@@ -2573,7 +2575,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _owned_post_mutation_allowed(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         post_id: str,
         *,
@@ -2631,7 +2633,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _owned_comment_mutation_allowed(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         space_id: str,
         comment_id: str,
     ) -> bool:
@@ -2678,7 +2680,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── Report handler ─────────────────────────────────────────────────
 
-    async def _on_space_report(self, event: "FederationEvent") -> None:
+    async def _on_space_report(self, event: FederationEvent) -> None:
         """A peer's member reported content — persist it if it is ours to
         triage. ``ReportService.create_report_from_remote`` re-derives the
         space from the target and checks this household reviews it, the
@@ -2703,7 +2705,7 @@ class FederationInboundService(ProtectionGateMixin):
             origin_instance_id=(str(p.get("reporter_instance_id") or "") or None),
         )
 
-    async def _on_space_report_decided(self, event: "FederationEvent") -> None:
+    async def _on_space_report_decided(self, event: FederationEvent) -> None:
         """Another reviewer household resolved / dismissed a space report
         (v_45). Admitted only from a household with content authority in
         the space, naming a decider seated there with it (``moderates_as``);
@@ -2745,7 +2747,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── Space membership handlers ──────────────────────────────────────
 
-    async def _on_space_member_role_changed(self, event: "FederationEvent") -> None:
+    async def _on_space_member_role_changed(self, event: FederationEvent) -> None:
         """Apply a host's role change locally (§13, multi-admin; v_41
         moderator).
 
@@ -2854,7 +2856,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _on_space_config_changed(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
     ) -> None:
         """§D1b — host renamed / re-emoji'd / toggled features. Apply
         to our local stub (if we have one) so the card stays
@@ -2990,6 +2992,7 @@ class FederationInboundService(ProtectionGateMixin):
                     "SPACE_CONFIG_CHANGED for %s: malformed space public key / "
                     "signature — dropping",
                     space_id,
+                    exc_info=True,
                 )
                 return
             if not authority_verified:
@@ -3260,7 +3263,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _on_space_member_profile_updated(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
     ) -> None:
         p = event.payload
         space_id = event.space_id or str(p.get("space_id") or "")
@@ -3318,6 +3321,7 @@ class FederationInboundService(ProtectionGateMixin):
                     user_id,
                     space_id,
                     exc,
+                    exc_info=True,
                 )
         if (
             "picture_hash" in p
@@ -3350,7 +3354,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── User-profile handlers ──────────────────────────────────────────
 
-    async def _on_users_sync(self, event: "FederationEvent") -> None:
+    async def _on_users_sync(self, event: FederationEvent) -> None:
         """Import a peer's full user roster.
 
         Each user is guarded on its own: the batch is a snapshot, so one
@@ -3376,12 +3380,13 @@ class FederationInboundService(ProtectionGateMixin):
                     (u or {}).get("username") if isinstance(u, dict) else u,
                     event.from_instance,
                     exc,
+                    exc_info=True,
                 )
 
-    async def _on_user_updated(self, event: "FederationEvent") -> None:
+    async def _on_user_updated(self, event: FederationEvent) -> None:
         await self._upsert_remote_user(event.from_instance, event.payload)
 
-    async def _on_user_removed(self, event: "FederationEvent") -> None:
+    async def _on_user_removed(self, event: FederationEvent) -> None:
         """Mark a remote user as deprovisioned + cascade-purge their content.
 
         Two layers of effect:
@@ -3425,6 +3430,7 @@ class FederationInboundService(ProtectionGateMixin):
                     "USER_REMOVED cascade: moment purge failed for %s: %s",
                     user_id,
                     exc,
+                    exc_info=True,
                 )
 
         if self._highlight_repo is not None:
@@ -3441,6 +3447,7 @@ class FederationInboundService(ProtectionGateMixin):
                     "USER_REMOVED cascade: highlight purge failed for %s: %s",
                     user_id,
                     exc,
+                    exc_info=True,
                 )
 
         try:
@@ -3452,6 +3459,7 @@ class FederationInboundService(ProtectionGateMixin):
                 "USER_REMOVED cascade: conversation lookup failed for %s: %s",
                 user_id,
                 exc,
+                exc_info=True,
             )
             conv_ids = []
         for conv_id in conv_ids:
@@ -3472,6 +3480,7 @@ class FederationInboundService(ProtectionGateMixin):
                     "USER_REMOVED cascade: hard_delete(%s) failed: %s",
                     conv_id,
                     exc,
+                    exc_info=True,
                 )
         if conv_ids:
             log.info(
@@ -3480,7 +3489,7 @@ class FederationInboundService(ProtectionGateMixin):
                 user_id,
             )
 
-    async def _on_user_status_updated(self, event: "FederationEvent") -> None:
+    async def _on_user_status_updated(self, event: FederationEvent) -> None:
         p = event.payload
         user_id = str(p.get("user_id") or "")
         if not user_id:
@@ -3525,7 +3534,7 @@ class FederationInboundService(ProtectionGateMixin):
                     "USERS_SYNC: invalid status for %s refused: %s", user_id, exc
                 )
                 return
-            if status is not None and status.is_expired(datetime.now(timezone.utc)):
+            if status is not None and status.is_expired(datetime.now(UTC)):
                 status = None
         else:
             log.warning("USERS_SYNC: non-object status for %s refused", user_id)
@@ -3537,7 +3546,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── Highlight handlers ─────────────────────────────────────────────────
 
-    async def _on_highlight_created(self, event: "FederationEvent") -> None:
+    async def _on_highlight_created(self, event: FederationEvent) -> None:
         """Land a remote ``HIGHLIGHT_CREATED`` envelope.
 
         Persists the parent ``Highlight`` row (or upserts an existing one
@@ -3579,7 +3588,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _highlight_write_binds(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         highlight: Highlight | None,
         frame: HighlightFrame | None,
     ) -> bool:
@@ -3618,7 +3627,7 @@ class FederationInboundService(ProtectionGateMixin):
         )
         return False
 
-    async def _on_highlight_frame_appended(self, event: "FederationEvent") -> None:
+    async def _on_highlight_frame_appended(self, event: FederationEvent) -> None:
         """Append a frame to an existing remote highlight.
 
         We expect the ``HIGHLIGHT_CREATED`` envelope to have arrived first —
@@ -3679,7 +3688,7 @@ class FederationInboundService(ProtectionGateMixin):
         await self._highlight_repo.save_frame(frame)
         await self._publish_frame_added(highlight, frame, is_first=False, p=p)
 
-    async def _on_highlight_frame_deleted(self, event: "FederationEvent") -> None:
+    async def _on_highlight_frame_deleted(self, event: FederationEvent) -> None:
         if self._highlight_repo is None:
             return
         p = event.payload
@@ -3713,7 +3722,7 @@ class FederationInboundService(ProtectionGateMixin):
             )
         )
 
-    async def _on_highlight_deleted(self, event: "FederationEvent") -> None:
+    async def _on_highlight_deleted(self, event: FederationEvent) -> None:
         if self._highlight_repo is None:
             return
         p = event.payload
@@ -3740,7 +3749,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── Highlight back-channel handlers ────────────────────────────────────
 
-    async def _on_highlight_frame_viewed(self, event: "FederationEvent") -> None:
+    async def _on_highlight_frame_viewed(self, event: FederationEvent) -> None:
         """A remote viewer marked one of *our* author's frames as seen.
 
         Persists the row in ``highlight_frame_views`` and republishes
@@ -3772,7 +3781,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _local_frame_reply_target(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         highlight_id: str,
         frame_id: str,
         actor_user_id: str,
@@ -3823,18 +3832,18 @@ class FederationInboundService(ProtectionGateMixin):
         )
         return None
 
-    async def _on_highlight_frame_reacted(self, event: "FederationEvent") -> None:
+    async def _on_highlight_frame_reacted(self, event: FederationEvent) -> None:
         await self._handle_reaction_envelope(event, removed=False)
 
     async def _on_highlight_frame_reaction_removed(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
     ) -> None:
         await self._handle_reaction_envelope(event, removed=True)
 
     async def _handle_reaction_envelope(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         *,
         removed: bool,
     ) -> None:
@@ -3870,7 +3879,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── Momentum handlers ──────────────────────────────────────────────
 
-    async def _on_moment_created(self, event: "FederationEvent") -> None:
+    async def _on_moment_created(self, event: FederationEvent) -> None:
         """Land a remote moment and fire :class:`MomentCreated`.
 
         Authority check: the envelope's signed sender (``from_instance``)
@@ -3990,7 +3999,7 @@ class FederationInboundService(ProtectionGateMixin):
             from_instance=event.from_instance,
         )
 
-    async def _on_moment_deleted(self, event: "FederationEvent") -> None:
+    async def _on_moment_deleted(self, event: FederationEvent) -> None:
         if self._moment_repo is None:
             return
         p = event.payload
@@ -4026,7 +4035,7 @@ class FederationInboundService(ProtectionGateMixin):
             author_user_id=author_user_id,
             origin_instance_id=origin_instance_id,
             expires_at=(
-                datetime.now(timezone.utc) + timedelta(days=MOMENT_RETENTION_DAYS)
+                datetime.now(UTC) + timedelta(days=MOMENT_RETENTION_DAYS)
             ).isoformat(),
         )
         if removed:
@@ -4043,18 +4052,18 @@ class FederationInboundService(ProtectionGateMixin):
             from_instance=event.from_instance,
         )
 
-    async def _on_moment_reacted(self, event: "FederationEvent") -> None:
+    async def _on_moment_reacted(self, event: FederationEvent) -> None:
         await self._handle_moment_reaction(event, removed=False)
 
     async def _on_moment_reaction_removed(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
     ) -> None:
         await self._handle_moment_reaction(event, removed=True)
 
     async def _handle_moment_reaction(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         *,
         removed: bool,
     ) -> None:
@@ -4113,7 +4122,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     @staticmethod
     def _moment_id_refused(
-        event: "FederationEvent", moment_id: str, author_user_id: str
+        event: FederationEvent, moment_id: str, author_user_id: str
     ) -> bool:
         """An owner-bound moment id (v_36) claimed for another author.
 
@@ -4165,18 +4174,26 @@ class FederationInboundService(ProtectionGateMixin):
             try:
                 home = await self._user_repo.get_instance_for_user(author_user_id)
             except Exception:  # pragma: no cover — defensive
+                log.debug(
+                    "FederationInboundService._moment_authority_matches: fail-soft error ignored",
+                    exc_info=True,
+                )
                 return True
             return home is None or home == origin_instance_id
         # Relay: trust the origin field; sender just relayed.
         try:
             home = await self._user_repo.get_instance_for_user(author_user_id)
         except Exception:  # pragma: no cover — defensive
+            log.debug(
+                "FederationInboundService._moment_authority_matches: fail-soft error ignored",
+                exc_info=True,
+            )
             return True
         return home is None or home == origin_instance_id
 
     async def _moment_origin_verified(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         origin_instance_id: str,
     ) -> bool:
         """A relayed moment must carry its origin household's signature.
@@ -4241,7 +4258,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _moment_create_is_stale(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         moment_id: str,
     ) -> bool:
         """A create for a deleted or expired moment is never applied.
@@ -4271,7 +4288,7 @@ class FederationInboundService(ProtectionGateMixin):
 
     async def _moment_row_binds(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         moment_id: str,
         author_user_id: str,
         origin_instance_id: str,
@@ -4314,7 +4331,7 @@ class FederationInboundService(ProtectionGateMixin):
                 from_instance=from_instance,
             )
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("moment-relay failed: %s", exc)
+            log.debug("moment-relay failed: %s", exc, exc_info=True)
 
     async def _publish_frame_added(
         self,
@@ -4412,7 +4429,7 @@ class FederationInboundService(ProtectionGateMixin):
         try:
             home = await self._user_repo.get_instance_for_user(author_user_id)
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("highlight authority lookup failed: %s", exc)
+            log.debug("highlight authority lookup failed: %s", exc, exc_info=True)
             return False
         # If the author is unknown locally, accept on first sight — the
         # ``USER_UPDATED`` / ``USERS_SYNC`` envelope from the same peer
@@ -4470,6 +4487,7 @@ class FederationInboundService(ProtectionGateMixin):
                     "USER_UPDATED: rejected remote picture for %s: %s",
                     user_id,
                     exc,
+                    exc_info=True,
                 )
         elif (
             "picture_hash" in payload
@@ -4507,7 +4525,9 @@ class FederationInboundService(ProtectionGateMixin):
             try:
                 await self._child_protection.on_remote_user_placed(user_id)
             except Exception as exc:
-                log.warning("§CP.F2 placement of %s failed: %s", user_id, exc)
+                log.warning(
+                    "§CP.F2 placement of %s failed: %s", user_id, exc, exc_info=True
+                )
         await self._release_held_dms(instance_id, user_id)
 
         # Per-user identity binding (independent user identity, proto v_25).
@@ -4716,7 +4736,7 @@ class FederationInboundService(ProtectionGateMixin):
         )
 
 
-def _edit_stamp(event: "FederationEvent") -> str | None:
+def _edit_stamp(event: FederationEvent) -> str | None:
     """When the sender made an edit, for last-writer-wins against the edits
     other paths deliver (a GFS ``post_edit`` / ``comment_edit``, a later
     federated edit): the payload's ``edited_at``, else the envelope's own

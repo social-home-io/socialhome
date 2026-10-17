@@ -154,7 +154,7 @@ class ImageProcessor:
             img = ImageOps.exif_transpose(img)  # type: ignore[assignment]
         except Exception:
             # Non-fatal — some images lack EXIF; proceed without.
-            pass
+            log.debug("image: EXIF auto-orient failed", exc_info=True)
 
         # Resize longest side to max_dimension preserving aspect ratio
         img = self._resize(img, self._max_dimension)
@@ -224,7 +224,7 @@ class ImageProcessor:
             # exif_transpose returns a new (possibly sRGB-reencoded) Image.
             img = ImageOps.exif_transpose(img)  # type: ignore[assignment]
         except Exception:
-            pass
+            log.debug("image: EXIF auto-orient failed", exc_info=True)
 
         # ``Image.open`` reads only the header: the pixels decode in resize /
         # convert / save, so a truncated or corrupt body fails HERE — with
@@ -259,6 +259,10 @@ class ImageProcessor:
                 return False
             img.load()
         except Exception:
+            log.debug(
+                "ImageProcessor._is_valid_webp_sync: fail-soft error ignored",
+                exc_info=True,
+            )
             return False
         return True
 

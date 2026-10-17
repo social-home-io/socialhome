@@ -18,7 +18,6 @@ from typing import Protocol, runtime_checkable
 from ..db import AsyncDatabase
 from .base import rows_to_dicts
 
-
 SCOPE_POST = "post"
 SCOPE_SPACE_POST = "space_post"
 SCOPE_MESSAGE = "message"

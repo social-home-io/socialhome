@@ -9,7 +9,7 @@ admin-visible state mid-flight.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -64,7 +64,7 @@ class SqlitePairingRelayRepo:
                 from_instance,
                 target_instance_id,
                 message,
-                received_at.astimezone(timezone.utc).isoformat(),
+                received_at.astimezone(UTC).isoformat(),
             ),
         )
 

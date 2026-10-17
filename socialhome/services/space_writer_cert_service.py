@@ -51,11 +51,12 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..crypto import b64url_decode, derive_instance_id, ed25519_public_key
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.gfs_channel import GFS_CHANNEL_FIELD
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODE_STRICT
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatureAccess, SpaceRole
 from ..domain.writer_cert import (
@@ -67,7 +68,6 @@ from ..domain.writer_cert import (
     scope_permits,
     strongest_scope,
 )
-from ..domain.gfs_channel import GFS_CHANNEL_FIELD
 from ..domain.writer_key import WRITER_KEY_FIELD, WriterKeyGrant
 from ..writer_cert import (
     InvalidWriterCert,
@@ -83,9 +83,9 @@ from ..writer_key import (
 )
 
 if TYPE_CHECKING:
-    from ..infrastructure.key_manager import KeyManager
     from ..domain.space import Space
     from ..federation.federation_service import FederationService
+    from ..infrastructure.key_manager import KeyManager
     from ..repositories.space_key_repo import AbstractSpaceKeyRepo
     from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
     from ..repositories.space_repo import AbstractSpaceRepo
@@ -138,7 +138,7 @@ _SCOPE_RANK: dict[str | None, int] = {
 
 
 def scope_weakened(
-    before: "str | None | WriterEntitlement", after: "str | None | WriterEntitlement"
+    before: str | None | WriterEntitlement, after: str | None | WriterEntitlement
 ) -> bool:
     """True when ``after`` grants less than ``before``: a weaker scope
     (write→comment, any→none), or — for entitlements — the same scope held
@@ -164,11 +164,11 @@ def _parse_utc(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -177,25 +177,25 @@ class SpaceWriterCertService:
 
     __slots__ = (
         "_channels",
-        "_spaces",
-        "_remote_members",
-        "_keys",
         "_federation",
+        "_kek",
+        "_keys",
         "_own_instance_id",
         "_own_pk",
+        "_remote_members",
+        "_spaces",
         "_truncation_warned",
-        "_kek",
     )
 
     def __init__(
         self,
         *,
-        space_repo: "AbstractSpaceRepo",
-        remote_member_repo: "AbstractSpaceRemoteMemberRepo",
-        space_key_repo: "AbstractSpaceKeyRepo",
+        space_repo: AbstractSpaceRepo,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo,
+        space_key_repo: AbstractSpaceKeyRepo,
         own_instance_id: str,
         own_identity_pk: bytes,
-        key_manager: "KeyManager | None" = None,
+        key_manager: KeyManager | None = None,
     ) -> None:
         self._spaces = space_repo
         #: KEK that wraps a held writer group key at rest (v_50). Without one
@@ -203,7 +203,7 @@ class SpaceWriterCertService:
         self._kek = key_manager
         self._remote_members = remote_member_repo
         self._keys = space_key_repo
-        self._federation: "FederationService | None" = None
+        self._federation: FederationService | None = None
         self._own_instance_id = own_instance_id
         self._own_pk = own_identity_pk
         #: (space id, instance id) pairs already warned about a binding
@@ -211,9 +211,9 @@ class SpaceWriterCertService:
         self._truncation_warned: set[tuple[str, str]] = set()
         #: v_51 — the private-space channel service (grants ride the same
         #: per-peer payloads as certs). ``None`` → no channel grants.
-        self._channels: "GfsChannelService | None" = None
+        self._channels: GfsChannelService | None = None
 
-    def attach_channels(self, channels: "GfsChannelService") -> None:
+    def attach_channels(self, channels: GfsChannelService) -> None:
         """Wire the v_51 private-space channel service."""
         self._channels = channels
 
@@ -256,19 +256,19 @@ class SpaceWriterCertService:
             log.exception("channel grant: dropping a stale seat in %s failed", space_id)
             return False
 
-    def attach_federation(self, federation_service: "FederationService") -> None:
+    def attach_federation(self, federation_service: FederationService) -> None:
         """Wire the federation service (peer versions + pinned peer keys)."""
         self._federation = federation_service
 
     # ── Entitlement ──────────────────────────────────────────────────────
 
-    async def scope_for_instance(self, space: "Space", instance_id: str) -> str | None:
+    async def scope_for_instance(self, space: Space, instance_id: str) -> str | None:
         """The strongest scope household ``instance_id`` holds in ``space``
         by our roster, or ``None`` (no live seat / no comment rights)."""
         return (await self.entitlement_for_instance(space, instance_id)).scope
 
     async def entitlement_for_instance(
-        self, space: "Space", instance_id: str
+        self, space: Space, instance_id: str
     ) -> WriterEntitlement:
         """Household ``instance_id``'s scope AND the users holding it (the
         v2 user binding), by our roster and the space's ``posts`` access
@@ -487,7 +487,7 @@ class SpaceWriterCertService:
 
     # ── Writer group key (v_50) ──────────────────────────────────────────
 
-    async def _matching_seed(self, space: "Space") -> bytes | None:
+    async def _matching_seed(self, space: Space) -> bytes | None:
         """Our space seed iff it still matches the pinned authority key."""
         seed = await self._spaces.get_space_seed(space.id)
         if seed is None or ed25519_public_key(seed).hex() != space.identity_public_key:
@@ -537,7 +537,7 @@ class SpaceWriterCertService:
 
     @staticmethod
     def _writer_key_aad(space_id: str, epoch: int) -> bytes:
-        return f"socialhome-writer-key:{space_id}:{epoch}".encode("utf-8")
+        return f"socialhome-writer-key:{space_id}:{epoch}".encode()
 
     async def accept_writer_key(self, space_id: str, raw: object) -> bool:
         """Verify + store a writer key grant a seed holder delivered to us
@@ -610,6 +610,7 @@ class SpaceWriterCertService:
                 space_id,
                 epoch,
                 exc,
+                exc_info=True,
             )
             return None
 
@@ -728,7 +729,7 @@ class SpaceWriterCertService:
 
     @staticmethod
     def check_item_cert(
-        space: "Space",
+        space: Space,
         raw: object,
         *,
         epoch: int,
@@ -777,12 +778,12 @@ class SpaceWriterCertService:
         arrived = _parse_utc(latest.created_at)
         if arrived is None:
             return False
-        age = ((now or datetime.now(timezone.utc)) - arrived).total_seconds()
+        age = ((now or datetime.now(UTC)) - arrived).total_seconds()
         return age <= WRITER_CERT_EPOCH_GRACE_S
 
     async def check_item(
         self,
-        space: "Space",
+        space: Space,
         raw: object,
         *,
         epoch: int,
@@ -816,10 +817,14 @@ class SpaceWriterCertService:
         try:
             return b64url_decode(WriterCert.from_wire(raw).instance_pk)
         except Exception:
+            log.debug(
+                "SpaceWriterCertService.cert_instance_pk: fail-soft error ignored",
+                exc_info=True,
+            )
             return None
 
 
-def writer_key_min_version(space: "Space | None") -> int | None:
+def writer_key_min_version(space: Space | None) -> int | None:
     """The ``proto_version`` a member household needs to be handed the
     space's writer group key, or ``None`` when the space has none.
 

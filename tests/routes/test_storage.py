@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pathlib
 
-
 from .conftest import _auth
 
 

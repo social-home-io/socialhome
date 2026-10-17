@@ -40,9 +40,9 @@ class PeerDirectoryService:
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
-        space_repo: "AbstractSpaceRepo",
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
+        space_repo: AbstractSpaceRepo,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -101,6 +101,7 @@ class PeerDirectoryService:
                     "peer_directory: send to %s failed: %s",
                     peer.id,
                     exc,
+                    exc_info=True,
                 )
 
     async def send_snapshot(self, to_instance_id: str) -> None:
@@ -117,4 +118,5 @@ class PeerDirectoryService:
                 "peer_directory: send snapshot to %s failed: %s",
                 to_instance_id,
                 exc,
+                exc_info=True,
             )

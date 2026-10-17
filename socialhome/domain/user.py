@@ -18,13 +18,13 @@ must never appear in any API response or federation payload.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import json
 import unicodedata
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
+from .errors import WrongTypeError
 from .picture_hash import clean_picture_hash
-
 
 # Usernames that a platform adapter must never provision, because the spec
 # (§4.1.9) reserves them for special routing or display semantics.
@@ -84,7 +84,7 @@ class UserStatus:
         except ValueError:
             return True
         if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
+            deadline = deadline.replace(tzinfo=UTC)
         return deadline <= now
 
     def to_json(self) -> str | None:
@@ -97,7 +97,7 @@ class UserStatus:
         )
 
     @classmethod
-    def from_json(cls, raw: str | None) -> "UserStatus":
+    def from_json(cls, raw: str | None) -> UserStatus:
         """Parse a stored ``status_json`` blob. Missing, malformed or
         non-object JSON reads as an unset status (never raises) — the
         column is cache data mirrored from a peer."""
@@ -144,7 +144,7 @@ def clean_status_text(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("The status text must be text.")
+        raise WrongTypeError("The status text must be text.")
     text = value.strip()
     if not text:
         return None
@@ -169,7 +169,7 @@ def clean_status_emoji(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("Pick a single emoji for your status.")
+        raise WrongTypeError("Pick a single emoji for your status.")
     emoji = value.strip()
     if not emoji:
         return None
@@ -433,7 +433,7 @@ class UserIdentityAssertion:
         }
 
     @classmethod
-    def from_wire_dict(cls, data: dict[str, object]) -> "UserIdentityAssertion":
+    def from_wire_dict(cls, data: dict[str, object]) -> UserIdentityAssertion:
         """Reconstruct from the wire shape produced by :meth:`to_wire_dict`.
 
         The optional binding/anchor fields default to ``None`` when absent so a
@@ -482,7 +482,7 @@ class DisplayableUser:
         *,
         alias: str | None = None,
         space_alias: str | None = None,
-    ) -> "DisplayableUser":
+    ) -> DisplayableUser:
         display = space_alias or alias or user.display_name
         return cls(
             user_id=user.user_id,
@@ -501,7 +501,7 @@ class DisplayableUser:
         *,
         alias: str | None = None,
         space_alias: str | None = None,
-    ) -> "DisplayableUser":
+    ) -> DisplayableUser:
         display = space_alias or alias or remote.display_name
         return cls(
             user_id=remote.user_id,

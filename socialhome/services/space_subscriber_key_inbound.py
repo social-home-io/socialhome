@@ -53,8 +53,8 @@ from ..federation.keywrap_seal import UnsupportedKemSuite, open_keywrap
 from .space_service import apply_space_content_key_from_metadata
 
 if TYPE_CHECKING:
-    from .space_authority_pin import AuthorityPinRefresher
     from ..repositories.space_repo import AbstractSpaceRepo
+    from .space_authority_pin import AuthorityPinRefresher
     from .space_crypto_service import SpaceContentEncryption
 
 log = logging.getLogger(__name__)
@@ -64,26 +64,26 @@ class SpaceSubscriberKeyInbound:
     """GFS-relay → local content-key import consumer for a subscriber."""
 
     __slots__ = (
-        "_spaces",
         "_crypto",
-        "_own_instance_id",
         "_keywrap_private_key",
+        "_own_instance_id",
         "_pin_refresher",
+        "_spaces",
     )
 
     def __init__(
         self,
         *,
-        space_repo: "AbstractSpaceRepo",
-        space_crypto: "SpaceContentEncryption",
+        space_repo: AbstractSpaceRepo,
+        space_crypto: SpaceContentEncryption,
     ) -> None:
         self._spaces = space_repo
         self._crypto = space_crypto
         self._own_instance_id: str = ""
         self._keywrap_private_key: bytes = b""
-        self._pin_refresher: "AuthorityPinRefresher | None" = None
+        self._pin_refresher: AuthorityPinRefresher | None = None
 
-    def attach_pin_refresher(self, refresher: "AuthorityPinRefresher") -> None:
+    def attach_pin_refresher(self, refresher: AuthorityPinRefresher) -> None:
         """Wire the lazy pin heal (v_44), as on :class:`SpacePublicInbound`."""
         self._pin_refresher = refresher
 

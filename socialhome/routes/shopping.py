@@ -29,7 +29,7 @@ class ShoppingCollectionView(BaseView):
     """``GET /api/shopping`` + ``POST /api/shopping``."""
 
     async def get(self) -> web.Response:
-        self.user
+        self.require_user()
         include_completed = (
             self.request.query.get("include_completed", "false").lower() == "true"
         )
@@ -61,10 +61,10 @@ class ShoppingItemDetailView(BaseView):
         * ``store: null`` → clear the field;
         * ``store: "Aldi"`` → set the field.
         """
-        self.user
+        self.require_user()
         item_id = self.match("id")
         body = await self.body()
-        store = body["store"] if "store" in body else UNSET_FIELD
+        store = body.get("store", UNSET_FIELD)
         item = await self.svc(shopping_service_key).update_item(
             item_id,
             text=body.get("text"),
@@ -73,7 +73,7 @@ class ShoppingItemDetailView(BaseView):
         return self._json(_item_dict(item))
 
     async def delete(self) -> web.Response:
-        self.user
+        self.require_user()
         item_id = self.match("id")
         await self.svc(shopping_service_key).delete_item(item_id)
         return self._json({"ok": True})
@@ -83,7 +83,7 @@ class ShoppingItemCompleteView(BaseView):
     """``PATCH /api/shopping/{id}/complete``."""
 
     async def patch(self) -> web.Response:
-        self.user
+        self.require_user()
         item_id = self.match("id")
         await self.svc(shopping_service_key).complete_item(item_id)
         return self._json({"ok": True})
@@ -93,7 +93,7 @@ class ShoppingItemUncompleteView(BaseView):
     """``PATCH /api/shopping/{id}/uncomplete``."""
 
     async def patch(self) -> web.Response:
-        self.user
+        self.require_user()
         item_id = self.match("id")
         await self.svc(shopping_service_key).uncomplete_item(item_id)
         return self._json({"ok": True})
@@ -103,7 +103,7 @@ class ShoppingClearCompletedView(BaseView):
     """``POST /api/shopping/clear-completed``."""
 
     async def post(self) -> web.Response:
-        self.user
+        self.require_user()
         count = await self.svc(shopping_service_key).clear_completed()
         return self._json({"cleared": count})
 
@@ -120,14 +120,14 @@ class ShoppingStoresView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.user
+        self.require_user()
         stores = await self.svc(shopping_service_key).list_stores()
         return self._json(
             [{"name": s.name, "sort_order": s.sort_order} for s in stores]
         )
 
     async def post(self) -> web.Response:
-        self.user
+        self.require_user()
         body = await self.body()
         name = body.get("name")
         store = await self.svc(shopping_service_key).create_store(
@@ -150,7 +150,7 @@ class ShoppingStoresOrderView(BaseView):
     """
 
     async def put(self) -> web.Response:
-        self.user
+        self.require_user()
         body = await self.body()
         order = body.get("order") or []
         if not isinstance(order, list):
@@ -188,7 +188,7 @@ class ShoppingStoreDetailView(BaseView):
     """
 
     async def patch(self) -> web.Response:
-        self.user
+        self.require_user()
         old_name = self.match("name")
         body = await self.body()
         new_name = body.get("name")
@@ -214,7 +214,7 @@ class ShoppingStoreDetailView(BaseView):
         )
 
     async def delete(self) -> web.Response:
-        self.user
+        self.require_user()
         name = self.match("name")
         cleared = await self.svc(shopping_service_key).delete_store(name)
         return self._json({"name": name, "cleared": cleared})

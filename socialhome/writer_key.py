@@ -77,7 +77,7 @@ def derive_writer_seed(space_seed: bytes, space_id: str, epoch: int) -> bytes:
         algorithm=hashes.SHA256(),
         length=32,
         salt=_DERIVE_SALT,
-        info=f"{space_id}:{int(epoch)}".encode("utf-8"),
+        info=f"{space_id}:{int(epoch)}".encode(),
     ).derive(space_seed)
 
 
@@ -200,6 +200,6 @@ def verify_writer_sig(
         raise UnsupportedWriterKeySuite(suite)
     try:
         sig = b64url_decode(writer_sig)
-    except Exception:
+    except ValueError, TypeError:
         return False
     return verify_ed25519(writer_pk, message, sig)

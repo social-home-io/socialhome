@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.errors import InvalidMediaRefError
+from socialhome.domain.events import (
+    MomentCreated,
+    MomentDeleted,
+    MomentReactionChanged,
+)
 from socialhome.domain.moment import Moment
 from socialhome.federation.owner_bound_id import (
     MOMENT_KIND,
     OwnerBinding,
     check_owner_bound_id,
-)
-from socialhome.domain.events import (
-    MomentCreated,
-    MomentDeleted,
-    MomentReactionChanged,
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
@@ -138,8 +138,8 @@ async def test_delete_and_expiry_remove_media_file(stack, tmp_dir):
         duration_ms=1000,
         parent_moment_id=None,
         origin_instance_id=stack.iid,
-        created_at=(datetime.now(timezone.utc) - timedelta(days=9)).isoformat(),
-        expires_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+        created_at=(datetime.now(UTC) - timedelta(days=9)).isoformat(),
+        expires_at=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
     )
     await stack.moment_repo.save(expired)
     assert (media_dir / "b.webm").exists()
@@ -396,7 +396,7 @@ async def test_expire_due_drops_expired(stack):
         content="fresh",
     )
     # Hand-write an expired row.
-    expired_at = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    expired_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     await stack.db.enqueue(
         "INSERT INTO moments(id, author_user_id, content, origin_instance_id, "
         "created_at, expires_at) VALUES(?,?,?,?,?,?)",

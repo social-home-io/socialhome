@@ -33,6 +33,7 @@ Everything here is sync and CPU-bound — call :func:`render_map` through
 from __future__ import annotations
 
 import io
+import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -51,10 +52,12 @@ from .map_frame import (
     TileSpot,
     edge_point,
     ideal_frame,
-    tile_grid,
     meters_per_px,
+    tile_grid,
 )
 from .map_scene import MapPalette, MapScene, SceneFace, SceneIcon
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "FONT_DIR",
@@ -262,6 +265,7 @@ def _decode(body: bytes, size: tuple[int, int] | None = None) -> Image.Image | N
             img.load()
             out = img.convert("RGBA")
     except Exception:
+        log.debug("_decode: fail-soft error ignored", exc_info=True)
         return None
     if size is not None and out.size != size:
         out = out.resize(size, Image.Resampling.LANCZOS)
@@ -373,6 +377,13 @@ def _merged_caption(
     return runs
 
 
+def _find_root(root: list[int], i: int) -> int:
+    """Union-find root of ``i`` in ``root`` (the merge pass's parent links)."""
+    while root[i] != i:
+        i = root[i]
+    return i
+
+
 def _merge(
     scene: MapScene,
     units: list[_Unit],
@@ -383,23 +394,18 @@ def _merge(
     rounds at most."""
     for _ in range(MAX_MERGE_ROUNDS):
         root = list(range(len(units)))
-
-        def find(i: int) -> int:
-            while root[i] != i:
-                i = root[i]
-            return i
-
         joined = False
         for i in range(len(units)):
             for j in range(i + 1, len(units)):
-                if find(i) != find(j) and units[i].rect.overlaps(units[j].rect):
-                    root[find(j)] = find(i)
+                ri, rj = _find_root(root, i), _find_root(root, j)
+                if ri != rj and units[i].rect.overlaps(units[j].rect):
+                    root[rj] = ri
                     joined = True
         if not joined:
             break
         clusters: dict[int, list[_Unit]] = {}
         for k, u in enumerate(units):
-            clusters.setdefault(find(k), []).append(u)
+            clusters.setdefault(_find_root(root, k), []).append(u)
         merged: list[_Unit] = []
         for cluster in clusters.values():
             if len(cluster) == 1:

@@ -21,7 +21,7 @@ shares: :func:`zone_of`, :func:`local_date`, :func:`local_instant`,
 """
 
 import logging
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 log = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ def coerce_tz(value: object, *, context: str) -> str:
 
 def zone_of(tz: str) -> ZoneInfo | timezone:
     """The zone for an IANA name — UTC when it is unknown."""
-    return ZoneInfo(tz) if is_valid_tz(tz) else timezone.utc
+    return ZoneInfo(tz) if is_valid_tz(tz) else UTC
 
 
 def local_date(now: datetime, tz: str) -> date:
@@ -95,7 +95,7 @@ def local_instant(d: date, t: time, tz: str) -> datetime:
     03:30 local.
     """
     local = datetime.combine(d, t).replace(tzinfo=zone_of(tz), fold=0)
-    return local.astimezone(timezone.utc)
+    return local.astimezone(UTC)
 
 
 def local_day_bounds(d: date, tz: str) -> tuple[datetime, datetime]:

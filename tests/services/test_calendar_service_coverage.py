@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
+from datetime import UTC
 
-from socialhome.repositories.space_repo import SqliteSpaceRepo
+import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
@@ -14,6 +14,7 @@ from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
 )
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.calendar_service import (
     CalendarService,
     SpaceCalendarService,
@@ -323,11 +324,11 @@ async def test_space_rsvp_bad_status(env):
 
 async def test_space_rsvp_happy(env):
     """Member RSVP roundtrip on a future event."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     await _seed_space(env)
     # Event must be in the future — Phase E rejects RSVPs to ended events.
-    future = datetime.now(timezone.utc) + timedelta(days=30)
+    future = datetime.now(UTC) + timedelta(days=30)
     event = await env.space_svc.create_event(
         space_id="sp1",
         summary="m",

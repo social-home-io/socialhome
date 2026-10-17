@@ -191,7 +191,7 @@ def verify_authority_event(
         raise UnsupportedAuthoritySuite(authority_sig_suite)
     try:
         sig = b64url_decode(authority_sig)
-    except Exception:
+    except ValueError, TypeError:
         return False
     return verify_ed25519(
         space_public_key,

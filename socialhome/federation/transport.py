@@ -36,26 +36,15 @@ import asyncio
 import logging
 import random
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 import aiolibdatachannel as rtc
 import orjson
 from aiohttp import ClientTimeout
 
-from . import app_framing
-from . import media_framing
-
-# Runtime import of two ints only — the relay transport class itself stays
-# behind TYPE_CHECKING, and this module is not imported by that one, so
-# there is no cycle to route around.
-from .gfs_relay_transport import (
-    RELAY_STATUS_THROTTLED,
-    RELAY_STATUS_TOO_LARGE,
-)
 from ..domain.events import PeerTransportChanged
-from ..exception_text import describe_exception
-from ..peer_http import post_to_peer
 from ..domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
@@ -63,6 +52,17 @@ from ..domain.federation import (
     FederationEventType,
     InstanceSource,
     RemoteInstance,
+)
+from ..exception_text import describe_exception
+from ..peer_http import post_to_peer
+from . import app_framing, media_framing
+
+# Runtime import of two ints only — the relay transport class itself stays
+# behind TYPE_CHECKING, and this module is not imported by that one, so
+# there is no cycle to route around.
+from .gfs_relay_transport import (
+    RELAY_STATUS_THROTTLED,
+    RELAY_STATUS_TOO_LARGE,
 )
 
 if TYPE_CHECKING:
@@ -105,7 +105,7 @@ class HttpsInboxTransport:
     patching module-level state.
     """
 
-    __slots__ = ("_client_factory", "_client", "_timeout_s")
+    __slots__ = ("_client", "_client_factory", "_timeout_s")
 
     def __init__(
         self,
@@ -154,6 +154,7 @@ class HttpsInboxTransport:
                 "HTTPS-inbox send to %s failed: %s",
                 instance.id,
                 describe_exception(exc),
+                exc_info=True,
             )
             return False, None
 
@@ -299,38 +300,38 @@ class _RtcPeer:
     """One DataChannel session for one paired peer."""
 
     __slots__ = (
-        "instance_id",
-        "_ice_provider",
-        "ice_generation",
-        "_signaling",
-        "_inbound",
-        "_pc",
-        "_channel",
-        "_open",
-        "_closed",
-        "_loop",
-        "_expected_answer_from",
-        "_send_hwm",
-        "_remote_description_applied",
+        "_app_buf",
+        "_app_channel",
+        "_app_inbound",
+        "_app_open",
         "_bus",
-        "_published_open",
-        "_polite",
-        "_making_offer",
-        "_is_offerer",
+        "_channel",
+        "_closed",
         "_dropped_candidates",
-        "_starved_awaiting_offer",
-        "_restarts",
+        "_expected_answer_from",
+        "_ice_provider",
+        "_inbound",
+        "_is_offerer",
+        "_loop",
+        "_making_offer",
+        "_media_buf",
+        "_media_channel",
+        "_media_inbound",
+        "_media_open",
         "_on_failed",
         "_on_open",
+        "_open",
+        "_pc",
+        "_polite",
+        "_published_open",
+        "_remote_description_applied",
+        "_restarts",
+        "_send_hwm",
+        "_signaling",
+        "_starved_awaiting_offer",
         "_teardown_task",
-        "_media_inbound",
-        "_media_channel",
-        "_media_open",
-        "_media_buf",
-        "_app_inbound",
-        "_app_channel",
-        "_app_open",
-        "_app_buf",
+        "ice_generation",
+        "instance_id",
     )
 
     def __init__(
@@ -342,7 +343,7 @@ class _RtcPeer:
         signaling: Callable[[FederationEventType, dict], Awaitable[None]],
         inbound: _InboundCallback,
         send_hwm: int = SEND_HWM_BYTES,
-        bus: "EventBus | None" = None,
+        bus: EventBus | None = None,
         polite: bool = False,
         on_failed: Callable[[str], Awaitable[None]] | None = None,
         on_open: Callable[[str], Awaitable[None]] | None = None,
@@ -350,7 +351,7 @@ class _RtcPeer:
         app_inbound: _AppInboundCallback | None = None,
     ) -> None:
         self.instance_id = instance_id
-        self._ice_provider: Callable[[], list[dict]] = ice_provider or (lambda: [])
+        self._ice_provider: Callable[[], list[dict]] = ice_provider or (list)
         #: The transport's ``_ice_generation`` at the moment this peer
         #: was built. Compared against the transport's current value in
         #: :meth:`needs_rehandshake` so a peer whose PeerConnection was
@@ -805,7 +806,7 @@ class _RtcPeer:
                     self._remote_description_applied.wait(),
                     timeout=ICE_BUFFER_TIMEOUT_S,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.warning(
                     "fed RTC: ICE candidate for %s dropped — remote "
                     "description not applied within %.0fs",
@@ -905,18 +906,20 @@ class _RtcPeer:
                             evict_cb = self._on_failed
                             instance_id = self.instance_id
 
-                            async def _evict_async() -> None:
+                            async def _evict_async(
+                                cb: Callable[[str], Awaitable[None]], iid: str
+                            ) -> None:
                                 try:
-                                    await evict_cb(instance_id)
+                                    await cb(iid)
                                 except Exception as exc:  # noqa: BLE001
                                     log.warning(
                                         "fed RTC on_failed handler raised for %s: %s",
-                                        instance_id,
+                                        iid,
                                         exc,
                                     )
 
                             self._loop.create_task(
-                                _evict_async(),
+                                _evict_async(evict_cb, instance_id),
                                 name=f"fed-rtc-evict[{instance_id}]",
                             )
                 elif isinstance(ev, rtc.IceStateChangeEvent):
@@ -1550,29 +1553,29 @@ class FederationTransport:
     """
 
     __slots__ = (
-        "_own_instance_id",
-        "_https_inbox",
-        "_gfs_relay",
-        "_signaling_send",
-        "_ice_servers",
-        "_peers",
-        "_lock",
-        "_inbound_handler",
-        "_media_inbound_handler",
         "_app_inbound_handler",
         "_bus",
-        "_rtc_suppressed_until",
+        "_closing",
+        "_gfs_relay",
+        "_gfs_routes",
+        "_https_inbox",
+        "_ice_generation",
+        "_ice_prime_timeout_s",
+        "_ice_primed",
+        "_ice_servers",
+        "_inbound_handler",
+        "_last_retire_at",
+        "_lock",
+        "_media_inbound_handler",
+        "_own_instance_id",
+        "_peers",
+        "_relay_rr",
         "_rtc_failure_count",
+        "_rtc_jitter",
         "_rtc_retry_backoff_base_s",
         "_rtc_retry_backoff_max_s",
-        "_rtc_jitter",
-        "_ice_generation",
-        "_ice_primed",
-        "_ice_prime_timeout_s",
-        "_last_retire_at",
-        "_closing",
-        "_gfs_routes",
-        "_relay_rr",
+        "_rtc_suppressed_until",
+        "_signaling_send",
     )
 
     def __init__(
@@ -1580,7 +1583,7 @@ class FederationTransport:
         *,
         own_instance_id: str,
         https_inbox: HttpsInboxTransport,
-        gfs_relay: "GfsRelayTransport | None" = None,
+        gfs_relay: GfsRelayTransport | None = None,
         gfs_routes: Callable[[str], Awaitable[list[str]]] | None = None,
         signaling_send: Callable[
             [str, FederationEventType, dict], Awaitable[DeliveryResult]
@@ -1589,7 +1592,7 @@ class FederationTransport:
         inbound_handler: Callable[[str, bytes], Awaitable[dict]] | None = None,
         media_inbound_handler: _MediaInboundCallback | None = None,
         app_inbound_handler: _AppInboundCallback | None = None,
-        bus: "EventBus | None" = None,
+        bus: EventBus | None = None,
         rtc_retry_backoff_base_s: float = RTC_RETRY_BACKOFF_BASE_S,
         rtc_retry_backoff_max_s: float = RTC_RETRY_BACKOFF_MAX_S,
         ice_prime_timeout_s: float = ICE_PRIME_TIMEOUT_S,
@@ -1797,6 +1800,7 @@ class FederationTransport:
                     "fed RTC send to %s raised (%s) — falling back to HTTPS inbox",
                     instance.id,
                     exc,
+                    exc_info=True,
                 )
                 sent = False
             if sent:
@@ -2032,7 +2036,7 @@ class FederationTransport:
             return None
         try:
             urls = await self._gfs_routes(instance.id)
-        except Exception:  # noqa: BLE001 — a transport must never raise
+        except Exception:
             log.warning(
                 "fed relay: could not resolve relay routes for %s",
                 instance.id,
@@ -2165,7 +2169,7 @@ class FederationTransport:
                     self._ice_primed.wait(),
                     self._ice_prime_timeout_s,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Latch: set the event so only the FIRST peer ever pays
                 # the wait. A platform that never primes costs the bound
                 # once per process, not once per peer. Safe only because
@@ -2218,6 +2222,7 @@ class FederationTransport:
                 "fed RTC handshake start failed for %s: %s",
                 instance.id,
                 exc,
+                exc_info=True,
             )
         # The lock is released across that await, so ``close_all()`` may
         # have run meanwhile. It closes whatever it finds in ``_peers``,
@@ -2474,7 +2479,7 @@ class FederationTransport:
             return False
         return (time.monotonic() - last) < self._rtc_retry_backoff_base_s
 
-    async def _retire_peer(self, instance_id: str, peer: "_RtcPeer") -> None:
+    async def _retire_peer(self, instance_id: str, peer: _RtcPeer) -> None:
         """Drop *peer* — the exact object the caller decided to rebuild.
 
         Deliberately distinct from :meth:`_evict_peer`, which reacts to

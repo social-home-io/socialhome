@@ -117,7 +117,7 @@ async def _space_b_state(client) -> tuple[list, list]:
 
 
 async def test_space_task_from_another_space_is_404_and_untouched(client):
-    bob, lid, tid = await _cross_space_env(client)
+    bob, _lid, tid = await _cross_space_env(client)
     before = await _space_b_state(client)
     r = await client.patch(
         f"/api/spaces/sp-a/tasks/{tid}",
@@ -135,7 +135,7 @@ async def test_space_task_from_another_space_is_404_and_untouched(client):
 
 
 async def test_space_task_list_from_another_space_is_404_and_untouched(client):
-    bob, lid, tid = await _cross_space_env(client)
+    bob, lid, _tid = await _cross_space_env(client)
     before = await _space_b_state(client)
     r = await client.get(f"/api/spaces/sp-a/tasks/lists/{lid}/tasks", headers=bob)
     assert r.status == 404
@@ -658,7 +658,7 @@ async def test_overlong_or_invisible_text_is_422(client):
     lid = await _household_list(client)
     for body in (
         {"title": "T" * 201},
-        {"title": "​‮"},
+        {"title": "\u200b\u202e"},
         {"title": "T", "description": "d" * 5001},
     ):
         r = await client.post(

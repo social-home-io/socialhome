@@ -21,7 +21,7 @@ import io
 import logging
 import tarfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiofiles.os
@@ -201,7 +201,7 @@ class BackupService:
         manifest = BackupManifest(
             schema_version=self._schema_version,
             instance_id=instance_id,
-            exported_at=datetime.now(timezone.utc).isoformat(),
+            exported_at=datetime.now(UTC).isoformat(),
             table_names=list(EXPORTABLE_TABLES),
         )
         manifest_payload = orjson.dumps(
@@ -258,7 +258,7 @@ class BackupService:
         try:
             rows = await self._db.fetchall(f"SELECT * FROM {table}")
         except Exception as exc:  # pragma: no cover
-            log.warning("backup: skipping %s due to %s", table, exc)
+            log.warning("backup: skipping %s due to %s", table, exc, exc_info=True)
             return []
         return [dict(r) for r in rows]
 
@@ -274,7 +274,7 @@ class BackupService:
     def _tar_add_bytes(tar: tarfile.TarFile, name: str, payload: bytes) -> None:
         info = tarfile.TarInfo(name=name)
         info.size = len(payload)
-        info.mtime = int(datetime.now(timezone.utc).timestamp())
+        info.mtime = int(datetime.now(UTC).timestamp())
         tar.addfile(info, io.BytesIO(payload))
 
     # ─── Restore ──────────────────────────────────────────────────────────
@@ -313,7 +313,7 @@ class BackupService:
         await self._db.enqueue(
             "INSERT INTO instance_config(key,value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (BACKUP_RESTORED_AT_KEY, datetime.now(timezone.utc).isoformat()),
+            (BACKUP_RESTORED_AT_KEY, datetime.now(UTC).isoformat()),
         )
 
     def _read_restore_tar(
@@ -402,4 +402,6 @@ class BackupService:
             try:
                 await self._db.enqueue(sql, params)
             except Exception as exc:
-                log.warning("backup: row import failed for %s: %s", table, exc)
+                log.warning(
+                    "backup: row import failed for %s: %s", table, exc, exc_info=True
+                )

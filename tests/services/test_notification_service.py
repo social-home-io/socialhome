@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
-from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.conversation import (
     MUTED_FOREVER,
@@ -23,7 +23,10 @@ from socialhome.domain.events import (
     DmMessageDeleted,
     DmMessageUpdated,
     PostEdited,
+    SpaceAdminSeedsRetiredAfterRestore,
     SpacePostCreated,
+    SpaceRemoteSeatLive,
+    TaskAssigned,
 )
 from socialhome.domain.mention import Mention, MentionType
 from socialhome.domain.post import Comment, CommentType, Post, PostType
@@ -35,12 +38,8 @@ from socialhome.domain.space import (
 )
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.domain.user import RemoteUser
-from socialhome.domain.events import (
-    SpaceAdminSeedsRetiredAfterRestore,
-    SpaceRemoteSeatLive,
-    TaskAssigned,
-)
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.calendar_repo import SqliteCalendarRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.notification_repo import SqliteNotificationRepo
@@ -51,7 +50,6 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
-from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.feed_service import FeedService
 from socialhome.services.notification_service import NotificationService
 from socialhome.services.space_moderation_service import SpaceModerationService
@@ -133,7 +131,7 @@ async def test_task_assigned(stack):
     """TaskAssigned event generates a notification for the assignee."""
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     evt = TaskAssigned(
         task=Task(
             id="t1",
@@ -155,7 +153,7 @@ async def test_task_assigned(stack):
 async def test_self_assign_no_notification(stack):
     """Assigning a task to yourself does not generate a notification."""
     a = await stack.provision_user("anna")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     evt = TaskAssigned(
         task=Task(
             id="t1",
@@ -473,7 +471,7 @@ async def test_space_comment_in_missing_space_is_silent(stack):
                 post_id="p1",
                 author="x",
                 type=CommentType.TEXT,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
                 content="hi",
             ),
             space_id="gone",
@@ -484,9 +482,9 @@ async def test_space_comment_in_missing_space_is_silent(stack):
 
 async def test_moderation_queued_notifies_admins(stack):
     """SpaceModerationQueued notifies space admins."""
+    from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
     from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
     from socialhome.services.space_service import SpaceService
-    from socialhome.domain.space import SpaceFeatures, SpaceFeatureAccess
 
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
@@ -519,9 +517,9 @@ async def test_moderation_queued_notifies_admins(stack):
 async def test_moderation_queued_notifies_moderators_but_not_members(stack):
     """v_41 — moderators work the queue, so they are told about it; a plain
     member is not."""
+    from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
     from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
     from socialhome.services.space_service import SpaceService
-    from socialhome.domain.space import SpaceFeatures, SpaceFeatureAccess
 
     await stack.provision_user("anna")
     mo = await stack.provision_user("mo")
@@ -559,11 +557,12 @@ async def test_moderation_queued_notifies_moderators_but_not_members(stack):
 async def test_task_deadline_notifies_assignees(stack):
     """TaskDeadlineDue notifies all assignees."""
     from datetime import date
+
     from socialhome.domain.events import TaskDeadlineDue
 
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     evt = TaskDeadlineDue(
         task=Task(
             id="t1",
@@ -617,7 +616,7 @@ async def _group(stack, conv_id: str, *users) -> None:
         Conversation(
             id=conv_id,
             type=ConversationType.GROUP_DM,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
     for u in users:
@@ -625,7 +624,7 @@ async def _group(stack, conv_id: str, *users) -> None:
             ConversationMember(
                 conversation_id=conv_id,
                 username=u.username,
-                joined_at=datetime.now(timezone.utc).isoformat(),
+                joined_at=datetime.now(UTC).isoformat(),
             )
         )
 
@@ -710,7 +709,7 @@ async def _named_group(stack, conv_id: str, name: str | None, *users) -> None:
         Conversation(
             id=conv_id,
             type=ConversationType.GROUP_DM,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             name=name,
         )
     )
@@ -719,7 +718,7 @@ async def _named_group(stack, conv_id: str, name: str | None, *users) -> None:
             ConversationMember(
                 conversation_id=conv_id,
                 username=u.username,
-                joined_at=datetime.now(timezone.utc).isoformat(),
+                joined_at=datetime.now(UTC).isoformat(),
             )
         )
 
@@ -792,16 +791,14 @@ async def test_one_to_one_mention_is_an_ordinary_message_bell(stack):
     anna = await stack.provision_user("anna-o")
     bob = await stack.provision_user("bob-o")
     await stack.conv_repo.create(
-        Conversation(
-            id="d-1", type=ConversationType.DM, created_at=datetime.now(timezone.utc)
-        )
+        Conversation(id="d-1", type=ConversationType.DM, created_at=datetime.now(UTC))
     )
     for u in (anna, bob):
         await stack.conv_repo.add_member(
             ConversationMember(
                 conversation_id="d-1",
                 username=u.username,
-                joined_at=datetime.now(timezone.utc).isoformat(),
+                joined_at=datetime.now(UTC).isoformat(),
             )
         )
     await stack.bus.publish(_dm_event("d-1", anna, [bob], mentions=[_m(bob)]))
@@ -825,7 +822,7 @@ async def test_dm_edit_notifies_only_the_newly_mentioned(stack):
             sender_user_id=anna.user_id,
             recipient_user_ids=(bob.user_id, carl.user_id, dora.user_id),
             content="now @carl-e and @dora-e",
-            edited_at=datetime.now(timezone.utc),
+            edited_at=datetime.now(UTC),
             new_mentions=(_m(carl), _m(dora), _m(anna)),
             sender_display_name="Anna",
         )
@@ -850,7 +847,7 @@ async def test_dm_edit_without_new_mentions_is_silent(stack):
             sender_user_id=anna.user_id,
             recipient_user_ids=(bob.user_id,),
             content="typo fixed",
-            edited_at=datetime.now(timezone.utc),
+            edited_at=datetime.now(UTC),
         )
     )
     assert await stack.notif_repo.list(bob.user_id) == []
@@ -1162,12 +1159,13 @@ async def test_dm_message_with_no_recipients_skips_push(stack):
 
 async def test_task_deadline_triggers_push(stack):
     from datetime import date
+
     from socialhome.domain.events import TaskDeadlineDue
 
     a = await stack.provision_user("anna")
     fake = _CapturingPush()
     stack.notif_svc.attach_push_service(fake)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     evt = TaskDeadlineDue(
         task=Task(
             id="t1",
@@ -1300,8 +1298,8 @@ async def test_calendar_event_created_on_personal_calendar_notifies_owner_only(s
         calendar_id="cal-bob",
         summary="Dentist appointment",
         created_by=alice.user_id,
-        start=datetime(2026, 5, 1, 10, tzinfo=timezone.utc),
-        end=datetime(2026, 5, 1, 11, tzinfo=timezone.utc),
+        start=datetime(2026, 5, 1, 10, tzinfo=UTC),
+        end=datetime(2026, 5, 1, 11, tzinfo=UTC),
     )
     await stack.bus.publish(CalendarEventCreated(event=event))
     # Owner gets the bell.
@@ -1342,8 +1340,8 @@ async def test_calendar_event_created_on_own_calendar_notifies_nobody(stack):
         calendar_id="cal-alice",
         summary="Lift weights",
         created_by=alice.user_id,
-        start=datetime(2026, 5, 1, 7, tzinfo=timezone.utc),
-        end=datetime(2026, 5, 1, 8, tzinfo=timezone.utc),
+        start=datetime(2026, 5, 1, 7, tzinfo=UTC),
+        end=datetime(2026, 5, 1, 8, tzinfo=UTC),
     )
     await stack.bus.publish(CalendarEventCreated(event=event))
     assert not any(
@@ -1383,8 +1381,8 @@ async def test_calendar_event_created_on_space_calendar_notifies_members(stack):
         calendar_id=space.id,
         summary="Saturday ride",
         created_by=alice.user_id,
-        start=datetime(2026, 5, 1, 9, tzinfo=timezone.utc),
-        end=datetime(2026, 5, 1, 12, tzinfo=timezone.utc),
+        start=datetime(2026, 5, 1, 9, tzinfo=UTC),
+        end=datetime(2026, 5, 1, 12, tzinfo=UTC),
     )
     await stack.bus.publish(CalendarEventCreated(event=event))
     # Member gets it.
@@ -1540,7 +1538,7 @@ async def test_task_completed_notifies_assignees(stack):
 
     alice = await stack.provision_user("alice-tc")
     bob = await stack.provision_user("bob-tc")
-    now = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 1, tzinfo=UTC)
     task = Task(
         id="t1",
         list_id="l1",
@@ -1577,7 +1575,7 @@ async def _space_task_env(stack, sid: str, member_ids: list[str]) -> None:
 
 
 def _space_task(*, assignees=(), status=TaskStatus.TODO) -> Task:
-    now = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 1, tzinfo=UTC)
     return Task(
         id="st1",
         list_id="sl1",
@@ -1655,7 +1653,7 @@ async def test_space_post_moderated_notifies_author(stack):
         author=author.user_id,
         type=PostType.TEXT,
         content="test",
-        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 1, tzinfo=UTC),
     )
     await stack.bus.publish(
         SpacePostModerated(
@@ -1917,10 +1915,10 @@ async def test_user_followed_remote_recipient_silent(stack):
 async def test_space_location_feature_enabled_notifies_non_actor_members(stack):
     """Enabling feature_location creates a notification for every member
     except the actor who flipped the toggle."""
-    from socialhome.domain.events import SpaceLocationFeatureEnabled
-    from socialhome.services.space_service import SpaceService
-    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
     from socialhome.crypto import derive_instance_id, generate_identity_keypair
+    from socialhome.domain.events import SpaceLocationFeatureEnabled
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.space_service import SpaceService
 
     # Need a space service to create a proper space with members.
     kp = generate_identity_keypair()
@@ -2055,7 +2053,7 @@ async def test_space_join_approved_for_a_non_local_user_saves_nothing(stack):
 async def test_space_mention_from_remote_author_names_them(stack):
     """A federated post by a remote member names that member, not
     "Someone" (the author lives in ``remote_users``)."""
-    space_svc, space, u = await _mention_space(stack, "bob")
+    _space_svc, space, u = await _mention_space(stack, "bob")
     await stack.db.enqueue(
         "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
         " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
@@ -2078,7 +2076,7 @@ async def test_space_mention_from_remote_author_names_them(stack):
                 author="r-zoe",
                 type=PostType.TEXT,
                 content="@bob hi",
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             ),
             space_id=space.id,
             mentions=(
@@ -2300,7 +2298,7 @@ async def test_edit_events_without_new_mentions_are_silent(stack):
         post_id=post.id,
         author=u["anna"].user_id,
         type=CommentType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content="y",
     )
     await stack.bus.publish(CommentUpdated(post_id=post.id, comment=c))
@@ -2338,7 +2336,7 @@ async def test_dm_edit_mention_across_a_guardian_block_is_silent(stack):
             sender_user_id=anna.user_id,
             recipient_user_ids=(kid.user_id, carl.user_id),
             content="@kid-gb @carl-gb",
-            edited_at=datetime.now(timezone.utc),
+            edited_at=datetime.now(UTC),
             new_mentions=(_m(kid), _m(carl)),
             sender_display_name="Anna",
         )
@@ -2386,7 +2384,7 @@ async def test_moderation_decided_notifies_the_submitter_title_only(stack, outco
             space.id, item.id, actor_user_id=a.user_id, reason="private reason"
         )
     else:
-        await mod.expire_due(datetime.now(timezone.utc) + timedelta(days=8))
+        await mod.expire_due(datetime.now(UTC) + timedelta(days=8))
     notes = [
         n
         for n in await stack.notif_repo.list(b.user_id, limit=50)
@@ -2778,7 +2776,7 @@ async def test_household_chat_edit_mention_links_to_the_chat_tab(stack):
             sender_user_id=anna.user_id,
             recipient_user_ids=(bob.user_id,),
             content="@bob-he",
-            edited_at=datetime.now(timezone.utc),
+            edited_at=datetime.now(UTC),
             new_mentions=(_m(bob),),
             sender_display_name="Anna",
         )

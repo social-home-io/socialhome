@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -18,23 +18,23 @@ from socialhome.crypto import (
     ed25519_public_key,
     generate_space_keypair,
 )
-from socialhome.domain.gfs_server import GfsServer
-from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.domain.events import (
-    SpaceFeaturesApplied,
-    DmMessageDeleted,
     CommentAdded,
     CommentUpdated,
     DmMessageCreated,
+    DmMessageDeleted,
     DmMessageUpdated,
     PostDeleted,
     PostEdited,
     SpaceConfigChanged,
+    SpaceFeaturesApplied,
     SpacePostCreated,
     UserStatusChanged,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.link_preview import LinkPreview
+from socialhome.domain.media_constraints import SPACE_COVER_MAX_DIMENSION
 from socialhome.domain.post import (
     FEED_POST_MAX_IMAGES,
     Comment,
@@ -44,13 +44,13 @@ from socialhome.domain.post import (
 )
 from socialhome.domain.space import JoinMode, SpaceMember, SpaceType
 from socialhome.domain.user import UserStatus
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,
     SqliteSpaceRepo,
     SqliteUserRepo,
 )
-from socialhome.domain.media_constraints import SPACE_COVER_MAX_DIMENSION
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
 from socialhome.repositories.space_cover_repo import SqliteSpaceCoverRepo
 from socialhome.repositories.space_icon_repo import SqliteSpaceIconRepo
@@ -86,7 +86,7 @@ def _event(
         event_type=event_type,
         from_instance=from_instance,
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=space_id,
         media_bytes=media_bytes,
@@ -606,7 +606,7 @@ async def test_inbound_space_comment_resolves_mentions(db, bus, inbound):
             id="p-mc",
             author="user-remote",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="post",
         ),
     )
@@ -1000,7 +1000,7 @@ async def test_space_post_updated_edits_content(db, bus, inbound):
         ),
     )
     repo = SqliteSpacePostRepo(db)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await repo.save(
         "sp-1",
         Post(
@@ -1045,7 +1045,7 @@ async def test_space_post_deleted_soft_deletes_and_publishes(db, bus, inbound):
             id="p-1",
             author="u",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="x",
         ),
     )
@@ -1294,7 +1294,7 @@ async def test_user_removed_cascades_to_moments_highlights_and_dms(db, bus):
     hidden_uid = "u-hidden"
     await _seed_dm_people(db, hidden_uid)
     other_uid = "u-other"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Seed: a moment from the hidden user and one from someone else.
     await moment_repo.save(
@@ -1440,7 +1440,7 @@ async def test_space_comment_created_persists_and_publishes(db, bus, inbound):
             id="p-1",
             author="u",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="post",
         ),
     )
@@ -1496,7 +1496,7 @@ async def test_a_space_comment_already_held_is_not_applied_twice(db, bus, inboun
             id="p-1",
             author="u",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="post",
         ),
     )
@@ -1506,7 +1506,7 @@ async def test_a_space_comment_already_held_is_not_applied_twice(db, bus, inboun
             post_id="p-1",
             author="u-r",
             type=CommentType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             deleted=True,
         ),
         space_id="sp-1",
@@ -1780,7 +1780,7 @@ def _binding_entry(
     baked into both signatures, and the entry carries the ``identity_anchor``
     wire field — matching the v_26 outbound shape.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from socialhome.crypto import (
         USER_SIG_SUITE_ED25519,
@@ -1798,7 +1798,7 @@ def _binding_entry(
         instance_id=iid,
         username=username,
         display_name=display,
-        issued_at=datetime.now(timezone.utc).isoformat(),
+        issued_at=datetime.now(UTC).isoformat(),
         user_seed=user_kp.private_key,
         user_public_key=user_kp.public_key,
         user_sig_suite=USER_SIG_SUITE_ED25519,
@@ -3750,18 +3750,18 @@ async def test_config_lww_hlc_deterministic_convergence(db, bus, inbound):
         )
         # admin-a (lower id) carries the HIGHER hlc; admin-z the lower.
         edits = {
-            "a": dict(
-                from_instance="admin-a",
-                author="admin-a",
-                name="ByA",
-                config_hlc="2000-0",
-            ),
-            "z": dict(
-                from_instance="admin-z",
-                author="admin-z",
-                name="ByZ",
-                config_hlc="1000-0",
-            ),
+            "a": {
+                "from_instance": "admin-a",
+                "author": "admin-a",
+                "name": "ByA",
+                "config_hlc": "2000-0",
+            },
+            "z": {
+                "from_instance": "admin-z",
+                "author": "admin-z",
+                "name": "ByZ",
+                "config_hlc": "1000-0",
+            },
         }
         for which in (first, second):
             await inbound._on_space_config_changed(
@@ -3854,7 +3854,7 @@ async def test_config_hlc_far_future_dropped_clock_abuse_guard(db, bus, inbound)
         seq=5,
     )
     # An honest edit lands first (within-bound HLC near real now).
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     await inbound._on_space_config_changed(
         _signed_cfg_event(
             space_id="sp-hlc-future",
@@ -3907,7 +3907,7 @@ async def test_config_hlc_within_drift_bound_applies(db, bus, inbound):
         space_pub_hex=kp.public_key.hex(),
         seq=5,
     )
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     # Within the bound: a few seconds of skew, well under HLC_MAX_DRIFT_MS.
     within = now_ms + (HLC_MAX_DRIFT_MS // 2)
     await inbound._on_space_config_changed(
@@ -3968,7 +3968,7 @@ async def two_spaces(db):
             id="post-b",
             author="u-b",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="B's post",
         ),
     )
@@ -3978,7 +3978,7 @@ async def two_spaces(db):
             post_id="post-b",
             author="u-b",
             type=CommentType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="B's comment",
         ),
         space_id="sp-b",
@@ -3988,7 +3988,7 @@ async def two_spaces(db):
 
 async def _post_row(db, post_id: str) -> dict:
     row = await db.fetchone("SELECT * FROM space_posts WHERE id=?", (post_id,))
-    return {k: row[k] for k in row.keys()}
+    return dict(row)
 
 
 async def _comment_row(db, comment_id: str) -> dict:
@@ -3996,7 +3996,7 @@ async def _comment_row(db, comment_id: str) -> dict:
         "SELECT * FROM space_post_comments WHERE id=?",
         (comment_id,),
     )
-    return {k: row[k] for k in row.keys()}
+    return dict(row)
 
 
 async def test_cross_space_post_created_refused(db, bus, inbound, two_spaces, caplog):
@@ -4267,7 +4267,7 @@ async def test_replayed_comment_delete_lowers_the_real_parent_once(
             id="post-b2",
             author="u-b",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="other",
         ),
     )
@@ -4325,7 +4325,7 @@ async def _auth_space(db) -> SqliteSpacePostRepo:
             id="p-a",
             author="u-a",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="A's post",
         ),
     )
@@ -4335,7 +4335,7 @@ async def _auth_space(db) -> SqliteSpacePostRepo:
             post_id="p-a",
             author="u-a",
             type=CommentType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="A's comment",
         ),
         space_id="sp-auth",
@@ -4669,7 +4669,7 @@ async def test_space_post_created_keeps_only_local_media_references(db, bus, inb
 )
 def test_moment_expired(value, expired):
     if isinstance(value, timedelta):
-        value = (datetime.now(timezone.utc) + value).isoformat()
+        value = (datetime.now(UTC) + value).isoformat()
     assert _moment_expired(value) is expired
 
 
@@ -4703,7 +4703,7 @@ async def test_space_post_updated_applies_the_card_rule(
             id="p-1",
             author="u",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="see https://example.com/a",
             link_preview=LinkPreview(url="https://example.com/a", title="Card"),
         ),
@@ -4731,7 +4731,7 @@ async def _seed_mention_post(db, space_id, post_id, content):
             id=post_id,
             author="user-remote",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content=content,
         ),
     )
@@ -4784,7 +4784,7 @@ async def test_inbound_space_comment_update_carries_only_new_mentions(db, bus, i
             post_id="p-cu",
             author="user-remote",
             type=CommentType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="first",
         ),
         space_id="sp-cu",
@@ -4873,7 +4873,7 @@ async def test_inbound_moderator_edit_mentions_nobody(db, bus, inbound):
             id="p-mod",
             author="user-carol",
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="hello",
         ),
     )
@@ -5213,7 +5213,7 @@ async def test_config_changed_owner_can_empty_the_list(db, bus, inbound):
 async def test_config_changed_ignores_an_owner_list_dated_far_ahead(db, bus, inbound):
     """A list more than a day ahead is refused, so a runaway counter can
     never make every later owner list look older."""
-    far = int(datetime.now(timezone.utc).timestamp() * 1000) + 2 * 86_400_000
+    far = int(datetime.now(UTC).timestamp() * 1000) + 2 * 86_400_000
     stored = _gfs_list("gfs-a", issued_at=5)
     got = await _gs_config(
         db,

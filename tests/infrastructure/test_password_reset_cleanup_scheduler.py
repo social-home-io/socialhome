@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -32,7 +32,7 @@ async def db(tmp_path):
 
 async def test_prune_once_drops_expired_rows(db):
     repo = SqlitePasswordResetRepo(db)
-    past = datetime.now(timezone.utc) - timedelta(hours=2)
+    past = datetime.now(UTC) - timedelta(hours=2)
     await repo.create_token("alice", "admin", ttl_seconds=3600, now=past)
     await repo.create_token("alice", "admin")
     sched = PasswordResetCleanupScheduler(repo)

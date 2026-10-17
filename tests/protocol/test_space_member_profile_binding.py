@@ -13,7 +13,7 @@ call that doesn't match the repo's signature.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -108,7 +108,7 @@ def _update(user_id: str, *, sender: str, name: str = "renamed") -> FederationEv
         event_type=FederationEventType.SPACE_MEMBER_PROFILE_UPDATED,
         from_instance=sender,
         to_instance=OWN,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"user_id": user_id, "space_display_name": name},
         space_id=SPACE_ID,
     )

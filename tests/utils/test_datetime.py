@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -17,7 +17,7 @@ from socialhome.utils.datetime import (
 def test_strict_accepts_z_suffix():
     """Trailing ``Z`` is interpreted as UTC, matching fromisoformat's +00:00."""
     t = parse_iso8601_strict("2026-04-18T12:00:00Z")
-    assert t == datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+    assert t == datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC)
 
 
 def test_strict_accepts_offset_suffix():
@@ -57,18 +57,18 @@ def test_optional_round_trips_valid_timestamp():
 
 def test_lenient_falls_back_to_now_on_garbage():
     """parse_iso8601_lenient returns UTC now when input can't be parsed."""
-    before = datetime.now(timezone.utc)
+    before = datetime.now(UTC)
     t = parse_iso8601_lenient("garbage")
-    after = datetime.now(timezone.utc)
+    after = datetime.now(UTC)
     assert before <= t <= after
     assert t.tzinfo is not None
 
 
 def test_lenient_falls_back_on_non_string():
     """Non-string input (e.g. integer from a malformed JSON) returns now."""
-    before = datetime.now(timezone.utc)
+    before = datetime.now(UTC)
     t = parse_iso8601_lenient(42)
-    after = datetime.now(timezone.utc)
+    after = datetime.now(UTC)
     assert before <= t <= after
 
 
@@ -81,18 +81,18 @@ def test_lenient_falls_back_on_none():
 def test_lenient_parses_valid_timestamps():
     """A valid ISO timestamp is parsed precisely, no fallback."""
     t = parse_iso8601_lenient("2026-04-18T12:00:00Z")
-    assert t == datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+    assert t == datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC)
 
 
 def test_as_utc_treats_naive_as_utc():
     assert as_utc(datetime(2026, 10, 11, 12, 0)) == datetime(
-        2026, 10, 11, 12, 0, tzinfo=timezone.utc
+        2026, 10, 11, 12, 0, tzinfo=UTC
     )
-    assert as_utc(datetime(2026, 10, 11, 12, 0)).tzinfo is timezone.utc
+    assert as_utc(datetime(2026, 10, 11, 12, 0)).tzinfo is UTC
 
 
 def test_as_utc_converts_aware_values():
     berlin = timezone(timedelta(hours=2))
     out = as_utc(datetime(2026, 10, 11, 14, 0, tzinfo=berlin))
-    assert out == datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+    assert out == datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
     assert out.utcoffset() == timedelta(0)

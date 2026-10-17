@@ -5,26 +5,13 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
 
-from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.task import (
-    RecurrenceRule,
-    Task,
-    TaskList,
-    TaskPriority,
-    TaskStatus,
-)
-from socialhome.federation.owner_bound_id import (
-    SPACE_TASK_KIND,
-    SPACE_TASK_LIST_KIND,
-    OwnerBinding,
-    check_owner_bound_id,
-)
 from socialhome.domain.events import TaskAssigned, TaskCompleted, TaskUpdated
 from socialhome.domain.space import (
     ContentAction,
@@ -33,7 +20,20 @@ from socialhome.domain.space import (
     ModerationTargetGoneError,
     SpacePermissionError,
 )
+from socialhome.domain.task import (
+    RecurrenceRule,
+    Task,
+    TaskList,
+    TaskPriority,
+    TaskStatus,
+)
 from socialhome.domain.user import User
+from socialhome.federation.owner_bound_id import (
+    SPACE_TASK_KIND,
+    SPACE_TASK_LIST_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
@@ -122,7 +122,7 @@ async def test_space_task_crud(env):
         (space_id, "TaskSpace", env.iid, "owner2", kp2.public_key.hex()),
     )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     tl = TaskList(id=uuid.uuid4().hex, name="Space Chores", created_by="u1")
     await env.space_task_repo.save_list(tl, space_id=space_id)
 
@@ -168,8 +168,8 @@ async def test_task_by_assignee_and_due_date(env):
             status=TaskStatus.TODO,
             position=0,
             created_by="u1",
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
             assignees=("u1",),
             due_date=date.today(),
         )
@@ -400,6 +400,7 @@ def test_next_occurrence_unsupported_freq_returns_none():
 async def test_complete_recurring_task_spawns_next_instance(env):
     """Transitioning a recurring task to DONE creates a child instance."""
     from dataclasses import replace
+
     from socialhome.domain.task import RecurrenceRule
 
     tl = await env.task_svc.create_list(name="Chores", created_by="u1")
@@ -1218,7 +1219,7 @@ async def test_space_reorder_moved_id_of_another_space_is_404(env):
 
 
 async def test_space_task_list_ids_are_owner_bound(env):
-    svc, _, lst = await _space_with_members(env)
+    _svc, _, lst = await _space_with_members(env)
     assert (
         check_owner_bound_id(
             SPACE_TASK_LIST_KIND, lst.id, space_id="sp-m", owner_user_id="uid-so"
@@ -1305,7 +1306,7 @@ async def test_update_task_bad_position_is_422(env, position):
     "kwargs",
     [
         {"title": "T" * 201},
-        {"title": "​‮  "},
+        {"title": "\u200b\u202e  "},
         {"title": "ok", "description": "d" * 5001},
     ],
 )
@@ -1317,24 +1318,24 @@ async def test_create_task_rejects_overlong_or_invisible_text(env, kwargs):
 
 
 async def test_task_text_is_sanitised(env):
-    tl = await env.task_svc.create_list(name="‮Chores‎", created_by="u1")
+    tl = await env.task_svc.create_list(name="\u202eChores‎", created_by="u1")
     assert tl.name == "Chores"
     t = await env.task_svc.create_task(
         list_id=tl.id,
-        title="‮Buy⁦ milk",
-        description="line1\n‮line2",
+        title="\u202eBuy\u2066 milk",
+        description="line1\n\u202eline2",
         created_by="u1",
     )
     assert t.title == "Buy milk"
     assert t.description == "line1\nline2"
     t2 = await env.task_svc.update_task(
-        t.id, actor_user_id="u1", title="⁧New", description="​"
+        t.id, actor_user_id="u1", title="\u2067New", description="\u200b"
     )
     assert t2.title == "New"
     assert t2.description is None
 
 
-@pytest.mark.parametrize("name", ["N" * 101, "​⁦"])
+@pytest.mark.parametrize("name", ["N" * 101, "\u200b\u2066"])
 async def test_list_names_are_capped_and_visible(env, name):
     with pytest.raises(ValueError):
         await env.task_svc.create_list(name=name, created_by="u1")
@@ -1738,10 +1739,10 @@ async def test_spawn_overdue_waits_for_household_day_west_of_utc(env):
     env.task_svc.attach_household_features(_HouseholdPrefs("America/Los_Angeles"))
     await _daily_task_due(env, date(2026, 4, 20))
 
-    evening = datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+    evening = datetime(2026, 4, 21, 3, 0, tzinfo=UTC)
     assert await env.task_svc.spawn_overdue_recurrences(now=evening) == []
 
-    next_morning = datetime(2026, 4, 21, 8, 0, tzinfo=timezone.utc)
+    next_morning = datetime(2026, 4, 21, 8, 0, tzinfo=UTC)
     spawned = await env.task_svc.spawn_overdue_recurrences(now=next_morning)
     assert [t.due_date for t in spawned] == [date(2026, 4, 21)]
 
@@ -1753,7 +1754,7 @@ async def test_spawn_overdue_on_household_day_east_of_utc(env):
     env.task_svc.attach_household_features(_HouseholdPrefs("Pacific/Auckland"))
     await _daily_task_due(env, date(2026, 4, 20))
 
-    now = datetime(2026, 4, 20, 13, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 20, 13, 0, tzinfo=UTC)
     spawned = await env.task_svc.spawn_overdue_recurrences(now=now)
     assert [t.due_date for t in spawned] == [date(2026, 4, 21)]
 
@@ -1762,7 +1763,7 @@ async def test_spawn_overdue_falls_back_to_utc_when_preferences_fail(env, caplog
     await _daily_task_due(env, date(2026, 4, 20))
     env.task_svc.attach_household_features(_HouseholdPrefs(None))
 
-    now = datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 21, 3, 0, tzinfo=UTC)
     with caplog.at_level(logging.WARNING):
         spawned = await env.task_svc.spawn_overdue_recurrences(now=now)
 

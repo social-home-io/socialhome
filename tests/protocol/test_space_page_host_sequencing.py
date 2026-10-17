@@ -30,7 +30,7 @@ from __future__ import annotations
 import copy
 import itertools
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -156,7 +156,7 @@ async def mesh(request, aiohttp_client, tmp_dir, monkeypatch):
             headers={"Authorization": f"Bearer {token}"},
         )
     host = houses["H"]
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     for house in houses.values():
         db = house.db
         await db.enqueue(
@@ -210,7 +210,7 @@ def _event(sender: House, event_type, payload: dict, to: House) -> FederationEve
         event_type=event_type,
         from_instance=sender.iid,
         to_instance=to.iid,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=copy.deepcopy(payload),
         space_id=SID,
     )
@@ -419,7 +419,7 @@ async def test_p2_a_concurrent_undo_is_kept(mesh):
     await _edit(a, pid, _with(x, p3="anna p3"))  # concurrent with the undo
     await _edit(b, pid, BASE)  # bert undoes his p1 change
     await _pump(mesh)
-    content, sides, _seq_, _p = _converged(await _states(mesh, pid))
+    content, sides, _, _p = _converged(await _states(mesh, pid))
     assert content == _with(BASE, p3="anna p3")
     assert sides == ()
 
@@ -576,7 +576,7 @@ async def test_p6_three_branches_leave_one_identical_conflict(mesh):
     await _deliver(c, h)
     await _deliver(b, h)
     await _pump(mesh)
-    content, sides, seq, _p = _converged(await _states(mesh, pid))
+    content, sides, _, _p = _converged(await _states(mesh, pid))
     assert content == _with(BASE, p2="bert p2", p5="carl p5")
     assert len(sides) == 1
     conflicts = {
@@ -589,8 +589,8 @@ async def test_p6_three_branches_leave_one_identical_conflict(mesh):
 
 
 async def test_an_unreachable_host_gets_one_proposal_when_it_returns(mesh):
-    from socialhome.domain.events import ConnectionReachable
     from socialhome.app_keys import event_bus_key
+    from socialhome.domain.events import ConnectionReachable
 
     a, h = mesh["A"], mesh["H"]
     pid = await _create(mesh)
@@ -614,7 +614,7 @@ async def test_an_unreachable_host_gets_one_proposal_when_it_returns(mesh):
     assert proposals[0]["content"] == _with(BASE, p1="offline 2")
     assert proposals[0]["base_seq"] == 1
     await _pump(mesh)
-    content, sides, seq, pending = _converged(await _states(mesh, pid))
+    content, _, seq, pending = _converged(await _states(mesh, pid))
     assert content == _with(BASE, p1="offline 2") and pending is None and seq == 2
 
 
@@ -627,7 +627,7 @@ async def test_stop_and_wait_one_outstanding_proposal_per_page(mesh):
     assert len(_sent_to(a, h)) == 1  # the next waits for the host's answer
     await _pump(mesh)
     # The answer released the newest draft, which converged too.
-    content, _sides_, _s, pending = _converged(await _states(mesh, pid))
+    content, _, _s, pending = _converged(await _states(mesh, pid))
     assert content == _with(BASE, p1="three") and pending is None
 
 
@@ -828,7 +828,7 @@ async def test_moderated_queued_resolution_is_released_everywhere(mesh):
     )
     assert r.status == 200, await r.text()
     await _pump(mesh)
-    content, s, _seq_, _p = _converged(await _states(mesh, pid))
+    content, s, _, _p = _converged(await _states(mesh, pid))
     assert content == _with(BASE, p2="carl's p2") and s == ()
 
 
@@ -1089,7 +1089,7 @@ async def test_i4_a_member_chunk_never_creates_a_page_on_the_host(mesh):
     assert await _content(h, pid) is None
     a.sent.extend((h.iid, et, p) for et, p in held)
     await _pump(mesh)
-    content, sides, seq, pending = _converged(await _states(mesh, pid))
+    content, _, seq, pending = _converged(await _states(mesh, pid))
     assert (content, seq, pending) == ("hello", 1, None)
 
 
@@ -1170,7 +1170,7 @@ STRANGER = "x" * 52
 
 
 async def _archived_proposal(h, pid, *, sender: str, actor: str):
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     return FederationEvent(
         msg_id=f"m-{next(_IDS)}",
         event_type=FET.SPACE_PAGE_UPDATED,
@@ -1193,7 +1193,7 @@ async def _archived_proposal(h, pid, *, sender: str, actor: str):
 async def test_c1_an_archived_refusal_reaches_no_non_member_and_carries_no_page(mesh):
     a, h = mesh["A"], mesh["H"]
     pid = await _create(mesh, "secret wiki text")
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     await h.db.enqueue(
         "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
         " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
@@ -1596,7 +1596,7 @@ async def test_r4_1_an_unsent_mine_resolution_survives_a_newer_host_version(mesh
 
 async def test_r4_1_an_unsent_edit_equal_to_another_users_side_is_still_proposed(mesh):
     a, h = mesh["A"], mesh["H"]
-    pid, _sides_ = await _with_bert_side(mesh)
+    pid, _ = await _with_bert_side(mesh)
     await _host_offline_for(a, h, True)
     # Anna independently writes exactly bert's version (not via resolve).
     await _edit(a, pid, _with(BASE, p2="bert p2"))

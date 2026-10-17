@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from typing import ClassVar
 from unittest.mock import patch
 
 import ifaddr
@@ -33,7 +34,7 @@ SEED = bytes(range(32))
 class FakeZeroconf:
     """Stand-in for :class:`zeroconf.asyncio.AsyncZeroconf`."""
 
-    instances: list[FakeZeroconf] = []
+    instances: ClassVar[list[FakeZeroconf]] = []
     scan = None  # the patched ``ifaddr.get_adapters`` (set per test)
     fail_init: Exception | None = None
     fail_register: Exception | None = None
@@ -288,12 +289,14 @@ async def test_loopback_listener_skips_without_warning(fake_zeroconf, caplog, ho
 
 async def test_no_lan_address_warns_once(fake_zeroconf, caplog):
     a = _advertiser()
-    with patch.object(adv_mod.ifaddr, "get_adapters", return_value=[ADAPTERS[0]]):
-        with caplog.at_level(logging.WARNING, logger=adv_mod.__name__):
-            await a.advertise(8100)
-            await a.settled()
-            await a.advertise(8200)
-            await a.settled()
+    with (
+        patch.object(adv_mod.ifaddr, "get_adapters", return_value=[ADAPTERS[0]]),
+        caplog.at_level(logging.WARNING, logger=adv_mod.__name__),
+    ):
+        await a.advertise(8100)
+        await a.settled()
+        await a.advertise(8200)
+        await a.settled()
     assert fake_zeroconf.instances == []
     assert len(caplog.records) == 1
 
@@ -386,10 +389,12 @@ async def test_withdraw_failure_is_fail_soft(fake_zeroconf):
 
 async def test_hostname_bind_without_lan_address_warns(fake_zeroconf, caplog):
     a = _advertiser(host="myhost.lan")
-    with patch.object(adv_mod.ifaddr, "get_adapters", return_value=[ADAPTERS[0]]):
-        with caplog.at_level(logging.WARNING, logger=adv_mod.__name__):
-            await a.advertise(8100)
-            await a.settled()
+    with (
+        patch.object(adv_mod.ifaddr, "get_adapters", return_value=[ADAPTERS[0]]),
+        caplog.at_level(logging.WARNING, logger=adv_mod.__name__),
+    ):
+        await a.advertise(8100)
+        await a.settled()
     assert fake_zeroconf.instances == []
     assert "myhost.lan" in caplog.text
 

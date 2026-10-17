@@ -19,10 +19,15 @@ import json
 import logging
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-
+from ..authority_cert import (
+    InvalidAuthorityCert,
+    UnsupportedAuthorityCertSuite,
+    authority_cert_epoch,
+    verify_authority_cert,
+)
 from ..authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
@@ -32,24 +37,18 @@ from ..authority_sig import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from ..authority_cert import (
-    InvalidAuthorityCert,
-    UnsupportedAuthorityCertSuite,
-    authority_cert_epoch,
-    verify_authority_cert,
-)
 from ..crypto import b64url_decode, verify_ed25519
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
-from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from ..domain.space import (
     normalize_category,
     normalize_join_mode,
 )
+from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from .domain import (
+    MIN_EPOCH_STEP_INTERVAL_S,
     ClientInstance,
     GfsSubscriber,
     GfsSubscriberWithKeys,
-    MIN_EPOCH_STEP_INTERVAL_S,
     GlobalSpace,
 )
 from .repositories import AbstractGfsFederationRepo
@@ -353,9 +352,9 @@ class GfsFederationService:
     def __init__(
         self,
         repo: AbstractGfsFederationRepo,
-        ws_registry: "GfsWebSocketRegistry | None" = None,
-        invite_repo: "AbstractGfsInviteRepo | None" = None,
-        epoch_repo: "AbstractGfsSpaceEpochRepo | None" = None,
+        ws_registry: GfsWebSocketRegistry | None = None,
+        invite_repo: AbstractGfsInviteRepo | None = None,
+        epoch_repo: AbstractGfsSpaceEpochRepo | None = None,
     ) -> None:
         self._repo = repo
         # Optional (v_49): when wired, the plaintext ``epoch`` of an
@@ -731,7 +730,7 @@ class GfsFederationService:
             raise PermissionError("Stale timestamp") from exc
         if parsed.tzinfo is None:
             raise PermissionError("Stale timestamp")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if abs((now - parsed).total_seconds()) > INSTANCE_UPDATE_TS_SKEW_SECONDS:
             raise PermissionError("Stale timestamp")
 
@@ -929,6 +928,7 @@ class GfsFederationService:
                 owning_instance,
                 space_id,
                 exc,
+                exc_info=True,
             )
 
     def schedule_subscriber_connected(
@@ -980,6 +980,7 @@ class GfsFederationService:
                 "GFS: reconnect notify lookup for %s failed: %s",
                 instance_id,
                 exc,
+                exc_info=True,
             )
             return
 

@@ -49,7 +49,9 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
 
 
-def match_zone(zones: Iterable[Z], latitude: float, longitude: float) -> Z | None:
+def match_zone[Z: ZoneCircle](
+    zones: Iterable[Z], latitude: float, longitude: float
+) -> Z | None:
     """Return the zone whose centre is closest to ``(latitude, longitude)``
     among those whose distance is within their ``radius_m`` (inclusive),
     or ``None`` when the point is outside every zone. Ties keep the

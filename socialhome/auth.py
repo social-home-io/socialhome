@@ -20,11 +20,11 @@ next to the platform adapters.
 from __future__ import annotations
 
 import hashlib
-
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from aiohttp import web
 
@@ -127,11 +127,11 @@ class AuthContext:
     @classmethod
     def from_user(
         cls,
-        user: "User",
+        user: User,
         *,
         auth_method: str,
         metadata: dict | None = None,
-    ) -> "AuthContext":
+    ) -> AuthContext:
         return cls(
             user_id=user.user_id,
             username=user.username,
@@ -151,7 +151,7 @@ class AuthStrategy(Protocol):
     return into a ``401``.
     """
 
-    async def authenticate(self, request: "web.Request") -> AuthContext | None: ...
+    async def authenticate(self, request: web.Request) -> AuthContext | None: ...
 
 
 def sha256_token_hash(raw_token: str) -> str:
@@ -186,9 +186,9 @@ def require_auth(
 
     @web.middleware
     async def middleware(
-        request: "web.Request",
-        handler: Callable[["web.Request"], Awaitable["web.StreamResponse"]],
-    ) -> "web.StreamResponse":
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
         if _is_public(request.path):
             return await handler(request)
 
@@ -201,7 +201,7 @@ def require_auth(
     return middleware
 
 
-def current_user(request: "web.Request") -> AuthContext:
+def current_user(request: web.Request) -> AuthContext:
     """Return the :class:`AuthContext` attached by :func:`require_auth`.
 
     Raises :class:`RuntimeError` if called before the auth middleware has
@@ -216,7 +216,7 @@ def current_user(request: "web.Request") -> AuthContext:
     return ctx
 
 
-def require_admin(request: "web.Request") -> AuthContext:
+def require_admin(request: web.Request) -> AuthContext:
     """Return the context, raising ``web.HTTPForbidden`` if not admin."""
     ctx = current_user(request)
     if not ctx.is_admin:
@@ -240,7 +240,7 @@ class BearerTokenStrategy:
     def __init__(self, user_repo) -> None:
         self._user_repo = user_repo
 
-    async def authenticate(self, request: "web.Request") -> AuthContext | None:
+    async def authenticate(self, request: web.Request) -> AuthContext | None:
         header = request.headers.get("Authorization", "")
         if not header.startswith("Bearer "):
             # Also accept ``?token=`` for WebSocket upgrades — the ws.ts
@@ -288,7 +288,7 @@ class HaIngressStrategy:
     def __init__(self, user_repo) -> None:
         self._user_repo = user_repo
 
-    async def authenticate(self, request: "web.Request") -> AuthContext | None:
+    async def authenticate(self, request: web.Request) -> AuthContext | None:
         # Only trust ``X-Remote-User-Name`` when HA Core's ingress
         # proxy is in the path. ``X-Hass-Source: core.ingress`` is set
         # by direct assignment in ``homeassistant/components/hassio/
@@ -313,7 +313,7 @@ class ChainedStrategy:
     def __init__(self, *strategies: AuthStrategy) -> None:
         self._strategies = strategies
 
-    async def authenticate(self, request: "web.Request") -> AuthContext | None:
+    async def authenticate(self, request: web.Request) -> AuthContext | None:
         for s in self._strategies:
             ctx = await s.authenticate(request)
             if ctx is not None:
@@ -369,10 +369,10 @@ class SignedMediaStrategy:
     def __init__(self) -> None:
         self._compiled_patterns = tuple(re.compile(p) for p in _SIGNED_PATH_PATTERNS)
 
-    async def authenticate(self, request: "web.Request") -> AuthContext | None:
+    async def authenticate(self, request: web.Request) -> AuthContext | None:
         if not any(p.match(request.path) for p in self._compiled_patterns):
             return None
-        signer: "MediaUrlSigner | None" = request.app.get(media_signer_key)
+        signer: MediaUrlSigner | None = request.app.get(media_signer_key)
         if signer is None:
             return None
         exp = request.query.get("exp", "")

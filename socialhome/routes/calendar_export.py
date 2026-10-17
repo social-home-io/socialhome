@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from aiohttp import web
 
@@ -12,7 +12,7 @@ from .base import BaseView
 
 def _ical_dt(dt: datetime) -> str:
     """Format a datetime as iCalendar YYYYMMDDTHHMMSSZ (UTC)."""
-    utc = dt.astimezone(timezone.utc)
+    utc = dt.astimezone(UTC)
     return utc.strftime("%Y%m%dT%H%M%SZ")
 
 
@@ -30,13 +30,13 @@ class CalendarExportView(BaseView):
     """``GET /api/calendar/{calendar_id}/export.ics`` — iCal export."""
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         calendar_id = self.match("calendar_id")
         svc = self.svc(calendar_service_key)
 
         # Use a very wide range to fetch all events for export.
-        far_past = datetime(2000, 1, 1, tzinfo=timezone.utc).isoformat()
-        far_future = datetime(2099, 12, 31, tzinfo=timezone.utc).isoformat()
+        far_past = datetime(2000, 1, 1, tzinfo=UTC).isoformat()
+        far_future = datetime(2099, 12, 31, tzinfo=UTC).isoformat()
         events = await svc.list_events_in_range(
             calendar_id,
             start=far_past,

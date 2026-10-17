@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -14,7 +14,7 @@ from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 @pytest.fixture
 async def env(tmp_dir):
     """Env with a space post repo and a seeded space + user."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
@@ -52,7 +52,7 @@ def _post(post_id: str, author: str = "uid-alice") -> Post:
         id=post_id,
         author=author,
         type=PostType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content="Hello space!",
     )
 
@@ -63,7 +63,7 @@ def _comment(comment_id: str, post_id: str, author: str = "uid-alice") -> Commen
         post_id=post_id,
         author=author,
         type=CommentType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content="Great post!",
     )
 
@@ -165,19 +165,19 @@ async def test_list_since_returns_strictly_newer_posts(env):
         id="sp-old",
         author="uid-alice",
         type=PostType.TEXT,
-        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
         content="old",
     )
     newer = Post(
         id="sp-new",
         author="uid-alice",
         type=PostType.TEXT,
-        created_at=datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 1, 12, tzinfo=UTC),
         content="new",
     )
     await env.repo.save(env.space_id, older)
     await env.repo.save(env.space_id, newer)
-    cutoff = datetime(2026, 4, 1, tzinfo=timezone.utc).isoformat()
+    cutoff = datetime(2026, 4, 1, tzinfo=UTC).isoformat()
     results = await env.repo.list_since(env.space_id, cutoff)
     assert [p.id for p in results] == ["sp-new"]
 
@@ -307,7 +307,7 @@ async def test_list_comments_since_joins_through_post(env):
         id="sp-cs-1",
         author="uid-alice",
         type=PostType.TEXT,
-        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
         content="x",
     )
     await env.repo.save(env.space_id, in_space)
@@ -317,7 +317,7 @@ async def test_list_comments_since_joins_through_post(env):
         post_id="sp-cs-1",
         author="uid-alice",
         type=CommentType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content="recent",
     )
     await env.repo.add_comment(c, space_id=env.space_id)
@@ -327,12 +327,12 @@ async def test_list_comments_since_joins_through_post(env):
         post_id="sp-cs-1",
         author="uid-alice",
         type=CommentType.TEXT,
-        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2025, 1, 1, tzinfo=UTC),
         content="old",
     )
     await env.repo.add_comment(old, space_id=env.space_id)
 
-    cutoff = datetime(2025, 6, 1, tzinfo=timezone.utc).isoformat()
+    cutoff = datetime(2025, 6, 1, tzinfo=UTC).isoformat()
     rows = await env.repo.list_comments_since(env.space_id, cutoff)
     ids = [c.id for _, c in rows]
     # Only the recent comment's date passes ``cutoff``.
@@ -352,7 +352,7 @@ async def test_list_comments_since_excludes_soft_deleted(env):
         post_id="sp-cs-2",
         author="uid-alice",
         type=CommentType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content="bye",
     )
     await env.repo.add_comment(c, space_id=env.space_id)
@@ -391,7 +391,7 @@ async def two(env):
 
 async def _post_row(env, post_id: str) -> dict:
     row = await env.db.fetchone("SELECT * FROM space_posts WHERE id=?", (post_id,))
-    return {k: row[k] for k in row.keys()}
+    return dict(row)
 
 
 async def _comment_row(env, comment_id: str) -> dict:
@@ -399,7 +399,7 @@ async def _comment_row(env, comment_id: str) -> dict:
         "SELECT * FROM space_post_comments WHERE id=?",
         (comment_id,),
     )
-    return {k: row[k] for k in row.keys()}
+    return dict(row)
 
 
 async def test_save_refuses_upsert_onto_another_spaces_post(two):
@@ -629,9 +629,9 @@ async def test_add_comment_keeps_the_rows_edited_at(env):
         post_id="p1",
         author="uid-alice",
         type=CommentType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content="edited before it arrived",
-        edited_at=datetime(2026, 10, 3, 12, tzinfo=timezone.utc),
+        edited_at=datetime(2026, 10, 3, 12, tzinfo=UTC),
     )
     assert await env.repo.add_comment(stamped, space_id=env.space_id)
     assert (await _edited_at(env, "space_post_comments", "c1")).startswith("2026-10-03")
@@ -687,7 +687,7 @@ def _ago(hours: float) -> str:
 
     from socialhome.domain.space_item import stamp_to_db
 
-    return stamp_to_db(datetime.now(timezone.utc) - timedelta(hours=hours))
+    return stamp_to_db(datetime.now(UTC) - timedelta(hours=hours))
 
 
 async def test_a_removal_tombstone_outlives_the_duplicate_horizon_only(env):
@@ -739,7 +739,7 @@ def _aged(post_id: str, days: float, *, type: PostType = PostType.TEXT) -> Post:
         id=post_id,
         author="uid-alice",
         type=type,
-        created_at=datetime.now(timezone.utc) - timedelta(days=days),
+        created_at=datetime.now(UTC) - timedelta(days=days),
         content="x",
     )
 
@@ -747,9 +747,7 @@ def _aged(post_id: str, days: float, *, type: PostType = PostType.TEXT) -> Post:
 def _cutoff(days: float) -> str:
     from datetime import timedelta
 
-    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 async def test_list_sync_page_pages_every_post_newest_first(env):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-
 from socialhome.app_keys import (
     event_bus_key,
     federation_service_key,

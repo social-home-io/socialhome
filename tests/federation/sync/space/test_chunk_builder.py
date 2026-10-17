@@ -11,9 +11,9 @@ from socialhome.crypto import generate_identity_keypair
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space.exporter import (
     CHUNK_SIZE_BUDGET_BYTES,
+    SENTINEL_RESOURCE,
     ChunkBuilder,
     PagedExporterMixin,
-    SENTINEL_RESOURCE,
     parse_chunk,
     record_batches,
     serialise_chunk,
@@ -48,7 +48,7 @@ class _FakeCrypto:
         sync_id: str,
         plaintext: bytes,
     ) -> tuple[int, str]:
-        self.last_aad = f"{space_id}:{self.epoch}:{sync_id}".encode("utf-8")
+        self.last_aad = f"{space_id}:{self.epoch}:{sync_id}".encode()
         import base64
 
         return self.epoch, base64.urlsafe_b64encode(plaintext).decode("ascii")

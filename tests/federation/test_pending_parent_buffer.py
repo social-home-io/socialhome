@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from socialhome.domain.events import (
     CommentAdded,
@@ -41,9 +41,7 @@ class _Recorder:
 
 
 def _post(pid: str) -> Post:
-    return Post(
-        id=pid, author="u", type=PostType.TEXT, created_at=datetime.now(timezone.utc)
-    )
+    return Post(id=pid, author="u", type=PostType.TEXT, created_at=datetime.now(UTC))
 
 
 def _comment(cid: str) -> Comment:
@@ -52,7 +50,7 @@ def _comment(cid: str) -> Comment:
         post_id="p",
         author="u",
         type=CommentType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content="x",
     )
 

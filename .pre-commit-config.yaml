@@ -40,7 +40,7 @@ repos:
   # format violations slip through until they fail on the push. Bump
   # via ``pre-commit autoupdate --repo https://github.com/astral-sh/ruff-pre-commit``.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.22
+    rev: v0.17.1
     hooks:
       - id: ruff
         name: ruff (lint, socialhome/ + tests/)

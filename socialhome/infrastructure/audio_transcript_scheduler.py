@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ..domain.events import DmMessageUpdated
@@ -53,16 +53,16 @@ class AudioTranscriptScheduler(ProtectionGateMixin):
     """
 
     __slots__ = (
+        "_bus",
         "_child_protection",
         "_convos",
-        "_users",
-        "_transcribe",
-        "_bus",
-        "_media_dir",
         "_interval",
-        "_window",
-        "_task",
+        "_media_dir",
         "_stop",
+        "_task",
+        "_transcribe",
+        "_users",
+        "_window",
     )
 
     def __init__(
@@ -100,7 +100,7 @@ class AudioTranscriptScheduler(ProtectionGateMixin):
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -109,13 +109,13 @@ class AudioTranscriptScheduler(ProtectionGateMixin):
             try:
                 await self._sweep_once()
             except Exception as exc:  # pragma: no cover — defensive
-                log.warning("audio-transcript sweep failed: %s", exc)
+                log.warning("audio-transcript sweep failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _sweep_once(self) -> int:
@@ -125,7 +125,7 @@ class AudioTranscriptScheduler(ProtectionGateMixin):
         ``since_iso`` cutoff inside the call so each pass picks up
         the window's current trailing edge.
         """
-        cutoff_dt = datetime.now(timezone.utc) - self._window
+        cutoff_dt = datetime.now(UTC) - self._window
         since_iso = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
         rows = await self._convos.find_pending_audio_transcripts(
             since_iso=since_iso,
@@ -155,6 +155,7 @@ class AudioTranscriptScheduler(ProtectionGateMixin):
                     "audio-transcript: cannot read %s: %s",
                     msg.media_url,
                     exc,
+                    exc_info=True,
                 )
                 continue
 
@@ -165,7 +166,7 @@ class AudioTranscriptScheduler(ProtectionGateMixin):
             try:
                 await self._convos.edit_message(msg.id, transcript)
             except Exception as exc:  # pragma: no cover
-                log.warning("audio-transcript: persist failed: %s", exc)
+                log.warning("audio-transcript: persist failed: %s", exc, exc_info=True)
                 continue
 
             recipient_ids = await self._collect_recipient_ids(
@@ -179,7 +180,7 @@ class AudioTranscriptScheduler(ProtectionGateMixin):
                     sender_user_id=msg.sender_user_id,
                     recipient_user_ids=recipient_ids,
                     content=transcript,
-                    edited_at=datetime.now(timezone.utc),
+                    edited_at=datetime.now(UTC),
                 )
             )
             patched += 1

@@ -3,7 +3,7 @@ chat end to end through DmService (policy-gated group-DM storage)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -22,8 +22,8 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.household_dashboard import ACK_EMOJI
-from socialhome.domain.user import DASHBOARD_AUTHOR
 from socialhome.domain.preferences import FeatureDisabledError
+from socialhome.domain.user import DASHBOARD_AUTHOR
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.preferences_repo import (
@@ -433,7 +433,7 @@ def _glance_msg(chat_id, mid, sender, minutes_ago, **kw) -> ConversationMessage:
         conversation_id=chat_id,
         sender_user_id=sender,
         content=kw.pop("content", mid),
-        created_at=datetime.now(timezone.utc) - timedelta(minutes=minutes_ago),
+        created_at=datetime.now(UTC) - timedelta(minutes=minutes_ago),
         **kw,
     )
 
@@ -461,8 +461,8 @@ async def test_recent_messages_reads_without_writing(stack):
     before = await _table_rows(stack)
 
     rows = await stack.chat.recent_messages(
-        since=datetime.now(timezone.utc) - timedelta(hours=6),
-        until=datetime.now(timezone.utc) + timedelta(minutes=2),
+        since=datetime.now(UTC) - timedelta(hours=6),
+        until=datetime.now(UTC) + timedelta(minutes=2),
         senders={anna.user_id, bob.user_id},
         limit=10,
     )
@@ -488,8 +488,8 @@ async def test_recent_messages_only_from_the_given_senders(stack):
     await stack.convos.save_message(_glance_msg(chat.id, "a", anna.user_id, 3))
     await stack.convos.save_message(_glance_msg(chat.id, "b", bob.user_id, 2))
     rows = await stack.chat.recent_messages(
-        since=datetime.now(timezone.utc) - timedelta(hours=6),
-        until=datetime.now(timezone.utc) + timedelta(minutes=2),
+        since=datetime.now(UTC) - timedelta(hours=6),
+        until=datetime.now(UTC) + timedelta(minutes=2),
         senders={anna.user_id},
         limit=3,
     )
@@ -499,8 +499,8 @@ async def test_recent_messages_only_from_the_given_senders(stack):
 async def test_recent_messages_never_creates_the_chat(stack):
     anna = await stack.provision("anna")
     rows = await stack.chat.recent_messages(
-        since=datetime.now(timezone.utc) - timedelta(hours=6),
-        until=datetime.now(timezone.utc) + timedelta(minutes=2),
+        since=datetime.now(UTC) - timedelta(hours=6),
+        until=datetime.now(UTC) + timedelta(minutes=2),
         senders={anna.user_id},
         limit=3,
     )
@@ -514,8 +514,8 @@ async def test_recent_messages_feature_off_reads_nothing(stack):
     await stack.convos.save_message(_glance_msg(chat.id, "a", anna.user_id, 3))
     await stack.feature(False)
     rows = await stack.chat.recent_messages(
-        since=datetime.now(timezone.utc) - timedelta(hours=6),
-        until=datetime.now(timezone.utc) + timedelta(minutes=2),
+        since=datetime.now(UTC) - timedelta(hours=6),
+        until=datetime.now(UTC) + timedelta(minutes=2),
         senders={anna.user_id},
         limit=3,
     )
@@ -526,7 +526,7 @@ async def test_recent_messages_feature_off_reads_nothing(stack):
 
 
 def _window() -> dict:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {"since": now - timedelta(hours=1), "until": now + timedelta(minutes=2)}
 
 

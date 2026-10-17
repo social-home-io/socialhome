@@ -99,18 +99,18 @@ import json
 import logging
 import secrets
 import time
-from dataclasses import replace
-from datetime import datetime, timedelta, timezone
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import aiohttp
 
 from ..crypto import b64url_decode, b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.events import (
-    SpaceFeaturesApplied,
     PeerCapabilitiesAdvertised,
     PeerTransportChanged,
+    SpaceFeaturesApplied,
     SpaceRemoteSeatLive,
 )
 from ..domain.federation import GfsConnection, InstanceSource
@@ -136,7 +136,6 @@ from ..domain.gfs_channel import (
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODE_STRICT
 from ..domain.space import SpaceType
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
-from ..outbound_fetch import OutboundFetchRefused
 from ..gfs_channel import (
     bind_grant,
     channel_pk_of,
@@ -152,18 +151,19 @@ from ..gfs_channel import (
     sign_unregister,
     verify_grant,
 )
+from ..outbound_fetch import OutboundFetchRefused
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
 from .gfs_http import refused_gfs_key
-from .gfs_server_targets import (
-    connections_on_list,
-    is_listing_target_id,
-    refusal_outcome,
-)
 from .gfs_publish_retry import (
     GfsPublish,
     GfsPublishRetryQueue,
     PublishOutcome,
     classify_publish_status,
+)
+from .gfs_server_targets import (
+    connections_on_list,
+    is_listing_target_id,
+    refusal_outcome,
 )
 
 if TYPE_CHECKING:
@@ -235,17 +235,17 @@ def _monotonic() -> float:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _anon_ts() -> str:
     now = int(time.time())
     jitter = secrets.randbelow(2 * ANON_TS_JITTER_S + 1) - ANON_TS_JITTER_S
-    return datetime.fromtimestamp(now + jitter, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(now + jitter, tz=UTC).isoformat()
 
 
 def _grant_aad(space_id: str, epoch: int) -> bytes:
-    return f"socialhome-gfs-channel:{space_id}:{epoch}".encode("utf-8")
+    return f"socialhome-gfs-channel:{space_id}:{epoch}".encode()
 
 
 class GfsChannelService:
@@ -255,11 +255,11 @@ class GfsChannelService:
         "_capability_hook",
         "_catching_up",
         "_conn_repo",
+        "_connected_at",
         "_crypto",
         "_federation",
         "_federation_repo",
         "_gfs",
-        "_connected_at",
         "_healing",
         "_inbound",
         "_kek",
@@ -271,11 +271,11 @@ class GfsChannelService:
         "_remote_members",
         "_retry",
         "_space_service",
-        "_sync",
         "_spaces",
         "_started_at",
         "_stop",
         "_stopping",
+        "_sync",
         "_tasks",
         "_writer_certs",
     )
@@ -283,17 +283,17 @@ class GfsChannelService:
     def __init__(
         self,
         *,
-        gfs: "GfsConnectionService",
-        conn_repo: "AbstractGfsConnectionRepo",
-        space_repo: "AbstractSpaceRepo",
-        space_key_repo: "AbstractSpaceKeyRepo",
-        remote_member_repo: "AbstractSpaceRemoteMemberRepo",
-        federation_repo: "AbstractFederationRepo | None",
-        space_crypto: "SpaceContentEncryption",
-        writer_certs: "SpaceWriterCertService",
+        gfs: GfsConnectionService,
+        conn_repo: AbstractGfsConnectionRepo,
+        space_repo: AbstractSpaceRepo,
+        space_key_repo: AbstractSpaceKeyRepo,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo,
+        federation_repo: AbstractFederationRepo | None,
+        space_crypto: SpaceContentEncryption,
+        writer_certs: SpaceWriterCertService,
         own_instance_id: str,
         own_identity_seed: bytes,
-        key_manager: "KeyManager | None",
+        key_manager: KeyManager | None,
     ) -> None:
         self._gfs = gfs
         self._conn_repo = conn_repo
@@ -307,10 +307,10 @@ class GfsChannelService:
         self._own_seed = own_identity_seed
         self._own_pk = ed25519_public_key(own_identity_seed)
         self._kek = key_manager
-        self._federation: "FederationService | None" = None
+        self._federation: FederationService | None = None
         self._space_service: object | None = None
-        self._inbound: "SpacePublicInbound | None" = None
-        self._sync: "_SyncScheduler | None" = None
+        self._inbound: SpacePublicInbound | None = None
+        self._sync: _SyncScheduler | None = None
         self._retry = GfsPublishRetryQueue(self._retry_send)
         #: channel id → ``gfs_instance_id``s that confirmed our registration
         #: in this process (the owner's grants name only these).
@@ -333,7 +333,7 @@ class GfsChannelService:
 
     # ── Wiring + lifecycle ───────────────────────────────────────────────
 
-    def attach_federation(self, federation: "FederationService") -> None:
+    def attach_federation(self, federation: FederationService) -> None:
         """Peer versions (the v_51 gate on every grant)."""
         self._federation = federation
 
@@ -346,17 +346,17 @@ class GfsChannelService:
         """Wire the settling of provisionally adopted channel servers."""
         self._capability_hook = hook
 
-    def attach_inbound(self, inbound: "SpacePublicInbound") -> None:
+    def attach_inbound(self, inbound: SpacePublicInbound) -> None:
         """Where a decrypted-later channel item goes (the same checks as a
         public ``space_item``)."""
         self._inbound = inbound
 
-    def attach_sync_scheduler(self, scheduler: "_SyncScheduler") -> None:
+    def attach_sync_scheduler(self, scheduler: _SyncScheduler) -> None:
         """The §25.6 scheduler a publish-only member asks for a catch-up
         from the host when the host comes back."""
         self._sync = scheduler
 
-    def wire(self, bus: "EventBus") -> None:
+    def wire(self, bus: EventBus) -> None:
         bus.subscribe(SpaceRemoteSeatLive, self._on_seat_live)
         bus.subscribe(PeerTransportChanged, self._on_peer_transport)
         bus.subscribe(PeerCapabilitiesAdvertised, self._on_peer_advertised)
@@ -391,7 +391,7 @@ class GfsChannelService:
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
-    async def _matching_seed(self, space: "Space") -> bytes | None:
+    async def _matching_seed(self, space: Space) -> bytes | None:
         try:
             seed = await self._spaces.get_space_seed(space.id)
         except RuntimeError:
@@ -409,7 +409,7 @@ class GfsChannelService:
                 out.append(conn)
         return out
 
-    async def _chosen_capable(self, space: "Space") -> list[GfsConnection]:
+    async def _chosen_capable(self, space: Space) -> list[GfsConnection]:
         """The OWNER's capable connections among the channel servers it chose
         for *space* (its signed list). No list stored yet means NONE — never
         "every server": the turn-on default / the upgrade step records a
@@ -422,7 +422,7 @@ class GfsChannelService:
         return [c for c in capable if c.id in chosen]
 
     @staticmethod
-    def _chose_none(space: "Space") -> bool:
+    def _chose_none(space: Space) -> bool:
         """The owner explicitly chose NO channel server."""
         return space.gfs_servers is not None and space.gfs_servers.servers_json == "[]"
 
@@ -462,7 +462,7 @@ class GfsChannelService:
             and await self._live_seat(space_id, instance_id)
         )
 
-    async def _channel_seed(self, space: "Space") -> tuple[str, bytes] | None:
+    async def _channel_seed(self, space: Space) -> tuple[str, bytes] | None:
         """``(channel_id, channel_seed)`` when we hold the matching seed and
         the stored channel key is the one it derives; else ``None``."""
         seed = await self._matching_seed(space)
@@ -477,7 +477,7 @@ class GfsChannelService:
 
     # ── Owner: create / keep / retire ────────────────────────────────────
 
-    async def eligible(self, space: "Space", *, joining: str | None = None) -> bool:
+    async def eligible(self, space: Space, *, joining: str | None = None) -> bool:
         """A PRIVATE space we own whose owner turned ``private_gfs`` ON, our
         seed matching the pin, with at least one live remote member household
         — link-joined, paired or mesh-only (``joining`` counts too: the
@@ -626,7 +626,7 @@ class GfsChannelService:
                         resp.status,
                     )
                 return resp.status
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             log.warning(
                 "gfs.channel: GFS %s unreachable: %s",
                 conn.id,
@@ -647,7 +647,7 @@ class GfsChannelService:
         await self._retire(space, stored[0])
         return True
 
-    async def _retire(self, space: "Space", channel_id: str) -> None:
+    async def _retire(self, space: Space, channel_id: str) -> None:
         """Unregister the channel everywhere we can sign for it, and forget
         it. Members get no grant for the next epoch."""
         # The servers the owner's list already dropped (recorded durably).
@@ -1125,7 +1125,7 @@ class GfsChannelService:
 
     # ── Epoch notices (any seed holder) ──────────────────────────────────
 
-    async def _channel_gfs_ids(self, space: "Space") -> tuple[str, ...]:
+    async def _channel_gfs_ids(self, space: Space) -> tuple[str, ...]:
         """Where the channel lives: the capable servers the owner chose that
         confirmed its registration; a delegated admin reuses the servers its
         own grant names."""
@@ -1161,7 +1161,7 @@ class GfsChannelService:
             return None
         return await self.own_grant(space_id, found[0])
 
-    async def _notice_targets(self, space: "Space") -> list[GfsConnection]:
+    async def _notice_targets(self, space: Space) -> list[GfsConnection]:
         """Where an epoch notice goes. The OWNER: its own registered
         connections the channel lives on. A delegated admin (v_57): every
         chosen channel server its grant names, including ones it never
@@ -1226,7 +1226,7 @@ class GfsChannelService:
             gfs_key=self._gfs.addressee_key_for(conn),
             # Exact, not jittered: the server orders the mode by it (after
             # the epoch), and only seed holders send notices.
-            ts=datetime.now(timezone.utc).isoformat(),
+            ts=datetime.now(UTC).isoformat(),
             epoch=epoch,
             publish_mode=space.features.gfs_publish_mode,
             writer_key_cert=wkc,
@@ -1376,7 +1376,7 @@ class GfsChannelService:
                         outcome.kind,
                     )
                 return outcome, held
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             log.warning(
                 "gfs.channel: GFS %s unreachable: %s",
                 conn.id,
@@ -1603,6 +1603,7 @@ class GfsChannelService:
                 "gfs.channel: stored grant for space %s no longer holds: %s",
                 space_id,
                 exc,
+                exc_info=True,
             )
             return None
         if grant.epoch != epoch or grant.channel_id != current[0]:
@@ -1635,10 +1636,10 @@ class GfsChannelService:
             # A publish-only member never takes a seat.
             return 0
         done = 0
+        channel_pass = grant.channel_pass
         for conn in await self._capable_in(grant.gfs_ids):
             if only is not None and conn.id != only:
                 continue
-            channel_pass = grant.channel_pass
 
             async def _subscribe(conn: GfsConnection = conn) -> PublishOutcome:
                 req = ChannelSubscribeRequest(
@@ -1646,7 +1647,7 @@ class GfsChannelService:
                     gfs_instance_id=conn.gfs_instance_id,
                     gfs_key=self._gfs.addressee_key_for(conn),
                     channel_id=grant.channel_id,
-                    ts=datetime.now(timezone.utc).isoformat(),
+                    ts=datetime.now(UTC).isoformat(),
                     signature="",
                     channel_pass=channel_pass,
                 )
@@ -1673,7 +1674,7 @@ class GfsChannelService:
                     gfs_instance_id=conn.gfs_instance_id,
                     gfs_key=self._gfs.addressee_key_for(conn),
                     channel_id=channel_id,
-                    ts=datetime.now(timezone.utc).isoformat(),
+                    ts=datetime.now(UTC).isoformat(),
                     signature="",
                 )
                 sig = sign_ed25519(self._own_seed, canonical(req.signing_payload()))
@@ -1859,7 +1860,7 @@ class GfsChannelService:
             gfs_instance_id=conn.gfs_instance_id,
             gfs_key=self._gfs.addressee_key_for(conn),
             channel_id=grant.channel_id,
-            ts=datetime.now(timezone.utc).isoformat(),
+            ts=datetime.now(UTC).isoformat(),
             signature="",
             epoch=grant.channel_epoch,
             channel_cert=grant.channel_cert,
@@ -1939,7 +1940,7 @@ class GfsChannelService:
                         url.rsplit("/", 1)[-1],
                     )
                 return outcome
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             log.warning(
                 "gfs.channel: GFS %s unreachable: %s",
                 conn.id,

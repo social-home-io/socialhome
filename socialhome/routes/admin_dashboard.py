@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import ipaddress
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -64,9 +64,9 @@ from .base import BaseView
 
 __all__ = [
     "AdminDashboardDisplayView",
+    "AdminDashboardDisplaysView",
     "AdminDashboardHaPanelConnectView",
     "AdminDashboardHaPanelsView",
-    "AdminDashboardDisplaysView",
     "AdminDashboardPasswordView",
     "AdminDashboardPinView",
     "AdminDashboardSessionsView",
@@ -149,7 +149,7 @@ def panel_url(
 def _iso(ts: float | None) -> str | None:
     if ts is None:
         return None
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+    return datetime.fromtimestamp(ts, UTC).isoformat()
 
 
 def _person(user: User, settings: DashboardSettings) -> dict[str, Any]:

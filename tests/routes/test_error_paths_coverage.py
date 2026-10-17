@@ -16,7 +16,6 @@ from socialhome.auth import sha256_token_hash
 
 from .conftest import _auth
 
-
 # ─── helpers ───────────────────────────────────────────────────────────────
 
 

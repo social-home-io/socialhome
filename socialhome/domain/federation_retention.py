@@ -6,7 +6,7 @@ protocols rather than the outbox replaying a week-stale event."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .federation import FederationEventType
 
@@ -58,5 +58,5 @@ def retention_expires_at(
     NEVER_DROP events (which retry indefinitely)."""
     if event_type in NEVER_DROP:
         return None
-    base = now or datetime.now(timezone.utc)
+    base = now or datetime.now(UTC)
     return (base + timedelta(days=RETENTION_DAYS)).isoformat()

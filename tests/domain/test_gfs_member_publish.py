@@ -13,10 +13,10 @@ from socialhome.domain.gfs_member_publish import (
     GFS_PUBLISH_MODE_STRICT,
     GFS_PUBLISH_MODE_TRUSTED,
     GFS_PUBLISH_MODES,
+    MEMBER_PUBLISH_ACTION,
     MEMBER_PUBLISH_ANON_FRAME_KEYS,
     MEMBER_PUBLISH_ANON_PREFIX,
     MEMBER_PUBLISH_ANON_REQUEST_KEYS,
-    MEMBER_PUBLISH_ACTION,
     MEMBER_PUBLISH_FRAME_KEYS,
     MEMBER_PUBLISH_MAX_PAYLOAD_CHARS,
     MEMBER_PUBLISH_REQUEST_KEYS,
@@ -29,8 +29,8 @@ from socialhome.domain.gfs_member_publish import (
     owner_epoch_notice_signing_payload,
     parse_writer_key_cert,
 )
-from socialhome.writer_key import sign_writer_key_cert
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
+from socialhome.writer_key import sign_writer_key_cert
 
 SPACE_SEED = os.urandom(32)
 AUTHOR_PK = ed25519_public_key(os.urandom(32))
@@ -401,7 +401,13 @@ def test_a_malformed_gfs_key_is_refused(bad):
 
 
 def test_the_owner_notice_payload_signs_the_gfs_key_only_when_present():
-    kw = dict(owning_instance="o", gfs_instance_id="g", space_id="s", epoch=1, ts="t")
+    kw = {
+        "owning_instance": "o",
+        "gfs_instance_id": "g",
+        "space_id": "s",
+        "epoch": 1,
+        "ts": "t",
+    }
     assert "gfs_key" not in owner_epoch_notice_signing_payload(**kw)
     assert owner_epoch_notice_signing_payload(**kw, gfs_key="ab" * 32)["gfs_key"] == (
         "ab" * 32

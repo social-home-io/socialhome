@@ -20,15 +20,13 @@ never touch each other.
 from __future__ import annotations
 
 import asyncio
-
 import json
-
-import orjson
-from datetime import datetime, timezone
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import orjson
 import pytest
 
 from socialhome.authority_cert import sign_authority_cert
@@ -37,22 +35,23 @@ from socialhome.crypto import (
     ed25519_public_key,
     generate_space_keypair,
 )
+from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
     FederationEventType,
 )
-from socialhome.db.database import AsyncDatabase
 from socialhome.domain.space import (
+    InviteExpiredError,
     JoinMode,
     Space,
     SpaceFeatures,
     SpaceRole,
     SpaceType,
 )
+from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.host_equivalence import acts_as_host
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
-from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space.exporter import (
     SENTINEL_RESOURCE,
     serialise_chunk,
@@ -70,13 +69,12 @@ from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.services.federation_inbound import SpaceMembershipInboundHandlers
 from socialhome.services.space_authority_pin import (
     apply_authority_cert,
     owner_statement_for_delegated,
     owner_statement_via,
 )
-from socialhome.services.federation_inbound import SpaceMembershipInboundHandlers
-from socialhome.domain.space import InviteExpiredError
 from socialhome.services.space_service import (
     build_space_snapshot_for_federation,
     store_owner_statement,
@@ -86,7 +84,6 @@ from socialhome.space_owner_statement import (
     sign_inviter_proof,
     sign_owner_statement,
 )
-
 from tests.invite_accept import accept_invite, accepting_service
 
 pytestmark = pytest.mark.security
@@ -139,7 +136,7 @@ def _invite(sender: str, meta: dict, *, token: str, user: str = "u-joe"):
         event_type=FederationEventType.SPACE_PRIVATE_INVITE,
         from_instance=sender,
         to_instance=JOINER,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={
             "space_id": SPACE,
             "invite_token": token,
@@ -646,7 +643,7 @@ X = derive_instance_id(ed25519_public_key(X_SEED))
 
 
 async def _x_invites_on_the_old_key(joiner, old_kp, *, statement_age_ms: int = 0):
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now = int(datetime.now(UTC).timestamp() * 1000)
     old_statement = sign_owner_statement(
         space_id=SPACE,
         owner_seed=R_SEED,
@@ -698,7 +695,7 @@ async def test_an_ex_admin_on_the_old_key_loses_us_when_the_owner_answers(joiner
         event_type=FederationEventType.SPACE_SYNC_REJECTED,
         from_instance=R,
         to_instance=JOINER,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={
             "sync_id": "s-1",
             "space_id": SPACE,
@@ -824,7 +821,7 @@ async def test_a_held_statement_for_the_pinned_key_is_only_replaced_by_a_newer(
         ),
     )
     held = (await joiner.spaces.get(SPACE)).owner_statement
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now = int(datetime.now(UTC).timestamp() * 1000)
     older = sign_owner_statement(
         space_id=SPACE,
         owner_seed=R_SEED,
@@ -1085,7 +1082,7 @@ def _rejected(reason: str, **extra) -> FederationEvent:
         event_type=FederationEventType.SPACE_SYNC_REJECTED,
         from_instance=R,
         to_instance=JOINER,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"sync_id": "s-5", "space_id": SPACE, "reason": reason, **extra},
         space_id=SPACE,
     )

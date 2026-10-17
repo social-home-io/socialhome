@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 

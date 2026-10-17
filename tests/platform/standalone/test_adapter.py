@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -28,7 +28,6 @@ from socialhome.services.space_public_author import (
     build_signed_author_inner,
     verify_signed_author_inner,
 )
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -142,7 +141,7 @@ async def test_authenticate_bearer_expired_token(db, adapter):
     """A token whose expires_at is in the past is rejected."""
     await _add_user(db, username="bob", display_name="Bob")
     raw = secrets.token_urlsafe(32)
-    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     await _add_token(db, "bob", raw, expires_at=past)
 
     result = await adapter.authenticate_bearer(raw)
@@ -153,7 +152,7 @@ async def test_authenticate_bearer_future_expiry_accepted(db, adapter):
     """A token whose expires_at is in the future is accepted."""
     await _add_user(db, username="carol", display_name="Carol")
     raw = secrets.token_urlsafe(32)
-    future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    future = (datetime.now(UTC) + timedelta(days=30)).isoformat()
     await _add_token(db, "carol", raw, expires_at=future)
 
     user = await adapter.authenticate_bearer(raw)
@@ -477,7 +476,7 @@ async def test_provision_admin_user_id_passes_public_relay_self_cert(
         author=u["user_id"],
         type=PostType.TEXT,
         content="hello from the household admin",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     inner = build_signed_author_inner(
         post=post,

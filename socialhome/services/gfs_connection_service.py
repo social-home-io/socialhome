@@ -60,22 +60,34 @@ callers that must re-bind to a GFS at a new address.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hmac
 import json
 import logging
 import time
 import uuid
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, nullcontext
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
+from datetime import UTC, datetime
 from typing import Literal
 
 import aiohttp
 
 from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
+from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
+from ..domain.errors import SpaceNotPublishableError, TierChangeRequiredError
+from ..domain.federation import GfsConnection, GfsSpacePublication
+from ..domain.gfs_server import GfsServer
+from ..domain.media_constraints import (
+    SPACE_IMAGE_DATA_URI_PREFIX,
+    SPACE_IMAGE_EMBED_MAX_BYTES,
+)
+from ..domain.space import (
+    SpaceType,
+    normalize_category,
+    normalize_join_mode,
+)
+from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..gfs_proof import (
     PROOF_CAPABILITY,
     PROOF_ROUTE,
@@ -84,32 +96,18 @@ from ..gfs_proof import (
     normalize_gfs_base_url,
     verify_possession_proof,
 )
-from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
-from ..domain.federation import GfsConnection, GfsSpacePublication
-from ..domain.gfs_server import GfsServer
-from ..domain.media_constraints import (
-    SPACE_IMAGE_DATA_URI_PREFIX,
-    SPACE_IMAGE_EMBED_MAX_BYTES,
-)
-from ..domain.errors import SpaceNotPublishableError, TierChangeRequiredError
-from ..domain.space import (
-    SpaceType,
-    normalize_category,
-    normalize_join_mode,
-)
-from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..outbound_fetch import OutboundFetchRefused, open_pinned_session
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_http import gfs_server_address
-from .gfs_server_targets import refusal_outcome, resolve_server_targets
 from .gfs_publish_retry import (
     GfsPublish,
     GfsPublishRetryQueue,
     PublishOutcome,
     classify_publish_status,
 )
+from .gfs_server_targets import refusal_outcome, resolve_server_targets
 from .space_authority_pin import owner_authority_cert
 
 log = logging.getLogger(__name__)
@@ -151,7 +149,9 @@ async def _remote_detail(resp, *, context: str) -> str:
     try:
         raw = await resp.content.read(_REMOTE_DETAIL_READ_BYTES)
     except Exception as exc:  # pragma: no cover - transport-level failure
-        log.debug("GFS %s: could not read the error body: %s", context, exc)
+        log.debug(
+            "GFS %s: could not read the error body: %s", context, exc, exc_info=True
+        )
         return ""
     body = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
     if len(body) <= MAX_REMOTE_DETAIL_CHARS:
@@ -337,46 +337,46 @@ class GfsConnectionService:
     """Service for managing GFS connections and space publications."""
 
     __slots__ = (
-        "_repo",
-        "_http_client",
-        "_space_repo",
-        "_theme_repo",
-        "_cover_repo",
-        "_icon_repo",
-        "_own_instance_id",
-        "_own_signing_key",
+        "_addressee_key",
         "_anon_publish",
         "_anon_warned",
-        "_caps_warned",
-        "_info_failed_at",
-        "_envelope_relay",
-        "_invite_links",
-        "_member_publish_strict",
-        "_private_channels",
-        "_addressee_key",
-        "_refreshed_at",
-        "_member_publish_trusted",
         "_authority_rotation",
-        "_rotation_warned",
-        "_publish_retry",
-        "_publish_client",
-        "_on_repinned",
+        "_caps_warned",
+        "_change_lock",
+        "_cover_repo",
+        "_envelope_relay",
+        "_http_client",
+        "_icon_repo",
+        "_info_failed_at",
+        "_invite_links",
+        "_listing_failed_at",
+        "_listing_proven_at",
+        "_listing_seen",
+        "_listing_sessions",
+        "_member_publish_strict",
+        "_member_publish_trusted",
+        "_member_servers",
         "_on_disconnect",
-        "_on_removed",
-        "_on_rebound",
-        "_rebind_warned",
-        "_replaces",
         "_on_listings_changed",
+        "_on_rebound",
+        "_on_removed",
+        "_on_repinned",
+        "_own_instance_id",
+        "_own_signing_key",
         "_possession",
+        "_private_channels",
         "_proof_offered",
         "_proven_at",
-        "_change_lock",
-        "_member_servers",
-        "_listing_sessions",
-        "_listing_seen",
-        "_listing_proven_at",
-        "_listing_failed_at",
+        "_publish_client",
+        "_publish_retry",
+        "_rebind_warned",
+        "_refreshed_at",
+        "_replaces",
+        "_repo",
+        "_rotation_warned",
+        "_space_repo",
         "_target_warned",
+        "_theme_repo",
     )
 
     def __init__(
@@ -1105,7 +1105,7 @@ class GfsConnectionService:
                     body = await resp.json()
                 except aiohttp.ContentTypeError, ValueError:
                     body = None
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             log.warning("GFS %s unreachable during %s: %s", gfs_url, PROOF_ROUTE, exc)
             return "unreachable"
         if not isinstance(body, dict):
@@ -1288,7 +1288,7 @@ class GfsConnectionService:
                         status=resp.status,
                     )
                 body = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsSignupError(
                 f"GFS unreachable while requesting a sign-up token: {exc}",
                 reason="unreachable",
@@ -1332,7 +1332,7 @@ class GfsConnectionService:
                         f"GFS /gfs/info did not return JSON: {exc}",
                         status=resp.status,
                     ) from exc
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsConnectionError(
                 f"GFS unreachable while fetching /gfs/info: {exc}",
             ) from exc
@@ -1415,7 +1415,7 @@ class GfsConnectionService:
                         status=resp.status,
                     )
                 body = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsConnectionError(
                 f"GFS unreachable: {exc}",
             ) from exc
@@ -1428,7 +1428,7 @@ class GfsConnectionService:
         registration_status = str(body.get("status") or "registered")
         local_status = "active" if registration_status == "registered" else "pending"
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         conn = GfsConnection(
             id=uuid.uuid4().hex,
             gfs_instance_id=gfs_instance_id,
@@ -1573,7 +1573,7 @@ class GfsConnectionService:
                     self._info_failed_at[conn.id] = time.monotonic()
                     return None
                 info = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        except (TimeoutError, aiohttp.ClientError, ValueError) as exc:
             log.debug(
                 "GFS %s unreachable during /gfs/info fetch: %s",
                 conn.id,
@@ -2181,7 +2181,7 @@ class GfsConnectionService:
             self._proven_at[conn.id] = time.monotonic()
             if conn.proof_required_at is None:
                 await self._repo.mark_proof_required(
-                    conn.id, datetime.now(timezone.utc).isoformat()
+                    conn.id, datetime.now(UTC).isoformat()
                 )
                 log.info(
                     "GFS %r (%s) proved possession of its key — required from now on",
@@ -2322,11 +2322,11 @@ class GfsConnectionService:
                     )
                 try:
                     data = await resp.json()
-                except Exception:
+                except aiohttp.ClientError, ValueError:
                     data = {}
                 if not isinstance(data, dict):
                     data = {}
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
         status = data.get("status") or "active"
@@ -2442,7 +2442,7 @@ class GfsConnectionService:
             # re-list a space its owner deliberately delisted. The GFS still
             # accepts a body without ``ts`` (older households keep publishing
             # and refreshing metadata); see ``GfsFederationService.publish_space``.
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
         }
         # v_44 — once the space authority key rotated, the owner's cert for
         # the current key, inside the signed body: the GFS re-pins only from
@@ -2547,7 +2547,7 @@ class GfsConnectionService:
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         canonical = json.dumps(
             {
                 "action": "unpublish",
@@ -2581,7 +2581,7 @@ class GfsConnectionService:
                     raise GfsConnectionError(
                         f"GFS rejected unpublish (HTTP {resp.status}): {detail}",
                     )
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
         await self._repo.unpublish_space(space_id, gfs_id)
@@ -2627,7 +2627,7 @@ class GfsConnectionService:
                 "this GFS can't host invite links yet",
             )
 
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         body = {
             "owning_instance": self._own_instance_id,
             "blob": blob,
@@ -2656,11 +2656,11 @@ class GfsConnectionService:
                     )
                 try:
                     data = await resp.json()
-                except Exception:
+                except aiohttp.ClientError, ValueError:
                     data = {}
                 if not isinstance(data, dict):
                     data = {}
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
         gfs_token = str(data.get("gfs_token") or "")
@@ -2699,7 +2699,7 @@ class GfsConnectionService:
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         body = {
             "owning_instance": self._own_instance_id,
             "ts": ts,
@@ -2728,7 +2728,7 @@ class GfsConnectionService:
                         f"GFS rejected invite revoke (HTTP {resp.status}): {detail}",
                         status=resp.status,
                     )
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
     def _sign_invite_action(
@@ -2781,7 +2781,7 @@ class GfsConnectionService:
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         canonical = json.dumps(
             {
                 "action": "subscribe",
@@ -2815,11 +2815,11 @@ class GfsConnectionService:
                     )
                 try:
                     data = await resp.json()
-                except Exception:
+                except aiohttp.ClientError, ValueError:
                     data = {}
                 if not isinstance(data, dict):
                     data = {}
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
         return str(data.get("status") or "subscribed")
 
@@ -2852,7 +2852,7 @@ class GfsConnectionService:
             raise GfsConnectionError(
                 "cannot unsubscribe from a GFS space without a wired signing identity",
             )
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         canonical = json.dumps(
             {
                 "action": "unsubscribe",
@@ -2886,11 +2886,11 @@ class GfsConnectionService:
                     )
                 try:
                     data = await resp.json()
-                except Exception:
+                except aiohttp.ClientError, ValueError:
                     data = {}
                 if not isinstance(data, dict):
                     data = {}
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
         return str(data.get("status") or "unsubscribed")
 
@@ -3112,7 +3112,7 @@ class GfsConnectionService:
                         outcome.kind,
                     )
                 return outcome
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             log.warning(
                 "publish_space_event: GFS %s relay failed for space %s: %s",
                 conn.id,
@@ -3306,6 +3306,7 @@ class GfsConnectionService:
             log.debug(
                 "gfs.heal_space_pins: space lookup failed for %s — skipping",
                 space_id,
+                exc_info=True,
             )
             return False
         if space is None:
@@ -3327,6 +3328,7 @@ class GfsConnectionService:
             log.debug(
                 "gfs.heal_space_pins: seed lookup failed for space %s — skipping",
                 space_id,
+                exc_info=True,
             )
             return False
         if seed is None:
@@ -3366,7 +3368,7 @@ class GfsConnectionService:
         """
         if not self._own_instance_id or not self._own_signing_key:
             return None
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         canonical = json.dumps(
             {
                 "instance_id": self._own_instance_id,
@@ -3414,7 +3416,7 @@ class GfsConnectionService:
                         resp.status,
                         await _remote_detail(resp, context="name sync"),
                     )
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             log.warning(
                 "GFS %s unreachable during name sync: %s",
                 conn.id,
@@ -3476,7 +3478,7 @@ class GfsConnectionService:
         background; the local report is always the source of truth.
         """
         import json
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from ..crypto import b64url_encode, sign_ed25519
 
@@ -3491,7 +3493,7 @@ class GfsConnectionService:
             "notes": notes,
             "reporter_instance_id": reporter_instance_id,
             "reporter_user_id": reporter_user_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
             "utf-8"

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+from typing import ClassVar
+
 import pytest
 
 from socialhome.app import (
@@ -41,7 +44,6 @@ from socialhome.repositories.space_media_outbox_repo import (
     SqliteSpaceMediaOutboxRepo,
 )
 from socialhome.services.peer_unpair_service import PeerUnpairService
-
 
 # ─── _aiohttp_timeout ────────────────────────────────────────────────────
 
@@ -476,8 +478,9 @@ async def test_redeliver_re_signs_with_fresh_timestamp(env):
     than ±300s ago is no longer rejected for clock skew. We capture the
     bytes actually POSTed and assert the timestamp is fresh while msg_id
     is preserved (replay-dedup still keys correctly)."""
+    from datetime import datetime, timedelta
+
     import orjson
-    from datetime import datetime, timedelta, timezone
 
     svc, fed_repo, kek = env
     peer_kp = generate_identity_keypair()
@@ -496,7 +499,7 @@ async def test_redeliver_re_signs_with_fresh_timestamp(env):
     await fed_repo.save_instance(peer)
 
     # A stale stored envelope (10 minutes old), signed the canonical way.
-    stale_iso = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    stale_iso = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     stored = {
         "msg_id": "never-drop-msg-1",
         "event_type": "space_dissolved",
@@ -542,7 +545,7 @@ async def test_redeliver_re_signs_with_fresh_timestamp(env):
     assert posted["encrypted_payload"] == "nonce:ct"
     # Fresh timestamp: well within the ±300s skew window.
     new_ts = datetime.fromisoformat(posted["timestamp"])
-    skew = abs((datetime.now(timezone.utc) - new_ts).total_seconds())
+    skew = abs((datetime.now(UTC) - new_ts).total_seconds())
     assert skew < 5, f"redelivered envelope timestamp not refreshed (skew {skew}s)"
     assert posted["timestamp"] != stale_iso
 
@@ -1119,7 +1122,7 @@ async def test_redeliver_does_not_follow_a_redirect_to_another_host(env):
 
     class _Redirect:
         status = 308
-        headers = {"Location": "https://elsewhere.example/wh"}
+        headers: ClassVar[dict[str, str]] = {"Location": "https://elsewhere.example/wh"}
 
         async def __aenter__(self):
             return self

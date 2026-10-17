@@ -11,7 +11,7 @@ edit that arrives before its create, edits and reactions out of order).
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -31,15 +31,15 @@ from socialhome.domain.events import (
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.space_item import AuthorityRemoval
-from socialhome.federation.pending_parent_buffer import (
-    PARENT_COMMENT,
-    PARENT_POST,
-    AwaitingParent,
-)
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
     mint_owner_bound_id,
+)
+from socialhome.federation.pending_parent_buffer import (
+    PARENT_COMMENT,
+    PARENT_POST,
+    AwaitingParent,
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
@@ -54,7 +54,7 @@ AUTHOR = derive_user_id(KP.public_key, "bob")
 ORIGIN = derive_instance_id(KP.public_key)
 OTHER_KP = generate_identity_keypair()
 OTHER = derive_user_id(OTHER_KP.public_key, "eve")
-T0 = datetime.now(timezone.utc) - timedelta(minutes=5)
+T0 = datetime.now(UTC) - timedelta(minutes=5)
 
 
 def _ts(seconds: float) -> str:
@@ -363,7 +363,7 @@ async def test_an_edit_with_a_far_future_stamp_is_refused(env):
     """A stamp far ahead would win every later edit: refused."""
     cid = _cid()
     await _seed_comment(env, cid)
-    future = (datetime.now(timezone.utc) + timedelta(days=1) - T0).total_seconds()
+    future = (datetime.now(UTC) + timedelta(days=1) - T0).total_seconds()
     assert not await _apply(env, "comment_edit", _edit(env, cid, "forever", future))
     assert (await env["posts"].get_comment(cid)).content == "original"
 

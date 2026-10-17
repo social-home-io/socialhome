@@ -14,7 +14,7 @@ Also hosts task comments (``task_comments``) and task attachments
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -26,12 +26,11 @@ from ..domain.task import (
     TaskList,
     TaskListTombstone,
     TaskPriority,
-    TaskTombstone,
     TaskStatus,
+    TaskTombstone,
     normalize_labels,
 )
 from .base import changed_since_sql, dump_json, load_json, row_to_dict, rows_to_dicts
-
 
 # ─── Shared helpers ───────────────────────────────────────────────────────
 
@@ -48,7 +47,7 @@ def _parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -85,8 +84,8 @@ def _row_to_task(row: dict) -> Task:
         status=TaskStatus(row.get("status", "todo")),
         position=int(row.get("position") or 0),
         created_by=row["created_by"],
-        created_at=_parse_dt(row["created_at"]) or datetime.now(timezone.utc),
-        updated_at=_parse_dt(row["updated_at"]) or datetime.now(timezone.utc),
+        created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
+        updated_at=_parse_dt(row["updated_at"]) or datetime.now(UTC),
         description=row.get("description"),
         due_date=_parse_date(row.get("due_date")),
         assignees=tuple(load_json(row.get("assignees_json"), [])),
@@ -990,7 +989,7 @@ def _row_to_task_comment(row: dict) -> TaskComment:
         task_id=row["task_id"],
         author=row["author"],
         content=row["content"],
-        created_at=_parse_dt(row["created_at"]) or datetime.now(timezone.utc),
+        created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
     )
 
 
@@ -1003,5 +1002,5 @@ def _row_to_task_attachment(row: dict) -> TaskAttachment:
         filename=row["filename"],
         mime=row["mime"],
         size_bytes=int(row["size_bytes"]),
-        created_at=_parse_dt(row["created_at"]) or datetime.now(timezone.utc),
+        created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
     )

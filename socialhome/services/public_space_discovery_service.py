@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import aiohttp
 
@@ -67,14 +67,14 @@ class PublicSpaceDiscoveryService:
     """
 
     __slots__ = (
-        "_repo",
-        "_gfs_connection_repo",
-        "_poll_interval",
         "_cache_ttl",
+        "_gfs_connection_repo",
         "_http_client",
-        "_task",
-        "_stop",
+        "_poll_interval",
         "_refresh_event",
+        "_repo",
+        "_stop",
+        "_task",
     )
 
     def __init__(
@@ -128,7 +128,7 @@ class PublicSpaceDiscoveryService:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -162,9 +162,7 @@ class PublicSpaceDiscoveryService:
             total += len(listings)
 
         # Purge stale cache rows.
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(hours=self._cache_ttl)
-        ).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(hours=self._cache_ttl)).isoformat()
         purged = await self._repo.purge_older_than(cutoff)
         if purged:
             log.debug("public_space_discovery: purged %d stale rows", purged)
@@ -188,7 +186,7 @@ class PublicSpaceDiscoveryService:
                             self._refresh_event.wait(),
                             timeout=self._poll_interval,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pass
                     finally:
                         self._refresh_event.clear()
@@ -197,7 +195,7 @@ class PublicSpaceDiscoveryService:
                         self._stop.wait(),
                         timeout=self._poll_interval,
                     )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 return
@@ -244,7 +242,12 @@ class PublicSpaceDiscoveryService:
         except Exception as exc:
             # Fail-soft: a down GFS must not break the poll loop — but stay
             # visible so a persistent outage isn't silent.
-            log.info("public_space_discovery: fetch failed for %s: %s", url, exc)
+            log.info(
+                "public_space_discovery: fetch failed for %s: %s",
+                url,
+                exc,
+                exc_info=True,
+            )
             return []
 
         items = body.get("spaces") if isinstance(body, dict) else body

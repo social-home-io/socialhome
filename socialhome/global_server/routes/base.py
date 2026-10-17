@@ -16,9 +16,9 @@ from typing import Any
 
 from aiohttp import web
 
-from .. import app_keys as K
 from ...domain.errors import PayloadTooLargeError
 from ...hardening import read_body_capped
+from .. import app_keys as K
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class GfsBaseView(web.View):
         """
         try:
             return await self.request.json()
-        except Exception:
+        except ValueError:
             return {}
 
     async def body_or_400(self) -> dict:

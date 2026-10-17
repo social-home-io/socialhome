@@ -32,7 +32,7 @@ WarmFn = Callable[..., Awaitable[int]]
 class GfsCapabilityWarmup:
     """One background ``/gfs/info`` pass over the active GFS connections."""
 
-    __slots__ = ("_warm", "_task", "_stop")
+    __slots__ = ("_stop", "_task", "_warm")
 
     def __init__(self, warm: WarmFn) -> None:
         self._warm = warm
@@ -52,14 +52,14 @@ class GfsCapabilityWarmup:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
     async def _run(self) -> None:
         try:
             relaying = await self._warm(should_stop=self._stop.is_set)
-        except Exception:  # noqa: BLE001 — never take startup down
+        except Exception:
             log.warning("gfs: capability warm-up failed", exc_info=True)
             return
         log.info("gfs: capability cache warmed (%d relay-capable server(s))", relaying)

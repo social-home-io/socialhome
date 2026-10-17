@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ..domain.child_protection import (
     PROTECTED_OWNER_PUBLISH_DETAIL,
@@ -40,8 +40,8 @@ from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.space import (
     PUBLIC_SPACE_TIERS,
-    SpacePermissionError,
     SETTINGS_AUTHORITY_ROLES,
+    SpacePermissionError,
     SpaceRole,
     SpaceType,
 )
@@ -73,7 +73,7 @@ MAX_PENDING_OWNER_APPROVALS_PER_HOUSEHOLD = 20
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 #: ``set_public_tier`` param naming the GFSs (the owner household's
@@ -101,15 +101,15 @@ class SpaceApprovalService(ProtectionGateMixin):
     """Quorum approval for ``dissolve`` and ``set_public_tier``."""
 
     __slots__ = (
-        "_proposals",
-        "_spaces",
-        "_remote_members",
-        "_users",
         "_bus",
-        "_own_instance_id",
-        "_federation",
-        "_space_service",
         "_child_protection",
+        "_federation",
+        "_own_instance_id",
+        "_proposals",
+        "_remote_members",
+        "_space_service",
+        "_spaces",
+        "_users",
     )
 
     def __init__(
@@ -432,7 +432,7 @@ class SpaceApprovalService(ProtectionGateMixin):
             proposed_by_user=actor_user,
             status=ProposalStatus.PENDING,
             created_at=now,
-            expires_at=(datetime.now(timezone.utc) + PROPOSAL_TTL).isoformat(),
+            expires_at=(datetime.now(UTC) + PROPOSAL_TTL).isoformat(),
         )
         await self._proposals.upsert(proposal)
         await self._emit(proposal, ProposalStatus.PENDING)
@@ -497,7 +497,7 @@ class SpaceApprovalService(ProtectionGateMixin):
                 proposed_by_user=proposer_user,
                 status=ProposalStatus.PENDING,
                 created_at=now,
-                expires_at=(datetime.now(timezone.utc) + PROPOSAL_TTL).isoformat(),
+                expires_at=(datetime.now(UTC) + PROPOSAL_TTL).isoformat(),
             )
             await self._proposals.upsert(proposal)
         await self._proposals.record_vote(

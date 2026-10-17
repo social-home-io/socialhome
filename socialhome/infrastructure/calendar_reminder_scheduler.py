@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ..domain.notification import Notification
@@ -38,20 +38,20 @@ class CalendarReminderScheduler:
 
     __slots__ = (
         "_calendar_repo",
-        "_user_repo",
-        "_notif_service",
-        "_interval",
-        "_window",
         "_fired",
-        "_task",
+        "_interval",
+        "_notif_service",
         "_stop",
+        "_task",
+        "_user_repo",
+        "_window",
     )
 
     def __init__(
         self,
-        calendar_repo: "AbstractCalendarRepo",
-        user_repo: "AbstractUserRepo",
-        notif_service: "NotificationService",
+        calendar_repo: AbstractCalendarRepo,
+        user_repo: AbstractUserRepo,
+        notif_service: NotificationService,
         *,
         interval_seconds: float = 60.0,
         reminder_window_minutes: int = 10,
@@ -76,7 +76,7 @@ class CalendarReminderScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -87,13 +87,13 @@ class CalendarReminderScheduler:
                 if fired:
                     log.debug("calendar-reminder: fired %d", fired)
             except Exception as exc:  # pragma: no cover
-                log.warning("calendar-reminder tick failed: %s", exc)
+                log.warning("calendar-reminder tick failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def tick_once(self) -> int:
@@ -101,7 +101,7 @@ class CalendarReminderScheduler:
 
         Returns the number of reminders fired this tick.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         horizon = now + self._window
         users = await self._user_repo.list_active()
         fired = 0
@@ -117,6 +117,7 @@ class CalendarReminderScheduler:
                     "calendar-reminder: list events failed user=%s: %s",
                     user.username,
                     exc,
+                    exc_info=True,
                 )
                 continue
             for event in events:
@@ -140,7 +141,7 @@ class CalendarReminderScheduler:
                     created_at=now.isoformat(),
                     link_url=f"/calendar?event={event.id}",
                 )
-                await self._notif_service._save_notif(note)  # noqa: SLF001
+                await self._notif_service._save_notif(note)
                 self._fired.add(key)
                 fired += 1
         return fired

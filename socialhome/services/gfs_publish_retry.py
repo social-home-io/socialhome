@@ -159,13 +159,13 @@ class GfsPublishRetryQueue:
     """Per-connection FIFO of failed GFS publishes, retried with backoff."""
 
     __slots__ = (
-        "_send",
-        "_queues",
-        "_task",
-        "_stop",
-        "_wake",
-        "_full_logged",
         "_conn_full_logged",
+        "_full_logged",
+        "_queues",
+        "_send",
+        "_stop",
+        "_task",
+        "_wake",
     )
 
     def __init__(self, send: PublishSender) -> None:
@@ -277,7 +277,7 @@ class GfsPublishRetryQueue:
             try:
                 await self._run_due()
             except Exception as exc:  # pragma: no cover — defensive
-                log.warning("GFS publish retry pass failed: %s", exc)
+                log.warning("GFS publish retry pass failed: %s", exc, exc_info=True)
             if self._stop.is_set():
                 return
             timeout = None

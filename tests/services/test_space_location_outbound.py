@@ -922,16 +922,16 @@ async def test_opt_in_skipped_when_feature_location_off(env):
 
 
 def _remote_pin(space_id: str, **over) -> RemoteSpaceLocationUpdated:
-    base = dict(
-        space_id=space_id,
-        instance_id="peer-1",
-        user_id="u-remote",
-        mode="gps",
-        latitude=48.1351,
-        longitude=11.582,
-        accuracy_m=9.0,
-        updated_at="2026-09-28T12:00:00+00:00",
-    )
+    base = {
+        "space_id": space_id,
+        "instance_id": "peer-1",
+        "user_id": "u-remote",
+        "mode": "gps",
+        "latitude": 48.1351,
+        "longitude": 11.582,
+        "accuracy_m": 9.0,
+        "updated_at": "2026-09-28T12:00:00+00:00",
+    }
     base.update(over)
     return RemoteSpaceLocationUpdated(**base)
 

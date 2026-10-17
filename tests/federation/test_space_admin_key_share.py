@@ -28,7 +28,6 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 
-
 OWNER = "owner-instance"
 OTHER = "evil-instance"
 SPACE_ID = "sp-1"

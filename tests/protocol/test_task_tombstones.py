@@ -14,7 +14,7 @@ tombstones (``test_task_list_tombstones.py``) fixed for lists.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -61,7 +61,7 @@ AUTHOR = "u-anna"  # the host's user who made the tasks
 S2 = "sp-two"  # a second space M holds, hosted by H2 (the squat target)
 H2 = "host-two"
 H2_USER = "u-bob"
-_NOW = datetime.now(timezone.utc) - timedelta(days=1)
+_NOW = datetime.now(UTC) - timedelta(days=1)
 
 
 def _config(tmp_path, name: str) -> Config:
@@ -218,7 +218,7 @@ async def _deliver(member, event_type, payload, *, sender: str = HOST, i: int = 
         event_type=event_type,
         from_instance=sender,
         to_instance=MEMBER,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=dict(payload),
         space_id=SPACE,
     )
@@ -247,7 +247,7 @@ async def _tasks(app) -> set[str]:
 
 
 def _since() -> str:
-    return (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    return (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
 
 
 # ── Missed deletes heal ─────────────────────────────────────────────────
@@ -450,7 +450,7 @@ async def test_a_hosts_tombstone_under_a_list_not_held_here_records_nothing(
 ):
     """``space_tasks.list_id`` is a FK: a stub needs its list live here in
     this space. A list held in another space never anchors one."""
-    host, member = households
+    _host, member = households
     await _seed_space(member[db_key], S2, H2, (H2,))
     l2 = mint_owner_bound_id(SPACE_TASK_LIST_KIND, space_id=S2, owner_user_id=H2_USER)
     assert await _repo(member).save_list(

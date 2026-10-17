@@ -10,7 +10,6 @@ from socialhome.services.audio_transcription_service import (
     AudioTranscriptionService,
 )
 
-
 # ── Fixture helpers ─────────────────────────────────────────────────────
 
 

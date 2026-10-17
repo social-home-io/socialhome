@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from .errors import CodedError
@@ -180,7 +180,7 @@ class ConversationMessage:
     deleted: bool = False
     edited_at: datetime | None = None
 
-    def soft_delete(self) -> "ConversationMessage":
+    def soft_delete(self) -> ConversationMessage:
         return copy.replace(
             self,
             content="",
@@ -195,11 +195,11 @@ class ConversationMessage:
 
     def edit(
         self, new_content: str, *, now: datetime | None = None
-    ) -> "ConversationMessage":
+    ) -> ConversationMessage:
         return copy.replace(
             self,
             content=new_content,
-            edited_at=now or datetime.now(timezone.utc),
+            edited_at=now or datetime.now(UTC),
         )
 
 
@@ -284,7 +284,7 @@ def mute_until_for(duration: str, *, now: datetime) -> str:
     delta = MUTE_DURATIONS[duration]
     if delta is None:
         return MUTED_FOREVER
-    until = now.astimezone(timezone.utc) + delta
+    until = now.astimezone(UTC) + delta
     return until.replace(microsecond=0).isoformat()
 
 
@@ -302,7 +302,7 @@ def mute_active(muted_until: str | None, *, now: datetime) -> bool:
     except ValueError:
         return False
     if until.tzinfo is None:
-        until = until.replace(tzinfo=timezone.utc)
+        until = until.replace(tzinfo=UTC)
     return until > now
 
 

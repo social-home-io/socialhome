@@ -84,13 +84,13 @@ Home Assistant lifting a panel's lock without the PIN
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
 import hmac
 import json
 import logging
-import asyncio
 import math
 import re
 import secrets
@@ -110,23 +110,21 @@ log = logging.getLogger(__name__)
 __all__ = [
     "ACK_MAX",
     "ACK_WINDOW_S",
-    "TILE_MAX",
-    "TILE_WINDOW_S",
     "COOKIE_NAME",
-    "GLOBAL_MAX_FAILURES",
-    "PAIR_CODE_MAX_FAILURES",
-    "PAIR_CODE_WINDOW_S",
-    "PAIR_MAX",
     "DISPLAY_IMAGE_MAX",
     "DISPLAY_READ_MAX",
     "DISPLAY_WINDOW_S",
+    "GLOBAL_MAX_FAILURES",
     "HA_UNLOCK_MAX",
     "HA_UNLOCK_WINDOW_S",
+    "KEEP_TTL_S",
     "MAP_RENDER_MAX",
+    "MAX_CLOCK_SKEW_S",
+    "PAIR_CODE_MAX_FAILURES",
+    "PAIR_CODE_WINDOW_S",
+    "PAIR_MAX",
     "PAIR_WINDOW_S",
     "PIN_THROTTLE_MAX_KEYS",
-    "KEEP_TTL_S",
-    "MAX_CLOCK_SKEW_S",
     "PRUNE_INTERVAL_S",
     "RENEW_AFTER_S",
     "REVOCATION_MAX",
@@ -136,6 +134,8 @@ __all__ = [
     "THROTTLE_MAX_FAILURES",
     "THROTTLE_MAX_KEYS",
     "THROTTLE_WINDOW_S",
+    "TILE_MAX",
+    "TILE_WINDOW_S",
     "DashboardAuth",
     "SessionClaims",
     "StaleSessionError",
@@ -331,7 +331,7 @@ class _FailureTable:
     a full table of live keys refuses newcomers instead.
     """
 
-    __slots__ = ("buckets", "_max_keys", "_evict_unlocked", "_no_room_until", "_what")
+    __slots__ = ("_evict_unlocked", "_max_keys", "_no_room_until", "_what", "buckets")
 
     def __init__(self, max_keys: int, *, evict_unlocked: bool, what: str) -> None:
         # Insertion-ordered: eviction walks it from the front.
@@ -412,21 +412,21 @@ class DashboardAuth:
     """Issues and verifies dashboard session cookies; throttles logins."""
 
     __slots__ = (
-        "_settings",
+        "_acks",
         "_clock",
-        "_logins",
-        "_pins",
+        "_display_reads",
         "_global",
         "_global_tripped",
-        "_verify_slot",
-        "_revoked",
+        "_logins",
         "_max_revoked",
-        "_acks",
-        "_tiles",
-        "_pairs",
-        "_display_reads",
-        "_pairs_pruned_at",
         "_pair_codes",
+        "_pairs",
+        "_pairs_pruned_at",
+        "_pins",
+        "_revoked",
+        "_settings",
+        "_tiles",
+        "_verify_slot",
         "last_seen_at",
     )
 

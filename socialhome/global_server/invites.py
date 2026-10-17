@@ -155,9 +155,9 @@ class GfsInviteService:
     def __init__(
         self,
         *,
-        federation: "GfsFederationService",
-        invite_repo: "AbstractGfsInviteRepo",
-        mint_limiter: "SlidingWindowCounter",
+        federation: GfsFederationService,
+        invite_repo: AbstractGfsInviteRepo,
+        mint_limiter: SlidingWindowCounter,
     ) -> None:
         # The limiter is INJECTED rather than built here: the public pages
         # module owns :class:`~.public.SlidingWindowCounter` and imports this
@@ -177,7 +177,7 @@ class GfsInviteService:
         expires_at: object,
         ts: str,
         signature: str,
-    ) -> "GfsInviteToken":
+    ) -> GfsInviteToken:
         """Park *blob* on *space_id*'s invite board and return the row.
 
         Order matters and is fail-closed: the signature is verified FIRST
@@ -264,7 +264,7 @@ class GfsInviteService:
         await self._repo.delete(gfs_token)
         log.info("GFS: %s revoked an invite for space %s", owning_instance, space_id)
 
-    async def get_live(self, gfs_token: str) -> "GfsInviteToken | None":
+    async def get_live(self, gfs_token: str) -> GfsInviteToken | None:
         """The unexpired invite row for *gfs_token*, or ``None``.
 
         A pure read: the public page calls this and NOTHING else, so a fetch

@@ -17,7 +17,7 @@ and SQLite:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -38,7 +38,7 @@ ORIGIN_KEY = generate_identity_keypair()
 ORIGIN = "peer-origin"
 RELAY = "peer-relay"
 ONWARD = "peer-onward"
-EXPIRES = (datetime.now(timezone.utc) + timedelta(days=5)).isoformat()
+EXPIRES = (datetime.now(UTC) + timedelta(days=5)).isoformat()
 
 
 def _config(tmp_dir) -> Config:
@@ -113,7 +113,7 @@ async def _deliver(app, payload, *, from_instance) -> None:
                 event_type=FET.MOMENT_CREATED,
                 from_instance=from_instance,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )
@@ -130,7 +130,7 @@ def _no_relay_moment(moment_id: str, *, hop_count: int) -> dict:
         "duration_ms": None,
         "parent_moment_id": None,
         "expires_at": EXPIRES,
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
         NO_RELAY_FIELD: True,
         "hop_count": 1,
     }

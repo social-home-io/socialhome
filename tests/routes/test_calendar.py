@@ -1,7 +1,7 @@
 """Tests for socialhome.routes.calendar."""
 
 import uuid as _uuid
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -32,7 +32,7 @@ async def test_create_event(client):
         "/api/calendars", json={"name": "C"}, headers=_auth(client._tok)
     )
     cid = (await r.json())["id"]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r2 = await client.post(
         f"/api/calendars/{cid}/events",
         json={
@@ -54,7 +54,7 @@ async def test_event_cover_round_trips_create_edit_clear(client):
         "/api/calendars", json={"name": "C"}, headers=_auth(client._tok)
     )
     cid = (await r.json())["id"]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # 1. Create with a cover.
     r = await client.post(
@@ -109,7 +109,7 @@ async def test_event_patch_attaches_client_event_uuid(client):
         "/api/calendars", json={"name": "C"}, headers=_auth(client._tok)
     )
     cid = (await r.json())["id"]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         f"/api/calendars/{cid}/events",
         json={
@@ -152,7 +152,7 @@ def _future_seed(*, days: int = 1) -> datetime:
     round-trips through storage and ``expand_rrule`` byte-for-byte —
     the tests compare ``occurrence_at`` strings.
     """
-    return (datetime.now(timezone.utc) + timedelta(days=days)).replace(
+    return (datetime.now(UTC) + timedelta(days=days)).replace(
         second=0,
         microsecond=0,
     )
@@ -182,7 +182,7 @@ async def _seed_space(client):
 
 async def test_space_create_and_list_events(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -219,7 +219,7 @@ async def test_space_create_event_requires_start_end(client):
 
 async def test_rsvp_roundtrip_and_broadcast(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -251,7 +251,7 @@ async def test_rsvp_roundtrip_and_broadcast(client):
 
 async def test_rsvp_invalid_status_422(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -272,7 +272,7 @@ async def test_rsvp_invalid_status_422(client):
 
 async def test_space_delete_event(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -313,7 +313,7 @@ async def _seed_outsider(client):
 async def test_space_create_event_non_member_403(client):
     await _seed_space(client)
     outsider = await _seed_outsider(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -328,7 +328,7 @@ async def test_space_create_event_non_member_403(client):
 
 async def test_rsvp_non_member_404(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -351,7 +351,7 @@ async def test_rsvp_non_member_404(client):
 
 async def test_space_event_patch_updates_fields(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -376,7 +376,7 @@ async def test_space_event_patch_updates_fields(client):
 
 async def test_space_event_patch_non_member_403(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -412,7 +412,7 @@ async def test_space_event_patch_missing_404(client):
 async def test_rsvp_delete_clears_response(client):
     """DELETE /api/calendars/events/{id}/rsvp removes the row."""
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -451,7 +451,7 @@ async def test_rsvp_delete_clears_response(client):
 
 async def test_rsvp_delete_non_member_404(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -572,7 +572,7 @@ async def _seed_outsider_member(client, *, role="member"):
 
 async def test_capacity_creates_event_with_capacity_field(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -591,7 +591,7 @@ async def test_capacity_creates_event_with_capacity_field(client):
 async def test_capped_event_member_rsvp_lands_in_pending_queue(client):
     await _seed_space(client)
     bob = await _seed_outsider_member(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -625,7 +625,7 @@ async def test_capped_event_member_rsvp_lands_in_pending_queue(client):
 async def test_approve_promotes_to_going(client):
     await _seed_space(client)
     bob = await _seed_outsider_member(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -661,7 +661,7 @@ async def test_approve_promotes_to_going(client):
 async def test_deny_clears_request(client):
     await _seed_space(client)
     bob = await _seed_outsider_member(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -717,7 +717,7 @@ async def test_rsvp_approval_of_others_events_is_content_authority(
     await _seed_space(client)
     bob = await _seed_outsider_member(client)
     cara = await _seed_third_member(client, role=role)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -749,7 +749,7 @@ async def test_rsvp_approval_of_others_events_is_content_authority(
 
 async def test_event_ics_endpoint_returns_vcalendar(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -774,7 +774,7 @@ async def test_event_ics_endpoint_returns_vcalendar(client):
 
 async def test_event_ics_non_member_404(client):
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -813,7 +813,7 @@ async def test_feed_token_lifecycle(client):
     assert body["url"] == f"/api/spaces/sp-cal/calendar/export.ics?token={token}"
     assert body["external_url"] == f"https://test.example{body['url']}"
     # Create an event so the feed has content.
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -901,7 +901,7 @@ async def test_approve_non_creator_non_admin_403(client):
         "VALUES('sp-cal', 'uid-carol', 'member')",
     )
     carol_auth = {"Authorization": "Bearer carol-tok"}
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -938,9 +938,9 @@ async def _space(client) -> str:
 
 
 async def _now_iso(days_ahead: int = 1) -> str:
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    return (datetime.now(timezone.utc) + timedelta(days=days_ahead)).isoformat()
+    return (datetime.now(UTC) + timedelta(days=days_ahead)).isoformat()
 
 
 async def test_space_event_not_in_feed_by_default(client):
@@ -1008,7 +1008,7 @@ async def test_event_copies_are_visibility_independent(client):
     cal_a = await _seed_member_calendar(client, username="anna", cal_id="cal-a")
     cal_b = await _seed_member_calendar(client, username="lina", cal_id="cal-b")
     cal_c = await _seed_member_calendar(client, username="max", cal_id="cal-c")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = _uuid.uuid4().hex
     for cid in (cal_a, cal_b, cal_c):
         r = await client.post(
@@ -1070,7 +1070,7 @@ async def test_recurring_event_copies_carry_stored_ids(client):
     those, and an ``@``-suffixed id 404s."""
     cal_a = await _seed_member_calendar(client, username="rita", cal_id="cal-r1")
     cal_b = await _seed_member_calendar(client, username="rudi", cal_id="cal-r2")
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now = datetime.now(UTC).replace(microsecond=0)
     grp = _uuid.uuid4().hex
     stored_ids = set()
     for cid in (cal_a, cal_b):
@@ -1109,7 +1109,7 @@ async def test_remote_invite_mirror_never_appears_in_copies(client):
     """A ``remote_invite`` row carrying the peer's ``client_event_uuid``
     is not ours to edit — it must stay out of ``copies``."""
     cal_a = await _seed_member_calendar(client, username="nina", cal_id="cal-n1")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = _uuid.uuid4().hex
     r = await client.post(
         f"/api/calendars/{cal_a}/events",
@@ -1174,7 +1174,7 @@ async def test_remote_invite_mirror_reports_no_copies(client):
     touching. Only ``origin='local'`` rows get a copies lookup.
     """
     cal_a = await _seed_member_calendar(client, username="orin", cal_id="cal-o1")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = _uuid.uuid4().hex
     r = await client.post(
         f"/api/calendars/{cal_a}/events",
@@ -1221,7 +1221,7 @@ async def test_remote_invite_mirror_reports_no_copies(client):
 async def test_event_without_client_event_uuid_has_empty_copies(client):
     """Legacy / ICS-imported rows carry no group uuid → ``copies: []``."""
     cal = await _seed_member_calendar(client, username="olga", cal_id="cal-o1")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         f"/api/calendars/{cal}/events",
         json={
@@ -1244,7 +1244,7 @@ async def test_space_event_payload_has_empty_copies(client):
     """Space events live in ``space_calendar_events`` and have no
     household fan-out — ``copies`` is always empty for them."""
     await _seed_space(client)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -1269,7 +1269,7 @@ async def test_post_twice_with_same_client_event_uuid_yields_one_row(client):
     calendar with the same ``client_event_uuid`` updates the existing row
     (still ``201``) instead of minting a duplicate."""
     cal = await _seed_member_calendar(client, username="petra", cal_id="cal-p1")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = _uuid.uuid4().hex
     payload = {
         "summary": "Book club",
@@ -1306,7 +1306,7 @@ async def test_patch_with_uuid_taken_on_same_calendar_is_422(client):
     calendar already holds violates ``ux_calendar_events_fanout`` — the
     endpoint answers 422, never a 500 with a stack trace."""
     cal = await _seed_member_calendar(client, username="quinn", cal_id="cal-q1")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     grp = _uuid.uuid4().hex
     r = await client.post(
         f"/api/calendars/{cal}/events",
@@ -1360,7 +1360,7 @@ async def test_legacy_external_event_cover_is_served_null_and_stays_editable(cli
             await client.post("/api/calendars", json={"name": "C"}, headers=h)
         ).json()
     )["id"]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         f"/api/calendars/{cid}/events",
         json={
@@ -1407,7 +1407,7 @@ async def test_space_event_cover_must_be_local_and_legacy_is_served_null(client)
     edit); a legacy stored one is served as ``null`` and doesn't block edits."""
     await _seed_space(client)
     h = _auth(client._tok)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     base = {
         "summary": "Stand-up",
         "start": now.isoformat(),

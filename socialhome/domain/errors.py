@@ -33,6 +33,7 @@ __all__ = [
     "PayloadTooLargeError",
     "SpaceNotPublishableError",
     "TierChangeRequiredError",
+    "WrongTypeError",
 ]
 
 ParamValue = str | int | float | bool
@@ -187,3 +188,13 @@ class GfsSelectionInvalidError(CodedError, ValueError):
         if max_servers is not None:
             params["max"] = max_servers
         super().__init__(params=params)
+
+
+class WrongTypeError(TypeError, ValueError):
+    """Malformed input: a field arrived with the wrong type.
+
+    A ``TypeError`` by meaning, and still a ``ValueError`` so every caller
+    that already catches malformed input as ``ValueError`` — and
+    ``BaseView._iter``'s ``ValueError`` clause — answers it exactly as
+    before (same status, same message).
+    """

@@ -15,17 +15,16 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.sync_manager import (
     ALLOWED_RESOURCES,
-    SYNC_REJECT_NOT_SEATED,
     MAX_ACTIVE_SESSIONS_PER_INSTANCE,
+    MAX_INSTANCE_SYNC_STATUS_SPACES,
     MAX_PENDING_REQUESTS,
     PENDING_REQUEST_TTL_SECONDS,
-    PendingSyncRequest,
-    MAX_INSTANCE_SYNC_STATUS_SPACES,
     SYNC_BEGIN_RATE_LIMIT_PER_HOUR,
+    SYNC_REJECT_NOT_SEATED,
+    PendingSyncRequest,
     SyncSessionManager,
     new_sync_id,
 )
-
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
 
@@ -387,7 +386,6 @@ async def test_begin_session_never_seated_household_gets_no_terminal_reject():
 
     async def reject_reason(space_id, requester_instance_id):
         asked.append((space_id, requester_instance_id))
-        return None
 
     mgr = SyncSessionManager(
         _FakeFedRepo(), check_member=check_member, reject_reason=reject_reason

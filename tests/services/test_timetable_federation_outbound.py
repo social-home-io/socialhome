@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 from typing import Any
 
 import orjson
@@ -34,7 +34,7 @@ from socialhome.services.timetable_federation_outbound import (
 )
 
 FET = FederationEventType
-_NOW = datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 9, 1, 8, 0, tzinfo=UTC)
 
 
 class _FakeFederation:

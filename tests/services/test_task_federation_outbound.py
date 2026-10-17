@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -47,7 +47,7 @@ class _FakeFed:
 
 
 def _task(tid: str) -> Task:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return Task(
         id=tid,
         list_id="L",
@@ -115,7 +115,7 @@ async def test_payload_carries_priority_labels_and_due_date(env):
         priority=TaskPriority.HIGH,
         labels=("Garden",),
         due_date=date(2026, 10, 3),
-        archived_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        archived_at=datetime(2026, 9, 1, tzinfo=UTC),
     )
     await bus.publish(TaskUpdated(task=t, space_id="sp-A"))
     payload = fed.broadcasts[0][2]

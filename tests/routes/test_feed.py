@@ -586,7 +586,7 @@ async def test_feed_video_post_has_signed_poster(client):
     """A video post carries a signed ``media_thumbnail_url`` — the
     ``.webp`` sibling of ``media_url`` (shared stem), signed so the SPA
     can drop it into ``<video poster>`` without a bearer token."""
-    post_id, fn = await _create_video_post(client)
+    post_id, _fn = await _create_video_post(client)
     post = next(p for p in await _feed(client) if p["id"] == post_id)
     poster = post["media_thumbnail_url"]
     base = poster.split("?", 1)[0]

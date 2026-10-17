@@ -8,7 +8,7 @@ live ``SPACE_TASK_*`` events carry.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .....domain.task import task_to_wire_dict
 
@@ -21,7 +21,7 @@ class TasksExporter:
 
     __slots__ = ("_repo",)
 
-    def __init__(self, space_task_repo: "AbstractSpaceTaskRepo") -> None:
+    def __init__(self, space_task_repo: AbstractSpaceTaskRepo) -> None:
         self._repo = space_task_repo
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:

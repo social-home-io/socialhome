@@ -115,28 +115,38 @@ async def _seed_owned_rows(db) -> None:
     for o in _OWNERS:
         for sql, params in (
             (
-                "INSERT INTO space_posts(id, space_id, author, type, content)"
-                " VALUES(?, ?, ?, 'text', 'body')",
+                (
+                    "INSERT INTO space_posts(id, space_id, author, type, content)"
+                    " VALUES(?, ?, ?, 'text', 'body')"
+                ),
                 (_row("post", o), SP, o),
             ),
             (
-                "INSERT INTO space_pages(id, space_id, title, content, created_by)"
-                " VALUES(?, ?, 'A page', 'body', ?)",
+                (
+                    "INSERT INTO space_pages(id, space_id, title, content, created_by)"
+                    " VALUES(?, ?, 'A page', 'body', ?)"
+                ),
                 (_row("page", o), SP, o),
             ),
             (
-                "INSERT INTO space_tasks(id, list_id, space_id, title, created_by)"
-                " VALUES(?, 'list-a', ?, 'A task', ?)",
+                (
+                    "INSERT INTO space_tasks(id, list_id, space_id, title, created_by)"
+                    " VALUES(?, 'list-a', ?, 'A task', ?)"
+                ),
                 (_row("task", o), SP, o),
             ),
             (
-                "INSERT INTO stickies(id, space_id, author, content)"
-                " VALUES(?, ?, ?, 'A sticky')",
+                (
+                    "INSERT INTO stickies(id, space_id, author, content)"
+                    " VALUES(?, ?, ?, 'A sticky')"
+                ),
                 (_row("sticky", o), SP, o),
             ),
             (
-                "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
-                " end_dt, created_by) VALUES(?, ?, 'A event', ?, ?, ?)",
+                (
+                    "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
+                    " end_dt, created_by) VALUES(?, ?, 'A event', ?, ?, ?)"
+                ),
                 (_row("ev", o), SP, _CAL["start"], _CAL["end"], o),
             ),
         ):

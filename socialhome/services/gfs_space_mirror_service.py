@@ -73,21 +73,28 @@ import logging
 import re
 import secrets
 import time
-from datetime import datetime, timedelta, timezone
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import aiohttp
 
+from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
 from ..domain.events import (
     RemoteSpaceMemberBanned,
     RemoteSpaceMemberRemoved,
     SpaceConfigChanged,
     SpaceMemberLeft,
 )
-from ..domain.gfs_space_seat import GfsSpaceSeat
 from ..domain.federation import GfsConnection
-from ..domain.space import Space, normalize_join_mode
+from ..domain.gfs_space_seat import GfsSpaceSeat
+from ..domain.space import (
+    PUBLIC_SPACE_TIERS,
+    Space,
+    SpaceConfigEventType,
+    SpaceRole,
+    normalize_join_mode,
+)
 from ..infrastructure.event_bus import EventBus
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.gfs_space_seat_repo import AbstractGfsSpaceSeatRepo
@@ -96,8 +103,6 @@ from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
 from .gfs_directory import GfsDirectoryCache
 from .gfs_http import MAX_GFS_BODY_BYTES, gfs_server_address, read_json_capped
-from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
-from ..domain.space import PUBLIC_SPACE_TIERS, SpaceConfigEventType, SpaceRole
 from .space_service import can_seat_remote_stub, stub_space_from_metadata
 
 log = logging.getLogger(__name__)
@@ -156,7 +161,7 @@ ORPHAN_SEAT_DAYS = 90
 #: The sweep only trusts the wall clock past this instant (a device that
 #: booted without a real-time clock reads 1970) — before it nothing is
 #: stamped or aged.
-CLOCK_SANE_AFTER = datetime(2026, 1, 1, tzinfo=timezone.utc)
+CLOCK_SANE_AFTER = datetime(2026, 1, 1, tzinfo=UTC)
 
 #: A row past its age is dropped only by a sweep at least this long after
 #: the one that first saw it expired — one clock jump never drops anything.
@@ -217,23 +222,23 @@ class GfsSpaceMirrorService:
     """Seats + tears down local stub rows for GFS-discovered spaces."""
 
     __slots__ = (
-        "_spaces",
-        "_gfs_conn_repo",
-        "_public_spaces",
-        "_gfs",
-        "_http_client",
-        "_own_instance_id",
-        "_last_pin_refresh",
         "_directories",
-        "_seats",
-        "_seated_at",
-        "_unwanted_at",
-        "_tasks",
-        "_stopping",
-        "_rechecks",
-        "_wanted_at",
+        "_gfs",
+        "_gfs_conn_repo",
+        "_http_client",
+        "_last_pin_refresh",
+        "_own_instance_id",
+        "_public_spaces",
         "_purging",
+        "_rechecks",
+        "_seated_at",
+        "_seats",
+        "_spaces",
+        "_stopping",
+        "_tasks",
         "_teardown",
+        "_unwanted_at",
+        "_wanted_at",
     )
 
     def __init__(
@@ -360,7 +365,7 @@ class GfsSpaceMirrorService:
                         url=url,
                         limit=MAX_GFS_BODY_BYTES,
                     )
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            except (TimeoutError, aiohttp.ClientError, OSError) as exc:
                 log.warning("gfs_space_mirror: fetch failed for %s: %s", url, exc)
                 continue
             if body is None:
@@ -451,7 +456,7 @@ class GfsSpaceMirrorService:
                 if resp.status != 200:
                     return None
                 body = await read_json_capped(resp, url=url, limit=MAX_GFS_BODY_BYTES)
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        except (TimeoutError, aiohttp.ClientError, OSError) as exc:
             log.warning("gfs_space_mirror: fetch failed for %s: %s", url, exc)
             return None
         return body if isinstance(body, dict) else None
@@ -822,9 +827,11 @@ class GfsSpaceMirrorService:
             self._spawn(self.release_unused_seats(event.space_id), "release")
 
     async def _on_config_changed(self, event: SpaceConfigChanged) -> None:
-        if event.event_type == SpaceConfigEventType.MEMBER_BANNED.value:
-            if await self._seats.list_for_space(event.space_id):
-                self._spawn(self.release_unused_seats(event.space_id), "release")
+        if (
+            event.event_type == SpaceConfigEventType.MEMBER_BANNED.value
+            and await self._seats.list_for_space(event.space_id)
+        ):
+            self._spawn(self.release_unused_seats(event.space_id), "release")
 
     def _spawn(
         self, coro: Coroutine[Any, Any, object], name: str, *, quiet: bool = False
@@ -1498,21 +1505,19 @@ def _seat_on(space_id: str, conn: GfsConnection) -> GfsSpaceSeat:
 
 def _utcnow() -> datetime:
     """The sweep's wall clock (a seam for tests)."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _stamp(at: datetime) -> str:
     """UTC in SQLite's ``datetime('now')`` form."""
-    return at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _parse_stamp(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=timezone.utc
-        )
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
     except ValueError:
         return None
 

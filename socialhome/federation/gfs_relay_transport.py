@@ -314,6 +314,7 @@ class GfsRelayTransport:
                 "gfs relay: could not seal an envelope for %s: %s",
                 instance.id,
                 exc,
+                exc_info=True,
             )
             return False, None
 
@@ -362,6 +363,7 @@ class GfsRelayTransport:
                 "gfs relay: no connection server could carry an envelope for %s: %s",
                 instance.id,
                 exc,
+                exc_info=True,
             )
             return False, None
         return bool(ok), None

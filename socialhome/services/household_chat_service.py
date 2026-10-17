@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..domain.conversation import (
     Conversation,
@@ -64,7 +64,7 @@ GLANCE_MESSAGE_TYPES: frozenset[str] = frozenset(
 class HouseholdChatService:
     """Create the household chat and keep its seats in step with the users."""
 
-    __slots__ = ("_convos", "_users", "_access", "_bus")
+    __slots__ = ("_access", "_bus", "_convos", "_users")
 
     def __init__(
         self,
@@ -226,8 +226,7 @@ class HouseholdChatService:
         )
         muted_until = (
             seat.muted_until
-            if seat is not None
-            and mute_active(seat.muted_until, now=datetime.now(timezone.utc))
+            if seat is not None and mute_active(seat.muted_until, now=datetime.now(UTC))
             else None
         )
         return SystemChatSummary(

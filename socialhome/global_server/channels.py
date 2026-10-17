@@ -163,13 +163,13 @@ class GfsChannelService:
     """Register, pin, step and relay opaque channels (see module docstring)."""
 
     __slots__ = (
+        "_addressee",
         "_anon_ip_limiter",
         "_anon_seen",
-        "_channels",
         "_channel_limiter",
+        "_channels",
         "_clock",
         "_federation",
-        "_addressee",
         "_limiter",
         "_max_channels",
         "_member_publish",
@@ -181,9 +181,9 @@ class GfsChannelService:
     def __init__(
         self,
         *,
-        federation: "GfsFederationService",
-        channel_repo: "AbstractGfsChannelRepo",
-        member_publish: "GfsMemberPublishService",
+        federation: GfsFederationService,
+        channel_repo: AbstractGfsChannelRepo,
+        member_publish: GfsMemberPublishService,
         gfs_instance_id: str,
         addressee: GfsAddressee | None = None,
         clock: Callable[[], float] = time.time,

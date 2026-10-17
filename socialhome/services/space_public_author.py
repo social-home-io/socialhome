@@ -167,7 +167,7 @@ def author_signing_bytes(inner: dict) -> bytes:
 
 def build_signed_author_inner(
     *,
-    post: "Post",
+    post: Post,
     space_id: str,
     author_username: str,
     author_pk: bytes,

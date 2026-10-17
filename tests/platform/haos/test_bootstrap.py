@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+import aiofiles
 import pytest
 
 from socialhome.crypto import (
@@ -24,7 +25,6 @@ from socialhome.platform.haos.supervisor import AddonInfo
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.user_service import UserService
-
 
 # ─── Fakes ───────────────────────────────────────────────────────────────
 
@@ -300,8 +300,8 @@ async def test_generate_integration_token_writes_file(env):
 
     token_path = os.path.join(env.data_dir, INTEGRATION_TOKEN_FILENAME)
     assert os.path.exists(token_path)
-    with open(token_path) as f:
-        raw = f.read().strip()
+    async with aiofiles.open(token_path) as f:
+        raw = (await f.read()).strip()
     assert len(raw) > 20
 
     mode = os.stat(token_path).st_mode & 0o777
@@ -358,8 +358,8 @@ async def test_run_provisions_admin_and_pushes_discovery(env):
     assert set(payload["config"].keys()) == {"host", "port", "token"}
     assert payload["config"]["host"] == "local-social-home"
     assert payload["config"]["port"] == 8099
-    with open(token_file) as f:
-        assert payload["config"]["token"] == f.read().strip()
+    async with aiofiles.open(token_file) as f:
+        assert payload["config"]["token"] == (await f.read()).strip()
 
 
 async def test_run_is_idempotent(env):

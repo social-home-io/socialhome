@@ -38,7 +38,7 @@ import copy
 import itertools
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -64,20 +64,20 @@ from socialhome.federation.inbound_validator import (
 )
 from socialhome.federation.owner_bound_id import (
     SPACE_POST_KIND,
+    SPACE_STICKY_KIND,
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
-    SPACE_STICKY_KIND,
     mint_owner_bound_id,
-)
-from socialhome.services.space_moderation_service import (
-    MAX_TOMBSTONES_PER_HOUSEHOLD,
-    MAX_PAYLOAD_BYTES,
-    MAX_PENDING_PER_SPACE,
-    MAX_PENDING_PER_SUBMITTER,
 )
 from socialhome.services.space_moderation_federation import (
     MAX_EXPIRY,
     MAX_PENDING_PER_HOUSEHOLD,
+)
+from socialhome.services.space_moderation_service import (
+    MAX_PAYLOAD_BYTES,
+    MAX_PENDING_PER_SPACE,
+    MAX_PENDING_PER_SUBMITTER,
+    MAX_TOMBSTONES_PER_HOUSEHOLD,
 )
 
 pytestmark = pytest.mark.security
@@ -184,7 +184,7 @@ async def mesh(aiohttp_client, tmp_dir, monkeypatch):
     list_id = mint_owner_bound_id(
         SPACE_TASK_LIST_KIND, space_id=SID, owner_user_id=host.user_id
     )
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     for house in houses.values():
         db = house.db
         await db.enqueue(
@@ -248,7 +248,7 @@ def _event(sender: House, event_type, payload: dict, to: House) -> FederationEve
         event_type=event_type,
         from_instance=sender.iid,
         to_instance=to.iid,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=copy.deepcopy(payload),
         space_id=SID,
     )
@@ -403,7 +403,7 @@ async def test_every_feature_round_trips_and_the_author_household_accepts_it(
     """The approval block's content check holds on the REAL wire payloads:
     anna's own household (which holds the item) accepts C's release of it."""
     a, c, d = mesh["A"], mesh["C"], mesh["D"]
-    start = datetime.now(timezone.utc) + timedelta(days=2)
+    start = datetime.now(UTC) + timedelta(days=2)
     path, body, table, column = {
         "posts": (
             f"/api/spaces/{SID}/posts",
@@ -458,7 +458,7 @@ async def test_a_reviewed_event_with_a_capacity_is_released_everywhere(mesh):
     for house in (a, h, c):
         VERSIONS[house.iid] = 56
     VERSIONS[d.iid] = 55
-    start = datetime.now(timezone.utc) + timedelta(days=2)
+    start = datetime.now(UTC) + timedelta(days=2)
     r = await a.tc.post(
         f"/api/spaces/{SID}/calendar/events",
         json={
@@ -525,7 +525,7 @@ def _submission(mesh, *, by: str | None = None, target: str | None = None) -> di
     target = target or mint_owner_bound_id(
         SPACE_STICKY_KIND, space_id=SID, owner_user_id=by
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {
         "space_id": SID,
         "item_id": f"item-{next(_IDS)}",
@@ -585,7 +585,7 @@ async def test_a_replayed_submission_and_decision_change_nothing(mesh):
         "item_id": sub["item_id"],
         "decision": "rejected",
         "decided_by": c.user_id,
-        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "decided_at": datetime.now(UTC).isoformat(),
         "reason": "dup",
     }
     for _ in range(2):
@@ -627,7 +627,7 @@ async def test_an_archived_space_takes_no_submission_but_still_takes_decisions(m
         "item_id": sub["item_id"],
         "decision": "rejected",
         "decided_by": c.user_id,
-        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "decided_at": datetime.now(UTC).isoformat(),
     }
     assert await _receive(h, _event(c, FET.SPACE_MODERATION_DECIDED, decision, h))
     rows = await _queue_rows(h)
@@ -643,7 +643,7 @@ async def test_a_decision_from_a_household_without_content_authority_is_refused(
         "item_id": sub["item_id"],
         "decision": "rejected",
         "decided_by": d.user_id,
-        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "decided_at": datetime.now(UTC).isoformat(),
     }
     await _receive(h, _event(d, FET.SPACE_MODERATION_DECIDED, decision, h))
     # And a moderator household naming somebody else as the decider.
@@ -832,7 +832,7 @@ async def test_an_approved_announce_card_reaches_every_household(mesh):
         await house.db.enqueue(
             "UPDATE spaces SET calendar_access='open' WHERE id=?", (SID,)
         )
-    start = datetime.now(timezone.utc) + timedelta(days=3)
+    start = datetime.now(UTC) + timedelta(days=3)
     r = await a.tc.post(
         f"/api/spaces/{SID}/calendar/events",
         json={
@@ -1078,7 +1078,7 @@ async def test_a_decision_before_its_submission_leaves_a_tombstone(mesh):
         "item_id": sub["item_id"],
         "decision": "rejected",
         "decided_by": c.user_id,
-        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "decided_at": datetime.now(UTC).isoformat(),
     }
     await _receive(h, _event(c, FET.SPACE_MODERATION_DECIDED, decision, h))
     await _receive(h, _event(a, FET.SPACE_MODERATION_SUBMITTED, sub, h))
@@ -1191,7 +1191,7 @@ async def test_an_oversized_or_expired_submission_is_refused(mesh):
     big["payload"]["content"] = "x" * (MAX_PAYLOAD_BYTES + 1)
     await _receive(h, _event(a, FET.SPACE_MODERATION_SUBMITTED, big, h))
     late = _submission(mesh)
-    late["expires_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    late["expires_at"] = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     await _receive(h, _event(a, FET.SPACE_MODERATION_SUBMITTED, late, h))
     assert await _queue_rows(h) == []
 
@@ -1199,13 +1199,13 @@ async def test_an_oversized_or_expired_submission_is_refused(mesh):
 async def test_a_far_expiry_and_a_future_submit_time_are_clamped(mesh):
     a, h = mesh["A"], mesh["H"]
     sub = _submission(mesh)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sub["expires_at"] = (now + timedelta(days=90)).isoformat()
     sub["submitted_at"] = (now + timedelta(days=30)).isoformat()
     await _receive(h, _event(a, FET.SPACE_MODERATION_SUBMITTED, sub, h))
     item = await h.app[space_moderation_service_key].get_item(SID, sub["item_id"])
-    assert item.expires_at <= datetime.now(timezone.utc) + MAX_EXPIRY
-    assert item.submitted_at <= datetime.now(timezone.utc) + timedelta(minutes=5)
+    assert item.expires_at <= datetime.now(UTC) + MAX_EXPIRY
+    assert item.submitted_at <= datetime.now(UTC) + timedelta(minutes=5)
     assert item.submitted_at >= item.expires_at - MAX_EXPIRY
 
 
@@ -1276,7 +1276,7 @@ def _decision(item_id: str, by: str, decision: str = "approved") -> dict:
         "item_id": item_id,
         "decision": decision,
         "decided_by": by,
-        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "decided_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -1354,7 +1354,7 @@ async def test_stale_tombstones_are_purged(mesh):
         ),
     )
     moderation = h.app[space_moderation_service_key]
-    await moderation.purge_decided(datetime.now(timezone.utc) + timedelta(days=15))
+    await moderation.purge_decided(datetime.now(UTC) + timedelta(days=15))
     assert await h.db.fetchall("SELECT id FROM space_moderation_queue", ()) == []
 
 
@@ -1421,7 +1421,7 @@ async def test_a_signed_copy_rides_next_to_the_payload_and_only_verified(mesh):
         (SID,),
     )
     target = mint_owner_bound_id(SPACE_POST_KIND, space_id=SID, owner_user_id=a.user_id)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     smuggled = {"post_id": target, "author_sig": "AAAA"}
     submission = {
         "space_id": SID,

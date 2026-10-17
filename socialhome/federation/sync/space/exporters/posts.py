@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import asdict
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..exporter import PagedExporterMixin
 from ..window import SYNC_PAGE_SIZE, SyncWindow, SyncWindows, iter_pages
@@ -20,19 +20,19 @@ if TYPE_CHECKING:
 
 
 def iter_post_pages(
-    repo: "AbstractSpacePostRepo",
+    repo: AbstractSpacePostRepo,
     space_id: str,
     window: SyncWindow,
     *,
     since: int | None = None,
-) -> AsyncIterator[list["Post"]]:
+) -> AsyncIterator[list[Post]]:
     """The space's live posts in ``window``, page by page. Shared by every
     exporter that walks posts (posts, polls, schedules) and the catch-up
     media. ``since``: only the posts changed after that stamp (an
     incremental session) — a reaction, a vote, a poll / schedule / listing
     change touches the post (migration 0086)."""
 
-    async def fetch(cursor: int | None) -> tuple[list["Post"], int | None]:
+    async def fetch(cursor: int | None) -> tuple[list[Post], int | None]:
         return await repo.list_sync_page(
             space_id,
             cutoff=window.cutoff,
@@ -53,7 +53,7 @@ class PostsExporter(PagedExporterMixin):
     __slots__ = ("_repo", "_windows")
 
     def __init__(
-        self, space_post_repo: "AbstractSpacePostRepo", windows: SyncWindows
+        self, space_post_repo: AbstractSpacePostRepo, windows: SyncWindows
     ) -> None:
         self._repo = space_post_repo
         self._windows = windows

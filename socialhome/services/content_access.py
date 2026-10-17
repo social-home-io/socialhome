@@ -36,7 +36,6 @@ from ..domain.space import (
     SpaceFeatureAccess,
     SpacePermissionError,
 )
-
 from .moderation_release import release_role
 
 if TYPE_CHECKING:
@@ -49,9 +48,13 @@ class ContentAccessMixin:
 
     __slots__ = ()
 
-    def _access_space_repo(self) -> "AbstractSpaceRepo":
+    # Borrowed slots: each consumer declares and assigns them.
+    _spaces: AbstractSpaceRepo
+    _moderation: ModerationSubmitter | None
+
+    def _access_space_repo(self) -> AbstractSpaceRepo:
         """The space repo the gate reads. The consumer declares the slot."""
-        repo: "AbstractSpaceRepo" = getattr(self, "_spaces")
+        repo: AbstractSpaceRepo = self._spaces
         return repo
 
     async def _gate(
@@ -98,15 +101,17 @@ class ContentAccessMixin:
             raise SpacePermissionError(f"not allowed to change {feature} here")
         return decision
 
-    def _moderation_submitter(self) -> "ModerationSubmitter | None":
+    def _moderation_submitter(self) -> ModerationSubmitter | None:
         """The moderation queue this service submits to (``_moderation``,
         set by ``attach_moderation``). The consumer declares the slot."""
-        submitter: "ModerationSubmitter | None" = getattr(self, "_moderation", None)
+        submitter: ModerationSubmitter | None = getattr(self, "_moderation", None)
         return submitter
 
-    def attach_moderation(self, submitter: "ModerationSubmitter") -> None:
+    def attach_moderation(self, submitter: ModerationSubmitter) -> None:
         """Wire the space moderation queue (``app._build_services``)."""
-        setattr(self, "_moderation", submitter)
+        # A ``__slots__ = ()`` mixin can't assign a borrowed slot directly
+        # (mypy: "not in __slots__"); the consumer declares ``_moderation``.
+        setattr(self, "_moderation", submitter)  # noqa: B010
 
     async def _submit_for_review(
         self,

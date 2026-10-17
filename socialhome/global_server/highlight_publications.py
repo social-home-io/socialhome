@@ -46,7 +46,7 @@ class ResolvedToken:
 class HighlightPublicationRegistry:
     """Records publish rows + mints / revokes share tokens."""
 
-    __slots__ = ("_pubs", "_tokens", "_ws", "_base_url")
+    __slots__ = ("_base_url", "_pubs", "_tokens", "_ws")
 
     def __init__(
         self,

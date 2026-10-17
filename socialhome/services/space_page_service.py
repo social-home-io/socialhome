@@ -36,7 +36,7 @@ import builtins
 import contextlib
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
@@ -48,15 +48,15 @@ from ..domain.space import (
     ModerationStaleError,
     ModerationTargetGoneError,
     Space,
-    SpaceModerationItem,
     SpaceArchivedError,
+    SpaceModerationItem,
     SpacePermissionError,
 )
 from ..media_signer import strip_signature_query, strip_signed_media_in_markdown
 from ..repositories.page_repo import mint_page_id, new_page
-from .inbound_media_store import optional_local_media_ref
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
+from .inbound_media_store import optional_local_media_ref
 from .page_conflict_service import (
     RESOLUTIONS,
     NoActiveConflictError,
@@ -67,11 +67,11 @@ from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
 
 if TYPE_CHECKING:
-    from .space_moderation_service import ModerationSubmitter
     from ..infrastructure.event_bus import EventBus
     from ..repositories.page_repo import AbstractPageRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .page_conflict_service import PageConflictService
+    from .space_moderation_service import ModerationSubmitter
 
 
 class _Unset:
@@ -92,7 +92,7 @@ class PageStaleError(Exception):
 
 
 async def snapshot_page_version(
-    pages: "AbstractPageRepo", *, previous: Page, editor_user_id: str
+    pages: AbstractPageRepo, *, previous: Page, editor_user_id: str
 ) -> None:
     """Persist ``previous`` as a row in ``page_edit_history``.
 
@@ -108,7 +108,7 @@ async def snapshot_page_version(
             title=previous.title,
             content=previous.content,
             edited_by=editor_user_id,
-            edited_at=datetime.now(timezone.utc).isoformat(),
+            edited_at=datetime.now(UTC).isoformat(),
             space_id=previous.space_id,
             cover_image_url=previous.cover_image_url,
         )
@@ -129,21 +129,21 @@ def _title(value: object) -> str:
 class SpacePageService(BusPublisherMixin, ContentAccessMixin):
     """Scoped page operations for one space's wiki."""
 
-    __slots__ = ("_pages", "_spaces", "_bus", "_conflicts", "_moderation")
+    __slots__ = ("_bus", "_conflicts", "_moderation", "_pages", "_spaces")
 
     def __init__(
         self,
-        page_repo: "AbstractPageRepo",
+        page_repo: AbstractPageRepo,
         *,
-        space_repo: "AbstractSpaceRepo",
-        bus: "EventBus | None" = None,
-        conflict_service: "PageConflictService | None" = None,
+        space_repo: AbstractSpaceRepo,
+        bus: EventBus | None = None,
+        conflict_service: PageConflictService | None = None,
     ) -> None:
         self._pages = page_repo
         self._spaces = space_repo
         self._bus = bus
         self._conflicts = conflict_service
-        self._moderation: "ModerationSubmitter | None" = None
+        self._moderation: ModerationSubmitter | None = None
 
     # ── Writer gate ──────────────────────────────────────────────────────
 
@@ -358,7 +358,7 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
                 resolves=resolves or (),
                 precheck=_check,
             )
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         base: dict | None = None
         async with self._page_lock(space_id, page_id):
             page = await self.get(space_id, page_id)
@@ -637,11 +637,9 @@ class PageModerationHandler:
             if not isinstance(raw, dict) or not raw:
                 raise ValueError("an edit needs at least one field")
             out["patch"] = _page_patch(
-                title=raw["title"] if "title" in raw else UNSET,
-                content=raw["content"] if "content" in raw else UNSET,
-                cover_image_url=(
-                    raw["cover_image_url"] if "cover_image_url" in raw else UNSET
-                ),
+                title=raw.get("title", UNSET),
+                content=raw.get("content", UNSET),
+                cover_image_url=(raw.get("cover_image_url", UNSET)),
             )
             out["base_updated_at"] = payload.get("base_updated_at")
             out["base_seq"] = _seq(payload.get("base_seq"))

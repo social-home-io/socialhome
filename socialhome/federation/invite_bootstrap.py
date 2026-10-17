@@ -97,7 +97,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import orjson
@@ -110,6 +110,7 @@ from ..crypto import (
     verify_ed25519,
     x25519_exchange,
 )
+from ..domain.errors import WrongTypeError
 from ..domain.federation import FederationEventType
 from ..domain.space import SpacePermissionError
 from ..utils.datetime import parse_iso8601_strict
@@ -375,7 +376,7 @@ def unseal_envelope_body(
     """
     sealed = envelope.get("sealed") if isinstance(envelope, dict) else None
     if not isinstance(sealed, dict):
-        raise ValueError("bootstrap envelope missing sealed payload")
+        raise WrongTypeError("bootstrap envelope missing sealed payload")
     ciphertext = sealed.get("ciphertext")
     if not isinstance(ciphertext, str) or not ciphertext:
         raise ValueError("bootstrap envelope missing ciphertext")
@@ -399,7 +400,7 @@ def unseal_envelope_body(
     except Exception as exc:
         raise ValueError(f"bootstrap body is not JSON: {exc}") from exc
     if not isinstance(body, dict):
-        raise ValueError("bootstrap body is not an object")
+        raise WrongTypeError("bootstrap body is not an object")
     return body
 
 
@@ -501,7 +502,7 @@ def validate_bootstrap_body(
         raise ValueError(f"unparseable bootstrap ts: {exc}") from exc
     if ts.tzinfo is None:
         raise ValueError("bootstrap ts is not timezone-aware")
-    current = now if now is not None else datetime.now(timezone.utc)
+    current = now if now is not None else datetime.now(UTC)
     if abs((current - ts).total_seconds()) > TIMESTAMP_SKEW_SECONDS:
         raise ValueError("bootstrap ts skew too large")
 
@@ -579,25 +580,25 @@ def verify_peer_keywrap(
 
 __all__ = [
     "BOOTSTRAP_SIG_SUITE_ED25519",
-    "SUPPORTED_BOOTSTRAP_SIG_SUITES",
-    "UnsupportedBootstrapSigSuite",
-    "MAX_SEALED_BLOB_BYTES",
-    "BootstrapEnvelopeTooLarge",
-    "MAX_INNER_BYTES",
-    "TIMESTAMP_SKEW_SECONDS",
     "KIND_REDEEM",
     "KIND_REDEEM_ACK",
     "KIND_REDEEM_DENY",
+    "MAX_INNER_BYTES",
+    "MAX_SEALED_BLOB_BYTES",
+    "RELAY_THROTTLE_COOLDOWN_S",
+    "SUPPORTED_BOOTSTRAP_SIG_SUITES",
+    "TIMESTAMP_SKEW_SECONDS",
+    "BootstrapEnvelopeTooLarge",
     "EnvelopeRelayThrottled",
     "InviteBootstrapHint",
-    "RELAY_THROTTLE_COOLDOWN_S",
     "RelayEnvelopeSender",
+    "UnsupportedBootstrapSigSuite",
     "canonical_signing_bytes",
-    "sign_bootstrap_body",
-    "seal_bootstrap_envelope",
+    "derive_space_session_keys",
     "open_bootstrap_envelope",
+    "seal_bootstrap_envelope",
+    "sign_bootstrap_body",
     "unseal_envelope_body",
     "validate_bootstrap_body",
-    "derive_space_session_keys",
     "verify_peer_keywrap",
 ]

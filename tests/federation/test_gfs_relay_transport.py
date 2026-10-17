@@ -22,11 +22,11 @@ from socialhome.domain.federation import (
 from socialhome.domain.space_item import ITEM_SIZE_BUCKETS, PAD_FIELD
 from socialhome.federation.gfs_relay_transport import (
     RELAY_KIND_ENVELOPE,
+    RELAY_MAX_BODY_BYTES,
+    RELAY_MAX_ENVELOPE_BYTES,
     RELAY_SIZE_BUCKETS,
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
-    RELAY_MAX_BODY_BYTES,
-    RELAY_MAX_ENVELOPE_BYTES,
     GfsRelayTransport,
     build_relay_plaintext,
     is_relay_envelope_body,
@@ -38,10 +38,8 @@ from socialhome.federation.invite_bootstrap import (
     EnvelopeRelayThrottled,
     unseal_envelope_body,
 )
-from socialhome.federation.keywrap_seal import seal_to_keywrap
-from socialhome.federation.keywrap_seal import open_keywrap
+from socialhome.federation.keywrap_seal import open_keywrap, seal_to_keywrap
 from socialhome.global_server.envelope_relay import ENVELOPE_MAX_BODY_BYTES
-
 
 ENVELOPE = {
     "msg_id": "msg-1",

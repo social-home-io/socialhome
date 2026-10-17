@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from socialhome.federation import pq_signer as pq_signer_module
-from socialhome.federation.pq_signer import PqSigner, _OQS_UNAVAILABLE_MSG
+from socialhome.federation.pq_signer import _OQS_UNAVAILABLE_MSG, PqSigner
 
 
 class _FakeSignatureCtx:

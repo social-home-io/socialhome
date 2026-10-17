@@ -17,7 +17,7 @@ it fits.
 from __future__ import annotations
 
 import base64
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .....repositories.profile_picture_repo import (
@@ -29,12 +29,12 @@ if TYPE_CHECKING:
 class MemberPicturesExporter:
     resource = "member_pictures"
 
-    __slots__ = ("_space_repo", "_picture_repo")
+    __slots__ = ("_picture_repo", "_space_repo")
 
     def __init__(
         self,
-        space_repo: "AbstractSpaceRepo",
-        profile_picture_repo: "AbstractProfilePictureRepo",
+        space_repo: AbstractSpaceRepo,
+        profile_picture_repo: AbstractProfilePictureRepo,
     ) -> None:
         self._space_repo = space_repo
         self._picture_repo = profile_picture_repo

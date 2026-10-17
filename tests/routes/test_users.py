@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
-from socialhome.app_keys import db_key as _db_key, ws_manager_key
+from socialhome.app_keys import db_key as _db_key
+from socialhome.app_keys import ws_manager_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
@@ -231,7 +232,7 @@ async def test_patch_me_sets_status_and_fires_frame(client):
 
 
 async def test_patch_me_status_clear_after_sets_expiry(client):
-    before = datetime.now(timezone.utc)
+    before = datetime.now(UTC)
     resp = await _patch_me(
         client,
         {"status_emoji": "🍽️", "status_text": "Lunch", "status_clear_after": "1h"},

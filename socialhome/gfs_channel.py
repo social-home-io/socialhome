@@ -122,7 +122,7 @@ def derive_channel_seed(space_seed: bytes, space_id: str, channel_id: str) -> by
         algorithm=hashes.SHA256(),
         length=32,
         salt=_KEY_SALT,
-        info=f"{space_id}:{channel_id}".encode("utf-8"),
+        info=f"{space_id}:{channel_id}".encode(),
     ).derive(space_seed)
 
 
@@ -135,7 +135,7 @@ def derive_channel_writer_seed(
         algorithm=hashes.SHA256(),
         length=32,
         salt=_WRITER_SALT,
-        info=f"{space_id}:{channel_id}:{_check_epoch(epoch)}".encode("utf-8"),
+        info=f"{space_id}:{channel_id}:{_check_epoch(epoch)}".encode(),
     ).derive(space_seed)
 
 
@@ -151,7 +151,7 @@ def derive_channel_epoch_offset(
         algorithm=hashes.SHA256(),
         length=5,
         salt=_OFFSET_SALT,
-        info=f"{space_id}:{channel_id}".encode("utf-8"),
+        info=f"{space_id}:{channel_id}".encode(),
     ).derive(space_seed)
     return int.from_bytes(raw, "big")
 

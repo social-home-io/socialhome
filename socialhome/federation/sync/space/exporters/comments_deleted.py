@@ -36,7 +36,7 @@ class CommentsDeletedExporter(PagedExporterMixin):
 
     __slots__ = ("_repo",)
 
-    def __init__(self, space_post_repo: "AbstractSpacePostRepo") -> None:
+    def __init__(self, space_post_repo: AbstractSpacePostRepo) -> None:
         self._repo = space_post_repo
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
@@ -56,7 +56,7 @@ class CommentsDeletedExporter(PagedExporterMixin):
             yield [comment_tombstone_record(c) for c in comments]
 
 
-def comment_tombstone_record(comment: "Comment") -> dict[str, Any]:
+def comment_tombstone_record(comment: Comment) -> dict[str, Any]:
     """The wire record of a deleted comment — ids and author only."""
     return {
         "id": comment.id,

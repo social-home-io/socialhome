@@ -28,9 +28,10 @@ import hashlib
 import logging
 import uuid
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Iterable
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import orjson
 
@@ -140,7 +141,7 @@ class RelayEnvelope:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "RelayEnvelope":
+    def from_dict(cls, data: dict) -> RelayEnvelope:
         return cls(
             destination_instance_id=str(data["destination_instance_id"]),
             destination_user_id=str(data["destination_user_id"]),
@@ -148,9 +149,7 @@ class RelayEnvelope:
             inner_event_type=str(data.get("inner_event_type", "dm_message")),
             message_id=str(data["message_id"]),
             sender_seq=int(data.get("sender_seq", 0)),
-            created_at=str(
-                data.get("created_at") or datetime.now(timezone.utc).isoformat()
-            ),
+            created_at=str(data.get("created_at") or datetime.now(UTC).isoformat()),
             sender_ephemeral_pk=str(data.get("sender_ephemeral_pk", "")),
             encrypted_payload=str(data.get("encrypted_payload", "")),
             payload_iv=str(data.get("payload_iv", "")),
@@ -165,11 +164,11 @@ class DmRoutingService(VisibilityMixin):
     """BFS-based DM relay routing across the paired instance graph."""
 
     __slots__ = (
-        "_repo",
+        "_child_protection",
         "_fed_repo",
         "_federation",
         "_own_instance_id",
-        "_child_protection",
+        "_repo",
     )
 
     def __init__(
@@ -180,7 +179,7 @@ class DmRoutingService(VisibilityMixin):
         federation_service=None,
         own_instance_id: str = "",
         child_protection_service=None,
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
     ) -> None:
         self._repo = repo
         self._fed_repo = federation_repo
@@ -439,7 +438,7 @@ class DmRoutingService(VisibilityMixin):
             inner_event_type=inner_event_type,
             message_id=str(uuid.uuid4()),
             sender_seq=seq,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             sender_ephemeral_pk=sender_ephemeral_pk,
             encrypted_payload=encrypted_payload,
             payload_iv=payload_iv,
@@ -558,9 +557,7 @@ class DmRoutingService(VisibilityMixin):
 
     async def prune_seen(self, *, cutoff: datetime | None = None) -> int:
         """Delete dedup rows older than ``DEDUP_TTL_SECONDS``."""
-        cutoff_dt = cutoff or (
-            datetime.now(timezone.utc) - timedelta(seconds=DEDUP_TTL_SECONDS)
-        )
+        cutoff_dt = cutoff or (datetime.now(UTC) - timedelta(seconds=DEDUP_TTL_SECONDS))
         return await self._repo.prune_seen(cutoff_iso=cutoff_dt.isoformat())
 
     # ─── Relay diagnostics ────────────────────────────────────────────────
@@ -577,7 +574,7 @@ class DmRoutingService(VisibilityMixin):
         direct single-hop send to a paired peer is not a relay.
         """
         cutoff = (
-            datetime.now(timezone.utc) - timedelta(hours=_LAST_RELAY_WINDOW_HOURS)
+            datetime.now(UTC) - timedelta(hours=_LAST_RELAY_WINDOW_HOURS)
         ).isoformat()
         row = await self._repo.fetch_last_relay_for(instance_id, cutoff_iso=cutoff)
         if row is None:

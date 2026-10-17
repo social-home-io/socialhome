@@ -182,13 +182,15 @@ def _url(server: TestServer) -> str:
 
 
 async def _post(server: TestServer, raw: bytes, sig: str) -> tuple[int, dict]:
-    async with ClientSession() as http:
-        async with http.post(
+    async with (
+        ClientSession() as http,
+        http.post(
             f"{_url(server)}/cluster/sync",
             data=raw,
             headers={"Content-Type": "application/json", "X-Node-Signature": sig},
-        ) as resp:
-            return resp.status, await resp.json()
+        ) as resp,
+    ):
+        return resp.status, await resp.json()
 
 
 async def _admin_add_peer(server: TestServer, body: dict) -> tuple[int, dict]:
@@ -632,9 +634,11 @@ async def test_a_tofu_row_is_never_the_signaling_node(gfs, tmp_dir, listeners):
 async def test_a_tofu_row_is_not_listed_on_cluster_health(gfs, tmp_dir, listeners):
     member, tofu = listeners
     await _member_and_tofu_rows(gfs, tmp_dir, member, tofu)
-    async with ClientSession() as http:
-        async with http.get(f"{_url(gfs)}/cluster/health") as resp:
-            body = await resp.json()
+    async with (
+        ClientSession() as http,
+        http.get(f"{_url(gfs)}/cluster/health") as resp,
+    ):
+        body = await resp.json()
     assert [p["node_id"] for p in body["peers"]] == ["node-b"]
     assert tofu.url not in json.dumps(body)
 

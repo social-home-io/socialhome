@@ -15,24 +15,28 @@ the :class:`PlatformAdapter` ABC.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from ... import app_keys as K
 from ...services.ha_bridge_service import HaBridgeService
-from ..federation_base import manual_federation_base
 from ..adapter import (
     Capability,
     ExternalUser,
     InstanceConfig,
     PlatformAdapter,
 )
+from ..federation_base import manual_federation_base
+from ..ha_home_location import persist_home_location_from_ha
 from ..local_credentials import (
     LocalCredentialStore,
+)
+from ..local_credentials import (
     hash_password as _hash_password,
 )
-from ..ha_home_location import persist_home_location_from_ha
 from .client import HaClient, build_ha_client
+from .displays import HaDisplayDirectory
 from .ice_servers_sync import HaIceServerSync
 from .providers import (
     HaAIProvider,
@@ -42,7 +46,6 @@ from .providers import (
     HaSTTProvider,
     HaUserDirectory,
 )
-from .displays import HaDisplayDirectory
 from .zones import HaZoneSource
 
 if TYPE_CHECKING:
@@ -72,24 +75,24 @@ class HaAdapter(PlatformAdapter):
     users: HaUserDirectory
 
     __slots__ = (
-        "_ha_url",
-        "_ha_token",
-        "_data_dir",
-        "_options",
-        "_ha_client",
-        "_ha_bridge",
-        "_ice_sync",
-        "_db",
-        "_instance_config",
         "_credentials",
+        "_data_dir",
+        "_db",
+        "_ha_bridge",
+        "_ha_client",
+        "_ha_token",
+        "_ha_url",
+        "_ice_sync",
+        "_instance_config",
+        "_options",
+        "ai",
         "auth",
-        "users",
+        "displays",
+        "events",
         "push",
         "stt",
-        "ai",
-        "events",
+        "users",
         "zones",
-        "displays",
     )
 
     def __init__(
@@ -109,7 +112,7 @@ class HaAdapter(PlatformAdapter):
         self._ha_bridge: HaBridgeService | None = None
         self._ice_sync: HaIceServerSync | None = None
         self._db: Any | None = None
-        self._instance_config: "AbstractInstanceConfigRepo | None" = None
+        self._instance_config: AbstractInstanceConfigRepo | None = None
         self._credentials: LocalCredentialStore | None = None
 
         self.auth = HaAuthProvider(self)
@@ -290,7 +293,7 @@ class HaAdapter(PlatformAdapter):
             return base
         return f"{base}/api/socialhome/inbox"
 
-    async def on_startup(self, app: "web.Application") -> None:
+    async def on_startup(self, app: web.Application) -> None:
         """Wire HaClient + HaBridge. No supervisor bootstrap here —
         that lives in :class:`~socialhome.platform.haos.HaosAdapter`."""
         session = app[K.http_session_key]
@@ -348,7 +351,9 @@ class HaAdapter(PlatformAdapter):
             try:
                 cfg = await self._ha_client.get_config()
             except Exception as exc:  # pragma: no cover
-                log.warning("ha_adapter: initial tz fetch failed: %s", exc)
+                log.warning(
+                    "ha_adapter: initial tz fetch failed: %s", exc, exc_info=True
+                )
             else:
                 tz = (cfg or {}).get("time_zone")
                 if isinstance(tz, str) and tz.strip():
@@ -364,7 +369,7 @@ class HaAdapter(PlatformAdapter):
             longitude=instance_cfg.longitude,
         )
 
-    async def on_cleanup(self, app: "web.Application") -> None:  # noqa: ARG002
+    async def on_cleanup(self, app: web.Application) -> None:
         """Stop the ICE-server sync loop."""
         if self._ice_sync is not None:
             await self._ice_sync.stop()

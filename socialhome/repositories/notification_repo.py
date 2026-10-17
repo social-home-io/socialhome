@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import builtins
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ._spec import Spec, spec_to_sql
 from .base import row_to_dict, rows_to_dicts
-
 
 #: Columns the Specification pattern is allowed to filter / order on.
 _NOTIFICATION_COLS: frozenset[str] = frozenset(
@@ -41,7 +40,7 @@ MAX_PER_USER: int = 200
 
 # Domain dataclass lives in ``socialhome/domain/notification.py``;
 # re-exported here so existing repo-level imports keep working.
-from ..domain.notification import Notification  # noqa: F401,E402
+from ..domain.notification import Notification
 
 
 @runtime_checkable
@@ -333,9 +332,7 @@ class SqliteNotificationRepo:
         the column would mis-compare here, because SQLite orders TEXT
         lexicographically and "T" (0x54) sorts above " " (0x20).
         """
-        cutoff = (
-            datetime.now(timezone.utc) - _timedelta_days(older_than_days)
-        ).isoformat()
+        cutoff = (datetime.now(UTC) - _timedelta_days(older_than_days)).isoformat()
         count = await self._db.fetchval(
             "SELECT COUNT(*) FROM notifications WHERE created_at < ?",
             (cutoff,),
@@ -414,5 +411,5 @@ def new_notification(
         title=title,
         body=body,
         link_url=link_url,
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
     )

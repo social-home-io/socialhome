@@ -157,25 +157,25 @@ class SpacePublicOutbound:
 
     __slots__ = (
         "_bus",
-        "_spaces",
         "_crypto",
-        "_users",
         "_gfs",
+        "_own_identity_seed",
         "_own_instance_id",
         "_own_instance_pk",
-        "_own_identity_seed",
-        "_writer_certs",
         "_posts",
+        "_spaces",
+        "_users",
+        "_writer_certs",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        space_repo: "AbstractSpaceRepo",
-        space_crypto: "SpaceContentEncryption",
-        user_repo: "AbstractUserRepo",
-        gfs_service: "GfsConnectionService",
+        space_repo: AbstractSpaceRepo,
+        space_crypto: SpaceContentEncryption,
+        user_repo: AbstractUserRepo,
+        gfs_service: GfsConnectionService,
     ) -> None:
         self._bus = bus
         self._spaces = space_repo
@@ -197,9 +197,9 @@ class SpacePublicOutbound:
         self._writer_certs: SpaceWriterCertService | None = None
         #: The space post store — only read to skip the removal of a
         #: calendar-derived post (never relayed, so nothing to remove).
-        self._posts: "AbstractSpacePostRepo | None" = None
+        self._posts: AbstractSpacePostRepo | None = None
 
-    def attach_posts(self, posts: "AbstractSpacePostRepo") -> None:
+    def attach_posts(self, posts: AbstractSpacePostRepo) -> None:
         """Wire the space post store (see :attr:`_posts`)."""
         self._posts = posts
 
@@ -441,7 +441,7 @@ class SpacePublicOutbound:
     # ── Authority-only items: approved posts and removals ────────────────
 
     async def _relay_approved(
-        self, event: SpacePostCreated, space: "Space", seed: bytes
+        self, event: SpacePostCreated, space: Space, seed: bytes
     ) -> None:
         """Relay a remote member's post just released from the moderation
         queue, under its AUTHOR's signature: the submitter's household signed

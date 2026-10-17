@@ -20,11 +20,11 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.presence import LocationUpdate, truncate_coord
+from socialhome.federation.federation_service import FederationService
+from socialhome.infrastructure.ws_manager import WebSocketManager
 from socialhome.repositories.presence_repo import SqlitePresenceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.presence_service import PresenceService
-from socialhome.federation.federation_service import FederationService
-from socialhome.infrastructure.ws_manager import WebSocketManager
 from tests.routes import conftest as routes_conftest
 
 #: Real app + SQLite + aiohttp TestClient (the routes fixture).

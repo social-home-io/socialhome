@@ -33,7 +33,7 @@ from socialhome.federation import routed_crypto
 from socialhome.federation.mesh_member_claim import mesh_member_claim
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import verify_writer_cert
-from tests.federation.test_peer_supports import _MeshRepo, _mesh_service
+from tests.federation.test_peer_supports import _mesh_service, _MeshRepo
 from tests.federation.test_routed_envelope import (
     _build_identity_chain,
     _mint_target_eph,

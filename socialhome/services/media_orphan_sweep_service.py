@@ -55,7 +55,7 @@ _SKIP_RE = re.compile(r"(\.preview\.webp|\.part\d+|\.assembled)", re.IGNORECASE)
 class MediaOrphanSweepService:
     """One-pass sweep of unreferenced media files."""
 
-    __slots__ = ("_media_dir", "_refs", "_grace", "_transcode")
+    __slots__ = ("_grace", "_media_dir", "_refs", "_transcode")
 
     def __init__(
         self,
@@ -63,7 +63,7 @@ class MediaOrphanSweepService:
         media_dir: pathlib.Path,
         reference_repo: AbstractMediaReferenceRepo,
         grace_seconds: int = GRACE_SECONDS,
-        media_transcode_repo: "AbstractMediaTranscodeRepo | None" = None,
+        media_transcode_repo: AbstractMediaTranscodeRepo | None = None,
     ) -> None:
         self._media_dir = media_dir
         self._refs = reference_repo

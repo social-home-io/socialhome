@@ -49,13 +49,13 @@ from ..domain.federation import GfsConnection
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.moment_repo import AbstractMomentRepo
 from . import highlight_public_framing as framing
-from .protection_gate import ProtectionGateMixin
 from .highlight_signaling_handler import (
     PeerFactory,
     _AnswererPeer,
     _content_type_for,
     _default_peer_factory,
 )
+from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
 
@@ -94,18 +94,18 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
 
     __slots__ = (
         "_child_protection",
-        "_moments",
         "_gfs_repo",
-        "_known_ids",
         "_http_client",
-        "_signing_key",
+        "_ice_servers",
+        "_known_ids",
+        "_lock",
+        "_media_dir",
+        "_moments",
         "_own_instance_id",
         "_peer_factory",
-        "_ice_servers",
-        "_media_dir",
-        "_sessions",
         "_relay_tasks",
-        "_lock",
+        "_sessions",
+        "_signing_key",
     )
 
     def __init__(
@@ -250,7 +250,7 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
         try:
             await sess.peer.add_ice_candidate(candidate)
         except Exception as exc:  # defensive — bad candidates shouldn't kill
-            log.debug("moment_signal ice: %s", exc)
+            log.debug("moment_signal ice: %s", exc, exc_info=True)
 
     # ── Streaming ──────────────────────────────────────────────────────
 
@@ -266,12 +266,12 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # defensive
-            log.warning("moment_signal serve %s: %s", session_id, exc)
+            log.warning("moment_signal serve %s: %s", session_id, exc, exc_info=True)
         finally:
             try:
                 await peer.close()
             except Exception:  # defensive
-                pass
+                log.debug("moment_signal: peer close failed", exc_info=True)
             async with self._lock:
                 self._sessions.pop(session_id, None)
 
@@ -565,7 +565,7 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
             try:
                 await sess.peer.close()
             except Exception:  # defensive
-                pass
+                log.debug("moment_signal: peer close failed", exc_info=True)
         for task in list(self._relay_tasks):
             if not task.done():
                 task.cancel()

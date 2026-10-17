@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import asdict, replace
-from datetime import datetime, timedelta, timezone
-from typing import Any, TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 from .....domain.calendar import OCCURRENCE_ID_SEPARATOR, is_occurrence_id
 from ..exporter import PagedExporterMixin
@@ -31,10 +31,10 @@ class CalendarExporter(PagedExporterMixin):
 
     __slots__ = ("_repo",)
 
-    def __init__(self, space_calendar_repo: "AbstractSpaceCalendarRepo") -> None:
+    def __init__(self, space_calendar_repo: AbstractSpaceCalendarRepo) -> None:
         self._repo = space_calendar_repo
 
-    def expanded(self) -> "ExpandedCalendarExporter":
+    def expanded(self) -> ExpandedCalendarExporter:
         """The record set for a requester below v_56 (see there)."""
         return ExpandedCalendarExporter(self._repo)
 
@@ -52,7 +52,7 @@ class CalendarExporter(PagedExporterMixin):
     async def _pages(
         self, space_id: str, since: int | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        async def page(cursor: int | None) -> tuple[list["CalendarEvent"], int | None]:
+        async def page(cursor: int | None) -> tuple[list[CalendarEvent], int | None]:
             return await self._repo.list_events_sync_page(
                 space_id, cursor=cursor, limit=SYNC_PAGE_SIZE, since=since
             )
@@ -86,7 +86,7 @@ class ExpandedCalendarExporter:
 
     __slots__ = ("_repo",)
 
-    def __init__(self, space_calendar_repo: "AbstractSpaceCalendarRepo") -> None:
+    def __init__(self, space_calendar_repo: AbstractSpaceCalendarRepo) -> None:
         self._repo = space_calendar_repo
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
@@ -98,7 +98,7 @@ class ExpandedCalendarExporter:
         yield await self._records(space_id, since)
 
     async def _records(self, space_id: str, since: int | None) -> list[dict[str, Any]]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         events = await self._repo.list_events_in_range(
             space_id,
             start=now - _EXPANDED_WINDOW,
@@ -108,7 +108,7 @@ class ExpandedCalendarExporter:
         return [_event_to_dict(_as_occurrence(e)) for e in events]
 
 
-def _as_occurrence(event: "CalendarEvent") -> "CalendarEvent":
+def _as_occurrence(event: CalendarEvent) -> CalendarEvent:
     """The expansion yields a series' first occurrence as the stored series
     row itself; an older receiver would upsert it without its rule. It goes
     out as an occurrence like the others, under ``<id>@<start>``."""
@@ -120,7 +120,7 @@ def _as_occurrence(event: "CalendarEvent") -> "CalendarEvent":
     return event
 
 
-def _event_to_dict(event: "CalendarEvent") -> dict[str, Any]:
+def _event_to_dict(event: CalendarEvent) -> dict[str, Any]:
     d = asdict(event)
     for field in ("start", "end"):
         v = d.get(field)

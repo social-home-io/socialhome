@@ -9,12 +9,11 @@ pragma it depends on hasn't taken effect.
 
 from __future__ import annotations
 
+import importlib.util
 import sqlite3
+from pathlib import Path
 
 import pytest
-
-import importlib.util
-from pathlib import Path
 
 _MIG = (
     Path(__file__).resolve().parents[2]

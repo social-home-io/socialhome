@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from socialhome.domain.child_protection import (
-    PROTECTED_ACCOUNT_RESTRICTIONS,
     NAME_ONLY_WITHHELD_KEYS,
+    PROTECTED_ACCOUNT_RESTRICTIONS,
     AccountProtectedError,
     ProtectedCapability,
     name_only,

@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 from types import ModuleType
-from typing import AsyncIterator
 
 # ── Fake aiolibdatachannel ───────────────────────────────────────────────
 # Injected into sys.modules BEFORE any production code imports it. The CI
@@ -229,7 +229,6 @@ class _FakePeerConnection:
 
     async def set_remote_description(self, sdp: str, type_: str) -> None:
         self._remote_type = type_
-        return None
 
     async def add_remote_candidate(self, candidate: str, mid: str = "") -> None:
         return None
@@ -247,7 +246,7 @@ class _FakePeerConnection:
                     self._ice_queue.get(),
                     timeout=0.01,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return
             if cand is None:
                 return
@@ -272,7 +271,7 @@ class _FakePeerConnection:
         # Terminate the incoming-channels iterator.
         try:
             self._incoming_queue.put_nowait(None)
-        except Exception:  # noqa: BLE001
+        except asyncio.QueueShutDown:
             pass
         # Cancel every task registered via spawn_task, mirroring the
         # real library's lifetime guarantee.
@@ -351,32 +350,30 @@ sys.modules["aiolibdatachannel"] = _fake_rtc
 # Imports below MUST come after the sys.modules injection above so the
 # fake aiolibdatachannel is resolved when production modules load.
 
-import dataclasses  # noqa: E402
-import functools  # noqa: E402
-import inspect  # noqa: E402
+import dataclasses
+import functools
+import inspect
 
-import pytest  # noqa: E402
+import pytest
 
-from socialhome.config import Config  # noqa: E402
-from socialhome.crypto import generate_identity_keypair, derive_instance_id  # noqa: E402
-from socialhome.dashboard import advertiser as _advertiser_module  # noqa: E402
-from socialhome.db import database as _db_module  # noqa: E402
-from socialhome.db.database import AsyncDatabase  # noqa: E402
-from socialhome.global_server.config import GfsConfig  # noqa: E402
-from socialhome.infrastructure.event_bus import EventBus  # noqa: E402
-from socialhome.repositories.conversation_repo import SqliteConversationRepo  # noqa: E402
-from socialhome.repositories.notification_repo import SqliteNotificationRepo  # noqa: E402
-from socialhome.repositories.post_repo import SqlitePostRepo  # noqa: E402
-from socialhome.repositories.space_post_repo import SqliteSpacePostRepo  # noqa: E402
-from socialhome.repositories.space_repo import SqliteSpaceRepo  # noqa: E402
-from socialhome.repositories.user_repo import SqliteUserRepo  # noqa: E402
-from socialhome.infrastructure.key_manager import KeyManager  # noqa: E402
-from socialhome.services.feed_service import FeedService  # noqa: E402
-from socialhome.services.space_service import SpaceService  # noqa: E402
-from socialhome.services.user_service import UserService  # noqa: E402
-
-from tests.migration_template import MigrationTemplateCache  # noqa: E402
-
+from socialhome.config import Config
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.dashboard import advertiser as _advertiser_module
+from socialhome.db import database as _db_module
+from socialhome.db.database import AsyncDatabase
+from socialhome.global_server.config import GfsConfig
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.repositories.conversation_repo import SqliteConversationRepo
+from socialhome.repositories.notification_repo import SqliteNotificationRepo
+from socialhome.repositories.post_repo import SqlitePostRepo
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.feed_service import FeedService
+from socialhome.services.space_service import SpaceService
+from socialhome.services.user_service import UserService
+from tests.migration_template import MigrationTemplateCache
 
 #: Write-coalescing window every test database runs with; see
 #: ``_fast_test_databases``.
@@ -548,7 +545,7 @@ def conversation_repo(db):
 
 @pytest.fixture
 async def user_service(seeded_db, bus):
-    db, iid = seeded_db
+    db, _iid = seeded_db
     repo = SqliteUserRepo(db)
     _kp = generate_identity_keypair()
     # Re-read the actual public key from the DB

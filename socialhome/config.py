@@ -21,13 +21,13 @@ from __future__ import annotations
 import logging
 import os
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 from .db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
-
 
 log = logging.getLogger(__name__)
 
@@ -258,7 +258,7 @@ class Config:
         return instance_id, public_key.lower()
 
     @classmethod
-    def from_env(cls) -> "Config":
+    def from_env(cls) -> Config:
         """Build a :class:`Config` from layered sources.
 
         Precedence (highest to lowest):

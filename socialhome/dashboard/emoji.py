@@ -33,11 +33,11 @@ import aiofiles.os
 from PIL import Image
 
 __all__ = [
+    "CODE_PATTERN",
     "EMOJI_DIR",
     "EMOJI_SIZES",
     "FALLBACK_CODE",
     "SOURCE_SIZE",
-    "CODE_PATTERN",
     "EmojiImages",
     "emoji_code",
     "is_code",
@@ -101,7 +101,7 @@ def scale_png(body: bytes, size: int) -> bytes:
 class EmojiImages:
     """The bundled emoji PNGs at the sizes panels ask for."""
 
-    __slots__ = ("_dir", "_cache", "_max")
+    __slots__ = ("_cache", "_dir", "_max")
 
     def __init__(
         self, directory: Path = EMOJI_DIR, *, max_entries: int = CACHE_ENTRIES

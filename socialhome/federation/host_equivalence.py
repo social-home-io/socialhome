@@ -38,7 +38,7 @@ reaches this household. Nothing changes for the owner itself.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.space import SpaceRole
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
 
 
-def owner_statement_current(space: "Space", *, now_ms: int | None = None) -> bool:
+def owner_statement_current(space: Space, *, now_ms: int | None = None) -> bool:
     """Whether the owner statement this household holds for *space* (already
     verified when stored) names the authority key and epoch the space pins
     and is younger than :data:`MAX_STATEMENT_AGE_MS`."""
@@ -68,16 +68,14 @@ def owner_statement_current(space: "Space", *, now_ms: int | None = None) -> boo
         same_epoch = int(held["authority_key_epoch"]) == space.authority_key_epoch
     except ValueError, TypeError, KeyError:
         return False
-    now = (
-        int(datetime.now(timezone.utc).timestamp() * 1000) if now_ms is None else now_ms
-    )
+    now = int(datetime.now(UTC).timestamp() * 1000) if now_ms is None else now_ms
     return same_key and same_epoch and issued_at >= now - MAX_STATEMENT_AGE_MS
 
 
 async def is_trusted_inviter(
-    space_repo: "AbstractSpaceRepo",
-    seat_repo: "AbstractSpaceRemoteMemberRepo | None",
-    space: "Space | None",
+    space_repo: AbstractSpaceRepo,
+    seat_repo: AbstractSpaceRemoteMemberRepo | None,
+    space: Space | None,
     sender: str,
 ) -> bool:
     """*sender* is the delegated admin household that invited this household
@@ -113,9 +111,9 @@ async def is_trusted_inviter(
 
 
 async def acts_as_host(
-    space_repo: "AbstractSpaceRepo",
-    seat_repo: "AbstractSpaceRemoteMemberRepo | None",
-    space: "Space | None",
+    space_repo: AbstractSpaceRepo,
+    seat_repo: AbstractSpaceRemoteMemberRepo | None,
+    space: Space | None,
     sender: str,
 ) -> bool:
     """*sender* may act as the host of *space* here: its owner, or the
@@ -128,9 +126,9 @@ async def acts_as_host(
 
 
 async def touches_owner_household(
-    space_repo: "AbstractSpaceRepo",
-    seat_repo: "AbstractSpaceRemoteMemberRepo | None",
-    space: "Space",
+    space_repo: AbstractSpaceRepo,
+    seat_repo: AbstractSpaceRemoteMemberRepo | None,
+    space: Space,
     *,
     user_id: str,
     instance_id: str | None = None,

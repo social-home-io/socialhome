@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import AsyncIterable
-
+from collections.abc import AsyncIterable
 
 from socialhome.app_keys import stt_service_key
 

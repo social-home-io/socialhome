@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -160,13 +160,13 @@ async def env(tmp_dir):
 
 
 async def _cert(env, **over) -> dict:
-    kw = dict(
-        space_seed=env.space_kp.private_key,
-        space_id=SPACE,
-        epoch=await env.crypto.get_current_epoch(SPACE),
-        instance_pk=env.author_kp.public_key,
-        scope="write",
-    )
+    kw = {
+        "space_seed": env.space_kp.private_key,
+        "space_id": SPACE,
+        "epoch": await env.crypto.get_current_epoch(SPACE),
+        "instance_pk": env.author_kp.public_key,
+        "scope": "write",
+    }
     kw.update(over)
     return sign_writer_cert(**kw).to_wire()
 
@@ -195,7 +195,7 @@ async def _envelope(
         "author_username": "bob",
         "type": "text",
         "content": "hello",
-        "created_at": datetime(2026, 10, 3, tzinfo=timezone.utc).isoformat(),
+        "created_at": datetime(2026, 10, 3, tzinfo=UTC).isoformat(),
         # The author's household: its id is the fingerprint of the key that
         # signs the inner (the relay path requires exactly that).
         "origin_instance_id": derive_instance_id(env.author_kp.public_key),
@@ -434,7 +434,7 @@ async def test_cert_only_item_previous_epoch_closed_after_the_grace(env):
     e0 = await env.crypto.get_current_epoch(SPACE)
     cert = await _cert(env)
     new_epoch = await env.crypto.rotate_epoch(SPACE)
-    old = datetime.now(timezone.utc) - timedelta(seconds=WRITER_CERT_EPOCH_GRACE_S + 60)
+    old = datetime.now(UTC) - timedelta(seconds=WRITER_CERT_EPOCH_GRACE_S + 60)
     await env.db.enqueue(
         "UPDATE space_keys SET created_at=? WHERE space_id=? AND epoch=?",
         (old.isoformat(), SPACE, new_epoch),
@@ -551,7 +551,7 @@ def _relay_hint(env, *, cert: dict | None) -> dict:
         author=uid,
         type=PostType.TEXT,
         content="hi",
-        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+        created_at=datetime(2026, 10, 3, tzinfo=UTC),
     )
     inner = build_signed_author_inner(
         post=post,
@@ -574,7 +574,7 @@ async def _host_relays(env, host, inner) -> bool:
                 author=inner["author_user_id"],
                 type=PostType.TEXT,
                 content="hi",
-                created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+                created_at=datetime(2026, 10, 3, tzinfo=UTC),
             ),
             space_id=SPACE,
             origin_instance_id="author.home",
@@ -631,7 +631,7 @@ async def _mesh_relays(env, host, inner, origin: str) -> bool:
                 author=inner["author_user_id"],
                 type=PostType.TEXT,
                 content="hi",
-                created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+                created_at=datetime(2026, 10, 3, tzinfo=UTC),
             ),
             space_id=SPACE,
             origin_instance_id=origin,

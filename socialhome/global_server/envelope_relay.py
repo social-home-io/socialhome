@@ -87,7 +87,6 @@ import orjson
 
 from .public import ClientIpResolver, build_window_limiter
 
-
 if TYPE_CHECKING:
     from .cluster import ClusterService
     from .repositories import AbstractGfsEnvelopeQueueRepo, AbstractGfsFederationRepo
@@ -349,30 +348,30 @@ class GfsEnvelopeRelay:
     """Deliver-or-queue sealed envelopes addressed by instance id."""
 
     __slots__ = (
+        "_accept_locks",
+        "_clock",
+        "_cluster",
+        "_drain_locks",
         "_fed_repo",
-        "_queue_repo",
-        "_ws_registry",
-        "_ttl",
-        "_max_queued",
+        "_inflight",
         "_max_bytes",
         "_max_inflight",
-        "_inflight",
-        "_clock",
+        "_max_inflight_per_recipient",
+        "_max_queued",
+        "_pending_by_recipient",
+        "_queue_repo",
         "_saturated_drops",
         "_saturation_warned_at",
-        "_cluster",
-        "_accept_locks",
-        "_drain_locks",
-        "_max_inflight_per_recipient",
-        "_pending_by_recipient",
+        "_ttl",
+        "_ws_registry",
     )
 
     def __init__(
         self,
         *,
-        fed_repo: "AbstractGfsFederationRepo",
-        queue_repo: "AbstractGfsEnvelopeQueueRepo",
-        ws_registry: "GfsWebSocketRegistry",
+        fed_repo: AbstractGfsFederationRepo,
+        queue_repo: AbstractGfsEnvelopeQueueRepo,
+        ws_registry: GfsWebSocketRegistry,
         ttl_seconds: int = ENVELOPE_QUEUE_TTL_SECONDS,
         max_queued_per_recipient: int = ENVELOPE_QUEUE_MAX_PER_RECIPIENT,
         max_bytes_per_recipient: int = ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT,
@@ -396,11 +395,11 @@ class GfsEnvelopeRelay:
         self._saturated_drops = 0
         self._saturation_warned_at = -math.inf
         #: Set by :meth:`attach_cluster`; ``None`` on a single node.
-        self._cluster: "ClusterService | None" = None
+        self._cluster: ClusterService | None = None
         self._accept_locks = KeyedLocks()
         self._drain_locks = KeyedLocks()
 
-    def attach_cluster(self, cluster: "ClusterService") -> None:
+    def attach_cluster(self, cluster: ClusterService) -> None:
         """Hint *cluster* after every enqueue, so a sibling node holding the
         recipient's socket drains it (see "Cross-node drain" above). A
         setter rather than a constructor argument: the cluster in turn calls
@@ -656,7 +655,10 @@ class GfsEnvelopeRelay:
             pending = await self._queue_repo.list_for(to_instance, now=int(time.time()))
         except Exception as exc:  # fail-soft: a drain must never kill the socket
             log.warning(
-                "gfs.envelope: drain lookup failed for %s: %s", to_instance, exc
+                "gfs.envelope: drain lookup failed for %s: %s",
+                to_instance,
+                exc,
+                exc_info=True,
             )
             return 0
         delivered = 0

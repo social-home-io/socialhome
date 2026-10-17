@@ -40,25 +40,25 @@ log = logging.getLogger(__name__)
 class MomentPublicOutbound(ProtectionGateMixin):
     __slots__ = (
         "_bus",
-        "_moments",
-        "_regs",
-        "_users",
+        "_child_protection",
         "_gfs",
         "_http_client",
-        "_signing_key",
+        "_moments",
         "_own_instance_id",
         "_own_users",
-        "_child_protection",
+        "_regs",
+        "_signing_key",
+        "_users",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        moment_repo: "AbstractMomentRepo",
-        registration_repo: "AbstractMomentPublicRegistrationRepo",
-        user_repo: "AbstractUserRepo",
-        gfs_repo: "AbstractGfsConnectionRepo",
+        moment_repo: AbstractMomentRepo,
+        registration_repo: AbstractMomentPublicRegistrationRepo,
+        user_repo: AbstractUserRepo,
+        gfs_repo: AbstractGfsConnectionRepo,
         http_client: aiohttp.ClientSession | None = None,
     ) -> None:
         self._bus = bus

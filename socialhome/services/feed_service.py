@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -32,6 +32,7 @@ from ..domain.events import (
     PostEdited,
     PostReactionChanged,
 )
+from ..domain.link_preview import card_survives_edit
 from ..domain.post import (
     FEED_POST_MAX_IMAGES,
     Comment,
@@ -41,14 +42,12 @@ from ..domain.post import (
     Post,
     PostType,
 )
-from ..domain.link_preview import card_survives_edit
 from ..domain.presence import truncate_coord
 from ..infrastructure.event_bus import EventBus
 from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.post_repo import AbstractPostRepo
 from ..repositories.user_repo import AbstractUserRepo
-
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
 
 if TYPE_CHECKING:
@@ -76,14 +75,14 @@ class FeedService:
     """Household-feed CRUD + reactions + comments."""
 
     __slots__ = (
-        "_posts",
-        "_users",
         "_bus",
         "_household",
-        "_quota",
+        "_link_previews",
         "_media_dir",
         "_media_refs",
-        "_link_previews",
+        "_posts",
+        "_quota",
+        "_users",
     )
 
     def __init__(
@@ -92,7 +91,7 @@ class FeedService:
         user_repo: AbstractUserRepo,
         bus: EventBus,
         *,
-        media_dir: "pathlib.Path | None" = None,
+        media_dir: pathlib.Path | None = None,
         media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._posts = post_repo
@@ -119,7 +118,7 @@ class FeedService:
         ``file_meta`` pre-checks the household's remaining budget."""
         self._quota = svc
 
-    def attach_link_previews(self, svc: "LinkPreviewService") -> None:
+    def attach_link_previews(self, svc: LinkPreviewService) -> None:
         """Wire the author-side link preview builder: a new ``text`` post
         with a web link (and ``no_link_preview`` unset) carries a preview
         card built by this household (``services.link_preview_service``)."""
@@ -205,7 +204,7 @@ class FeedService:
             id=uuid.uuid4().hex,
             author=author.user_id,
             type=post_type,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content=content,
             # Image posts route their URLs through ``image_urls``;
             # ``media_url`` stays for video / file scalars only.
@@ -383,7 +382,7 @@ class FeedService:
             post_id=post.id,
             author=author.user_id,
             type=ctype,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             parent_id=parent_id,
             content=content,
             media_url=media_url,
@@ -570,9 +569,10 @@ def _validate_content(
             raise ValueError(
                 f"location label exceeds {LOCATION_LABEL_MAX} characters",
             )
-    elif post_type in (PostType.TEXT, PostType.TRANSCRIPT):
-        if not content or not content.strip():
-            raise ValueError(f"{post_type.value} post requires content")
+    elif post_type in (PostType.TEXT, PostType.TRANSCRIPT) and (
+        not content or not content.strip()
+    ):
+        raise ValueError(f"{post_type.value} post requires content")
     # Non-image post types must not carry ``image_urls`` — keeps the
     # column meaning unambiguous on the read side.
     if post_type is not PostType.IMAGE and image_urls:

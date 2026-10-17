@@ -11,7 +11,7 @@ Verifies that:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 from socialhome.domain.child_protection import (
@@ -35,7 +35,7 @@ def _event(user_id: str = "u1") -> UserProfileUpdated:
         bio="updated",
         picture_hash="hashv2",
         picture_webp=None,
-        occurred_at=datetime(2026, 5, 6, 12, tzinfo=timezone.utc),
+        occurred_at=datetime(2026, 5, 6, 12, tzinfo=UTC),
     )
 
 

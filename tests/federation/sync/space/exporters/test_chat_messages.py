@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from socialhome.domain.conversation import (
     Conversation,
@@ -12,15 +12,18 @@ from socialhome.domain.conversation import (
     SystemChatScope,
 )
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
-from socialhome.federation.sync.space.exporter import ALLOWED_RESOURCES
-from socialhome.federation.sync.space.exporter import REMOVAL_RESOURCES, RESOURCE_ORDER
+from socialhome.federation.sync.space.exporter import (
+    ALLOWED_RESOURCES,
+    REMOVAL_RESOURCES,
+    RESOURCE_ORDER,
+)
 from socialhome.federation.sync.space.exporters import (
     ChatMessagesDeletedExporter,
     ChatMessagesExporter,
 )
 from socialhome.federation.sync.space.window import SYNC_PAGE_SIZE
 
-_AT = datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
+_AT = datetime(2026, 6, 1, 10, 0, tzinfo=UTC)
 _SPACE = Space(
     id="sp-1",
     name="S",
@@ -247,7 +250,7 @@ async def test_a_space_with_retention_streams_its_window():
     await ChatMessagesDeletedExporter(convos, _Spaces(kept)).list_records("sp-1")  # type: ignore[arg-type]
     cutoffs = [c for _, c, _, _ in convos.asked]
     assert len(cutoffs) == 2 and all(c is not None for c in cutoffs)
-    expected = datetime.now(timezone.utc).replace(tzinfo=None)
+    expected = datetime.now(UTC).replace(tzinfo=None)
     for c in cutoffs:
         age = expected - datetime.fromisoformat(c)
         assert 6.99 < age.total_seconds() / 86400 < 7.01

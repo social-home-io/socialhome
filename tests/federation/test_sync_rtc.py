@@ -11,7 +11,6 @@ from socialhome.federation.sync_rtc import (
     SyncRtcSession,
 )
 
-
 # ─── Constants ────────────────────────────────────────────────────────────
 
 

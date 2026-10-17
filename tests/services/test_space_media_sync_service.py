@@ -21,7 +21,6 @@ from socialhome.services.space_media_sync_service import (
     SpaceMediaSyncService,
 )
 
-
 #: Successful-delivery shape the scheduler treats as a green ship.
 _OK = DeliveryResult(instance_id="peer-x", ok=True)
 

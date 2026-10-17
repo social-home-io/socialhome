@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from .errors import CodedError
 from .federation_capabilities import FederationCapability
 
-
 # ─── Event type vocabulary (§24.11) ───────────────────────────────────────
 
 
@@ -1472,7 +1471,7 @@ def is_relay_only(
     return last_relay_accepted_at > last_reachable_at
 
 
-def gfs_relay_available(instance: "RemoteInstance") -> bool:
+def gfs_relay_available(instance: RemoteInstance) -> bool:
     """Whether the GFS fallback can work with this peer at all.
 
     Only a confirmed, directly paired household (``source = manual``) at
@@ -1500,7 +1499,7 @@ PENDING_KIND_REQUEST: str = "request"
 PENDING_KIND_APPROVAL: str = "approval"
 
 
-def pending_kind(instance: "RemoteInstance") -> str | None:
+def pending_kind(instance: RemoteInstance) -> str | None:
     """Which handshake a pending ``remote_instances`` row is, or ``None``
     when it is not pending. Pure, no I/O.
 

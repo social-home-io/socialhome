@@ -32,7 +32,7 @@ What is pinned here:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -92,8 +92,8 @@ from socialhome.services.gfs_member_publish_service import (
     parse_item_plaintext,
 )
 from socialhome.services.space_crypto_service import SpaceContentEncryption
-from socialhome.services.space_public_inbound import SpacePublicInbound
 from socialhome.services.space_public_author import build_signed_author_inner
+from socialhome.services.space_public_inbound import SpacePublicInbound
 from socialhome.services.space_public_outbound import SpacePublicOutbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 
@@ -337,7 +337,7 @@ def _host_post(world, post_id: str = "post-host-1") -> Post:
         author=world.host_user,
         type=PostType.TEXT,
         content="short",
-        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
     )
 
 
@@ -399,7 +399,7 @@ async def test_a_comment_removal_reaches_the_follower(world):
             author=world.member_user,
             type=CommentType.TEXT,
             content="a comment",
-            created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 10, tzinfo=UTC),
         ),
         space_id=SPACE_ID,
     )
@@ -454,7 +454,7 @@ async def test_a_comment_removal_that_overtakes_its_post_still_removes(world):
             author=world.member_user,
             type=CommentType.TEXT,
             content="back?",
-            created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 10, tzinfo=UTC),
         ),
         space_id=SPACE_ID,
     )
@@ -548,7 +548,7 @@ def _queued_post(world) -> Post:
         author=world.member_user,
         type=PostType.TEXT,
         content=POST_TEXT,
-        created_at=datetime(2026, 6, 11, 9, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 11, 9, 0, tzinfo=UTC),
     )
 
 
@@ -626,8 +626,8 @@ async def test_an_unapproved_or_rejected_post_never_reaches_the_gfs(world):
                 submitted_by=world.member_user,
                 payload={"post_id": post.id, "content": POST_TEXT},
                 current_snapshot=None,
-                submitted_at=datetime(2026, 6, 11, tzinfo=timezone.utc),
-                expires_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+                submitted_at=datetime(2026, 6, 11, tzinfo=UTC),
+                expires_at=datetime(2026, 6, 18, tzinfo=UTC),
             )
         )
     )

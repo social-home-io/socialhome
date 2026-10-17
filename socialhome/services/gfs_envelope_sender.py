@@ -45,7 +45,6 @@ redeem immediately with a reason a human can act on.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -53,8 +52,8 @@ from urllib.parse import urlparse
 import aiohttp
 
 from ..domain.federation import GfsConnection
-from ..federation.invite_bootstrap import EnvelopeRelayThrottled
 from ..domain.space import SpacePermissionError
+from ..federation.invite_bootstrap import EnvelopeRelayThrottled
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from .gfs_connection_service import GfsConnectionService
 
@@ -179,7 +178,7 @@ class GfsEnvelopeSender:
                     resp.status,
                 )
                 return False
-        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+        except (TimeoutError, aiohttp.ClientError, RuntimeError) as exc:
             log.info(
                 "gfs.envelope: could not reach %r (%s): %s",
                 conn.display_name,
@@ -219,10 +218,10 @@ class GfsEnvelopeSender:
 
 
 __all__ = [
-    "EnvelopeRelayThrottled",
-    "EnvelopeRelayUnavailable",
     "GFS_ENVELOPE_PATH",
     "GFS_ENVELOPE_TIMEOUT_S",
+    "EnvelopeRelayThrottled",
+    "EnvelopeRelayUnavailable",
     "GfsEnvelopeSender",
     "normalize_gfs_base",
 ]

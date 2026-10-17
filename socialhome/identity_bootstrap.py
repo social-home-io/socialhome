@@ -23,7 +23,7 @@ standalone mode too.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .crypto import (
     b64url_encode,
@@ -53,14 +53,14 @@ class IdentityMaterial:
     """
 
     __slots__ = (
-        "identity_seed",
         "identity_public_key",
+        "identity_seed",
         "instance_id",
-        "pq_seed",
-        "pq_public_key",
         "keywrap_private_key",
         "keywrap_public_key",
         "keywrap_sig",
+        "pq_public_key",
+        "pq_seed",
     )
 
     def __init__(
@@ -228,7 +228,7 @@ async def ensure_instance_identity(
             keywrap.public_key.hex(),
             keywrap_sig,
             routing_secret,
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(UTC).isoformat(),
         ),
     )
     log.info(

@@ -193,8 +193,10 @@ def test_a_list_tombstone_stamps_the_list_and_cascades_to_its_tasks(conn):
     [
         "UPDATE space_pages SET content='new body', seq=1 WHERE id='pg'",
         "UPDATE space_pages SET title='Renamed' WHERE id='pg'",
-        "UPDATE space_pages SET deleted_at=datetime('now'), title='', content=''"
-        " WHERE id='pg'",
+        (
+            "UPDATE space_pages SET deleted_at=datetime('now'), title='', content=''"
+            " WHERE id='pg'"
+        ),
     ],
 )
 def test_a_page_edit_and_tombstone_stamp(conn, sql):
@@ -248,12 +250,16 @@ def test_an_idempotent_reapply_and_bookkeeping_stamp_nothing(conn):
 def test_a_space_page_snapshot_touches_its_page(conn):
     stamps = [_seq(conn, "space_pages", "pg")]
     for sql in (
-        "INSERT INTO space_page_snapshots(page_id, space_id, snapshot_at, body,"
-        " snapshot_by, side, conflict) VALUES('pg','sp','t1','b','u','theirs',1)",
+        (
+            "INSERT INTO space_page_snapshots(page_id, space_id, snapshot_at, body,"
+            " snapshot_by, side, conflict) VALUES('pg','sp','t1','b','u','theirs',1)"
+        ),
         "UPDATE space_page_snapshots SET conflict=0 WHERE page_id='pg'",
         "DELETE FROM space_page_snapshots WHERE page_id='pg'",
-        "INSERT INTO space_page_snapshots(page_id, space_id, snapshot_at, body,"
-        " snapshot_by, side) VALUES('pg','sp','t2','b','u','base')",
+        (
+            "INSERT INTO space_page_snapshots(page_id, space_id, snapshot_at, body,"
+            " snapshot_by, side) VALUES('pg','sp','t2','b','u','base')"
+        ),
     ):
         conn.execute(sql)
         stamps.append(_seq(conn, "space_pages", "pg"))

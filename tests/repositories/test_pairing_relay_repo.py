@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -34,7 +34,7 @@ async def env(tmp_dir):
 
 
 async def test_save_get_roundtrip(env):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await env.repo.save(
         request_id="r-1",
         from_instance="peer-a",
@@ -51,7 +51,7 @@ async def test_save_get_roundtrip(env):
 
 
 async def test_list_pending_excludes_non_pending(env):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await env.repo.save(
         request_id="r-1",
         from_instance="a",
@@ -72,7 +72,7 @@ async def test_list_pending_excludes_non_pending(env):
 
 
 async def test_set_status_transitions(env):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await env.repo.save(
         request_id="r-1",
         from_instance="a",
@@ -85,7 +85,7 @@ async def test_set_status_transitions(env):
 
 
 async def test_count_pending(env):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for i in range(3):
         await env.repo.save(
             request_id=f"r-{i}",
@@ -100,7 +100,7 @@ async def test_count_pending(env):
 
 
 async def test_delete_oldest_pending_keeps_most_recent(env):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for i in range(5):
         await env.repo.save(
             request_id=f"r-{i}",
@@ -116,7 +116,7 @@ async def test_delete_oldest_pending_keeps_most_recent(env):
 
 
 async def test_delete_older_than_filters_by_status_and_age(env):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     async def _seed(rid, status, dt):
         await env.db.enqueue(

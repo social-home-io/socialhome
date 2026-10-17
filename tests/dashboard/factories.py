@@ -10,12 +10,6 @@ from zoneinfo import ZoneInfo
 
 from PIL import Image
 
-from socialhome.services.map_tile_service import (
-    Tile,
-    TileCoordinateError,
-    TileUnavailableError,
-)
-
 from socialhome.domain.household_dashboard import (
     MENTION_HERE,
     MENTION_PERSON,
@@ -31,6 +25,11 @@ from socialhome.domain.household_dashboard import (
     DashboardZone,
     HomeSnapshot,
     PersonSnapshot,
+)
+from socialhome.services.map_tile_service import (
+    Tile,
+    TileCoordinateError,
+    TileUnavailableError,
 )
 
 BERLIN = ZoneInfo("Europe/Berlin")

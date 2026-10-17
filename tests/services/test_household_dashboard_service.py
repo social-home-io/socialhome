@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 import pytest
@@ -53,11 +53,11 @@ from socialhome.repositories.calendar_repo import _expand_window
 from socialhome.repositories.cp_repo import SqliteCpRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import household_dashboard_service as dashboard_module
+from socialhome.services.child_protection_service import ChildProtectionService
 from socialhome.services.household_dashboard_service import (
     MAX_STICKIES,
     HouseholdDashboardService,
 )
-from socialhome.services.child_protection_service import ChildProtectionService
 from socialhome.services.timetable_service import TimetableService
 from socialhome.utils.timezones import local_instant, zone_of
 
@@ -462,7 +462,7 @@ def entry(eid: str, weekday: int, start: time, end: time, title, **kw):
 
 
 def ben_timetable() -> Timetable:
-    stamp = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    stamp = datetime(2026, 9, 1, tzinfo=UTC)
     return Timetable(
         id="tt-ben",
         name="5b",
@@ -503,7 +503,7 @@ def ben_timetable() -> Timetable:
 
 
 def carl_timetable() -> Timetable:
-    stamp = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    stamp = datetime(2026, 9, 1, tzinfo=UTC)
     return Timetable(
         id="tt-carl",
         name="Uni",
@@ -518,7 +518,7 @@ def carl_timetable() -> Timetable:
 
 def music_timetable() -> Timetable:
     """A second plan Ben is assigned to (only some tests use it)."""
-    stamp = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    stamp = datetime(2026, 9, 1, tzinfo=UTC)
     return Timetable(
         id="tt-music",
         name="Music school",
@@ -881,7 +881,7 @@ async def test_home_tz_boundary_uses_household_date():
         ),
     ]
     now = at(MONDAY, 23, 30, tz=ny)
-    assert now.astimezone(timezone.utc).date() == TUESDAY  # UTC is already tomorrow
+    assert now.astimezone(UTC).date() == TUESDAY  # UTC is already tomorrow
     snap = await h.home(now)
     assert snap.today == MONDAY
     assert titles(snap.events_today) == ["Tonight"]
@@ -2081,7 +2081,7 @@ async def test_mentions_are_off_with_the_messages_and_never_read():
 async def test_mentions_on_home_and_their_acknowledgement_state():
     h = Harness(settings=messages_on())
     now = at(MONDAY, 15, 30)
-    ago = lambda m: now - timedelta(minutes=m)  # noqa: E731
+    ago = lambda m: now - timedelta(minutes=m)
     h.chat.mention_rows = [
         glance("here", "u-anna", ago(5), here=True, content=" @here dinner! "),
         # The sender's own ✅ doesn't count for @here; anyone else's does.

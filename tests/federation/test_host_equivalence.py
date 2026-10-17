@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -65,7 +65,7 @@ async def env(db):
 
 def _current_statement(*, age_ms: int = 0, key: str = "aa" * 32, epoch: int = 0):
     """A stored (already verified) owner statement for the pinned key."""
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now = int(datetime.now(UTC).timestamp() * 1000)
     return json.dumps(
         {"authority_pk": key, "authority_key_epoch": epoch, "issued_at": now - age_ms}
     )
@@ -107,7 +107,7 @@ async def test_a_demoted_or_removed_admin_seat_ends_the_trust(env):
 
 
 async def test_no_marker_no_trust(env, db):
-    spaces, seats = env
+    _spaces, _seats = env
     await db.enqueue(
         "UPDATE spaces SET invited_by_instance=NULL, invited_by_epoch=NULL"
         " WHERE id='sp-1'"

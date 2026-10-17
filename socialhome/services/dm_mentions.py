@@ -63,13 +63,13 @@ def _names(*names: str | None) -> tuple[str, ...]:
 class DmMentionResolver:
     """Conversation-seat-scoped mention resolution. Stateless; cheap to build."""
 
-    __slots__ = ("_convos", "_users", "_system_chats")
+    __slots__ = ("_convos", "_system_chats", "_users")
 
     def __init__(
         self,
         conversation_repo: AbstractConversationRepo,
         user_repo: AbstractUserRepo,
-        system_chats: "SystemChatPolicy | None" = None,
+        system_chats: SystemChatPolicy | None = None,
     ) -> None:
         self._convos = conversation_repo
         self._users = user_repo
@@ -200,6 +200,7 @@ class DmMentionResolver:
                 "mention resolution failed for conversation %s: %s",
                 conversation_id,
                 exc,
+                exc_info=True,
             )
             return ()
         return out
@@ -216,7 +217,10 @@ class DmMentionResolver:
             parsed = await self._parse(conversation_id, texts)
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(
-                "mention count failed for conversation %s: %s", conversation_id, exc
+                "mention count failed for conversation %s: %s",
+                conversation_id,
+                exc,
+                exc_info=True,
             )
             return 0
         return sum(1 for ms in parsed if any(m.user_id == user_id for m in ms))
@@ -246,7 +250,10 @@ class DmMentionResolver:
             old, new = await self._parse(conversation_id, [before or "", after])
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(
-                "mention diff failed for conversation %s: %s", conversation_id, exc
+                "mention diff failed for conversation %s: %s",
+                conversation_id,
+                exc,
+                exc_info=True,
             )
             return ()
         return mentions_added(old, new)

@@ -3,13 +3,16 @@ periodic session may stream only the changed rows, and when it must not."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from socialhome.domain.conversation import ConversationMessage, SystemChatScope
+from socialhome.domain.page import Page
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceSyncWatermark
+from socialhome.domain.task import Task, TaskList, TaskStatus
+from socialhome.domain.timetable import Timetable
 from socialhome.federation.sync.space.exporter import IncrementalExporter
 from socialhome.federation.sync.space.exporters import (
     BazaarExporter,
@@ -22,12 +25,12 @@ from socialhome.federation.sync.space.exporters import (
     GalleryAlbumsDeletedExporter,
     GalleryExporter,
     GalleryItemsDeletedExporter,
+    PagesDeletedExporter,
+    PagesExporter,
     PollsExporter,
     PostsDeletedExporter,
     PostsExporter,
     SchedulesExporter,
-    PagesDeletedExporter,
-    PagesExporter,
     StickiesDeletedExporter,
     StickiesExporter,
     TaskListsDeletedExporter,
@@ -39,12 +42,6 @@ from socialhome.federation.sync.space.exporters import (
     ZonesDeletedExporter,
     ZonesExporter,
 )
-from socialhome.domain.page import Page
-from socialhome.domain.task import Task, TaskList, TaskStatus
-from socialhome.domain.timetable import Timetable
-from socialhome.repositories.page_repo import SqlitePageRepo
-from socialhome.repositories.task_repo import SqliteSpaceTaskRepo
-from socialhome.repositories.timetable_repo import SqliteSpaceTimetableRepo
 from socialhome.federation.sync.space.watermark import (
     FULL_RESYNC_INTERVAL_S,
     SYNC_SHAPE_VERSION,
@@ -57,13 +54,16 @@ from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
 from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.repositories.page_repo import SqlitePageRepo
 from socialhome.repositories.space_poll_repo import SqliteSpacePollRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.space_zone_repo import SqliteSpaceZoneRepo
 from socialhome.repositories.sticky_repo import SqliteStickyRepo
+from socialhome.repositories.task_repo import SqliteSpaceTaskRepo
+from socialhome.repositories.timetable_repo import SqliteSpaceTimetableRepo
 
-NOW = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
 
 
 class _Repo:
@@ -248,7 +248,7 @@ async def _covered_record_keys(db) -> dict[str, list[str]]:
     convos = SqliteConversationRepo(db)
     spaces = SqliteSpaceRepo(db)
     windows = SyncWindows(spaces)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for pid in ("p-live", "p-gone"):
         await posts.save(
             "sp",

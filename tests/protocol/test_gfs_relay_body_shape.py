@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import orjson
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from socialhome.crypto import (
     derive_user_id,
@@ -44,13 +45,12 @@ from socialhome.federation.gfs_relay_transport import (
     RELAY_SIZE_BUCKETS,
     GfsRelayTransport,
 )
-from socialhome.services.space_public_author import build_signed_author_inner
 from socialhome.federation.keywrap_seal import open_keywrap
 from socialhome.global_server.envelope_relay import (
     ENVELOPE_MAX_BODY_BYTES,
     SEALED_KEYS,
 )
-
+from socialhome.services.space_public_author import build_signed_author_inner
 
 pytestmark = pytest.mark.security
 
@@ -142,7 +142,7 @@ async def test_only_the_addressed_household_can_open_the_relay_body():
     )
     sealed = relay.bodies[0]["sealed"]
 
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         open_keywrap(sealed=sealed, recipient_keywrap_priv=other.private_key)
 
     plain = orjson.loads(
@@ -232,7 +232,7 @@ async def test_a_moderation_submission_and_a_plain_write_look_the_same():
     identity = generate_identity_keypair()
     encoder = FederationEncoder(identity.private_key)
     author = derive_user_id(identity.public_key, "anna")
-    created = datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc)
+    created = datetime(2026, 9, 18, 10, 0, tzinfo=UTC)
     post = Post(
         id="p" * 32,
         author=author,

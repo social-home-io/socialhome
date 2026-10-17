@@ -32,10 +32,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..domain.calendar import coerce_capacity
+from ..domain.errors import WrongTypeError
 from ..domain.federation import FederationEventType
 from ..domain.link_preview import link_preview_from_dict, link_preview_to_dict
 from ..domain.page_version import is_version_hash, version_hash
@@ -344,13 +345,13 @@ def _attachment(p: Mapping, kind: str) -> Mapping:
     attachments = p.get("attachments")
     value = attachments.get(kind) if isinstance(attachments, Mapping) else None
     if not isinstance(value, Mapping):
-        raise ValueError(f"the item has no {kind}")
+        raise WrongTypeError(f"the item has no {kind}")
     return value
 
 
 def _slots(raw: object) -> list[tuple[str, str | None, str | None]]:
     if not isinstance(raw, list):
-        raise ValueError("slots must be a list")
+        raise WrongTypeError("slots must be a list")
     return [
         (str(s["slot_date"]), s.get("start_time") or None, s.get("end_time") or None)
         for s in raw
@@ -411,12 +412,12 @@ def _ends_within(raw: object, duration_days: object) -> bool:
     if end is None:
         return False
     if end.tzinfo is None:
-        end = end.replace(tzinfo=timezone.utc)
+        end = end.replace(tzinfo=UTC)
     try:
         days = max(1, int(duration_days) if isinstance(duration_days, int | str) else 7)
     except TypeError, ValueError:
         return False
-    return end <= datetime.now(timezone.utc) + timedelta(days=days, hours=1)
+    return end <= datetime.now(UTC) + timedelta(days=days, hours=1)
 
 
 # Pages.

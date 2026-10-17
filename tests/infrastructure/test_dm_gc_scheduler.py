@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -43,7 +43,7 @@ async def env(tmp_dir):
 
 
 async def _make_dm_with_members(env, *, conv_id: str, members: list[str]) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     conv = Conversation(
         id=conv_id,
         type=ConversationType.DM if len(members) == 2 else ConversationType.GROUP_DM,

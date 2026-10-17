@@ -10,7 +10,6 @@ import pytest
 from socialhome.global_server import ws_registry as ws_registry_mod
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 
-
 # ── Fakes ──────────────────────────────────────────────────────────────────────
 
 

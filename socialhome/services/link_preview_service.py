@@ -118,23 +118,23 @@ class LinkPreviewService:
     """Fetch, cache and rate-limit link previews (see the module docstring)."""
 
     __slots__ = (
+        "_cache",
+        "_clock",
         "_fetcher",
         "_images",
+        "_inflight",
+        "_limiter",
         "_media_dir",
         "_preferences",
-        "_limiter",
-        "_clock",
-        "_cache",
-        "_inflight",
     )
 
     def __init__(
         self,
         *,
         fetcher: OutboundFetcher,
-        image_processor: "ImageProcessor",
+        image_processor: ImageProcessor,
         media_dir: pathlib.Path,
-        preferences: "PreferencesService | None" = None,
+        preferences: PreferencesService | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._fetcher = fetcher
@@ -180,7 +180,7 @@ class LinkPreviewService:
             task.add_done_callback(self._forget_inflight)
         return await asyncio.shield(task)
 
-    def _forget_inflight(self, task: "asyncio.Task[LinkPreview | None]") -> None:
+    def _forget_inflight(self, task: asyncio.Task[LinkPreview | None]) -> None:
         for key, pending in list(self._inflight.items()):
             if pending is task:
                 del self._inflight[key]

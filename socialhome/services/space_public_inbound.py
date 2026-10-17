@@ -83,29 +83,28 @@ from ..authority_sig import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
+from ..crypto import derive_instance_id
 from ..domain.events import PostEdited, SpacePostCreated
-from ..domain.link_preview import card_survives_edit
 from ..domain.gfs_member_publish import (
     SPACE_ITEM_EVENT_TYPE,
     InvalidMemberPublish,
     SpaceItemFrame,
 )
+from ..domain.link_preview import card_survives_edit
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
-from ..crypto import derive_instance_id
 from ..domain.space import SpaceRole
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
     ITEM_TYPE_POST_EDIT,
     POST_SHAPED_ITEM_TYPES,
+    AuthorityRemoval,
     item_stamp,
     required_scope,
     stamp_to_db,
-    AuthorityRemoval,
 )
 from ..domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
-from ..writer_cert import verify_writer_users
 from ..federation.pending_parent_buffer import (
     AwaitingParent,
     PendingParentBuffer,
@@ -114,6 +113,7 @@ from ..federation.pending_parent_buffer import (
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
+from ..writer_cert import verify_writer_users
 from .gfs_member_publish_service import parse_item_plaintext
 from .inbound_media_store import local_media_ref, local_media_refs
 from .link_preview_service import wire_link_preview
@@ -133,9 +133,9 @@ from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 if TYPE_CHECKING:
     from ..domain.space import Space
     from ..federation.space_authorship import SpaceAuthorship
-    from .space_authority_pin import AuthorityPinRefresher
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
+    from .space_authority_pin import AuthorityPinRefresher
     from .space_crypto_service import SpaceContentEncryption
     from .space_mentions import SpaceMentionResolver
 
@@ -146,27 +146,27 @@ class SpacePublicInbound:
     """GFS-relay → local-persist consumer for public/global space posts."""
 
     __slots__ = (
-        "_bus",
-        "_spaces",
-        "_crypto",
-        "_posts",
-        "_own_instance_id",
-        "_mentions",
-        "_pin_refresher",
-        "_writer_certs",
         "_authorship",
+        "_bus",
+        "_crypto",
         "_items",
+        "_mentions",
+        "_own_instance_id",
         "_pending_parents",
+        "_pin_refresher",
+        "_posts",
+        "_spaces",
+        "_writer_certs",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        space_repo: "AbstractSpaceRepo",
-        space_crypto: "SpaceContentEncryption",
-        space_post_repo: "AbstractSpacePostRepo",
-        mention_resolver: "SpaceMentionResolver | None" = None,
+        space_repo: AbstractSpaceRepo,
+        space_crypto: SpaceContentEncryption,
+        space_post_repo: AbstractSpacePostRepo,
+        mention_resolver: SpaceMentionResolver | None = None,
     ) -> None:
         self._bus = bus
         self._spaces = space_repo
@@ -176,14 +176,14 @@ class SpacePublicInbound:
         #: Resolves @-mentions in the decrypted relayed post against this
         #: household's view of the space's members. ``None`` → no mentions.
         self._mentions = mention_resolver
-        self._pin_refresher: "AuthorityPinRefresher | None" = None
+        self._pin_refresher: AuthorityPinRefresher | None = None
         #: v_49 — the writer-cert service. Host-signed frames (all of them
         #: today) skip its epoch-freshness gate; member-authorized items
         #: (PR 2) will run it.
         self._writer_certs: SpaceWriterCertService | None = None
         #: v_49 — a member household's own view of the access levels and the
         #: roster, run on member-published items as defence in depth.
-        self._authorship: "SpaceAuthorship | None" = None
+        self._authorship: SpaceAuthorship | None = None
         #: v_49 — applies member-published comments, deletes and reactions.
         self._items = SpaceItemInbound(
             bus=bus,
@@ -199,7 +199,7 @@ class SpacePublicInbound:
         """Wire the parent-wait buffer (shared with the federated path)."""
         self._pending_parents = buffer
 
-    def attach_authorship(self, authorship: "SpaceAuthorship") -> None:
+    def attach_authorship(self, authorship: SpaceAuthorship) -> None:
         """Wire the access-level / seat check for ``space_item``."""
         self._authorship = authorship
 
@@ -207,7 +207,7 @@ class SpacePublicInbound:
         """Wire the v_49 writer-cert service."""
         self._writer_certs = writer_certs
 
-    def attach_pin_refresher(self, refresher: "AuthorityPinRefresher") -> None:
+    def attach_pin_refresher(self, refresher: AuthorityPinRefresher) -> None:
         """Wire the lazy pin heal (v_44): on an authority failure the
         subscriber re-fetches the GFS listing's owner cert once."""
         self._pin_refresher = refresher
@@ -468,7 +468,7 @@ class SpacePublicInbound:
 
     # ── Authority-only notices (host relay) ──────────────────────────────
 
-    async def _on_authority_inner(self, space: "Space", inner: dict) -> None:
+    async def _on_authority_inner(self, space: Space, inner: dict) -> None:
         """An inner with no author signature, under a verified authority
         signature: a removal notice (see
         :mod:`~socialhome.services.space_public_authority`). Anything else is

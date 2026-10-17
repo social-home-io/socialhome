@@ -31,7 +31,7 @@ class PersonSummaryService(ProtectionGateMixin):
     way, comes back by name only — no picture.
     """
 
-    __slots__ = ("_users", "_federation", "_aliases", "_child_protection")
+    __slots__ = ("_aliases", "_child_protection", "_federation", "_users")
 
     def __init__(
         self,

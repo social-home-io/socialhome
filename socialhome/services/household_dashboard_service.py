@@ -72,7 +72,7 @@ import hashlib
 import logging
 from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from ..domain import timetable as td
 from ..domain.calendar import Calendar, CalendarEvent, all_day_covers
@@ -319,19 +319,19 @@ class HouseholdDashboardService:
     """Build the household dashboard's snapshots (read-only)."""
 
     __slots__ = (
-        "_users",
-        "_presence",
-        "_zones",
+        "_acks",
         "_calendar",
-        "_tasks",
-        "_shopping",
-        "_timetables",
-        "_stickies",
-        "_preferences",
-        "_settings",
         "_chat",
         "_cp",
-        "_acks",
+        "_preferences",
+        "_presence",
+        "_settings",
+        "_shopping",
+        "_stickies",
+        "_tasks",
+        "_timetables",
+        "_users",
+        "_zones",
     )
 
     def __init__(
@@ -574,9 +574,7 @@ class HouseholdDashboardService:
         members = tuple(await _safe("users", self._users.list_active(), list[User]()))
         hidden = frozenset(uid for uid, s in settings.people if not s.show)
         shown = tuple(u for u in members if u.user_id not in hidden)
-        local_now = as_utc(now or datetime.now(timezone.utc)).astimezone(
-            zone_of(prefs.tz)
-        )
+        local_now = as_utc(now or datetime.now(UTC)).astimezone(zone_of(prefs.tz))
         sections = frozenset(
             {s for s in _TOGGLED_SECTIONS if prefs.is_enabled(s)} | {SECTION_SHOPPING}
         )

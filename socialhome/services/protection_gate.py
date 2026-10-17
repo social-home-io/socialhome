@@ -50,10 +50,10 @@ class ProtectionGateMixin:
 
     __slots__ = ()
 
-    _child_protection: "ChildProtectionService | None"
+    _child_protection: ChildProtectionService | None
 
     def attach_child_protection(
-        self, child_protection_service: "ChildProtectionService"
+        self, child_protection_service: ChildProtectionService
     ) -> None:
         """Wire :class:`ChildProtectionService` for the §CP hooks."""
         # The slot lives on the consumer (see module docstring); mypy only

@@ -45,19 +45,19 @@ EPOCH = "1970-01-01T00:00:00+00:00"
 class ResyncInboundHandlers:
     """Registers :data:`FederationEventType.INSTANCE_RESYNC_REQUEST`."""
 
-    __slots__ = ("_federation", "_capabilities_outbound", "_space_resume")
+    __slots__ = ("_capabilities_outbound", "_federation", "_space_resume")
 
     def __init__(
         self,
         *,
-        capabilities_outbound: "CapabilitiesOutbound",
-        space_resume: "SpaceSyncResumeProvider",
+        capabilities_outbound: CapabilitiesOutbound,
+        space_resume: SpaceSyncResumeProvider,
     ) -> None:
         self._capabilities_outbound = capabilities_outbound
         self._space_resume = space_resume
-        self._federation: "FederationService | None" = None
+        self._federation: FederationService | None = None
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         """Register the resync handler on the service's event registry."""
         self._federation = federation_service
         federation_service._event_registry.register(
@@ -65,7 +65,7 @@ class ResyncInboundHandlers:
             self._on_resync_request,
         )
 
-    async def _on_resync_request(self, event: "FederationEvent") -> None:
+    async def _on_resync_request(self, event: FederationEvent) -> None:
         scope = str(event.payload.get("scope") or "")
         requester = event.from_instance
         if scope == "capabilities":

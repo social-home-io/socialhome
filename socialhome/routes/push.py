@@ -21,7 +21,7 @@ class PushVapidKeyView(BaseView):
     """``GET /api/push/vapid_public_key``."""
 
     async def get(self) -> web.Response:
-        self.user
+        self.require_user()
         svc = self.svc(K.push_service_key)
         return self._json({"public_key": svc.vapid_public_key})
 

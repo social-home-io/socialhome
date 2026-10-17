@@ -26,9 +26,9 @@ from socialhome.writer_cert import (
     UnsupportedWriterCertSuite,
     UnsupportedWriterUsersSuite,
     bind_writer_users,
-    verify_writer_users,
     sign_writer_cert,
     verify_writer_cert,
+    verify_writer_users,
     writer_cert_signing_bytes,
 )
 
@@ -38,25 +38,25 @@ AUTHOR_PK = ed25519_public_key(os.urandom(32))
 
 
 def _issue(**over) -> WriterCert:
-    kw = dict(
-        space_seed=SPACE_SEED,
-        space_id="sp-1",
-        epoch=4,
-        instance_pk=AUTHOR_PK,
-        scope=WRITER_SCOPE_WRITE,
-    )
+    kw = {
+        "space_seed": SPACE_SEED,
+        "space_id": "sp-1",
+        "epoch": 4,
+        "instance_pk": AUTHOR_PK,
+        "scope": WRITER_SCOPE_WRITE,
+    }
     kw.update(over)
     return sign_writer_cert(**kw)
 
 
 def _verify(cert, **over) -> None:
-    kw = dict(
-        space_pubkey=SPACE_PK,
-        space_id="sp-1",
-        epoch=4,
-        author_pk=AUTHOR_PK,
-        required_scope=WRITER_SCOPE_WRITE,
-    )
+    kw = {
+        "space_pubkey": SPACE_PK,
+        "space_id": "sp-1",
+        "epoch": 4,
+        "author_pk": AUTHOR_PK,
+        "required_scope": WRITER_SCOPE_WRITE,
+    }
     kw.update(over)
     verify_writer_cert(cert, **kw)
 

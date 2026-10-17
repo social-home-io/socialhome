@@ -46,20 +46,20 @@ class DmHistoryScheduler:
 
     __slots__ = (
         "_bus",
-        "_federation",
         "_conversation_repo",
-        "_queue",
-        "_own_instance_id",
+        "_federation",
         "_last_request_at",
+        "_own_instance_id",
+        "_queue",
     )
 
     def __init__(
         self,
         *,
-        bus: "EventBus",
-        federation: "FederationService",
-        conversation_repo: "AbstractConversationRepo",
-        queue: "ReconnectSyncQueue",
+        bus: EventBus,
+        federation: FederationService,
+        conversation_repo: AbstractConversationRepo,
+        queue: ReconnectSyncQueue,
         own_instance_id: str,
     ) -> None:
         self._bus = bus
@@ -111,6 +111,7 @@ class DmHistoryScheduler:
                 "dm history: failed to list conversations for %s: %s",
                 instance_id,
                 exc,
+                exc_info=True,
             )
             return 0
 

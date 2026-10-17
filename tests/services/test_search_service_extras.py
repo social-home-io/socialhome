@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -40,7 +40,7 @@ def _post(pid: str, content: str):
         author="u1",
         type=PostType.TEXT,
         content=content,
-        created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 15, tzinfo=UTC),
     )
 
 
@@ -53,7 +53,7 @@ async def test_comment_added_does_not_index_separately(env):
         author="u1",
         type=CommentType.TEXT,
         content="comment-only-text",
-        created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 15, tzinfo=UTC),
     )
     await bus.publish(CommentAdded(post_id="p1", comment=comment))
     hits = await svc.search("comment-only-text")

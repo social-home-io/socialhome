@@ -26,7 +26,7 @@ import logging
 import os
 import socket
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiohttp
 import pytest
@@ -59,10 +59,10 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_member_publish_service import GfsMemberPublishService
 from socialhome.services.gfs_publish_retry import GfsPublish
-from socialhome.services.gfs_server_targets import listing_target_id
 from socialhome.services.gfs_server_selection_service import (
     GfsServerSelectionService,
 )
+from socialhome.services.gfs_server_targets import listing_target_id
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 from socialhome.writer_key import derive_writer_seed, issue_writer_key_grant
 
@@ -530,7 +530,7 @@ async def test_a_listed_private_address_we_never_joined_is_dropped(world):
         sign_gfs_server_list(
             space_id=SPACE_ID,
             servers=world["servers"]["list"],
-            issued_at=int(datetime.now(timezone.utc).timestamp() * 1000),
+            issued_at=int(datetime.now(UTC).timestamp() * 1000),
             owner_seed=world["owner"].seed,
         ),
     )

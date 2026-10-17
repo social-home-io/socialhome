@@ -11,7 +11,7 @@ bound ``?`` parameter, so there is no injection surface to allow-list.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -290,9 +290,7 @@ class SqliteAppRepo:
         # ``datetime('now')`` value (space separator) would sort below the
         # cutoff and silently drain to nothing. ``add_pending_session`` writes
         # the matching shape; keep it that way.
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
-        ).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
         rows = await self._db.fetchall(
             """SELECT * FROM app_pending_sessions
                WHERE app_id = ? AND user_id = ? AND created_at >= ?
@@ -316,9 +314,7 @@ class SqliteAppRepo:
         count at this revision) — same mechanism as
         ``federation_repo.prune_replay_cache``.
         """
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
-        ).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
         before = await self._db.fetchval(
             "SELECT COUNT(*) FROM app_pending_sessions WHERE created_at < ?",
             (cutoff,),

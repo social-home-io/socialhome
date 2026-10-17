@@ -14,10 +14,9 @@ import aiolibdatachannel as rtc
 
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.transport import (
-    _RtcPeer,
     _build_rtc_config,
+    _RtcPeer,
 )
-
 
 # ─── _build_rtc_config ──────────────────────────────────────────────────
 
@@ -136,7 +135,7 @@ async def test_peer_accept_offer_signals_answer_sdp():
 
 async def test_peer_apply_answer_mismatch_returns_false():
     """S-14: answer from the wrong peer is rejected."""
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -151,7 +150,7 @@ async def test_peer_apply_answer_mismatch_returns_false():
 
 
 async def test_peer_apply_answer_match_returns_true():
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -168,7 +167,7 @@ async def test_peer_apply_answer_when_pc_missing_is_safe():
     """After ``close()`` the pc is None — apply_answer must not crash and
     returns ``False`` (perfect-negotiation guard: no pending offer, so
     this ANSWER is stale and should be silently dropped)."""
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -181,7 +180,7 @@ async def test_peer_apply_answer_when_pc_missing_is_safe():
 
 
 async def test_peer_add_ice_candidate_empty_is_noop():
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -194,7 +193,7 @@ async def test_peer_add_ice_candidate_empty_is_noop():
 
 
 async def test_peer_add_ice_candidate_real():
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -222,7 +221,7 @@ async def test_peer_add_ice_candidate_no_pc_is_safe(monkeypatch):
     # Short timeout so the test doesn't park for 10s on the default.
     monkeypatch.setattr(transport_mod, "ICE_BUFFER_TIMEOUT_S", 0.05)
 
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -245,7 +244,7 @@ async def test_peer_add_ice_candidate_buffers_until_remote_description():
     pytest_homeassistant_custom_component plugin would flag at
     teardown).
     """
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -284,7 +283,7 @@ async def test_peer_apply_answer_releases_buffered_ice():
     answer's remote description is applied. Symmetric counterpart to
     :func:`test_peer_add_ice_candidate_buffers_until_remote_description`
     (which covers the answerer side via the bare event)."""
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -293,7 +292,7 @@ async def test_peer_apply_answer_releases_buffered_ice():
 
     applied: list[tuple[str, str]] = []
 
-    import aiolibdatachannel as _rtc  # noqa: PLC0415 — late import for stub
+    import aiolibdatachannel as _rtc
 
     class _StubPc:
         signaling_state = _rtc.SignalingState.HAVE_LOCAL_OFFER
@@ -338,7 +337,7 @@ async def test_peer_add_ice_candidate_after_close_is_silent(monkeypatch):
 
     monkeypatch.setattr(transport_mod, "ICE_BUFFER_TIMEOUT_S", 0.05)
 
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -352,7 +351,7 @@ async def test_peer_add_ice_candidate_after_close_is_silent(monkeypatch):
 
 
 async def test_peer_send_on_closed_channel_returns_false():
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -363,7 +362,7 @@ async def test_peer_send_on_closed_channel_returns_false():
 
 
 async def test_peer_send_when_ready_writes_frame():
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -389,7 +388,7 @@ async def test_peer_send_when_ready_writes_frame():
 
 async def test_peer_send_drops_frame_when_over_hwm():
     """Frames are dropped when buffered_amount ≥ HWM."""
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -414,7 +413,7 @@ async def test_peer_send_drops_frame_when_over_hwm():
 
 
 async def test_peer_send_returns_false_on_rtc_error():
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -434,7 +433,7 @@ async def test_peer_send_returns_false_on_rtc_error():
 
 
 async def test_peer_close_cancels_tasks_and_clears_state():
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -451,7 +450,7 @@ async def test_peer_close_cancels_tasks_and_clears_state():
 async def test_peer_drain_channel_marks_open_then_closed():
     """A channel that opens and immediately closes should flip the
     peer's ``_open`` bit on, then off."""
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -493,7 +492,7 @@ async def test_peer_drain_channel_marks_open_then_closed():
 
 async def test_peer_drain_channel_handles_wait_open_failure():
     """If wait_open raises an rtc error, the loop logs and returns cleanly."""
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -583,7 +582,7 @@ async def test_peer_drain_channel_skips_malformed_frame():
 
 async def test_peer_drain_ice_handles_rtc_errors():
     """rtc errors inside the ICE iterator are swallowed + logged."""
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,
@@ -604,7 +603,7 @@ async def test_peer_drain_ice_handles_rtc_errors():
 
 async def test_peer_drain_incoming_channel_ignores_wrong_label():
     """Only channels labelled ``fed-v1`` are consumed."""
-    events, signaling = await _collect_signals()
+    _events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
         signaling=signaling,

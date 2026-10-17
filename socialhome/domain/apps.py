@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
+from .errors import WrongTypeError
+
 
 class AppError(Exception):
     """Base for app-registry domain errors."""
@@ -169,7 +171,7 @@ class AppCatalogEntry:
             raise ValueError(f"catalog entry missing fields: {missing}")
         caps = data.get("capabilities", [])
         if not isinstance(caps, list):
-            raise ValueError("catalog entry capabilities must be a list")
+            raise WrongTypeError("catalog entry capabilities must be a list")
         return cls(
             app_id=str(data["app_id"]),
             name=str(data["name"]),

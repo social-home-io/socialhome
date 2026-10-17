@@ -40,7 +40,7 @@ import asyncio
 import base64
 import logging
 import pathlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import aiofiles
@@ -54,10 +54,10 @@ from .peer_unpair_service import is_unpair_tombstone
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
-    from ..repositories.federation_repo import AbstractFederationRepo
     from ..federation.federation_service import FederationService
     from ..repositories.conversation_repo import AbstractConversationRepo
     from ..repositories.dm_media_outbox_repo import AbstractDmMediaOutboxRepo
+    from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.peer_user_visibility_repo import (
         AbstractPeerUserVisibilityRepo,
     )
@@ -119,15 +119,15 @@ class DmMediaSyncService(VisibilityMixin):
 
     __slots__ = (
         "_convos",
-        "_outbox",
         "_federation",
         "_federation_repo",
-        "_media_dir",
         "_image_proc",
-        "_video_proc",
         "_interval",
-        "_task",
+        "_media_dir",
+        "_outbox",
         "_stop",
+        "_task",
+        "_video_proc",
         "_wake",
     )
 
@@ -139,8 +139,8 @@ class DmMediaSyncService(VisibilityMixin):
         federation: FederationService | None,
         media_dir: pathlib.Path,
         interval_seconds: float = 5.0,
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
-        federation_repo: "AbstractFederationRepo | None" = None,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
+        federation_repo: AbstractFederationRepo | None = None,
     ) -> None:
         self._convos = convos
         self._outbox = outbox
@@ -166,7 +166,7 @@ class DmMediaSyncService(VisibilityMixin):
         # poll (catches rows reclaimed after a crash / retries coming due).
         self._wake = asyncio.Event()
 
-    def attach_federation(self, federation: "FederationService") -> None:
+    def attach_federation(self, federation: FederationService) -> None:
         """Wire federation after construction (breaks the boot cycle).
 
         :class:`FederationService` is built later than this service
@@ -240,6 +240,7 @@ class DmMediaSyncService(VisibilityMixin):
                     "dm-media-sync: video poster extraction failed for %s: %s",
                     media_url,
                     exc,
+                    exc_info=True,
                 )
                 return None
             data = video_frame
@@ -324,7 +325,9 @@ class DmMediaSyncService(VisibilityMixin):
                     stuck,
                 )
         except Exception as exc:  # pragma: no cover
-            log.warning("dm-media-sync: reclaim_in_flight failed: %s", exc)
+            log.warning(
+                "dm-media-sync: reclaim_in_flight failed: %s", exc, exc_info=True
+            )
         try:
             # Backstop for a crash mid-teardown: rows for a household that is
             # gone could only ever be refused.
@@ -335,7 +338,7 @@ class DmMediaSyncService(VisibilityMixin):
                     orphaned,
                 )
         except Exception as exc:  # pragma: no cover
-            log.warning("dm-media-sync: purge_orphaned failed: %s", exc)
+            log.warning("dm-media-sync: purge_orphaned failed: %s", exc, exc_info=True)
         self._stop.clear()
         self._task = asyncio.create_task(self._loop())
 
@@ -346,7 +349,7 @@ class DmMediaSyncService(VisibilityMixin):
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -364,7 +367,7 @@ class DmMediaSyncService(VisibilityMixin):
                         shipped,
                     )
             except Exception as exc:  # pragma: no cover
-                log.warning("dm-media-sync flush failed: %s", exc)
+                log.warning("dm-media-sync flush failed: %s", exc, exc_info=True)
             if self._stop.is_set():
                 break
             # Wake on a fresh enqueue (``_wake``), else fall back to the
@@ -374,7 +377,7 @@ class DmMediaSyncService(VisibilityMixin):
                     self._wake.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def flush_once(self, *, limit: int = 25) -> int:
@@ -417,6 +420,7 @@ class DmMediaSyncService(VisibilityMixin):
                     "dm-media-sync: get_message(%s) failed: %s",
                     entry.message_id,
                     exc,
+                    exc_info=True,
                 )
                 message = None
             if message is not None:
@@ -443,6 +447,7 @@ class DmMediaSyncService(VisibilityMixin):
                     entry.blob_id,
                     entry.target_instance_id,
                     exc,
+                    exc_info=True,
                 )
                 await self._reschedule_or_fail(entry, str(exc))
                 continue
@@ -458,7 +463,10 @@ class DmMediaSyncService(VisibilityMixin):
             sem = asyncio.Semaphore(PIPELINE_WINDOW)
 
             async def _send(
-                item: tuple[dict, bytes], *, tgt: str = entry.target_instance_id
+                item: tuple[dict, bytes],
+                *,
+                tgt: str = entry.target_instance_id,
+                sem: asyncio.Semaphore = sem,
             ) -> None:
                 payload, raw = item
                 async with sem:
@@ -592,7 +600,7 @@ class DmMediaSyncService(VisibilityMixin):
             base_seconds=BACKOFF_BASE_SECONDS,
             cap_seconds=BACKOFF_CAP_SECONDS,
         )
-        next_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        next_at = datetime.now(UTC) + timedelta(seconds=delay)
         await self._outbox.reschedule(
             blob_id=entry.blob_id,
             target_instance_id=entry.target_instance_id,

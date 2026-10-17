@@ -31,7 +31,7 @@ host; ``owner`` has no remote seat shape, hence n/a. The local columns
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -134,7 +134,7 @@ def _event(sender: str) -> FederationEvent:
         event_type=FederationEventType.SPACE_POST_DELETED,
         from_instance=sender,
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={},
         space_id=REMOTE_SP,
     )

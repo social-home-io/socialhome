@@ -31,7 +31,7 @@ two different consumers, one PresenceUpdated event.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -64,12 +64,12 @@ class SpaceLocationOutbound:
 
     __slots__ = (
         "_bus",
-        "_ws",
         "_federation",
-        "_spaces",
-        "_zones",
-        "_users",
         "_presence",
+        "_spaces",
+        "_users",
+        "_ws",
+        "_zones",
     )
 
     def __init__(
@@ -77,7 +77,7 @@ class SpaceLocationOutbound:
         *,
         bus: EventBus,
         ws: WebSocketManager,
-        federation_service: "FederationService",
+        federation_service: FederationService,
         space_repo: AbstractSpaceRepo,
         space_zone_repo: AbstractSpaceZoneRepo,
         user_repo: AbstractUserRepo,
@@ -203,6 +203,7 @@ class SpaceLocationOutbound:
             log.debug(
                 "space-location-outbound: list_active failed: %s",
                 exc,
+                exc_info=True,
             )
             return
         match = next(
@@ -219,7 +220,7 @@ class SpaceLocationOutbound:
             latitude=match.latitude,
             longitude=match.longitude,
             accuracy_m=match.gps_accuracy_m,
-            updated_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(UTC).isoformat(),
         )
         if payload is None:
             return
@@ -241,7 +242,9 @@ class SpaceLocationOutbound:
         try:
             members = await self._spaces.list_members(event.space_id)
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("space-location-outbound: list members failed: %s", exc)
+            log.debug(
+                "space-location-outbound: list members failed: %s", exc, exc_info=True
+            )
             return
         opted_in = {m.user_id for m in members if m.location_share_enabled}
         if not opted_in:
@@ -252,9 +255,10 @@ class SpaceLocationOutbound:
             log.debug(
                 "space-location-outbound: list_active failed: %s",
                 exc,
+                exc_info=True,
             )
             return
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         for p in presences:
             if p.user_id not in opted_in:
                 continue
@@ -323,6 +327,7 @@ class SpaceLocationOutbound:
                 "space-location-outbound: list zones failed for %s: %s",
                 space_id,
                 exc,
+                exc_info=True,
             )
             return None
         return match_zone(zones, latitude, longitude)
@@ -336,6 +341,7 @@ class SpaceLocationOutbound:
             log.debug(
                 "space-location-outbound: list local members failed: %s",
                 exc,
+                exc_info=True,
             )
             return
         await self._ws.broadcast_to_users(
@@ -359,4 +365,5 @@ class SpaceLocationOutbound:
                 "space-location-outbound: broadcast failed for space=%s: %s",
                 space_id,
                 exc,
+                exc_info=True,
             )

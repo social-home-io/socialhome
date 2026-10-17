@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -26,9 +26,9 @@ from socialhome.domain.space import (
     AccessAdminOnlyError,
     ContentAction,
     ContentQueuedForReview,
+    HostTooOldError,
     ModerationAlreadyDecidedError,
     ModerationExpiredError,
-    HostTooOldError,
     ModerationInProgressError,
     ModerationPayloadTooLargeError,
     ModerationQueueFullError,
@@ -41,13 +41,13 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.sticky_repo import SqliteStickyRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.moderation_release import current_release
 from socialhome.services.space_moderation_service import (
     MAX_PENDING_PER_SUBMITTER,
     MAX_REJECT_REASON,
     ApplyResult,
     SpaceModerationService,
 )
-from socialhome.services.moderation_release import current_release
 from socialhome.services.sticky_service import StickyModerationHandler, StickyService
 
 HOST = "inst-host"
@@ -534,7 +534,7 @@ async def test_describe_shape(env):
 
 async def test_expire_due_and_purge(env):
     item = await _queue_create(env)
-    later = datetime.now(timezone.utc) + timedelta(days=8)
+    later = datetime.now(UTC) + timedelta(days=8)
     assert await env.mod.expire_due(later) == 1
     assert (
         await env.spaces.get_moderation_item(item.id)
@@ -634,7 +634,7 @@ async def test_approve_past_expiry_expires_it_410(env):
     item = await _queue_create(env)
     await env.db.enqueue(
         "UPDATE space_moderation_queue SET expires_at=? WHERE id=?",
-        ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), item.id),
+        ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), item.id),
     )
     with pytest.raises(ModerationExpiredError):
         await env.mod.approve("sp", item.id, actor_user_id="mod")

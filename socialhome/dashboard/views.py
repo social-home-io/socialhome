@@ -51,13 +51,12 @@ from .auth import (
     KEEP_TTL_S,
     REVOKED_LOCKED,
     REVOKED_SIGNED_OUT,
-    StaleSessionError,
     THROTTLE_MAX_FAILURES,
     DashboardAuth,
+    StaleSessionError,
 )
-from .clock import household_clock, resolve_zone
 from .boards import board_base, home_board, model_fields, person_board
-from .messages import MentionCard
+from .clock import household_clock, resolve_zone
 from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
@@ -69,6 +68,7 @@ from .keys import (
     SNAPSHOTS_KEY,
     TILES_KEY,
 )
+from .messages import MentionCard
 from .policy import build_dashboard_csp
 from .presenter import (
     ColorBook,
@@ -92,7 +92,6 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "ACK_ID_MAX",
-    "ack_id",
     "AVATAR_CACHE",
     "HERE_SHOWN",
     "HOME_FRAGMENT",
@@ -101,6 +100,7 @@ __all__ = [
     "PIN_WAIT",
     "PIN_WRONG",
     "SIGNED_OUT_PATH",
+    "TILE_CACHE",
     "AckView",
     "AvatarView",
     "EnterView",
@@ -117,9 +117,9 @@ __all__ = [
     "PersonFragmentView",
     "PersonView",
     "StaticView",
-    "TILE_CACHE",
     "TileView",
     "UnlockView",
+    "ack_id",
     "clear_session_cookie",
     "cookie_secure",
     "html_response",

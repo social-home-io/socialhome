@@ -13,7 +13,7 @@ The GFS verifies the Ed25519 signature against the registered
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -23,13 +23,13 @@ from socialhome.crypto import (
     generate_identity_keypair,
     sign_ed25519,
 )
-from socialhome.global_server import create_gfs_app
-from socialhome.global_server.app_keys import (
-    gfs_fed_repo_key,
-)
 from socialhome.domain.media_constraints import (
     SPACE_IMAGE_DATA_URI_MAX_CHARS,
     SPACE_IMAGE_DATA_URI_PREFIX,
+)
+from socialhome.global_server import create_gfs_app
+from socialhome.global_server.app_keys import (
+    gfs_fed_repo_key,
 )
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.public import SPACE_PUBLISH_MAX_BODY_BYTES
@@ -68,11 +68,11 @@ async def _register_owner(
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _now_iso_offset(*, minutes: int) -> str:
-    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+    return (datetime.now(UTC) + timedelta(minutes=minutes)).isoformat()
 
 
 def _sign_publish_body(body: dict, *, seed: bytes, ts: str | None = None) -> dict:
@@ -368,7 +368,7 @@ def _sign_unpublish(
     test can sign a DIFFERENT action (domain separation) and watch the
     server reject the captured signature.
     """
-    ts = ts or datetime.now(timezone.utc).isoformat()
+    ts = ts or datetime.now(UTC).isoformat()
     canonical = json.dumps(
         {
             "action": action,
@@ -412,7 +412,7 @@ async def test_unpublish_space_unsigned_is_rejected_and_stays_listed(gfs_client)
         "/gfs/spaces/sp-unsigned/unpublish",
         json={
             "owning_instance": "owner.home",
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "signature": "",
         },
     )
@@ -460,7 +460,7 @@ async def test_unpublish_space_stale_ts_403(gfs_client):
             status="active",
         )
     )
-    stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    stale = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     body = _sign_unpublish("sp-stale", seed=seed, ts=stale)
     resp = await gfs_client.delete("/gfs/spaces/sp-stale/unpublish", json=body)
     assert resp.status == 403
@@ -839,7 +839,7 @@ async def test_instance_update_happy_path_200(gfs_client):
     """A registered instance renames itself with a valid signature + fresh ts."""
     app = gfs_client.server.app
     seed, _pk = await _register_owner(app, instance_id="rename.home")
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     body = _sign_body(
         {"instance_id": "rename.home", "display_name": "Fresh Name", "ts": ts},
         seed=seed,
@@ -856,7 +856,7 @@ async def test_instance_update_happy_path_200(gfs_client):
 
 async def test_instance_update_unknown_instance_403(gfs_client):
     """An instance the GFS hasn't registered can't rename — 403."""
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     body = {
         "instance_id": "ghost.home",
         "display_name": "Ghost",
@@ -872,7 +872,7 @@ async def test_instance_update_bad_signature_403(gfs_client):
     app = gfs_client.server.app
     await _register_owner(app, instance_id="known.home")
     other_seed = generate_identity_keypair().private_key
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     body = _sign_body(
         {"instance_id": "known.home", "display_name": "Hijack", "ts": ts},
         seed=other_seed,
@@ -887,7 +887,7 @@ async def test_instance_update_stale_timestamp_403(gfs_client):
     """A stale ts is rejected with 403 (replay guard)."""
     app = gfs_client.server.app
     seed, _pk = await _register_owner(app, instance_id="stale.home")
-    ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    ts = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     body = _sign_body(
         {"instance_id": "stale.home", "display_name": "Late", "ts": ts},
         seed=seed,
@@ -900,7 +900,7 @@ async def test_instance_update_overlong_name_422(gfs_client):
     """A >80-char display_name maps to 422."""
     app = gfs_client.server.app
     seed, _pk = await _register_owner(app, instance_id="long.home")
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     name = "z" * 81
     body = _sign_body(
         {"instance_id": "long.home", "display_name": name, "ts": ts},

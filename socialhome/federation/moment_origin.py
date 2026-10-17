@@ -289,17 +289,17 @@ def check_relayed_moment_origin(
 
 
 __all__ = [
-    "OriginCheck",
-    "check_relayed_moment_origin",
     "MOMENT_ORIGIN_SIG_SUITE_ED25519",
     "NO_RELAY_FIELD",
-    "carries_no_relay",
     "ORIGIN_IDENTITY_PK_FIELD",
     "ORIGIN_SIG_FIELD",
     "ORIGIN_SIG_SUITE_FIELD",
     "SIGNED_MOMENT_EVENT_TYPES",
     "SUPPORTED_MOMENT_ORIGIN_SIG_SUITES",
+    "OriginCheck",
     "UnsupportedMomentOriginSuite",
+    "carries_no_relay",
+    "check_relayed_moment_origin",
     "moment_origin_signing_bytes",
     "sign_moment_origin",
     "verify_moment_origin",

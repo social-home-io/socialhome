@@ -200,7 +200,7 @@ class MomentRelayStreamView(GfsBaseView):
                 channel.connected.wait(),
                 timeout=RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS,
             )
-        except asyncio.TimeoutError, TimeoutError:
+        except TimeoutError:
             bridge.close(relay_id)
             return unavailable_response()
 

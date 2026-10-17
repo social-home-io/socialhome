@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 class MediaOrphanSweepScheduler:
     """Background task that periodically sweeps orphaned media files."""
 
-    __slots__ = ("_service", "_interval", "_task", "_stop")
+    __slots__ = ("_interval", "_service", "_stop", "_task")
 
     def __init__(
         self,
@@ -47,7 +47,7 @@ class MediaOrphanSweepScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -59,8 +59,8 @@ class MediaOrphanSweepScheduler:
                 # leaked source blobs are reaped by a sibling pass each tick.
                 await self._service.sweep_transcode_src_once()
             except Exception as exc:  # pragma: no cover — defensive
-                log.warning("media-sweep failed: %s", exc)
+                log.warning("media-sweep failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue

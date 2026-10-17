@@ -32,12 +32,6 @@ from ..app_keys import (
     platform_adapter_key,
     url_update_outbound_key,
 )
-from ..peer_url import InvalidPeerUrlError, validate_peer_url
-from ..platform.federation_base import (
-    INBOX_PATH,
-    MANUAL_BASE_KEY,
-    read_manual_base,
-)
 from ..domain.federation import (
     FederationBaseManagedByPlatformError,
     FederationEventType,
@@ -48,6 +42,12 @@ from ..domain.federation_capabilities import (
     FederationCapability,
     feature_keys_missing_below,
     features_missing_below,
+)
+from ..peer_url import InvalidPeerUrlError, validate_peer_url
+from ..platform.federation_base import (
+    INBOX_PATH,
+    MANUAL_BASE_KEY,
+    read_manual_base,
 )
 from ..security import error_response
 from .base import BaseView
@@ -148,7 +148,7 @@ def _validate_base(raw: str) -> str | None:
     base = raw.strip().rstrip("/")
     if not base:
         return None
-    if not (base.startswith("http://") or base.startswith("https://")):
+    if not (base.startswith(("http://", "https://"))):
         return None
     if base.endswith(INBOX_PATH):
         base = base[: -len(INBOX_PATH)].rstrip("/")
@@ -204,7 +204,7 @@ class AdminFederationIceServersView(BaseView):
         if self.user is None or not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
         fed = self.svc(federation_service_key)
-        raw = list(getattr(fed, "_ice_servers", []) or [])  # noqa: SLF001
+        raw = list(getattr(fed, "_ice_servers", []) or [])
         servers = [_redact_ice_server(s) for s in raw if isinstance(s, dict)]
         has_turn = any(
             u.startswith(("turn:", "turns:")) for s in servers for u in s["urls"]
@@ -260,6 +260,10 @@ class AdminFederationExternalUrlView(BaseView):
         try:
             effective = await adapter.get_federation_base()
         except Exception:  # pragma: no cover — a read must not 500
+            log.debug(
+                "AdminFederationExternalUrlView.get: fail-soft error ignored",
+                exc_info=True,
+            )
             effective = None
         # Which source the resolved value came from, so the UI can say so
         # instead of leaving the admin to guess. A stored value the
@@ -316,6 +320,10 @@ class AdminFederationExternalUrlView(BaseView):
                     platform_adapter_key,
                 ).get_federation_base()
             except Exception:  # pragma: no cover — defensive
+                log.debug(
+                    "AdminFederationExternalUrlView.put: fail-soft error ignored",
+                    exc_info=True,
+                )
                 resolved = None
             if resolved:
                 outbound = self.svc(url_update_outbound_key)

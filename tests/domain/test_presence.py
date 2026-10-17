@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from socialhome.domain.presence import (
+    PRESENCE_STATES,
     LocationUpdate,
     PersonPresence,
-    PRESENCE_STATES,
     truncate_coord,
 )
 

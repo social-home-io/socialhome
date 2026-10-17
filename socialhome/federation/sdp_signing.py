@@ -45,7 +45,7 @@ def sign_rtc_offer(
     Returns a :class:`SignedSDP` that can be serialised into a federation
     event payload.
     """
-    payload = f"{sdp_type}:{sdp}".encode("utf-8")
+    payload = f"{sdp_type}:{sdp}".encode()
     sig = sign_ed25519(identity_seed, payload)
     return SignedSDP(
         sdp=sdp,
@@ -64,7 +64,7 @@ def verify_rtc_offer(
     Returns ``True`` iff the signature is valid. Does NOT check the SDP
     content for semantic validity — that is left to the WebRTC stack.
     """
-    payload = f"{signed.sdp_type}:{signed.sdp}".encode("utf-8")
+    payload = f"{signed.sdp_type}:{signed.sdp}".encode()
     return verify_ed25519(remote_public_key, payload, b64url_decode(signed.signature))
 
 

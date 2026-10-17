@@ -8,19 +8,20 @@ preserves its wall-clock anchor across DST transitions.
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 
-from socialhome.domain.space import SpaceFeatures
-from socialhome.repositories.space_repo import SqliteSpaceRepo
-
-from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import Calendar
+from socialhome.domain.space import SpaceFeatures
 from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
 )
 from socialhome.repositories.preferences_repo import SqlitePreferencesRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.calendar_service import (
     CalendarService,
@@ -229,12 +230,12 @@ async def test_recurring_event_preserves_wall_clock_across_dst(env):
         rrule="FREQ=WEEKLY;COUNT=3",
         tz="Europe/Berlin",
     )
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     occurrences = await env.cal_repo.list_events_in_range(
         event.calendar_id,
-        start=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        end=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        start=datetime(2026, 3, 1, tzinfo=UTC),
+        end=datetime(2026, 5, 1, tzinfo=UTC),
     )
     starts = [e.start.isoformat() for e in occurrences]
     assert starts == [

@@ -23,15 +23,14 @@ import socialhome.global_server.routes.highlight_rtc as hr
 from socialhome.global_server import relay_bridge
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
+    gfs_highlight_pub_service_key,
     gfs_relay_bridge_key,
     gfs_rtc_key,
-    gfs_highlight_pub_service_key,
     gfs_ws_registry_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
-
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 

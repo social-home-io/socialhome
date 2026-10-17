@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -14,7 +14,6 @@ from socialhome.infrastructure.gfs_ws_supervisor import (
     GfsWebSocketSupervisor,
     _relay_for,
 )
-
 
 # ── Fakes ──────────────────────────────────────────────────────────────────────
 
@@ -52,7 +51,7 @@ def _make_conn(gfs_id: str, url: str) -> GfsConnection:
         public_key="aa" * 32,
         inbox_url=url,
         status="active",
-        paired_at=datetime.now(timezone.utc).isoformat(),
+        paired_at=datetime.now(UTC).isoformat(),
     )
 
 
@@ -265,7 +264,7 @@ async def test_supervisor_restarts_dead_client_on_reconcile(http_session):
     the next reconcile even though its pairing is still active — the
     supervisor must not treat "present in ``self._clients``" as "running"."""
     repo = _FakeRepo([_make_conn("g1", "http://gfs1.test")])
-    instances: list["_StubClient"] = []
+    instances: list[_StubClient] = []
     stops: list[str] = []
 
     class _StubClient:
@@ -324,7 +323,7 @@ async def test_supervisor_does_not_restart_healthy_client(http_session):
     """A live client (``is_alive()`` True) is never needlessly torn down on a
     reconcile — only dead clients are replaced."""
     repo = _FakeRepo([_make_conn("g1", "http://gfs1.test")])
-    instances: list["_StubClient"] = []
+    instances: list[_StubClient] = []
     stops: list[str] = []
 
     class _StubClient:

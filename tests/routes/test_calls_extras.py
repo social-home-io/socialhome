@@ -113,8 +113,9 @@ async def test_calls_hangup_non_participant_403(client):
 
 
 async def test_ice_servers_includes_turn_when_configured(client):
-    from socialhome.app_keys import config_key
     import dataclasses as _dc
+
+    from socialhome.app_keys import config_key
 
     cfg = client.server.app[config_key]
     new_cfg = _dc.replace(

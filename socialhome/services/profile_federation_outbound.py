@@ -46,6 +46,7 @@ from .user_identity_binding import user_identity_binding_fields
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
+    from ..domain.user import User
     from ..federation.federation_service import FederationService
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.peer_user_visibility_repo import (
@@ -53,7 +54,6 @@ if TYPE_CHECKING:
     )
     from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
     from ..repositories.user_repo import AbstractUserRepo
-    from ..domain.user import User
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class ProfileFederationOutbound(
 
     # Narrow the mixin's ``FederationService | None`` slot — this service
     # always wires a live federation service in ``__init__``.
-    _federation: "FederationService"
+    _federation: FederationService
 
     __slots__ = (
         "_bus",
@@ -101,11 +101,11 @@ class ProfileFederationOutbound(
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
-        user_repo: "AbstractUserRepo | None" = None,
-        profile_picture_repo: "AbstractProfilePictureRepo | None" = None,
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
+        user_repo: AbstractUserRepo | None = None,
+        profile_picture_repo: AbstractProfilePictureRepo | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -165,7 +165,7 @@ class ProfileFederationOutbound(
     async def send_profile(
         self,
         instance_id: str,
-        user: "User",
+        user: User,
         *,
         with_picture: bool = False,
     ) -> None:
@@ -313,7 +313,7 @@ class ProfileFederationOutbound(
         if self._snapshot_sender is not None:
             await self._snapshot_sender(instance_id)
 
-    async def _local_user(self, user_id: str) -> "User | None":
+    async def _local_user(self, user_id: str) -> User | None:
         if self._user_repo is None:
             return None
         return await self._user_repo.get_by_user_id(user_id)

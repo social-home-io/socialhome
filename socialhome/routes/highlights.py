@@ -32,16 +32,11 @@ from aiohttp import web
 from ..app_keys import (
     dm_service_key,
     feed_service_key,
+    highlight_service_key,
     media_signer_key,
     media_transcode_repo_key,
     report_service_key,
     space_service_key,
-    highlight_service_key,
-)
-from ..domain.report import (
-    DuplicateReportError,
-    ReportRateLimitedError,
-    ReportTargetType,
 )
 from ..domain.highlight import (
     Highlight,
@@ -49,11 +44,15 @@ from ..domain.highlight import (
     HighlightFrame,
     HighlightFrameType,
 )
+from ..domain.report import (
+    DuplicateReportError,
+    ReportRateLimitedError,
+    ReportTargetType,
+)
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
 from .base import BaseView
 from .media_status import READY, media_filename
-
 
 # ─── Serialisation helpers ────────────────────────────────────────────────
 
@@ -436,7 +435,6 @@ class HighlightReportView(BaseView):
 
 
 __all__ = [
-    "HighlightsCollectionView",
     "HighlightDetailView",
     "HighlightDmReplyView",
     "HighlightFrameDetailView",
@@ -445,4 +443,5 @@ __all__ = [
     "HighlightFramesCollectionView",
     "HighlightReportView",
     "HighlightShareView",
+    "HighlightsCollectionView",
 ]

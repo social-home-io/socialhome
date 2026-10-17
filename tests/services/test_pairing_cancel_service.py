@@ -311,7 +311,7 @@ class _SlowFed:
     sleeps that many seconds — before answering: widens the window in which
     a confirm can interleave."""
 
-    def __init__(self, ticks: int | float) -> None:
+    def __init__(self, ticks: float) -> None:
         self.ticks = ticks
         self.sent: list = []
 

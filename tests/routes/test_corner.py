@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .conftest import _auth
 
@@ -229,9 +229,7 @@ async def test_corner_serialises_today_timetable_and_events(client):
 
     r = await client.post("/api/calendars", json={"name": "Me"}, headers=h)
     cid = (await r.json())["id"]
-    midnight = datetime.now(timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     r = await client.post(
         f"/api/calendars/{cid}/events",
         json={

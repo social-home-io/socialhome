@@ -25,8 +25,11 @@ from socialhome.dashboard.app import build_dashboard_app
 from socialhome.dashboard.auth import (
     ACK_MAX,
     COOKIE_NAME,
+    DISPLAY_IMAGE_MAX,
+    DISPLAY_READ_MAX,
     HA_UNLOCK_MAX,
     HA_UNLOCK_WINDOW_S,
+    MAP_RENDER_MAX,
     PAIR_MAX,
     THROTTLE_MAX_FAILURES,
     DashboardAuth,
@@ -38,19 +41,14 @@ from socialhome.dashboard.display_api import (
     is_display_api,
     is_public_display_path,
 )
-from socialhome.dashboard.auth import (
-    DISPLAY_IMAGE_MAX,
-    DISPLAY_READ_MAX,
-    MAP_RENDER_MAX,
-)
 from socialhome.dashboard.display_json import STRING_KEYS
 from socialhome.dashboard.render import DashboardRenderer
-from socialhome.domain.theme import HouseholdTheme
 from socialhome.domain.household_dashboard import (
     CLAIM_TTL_SECONDS,
     PAIRING_TTL_SECONDS,
     ExternalDisplayPanel,
 )
+from socialhome.domain.theme import HouseholdTheme
 from socialhome.i18n import Catalog
 from socialhome.services.dashboard_display_service import (
     SEEN_INTERVAL_S,
@@ -62,13 +60,13 @@ from .conftest import PASSWORD, default_theme
 from .factories import (
     MAP_PEOPLE,
     MENTIONS,
-    PictureTiles,
-    solid_png,
     MESSAGES,
+    PictureTiles,
     home,
     leo_page,
     map_home,
     person,
+    solid_png,
 )
 
 RENDERER = DashboardRenderer(
@@ -1668,7 +1666,7 @@ async def test_map_png_counts_as_an_image_and_painting_is_throttled(
     client, displays, snapshots, auth, monkeypatch
 ):
     _seed(snapshots)
-    display_id, token = await _paired(client, displays)
+    _display_id, token = await _paired(client, displays)
     kinds: list[bool] = []
     real = DashboardAuth.begin_display_read
 

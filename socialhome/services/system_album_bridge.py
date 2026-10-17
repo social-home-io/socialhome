@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 class SystemAlbumBridge:
     """Subscribe to post lifecycle events and mirror media into the system album."""
 
-    __slots__ = ("_gallery", "_bus")
+    __slots__ = ("_bus", "_gallery")
 
     def __init__(self, gallery: GalleryService, bus: EventBus) -> None:
         self._gallery = gallery
@@ -73,6 +73,7 @@ class SystemAlbumBridge:
                 "system-album: mirror PostCreated failed for %s: %s",
                 event.post.id,
                 exc,
+                exc_info=True,
             )
 
     async def _on_post_edited(self, event: PostEdited) -> None:
@@ -83,6 +84,7 @@ class SystemAlbumBridge:
                 "system-album: mirror PostEdited failed for %s: %s",
                 event.post.id,
                 exc,
+                exc_info=True,
             )
 
     async def _on_post_deleted(self, event: PostDeleted) -> None:
@@ -97,6 +99,7 @@ class SystemAlbumBridge:
                 "system-album: unmirror PostDeleted failed for %s: %s",
                 event.post_id,
                 exc,
+                exc_info=True,
             )
 
     # ─── Space feed ───────────────────────────────────────────────────────
@@ -109,6 +112,7 @@ class SystemAlbumBridge:
                 "system-album: mirror SpacePostCreated failed for %s: %s",
                 event.post.id,
                 exc,
+                exc_info=True,
             )
 
     async def _on_space_post_synced(self, event: SpacePostSynced) -> None:
@@ -129,6 +133,7 @@ class SystemAlbumBridge:
                 "system-album: mirror SpacePostSynced failed for %s: %s",
                 event.post.id,
                 exc,
+                exc_info=True,
             )
 
     async def _on_space_post_moderated(self, event: SpacePostModerated) -> None:
@@ -145,4 +150,5 @@ class SystemAlbumBridge:
                 "system-album: unmirror SpacePostModerated failed for %s: %s",
                 event.post.id,
                 exc,
+                exc_info=True,
             )

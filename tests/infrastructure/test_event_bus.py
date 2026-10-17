@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
+from datetime import UTC, datetime
 
 from socialhome.domain.events import PostCreated
 from socialhome.domain.post import Post, PostType
@@ -19,7 +18,7 @@ async def test_publish_delivers():
         seen.append(e.post.id)
 
     bus.subscribe(PostCreated, handler)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await bus.publish(
         PostCreated(post=Post(id="p1", author="u", type=PostType.TEXT, created_at=now))
     )
@@ -39,7 +38,7 @@ async def test_handler_error_isolation():
 
     bus.subscribe(PostCreated, bad)
     bus.subscribe(PostCreated, good)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await bus.publish(
         PostCreated(post=Post(id="p", author="u", type=PostType.TEXT, created_at=now))
     )

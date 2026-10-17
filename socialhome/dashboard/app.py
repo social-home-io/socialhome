@@ -43,27 +43,26 @@ from .auth import (
     DashboardAuth,
     StaleSessionError,
 )
+from .avatars import AvatarImages
 from .display_api import (
     guard_display_request,
     is_display_api,
     register_display_routes,
 )
-from .avatars import AvatarImages
 from .emoji import EmojiImages
-from .map_png import MapPictures
 from .keys import (
     AUTH_KEY,
     AVATARS_KEY,
-    EMOJI_KEY,
     CLAIMS_KEY,
     DISPLAYS_KEY,
+    EMOJI_KEY,
     HOUSEHOLD_NAME_KEY,
     HOUSEHOLD_THEME_KEY,
     HOUSEHOLD_TZ_KEY,
+    MAP_PICTURES_KEY,
     RENDERER_KEY,
     SETTINGS_KEY,
     SNAPSHOTS_KEY,
-    MAP_PICTURES_KEY,
     TILES_KEY,
     DashboardSnapshots,
     DashboardTiles,
@@ -71,6 +70,7 @@ from .keys import (
     HouseholdThemeFn,
     HouseholdTzFn,
 )
+from .map_png import MapPictures
 from .policy import DASHBOARD_CSP_DIRECTIVES, build_dashboard_csp
 from .render import DashboardRenderer
 from .views import (
@@ -86,8 +86,8 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "DASHBOARD_CSP_DIRECTIVES",
-    "MAX_BODY_BYTES",
     "DEFAULT_LOCAL_HOSTNAMES",
+    "MAX_BODY_BYTES",
     "PUBLIC_PATHS",
     "ExtraHosts",
     "build_dashboard_app",

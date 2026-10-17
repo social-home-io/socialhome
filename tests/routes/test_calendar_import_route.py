@@ -12,7 +12,6 @@ from socialhome.services.calendar_import_service import CalendarImportService
 
 from .conftest import _auth
 
-
 _ICS_BYTES = (
     b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//T//EN\r\n"
     b"BEGIN:VEVENT\r\nUID:x@t\r\nSUMMARY:Dentist\r\n"
@@ -108,10 +107,14 @@ def _vcal(*vevents: str) -> bytes:
 
 
 _TWO_EVENTS = (
-    "UID:a@t\r\nSUMMARY:Dentist\r\n"
-    "DTSTART:20260601T100000Z\r\nDTEND:20260601T110000Z\r\n",
-    "UID:b@t\r\nSUMMARY:Piano\r\n"
-    "DTSTART:20260602T150000Z\r\nDTEND:20260602T160000Z\r\n",
+    (
+        "UID:a@t\r\nSUMMARY:Dentist\r\n"
+        "DTSTART:20260601T100000Z\r\nDTEND:20260601T110000Z\r\n"
+    ),
+    (
+        "UID:b@t\r\nSUMMARY:Piano\r\n"
+        "DTSTART:20260602T150000Z\r\nDTEND:20260602T160000Z\r\n"
+    ),
 )
 
 

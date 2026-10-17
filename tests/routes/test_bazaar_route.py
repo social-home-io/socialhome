@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-
 from .conftest import _auth
-
 
 _TEST_SPACE_ID = "space-bazaar-route"
 

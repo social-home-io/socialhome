@@ -22,7 +22,7 @@ values already parsed.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def parse_iso8601_strict(value: str) -> datetime:
@@ -30,7 +30,7 @@ def parse_iso8601_strict(value: str) -> datetime:
 
     Raises :class:`ValueError` on malformed input.
     """
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return datetime.fromisoformat(value)
 
 
 def parse_iso8601_optional(value: str | None) -> datetime | None:
@@ -40,7 +40,7 @@ def parse_iso8601_optional(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -56,15 +56,15 @@ def parse_iso8601_lenient(value: object) -> datetime:
     """
     if isinstance(value, str) and value:
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return datetime.fromisoformat(value)
         except ValueError:
             pass
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def as_utc(value: datetime) -> datetime:
     """``value`` as a tz-aware UTC datetime; a naive one is taken as UTC
     already (the shape SQLite ``datetime('now')`` stamps parse to)."""
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

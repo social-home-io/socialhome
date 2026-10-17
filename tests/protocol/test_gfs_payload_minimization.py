@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiohttp
@@ -275,7 +275,7 @@ async def post_payload(household):
         id=POST_ID,
         author=household["author_user_id"],
         type=PostType.TEXT,
-        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
         content=POST_TEXT,
         location=LocationData(lat=52.1234, lon=13.4321, label=LOCATION_LABEL),
         link_preview=LinkPreview(
@@ -438,7 +438,7 @@ async def _publish_anonymously(tmp_dir, payload: dict, event_type: str) -> dict:
             own_signing_key=generate_identity_keypair().private_key,
         )
         # Pin the capability: this GFS advertised ``anonymous_publish: true``.
-        svc._anon_publish["gfs-1"] = True  # noqa: SLF001
+        svc._anon_publish["gfs-1"] = True
         delivered = await svc.publish_space_event(
             space_id=SPACE_ID,
             event_type=event_type,
@@ -539,7 +539,7 @@ async def test_no_publish_body_ever_carries_identity(
             own_signing_key=generate_identity_keypair().private_key,
         )
         if state == "anonymous":
-            svc._anon_publish["gfs-1"] = True  # noqa: SLF001
+            svc._anon_publish["gfs-1"] = True
         await svc.start()
         await svc.publish_space_event(
             space_id=SPACE_ID,
@@ -548,9 +548,9 @@ async def test_no_publish_body_ever_carries_identity(
         )
         if state == "down":
             session.state = "old"  # back, but still without the capability
-            svc._info_failed_at.clear()  # noqa: SLF001
+            svc._info_failed_at.clear()
         for _ in range(100):
-            if not svc._publish_retry._queues:  # noqa: SLF001
+            if not svc._publish_retry._queues:
                 break
             await asyncio.sleep(0.01)
         await svc.stop()
@@ -636,10 +636,8 @@ async def test_gfs_relays_to_every_subscriber_including_the_publisher(
     """A publisher that also subscribes still receives the relay — the GFS can
     no longer exclude it, because it no longer knows who published. Guards: the
     old GFS skipped ``from_instance`` in the fan-out."""
-    svc, ws = gfs
-    await svc._repo.add_subscriber(  # noqa: SLF001
-        space_id=SPACE_ID, instance_id=PUBLISHER_INSTANCE
-    )
+    svc, _ws = gfs
+    await svc._repo.add_subscriber(space_id=SPACE_ID, instance_id=PUBLISHER_INSTANCE)
     delivered = await svc.publish_event(
         SPACE_ID, AUTHORITY_EVENT_SPACE_POST_PUBLIC, post_payload
     )

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ..repositories.federation_repo import AbstractFederationRepo
 
@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 class ReplayCachePruneScheduler:
     """Background task that prunes stale replay-cache rows."""
 
-    __slots__ = ("_repo", "_interval", "_window", "_task", "_stop")
+    __slots__ = ("_interval", "_repo", "_stop", "_task", "_window")
 
     def __init__(
         self,
@@ -64,7 +64,7 @@ class ReplayCachePruneScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -75,13 +75,13 @@ class ReplayCachePruneScheduler:
                 if pruned:
                     log.debug("replay-cache: pruned %d stale rows", pruned)
             except Exception as exc:  # pragma: no cover
-                log.warning("replay-cache prune failed: %s", exc)
+                log.warning("replay-cache prune failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _prune_once(self) -> int:
@@ -92,6 +92,6 @@ class ReplayCachePruneScheduler:
         no timezone, space separator). We format the cutoff the same
         way so the string comparison behaves correctly.
         """
-        cutoff_dt = datetime.now(timezone.utc) - self._window
+        cutoff_dt = datetime.now(UTC) - self._window
         cutoff = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
         return await self._repo.prune_replay_cache(cutoff)

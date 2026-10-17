@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -266,7 +266,7 @@ async def test_undeliverable_unpair_leaves_a_tombstone_that_retries(env, outcome
     assert queued["payload"] == {}
     assert queued["status"] is PairingStatus.UNPAIRING
     expires = datetime.fromisoformat(queued["expires_at"])
-    expected = datetime.now(timezone.utc) + UNPAIR_RETRY_MAX_AGE
+    expected = datetime.now(UTC) + UNPAIR_RETRY_MAX_AGE
     assert abs((expires - expected).total_seconds()) < 60
     # The UI drops the connection now — the tombstone is not a connection.
     assert [e.instance_id for e in env["published"]] == ["peer-b"]

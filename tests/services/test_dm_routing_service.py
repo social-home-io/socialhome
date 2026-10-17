@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -30,7 +30,6 @@ from socialhome.services.dm_routing_service import (
     RelayEnvelope,
     _hash_mod,
 )
-
 
 # ─── Test helpers ─────────────────────────────────────────────────────────
 
@@ -192,7 +191,7 @@ async def test_get_known_peers_self_equals_own_peers(env):
 
 
 async def test_get_known_peers_other_reads_network_discovery(env):
-    db, _, svc, _ = env
+    _db, _, svc, _ = env
     # m introduced us to x and y.
     await svc.record_network_sync(
         source_instance_id="m",
@@ -332,7 +331,7 @@ async def test_get_or_select_path_returns_stored_primary(env):
     _, fed_repo, svc, _ = env
     await fed_repo.save_instance(_remote("m"))
     await svc.record_network_sync(source_instance_id="m", peer_ids=["target"])
-    first = await svc.select_conversation_path("c1", "alice", "target")
+    await svc.select_conversation_path("c1", "alice", "target")
     # Mutate the stored primary to a known-good marker so we can prove
     # the call doesn't re-run BFS.
     await svc._repo.set_relay_paths(
@@ -344,12 +343,12 @@ async def test_get_or_select_path_returns_stored_primary(env):
     )
     again = await svc.get_or_select_path("c1", "alice", "target")
     assert again == ["m", "target"]
-    assert again != first or True  # silence unused var
+    assert True  # silence unused var
 
 
 async def test_get_or_select_path_promotes_alternative_when_primary_stale(env):
     """Primary's first hop offline → next valid alt is promoted to primary."""
-    db, fed_repo, svc, _ = env
+    _db, fed_repo, svc, _ = env
     # Two confirmed peers, both reach 'target' as a 2-hop relay.
     await fed_repo.save_instance(_remote("m"))
     await fed_repo.save_instance(_remote("n"))
@@ -501,7 +500,7 @@ async def test_send_relay_blocked_for_minor(env):
 
 
 async def test_send_relay_sender_seq_increments(env):
-    _, fed_repo, svc, fed = env
+    _, fed_repo, svc, _fed = env
     await fed_repo.save_instance(_remote("target"))
     e1 = await svc.send_relay_envelope(
         conversation_id="c1",
@@ -542,7 +541,7 @@ def _envelope_dict(
         "inner_event_type": "dm_message",
         "message_id": msg_id,
         "sender_seq": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "sender_ephemeral_pk": "pk",
         "encrypted_payload": "ct",
         "payload_iv": "iv",
@@ -687,7 +686,7 @@ def test_hash_mod_zero_n():
 async def test_last_relay_for_returns_recent_relay(env):
     """A DM that relayed via instance X in the last hour shows up."""
     _, _, svc, _ = env
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     await _seed_relay(svc, target="peer-target", via="peer-relay", ts=now)
     got = await svc.last_relay_for("peer-target")
     assert got is not None
@@ -697,7 +696,7 @@ async def test_last_relay_for_returns_recent_relay(env):
 async def test_last_relay_for_returns_none_when_older_than_24h(env):
     """Relays older than 24h don't surface."""
     _, _, svc, _ = env
-    long_ago = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    long_ago = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     await _seed_relay(svc, target="peer-target", via="peer-relay", ts=long_ago)
     assert await svc.last_relay_for("peer-target") is None
 

@@ -17,7 +17,6 @@ from socialhome.federation.inbound_validator import (
     make_parse_json,
 )
 
-
 pytestmark = pytest.mark.security
 
 

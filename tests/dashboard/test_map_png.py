@@ -29,6 +29,7 @@ from socialhome.dashboard.map_view import map_view
 from socialhome.dashboard.presenter import home_colors
 from socialhome.dashboard.render import DashboardRenderer
 from socialhome.i18n import Catalog
+
 from .factories import PictureTiles, map_home, solid_png
 from .test_map_render import LIGHT
 

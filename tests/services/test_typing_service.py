@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +19,6 @@ from socialhome.services.typing_service import (
     TYPING_TTL_SECONDS,
     TypingService,
 )
-
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
 
@@ -678,7 +677,7 @@ async def test_user_typing_no_repo_fans_to_every_peer():
 class _BlockCp:
     """``kid`` is protected and a guardian blocked ``bob`` and ``remote-eve``."""
 
-    _PAIRS = {frozenset({"kid", "bob"}), frozenset({"kid", "remote-eve"})}
+    _PAIRS = frozenset({frozenset({"kid", "bob"}), frozenset({"kid", "remote-eve"})})
 
     def register_gate(self, gate):
         pass
@@ -787,7 +786,7 @@ class _SystemConvos:
         return Conversation(
             id="hh",
             type=ConversationType.GROUP_DM,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             system_scope=SystemChatScope.HOUSEHOLD,
         )
 

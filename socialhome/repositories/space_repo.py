@@ -25,13 +25,12 @@ this module from becoming another 1000-line dumping ground.
 
 from __future__ import annotations
 
-from dataclasses import replace
 import uuid
-from datetime import datetime, timedelta, timezone
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..infrastructure.hlc import HLC
 from ..domain.gfs_server import (
     SignedGfsServerList,
     signed_gfs_server_list_from_column,
@@ -50,6 +49,7 @@ from ..domain.space import (
     SpaceType,
     normalize_retention_exempt_types,
 )
+from ..infrastructure.hlc import HLC
 from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
 
 
@@ -1458,7 +1458,7 @@ class SqliteSpaceRepo:
         strictly increasing sequence numbers AND a strictly increasing HLC,
         even on SQLite builds that predate the ``RETURNING`` clause.
         """
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
 
         def _run(conn):
             row = conn.execute(
@@ -1876,7 +1876,7 @@ class SqliteSpaceRepo:
             (
                 status.value,
                 reviewed_by,
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
                 reason,
                 item_id,
                 *allowed,
@@ -1939,7 +1939,7 @@ class SqliteSpaceRepo:
         changed = await self._db.enqueue_rowcount(
             "UPDATE space_moderation_queue SET reviewed_by=?, reviewed_at=? "
             "WHERE id=? AND status='pending'",
-            (reviewed_by, datetime.now(timezone.utc).isoformat(), item_id),
+            (reviewed_by, datetime.now(UTC).isoformat(), item_id),
         )
         return changed > 0
 
@@ -1993,7 +1993,7 @@ class SqliteSpaceRepo:
             "UPDATE space_moderation_queue SET status='expired', "
             "payload_json=NULL, current_snapshot=NULL, reviewed_at=? "
             f"WHERE space_id=? AND status='pending' AND submitted_by NOT IN ({marks})",
-            (datetime.now(timezone.utc).isoformat(), space_id, *keep),
+            (datetime.now(UTC).isoformat(), space_id, *keep),
         )
 
     async def list_moderation_for_submitter(
@@ -2434,7 +2434,7 @@ class SqliteSpaceRepo:
         ttl_days: int = 7,
     ) -> str:
         invitation_id = uuid.uuid4().hex
-        expires = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
+        expires = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO space_invitations(
@@ -2471,9 +2471,7 @@ class SqliteSpaceRepo:
         listing, the accept and the issuer's answer check all ignore it).
         """
         invitation_id = uuid.uuid4().hex
-        expires = (
-            datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
-        ).isoformat()
+        expires = (datetime.now(UTC) + timedelta(minutes=ttl_minutes)).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO space_invitations(
@@ -2696,7 +2694,7 @@ class SqliteSpaceRepo:
         :data:`SPACE_JOIN_REQUEST_APPROVED` round-trips match.
         """
         rid = request_id or uuid.uuid4().hex
-        expires = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
+        expires = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO space_join_requests(
@@ -2963,7 +2961,7 @@ def _parse_ts(value) -> datetime | None:
     if isinstance(value, datetime):
         return value
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return datetime.fromisoformat(str(value))
     except ValueError:
         return None
 
@@ -3019,8 +3017,8 @@ def _row_to_moderation_item(row: dict | None) -> SpaceModerationItem | None:
         submitted_by=row.get("submitted_by", ""),
         payload=load_json(row.get("payload_json"), default={}),
         current_snapshot=row.get("current_snapshot"),
-        submitted_at=_parse_ts(row.get("submitted_at")) or datetime.now(timezone.utc),
-        expires_at=_parse_ts(row.get("expires_at")) or datetime.now(timezone.utc),
+        submitted_at=_parse_ts(row.get("submitted_at")) or datetime.now(UTC),
+        expires_at=_parse_ts(row.get("expires_at")) or datetime.now(UTC),
         status=status,
         reviewed_by=row.get("reviewed_by"),
         reviewed_at=_parse_ts(row.get("reviewed_at")),

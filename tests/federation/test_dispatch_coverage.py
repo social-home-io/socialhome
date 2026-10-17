@@ -25,7 +25,6 @@ from socialhome.federation.sync_manager import SyncSessionManager
 from socialhome.infrastructure import EventBus, IdempotencyCache, KeyManager
 from socialhome.repositories import SqliteFederationRepo, SqliteOutboxRepo
 
-
 # ─── Test environment ────────────────────────────────────────────────────
 
 
@@ -117,7 +116,7 @@ def _evt(et, *, payload, space_id=None, from_inst="peer-1"):
 
 
 async def test_dispatch_space_sync_begin_admits_and_emits_offer(env):
-    svc, sync_mgr, peer = env
+    svc, _sync_mgr, peer = env
     await svc._dispatch_event(
         _evt(
             FederationEventType.SPACE_SYNC_BEGIN,

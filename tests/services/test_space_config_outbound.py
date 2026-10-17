@@ -20,16 +20,12 @@ import pytest
 from PIL import Image
 
 from socialhome.crypto import generate_space_keypair
+from socialhome.domain.events import SpaceConfigChanged
+from socialhome.domain.federation import FederationEventType
 from socialhome.domain.media_constraints import (
     SPACE_COVER_BOOTSTRAP_MAX_BYTES,
     SPACE_COVER_SNAPSHOT_MAX_BYTES,
 )
-from socialhome.services.space_crypto_service import (
-    strip_authority_sig_fields,
-    verify_authority_event,
-)
-from socialhome.domain.events import SpaceConfigChanged
-from socialhome.domain.federation import FederationEventType
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -38,6 +34,10 @@ from socialhome.domain.space import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.space_config_outbound import SpaceConfigOutbound
+from socialhome.services.space_crypto_service import (
+    strip_authority_sig_fields,
+    verify_authority_event,
+)
 
 
 def _make_space(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -25,7 +25,7 @@ from socialhome.repositories.page_repo import (
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with a page repo over a real SQLite database."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
@@ -116,7 +116,7 @@ async def test_page_expired_lock_release(env):
 
     await env.page_repo.acquire_lock(page.id, "anna", ttl=timedelta(microseconds=1))
 
-    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     await env.db.enqueue(
         "UPDATE pages SET lock_expires_at=? WHERE id=?",
         (past, page.id),
@@ -144,7 +144,7 @@ async def test_page_lock_and_versions(env):
         title="Wiki",
         content="v1",
         edited_by="u1",
-        edited_at=datetime.now(timezone.utc).isoformat(),
+        edited_at=datetime.now(UTC).isoformat(),
     )
     await env.page_repo.save_version(v)
     versions = await env.page_repo.list_versions(p.id, space_id=None)

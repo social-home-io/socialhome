@@ -14,7 +14,7 @@ Two surfaces:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -39,7 +39,7 @@ def _event(event_type: FederationEventType, payload: dict) -> FederationEvent:
         event_type=event_type,
         from_instance="peer-a",
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
     )
 
@@ -137,7 +137,7 @@ async def test_inbound_audio_first_arrival_publishes_created(inbound_svc, db, bu
         "media_url": "api/media/voice.ogg",
         "mime_type": "audio/ogg",
         "file_name": "voice.ogg",
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
         "recipient_user_ids": ["u-local"],
     }
     await inbound_svc._on_dm_message(_event(FederationEventType.DM_MESSAGE, payload))
@@ -169,7 +169,7 @@ async def test_inbound_audio_repeat_with_transcript_publishes_updated(
         "media_url": "api/media/voice2.ogg",
         "mime_type": "audio/ogg",
         "file_name": "voice2.ogg",
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
         "recipient_user_ids": ["u-local"],
     }
     # First leg — no transcript yet.
@@ -180,7 +180,7 @@ async def test_inbound_audio_repeat_with_transcript_publishes_updated(
         )
     )
     # Second leg — sender's STT landed; same id, new content + edited_at.
-    edited_at = datetime.now(timezone.utc).isoformat()
+    edited_at = datetime.now(UTC).isoformat()
     await inbound_svc._on_dm_message(
         _event(
             FederationEventType.DM_MESSAGE,

@@ -15,7 +15,8 @@ reach Whisper with only network-level queuing between them.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, AsyncIterable
+from collections.abc import AsyncIterable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..platform.adapter import AbstractPlatformAdapter
@@ -37,7 +38,7 @@ class SttService:
 
     __slots__ = ("_adapter",)
 
-    def __init__(self, adapter: "AbstractPlatformAdapter") -> None:
+    def __init__(self, adapter: AbstractPlatformAdapter) -> None:
         self._adapter = adapter
 
     @property

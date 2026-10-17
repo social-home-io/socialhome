@@ -24,7 +24,6 @@ from tests.federation.test_federation_service import (
     InMemoryOutboxRepo,
 )
 
-
 # ─── Shared helpers ──────────────────────────────────────────────────────────
 
 

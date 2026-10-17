@@ -39,10 +39,10 @@ class VideoProcessor:
     ACCEPTED_MIME_TYPES: frozenset[str] = VIDEO_ACCEPTED_MIMES
 
     __slots__ = (
-        "_max_dimension",
-        "_crf",
-        "_max_duration",
         "_audio_bitrate",
+        "_crf",
+        "_max_dimension",
+        "_max_duration",
         "_max_input_bytes",
     )
 

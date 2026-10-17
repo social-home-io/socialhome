@@ -20,7 +20,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-
 #: Hard caps. Composer + service both enforce.
 MOMENT_MAX_CONTENT_LEN: int = 1_000
 MOMENT_MAX_VIDEO_MS: int = 15_000
@@ -100,7 +99,7 @@ MOMENT_MAX_HASHTAG_LEN: int = 32
 #: ``#tag`` matcher. Word characters only — no spaces, punctuation,
 #: emoji. Matches the URL-safe charset so the SPA can route to
 #: ``/momentum/archive?tag=<tag>`` without escaping.
-_HASHTAG_RE = re.compile(r"(?<!\w)#([A-Za-z0-9_]{1,%d})" % MOMENT_MAX_HASHTAG_LEN)
+_HASHTAG_RE = re.compile(rf"(?<!\w)#([A-Za-z0-9_]{{1,{MOMENT_MAX_HASHTAG_LEN}}})")
 
 
 def extract_hashtags(content: str) -> list[str]:

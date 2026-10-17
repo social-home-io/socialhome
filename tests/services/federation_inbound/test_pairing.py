@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import logging
-
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -16,6 +15,7 @@ from socialhome.crypto import (
     generate_x25519_keypair,
     sign_ed25519,
 )
+from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
     PairingAborted,
     PairingAcceptReceived,
@@ -32,7 +32,6 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
-from socialhome.db.database import AsyncDatabase
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.services.federation_inbound import PairingInboundHandlers
@@ -110,7 +109,7 @@ class _FakeFederationRepo:
         self.capabilities_seen.append(instance_id)
         self.instances[instance_id] = replace(
             inst,
-            capabilities_seen_at=datetime.now(timezone.utc).isoformat(),
+            capabilities_seen_at=datetime.now(UTC).isoformat(),
         )
 
     async def update_display_name(self, instance_id: str, name: str) -> None:
@@ -134,7 +133,7 @@ def _event(event_type, payload, *, from_instance="peer-a", space_id=None):
         event_type=event_type,
         from_instance=from_instance,
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=space_id,
     )

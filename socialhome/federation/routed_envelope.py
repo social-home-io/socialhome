@@ -226,26 +226,26 @@ class SpaceRoutedHandler:
     """Wraps + unwraps :data:`FederationEventType.SPACE_ROUTED`."""
 
     __slots__ = (
+        "_deferred_retransmits",
+        "_dispatcher",
+        "_eph_ttl_s",
         "_federation",
         "_federation_repo",
-        "_dispatcher",
-        "_target_eph_lookup",
-        "_seen_ttl_s",
-        "_eph_ttl_s",
-        "_seen_routes",
-        "_seen_nacks",
         "_origin_eph_state",
-        "_reply_eph_state",
         "_pending_routed",
-        "_deferred_retransmits",
+        "_reply_eph_state",
         "_route_service",
+        "_seen_nacks",
+        "_seen_routes",
+        "_seen_ttl_s",
+        "_target_eph_lookup",
     )
 
     def __init__(
         self,
         *,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
         event_dispatcher: EventDispatcher,
         target_eph_lookup: TargetEphLookup,
         seen_ttl_s: float = 60.0,
@@ -301,7 +301,7 @@ class SpaceRoutedHandler:
 
     # ── Attach ─────────────────────────────────────────────────────────
 
-    def attach_route_service(self, route_service: "RouteDiscoveryService") -> None:
+    def attach_route_service(self, route_service: RouteDiscoveryService) -> None:
         """Give the handler the discovery service so a verified
         ``SPACE_ROUTE_STALE`` nack can invalidate + rediscover the route."""
         self._route_service = route_service
@@ -337,8 +337,8 @@ class SpaceRoutedHandler:
             len(tasks),
         )
 
-    def attach_to(self, federation_service: "FederationService") -> None:
-        registry = federation_service._event_registry  # noqa: SLF001
+    def attach_to(self, federation_service: FederationService) -> None:
+        registry = federation_service._event_registry
         registry.register(
             FederationEventType.SPACE_ROUTED,
             self._on_routed,
@@ -1616,7 +1616,7 @@ class SpaceRoutedHandler:
         pending: _PendingRouted,
         inner_payload_json: str,
         discovery: tuple[list[str], str],
-        route_service: "RouteDiscoveryService",
+        route_service: RouteDiscoveryService,
     ) -> str:
         """Re-ship ``pending``'s inner event over ``discovery`` as the
         single ``is_retry`` retransmit; returns the new route_id. Shared by
@@ -1635,7 +1635,7 @@ class SpaceRoutedHandler:
 
     @staticmethod
     def _deferred_retransmit_delay_s(
-        target: str, route_service: "RouteDiscoveryService"
+        target: str, route_service: RouteDiscoveryService
     ) -> float:
         """Seconds until the deferred attempt may plausibly find a route:
         whatever is left of ``route_service``'s negative cooldown for
@@ -1649,7 +1649,7 @@ class SpaceRoutedHandler:
         *,
         route_id: str,
         pending: _PendingRouted,
-        route_service: "RouteDiscoveryService",
+        route_service: RouteDiscoveryService,
         state: str,
         reason: str,
     ) -> None:
@@ -1703,7 +1703,7 @@ class SpaceRoutedHandler:
         route_id: str,
         pending: _PendingRouted,
         inner_payload_json: str,
-        route_service: "RouteDiscoveryService",
+        route_service: RouteDiscoveryService,
         state: str,
         delay_s: float,
     ) -> None:

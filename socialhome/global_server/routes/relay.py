@@ -8,8 +8,8 @@ from dataclasses import asdict
 
 from aiohttp import web
 
-from .. import app_keys as K
 from ...gfs_proof import PROOF_CAPABILITY, bindable_base_url, parse_proof_nonce
+from .. import app_keys as K
 from ..admin_service import verify_report_signature
 from ..public import (
     PAIR_TOKEN_TTL_SECONDS,

@@ -30,7 +30,7 @@ class _ModerationSweeper(Protocol):
 class ModerationExpiryScheduler:
     """Background task that expires and purges moderation-queue items."""
 
-    __slots__ = ("_svc", "_interval", "_task", "_stop")
+    __slots__ = ("_interval", "_stop", "_svc", "_task")
 
     def __init__(
         self,
@@ -56,7 +56,7 @@ class ModerationExpiryScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -65,10 +65,10 @@ class ModerationExpiryScheduler:
             try:
                 await self.run_once()
             except Exception as exc:  # pragma: no cover - logged, loop survives
-                log.warning("moderation expiry sweep failed: %s", exc)
+                log.warning("moderation expiry sweep failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def run_once(self) -> tuple[int, int]:

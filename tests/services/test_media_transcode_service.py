@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import aiofiles
 import aiofiles.os
@@ -29,7 +29,6 @@ from socialhome.services.media_transcode_service import (
     MAX_ATTEMPTS,
     MediaTranscodeService,
 )
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -83,7 +82,7 @@ class FakeTranscodeRepo:
         )
 
     async def list_due(self, *, limit=10):
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
         out = [
             MediaTranscodeJob(
                 output_filename=r.output_filename,
@@ -266,7 +265,7 @@ async def test_processor_error_reschedules_then_fails_after_max_attempts(tmp_pat
     row = repo.rows["out.webm"]
     assert row.status == "pending"
     assert row.attempts == 1
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now_iso = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     assert row.next_attempt_at > now_iso
     # A reschedule must NOT publish the terminal failed frame.
     assert bus.published == []
@@ -323,11 +322,9 @@ async def test_reschedule_backs_off_even_on_the_unluckiest_jitter(
     row = repo.rows["out.webm"]
     assert row.attempts == 1
     # Half the 30 s first window — pinned, not "some time in the future".
-    expected = datetime.now(timezone.utc) + timedelta(seconds=BACKOFF_BASE_SECONDS / 2)
+    expected = datetime.now(UTC) + timedelta(seconds=BACKOFF_BASE_SECONDS / 2)
     assert row.next_attempt_at <= expected.strftime("%Y-%m-%d %H:%M:%S")
-    assert row.next_attempt_at > datetime.now(timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    assert row.next_attempt_at > datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     # The contract that actually matters: not due on the next tick.
     assert await repo.list_due() == []
     assert await svc.flush_once() == 0

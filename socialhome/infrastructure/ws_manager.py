@@ -26,10 +26,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import orjson
 from collections import defaultdict
 from typing import Any
 
+import orjson
 from aiohttp import WSCloseCode, web
 
 from ..security import sanitise_for_api
@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 class WebSocketManager:
     """Per-user registry of live WebSocket sessions."""
 
-    __slots__ = ("_by_user", "_active_conv", "_lock")
+    __slots__ = ("_active_conv", "_by_user", "_lock")
 
     def __init__(self) -> None:
         # ``set`` so duplicate registrations are idempotent.
@@ -186,14 +186,14 @@ class WebSocketManager:
                     message=b"server shutting down",
                 )
             except Exception as exc:  # defensive — closing should not raise
-                log.debug("ws.close_all: close failed: %s", exc)
+                log.debug("ws.close_all: close failed: %s", exc, exc_info=True)
 
         try:
             await asyncio.wait_for(
                 asyncio.gather(*(_close(ws) for ws in sockets), return_exceptions=True),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning(
                 "ws.close_all: %.1fs timeout — some sockets did not close cleanly",
                 timeout,
@@ -224,7 +224,7 @@ class WebSocketManager:
             except ConnectionResetError, RuntimeError, asyncio.CancelledError:
                 dead.append(ws)
             except Exception as exc:  # defensive
-                log.debug("ws send failed user=%s: %s", user_id, exc)
+                log.debug("ws send failed user=%s: %s", user_id, exc, exc_info=True)
                 dead.append(ws)
         if dead:
             async with self._lock:

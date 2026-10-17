@@ -100,8 +100,10 @@ def retention_window_sql(
     if type_col is None or not exempt:
         return f" AND datetime({created_col}) >= datetime(?)", (cutoff,)
     return (
-        f" AND (datetime({created_col}) >= datetime(?)"
-        f" OR {type_col} IN (SELECT value FROM json_each(?)))",
+        (
+            f" AND (datetime({created_col}) >= datetime(?)"
+            f" OR {type_col} IN (SELECT value FROM json_each(?)))"
+        ),
         (cutoff, json.dumps(exempt)),
     )
 

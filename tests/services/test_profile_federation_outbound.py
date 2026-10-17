@@ -69,7 +69,6 @@ class _FakeFederationService:
 
     async def send_event(self, *, to_instance_id, event_type, payload):
         self.sent.append((to_instance_id, event_type, payload))
-        return None
 
     async def drop_queued(self, instance_id, event_types) -> int:
         self.dropped.append((instance_id, frozenset(event_types)))
@@ -139,15 +138,15 @@ class _FakeVisibilityRepo:
 
 
 def _event(**over) -> UserProfileUpdated:
-    base = dict(
-        user_id="u1",
-        username="alice",
-        display_name="Alice",
-        bio="hello",
-        picture_hash="h1",
-        picture_webp=None,
-        handle=None,
-    )
+    base = {
+        "user_id": "u1",
+        "username": "alice",
+        "display_name": "Alice",
+        "bio": "hello",
+        "picture_hash": "h1",
+        "picture_webp": None,
+        "handle": None,
+    }
     base.update(over)
     return UserProfileUpdated(**base)
 
@@ -614,7 +613,7 @@ async def test_block_drops_stale_queued_envelopes_before_the_name_only_update():
 
 
 async def test_block_with_nothing_queued_sends_no_snapshot():
-    _bus, fed, out, _cp = _gated()
+    _bus, _fed, out, _cp = _gated()
     snapshots: list[str] = []
 
     async def _snapshot(peer: str) -> None:

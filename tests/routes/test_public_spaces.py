@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from socialhome.auth import sha256_token_hash
 from socialhome.repositories.public_space_repo import (
     PublicSpaceListing,

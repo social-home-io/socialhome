@@ -26,20 +26,20 @@ ORIGIN = derive_instance_id(KP.public_key)
 
 
 def _inner(**over) -> dict:
-    kw = dict(
-        item_type="comment",
-        item_target="c-1",
-        space_id="sp-1",
-        post_id="p-1",
-        author_user_id=USER,
-        author_username="bob",
-        author_pk=KP.public_key,
-        author_identity_seed=KP.private_key,
-        origin_instance_id=ORIGIN,
-        ts="2026-10-03T12:00:00+00:00",
-        comment_type="text",
-        content="hello",
-    )
+    kw = {
+        "item_type": "comment",
+        "item_target": "c-1",
+        "space_id": "sp-1",
+        "post_id": "p-1",
+        "author_user_id": USER,
+        "author_username": "bob",
+        "author_pk": KP.public_key,
+        "author_identity_seed": KP.private_key,
+        "origin_instance_id": ORIGIN,
+        "ts": "2026-10-03T12:00:00+00:00",
+        "comment_type": "text",
+        "content": "hello",
+    }
     kw.update(over)
     return build_signed_item_inner(**kw)
 

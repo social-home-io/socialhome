@@ -15,7 +15,7 @@ these tests encode, against the real application registry and SQLite:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -161,7 +161,7 @@ async def _open(app, *, sender, from_user, session_id="sess-1") -> None:
                 event_type=FET.APP_SESSION,
                 from_instance=sender,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )
@@ -209,7 +209,7 @@ async def _message(app, *, sender, **fields) -> None:
                 event_type=FET.APP_MESSAGE,
                 from_instance=sender,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )

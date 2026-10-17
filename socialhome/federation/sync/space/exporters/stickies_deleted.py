@@ -18,5 +18,5 @@ class StickiesDeletedExporter(RowTombstonesExporter):
 
     __slots__ = ()
 
-    def __init__(self, sticky_repo: "AbstractStickyRepo") -> None:
+    def __init__(self, sticky_repo: AbstractStickyRepo) -> None:
         super().__init__(sticky_repo.list_tombstones_page)

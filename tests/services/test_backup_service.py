@@ -14,11 +14,11 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.services.backup_service import (
+    EXPORTABLE_TABLES,
+    NEVER_EXPORT,
     BackupError,
     BackupRestoreNotEmpty,
     BackupService,
-    EXPORTABLE_TABLES,
-    NEVER_EXPORT,
 )
 
 

@@ -196,8 +196,10 @@ def test_a_tombstone_stamps_and_the_album_trigger_stamps_its_items(conn):
     [
         "INSERT INTO space_polls(post_id, question) VALUES('p','Q?')",
         "INSERT INTO space_schedule_poll_meta(post_id, title) VALUES('p','When?')",
-        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode, title,"
-        " end_time, currency) VALUES('p','sp','u','fixed','Bike','2027','EUR')",
+        (
+            "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode, title,"
+            " end_time, currency) VALUES('p','sp','u','fixed','Bike','2027','EUR')"
+        ),
     ],
 )
 def test_a_post_child_row_touches_the_post(conn, sql):

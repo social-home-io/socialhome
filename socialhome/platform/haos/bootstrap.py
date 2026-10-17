@@ -26,13 +26,17 @@ before it next re-polls its discovery cache).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+
+import aiofiles
+import aiofiles.os
 
 from ...db import AsyncDatabase
 from ...identity_bootstrap import derive_local_user_id
@@ -80,12 +84,12 @@ class HaBootstrap:
     """
 
     __slots__ = (
+        "_data_dir",
         "_db",
         "_instance_config",
-        "_users",
         "_sv",
-        "_data_dir",
         "_user_service",
+        "_users",
     )
 
     def __init__(
@@ -243,7 +247,7 @@ class HaBootstrap:
                 user_id,
                 username,
                 display_name or username,
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
                 external_id,
                 username,
                 username,
@@ -292,19 +296,17 @@ class HaBootstrap:
                 user["user_id"],
                 INTEGRATION_TOKEN_LABEL,
                 token_hash,
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
             ),
         )
 
         token_path = self._token_path()
         try:
-            # Cold path: bootstrap runs once at add-on startup before the
-            # HTTP server begins serving — sync file writes don't block
-            # any in-flight coroutines.
-            os.makedirs(self._data_dir, exist_ok=True)
-            with open(token_path, "w", encoding="utf-8") as f:
-                f.write(raw_token)
-            os.chmod(token_path, 0o600)
+            await aiofiles.os.makedirs(self._data_dir, exist_ok=True)
+            async with aiofiles.open(token_path, "w", encoding="utf-8") as f:
+                await f.write(raw_token)
+            # aiofiles has no chmod; it's a single syscall off the loop.
+            await asyncio.to_thread(os.chmod, token_path, 0o600)
             log.info("ha_bootstrap: integration token written to %s", token_path)
         except OSError as exc:
             # Discovery push will notice the file missing and log — the DB
@@ -328,15 +330,12 @@ class HaBootstrap:
         substitution on the integration side.
         """
         token_path = self._token_path()
-        # Cold path: _push_discovery is called from the boot-time run()
-        # method, so reading the token file synchronously here doesn't
-        # contend with any request-serving coroutines.
-        if not os.path.exists(token_path):
+        if not await aiofiles.os.path.exists(token_path):
             log.debug("ha_bootstrap: no integration token file — skipping discovery")
             return
         try:
-            with open(token_path, encoding="utf-8") as f:
-                raw_token = f.read().strip()
+            async with aiofiles.open(token_path, encoding="utf-8") as f:
+                raw_token = (await f.read()).strip()
         except OSError as exc:
             log.warning("ha_bootstrap: could not read %s: %s", token_path, exc)
             return
@@ -383,7 +382,7 @@ class HaBootstrap:
 
 __all__ = [
     "BOOTSTRAP_FLAG",
-    "HaBootstrap",
     "INTEGRATION_TOKEN_FILENAME",
     "INTEGRATION_TOKEN_LABEL",
+    "HaBootstrap",
 ]

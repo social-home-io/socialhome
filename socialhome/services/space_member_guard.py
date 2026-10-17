@@ -52,10 +52,10 @@ class SpaceMemberGuardMixin:
 
     __slots__ = ()
 
-    _spaces: "AbstractSpaceRepo"
-    _users: "AbstractUserRepo"
+    _spaces: AbstractSpaceRepo
+    _users: AbstractUserRepo
 
-    async def _member_or_raise(self, space_id: str, user_id: str) -> "SpaceMember":
+    async def _member_or_raise(self, space_id: str, user_id: str) -> SpaceMember:
         """Return the caller's membership row, or raise if they aren't a member."""
         member = await self._spaces.get_member(space_id, user_id)
         if member is None:
@@ -66,10 +66,10 @@ class SpaceMemberGuardMixin:
         self,
         space_id: str,
         user_id: str,
-        roles: "Collection[SpaceRole]",
+        roles: Collection[SpaceRole],
         *,
         message: str,
-    ) -> "SpaceMember":
+    ) -> SpaceMember:
         """Return the membership row iff its role is in ``roles``; else raise.
 
         Raises :class:`SpacePermissionError` with ``message`` when the
@@ -80,7 +80,7 @@ class SpaceMemberGuardMixin:
             raise SpacePermissionError(message)
         return member
 
-    async def _actor_or_raise(self, username: str, *, label: str = "actor") -> "User":
+    async def _actor_or_raise(self, username: str, *, label: str = "actor") -> User:
         """Resolve ``username`` to a :class:`User`, or raise ``KeyError``.
 
         ``label`` tunes the error noun so call sites keep their existing

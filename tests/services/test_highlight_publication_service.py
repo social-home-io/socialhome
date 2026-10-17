@@ -7,7 +7,7 @@ sign-then-POST pattern is exercised end-to-end without a real socket.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -20,7 +20,6 @@ from socialhome.services.highlight_publication_service import (
     HighlightPublicationError,
     HighlightPublicationService,
 )
-
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -56,7 +55,7 @@ class _StubSession:
 
 
 def _expires(days: int = 7) -> str:
-    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    return (datetime.now(UTC) + timedelta(days=days)).isoformat()
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────────
@@ -159,7 +158,7 @@ async def test_revoke_token_calls_gfs(repos, seeded_highlight):
     await repos["highlights"].mark_published(
         seeded_highlight.id,
         gfs_id="gfs-abc",
-        published_at=datetime.now(timezone.utc).isoformat(),
+        published_at=datetime.now(UTC).isoformat(),
     )
     sess = _StubSession(status=200, body={"status": "ok"})
     svc = _make_service(repos, session=sess)
@@ -180,7 +179,7 @@ async def test_unpublish_clears_local_flag_even_if_gfs_404(repos, seeded_highlig
     await repos["highlights"].mark_published(
         seeded_highlight.id,
         gfs_id="gfs-abc",
-        published_at=datetime.now(timezone.utc).isoformat(),
+        published_at=datetime.now(UTC).isoformat(),
     )
     sess = _StubSession(status=404, body={"error": "not_found"})
     svc = _make_service(repos, session=sess)
@@ -227,7 +226,7 @@ async def test_revoke_token_to_inactive_gfs_raises(repos, seeded_highlight):
     await repos["highlights"].mark_published(
         seeded_highlight.id,
         gfs_id="gfs-abc",
-        published_at=datetime.now(timezone.utc).isoformat(),
+        published_at=datetime.now(UTC).isoformat(),
     )
     await repos["gfs"]._db.enqueue(
         "UPDATE gfs_connections SET status='suspended' WHERE id='gfs-abc'"
@@ -247,7 +246,7 @@ async def test_unpublish_logs_and_clears_on_aiohttp_client_error(
     await repos["highlights"].mark_published(
         seeded_highlight.id,
         gfs_id="gfs-abc",
-        published_at=datetime.now(timezone.utc).isoformat(),
+        published_at=datetime.now(UTC).isoformat(),
     )
 
     class _BoomSession(_StubSession):
@@ -323,7 +322,7 @@ async def test_revoke_token_aiohttp_client_error_wraps(repos, seeded_highlight):
     await repos["highlights"].mark_published(
         seeded_highlight.id,
         gfs_id="gfs-abc",
-        published_at=datetime.now(timezone.utc).isoformat(),
+        published_at=datetime.now(UTC).isoformat(),
     )
 
     class _BoomSession(_StubSession):
@@ -342,7 +341,7 @@ async def test_revoke_token_http_error_wraps(repos, seeded_highlight):
     await repos["highlights"].mark_published(
         seeded_highlight.id,
         gfs_id="gfs-abc",
-        published_at=datetime.now(timezone.utc).isoformat(),
+        published_at=datetime.now(UTC).isoformat(),
     )
     sess = _StubSession(status=500, body={"error": "server"})
     svc = _make_service(repos, session=sess)

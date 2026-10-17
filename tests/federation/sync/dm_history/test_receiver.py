@@ -6,7 +6,6 @@ import json
 import logging
 from types import SimpleNamespace
 
-
 from socialhome.domain.events import DmHistorySyncComplete
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.sync.dm_history.receiver import DmHistoryReceiver

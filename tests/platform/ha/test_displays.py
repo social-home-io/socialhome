@@ -397,9 +397,11 @@ async def test_a_registry_that_doesnt_answer_is_a_failure(
     directory, client, command, caplog
 ):
     client.ws[command] = None
-    with caplog.at_level(logging.WARNING):
-        with pytest.raises(DisplayDiscoveryFailedError):
-            await directory.list_panels()
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(DisplayDiscoveryFailedError),
+    ):
+        await directory.list_panels()
     assert command in caplog.text
 
 
@@ -426,9 +428,8 @@ async def test_connect_calls_the_panels_esphome_action(directory, client):
 async def test_connect_failure_never_logs_the_sealed_value(directory, client, caplog):
     kitchen = (await directory.list_panels())[0]
     client.service_reply = None
-    with caplog.at_level(logging.DEBUG):
-        with pytest.raises(DisplayDiscoveryFailedError):
-            await directory.connect(kitchen, sealed=SEALED)
+    with caplog.at_level(logging.DEBUG), pytest.raises(DisplayDiscoveryFailedError):
+        await directory.connect(kitchen, sealed=SEALED)
     assert SEALED not in caplog.text and "Y3Q" not in caplog.text
     assert "sh_dash_kitchen_connect_social_home" in caplog.text
 

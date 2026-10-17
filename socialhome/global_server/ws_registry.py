@@ -61,7 +61,7 @@ WS_SEND_TIMEOUT_S: float = 10.0
 class GfsWebSocketRegistry:
     """Per-instance registry of live GFS-side WebSocket sessions."""
 
-    __slots__ = ("_by_instance", "_lock", "_closing")
+    __slots__ = ("_by_instance", "_closing", "_lock")
 
     def __init__(self) -> None:
         self._by_instance: dict[str, web.WebSocketResponse] = {}
@@ -87,7 +87,9 @@ class GfsWebSocketRegistry:
                     message=b"replaced",
                 )
             except Exception as exc:  # defensive — never block new registration
-                log.debug("ws.evict failed instance=%s: %s", instance_id, exc)
+                log.debug(
+                    "ws.evict failed instance=%s: %s", instance_id, exc, exc_info=True
+                )
         log.info(
             "gfs.ws.register: instance=%s total=%d",
             instance_id,
@@ -121,7 +123,9 @@ class GfsWebSocketRegistry:
             try:
                 await ws.close(code=1001, message=b"server-shutdown")
             except Exception as exc:
-                log.debug("gfs.ws.close_all: socket close failed: %s", exc)
+                log.debug(
+                    "gfs.ws.close_all: socket close failed: %s", exc, exc_info=True
+                )
         if self._closing:
             await asyncio.gather(*self._closing, return_exceptions=True)
 
@@ -184,7 +188,9 @@ class GfsWebSocketRegistry:
             await self._drop_dead(instance_id, ws)
             return False
         except Exception as exc:  # defensive
-            log.debug("gfs.ws.send failed instance=%s: %s", instance_id, exc)
+            log.debug(
+                "gfs.ws.send failed instance=%s: %s", instance_id, exc, exc_info=True
+            )
             await self._drop_dead(instance_id, ws)
             return False
 
@@ -211,7 +217,12 @@ class GfsWebSocketRegistry:
             async with asyncio.timeout(WS_SEND_TIMEOUT_S):
                 await ws.close(code=_EVICT_STALLED_CODE, message=b"send-timeout")
         except Exception as exc:
-            log.debug("gfs.ws: closing stalled socket %s failed: %s", instance_id, exc)
+            log.debug(
+                "gfs.ws: closing stalled socket %s failed: %s",
+                instance_id,
+                exc,
+                exc_info=True,
+            )
 
     async def _drop_dead(
         self,

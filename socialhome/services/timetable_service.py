@@ -36,7 +36,7 @@ import copy
 import logging
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from ..domain import timetable as td
@@ -99,7 +99,7 @@ Mutation = Callable[[Timetable, datetime], Timetable]
 
 def _utcnow() -> datetime:
     """The service clock — one seam for "now" and "today" (tests shift it)."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _new_id() -> str:
@@ -572,7 +572,7 @@ class TimetableEditorMixin:
 class TimetableService(BusPublisherMixin, TimetableEditorMixin):
     """Household timetable operations."""
 
-    __slots__ = ("_repo", "_bus", "_household", "_users")
+    __slots__ = ("_bus", "_household", "_repo", "_users")
 
     def __init__(
         self,
@@ -764,7 +764,12 @@ class TimetableService(BusPublisherMixin, TimetableEditorMixin):
             try:
                 today = td.today_timetable(tt, local_date(now, tt.tz))
             except Exception as exc:  # one bad row never empties the slice
-                log.warning("timetable %s: today's lessons failed: %s", tt.id, exc)
+                log.warning(
+                    "timetable %s: today's lessons failed: %s",
+                    tt.id,
+                    exc,
+                    exc_info=True,
+                )
                 continue
             if today is None or not td.has_lessons(today):
                 continue  # not in effect, or no filled lesson today
@@ -786,7 +791,7 @@ class SpaceTimetableService(SpaceMemberGuardMixin):
     :class:`TimetableEditorMixin`) and re-checks access on every call.
     """
 
-    __slots__ = ("_repo", "_spaces", "_bus")
+    __slots__ = ("_bus", "_repo", "_spaces")
 
     def __init__(
         self,
@@ -863,7 +868,7 @@ class SpaceTimetableScope(BusPublisherMixin, TimetableEditorMixin):
     are "not found".
     """
 
-    __slots__ = ("_svc", "_space_id", "_actor", "_bus")
+    __slots__ = ("_actor", "_bus", "_space_id", "_svc")
 
     def __init__(
         self, svc: SpaceTimetableService, space_id: str, actor_user_id: str

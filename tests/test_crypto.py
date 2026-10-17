@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from socialhome.crypto import (
     MOVE_LINK_SUITE_ED25519,
     REPLAY_CACHE_WINDOW,
     SUPPORTED_MOVE_LINK_SUITES,
-    is_instance_id,
     SUPPORTED_USER_SIG_SUITES,
     USER_SIG_SUITE_ED25519,
     MoveLinkBindingInvalid,
@@ -31,14 +31,15 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_routing_secret,
     generate_x25519_keypair,
+    is_instance_id,
     is_small_order_ed25519_key,
     is_valid_ed25519_public_key,
     keyed_hash,
+    move_link_release_signed_bytes,
+    move_link_user_signed_bytes,
     random_token,
     sha256_hex,
     sign_ed25519,
-    move_link_release_signed_bytes,
-    move_link_user_signed_bytes,
     sign_user_assertion,
     sign_user_self,
     user_identity_signed_bytes,
@@ -50,8 +51,6 @@ from socialhome.crypto import (
     verify_user_self,
     x25519_exchange,
 )
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
 from socialhome.domain.user import UserIdentityAssertion
 
 
@@ -270,7 +269,7 @@ def test_user_identity_assertion_sign_and_verify():
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)
     uid = derive_user_id(kp.public_key, "pascal")
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
     sig = sign_user_assertion(
         kp.private_key,
         user_id=uid,
@@ -295,7 +294,7 @@ def test_user_identity_assertion_tampered_display_name():
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)
     uid = derive_user_id(kp.public_key, "pascal")
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
     sig = sign_user_assertion(
         kp.private_key,
         user_id=uid,
@@ -321,7 +320,7 @@ def test_user_identity_assertion_wrong_instance_id():
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)
     uid = derive_user_id(kp.public_key, "pascal")
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
     sig = sign_user_assertion(
         kp.private_key,
         user_id=uid,
@@ -365,7 +364,7 @@ def test_replay_cache_different_ids_independent():
 def test_replay_cache_load_from_persistence():
     """Replay IDs loaded from storage are immediately considered seen."""
     rc = ReplayCache()
-    rc.load([("m1", datetime.now(timezone.utc).isoformat())])
+    rc.load([("m1", datetime.now(UTC).isoformat())])
     assert rc.seen("m1") is True
     assert rc.seen("m2") is False
 
@@ -382,7 +381,7 @@ def test_replay_cache_warm_entries_dedupe_scoped_runtime_checks():
     dedup and is applied twice.
     """
     rc = ReplayCache()
-    rc.load([("warmed-msg", datetime.now(timezone.utc).isoformat())])
+    rc.load([("warmed-msg", datetime.now(UTC).isoformat())])
     assert rc.seen("warmed-msg", from_instance="peer-instance") is True
 
 
@@ -411,7 +410,7 @@ def test_replay_cache_dedupes_lost_ack_retry_within_window():
     lands hours after the first (successful-but-unacked) delivery, and only
     forgets it once the window has elapsed."""
     rc = ReplayCache(window=REPLAY_CACHE_WINDOW)
-    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
     # First delivery: not seen, recorded.
     assert rc.seen("m", from_instance="p", now=t0) is False
     # Lost-ack retry ~5 h later (within the ~5.2 h max jittered cadence):
@@ -486,9 +485,9 @@ def test_derive_instance_id_bad_key():
 def test_replay_cache_prune_removes_old_entries():
     """ReplayCache.prune removes entries older than the window."""
     rc = ReplayCache(window=timedelta(seconds=1))
-    past = datetime.now(timezone.utc) - timedelta(seconds=10)
+    past = datetime.now(UTC) - timedelta(seconds=10)
     rc._seen["old"] = past
-    rc.prune(now=datetime.now(timezone.utc))
+    rc.prune(now=datetime.now(UTC))
     assert "old" not in rc._seen
 
 
@@ -587,7 +586,7 @@ def _make_dual_assertion(*, username: str = "pascal", display_name: str = "Pasca
     user_kp = generate_identity_keypair()
     iid = derive_instance_id(instance_kp.public_key)
     uid = derive_user_id(instance_kp.public_key, username)
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
     a = build_user_identity_assertion(
         instance_seed=instance_kp.private_key,
         user_id=uid,
@@ -645,7 +644,7 @@ def test_legacy_assertion_without_user_binding_unchanged():
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)
     uid = derive_user_id(kp.public_key, "pascal")
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
     a = build_user_identity_assertion(
         instance_seed=kp.private_key,
         user_id=uid,
@@ -725,7 +724,7 @@ def test_anchor_derived_user_id_verifies():
     iid = derive_instance_id(instance_kp.public_key)
     anchor = "deadbeef" * 4  # opaque uuid-like value, != username
     uid = derive_user_id(instance_kp.public_key, anchor)
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
     a = build_user_identity_assertion(
         instance_seed=instance_kp.private_key,
         user_id=uid,
@@ -752,7 +751,7 @@ def test_forged_anchor_rejected():
     iid = derive_instance_id(instance_kp.public_key)
     anchor = "deadbeef" * 4
     uid = derive_user_id(instance_kp.public_key, anchor)
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
     a = build_user_identity_assertion(
         instance_seed=instance_kp.private_key,
         user_id=uid,
@@ -775,7 +774,7 @@ def test_legacy_no_anchor_falls_back_to_username():
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)
     uid = derive_user_id(kp.public_key, "pascal")
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
     a = build_user_identity_assertion(
         instance_seed=kp.private_key,
         user_id=uid,
@@ -797,7 +796,7 @@ def test_anchored_binding_roundtrip():
     iid = derive_instance_id(instance_kp.public_key)
     anchor = "deadbeef" * 4
     uid = derive_user_id(instance_kp.public_key, anchor)
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
     a = build_user_identity_assertion(
         instance_seed=instance_kp.private_key,
         user_id=uid,
@@ -878,14 +877,14 @@ def test_move_link_suite_contract():
 def _move_link_byte_args():
     kp = generate_identity_keypair()
     new_kp = generate_identity_keypair()
-    return dict(
-        old_user_id="old_uid",
-        new_user_id="new_uid",
-        user_public_key=kp.public_key,
-        new_instance_public_key=new_kp.public_key,
-        issued_at="2026-06-16T00:00:00+00:00",
-        suite=MOVE_LINK_SUITE_ED25519,
-    )
+    return {
+        "old_user_id": "old_uid",
+        "new_user_id": "new_uid",
+        "user_public_key": kp.public_key,
+        "new_instance_public_key": new_kp.public_key,
+        "issued_at": "2026-06-16T00:00:00+00:00",
+        "suite": MOVE_LINK_SUITE_ED25519,
+    }
 
 
 def test_move_link_release_bytes_commit_to_destination_user_id():
@@ -927,7 +926,7 @@ def _build_move_scenario(*, username: str = "pascal", display_name: str = "Pasca
     new_instance_id = derive_instance_id(new_home_kp.public_key)
     old_user_id = derive_user_id(old_home_kp.public_key, anchor)
     new_user_id = derive_user_id(new_home_kp.public_key, anchor)
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
 
     new_home_assertion = build_user_identity_assertion(
         instance_seed=new_home_kp.private_key,
@@ -1122,7 +1121,7 @@ def test_verify_move_link_freshness_is_caller_controlled():
     ``max_age`` — proving the bound now reaches both the link's own freshness
     gate AND the embedded new-home assertion check."""
     s = _build_move_scenario()
-    way_back = (datetime.now(timezone.utc) - timedelta(days=800)).isoformat()
+    way_back = (datetime.now(UTC) - timedelta(days=800)).isoformat()
     # Build a fully-consistent but OLD link (assertion + link share the old date)
     # so it fails ONLY on freshness when freshness is actually enforced.
     user_kp = s["user_kp"]

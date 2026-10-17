@@ -12,10 +12,9 @@ Exposed as two repo classes to mirror the table split; helpers are shared.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from datetime import date, datetime, timezone
-from typing import Protocol, runtime_checkable
-
 from dataclasses import replace
+from datetime import UTC, date, datetime
+from typing import Protocol, runtime_checkable
 
 from ..auth import sha256_token_hash
 from ..db import AsyncDatabase
@@ -104,7 +103,7 @@ def _parse(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -1439,8 +1438,8 @@ def _row_to_event(row: dict | None) -> CalendarEvent | None:
         id=row["id"],
         calendar_id=row["calendar_id"],
         summary=row["summary"],
-        start=_parse(row["start_dt"]) or datetime.now(timezone.utc),
-        end=_parse(row["end_dt"]) or datetime.now(timezone.utc),
+        start=_parse(row["start_dt"]) or datetime.now(UTC),
+        end=_parse(row["end_dt"]) or datetime.now(UTC),
         created_by=row["created_by"],
         description=row.get("description"),
         all_day=bool_col(row.get("all_day", 0)),
@@ -1466,8 +1465,8 @@ def _row_to_space_event(row: dict) -> CalendarEvent:
         id=row["id"],
         calendar_id=row["space_id"],
         summary=row["summary"],
-        start=_parse(row["start_dt"]) or datetime.now(timezone.utc),
-        end=_parse(row["end_dt"]) or datetime.now(timezone.utc),
+        start=_parse(row["start_dt"]) or datetime.now(UTC),
+        end=_parse(row["end_dt"]) or datetime.now(UTC),
         created_by=row["created_by"],
         description=row.get("description"),
         all_day=bool_col(row.get("all_day", 0)),

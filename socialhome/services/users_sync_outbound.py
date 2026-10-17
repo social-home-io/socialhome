@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import PairingConfirmed
@@ -47,10 +47,10 @@ from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
-    from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
     from ..repositories.peer_user_visibility_repo import (
         AbstractPeerUserVisibilityRepo,
     )
+    from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
     from ..repositories.user_repo import AbstractUserRepo
 
 log = logging.getLogger(__name__)
@@ -60,24 +60,24 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
     """Send ``USERS_SYNC`` to a freshly-confirmed peer."""
 
     # Narrow the mixin's ``FederationService | None`` slot — always wired.
-    _federation: "FederationService"
+    _federation: FederationService
 
     __slots__ = (
         "_bus",
         "_child_protection",
         "_federation",
-        "_user_repo",
         "_picture_repo",
+        "_user_repo",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        user_repo: "AbstractUserRepo",
-        profile_picture_repo: "AbstractProfilePictureRepo | None" = None,
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
+        federation_service: FederationService,
+        user_repo: AbstractUserRepo,
+        profile_picture_repo: AbstractProfilePictureRepo | None = None,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -105,11 +105,11 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
         try:
             users = await self._user_repo.list_active()
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("users-sync: list_active failed: %s", exc)
+            log.debug("users-sync: list_active failed: %s", exc, exc_info=True)
             return
 
         hidden = await self.hidden_for_peer(peer_id)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         payload_users: list[dict] = []
         for u in users:
             if u.user_id in hidden:
@@ -164,6 +164,7 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
                         "users-sync: picture lookup for %s failed: %s",
                         u.user_id,
                         exc,
+                        exc_info=True,
                     )
                     pic = None
                 if pic is not None:
@@ -183,4 +184,4 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
                 payload={"users": payload_users},
             )
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("users-sync: send to %s failed: %s", peer_id, exc)
+            log.debug("users-sync: send to %s failed: %s", peer_id, exc, exc_info=True)

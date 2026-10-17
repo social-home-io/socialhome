@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import PairingIntroRelayReceived
@@ -56,13 +56,13 @@ def _row_to_request(row: dict) -> PendingRelayRequest:
 class PairingRelayQueue:
     """Durable queue of admin-pending pairing relay requests."""
 
-    __slots__ = ("_bus", "_federation", "_repo", "_own_instance_id")
+    __slots__ = ("_bus", "_federation", "_own_instance_id", "_repo")
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation: "FederationService",
+        federation: FederationService,
         repo: AbstractPairingRelayRepo,
         own_instance_id: str,
     ) -> None:
@@ -82,7 +82,7 @@ class PairingRelayQueue:
             from_instance=event.from_instance,
             target_instance_id=event.target_instance_id,
             message=event.message,
-            received_at=datetime.now(timezone.utc),
+            received_at=datetime.now(UTC),
         )
         # Drop oldest pending rows past the cap so a noisy peer cannot
         # DoS the admin list.

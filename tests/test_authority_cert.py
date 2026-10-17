@@ -275,7 +275,7 @@ def test_authority_cert_epoch(cert, expected):
 def test_epoch_above_int64_is_refused(owner):
     from socialhome.authority_cert import MAX_AUTHORITY_KEY_EPOCH
 
-    kp, owner_id = owner
+    _kp, owner_id = owner
     with pytest.raises(ValueError):
         _cert(owner, epoch=MAX_AUTHORITY_KEY_EPOCH + 1)
     cert = _cert(owner, epoch=MAX_AUTHORITY_KEY_EPOCH)

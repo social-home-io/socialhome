@@ -27,9 +27,8 @@ from pathlib import Path
 
 import pytest
 
-import socialhome.domain.gfs_server as gfs_server
-import socialhome.outbound_fetch as outbound_fetch
-import socialhome.peer_url as peer_url
+from socialhome import outbound_fetch, peer_url
+from socialhome.domain import gfs_server
 
 # Load the harness module by path — it lives outside the ``socialhome``
 # package and pytest's import machinery doesn't pick it up via normal
@@ -111,14 +110,7 @@ def test_block_splitter_separates_consecutive_log_levels(harness):
     must produce one block per line. Pre-fix every line after the
     first folded into block 0, so the audit could only ever see
     one block per file."""
-    text = "\n".join(
-        [
-            "INFO:socialhome.app:starting",
-            "WARNING:socialhome.federation.transport:HTTPS-inbox send to x failed: ",
-            "ERROR:aiolibdatachannel:rtc::impl::DtlsTransport: DTLS handshake failed",
-            "INFO:socialhome.app:ready",
-        ]
-    )
+    text = "INFO:socialhome.app:starting\nWARNING:socialhome.federation.transport:HTTPS-inbox send to x failed: \nERROR:aiolibdatachannel:rtc::impl::DtlsTransport: DTLS handshake failed\nINFO:socialhome.app:ready"
     blocks = harness._split_log_into_blocks(text)
     assert len(blocks) == 4
     assert blocks[0][0].startswith("INFO:socialhome.app:starting")
@@ -130,16 +122,7 @@ def test_block_splitter_keeps_traceback_frames_attached(harness):
     frames + final exception summary into one block, so the benign
     filter can suppress the entire trace when its tail names a
     known cause."""
-    text = "\n".join(
-        [
-            "INFO:setup:ready",
-            "Traceback (most recent call last):",
-            '  File "x.py", line 1, in <module>',
-            "    raise ValueError('boom')",
-            "ValueError: boom",
-            "INFO:setup:continued",
-        ]
-    )
+    text = "INFO:setup:ready\nTraceback (most recent call last):\n  File \"x.py\", line 1, in <module>\n    raise ValueError('boom')\nValueError: boom\nINFO:setup:continued"
     blocks = harness._split_log_into_blocks(text)
     # 3 blocks: INFO setup ready, the Traceback block (5 lines),
     # INFO setup continued.
@@ -192,13 +175,7 @@ def test_dtls_block_is_correctly_classified_as_benign(harness):
     """End-to-end: a single-line DTLS error block flows through the
     splitter + audit suppression filter cleanly, even though the
     block_text is just the one line (no indented frames)."""
-    text = "\n".join(
-        [
-            "INFO:setup:ready",
-            "ERROR:aiolibdatachannel:rtc::impl::DtlsTransport::doRecv@1001: DTLS handshake failed",
-            "INFO:setup:continued",
-        ]
-    )
+    text = "INFO:setup:ready\nERROR:aiolibdatachannel:rtc::impl::DtlsTransport::doRecv@1001: DTLS handshake failed\nINFO:setup:continued"
     blocks = harness._split_log_into_blocks(text)
     dtls = next(b for b in blocks if "DTLS handshake failed" in b[0])
     # Header is interesting (ERROR:) and body matches a benign needle.

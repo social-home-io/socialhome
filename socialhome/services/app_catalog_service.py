@@ -13,7 +13,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-
 from ..domain.apps import AppCatalogEntry
 
 log = logging.getLogger(__name__)
@@ -29,7 +28,7 @@ class AppCatalogService:
     Pass ``force=True`` to :meth:`fetch_catalog` to bypass the cache.
     """
 
-    __slots__ = ("_session_factory", "_catalog_url", "_cache", "_cache_ts")
+    __slots__ = ("_cache", "_cache_ts", "_catalog_url", "_session_factory")
 
     def __init__(
         self,
@@ -77,10 +76,12 @@ class AppCatalogService:
         ):
             return self._cache
 
-        async with self._session_factory() as session:
-            async with session.get(self._catalog_url) as resp:
-                resp.raise_for_status()
-                raw = await resp.text()
+        async with (
+            self._session_factory() as session,
+            session.get(self._catalog_url) as resp,
+        ):
+            resp.raise_for_status()
+            raw = await resp.text()
         doc = json.loads(raw)
         out: list[AppCatalogEntry] = []
         for item in doc.get("apps", []):

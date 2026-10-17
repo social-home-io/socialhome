@@ -10,23 +10,24 @@ from socialhome.domain.conversation import (
     DmTooLongError,
     GroupTooSmallError,
 )
+from socialhome.domain.errors import (
+    CodedError,
+    GfsSelectionInvalidError,
+    GfsSelectionRequiredError,
+    ImageTooLargeError,
+    ImageUnreadableError,
+    InvalidMediaRefError,
+    PayloadTooLargeError,
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
+    WrongTypeError,
+)
 from socialhome.domain.federation import (
     FederationBaseManagedByPlatformError,
     GfsNotConnectedError,
     GfsNotSharedError,
     PairingKeywrapInvalidError,
     PairingReachInvalidError,
-)
-from socialhome.domain.errors import (
-    CodedError,
-    GfsSelectionInvalidError,
-    GfsSelectionRequiredError,
-    InvalidMediaRefError,
-    ImageTooLargeError,
-    ImageUnreadableError,
-    PayloadTooLargeError,
-    SpaceNotPublishableError,
-    TierChangeRequiredError,
 )
 from socialhome.domain.space import (
     AgeRestrictedError,
@@ -56,7 +57,6 @@ from socialhome.services.dm_service import (
     RecipientBlockedError,
 )
 from socialhome.services.poll_service import PollClosedError
-
 
 # ─── CodedError ──────────────────────────────────────────────────────────
 
@@ -343,3 +343,11 @@ def test_federation_base_managed_by_platform_is_coded():
     assert (exc.status, exc.code) == (422, "FEDERATION_BASE_MANAGED_BY_PLATFORM")
     assert exc.detail == "This home's address is managed by Home Assistant."
     assert exc.params == {}
+
+
+def test_wrong_type_error_is_both_a_type_error_and_a_value_error():
+    """Callers catching malformed input as ``ValueError`` keep catching it."""
+    exc = WrongTypeError("x must be a string")
+    assert isinstance(exc, TypeError)
+    assert isinstance(exc, ValueError)
+    assert str(exc) == "x must be a string"

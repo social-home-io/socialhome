@@ -17,15 +17,15 @@ from socialhome.domain.writer_cert import (
 
 
 def _cert(**over) -> WriterCert:
-    base = dict(
-        cert_suite="ed25519",
-        space_id="sp-1",
-        epoch=3,
-        instance_pk="A" * 43,
-        scope=WRITER_SCOPE_WRITE,
-        issued_at=1_700_000_000,
-        cert_sig="sig",
-    )
+    base = {
+        "cert_suite": "ed25519",
+        "space_id": "sp-1",
+        "epoch": 3,
+        "instance_pk": "A" * 43,
+        "scope": WRITER_SCOPE_WRITE,
+        "issued_at": 1_700_000_000,
+        "cert_sig": "sig",
+    }
     base.update(over)
     return WriterCert(**base)
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import builtins
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -151,7 +151,7 @@ class SqliteHighlightRepo:
             highlight_date=highlight_date,
             audience_kind=audience_kind,
             audience=tuple(audience),
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             expires_at=expires_at,
         )
         await self._db.enqueue(
@@ -262,7 +262,7 @@ class SqliteHighlightRepo:
             caption_text=caption_text,
             caption_emoji=caption_emoji,
             duration_ms=duration_ms,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
         )
         await self._db.enqueue(
             """
@@ -386,7 +386,7 @@ class SqliteHighlightRepo:
         reactor_user_id: str,
         emoji: str,
     ) -> HighlightFrameReaction:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO highlight_frame_reactions(
@@ -519,7 +519,7 @@ class SqliteHighlightRepo:
                 highlight.highlight_date,
                 highlight.audience_kind.value,
                 dump_json(list(highlight.audience)),
-                highlight.created_at or datetime.now(timezone.utc).isoformat(),
+                highlight.created_at or datetime.now(UTC).isoformat(),
                 highlight.expires_at,
             ),
         )
@@ -549,7 +549,7 @@ class SqliteHighlightRepo:
                 frame.caption_text,
                 frame.caption_emoji,
                 frame.duration_ms,
-                frame.created_at or datetime.now(timezone.utc).isoformat(),
+                frame.created_at or datetime.now(UTC).isoformat(),
             ),
         )
         return frame

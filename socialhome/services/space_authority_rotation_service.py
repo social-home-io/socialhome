@@ -101,10 +101,10 @@ from .space_authority_pin import (
 )
 from .space_crypto_service import KEY_SUITE_AESGCM_256, SUPPORTED_KEY_SUITES
 from .space_service import (
-    space_metadata_for_federation,
     apply_gfs_servers_from_metadata,
     apply_owner_statement_from_metadata,
     keep_local_space_state,
+    space_metadata_for_federation,
     stub_space_from_metadata,
 )
 
@@ -161,33 +161,33 @@ class SpaceAuthorityRotationService:
     """Owner-side rotation + member-side bundle application (v_44)."""
 
     __slots__ = (
-        "_spaces",
-        "_remote_members",
         "_bus",
-        "_own_instance_id",
-        "_federation",
-        "_federation_repo",
-        "_space_crypto",
-        "_space_service",
-        "_gfs",
-        "_subscriber_keys",
-        "_member_gfs",
-        "_writer_certs",
-        "_locks",
+        "_closed",
+        "_echo_pending",
         "_echo_reacted",
         "_echo_rotated",
-        "_echo_pending",
-        "_tasks",
-        "_closed",
+        "_federation",
+        "_federation_repo",
+        "_gfs",
+        "_locks",
+        "_member_gfs",
+        "_own_instance_id",
+        "_remote_members",
         "_restore_pending",
+        "_space_crypto",
+        "_space_service",
+        "_spaces",
+        "_subscriber_keys",
+        "_tasks",
         "_warned_pending",
+        "_writer_certs",
     )
 
     def __init__(
         self,
         *,
-        space_repo: "AbstractSpaceRepo",
-        remote_member_repo: "AbstractSpaceRemoteMemberRepo",
+        space_repo: AbstractSpaceRepo,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo,
         bus: EventBus,
         own_instance_id: str,
     ) -> None:
@@ -195,20 +195,20 @@ class SpaceAuthorityRotationService:
         self._remote_members = remote_member_repo
         self._bus = bus
         self._own_instance_id = own_instance_id
-        self._federation: "FederationService | None" = None
-        self._federation_repo: "AbstractFederationRepo | None" = None
-        self._space_crypto: "SpaceContentEncryption | None" = None
-        self._space_service: "SpaceService | None" = None
+        self._federation: FederationService | None = None
+        self._federation_repo: AbstractFederationRepo | None = None
+        self._space_crypto: SpaceContentEncryption | None = None
+        self._space_service: SpaceService | None = None
         self._gfs = None
         self._subscriber_keys = None
         self._member_gfs = None
         #: v_49 — re-issues each household's writer cert under the NEW
         #: authority key (owner side) and stores ours (member side).
-        self._writer_certs: "SpaceWriterCertService | None" = None
+        self._writer_certs: SpaceWriterCertService | None = None
         #: Per-space rotation / bundle locks. Weak values: a lock nobody holds
         #: or waits on is dropped, so the map never grows with the number of
         #: spaces ever touched.
-        self._locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+        self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
         #: Owner side (v_46): last reaction per ``(space_id, household)`` and
@@ -236,16 +236,16 @@ class SpaceAuthorityRotationService:
 
     def attach_federation(
         self,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
     ) -> None:
         self._federation = federation_service
         self._federation_repo = federation_repo
 
-    def attach_space_crypto(self, space_crypto: "SpaceContentEncryption") -> None:
+    def attach_space_crypto(self, space_crypto: SpaceContentEncryption) -> None:
         self._space_crypto = space_crypto
 
-    def attach_space_service(self, space_service: "SpaceService") -> None:
+    def attach_space_service(self, space_service: SpaceService) -> None:
         """The roster snapshot builder and the seed share live there."""
         self._space_service = space_service
 
@@ -253,7 +253,7 @@ class SpaceAuthorityRotationService:
         """Optional: re-publish public/global spaces so each GFS re-pins."""
         self._gfs = gfs_service
 
-    def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
+    def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Optional (v_49): the bundle carries each household its own writer
         cert signed with the new key; a member stores the one it receives."""
         self._writer_certs = writer_certs
@@ -300,14 +300,14 @@ class SpaceAuthorityRotationService:
     def wire(self) -> None:
         self._bus.subscribe(SpaceAdminAuthorityRevoked, self._on_revoked)
 
-    def attach_to(self, federation_service: "FederationService") -> None:
-        federation_service._event_registry.register(  # noqa: SLF001
+    def attach_to(self, federation_service: FederationService) -> None:
+        federation_service._event_registry.register(
             FederationEventType.SPACE_AUTHORITY_ROTATED,
             self._on_rotated,
         )
         # A second, independent handler next to the sync admission one: the
         # echo is read whether or not the sync itself is admitted.
-        federation_service._event_registry.register(  # noqa: SLF001
+        federation_service._event_registry.register(
             FederationEventType.SPACE_SYNC_BEGIN,
             self._on_sync_begin,
         )
@@ -597,7 +597,7 @@ class SpaceAuthorityRotationService:
 
     async def _distribute(
         self,
-        space: "Space",
+        space: Space,
         cert: dict,
         seed: bytes,
         content_key: dict | None,
@@ -763,7 +763,7 @@ class SpaceAuthorityRotationService:
                     space.id,
                 )
 
-    async def _roster_for(self, space: "Space", seed: bytes, inst: str) -> list[dict]:
+    async def _roster_for(self, space: Space, seed: bytes, inst: str) -> list[dict]:
         if self._space_service is None:
             return []
         try:
@@ -797,7 +797,7 @@ class SpaceAuthorityRotationService:
                 space_id,
             )
 
-    async def _refresh_gfs(self, space: "Space") -> None:
+    async def _refresh_gfs(self, space: Space) -> None:
         """Re-publish a public/global space to every GFS that already lists
         it (each re-pins from the cert), THEN re-seal the content key to
         subscribers — the handoff is signed with the new key, which a GFS
@@ -937,7 +937,7 @@ class SpaceAuthorityRotationService:
             )
             self._spawn(self._resend_bundle(space_id, sender), f"resend-{space_id}")
 
-    def _cert_proves(self, space: "Space", cert: object, epoch: int) -> bool:
+    def _cert_proves(self, space: Space, cert: object, epoch: int) -> bool:
         """``cert`` is our own household's cert for ``epoch`` of this space."""
         fed = self._federation
         if fed is None or not isinstance(cert, dict):
@@ -1183,7 +1183,7 @@ class SpaceAuthorityRotationService:
 
     async def _note_forgotten(
         self,
-        space: "Space",
+        space: Space,
         p: dict,
         held_before: int,
         held_cert: dict | None,
@@ -1408,7 +1408,7 @@ class SpaceAuthorityRotationService:
         missed = [e for e in candidates if baseline_epoch < e < new_epoch]
         return max(missed) if missed else None
 
-    def _authority_ok(self, space: "Space", event_type: str, part: object) -> bool:
+    def _authority_ok(self, space: Space, event_type: str, part: object) -> bool:
         if not isinstance(part, dict):
             return False
         sig = str(part.get("authority_sig") or "")
@@ -1428,7 +1428,7 @@ class SpaceAuthorityRotationService:
             return False
 
     async def _reset_config(
-        self, space: "Space", meta: object, owner: str, cutoff: int
+        self, space: Space, meta: object, owner: str, cutoff: int
     ) -> None:
         if not self._authority_ok(space, _CONFIG_EVENT, meta):
             log.warning(
@@ -1473,7 +1473,7 @@ class SpaceAuthorityRotationService:
 
     async def _reset_roster(
         self,
-        space: "Space",
+        space: Space,
         entries: object,
         roster_version: object,
         cutoff: int,
@@ -1577,7 +1577,7 @@ class SpaceAuthorityRotationService:
             )
 
     def _verify_entries_sync(
-        self, space: "Space", candidates: list[tuple[dict, bool]]
+        self, space: Space, candidates: list[tuple[dict, bool]]
     ) -> list[tuple[dict, bool]]:
         """Worker thread: keep only entries signed with the new key."""
         out: list[tuple[dict, bool]] = []
@@ -1592,7 +1592,7 @@ class SpaceAuthorityRotationService:
         return out
 
     def _content_key_parts(
-        self, space: "Space", meta: object
+        self, space: Space, meta: object
     ) -> tuple[int, bytes, str] | None:
         """The bundle's content key as ``(epoch, raw, rotated_by)`` — only
         when it is signed with the new key and well-formed."""
@@ -1630,9 +1630,7 @@ class SpaceAuthorityRotationService:
             return None
         return epoch, raw, rotated_by
 
-    async def _reset_content_key(
-        self, space: "Space", meta: object, cutoff: int
-    ) -> None:
+    async def _reset_content_key(self, space: Space, meta: object, cutoff: int) -> None:
         parts = self._content_key_parts(space, meta)
         if parts is None:
             return
@@ -1652,7 +1650,7 @@ class SpaceAuthorityRotationService:
                 "SPACE_AUTHORITY_ROTATED for %s: malformed content key", space.id
             )
 
-    async def _import_content_key(self, space: "Space", meta: object) -> None:
+    async def _import_content_key(self, space: Space, meta: object) -> None:
         """A non-baseline bundle's content key: an ordinary owner rekey,
         stored only while we still pin the key that signed it."""
         parts = self._content_key_parts(space, meta)

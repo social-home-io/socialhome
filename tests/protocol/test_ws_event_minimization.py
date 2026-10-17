@@ -16,7 +16,6 @@ import pytest
 
 from socialhome.services.realtime_service import _safe
 
-
 pytestmark = pytest.mark.security
 
 
@@ -93,4 +92,4 @@ async def test_typing_event_carries_only_routing():
     # Member list is empty, so no broadcast captured. Force one by
     # invoking handle_remote_typing instead, which should also obey
     # the no-content rule.
-    pass  # nothing to assert — just verify no exception
+    # nothing to assert — just verify no exception

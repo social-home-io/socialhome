@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 class PageLockExpiryScheduler:
     """Background task that releases page locks past their TTL."""
 
-    __slots__ = ("_repo", "_interval", "_task", "_stop")
+    __slots__ = ("_interval", "_repo", "_stop", "_task")
 
     def __init__(
         self,
@@ -50,7 +50,7 @@ class PageLockExpiryScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -61,11 +61,11 @@ class PageLockExpiryScheduler:
                 if released:
                     log.debug("page-lock: released %d expired locks", released)
             except Exception as exc:  # pragma: no cover
-                log.warning("page-lock loop failed: %s", exc)
+                log.warning("page-lock loop failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue

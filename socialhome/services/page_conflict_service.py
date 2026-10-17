@@ -39,7 +39,7 @@ import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from ..domain.events import (
@@ -393,7 +393,7 @@ class Sequenced:
         return out
 
     @classmethod
-    def from_wire(cls, raw: object) -> "Sequenced | None":
+    def from_wire(cls, raw: object) -> Sequenced | None:
         if not isinstance(raw, Mapping):
             return None
         outcome = raw.get("outcome")
@@ -617,7 +617,7 @@ class SequenceResult:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _editor(page: Page) -> str:
@@ -650,27 +650,27 @@ class PageConflictService(BusPublisherMixin):
     resolve the conflicts concurrent edits leave."""
 
     __slots__ = (
-        "_pages",
         "_bus",
-        "_locks",
         "_federation",
-        "_own_instance_id",
-        "_spaces",
-        "_limiter",
         "_floor_raised",
+        "_limiter",
+        "_locks",
+        "_own_instance_id",
+        "_pages",
+        "_spaces",
     )
 
     def __init__(
-        self, page_repo: AbstractPageRepo, *, bus: "EventBus | None" = None
+        self, page_repo: AbstractPageRepo, *, bus: EventBus | None = None
     ) -> None:
         self._pages = page_repo
         self._bus = bus
         self._locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
-        self._federation: "FederationService | None" = None
+        self._federation: FederationService | None = None
         self._own_instance_id = ""
-        self._spaces: "AbstractSpaceRepo | None" = None
+        self._spaces: AbstractSpaceRepo | None = None
         self._limiter = RateLimiter()
         #: ``(space_id, page_id)`` → ``[(monotonic time, amount)]`` of the
         #: floor raises from hints in the last day.
@@ -678,10 +678,10 @@ class PageConflictService(BusPublisherMixin):
 
     def attach_federation(
         self,
-        federation: "FederationService",
+        federation: FederationService,
         *,
         own_instance_id: str,
-        space_repo: "AbstractSpaceRepo",
+        space_repo: AbstractSpaceRepo,
     ) -> None:
         """Wire the federation side. Without it this household sequences
         every page itself (a lone household is its own host)."""
@@ -842,7 +842,7 @@ class PageConflictService(BusPublisherMixin):
         actor_user_id: str,
         patch: Mapping[str, Any],
         resolves: Sequence[str] = (),
-        precheck: "Callable[[Page], Awaitable[None]] | None" = None,
+        precheck: Callable[[Page], Awaitable[None]] | None = None,
     ) -> Page:
         """A local edit on the host: ``patch`` over the current version,
         sequenced as a fast-forward (``precheck`` runs on the page under the
@@ -1133,7 +1133,7 @@ class PageConflictService(BusPublisherMixin):
         for old in [s for s in state.sides if s.by == by]:
             state.sides.remove(old)
             state.retired.append(old)
-        when = datetime.now(timezone.utc)
+        when = datetime.now(UTC)
         taken = {s.at for s in state.sides}
         stamp = when.isoformat(timespec="microseconds")
         while stamp in taken:
@@ -1306,7 +1306,9 @@ class PageConflictService(BusPublisherMixin):
                 space_id=space_id,
             )
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("page ack to %s failed: %s", proposer_instance, exc)
+            log.debug(
+                "page ack to %s failed: %s", proposer_instance, exc, exc_info=True
+            )
 
     async def _broadcast(
         self,

@@ -96,9 +96,11 @@ dev = [
     # format rules change between minors, so a dev env on a different
     # ruff prints "would reformat" for files the pre-commit hook just
     # accepted, and vice-versa; the LINT rule set grows between minors
-    # too, so a newer ruff reports thousands of findings the pinned hook
-    # and CI don't gate on. Bump all three together.
-    "ruff==0.15.22",
+    # too (0.17 widened the defaults with BLE001, RUF059, TRY004, ...), so
+    # a newer ruff reports findings the pinned hook and CI don't gate on.
+    # We run ruff's default rules with no select/ignore: a bump fixes the
+    # codebase, never pins the old rule set. Bump all three together.
+    "ruff==0.17.1",
     "pre-commit==4.7.0",
     # Pulled in so ``tests/global_server/*`` can import the GFS admin
     # modules without a separate ``pip install .[global-server]`` step.

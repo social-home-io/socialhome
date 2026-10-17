@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,16 +20,11 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_space_keypair,
 )
-from socialhome.space_owner_statement import (
-    MAX_STATEMENT_AGE_MS,
-    sign_inviter_proof,
-    sign_owner_statement,
-)
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     DELIVERY_ERROR_MESH_DEFERRED,
-    DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_QUEUED,
+    DELIVERY_ERROR_RELAY_THROTTLED,
     DeliveryResult,
     FederationEvent,
     FederationEventType,
@@ -44,10 +38,10 @@ from socialhome.domain.space import (
     InviteExpiredError,
     JoinMode,
     RemoteAdminOutcome,
+    Space,
     SpaceFeatures,
     SpaceMember,
     SpacePermissionError,
-    Space,
     SpaceRole,
     SpaceType,
 )
@@ -64,6 +58,11 @@ from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_approval_service import SpaceApprovalService
 from socialhome.services.space_service import SpaceService, seal_join_snapshot
 from socialhome.services.user_service import UserService
+from socialhome.space_owner_statement import (
+    MAX_STATEMENT_AGE_MS,
+    sign_inviter_proof,
+    sign_owner_statement,
+)
 
 
 @pytest.fixture

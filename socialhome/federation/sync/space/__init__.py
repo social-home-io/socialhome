@@ -22,18 +22,18 @@ Modules:
   (event-driven on pair-confirm + periodic every 30 min).
 """
 
-from .exporter import ChunkBuilder, ResourceExporter, RESOURCE_ORDER
+from .exporter import RESOURCE_ORDER, ChunkBuilder, ResourceExporter
 from .provider import SpaceSyncService
 from .receiver import SpaceSyncReceiver
 from .scheduler import SpaceSyncScheduler
 from .window import SyncWindows
 
 __all__ = [
-    "ChunkBuilder",
     "RESOURCE_ORDER",
+    "ChunkBuilder",
     "ResourceExporter",
-    "SpaceSyncService",
     "SpaceSyncReceiver",
     "SpaceSyncScheduler",
+    "SpaceSyncService",
     "SyncWindows",
 ]

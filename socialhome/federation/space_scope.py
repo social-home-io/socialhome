@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def resolve_space_id(event: "FederationEvent") -> str | None:
+def resolve_space_id(event: FederationEvent) -> str | None:
     """Return the space this envelope may write to, or ``None`` to refuse.
 
     ``None`` means one of: no space id at all, or the routing field and the
@@ -56,7 +56,7 @@ def resolve_space_id(event: "FederationEvent") -> str | None:
 
 
 def log_cross_space_refusal(
-    event: "FederationEvent",
+    event: FederationEvent,
     *,
     space_id: str,
     what: str,
@@ -80,7 +80,7 @@ def log_cross_space_refusal(
 
 
 def log_not_applied(
-    event: "FederationEvent",
+    event: FederationEvent,
     *,
     what: str,
     row_id: str,
@@ -104,7 +104,7 @@ def log_not_applied(
     )
 
 
-def archive_refusal(space: "Space | None", sender: str) -> str | None:
+def archive_refusal(space: Space | None, sender: str) -> str | None:
     """Why a content write from ``sender`` may not land in ``space``, or ``None``.
 
     An archived space is a **read-only snapshot** — locally

@@ -57,7 +57,7 @@ from __future__ import annotations
 import logging
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives import hashes as _hashes
@@ -76,17 +76,17 @@ from ..domain.events import AutoPairRequestIncoming, PairingConfirmed
 from ..domain.federation import (
     AutoPairRequestExpiredError,
     FederationEventType,
-    PairingAlreadyConfirmedError,
     InstanceSource,
+    PairingAlreadyConfirmedError,
     PairingStatus,
     RemoteInstance,
 )
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
+from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..services.auto_pair_inbox import AutoPairInbox, auto_pair_request_expired
 from .inbound_validator import TIMESTAMP_SKEW_SECONDS
-from ..peer_url import InvalidPeerUrlError, validate_peer_url
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
@@ -150,18 +150,7 @@ def _vouch_blob(
     ts: str,
     nonce: str,
 ) -> bytes:
-    return "|".join(
-        [
-            "vouch/v1",
-            a_id,
-            a_pk_hex,
-            a_inbox_url,
-            a_dh_pk_hex,
-            c_id,
-            ts,
-            nonce,
-        ]
-    ).encode("utf-8")
+    return f"vouch/v1|{a_id}|{a_pk_hex}|{a_inbox_url}|{a_dh_pk_hex}|{c_id}|{ts}|{nonce}".encode()
 
 
 def _ack_blob(
@@ -173,17 +162,7 @@ def _ack_blob(
     ts: str,
     nonce: str,
 ) -> bytes:
-    return "|".join(
-        [
-            "ack/v1",
-            a_id,
-            a_dh_pk_hex,
-            c_id,
-            c_dh_pk_hex,
-            ts,
-            nonce,
-        ]
-    ).encode("utf-8")
+    return f"ack/v1|{a_id}|{a_dh_pk_hex}|{c_id}|{c_dh_pk_hex}|{ts}|{nonce}".encode()
 
 
 def _derive_session_keys(
@@ -231,14 +210,14 @@ class AutoPairCoordinator:
     """Coordinator for the three-party transitive auto-pair flow."""
 
     __slots__ = (
-        "_repo",
-        "_key_manager",
         "_bus",
         "_federation",
-        "_own_identity_seed",
-        "_own_identity_pk",
-        "_pending",
         "_inbox",
+        "_key_manager",
+        "_own_identity_pk",
+        "_own_identity_seed",
+        "_pending",
+        "_repo",
     )
 
     def __init__(
@@ -247,7 +226,7 @@ class AutoPairCoordinator:
         federation_repo: AbstractFederationRepo,
         key_manager: KeyManager,
         bus: EventBus,
-        federation_service: "FederationService",
+        federation_service: FederationService,
         own_identity_seed: bytes,
         own_identity_pk: bytes,
         inbox: AutoPairInbox,
@@ -302,7 +281,7 @@ class AutoPairCoordinator:
         dh_kp = generate_x25519_keypair()
         token = random_token(16)
         nonce = secrets.token_hex(16)
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
 
         # A mints a per-peer inbox URL — the suffix becomes
         # ``RemoteInstance.local_inbox_id`` for the C-side row, so the
@@ -380,7 +359,7 @@ class AutoPairCoordinator:
 
     # ── Vouching peer (B) ──────────────────────────────────────────────
 
-    async def on_intro_from_peer(self, event: "FederationEvent") -> None:
+    async def on_intro_from_peer(self, event: FederationEvent) -> None:
         """B side: auto-forwards the signed envelope without admin approval."""
         p = event.payload
         target_id = str(p.get("target_id") or "")
@@ -407,8 +386,8 @@ class AutoPairCoordinator:
         if not _inbox_url_ok(a_inbox_url, field="a_inbox_url", context="vouch"):
             return
         try:
-            t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            age = (datetime.now(timezone.utc) - t).total_seconds()
+            t = datetime.fromisoformat(ts)
+            age = (datetime.now(UTC) - t).total_seconds()
             if age > INTRO_TTL_SECONDS:
                 log.warning("auto-pair (vouch): stale ts=%s", ts)
                 return
@@ -472,7 +451,7 @@ class AutoPairCoordinator:
 
     # ── Target (C) ─────────────────────────────────────────────────────
 
-    async def on_intro_at_target(self, event: "FederationEvent") -> None:
+    async def on_intro_at_target(self, event: FederationEvent) -> None:
         """C side: verify B's vouch, then queue for admin approval."""
         p = event.payload
         # Dispatch: A→B event has ``target_id``; B→C event has ``via_b_id``.
@@ -641,7 +620,7 @@ class AutoPairCoordinator:
             req.from_a_dh_pk,
             is_initiator=False,
         )
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         inbox_id = existing.local_inbox_id if existing else secrets.token_urlsafe(24)
         # Pending, not confirmed: A may have cancelled its request meanwhile,
         # and a one-sided confirmed row would be a pairing A never agreed
@@ -724,7 +703,7 @@ class AutoPairCoordinator:
 
     # ── Vouching peer (B) — relay the ack from C to A ──────────────────
 
-    async def on_ack_via_at_relay(self, event: "FederationEvent") -> None:
+    async def on_ack_via_at_relay(self, event: FederationEvent) -> None:
         """B side: receives ``PAIRING_INTRO_AUTO_ACK_VIA`` from C and
         forwards as ``PAIRING_INTRO_AUTO_ACK`` to A.
 
@@ -759,7 +738,7 @@ class AutoPairCoordinator:
 
     # ── Originator (A) — ack handler ───────────────────────────────────
 
-    async def on_ack_at_originator(self, event: "FederationEvent") -> None:
+    async def on_ack_at_originator(self, event: FederationEvent) -> None:
         p = event.payload
         token = str(p.get("token") or "")
         self._prune_pending()
@@ -866,7 +845,7 @@ class AutoPairCoordinator:
             status=PairingStatus.CONFIRMED,
             source=InstanceSource.MANUAL,
             relay_via=via_b_id,
-            paired_at=datetime.now(timezone.utc).isoformat(),
+            paired_at=datetime.now(UTC).isoformat(),
         )
         # Only over our still-pending provisional row, in one transaction:
         # a cancel that committed first leaves nothing to confirm.

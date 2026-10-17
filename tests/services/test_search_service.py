@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from socialhome.db.database import AsyncDatabase
@@ -11,8 +13,6 @@ from socialhome.domain.events import (
     PostEdited,
     SpacePostCreated,
 )
-from datetime import datetime, timezone
-
 from socialhome.domain.post import Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.search_repo import (
@@ -41,7 +41,7 @@ def _post(post_id: str, content: str) -> Post:
         author="u1",
         type=PostType.TEXT,
         content=content,
-        created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 15, tzinfo=UTC),
     )
 
 

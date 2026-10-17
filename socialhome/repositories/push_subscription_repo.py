@@ -11,16 +11,15 @@ generic API sanitiser strips them from any accidental serialisation.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from .base import rows_to_dicts
-
 
 # Domain dataclass lives in ``socialhome/domain/push_subscription.py``;
 # re-exported here so existing repo-level imports keep working.
-from ..domain.push_subscription import PushSubscription  # noqa: F401,E402
+from ..domain.push_subscription import PushSubscription
+from .base import rows_to_dicts
 
 
 @runtime_checkable
@@ -39,7 +38,7 @@ class SqlitePushSubscriptionRepo:
         self._db = db
 
     async def save(self, sub: PushSubscription) -> None:
-        created = sub.created_at or datetime.now(timezone.utc).isoformat()
+        created = sub.created_at or datetime.now(UTC).isoformat()
         # Upsert on id so a re-register doesn't multiply rows. The id is
         # client-chosen (the SPA derives it from the endpoint), so the
         # update is scoped to the row's owner — a colliding id from

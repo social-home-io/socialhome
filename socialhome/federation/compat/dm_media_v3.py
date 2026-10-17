@@ -32,10 +32,9 @@ from __future__ import annotations
 
 import logging
 
-from . import register
 from ...domain.federation import FederationEventType
 from ...domain.federation_capabilities import FederationCapability
-
+from . import register
 
 log = logging.getLogger(__name__)
 

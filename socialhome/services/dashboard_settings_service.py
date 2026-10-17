@@ -44,13 +44,13 @@ import secrets
 import time
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 from ..domain.household_dashboard import (
     IDLE_RETURN_CHOICES,
-    MAX_DISPLAYS,
     MAX_ADDRESS_LENGTH,
+    MAX_DISPLAYS,
     MAX_PIN_LENGTH,
     MIN_PASSWORD_LENGTH,
     MIN_PIN_LENGTH,
@@ -372,16 +372,16 @@ class DashboardSettingsService:
     """Admin-managed household dashboard configuration and credentials."""
 
     __slots__ = (
-        "_repo",
-        "_fixed_port",
-        "_main_port",
-        "_lock",
-        "_key_manager",
-        "_cookie_secret",
-        "_cookie_key_version",
         "_cached",
-        "_generation",
+        "_cookie_key_version",
+        "_cookie_secret",
         "_displays",
+        "_fixed_port",
+        "_generation",
+        "_key_manager",
+        "_lock",
+        "_main_port",
+        "_repo",
     )
 
     def __init__(
@@ -562,7 +562,7 @@ class DashboardSettingsService:
             await self._repo.set_many(
                 {
                     KEY_PASSWORD_HASH: hashed,
-                    KEY_PASSWORD_SET_AT: datetime.now(timezone.utc).isoformat(),
+                    KEY_PASSWORD_SET_AT: datetime.now(UTC).isoformat(),
                     KEY_EPOCH: str(await self._epoch_unlocked() + 1),
                     KEY_DISPLAYS: _NO_DISPLAYS,
                 }
@@ -601,7 +601,7 @@ class DashboardSettingsService:
             await self._repo.set_many(
                 {
                     KEY_PIN_HASH: hashed,
-                    KEY_PIN_SET_AT: datetime.now(timezone.utc).isoformat(),
+                    KEY_PIN_SET_AT: datetime.now(UTC).isoformat(),
                 }
             )
             self._wrote(None)

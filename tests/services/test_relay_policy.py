@@ -7,9 +7,9 @@ optional ``author_user_id`` / ``target_id`` are absent.
 
 from __future__ import annotations
 
-import pytest
+from datetime import UTC, datetime
 
-from datetime import datetime, timezone
+import pytest
 
 from socialhome.domain.report import (
     ContentReport,
@@ -68,7 +68,7 @@ async def test_open_report_on_moment_short_circuits(policy):
             category=ReportCategory.SPAM,
             notes=None,
             status=ReportStatus.PENDING,
-            created_at=datetime(2026, 5, 6, 12, tzinfo=timezone.utc),
+            created_at=datetime(2026, 5, 6, 12, tzinfo=UTC),
             resolved_by=None,
             resolved_at=None,
         )
@@ -95,7 +95,7 @@ async def test_open_report_on_user_short_circuits(policy):
             category=ReportCategory.HARASSMENT,
             notes=None,
             status=ReportStatus.PENDING,
-            created_at=datetime(2026, 5, 6, 12, tzinfo=timezone.utc),
+            created_at=datetime(2026, 5, 6, 12, tzinfo=UTC),
             resolved_by=None,
             resolved_at=None,
         )
@@ -122,9 +122,9 @@ async def test_resolved_report_does_not_block_relay(policy):
             category=ReportCategory.SPAM,
             notes=None,
             status=ReportStatus.RESOLVED,
-            created_at=datetime(2026, 5, 6, 12, tzinfo=timezone.utc),
+            created_at=datetime(2026, 5, 6, 12, tzinfo=UTC),
             resolved_by="admin",
-            resolved_at=datetime(2026, 5, 6, 13, tzinfo=timezone.utc),
+            resolved_at=datetime(2026, 5, 6, 13, tzinfo=UTC),
         )
     )
     assert (

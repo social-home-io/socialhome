@@ -6,7 +6,6 @@ import pytest
 
 from socialhome.global_server.markdown_lite import render_markdown
 
-
 # ─── Empty / whitespace ──────────────────────────────────────────────────
 
 

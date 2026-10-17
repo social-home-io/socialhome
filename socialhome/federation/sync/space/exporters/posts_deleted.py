@@ -45,7 +45,7 @@ class PostsDeletedExporter(PagedExporterMixin):
 
     __slots__ = ("_repo",)
 
-    def __init__(self, space_post_repo: "AbstractSpacePostRepo") -> None:
+    def __init__(self, space_post_repo: AbstractSpacePostRepo) -> None:
         self._repo = space_post_repo
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
@@ -61,7 +61,7 @@ class PostsDeletedExporter(PagedExporterMixin):
     ) -> AsyncIterator[list[dict[str, Any]]]:
         async def fetch(
             cursor: int | None,
-        ) -> tuple[list["PostTombstone"], int | None]:
+        ) -> tuple[list[PostTombstone], int | None]:
             return await self._repo.list_post_tombstones_page(
                 space_id, cursor=cursor, limit=SYNC_PAGE_SIZE, since=since
             )
@@ -70,7 +70,7 @@ class PostsDeletedExporter(PagedExporterMixin):
             yield [post_tombstone_record(t) for t in page]
 
 
-def post_tombstone_record(tombstone: "PostTombstone") -> dict[str, Any]:
+def post_tombstone_record(tombstone: PostTombstone) -> dict[str, Any]:
     """The wire record of a deleted post — identity only, never content."""
     record: dict[str, Any] = {
         "id": tombstone.id,

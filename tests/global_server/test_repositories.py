@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
 from dataclasses import replace
 
@@ -980,7 +981,7 @@ async def test_publish_mode_moves_only_forward_in_time(gfs_db):
 
 async def test_publish_mode_check_constraint(gfs_db):
     _repo, epochs = await _epochs(gfs_db)
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.IntegrityError):
         await epochs.set_publish_mode("sp", "open", at=1)
 
 
@@ -1039,7 +1040,7 @@ async def test_upsert_keeps_strict_state(gfs_db):
 
 async def test_relay_bytes_sums_only_unexpired_relay_rows(gfs_db):
     queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
-    kw = dict(max_per_recipient=10, max_bytes_per_recipient=10**6)
+    kw = {"max_per_recipient": 10, "max_bytes_per_recipient": 10**6}
     await queue.enqueue("a" * 32, "x" * 10, created_at=0, expires_at=100, **kw)
     await queue.enqueue(
         "a" * 32, "y" * 7, created_at=0, expires_at=100, frame_type="relay", **kw
@@ -1136,13 +1137,19 @@ async def test_enqueue_relay_refuses_an_item_bigger_than_a_cap(gfs_db):
 
 
 _RELAY_SUM_QUERIES = (
-    "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
-    " WHERE frame_type='relay' AND expires_at > 0 AND to_instance='a'",
-    "SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
-    " WHERE frame_type='relay' AND expires_at > 0",
-    "SELECT to_instance FROM gfs_envelope_queue"
-    " WHERE frame_type='relay' AND expires_at > 0 GROUP BY to_instance"
-    " ORDER BY SUM(size_bytes) DESC, to_instance = 'a' ASC LIMIT 1",
+    (
+        "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
+        " WHERE frame_type='relay' AND expires_at > 0 AND to_instance='a'"
+    ),
+    (
+        "SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
+        " WHERE frame_type='relay' AND expires_at > 0"
+    ),
+    (
+        "SELECT to_instance FROM gfs_envelope_queue"
+        " WHERE frame_type='relay' AND expires_at > 0 GROUP BY to_instance"
+        " ORDER BY SUM(size_bytes) DESC, to_instance = 'a' ASC LIMIT 1"
+    ),
 )
 
 

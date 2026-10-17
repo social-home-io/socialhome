@@ -166,6 +166,7 @@ async def test_upload_image_still_transcodes(client):
     passthrough.
     """
     import io
+
     from PIL import Image
 
     img = Image.new("RGB", (16, 16), color=(80, 200, 120))

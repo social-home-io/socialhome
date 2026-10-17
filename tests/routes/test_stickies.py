@@ -383,9 +383,13 @@ async def test_sticky_content_over_cap_is_422(client):
 
 async def test_sticky_content_strips_control_and_bidi(client):
     h = _auth(client._tok)
-    r = await client.post("/api/stickies", json={"content": "a‮b\x00c\nd"}, headers=h)
+    r = await client.post(
+        "/api/stickies", json={"content": "a\u202eb\x00c\nd"}, headers=h
+    )
     assert (await r.json())["content"] == "abc\nd"
-    r = await client.post("/api/stickies", json={"content": "‮​\x00"}, headers=h)
+    r = await client.post(
+        "/api/stickies", json={"content": "\u202e\u200b\x00"}, headers=h
+    )
     assert r.status == 422
 
 

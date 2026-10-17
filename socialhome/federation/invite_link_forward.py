@@ -85,16 +85,16 @@ class InviteLinkForwardCoordinator:
 
     __slots__ = (
         "_federation",
-        "_space_service",
-        "_timeout",
         "_pending",
         "_pending_host",
+        "_space_service",
+        "_timeout",
     )
 
     def __init__(
         self,
         *,
-        federation_service: "FederationService",
+        federation_service: FederationService,
         timeout: float = REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         self._federation = federation_service
@@ -109,8 +109,8 @@ class InviteLinkForwardCoordinator:
         """The host-side decision (``handle_forwarded_invite_action``)."""
         self._space_service = space_service
 
-    def attach_to(self, federation_service: "FederationService") -> None:
-        registry = federation_service._event_registry  # noqa: SLF001
+    def attach_to(self, federation_service: FederationService) -> None:
+        registry = federation_service._event_registry
         # Every handler bound to a type runs; the private-invite handler's
         # SPACE_REMOTE_ADMIN_ACTION handler leaves these actions to us.
         registry.register(
@@ -186,7 +186,7 @@ class InviteLinkForwardCoordinator:
             self._pending.pop(nonce, None)
             self._pending_host.pop(nonce, None)
 
-    async def _on_result(self, event: "FederationEvent") -> None:
+    async def _on_result(self, event: FederationEvent) -> None:
         p = event.payload if isinstance(event.payload, dict) else {}
         nonce = str(p.get("request_nonce") or "")
         fut = self._pending.get(nonce)
@@ -205,7 +205,7 @@ class InviteLinkForwardCoordinator:
 
     # ── Host ───────────────────────────────────────────────────────────
 
-    async def _on_forwarded_request(self, event: "FederationEvent") -> None:
+    async def _on_forwarded_request(self, event: FederationEvent) -> None:
         p = event.payload if isinstance(event.payload, dict) else {}
         action = p.get("action")
         if action not in FORWARDED_INVITE_LINK_ACTIONS:

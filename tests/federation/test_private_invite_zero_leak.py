@@ -26,7 +26,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
-from socialhome.domain.space import JoinMode, SpaceType
+from socialhome.domain.space import JoinMode, SpacePermissionError, SpaceType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_remote_member_repo import (
@@ -36,7 +36,6 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_service import SpaceService
 from socialhome.services.user_service import UserService
-
 
 # The only kwargs permitted on the federation-helper call for
 # ``SPACE_PRIVATE_INVITE`` outbound. ``space_id`` is NOT in the list on
@@ -159,7 +158,7 @@ async def test_private_invite_refuses_unpaired_peer(space_stack):
             error="not_confirmed",
         ),
     )
-    with pytest.raises(Exception):
+    with pytest.raises(SpacePermissionError):
         await svc.invite_remote_user(
             space.id,
             actor_username="alice",

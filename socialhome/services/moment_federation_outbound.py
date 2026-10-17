@@ -67,27 +67,27 @@ class MomentFederationOutbound(
     """Publish moment mutations to the 3-hop peer mesh."""
 
     __slots__ = (
-        "_child_protection",
         "_bus",
+        "_child_protection",
         "_federation",
         "_federation_repo",
-        "_user_repo",
         "_relay_policy",
+        "_user_repo",
     )
 
     # Narrow the mixins' optional ``_federation`` — this service requires it
     # at construction, so direct attribute access elsewhere is non-None.
-    _federation: "FederationService"
+    _federation: FederationService
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
-        user_repo: "AbstractUserRepo",
-        relay_policy: "RelayPolicy | None" = None,
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
+        user_repo: AbstractUserRepo,
+        relay_policy: RelayPolicy | None = None,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -322,7 +322,7 @@ class MomentFederationOutbound(
         try:
             return await self._user_repo.get_instance_for_user(user_id)
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("moment-outbound: user lookup failed: %s", exc)
+            log.debug("moment-outbound: user lookup failed: %s", exc, exc_info=True)
             return None
 
     async def _policy_allows(

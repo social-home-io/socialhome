@@ -25,10 +25,10 @@ from typing import TYPE_CHECKING
 from ..domain.report import ReportTargetType
 
 if TYPE_CHECKING:
-    from ..repositories.post_repo import AbstractPostRepo
     from ..repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ..repositories.gallery_repo import AbstractGalleryRepo
     from ..repositories.page_repo import AbstractPageRepo
+    from ..repositories.post_repo import AbstractPostRepo
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.sticky_repo import AbstractStickyRepo
     from ..repositories.task_repo import AbstractSpaceTaskRepo
@@ -92,25 +92,25 @@ class ReportScope:
     """Looks a report target up and returns the space it lives in."""
 
     __slots__ = (
-        "_posts",
+        "_calendar",
         "_feed",
+        "_gallery",
         "_pages",
+        "_posts",
         "_stickies",
         "_tasks",
-        "_calendar",
-        "_gallery",
     )
 
     def __init__(
         self,
         *,
-        space_post_repo: "AbstractSpacePostRepo | None" = None,
-        post_repo: "AbstractPostRepo | None" = None,
-        page_repo: "AbstractPageRepo | None" = None,
-        sticky_repo: "AbstractStickyRepo | None" = None,
-        space_task_repo: "AbstractSpaceTaskRepo | None" = None,
-        space_calendar_repo: "AbstractSpaceCalendarRepo | None" = None,
-        gallery_repo: "AbstractGalleryRepo | None" = None,
+        space_post_repo: AbstractSpacePostRepo | None = None,
+        post_repo: AbstractPostRepo | None = None,
+        page_repo: AbstractPageRepo | None = None,
+        sticky_repo: AbstractStickyRepo | None = None,
+        space_task_repo: AbstractSpaceTaskRepo | None = None,
+        space_calendar_repo: AbstractSpaceCalendarRepo | None = None,
+        gallery_repo: AbstractGalleryRepo | None = None,
     ) -> None:
         self._posts = space_post_repo
         self._feed = post_repo

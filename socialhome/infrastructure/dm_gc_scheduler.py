@@ -45,7 +45,7 @@ _DM_MEDIA_ORPHAN_RE = re.compile(
 class DmGcScheduler:
     """Background task that hard-deletes fully-left DM conversations."""
 
-    __slots__ = ("_repo", "_media_dir", "_interval", "_task", "_stop")
+    __slots__ = ("_interval", "_media_dir", "_repo", "_stop", "_task")
 
     def __init__(
         self,
@@ -76,7 +76,7 @@ class DmGcScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -87,7 +87,7 @@ class DmGcScheduler:
                 if pruned:
                     log.debug("dm-gc: hard-deleted %d empty conversations", pruned)
             except Exception as exc:  # pragma: no cover
-                log.warning("dm-gc sweep failed: %s", exc)
+                log.warning("dm-gc sweep failed: %s", exc, exc_info=True)
             try:
                 orphans = await self._sweep_media_orphans()
                 if orphans:
@@ -96,13 +96,13 @@ class DmGcScheduler:
                         orphans,
                     )
             except Exception as exc:  # pragma: no cover
-                log.warning("dm-gc media-orphan sweep failed: %s", exc)
+                log.warning("dm-gc media-orphan sweep failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _sweep_once(self) -> int:
@@ -146,6 +146,9 @@ class DmGcScheduler:
             except Exception:  # pragma: no cover
                 # Repo errors shouldn't kill the sweep; skip this
                 # message and try the rest.
+                log.debug(
+                    "dm gc: lookup of message %s failed", message_id, exc_info=True
+                )
                 continue
             if msg is not None and not msg.deleted:
                 # Row exists and is live — the part/preview files

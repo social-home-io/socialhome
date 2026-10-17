@@ -26,7 +26,7 @@ class PeerSpaceCollectionView(BaseView):
         # §CP.F1 discovery filter — mirror the public_spaces route.
         cp_svc = self.svc(K.child_protection_service_key)
         max_min_age: int | None = None
-        protection = await cp_svc._repo.get_user_protection(  # noqa: SLF001
+        protection = await cp_svc._repo.get_user_protection(
             ctx.user_id,
         )
         if protection and protection.get("child_protection_enabled"):

@@ -52,10 +52,10 @@ Fire-and-forget — the SH never acks at the application layer.
 from __future__ import annotations
 
 import asyncio
-import orjson
 import logging
 import time
 
+import orjson
 from aiohttp import WSMsgType, web
 
 from ... import crypto
@@ -156,6 +156,7 @@ class GfsWebSocketView(web.View):
                 "gfs.ws.loop_error: instance=%s exc=%s",
                 instance_id,
                 exc,
+                exc_info=True,
             )
         finally:
             seen_timer.cancel()
@@ -173,7 +174,7 @@ class GfsWebSocketView(web.View):
         """
         try:
             msg = await ws.receive(timeout=HELLO_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await ws.close(
                 code=WS_CLOSE_HELLO_TIMEOUT,
                 message=b"hello-timeout",
@@ -238,7 +239,7 @@ class GfsWebSocketView(web.View):
             await ws.close(code=WS_CLOSE_AUTH_FAILED, message=WS_AUTH_FAILED_REASON)
             return None
 
-        message = f"{instance_id}|{ts}".encode("utf-8")
+        message = f"{instance_id}|{ts}".encode()
         verified = crypto.verify_ed25519(raw_key, message, raw_sig)
         if not (known and verified):
             await ws.close(code=WS_CLOSE_AUTH_FAILED, message=WS_AUTH_FAILED_REASON)

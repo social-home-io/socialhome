@@ -4,48 +4,38 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 
 import pytest
 
 from socialhome.domain.errors import CodedError
 from socialhome.domain.household_dashboard import (
-    normalize_mac,
-    parse_panel_key,
-    MAX_DISPLAYS,
-    MAX_PENDING_PAIRINGS,
-    PAIRING_CODE_ALPHABET,
-    PAIRING_CODE_LENGTH,
-    PAIRING_TTL_SECONDS,
-    DashboardDisabledError,
-    DashboardDisplay,
-    DashboardDisplayLimitError,
-    DashboardDisplayNotFoundError,
-    DashboardPairingCodeInvalidError,
-    DashboardPairingThrottledError,
-    DisplayHaUnlockOffError,
-    DisplayPairingStatus,
-    MENTION_HERE,
-    MENTION_PERSON,
-    DashboardMention,
-    here_alerts,
-    mentioned_ids,
-    mentions_for,
-    is_pure_emoji,
-    leading_emoji,
     DEFAULT_DASHBOARD_PORT,
     IDLE_RETURN_CHOICES,
     MAP_DROP_AFTER,
     MAP_STALE_AFTER,
-    DashboardZone,
+    MAX_DISPLAYS,
+    MAX_PENDING_PAIRINGS,
+    MENTION_HERE,
+    MENTION_PERSON,
     MIN_PASSWORD_LENGTH,
+    PAIRING_CODE_ALPHABET,
+    PAIRING_CODE_LENGTH,
+    PAIRING_TTL_SECONDS,
     PERSON_PALETTE,
     SETUP_TOKEN_TTL_SECONDS,
     SUPPORTED_DASHBOARD_LOCALES,
     TIMETABLE_COLOR_HEX,
+    DashboardDisabledError,
+    DashboardDisplay,
+    DashboardDisplayLimitError,
+    DashboardDisplayNotFoundError,
     DashboardEvent,
     DashboardLesson,
+    DashboardMention,
     DashboardNotRunningError,
+    DashboardPairingCodeInvalidError,
+    DashboardPairingThrottledError,
     DashboardPasswordRequiredError,
     DashboardPasswordTooShortError,
     DashboardPerson,
@@ -59,13 +49,23 @@ from socialhome.domain.household_dashboard import (
     DashboardShoppingItem,
     DashboardSticky,
     DashboardTask,
+    DashboardZone,
+    DisplayHaUnlockOffError,
+    DisplayPairingStatus,
     HomeSnapshot,
     PersonSnapshot,
     hash_color,
+    here_alerts,
     in_night_window,
     initials,
+    is_pure_emoji,
+    leading_emoji,
     lesson_color_token,
+    mentioned_ids,
+    mentions_for,
+    normalize_mac,
     normalize_token_key,
+    parse_panel_key,
     picture_effective,
     subject_color_tokens,
     token_hex,
@@ -265,7 +265,7 @@ def test_hash_color_matches_the_spa(name, token):
 
 
 def _tt(*entries: TimetableEntry) -> Timetable:
-    at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    at = datetime(2026, 1, 1, tzinfo=UTC)
     return Timetable(
         id="tt1",
         name="5b",
@@ -457,7 +457,7 @@ def _mention(mid: str, kind: str, person: str | None = None) -> DashboardMention
         message_id=mid,
         sender_id="u-anna",
         text="hi",
-        sent_at=datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc),
+        sent_at=datetime(2026, 10, 12, 12, 0, tzinfo=UTC),
         kind=kind,
         person_id=person,
     )

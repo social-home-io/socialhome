@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ..federation.inbound_validator import TIMESTAMP_SKEW_SECONDS
 from ..infrastructure.event_bus import EventBus
@@ -41,8 +41,8 @@ def auto_pair_request_expired(iso_ts: str, *, now: datetime | None = None) -> bo
     except TypeError, ValueError:
         return True
     if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
-    now = now or datetime.now(timezone.utc)
+        stamp = stamp.replace(tzinfo=UTC)
+    now = now or datetime.now(UTC)
     if stamp - now > timedelta(seconds=TIMESTAMP_SKEW_SECONDS):
         return True
     return now - stamp > timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS)
@@ -67,7 +67,7 @@ class PendingAutoPairRequest:
     from_a_display: str = ""
     via_b_display: str = ""
     received_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat(),
+        default_factory=lambda: datetime.now(UTC).isoformat(),
     )
 
 

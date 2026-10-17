@@ -293,7 +293,7 @@ class SlidingWindowCounter:
     allowed hit re-inserts its key, so iteration order IS recency order.
     """
 
-    __slots__ = ("_limit", "_max_keys", "_hits")
+    __slots__ = ("_hits", "_limit", "_max_keys")
 
     def __init__(
         self,
@@ -354,7 +354,7 @@ class PairingTokenService:
 
     __slots__ = ("_admin_repo",)
 
-    def __init__(self, admin_repo: "AbstractGfsAdminRepo") -> None:
+    def __init__(self, admin_repo: AbstractGfsAdminRepo) -> None:
         self._admin_repo = admin_repo
 
     async def generate(self, client_ip: str) -> tuple[str | None, int]:
@@ -414,18 +414,17 @@ def _is_public_listing(path: str) -> bool:
     space. It writes nothing, so there is no per-household identity to key a
     limiter on — the client address is all there is.
     """
-    return path == "/" or path.startswith("/spaces/") or path.startswith("/join/")
+    return path == "/" or path.startswith(("/spaces/", "/join/"))
 
 
 def _is_public_rtc_entry(path: str) -> bool:
     """The anonymous, WS-amplifying RTC entry points: the offers and the
     relay-stream GETs (not the signed author uploads at ``/relay-stream/``,
     not the high-frequency session/ICE polls)."""
-    return (
-        path in ("/gfs/highlight_rtc/offer", "/gfs/moment_rtc/offer")
-        or path.startswith("/gfs/highlight_rtc/relay/")
-        or path.startswith("/gfs/moment_rtc/relay/")
-    )
+    return path in (
+        "/gfs/highlight_rtc/offer",
+        "/gfs/moment_rtc/offer",
+    ) or path.startswith(("/gfs/highlight_rtc/relay/", "/gfs/moment_rtc/relay/"))
 
 
 def build_listing_rate_limit(resolver: ClientIpResolver):

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import sqlite3
 
-
 from socialhome.repositories.base import (
     bool_col,
     dump_json,
@@ -16,7 +15,6 @@ from socialhome.repositories.base import (
     rows_to_dicts,
     sync_page_cursor,
 )
-
 
 # ── row_to_dict ───────────────────────────────────────────────────────────
 

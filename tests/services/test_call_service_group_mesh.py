@@ -132,8 +132,9 @@ def test_turn_credential_has_expiry_and_user():
 
 
 def test_turn_credential_min_ttl_is_60s():
-    from socialhome.routes.calls import _make_turn_credential
     import time
+
+    from socialhome.routes.calls import _make_turn_credential
 
     now = int(time.time())
     user, _ = _make_turn_credential("secret", "alice-id", ttl_seconds=10)

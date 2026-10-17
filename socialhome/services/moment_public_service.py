@@ -46,15 +46,15 @@ class MomentPublicService(ProtectionGateMixin):
     """Author/follower bookkeeping + GFS round-trips."""
 
     __slots__ = (
-        "_regs",
-        "_follows",
-        "_users",
-        "_gfs",
-        "_pictures",
-        "_http_client",
-        "_signing_key",
-        "_own_instance_id",
         "_child_protection",
+        "_follows",
+        "_gfs",
+        "_http_client",
+        "_own_instance_id",
+        "_pictures",
+        "_regs",
+        "_signing_key",
+        "_users",
     )
 
     def __init__(

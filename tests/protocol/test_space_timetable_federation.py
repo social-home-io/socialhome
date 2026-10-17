@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 from types import MappingProxyType
 
 import orjson
@@ -53,11 +53,11 @@ from socialhome.domain.timetable import (
     TimetableEntry,
     entry_to_dict,
 )
+from socialhome.federation.federation_service import DeliveryResult
 from socialhome.federation.owner_bound_id import (
     SPACE_TIMETABLE_KIND,
     mint_owner_bound_id,
 )
-from socialhome.federation.federation_service import DeliveryResult
 
 from .test_space_content_scope import timetable_wire
 
@@ -108,16 +108,20 @@ _SEED = [
     ),
     *[
         (
-            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
-            " identity_public_key, feature_timetable) VALUES(?,?,?,?,?,1)",
+            (
+                "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+                " identity_public_key, feature_timetable) VALUES(?,?,?,?,?,1)"
+            ),
             (sid, sid, HOST, "anna", "00" * 32),
         )
         for sid in (SP, SP2)
     ],
     *[
         (
-            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
-            " VALUES(?,?,?,?)",
+            (
+                "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+                " VALUES(?,?,?,?)"
+            ),
             (sid, inst, uid, role),
         )
         for sid, inst, uid, role in (
@@ -138,8 +142,10 @@ _SEED = [
     # Removed (not banned) seats: an admin elsewhere and a host member.
     *[
         (
-            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role,"
-            " tombstoned) VALUES(?,?,?,?,1)",
+            (
+                "INSERT INTO space_remote_members(space_id, instance_id, user_id, role,"
+                " tombstoned) VALUES(?,?,?,?,1)"
+            ),
             (SP, inst, uid, role),
         )
         for inst, uid, role in ((ADMIN, "u-gone", "admin"), (HOST, "u-hgone", "member"))
@@ -150,8 +156,10 @@ _SEED = [
     ),
     *[
         (
-            "INSERT INTO space_timetables(id, space_id, name, created_by,"
-            " updated_by, created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+            (
+                "INSERT INTO space_timetables(id, space_id, name, created_by,"
+                " updated_by, created_at, updated_at) VALUES(?,?,?,?,?,?,?)"
+            ),
             (tid, sid, "Plan", "u-adm", "u-adm", _TS, _TS),
         )
         for tid, sid in ((TT, SP), (TT_OTHER, SP2))
@@ -187,7 +195,7 @@ def _event(event_type, payload, *, sender, space_id=SP) -> FederationEvent:
         event_type=event_type,
         from_instance=sender,
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=space_id,
     )

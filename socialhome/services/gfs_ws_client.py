@@ -80,22 +80,22 @@ class GfsWebSocketClient:
     """
 
     __slots__ = (
+        "_connected_event",
         "_gfs_url",
         "_instance_id",
-        "_signing_key",
-        "_session_factory",
-        "_on_relay",
-        "_on_highlight_signal",
-        "_on_moment_signal",
-        "_on_moment_public",
-        "_on_follow_changed",
-        "_on_new_subscriber",
-        "_on_envelope",
         "_on_connected",
+        "_on_envelope",
+        "_on_follow_changed",
+        "_on_highlight_signal",
+        "_on_moment_public",
+        "_on_moment_signal",
+        "_on_new_subscriber",
+        "_on_relay",
         "_reconnect_delays",
+        "_session_factory",
+        "_signing_key",
         "_stop",
         "_task",
-        "_connected_event",
         "_ws",
         "last_auth_error",
     )
@@ -252,7 +252,7 @@ class GfsWebSocketClient:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -299,6 +299,7 @@ class GfsWebSocketClient:
                     "gfs.ws.client: connection to %s failed: %s",
                     self._gfs_url,
                     exc,
+                    exc_info=True,
                 )
 
             if self._stop.is_set():
@@ -310,7 +311,7 @@ class GfsWebSocketClient:
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
                 return  # _stop fired — exit loop
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _run_once(self, ws_url: str) -> None:
@@ -332,6 +333,7 @@ class GfsWebSocketClient:
                         "gfs.ws.client: on_connected handler raised for %s: %s",
                         self._gfs_url,
                         exc,
+                        exc_info=True,
                     )
             # Explicit ``receive()`` loop (not ``async for``): a
             # server-initiated close ends ``async for`` WITHOUT yielding a
@@ -350,7 +352,7 @@ class GfsWebSocketClient:
                         # sending a frame (it may stay quiet on a healthy link).
                         try:
                             msg = await asyncio.wait_for(ws.receive(), timeout=0.5)
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             self.last_auth_error = None
                             auth_window_open = False
                             continue
@@ -415,6 +417,7 @@ class GfsWebSocketClient:
                     "gfs.ws.client: on_highlight_signal handler raised for %s: %s",
                     self._gfs_url,
                     exc,
+                    exc_info=True,
                 )
             return
         if frame_type == "moment_signal":
@@ -431,6 +434,7 @@ class GfsWebSocketClient:
                     "gfs.ws.client: on_moment_signal handler raised for %s: %s",
                     self._gfs_url,
                     exc,
+                    exc_info=True,
                 )
             return
         if frame_type in ("incoming_public_moment", "incoming_public_moment_delete"):
@@ -448,6 +452,7 @@ class GfsWebSocketClient:
                     "gfs.ws.client: on_moment_public handler raised for %s: %s",
                     self._gfs_url,
                     exc,
+                    exc_info=True,
                 )
             return
         if frame_type == "follow_changed":
@@ -460,6 +465,7 @@ class GfsWebSocketClient:
                     "gfs.ws.client: on_follow_changed handler raised for %s: %s",
                     self._gfs_url,
                     exc,
+                    exc_info=True,
                 )
             return
         if frame_type == "new_subscriber":
@@ -477,6 +483,7 @@ class GfsWebSocketClient:
                     "gfs.ws.client: on_new_subscriber handler raised for %s: %s",
                     self._gfs_url,
                     exc,
+                    exc_info=True,
                 )
             return
         if frame_type == "envelope":
@@ -503,6 +510,7 @@ class GfsWebSocketClient:
                     "gfs.ws.client: on_envelope handler raised for %s: %s",
                     self._gfs_url,
                     exc,
+                    exc_info=True,
                 )
             return
         if frame_type == "server_info_updated":
@@ -525,11 +533,12 @@ class GfsWebSocketClient:
                 "gfs.ws.client: on_relay handler raised for %s: %s",
                 self._gfs_url,
                 exc,
+                exc_info=True,
             )
 
     def _build_hello(self) -> dict:
         ts = int(time.time())
-        message = f"{self._instance_id}|{ts}".encode("utf-8")
+        message = f"{self._instance_id}|{ts}".encode()
         sig = sign_ed25519(self._signing_key, message)
         return {
             "type": "hello",

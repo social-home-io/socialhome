@@ -8,12 +8,10 @@ absent.
 
 from __future__ import annotations
 
-
 import pytest
 
 from socialhome.infrastructure.dm_gc_scheduler import DmGcScheduler
 from socialhome.repositories import SqliteConversationRepo
-
 
 pytestmark = pytest.mark.asyncio
 

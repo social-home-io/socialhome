@@ -25,6 +25,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from .errors import WrongTypeError
+
 #: Full write rights: posts, comments, reactions (owner / admin / moderator /
 #: member seats).
 WRITER_SCOPE_WRITE: str = "write"
@@ -112,7 +114,7 @@ class WriterCert:
             "issued_at": self.issued_at,
         }
 
-    def v1(self) -> "WriterCert":
+    def v1(self) -> WriterCert:
         """This cert WITHOUT the user binding — the v1 fields only, which is
         all that ever travels in plaintext (to a connection server, in a
         fan-out frame): the binding names the household's users."""
@@ -148,13 +150,13 @@ class WriterCert:
         return wire
 
     @classmethod
-    def from_wire(cls, raw: object) -> "WriterCert":
+    def from_wire(cls, raw: object) -> WriterCert:
         """Parse a wire dict; ``ValueError`` on any malformed / missing field.
 
         An unknown ``cert_suite`` STRING parses (the verifier rejects it with
         ``UnsupportedWriterCertSuite``); an unknown ``scope`` does not."""
         if not isinstance(raw, dict):
-            raise ValueError("writer cert is not an object")
+            raise WrongTypeError("writer cert is not an object")
         suite = raw.get("cert_suite")
         space_id = raw.get("space_id")
         epoch = raw.get("epoch")

@@ -12,7 +12,6 @@ import json
 import logging
 from unittest.mock import MagicMock
 
-
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.domain.events import MomentCreated
 from socialhome.federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
@@ -236,12 +235,12 @@ async def test_outbound_wire_subscribes_to_bus():
 
 
 async def test_inbound_delete_removes_local_row_on_valid_signature(db):
+    from socialhome.domain.events import MomentDeleted
+    from socialhome.domain.moment import Moment
     from socialhome.repositories.moment_public_repo import (
         SqliteMomentPublicFollowRepo,
     )
     from socialhome.repositories.moment_repo import SqliteMomentRepo
-    from socialhome.domain.events import MomentDeleted
-    from socialhome.domain.moment import Moment
 
     bus = EventBus()
     deletes: list[MomentDeleted] = []
@@ -303,12 +302,12 @@ async def test_inbound_delete_removes_local_row_on_valid_signature(db):
 
 
 async def test_inbound_delete_rejects_bad_signature(db):
+    from socialhome.domain.events import MomentDeleted
+    from socialhome.domain.moment import Moment
     from socialhome.repositories.moment_public_repo import (
         SqliteMomentPublicFollowRepo,
     )
     from socialhome.repositories.moment_repo import SqliteMomentRepo
-    from socialhome.domain.events import MomentDeleted
-    from socialhome.domain.moment import Moment
 
     bus = EventBus()
     deletes: list[MomentDeleted] = []

@@ -7,7 +7,7 @@ RSVP responses propagate back to the organiser's local row.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -94,7 +94,7 @@ def _envelope(event_type, payload, from_instance="i_remote"):
         event_type=event_type,
         from_instance=from_instance,
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
     )
 
@@ -136,7 +136,7 @@ async def test_inbound_invite_mirrors_into_recipient_calendar(env):
     handler = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await handler(
         _envelope(
             FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
@@ -169,7 +169,7 @@ async def test_inbound_invite_idempotent_under_redelivery(env):
     handler = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "event_id": "remote-evt-1",
         "summary": "BBQ",
@@ -195,7 +195,7 @@ async def test_inbound_update_overwrites_in_place(env):
     update = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_EVENT_UPDATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     base = {
         "event_id": "remote-evt-1",
         "start": now.isoformat(),
@@ -228,7 +228,7 @@ async def test_inbound_delete_removes_mirror(env):
     delete = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_EVENT_DELETED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await create(
         _envelope(
             FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
@@ -259,7 +259,7 @@ async def test_inbound_rsvp_writes_to_local_event(env):
     rsvp = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_RSVP_UPDATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cal_repo.events["local-evt"] = CalendarEvent(
         id="local-evt",
         calendar_id="cal-anna",
@@ -295,7 +295,7 @@ async def test_inbound_rsvp_for_unknown_event_dropped(env):
     rsvp = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_RSVP_UPDATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await rsvp(
         _envelope(
             FederationEventType.PERSONAL_CALENDAR_RSVP_UPDATED,
@@ -315,7 +315,7 @@ async def test_inbound_rsvp_rejects_bad_status(env):
     rsvp = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_RSVP_UPDATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cal_repo.events["local-evt"] = CalendarEvent(
         id="local-evt",
         calendar_id="cal-anna",
@@ -347,7 +347,7 @@ async def test_inbound_rsvp_deleted_clears_row(env):
     rsvp_del = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_RSVP_DELETED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cal_repo.events["local-evt"] = CalendarEvent(
         id="local-evt",
         calendar_id="cal-anna",
@@ -410,7 +410,7 @@ async def test_inbound_invite_dropped_when_user_has_no_calendar(env):
         user_id="u-ben",
         display_name="Ben",
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await handler(
         _envelope(
             FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
@@ -436,7 +436,7 @@ async def test_inbound_invite_dropped_when_user_unknown(env):
     handler = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await handler(
         _envelope(
             FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
@@ -480,7 +480,7 @@ async def test_inbound_delete_with_attendee_list_drops_per_recipient(env):
     delete = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_EVENT_DELETED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "event_id": "remote-evt-1",
         "summary": "BBQ",
@@ -554,7 +554,7 @@ async def test_inbound_rsvp_updated_defaults_occurrence_to_event_start(env):
     rsvp = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_RSVP_UPDATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cal_repo.events["evt"] = CalendarEvent(
         id="evt",
         calendar_id="cal-anna",
@@ -606,7 +606,7 @@ async def test_inbound_invite_persists_client_event_uuid(env):
     handler = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await handler(
         _envelope(
             FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
@@ -633,7 +633,7 @@ async def test_inbound_invite_without_uuid_lands_as_null(env):
     handler = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await handler(
         _envelope(
             FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
@@ -657,7 +657,7 @@ async def test_inbound_invite_rejects_non_string_uuid(env):
     handler = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await handler(
         _envelope(
             FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
@@ -719,7 +719,7 @@ async def test_inbound_invite_validates_peer_tz(env, wire_tz, expected):
 
 
 def _organiser_event(cal_repo, *, attendees=("u-bob",), origin="local"):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cal_repo.events["org-evt"] = CalendarEvent(
         id="org-evt",
         calendar_id="cal-anna",
@@ -863,7 +863,7 @@ async def test_inbound_rsvp_deleted_by_invited_user_clears_row(env):
 
 
 def _invite_payload(remote_id="remote-evt-1", organiser="u-bob"):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {
         "event_id": remote_id,
         "summary": "BBQ",
@@ -876,7 +876,7 @@ def _invite_payload(remote_id="remote-evt-1", organiser="u-bob"):
 
 
 def _seed_row(cal_repo, row_id, **overrides):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     fields = {
         "id": row_id,
         "calendar_id": "cal-anna",
@@ -1040,7 +1040,7 @@ async def test_inbound_invite_keeps_only_a_local_cover(env, cover, expected):
     update = fed._event_registry.handlers[
         FederationEventType.PERSONAL_CALENDAR_EVENT_UPDATED
     ]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     base = {
         "event_id": "remote-evt-1",
         "summary": "BBQ",

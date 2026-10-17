@@ -912,7 +912,7 @@ def test_feature_keys_missing_below_parallels_the_labels():
     labels_by_key = {
         fc.CAPABILITY_FEATURE_KEYS[ver]: label for ver, label in fc.CAPABILITY_FEATURES
     }
-    for version in range(0, fc.OURS + 2):
+    for version in range(fc.OURS + 2):
         keys = fc.feature_keys_missing_below(version)
         assert [labels_by_key[k] for k in keys] == fc.features_missing_below(version)
         space_keys = fc.space_feature_keys_missing_below(version)

@@ -41,7 +41,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from ..domain.events import (
@@ -52,8 +52,10 @@ from ..domain.events import (
     SpaceModerationQueued,
     SpaceModerationRejected,
 )
+from ..domain.federation import FederationEventType
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
+    WRITER_ROLES,
     AccessAdminOnlyError,
     AccessDecision,
     ContentAction,
@@ -69,9 +71,7 @@ from ..domain.space import (
     SpaceModerationItem,
     SpacePermissionError,
     SpaceRole,
-    WRITER_ROLES,
 )
-from ..domain.federation import FederationEventType
 from ..repositories.base import dump_json
 from .bus_publisher import BusPublisherMixin
 from .moderation_release import release_scope
@@ -232,23 +232,23 @@ class SpaceModerationService(BusPublisherMixin):
     """Submit, list, approve, reject and expire queued space content."""
 
     __slots__ = (
-        "_spaces",
-        "_users",
-        "_federation_repo",
         "_bus",
-        "_own_instance_id",
+        "_federated",
+        "_federation_repo",
         "_handlers",
         "_inflight",
-        "_federated",
+        "_own_instance_id",
+        "_spaces",
+        "_users",
     )
 
     def __init__(
         self,
-        space_repo: "AbstractSpaceRepo",
+        space_repo: AbstractSpaceRepo,
         *,
-        user_repo: "AbstractUserRepo",
-        bus: "EventBus | None" = None,
-        federation_repo: "AbstractFederationRepo | None" = None,
+        user_repo: AbstractUserRepo,
+        bus: EventBus | None = None,
+        federation_repo: AbstractFederationRepo | None = None,
         own_instance_id: str | None = None,
     ) -> None:
         self._spaces = space_repo
@@ -377,7 +377,7 @@ class SpaceModerationService(BusPublisherMixin):
         else:
             # Only the host could review it, and nothing can reach the host.
             raise SpacePermissionError(f"{feature} here needs review, which is off")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         item = SpaceModerationItem(
             id=uuid.uuid4().hex,
             space_id=space.id,
@@ -514,7 +514,7 @@ class SpaceModerationService(BusPublisherMixin):
                 item_id,
             )
             return False
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return await self._spaces.insert_moderation_item_if_absent(
             SpaceModerationItem(
                 id=item_id,
@@ -548,7 +548,7 @@ class SpaceModerationService(BusPublisherMixin):
             space_id, keep_submitters=frozenset(m.user_id for m in members)
         )
 
-    def watch_seats(self, bus: "EventBus") -> None:
+    def watch_seats(self, bus: EventBus) -> None:
         """Re-check this household's content authority whenever a local
         seat changes (a role change, a member leaving or removed)."""
         bus.subscribe(SpaceConfigChanged, self._on_seat_change)
@@ -566,7 +566,7 @@ class SpaceModerationService(BusPublisherMixin):
                 dropped,
             )
 
-    async def outbox_entry_wanted(self, entry: "OutboxEntry") -> bool:
+    async def outbox_entry_wanted(self, entry: OutboxEntry) -> bool:
         """May a queued envelope still go out? A retried
         ``SPACE_MODERATION_SUBMITTED`` only to a household that still
         reviews the space (the host, or a live admin / moderator seat)."""
@@ -665,7 +665,9 @@ class SpaceModerationService(BusPublisherMixin):
             try:
                 preview = handler.preview(item)
             except Exception:  # a corrupt row must not break the whole list
-                log.warning("moderation: preview failed for item %s", item.id)
+                log.warning(
+                    "moderation: preview failed for item %s", item.id, exc_info=True
+                )
         snapshot = item_payload_snapshot(item)
         current: dict | None = None
         target_id = payload.get("target_id")
@@ -806,7 +808,7 @@ class SpaceModerationService(BusPublisherMixin):
             raise ModerationAlreadyDecidedError(
                 f"item {item_id!r} is already {item.status.value}"
             )
-        if _aware(item.expires_at) <= datetime.now(timezone.utc):
+        if _aware(item.expires_at) <= datetime.now(UTC):
             await self._expire(item, actor_user_id)
             raise ModerationExpiredError("this submission's review window has passed")
         if space.archived or not self._feature_on(space, item):
@@ -869,7 +871,7 @@ class SpaceModerationService(BusPublisherMixin):
             )
         resuming = item.status is ModerationStatus.APPROVED
         # The same checks guard a resume: it releases more of the item.
-        if _aware(item.expires_at) <= datetime.now(timezone.utc):
+        if _aware(item.expires_at) <= datetime.now(UTC):
             if not resuming:
                 await self._expire(item, actor_user_id)
             raise ModerationExpiredError("this submission's review window has passed")
@@ -988,6 +990,7 @@ class SpaceModerationService(BusPublisherMixin):
                 decision.value,
                 item.id,
                 exc,
+                exc_info=True,
             )
 
     async def _may_overturn(
@@ -1060,7 +1063,11 @@ class SpaceModerationService(BusPublisherMixin):
         try:
             live = await handler.snapshot(item.space_id, target)
         except Exception:  # can't tell → assume nothing landed
-            log.warning("moderation: could not re-read %s after a failure", target)
+            log.warning(
+                "moderation: could not re-read %s after a failure",
+                target,
+                exc_info=True,
+            )
             return False
         match item.action:
             case ContentAction.CREATE.value:
@@ -1121,14 +1128,14 @@ class SpaceModerationService(BusPublisherMixin):
 
     async def expire_due(self, now: datetime | None = None) -> int:
         """Expire every overdue pending item; returns how many moved."""
-        moved = await self._spaces.expire_due(now or datetime.now(timezone.utc))
+        moved = await self._spaces.expire_due(now or datetime.now(UTC))
         for item in moved:
             await self._emit(SpaceModerationExpired(item=item))
         return len(moved)
 
     async def purge_decided(self, now: datetime | None = None) -> int:
         """NULL the content of items decided more than the retention ago."""
-        at = now or datetime.now(timezone.utc)
+        at = now or datetime.now(UTC)
         await self._spaces.delete_stale_tombstones(at - TOMBSTONE_RETENTION)
         return await self._spaces.purge_payloads(at - MODERATION_PAYLOAD_RETENTION)
 
@@ -1171,13 +1178,13 @@ def _decided(
         item,
         status=status,
         reviewed_by=reviewer,
-        reviewed_at=datetime.now(timezone.utc),
+        reviewed_at=datetime.now(UTC),
     )
 
 
 def _aware(value: datetime) -> datetime:
     """``value`` as tz-aware UTC (a naive stored timestamp is UTC)."""
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _iso(value: datetime | None) -> str | None:

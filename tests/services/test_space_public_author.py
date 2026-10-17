@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
+import pytest
 
 from socialhome.crypto import (
     b64url_decode,
@@ -13,8 +15,6 @@ from socialhome.crypto import (
     sign_ed25519,
     verify_ed25519,
 )
-import pytest
-
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import LocationData, Post, PostType
 from socialhome.services.space_public_author import (
@@ -181,14 +181,14 @@ def test_legacy_normalisation_matches_explicit_none():
     absent", nothing more."""
     kp = generate_identity_keypair()
     username = "alice"
-    kw = dict(
-        post=_post(author=derive_user_id(kp.public_key, username)),
-        space_id="sp",
-        author_username=username,
-        author_pk=kp.public_key,
-        author_identity_seed=kp.private_key,
-        origin_instance_id="origin.home",
-    )
+    kw = {
+        "post": _post(author=derive_user_id(kp.public_key, username)),
+        "space_id": "sp",
+        "author_username": username,
+        "author_pk": kp.public_key,
+        "author_identity_seed": kp.private_key,
+        "origin_instance_id": "origin.home",
+    }
     a = build_signed_author_inner(author_identity_anchor=username, **kw)
     b = build_signed_author_inner(author_identity_anchor=None, **kw)
     a.pop("author_sig")
@@ -310,17 +310,17 @@ def test_missing_optional_field_defaults_to_none():
 
 
 def _post(**over) -> Post:
-    base = dict(
-        id="p1",
-        author="u1",
-        type=PostType.TEXT,
-        created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
-        content="hi",
-        media_url=None,
-        image_urls=("a.jpg", "b.jpg"),
-        hidden_from_feed=False,
-        location=None,
-    )
+    base = {
+        "id": "p1",
+        "author": "u1",
+        "type": PostType.TEXT,
+        "created_at": datetime(2026, 6, 10, tzinfo=UTC),
+        "content": "hi",
+        "media_url": None,
+        "image_urls": ("a.jpg", "b.jpg"),
+        "hidden_from_feed": False,
+        "location": None,
+    }
     base.update(over)
     return Post(**base)
 
@@ -436,7 +436,7 @@ def test_verify_signed_author_inner_rejects_malformed_sig():
 def test_verify_signed_author_inner_rejects_wrong_signing_key():
     # author_pk is the real author, but the sig was made by a different key.
     impostor = generate_identity_keypair()
-    kp, inner = _signed_inner()
+    _kp, inner = _signed_inner()
     inner["author_sig"] = b64url_encode(
         sign_ed25519(impostor.private_key, author_signing_bytes(inner))
     )
