@@ -86,3 +86,5 @@ docs/superpowers/
 
 # pytest --security-manifest output (tests/security_guard.py)
 security-manifest/
+# CI shard outputs (tests/sharding.py, .github/workflows/ci.yml)
+shard-out/
