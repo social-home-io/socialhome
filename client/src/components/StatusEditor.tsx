@@ -26,7 +26,7 @@ import { formatLocale, t } from '@/i18n/i18n'
 
 /** ``keep`` = leave an existing deadline as it is (only offered while
  *  the current status has one). */
-export type ClearAfterChoice = 'none' | '30m' | '1h' | '4h' | 'today' | 'keep'
+type ClearAfterChoice = 'none' | '30m' | '1h' | '4h' | 'today' | 'keep'
 
 const CHOICES: { id: Exclude<ClearAfterChoice, 'keep'>; labelKey: string }[] = [
   { id: 'none', labelKey: 'status.clear_never' },
@@ -37,7 +37,7 @@ const CHOICES: { id: Exclude<ClearAfterChoice, 'keep'>; labelKey: string }[] = [
 ]
 
 /** Matches the server caps in ``socialhome/domain/user.py``. */
-export const STATUS_TEXT_MAX = 80
+const STATUS_TEXT_MAX = 80
 /** Code points; a single emoji can span several (skin tone, ZWJ). The
  *  input's ``maxLength`` counts UTF-16 units, hence the headroom. */
 const STATUS_EMOJI_MAX_UNITS = 32
@@ -61,14 +61,14 @@ export function liveStatus(s: UserStatus | null | undefined): UserStatus | null 
 }
 
 /** What the status fields hold while being edited. */
-export interface StatusDraft {
+interface StatusDraft {
   emoji: string
   text: string
   clearAfter: ClearAfterChoice
 }
 
 /** The fields' starting point for *status* (the saved one). */
-export function statusDraftFrom(status: UserStatus | null | undefined): StatusDraft {
+function statusDraftFrom(status: UserStatus | null | undefined): StatusDraft {
   const live = liveStatus(status)
   return {
     emoji: live?.emoji ?? '',
@@ -79,7 +79,7 @@ export function statusDraftFrom(status: UserStatus | null | undefined): StatusDr
 
 /** The ``PATCH /api/me`` body that saves *draft*. ``keepUntil`` is the
  *  saved deadline the "Until …" chip keeps. An empty draft clears. */
-export function statusPatchBody(
+function statusPatchBody(
   draft: StatusDraft,
   keepUntil: string | null,
 ): Record<string, string | null> {
@@ -101,7 +101,7 @@ export function statusPatchBody(
  * returned profile and a toast confirms. Returns the user, or ``null``
  * after an error toast (a 422's readable detail when there is one).
  */
-export async function saveMyStatus(
+async function saveMyStatus(
   body: Record<string, string | null>,
   cleared: boolean,
 ): Promise<User | null> {

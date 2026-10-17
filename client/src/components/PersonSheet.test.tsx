@@ -36,7 +36,7 @@ const { api } = await import('@/api')
 const { PersonSheet, openPerson, closePerson } = await import('./PersonSheet')
 const blocks = await import('@/store/blocks')
 const follows = await import('@/store/follows')
-const { statusEditorOpen } = await import('./StatusEditor')
+const { statusEditorOpen, StatusEditorHost } = await import('./StatusEditor')
 
 const apiMock = api as unknown as Record<'get' | 'post' | 'delete', ReturnType<typeof vi.fn>>
 
@@ -411,6 +411,34 @@ describe('PersonSheet', () => {
     expect(statusEditorOpen.value).toBe(true)
     await waitFor(() => { expect(q(document, 'person-sheet')).toBeNull() })
     statusEditorOpen.value = false
+  })
+
+  it('yourself: Edit status moves focus into the status dialog; Cancel returns it to the sheet\'s opener', async () => {
+    statusEditorOpen.value = false
+    const opener = document.createElement('button')
+    opener.textContent = 'open me'
+    document.body.appendChild(opener)
+    opener.focus()
+    render(<><PersonSheet /><StatusEditorHost /></>)
+    await act(async () => {
+      openPerson('u-me', { person: oma({ display_name: 'Pascal', username: 'pascal' }) })
+    })
+    const edit = q(document, 'person-edit-status')!
+    edit.focus()
+    await act(async () => { fireEvent.click(edit) })
+    await waitFor(() => { expect(q(document, 'person-sheet')).toBeNull() })
+    const dialog = await waitFor(() => {
+      const d = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')]
+        .find(el => el.textContent?.includes('Your status'))
+      expect(d).toBeTruthy()
+      return d!
+    })
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true))
+    const cancel = [...dialog.querySelectorAll('button')].find(b => b.textContent === 'Cancel')!
+    await act(async () => { fireEvent.click(cancel) })
+    expect(statusEditorOpen.value).toBe(false)
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+    opener.remove()
   })
 
   it('someone else: no Edit status button', async () => {

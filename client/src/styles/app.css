@@ -247,6 +247,12 @@ a:focus:not(:focus-visible) { outline: none; }
   bottom: 3px;
   background: var(--sh-primary);
 }
+/* While the "You" menu is open the top bar (a sticky stacking context)
+ * lifts above the toast layer, so a "Status updated" toast can't cover
+ * the menu it came from. Any dialog an item opens closes the menu first. */
+.sh-topbar:has(.sh-me-menu) { z-index: calc(var(--sh-z-toast) + 1); }
+/* A menu with a header: header + role="menu" list stack in the popup. */
+.sh-post-menu__items { display: flex; flex-direction: column; }
 .sh-me-menu .sh-post-menu__header {
   padding: var(--sh-space-sm) var(--sh-space-md) var(--sh-space-sm);
   margin-bottom: var(--sh-space-xs);

@@ -103,7 +103,8 @@ function IngressAuthFailed() {
   )
 }
 
-function TopBar() {
+/** The sticky top bar: page heading, search, notifications, the "You" menu. */
+export function TopBar() {
   return (
     <header class="sh-topbar" role="banner">
       <TopBarHeading />

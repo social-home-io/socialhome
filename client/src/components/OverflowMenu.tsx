@@ -14,11 +14,14 @@
  * menu such as "which store"). ``bareTrigger`` drops the round ⋯
  * button chrome so the trigger can look like a pill; ``open`` /
  * ``onOpenChange`` make the open state controllable. ``header`` puts a
- * non-focusable block (``role="none"``) above the items — arrow keys
- * and type-ahead skip it.
+ * non-focusable block above the items: it renders as a sibling just
+ * before the ``role="menu"`` element (a menu may only own menu items),
+ * inside the same popup, and the menu points at it with
+ * ``aria-describedby`` so a screen reader still hears it. Arrow keys and
+ * type-ahead never land on it.
  */
 import type { ComponentChildren, Ref } from 'preact'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { assignRef } from '@/utils/refs'
 
 export interface MenuItem {
@@ -59,7 +62,8 @@ interface Props {
   /** Lands on the trigger button (Preact 11 passes ``ref`` as a prop), the
    *  control a caller hands focus back to. */
   ref?: Ref<HTMLButtonElement>
-  /** Non-focusable content above the items (e.g. who / what state). */
+  /** Non-focusable content above the items (e.g. who / what state);
+   *  the menu's ``aria-describedby`` points at it. */
   header?: ComponentChildren
   /** Width of a ``floating`` menu in px (default 200). */
   menuWidth?: number
@@ -90,6 +94,7 @@ export function OverflowMenu({
   }, [ref])
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
+  const headerId = useId()
 
   const menuItems = () => Array.from(
     menuRef.current?.querySelectorAll<HTMLElement>(
@@ -173,6 +178,33 @@ export function OverflowMenu({
   // would close the menu before the click lands).
   const keepFocus = (e: PointerEvent) => e.preventDefault()
 
+  const popupClass = `sh-post-menu${floating ? ' sh-timetable-menu--floating' : ''} ${menuClass}`.trim()
+  const popupStyle = floating && pos
+    ? { top: `${pos.top}px`, left: `${pos.left}px`, width: `${menuWidth}px` }
+    : undefined
+  const renderItems = () => (
+    <>
+      {items.map(item => {
+        const radio = item.checked !== undefined
+        const cls = [item.danger ? 'sh-post-menu-danger' : '', item.class ?? '']
+          .filter(Boolean).join(' ')
+        return (
+          <button key={item.key ?? item.label} type="button"
+                  role={radio ? 'menuitemradio' : 'menuitem'}
+                  aria-checked={radio ? (item.checked ? 'true' : 'false') : undefined}
+                  tabIndex={-1}
+                  class={cls || undefined}
+                  aria-disabled={item.disabled ? 'true' : undefined}
+                  title={item.title}
+                  onPointerDown={keepFocus} onClick={pick(item)}>
+            {item.label}
+            {item.checked && <span aria-hidden="true" class="sh-post-menu__check">✓</span>}
+          </button>
+        )
+      })}
+    </>
+  )
+
   return (
     <div
       ref={wrapRef}
@@ -195,34 +227,19 @@ export function OverflowMenu({
       >
         {children}
       </button>
-      {open && (
-        <div ref={menuRef}
-             class={`sh-post-menu${floating ? ' sh-timetable-menu--floating' : ''} ${menuClass}`.trim()}
-             role="menu" aria-label={label}
-             style={floating && pos ? { top: `${pos.top}px`, left: `${pos.left}px`, width: `${menuWidth}px` } : undefined}>
-          {header != null && (
-            <div role="none" class="sh-post-menu__header">{header}</div>
-          )}
-          {items.map(item => {
-            const radio = item.checked !== undefined
-            const cls = [item.danger ? 'sh-post-menu-danger' : '', item.class ?? '']
-              .filter(Boolean).join(' ')
-            return (
-              <button key={item.key ?? item.label} type="button"
-                      role={radio ? 'menuitemradio' : 'menuitem'}
-                      aria-checked={radio ? (item.checked ? 'true' : 'false') : undefined}
-                      tabIndex={-1}
-                      class={cls || undefined}
-                      aria-disabled={item.disabled ? 'true' : undefined}
-                      title={item.title}
-                      onPointerDown={keepFocus} onClick={pick(item)}>
-                {item.label}
-                {item.checked && <span aria-hidden="true" class="sh-post-menu__check">✓</span>}
-              </button>
-            )
-          })}
+      {open && (header == null ? (
+        <div ref={menuRef} class={popupClass} role="menu" aria-label={label} style={popupStyle}>
+          {renderItems()}
         </div>
-      )}
+      ) : (
+        <div class={`${popupClass} sh-post-menu--with-header`} style={popupStyle}>
+          <div id={headerId} class="sh-post-menu__header">{header}</div>
+          <div ref={menuRef} class="sh-post-menu__items" role="menu" aria-label={label}
+               aria-describedby={headerId}>
+            {renderItems()}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, waitFor, act, cleanup, type RenderResult } from '@testing-library/preact'
 import { signal } from '@preact/signals'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import type { User } from '@/types'
 
 type Handler = (e: { type: string; data: Record<string, unknown> }) => void
@@ -115,13 +113,32 @@ describe('MeButton', () => {
     expect(badge(view)).toBeNull()
   })
 
+  it('a deadline past the ~24.8-day setTimeout cap still drops the badge (the timer re-arms)', async () => {
+    vi.useFakeTimers()
+    const DAY = 86_400_000
+    const far = new Date(Date.now() + 30 * DAY).toISOString()
+    currentUser.value = { ...baseUser, status: { emoji: '🏝️', text: 'Sabbatical', expires_at: far } }
+    const { view } = await mount()
+    // The first (capped) timer fires at ~24.8 days; still live.
+    await act(async () => { vi.advanceTimersByTime(25 * DAY) })
+    expect(badge(view)).not.toBeNull()
+    // Only a re-armed timer can re-render at the real deadline.
+    await act(async () => { vi.advanceTimersByTime(5 * DAY + 60_000) })
+    expect(badge(view)).toBeNull()
+  })
+
   it('menu without a status: header says "No status set"; Set a status… and Profile & settings', async () => {
     const { view } = await mount()
     fireEvent.click(trigger(view))
     expect(trigger(view).getAttribute('aria-expanded')).toBe('true')
     const menu = view.getByRole('menu')
-    const header = menu.querySelector('.sh-post-menu__header')!
-    expect(header.getAttribute('role')).toBe('none')
+    // The header is not inside role="menu" (a menu owns only items) but
+    // sits just before it in the popup, and describes it.
+    const header = view.container.querySelector<HTMLElement>('.sh-post-menu__header')!
+    expect(menu.contains(header)).toBe(false)
+    expect(header.nextElementSibling).toBe(menu)
+    expect(header.id).not.toBe('')
+    expect(menu.getAttribute('aria-describedby')).toBe(header.id)
     expect(header.textContent).toContain('Anna')
     expect(header.textContent).toContain('@anna_h')
     expect(header.textContent).toContain('No status set')
@@ -134,7 +151,7 @@ describe('MeButton', () => {
     currentUser.value = { ...baseUser, status: { emoji: '🌴', text: 'On leave', expires_at: FUTURE } }
     const { view } = await mount()
     fireEvent.click(trigger(view))
-    const header = view.getByRole('menu').querySelector('.sh-post-menu__header')!
+    const header = view.container.querySelector('.sh-post-menu__header')!
     expect(header.textContent).toContain('🌴 On leave')
     expect(header.textContent).toMatch(/Until /)
     expect(itemNames(view)).toEqual(['Edit status…', 'Clear status', 'Profile & settings'])
@@ -179,24 +196,24 @@ describe('MeButton', () => {
     expect(document.activeElement).toBe(trigger(view))
   })
 
-  it('our own user.status_changed frame updates currentUser and the badge', async () => {
+  it('follows our own user.status_changed frames through the app-wide store', async () => {
     const { view } = await mount()
+    const { wireMyStatusWs } = await import('@/store/myStatus')
+    const off = wireMyStatusWs()
     act(() => {
       emit('user.status_changed', { user_id: 'u1', status: { emoji: '🍽️', text: 'Lunch', expires_at: null } })
     })
-    expect(currentUser.value?.status?.text).toBe('Lunch')
     await waitFor(() => expect(badge(view)?.textContent).toBe('🍽️'))
+    act(() => { emit('user.status_changed', { user_id: 'u2', status: { emoji: '🎧', text: 'Focus', expires_at: null } }) })
+    expect(badge(view)?.textContent).toBe('🍽️')
     act(() => { emit('user.status_changed', { user_id: 'u1', status: null }) })
     await waitFor(() => expect(badge(view)).toBeNull())
-    expect(currentUser.value?.status).toEqual({ emoji: null, text: null, expires_at: null })
+    off()
   })
 
-  it("someone else's frame leaves currentUser alone", async () => {
+  it('does not subscribe to WS frames itself (the store owns that)', async () => {
     await mount()
-    act(() => {
-      emit('user.status_changed', { user_id: 'u2', status: { emoji: '🎧', text: 'Focus', expires_at: null } })
-    })
-    expect(currentUser.value?.status?.text).toBeNull()
+    expect(handlers.get('user.status_changed')?.size ?? 0).toBe(0)
   })
 
   it('renders in haos mode too (no token, ingress auth)', async () => {
@@ -208,11 +225,5 @@ describe('MeButton', () => {
     const { view } = await mount()
     expect(trigger(view).getAttribute('aria-label')).toBe('You: Anna')
     instanceConfig.value = null
-  })
-
-  it('the App top bar mounts it right after the notification bell, and the status dialog once', () => {
-    const app = readFileSync(join(__dirname, '..', 'App.tsx'), 'utf8')
-    expect(app).toMatch(/<NotificationBell \/>\s*<MeButton \/>/)
-    expect(app.match(/<StatusEditorHost \/>/g)?.length).toBe(1)
   })
 })

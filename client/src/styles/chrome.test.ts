@@ -81,6 +81,11 @@ describe('TopBar "You" button', () => {
     expect(bodiesFor('.sh-me-btn:focus-visible', 'none')).toMatch(/outline\s*:\s*2px solid/)
   })
 
+  it('while the "You" menu is open the top bar stacks above the toast layer', () => {
+    expect(bodiesFor('.sh-topbar:has(.sh-me-menu)', 'none'))
+      .toMatch(/z-index\s*:\s*calc\(var\(--sh-z-toast\)\s*\+\s*1\)/)
+  })
+
   it('toasts stack under the top bar, never over the bell / "You" button', () => {
     expect(bodiesFor('.sh-toast-container', 'none')).toMatch(/top\s*:\s*calc\(var\(--sh-topbar-height\)/)
     const phone = rules.filter(r => r.media && r.selectors.includes('.sh-toast-container'))

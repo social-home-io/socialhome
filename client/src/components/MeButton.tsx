@@ -12,16 +12,14 @@
  * edit status (opens ``StatusEditorHost``), clear status (only while
  * one is set) and Profile & settings.
  *
- * Liveness: this component is mounted for the whole signed-in session,
- * so it owns the caller's own ``user.status_changed`` frames — a status
- * set on another device, or cleared by the server's expiry sweep, lands
- * on ``currentUser`` for every surface. A timer re-renders at the
- * deadline so the badge leaves on time even before the sweep runs.
+ * Liveness: it only reads ``currentUser``, which ``store/myStatus`` keeps
+ * in step with our own ``user.status_changed`` frames (another device,
+ * the server's expiry sweep). A timer re-renders at the deadline so the
+ * badge leaves on time even before the sweep runs.
  */
 import { useEffect, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { t } from '@/i18n/i18n'
-import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
 import type { UserStatus } from '@/types'
 import { Avatar } from './Avatar'
@@ -39,30 +37,20 @@ function statusText(s: UserStatus | null): string | null {
 
 export function MeButton() {
   const loc = useLocation()
-  const [, setTick] = useState(0)
+  const [tick, setTick] = useState(0)
   const user = currentUser.value
   const status = liveStatus(user?.status)
   const expiresAt = status?.expires_at ?? null
 
-  // Our own status changed elsewhere (another device, the expiry sweep).
-  useEffect(() => ws.on('user.status_changed', (e) => {
-    const me = currentUser.value
-    if (!me || e.data.user_id !== me.user_id) return
-    currentUser.value = {
-      ...me,
-      status: (e.data.status as UserStatus | null)
-        ?? { emoji: null, text: null, expires_at: null },
-    }
-  }), [])
-
   // Re-render at the deadline so ``liveStatus`` drops the badge on time.
+  // A deadline past the setTimeout cap fires early; ``tick`` re-arms it.
   useEffect(() => {
     if (!expiresAt) return
     const ms = Date.parse(expiresAt) - Date.now()
     if (!(ms > 0)) return
     const id = setTimeout(() => setTick(n => n + 1), Math.min(ms + 50, MAX_TIMER_MS))
     return () => clearTimeout(id)
-  }, [expiresAt])
+  }, [expiresAt, tick])
 
   if (!user) return null
 
