@@ -83,3 +83,6 @@ docs/superpowers/
 
 # haos-ingress-ui skill: puppeteer-core install
 .claude/skills/haos-ingress-ui/checks/node_modules/
+
+# pytest --security-manifest output (tests/security_guard.py)
+security-manifest/
