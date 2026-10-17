@@ -325,7 +325,7 @@ class CornerService(ProtectionGateMixin):
             hidden |= await self._guardian_block_counterparts(user_id)
         except Exception as exc:  # pragma: no cover — defensive
             # Fails closed: no whereabouts rather than unfiltered ones.
-            log.debug("corner: presence failed: %s", exc, exc_info=True)
+            log.warning("corner: presence failed: %s", exc, exc_info=True)
             return ()
         return tuple(p for p in rows if p.user_id not in hidden)
 
@@ -339,7 +339,7 @@ class CornerService(ProtectionGateMixin):
         try:
             users = await self._users.list_by_ids({p.user_id for p in presence})
         except Exception as exc:
-            log.debug("corner: statuses failed: %s", exc, exc_info=True)
+            log.warning("corner: statuses failed: %s", exc, exc_info=True)
             return {}
         return {
             u.user_id: live

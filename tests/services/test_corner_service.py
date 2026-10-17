@@ -592,10 +592,16 @@ async def test_presence_statuses_only_live_and_only_for_visible_rows():
     }
 
 
-async def test_presence_statuses_fail_soft():
-    """A user-repo failure costs the statuses, not the whereabouts."""
+async def test_presence_statuses_fail_soft(caplog):
+    """A user-repo failure costs the statuses, not the whereabouts — and
+    is logged at WARNING so the fault is visible in production."""
     svc, _ = _svc(users=_BlockingUsers())  # no ``list_by_ids``
     svc._presence = _Presence()
-    bundle = await _build(svc, _utc(MON, 5))
+    with caplog.at_level("WARNING"):
+        bundle = await _build(svc, _utc(MON, 5))
     assert len(bundle.presence) == 3
     assert bundle.statuses == {}
+    assert any(
+        r.levelname == "WARNING" and "statuses failed" in r.getMessage()
+        for r in caplog.records
+    )
