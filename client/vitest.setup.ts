@@ -18,6 +18,9 @@ options.requestAnimationFrame = (cb: () => void) => { setTimeout(cb, 0) }
 // not synchronously. testing-library's cleanup() doesn't wrap the unmount
 // in act(), so without it a test's cleanups (hang up a call, clear a
 // signal…) fire later — inside the *next* test. act() flushes them here.
+// It is a safety net, not a crutch: every test must also pass with plain
+// cleanup() (unique ids per test, module state reset in beforeEach). The
+// suite was verified that way; InCallPage.test.tsx keeps a regression.
 afterEach(() => {
   act(() => cleanup())
 })
