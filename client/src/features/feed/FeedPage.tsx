@@ -20,7 +20,6 @@ import { useTitle } from '@/store/pageTitle'
 import { PostCard } from '@/components/PostCard'
 import { Composer } from '@/components/Composer'
 import { openCommentOverlay } from '@/components/CommentOverlay'
-import { HouseholdPresenceStrip } from '@/components/HouseholdPresenceStrip'
 import { DmThreadSkeleton, FeedSkeleton, PostCardSkeleton } from '@/components/Skeleton'
 import { Button } from '@/components/Button'
 import { PullToRefresh } from '@/components/PullToRefresh'
@@ -234,7 +233,9 @@ function HouseholdChatTab() {
   )
 }
 
-/** The Feed tab — presence strip, composer, posts. */
+/** The Feed tab — composer, then posts. Who's home lives on Corner
+ *  (the dashboard) and ``/presence``, not here; the household roster
+ *  is still loaded so post avatars resolve. */
 function FeedTabBody() {
   useEffect(() => {
     void loadHouseholdUsers()
@@ -312,7 +313,6 @@ function FeedTabBody() {
   return (
     <PullToRefresh onRefresh={() => loadFeed()}>
     <div class="sh-feed">
-      <HouseholdPresenceStrip />
       <Composer onSubmit={handleSubmit} context="Household" />
       {posts.value.map(post => (
         <div key={post.id} class="sh-feed-item">

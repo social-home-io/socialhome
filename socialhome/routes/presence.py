@@ -66,13 +66,9 @@ class PresenceCollectionView(BaseView):
             # as unset even before the expiry sweep clears it.
             now = datetime.now(UTC)
             statuses = {
-                u.user_id: {
-                    "emoji": u.status.emoji,
-                    "text": u.status.text,
-                    "expires_at": u.status.expires_at,
-                }
+                u.user_id: live
                 for u in users
-                if u.status.is_set and not u.status.is_expired(now)
+                if (live := u.status.visible_dict(now)) is not None
             }
         # §Privacy — drop blocked household members from the viewer's
         # presence list. The block is local to this viewer; other

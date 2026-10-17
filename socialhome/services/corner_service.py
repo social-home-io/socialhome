@@ -13,7 +13,7 @@ a single widget failure never fails the whole dashboard.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -106,6 +106,11 @@ class CornerBundle:
     #: The caller's events overlapping today (household-tz day bounds) —
     #: unlike ``upcoming_events`` this includes this morning's.
     today_events: tuple[CalendarEvent, ...] = ()
+    #: Live (set, unexpired) ``{emoji, text, expires_at}`` status per
+    #: ``presence`` row, keyed by ``user_id``; people without one are
+    #: absent. Only covers the already-filtered ``presence`` rows, so a
+    #: blocked member's status never reaches the viewer.
+    statuses: dict[str, dict] = field(default_factory=dict)
 
 
 class CornerService(ProtectionGateMixin):
@@ -172,6 +177,7 @@ class CornerService(ProtectionGateMixin):
         unread_conversations = await self._count_unread_dms(username)
         upcoming_events = await self._upcoming_events(username, now)
         presence = await self._presence_list(user_id)
+        statuses = await self._presence_statuses(presence, now)
         tasks_due = await self._tasks_due_today(user_id, now)
         bazaar_summary = await self._bazaar_summary(user_id)
         followed_ids, followed_feed = await self._followed_spaces_feed(
@@ -195,6 +201,7 @@ class CornerService(ProtectionGateMixin):
             followed_spaces_feed=followed_feed,
             today_timetable=today_timetable,
             today_events=today_events,
+            statuses=statuses,
         )
 
     # ── Per-slice helpers ──────────────────────────────────────────────
@@ -321,6 +328,24 @@ class CornerService(ProtectionGateMixin):
             log.debug("corner: presence failed: %s", exc, exc_info=True)
             return ()
         return tuple(p for p in rows if p.user_id not in hidden)
+
+    async def _presence_statuses(
+        self, presence: tuple[PersonPresence, ...], now: datetime
+    ) -> dict[str, dict]:
+        """Each listed person's live status — the same set-and-unexpired
+        rule ``GET /api/presence`` applies. Fails soft to no statuses."""
+        if not presence:
+            return {}
+        try:
+            users = await self._users.list_by_ids({p.user_id for p in presence})
+        except Exception as exc:
+            log.debug("corner: statuses failed: %s", exc, exc_info=True)
+            return {}
+        return {
+            u.user_id: live
+            for u in users
+            if (live := u.status.visible_dict(now)) is not None
+        }
 
     async def _tasks_due_today(self, user_id: str, now: datetime) -> tuple[Task, ...]:
         """Open tasks due on or before today in the household tz."""

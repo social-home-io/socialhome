@@ -4417,7 +4417,6 @@
   "calls.picker.video_hint": "Kamera von Anfang an an.",
   "presence.state.in_zone": "In einer Zone",
   "presence.state.unknown": "Unbekannt",
-  "presence.strip_aria": "Haushaltsmitglieder",
   "mention.loading": "Mitglieder werden geladen…",
   "mention.no_match_space": "Kein Mitglied dieses Raums passt zu „@{query}“",
   "mention.no_match_chat": "Niemand in diesem Chat passt zu „@{query}“",

@@ -63,6 +63,8 @@ describe('Page-shaped skeletons', () => {
   it('FeedSkeleton renders 3 post-shaped skeletons', () => {
     const { container } = render(<FeedSkeleton />)
     expect(container.querySelectorAll('.sh-post--skeleton').length).toBe(3)
+    // The feed opens on the composer now — no member-strip placeholder.
+    expect(container.querySelectorAll('.sh-skeleton--circle').length).toBe(3)
   })
 
   it('DmInboxSkeleton renders 5 inbox rows', () => {

@@ -4417,7 +4417,6 @@
   "calls.picker.video_hint": "Camera meteen aan.",
   "presence.state.in_zone": "In een zone",
   "presence.state.unknown": "Onbekend",
-  "presence.strip_aria": "Leden van het huishouden",
   "mention.loading": "Leden laden…",
   "mention.no_match_space": "Geen lid van deze ruimte past bij ‘@{query}’",
   "mention.no_match_chat": "Niemand in deze chat past bij ‘@{query}’",

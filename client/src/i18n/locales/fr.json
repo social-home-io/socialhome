@@ -4417,7 +4417,6 @@
   "calls.picker.video_hint": "Caméra allumée dès le début.",
   "presence.state.in_zone": "Dans une zone",
   "presence.state.unknown": "Inconnu",
-  "presence.strip_aria": "Membres du foyer",
   "mention.loading": "Chargement des membres…",
   "mention.no_match_space": "Aucun membre de cet espace ne correspond à « @{query} »",
   "mention.no_match_chat": "Personne dans cette discussion ne correspond à « @{query} »",

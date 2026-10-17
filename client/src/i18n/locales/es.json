@@ -4444,7 +4444,6 @@
   "calls.picker.video_hint": "Cámara encendida desde el principio.",
   "presence.state.in_zone": "En una zona",
   "presence.state.unknown": "Desconocido",
-  "presence.strip_aria": "Miembros del hogar",
   "mention.loading": "Cargando miembros…",
   "mention.no_match_space": "Ningún miembro de este espacio coincide con «@{query}»",
   "mention.no_match_chat": "Nadie en este chat coincide con «@{query}»",

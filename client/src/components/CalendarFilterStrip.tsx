@@ -2,11 +2,11 @@
  * CalendarFilterStrip — pinned-to-the-wall row of household-member
  * calendars shown above the calendar header.
  *
- * Mirrors the look + feel of :class:`HouseholdPresenceStrip` so the
- * calendar reads as the same surface family as the feed: each member's
- * calendar is a polaroid-style card carrying their avatar, name, a
- * one-line "Calendar" / "{N} calendars" label, and a washi-tape strip
- * coloured by the calendar's hue. Click → toggles visibility of that
+ * Uses the feed's "taped to the wall" look so the calendar reads as
+ * the same surface family: each member's calendar is a polaroid-style
+ * card carrying their avatar, name, a one-line "Calendar" /
+ * "{N} calendars" label, and a washi-tape strip coloured by the
+ * calendar's hue. Click → toggles visibility of that
  * member's events in the calendar view.
  *
  * A member with more than one calendar collapses into one card that

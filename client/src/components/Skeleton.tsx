@@ -88,16 +88,10 @@ export function PostCardSkeleton({ withMedia = false }: { withMedia?: boolean })
 }
 
 
-/** Stand-in for the household feed: 3 post cards (one with media)
- *  plus a thin presence-strip header row. */
+/** Stand-in for the household feed: 3 post cards (one with media). */
 export function FeedSkeleton() {
   return (
     <div class="sh-feed sh-feed--skeleton" aria-busy="true">
-      <div class="sh-skeleton-presence-strip">
-        {[0, 1, 2, 3].map(i => (
-          <Skeleton key={i} shape="circle" width={36} height={36} />
-        ))}
-      </div>
       <div class="sh-feed-item"><PostCardSkeleton /></div>
       <div class="sh-feed-item"><PostCardSkeleton withMedia /></div>
       <div class="sh-feed-item"><PostCardSkeleton /></div>

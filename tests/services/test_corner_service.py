@@ -25,6 +25,7 @@ from socialhome.domain.timetable import (
     TimetableValidity,
     week_anchor,
 )
+from socialhome.domain.user import UserStatus
 from socialhome.services import corner_service as cs
 from socialhome.services.corner_service import CornerService
 from socialhome.services.timetable_service import (
@@ -553,3 +554,48 @@ async def test_presence_without_child_protection_drops_only_personal_blocks():
     svc._presence = _Presence()
     bundle = await _build(svc, _utc(MON, 5))
     assert [p.user_id for p in bundle.presence] == ["u-ben", "u-kid", "u-dora"]
+
+
+class _StatusUsers(_BlockingUsers):
+    """Users with statuses: ben live, kid live (but guardian-blocked),
+    dora expired; ``list_by_ids`` records what it was asked for."""
+
+    def __init__(self):
+        super().__init__()
+        self.asked: set[str] = set()
+
+    async def list_by_ids(self, user_ids):
+        self.asked = set(user_ids)
+        statuses = {
+            "u-ben": UserStatus(emoji="🎧", text="Focus"),
+            "u-kid": UserStatus(text="secret"),
+            "u-dora": UserStatus(text="old", expires_at="2000-01-01T00:00:00+00:00"),
+        }
+        return [
+            SimpleNamespace(user_id=uid, status=statuses.get(uid, UserStatus()))
+            for uid in user_ids
+        ]
+
+
+async def test_presence_statuses_only_live_and_only_for_visible_rows():
+    """Statuses follow ``GET /api/presence``: expired ones drop, and no one
+    filtered out of the whereabouts (blocked / guardian-blocked) is even
+    looked up."""
+    users = _StatusUsers()
+    svc, _ = _svc(users=users)
+    svc._presence = _Presence()
+    svc.attach_child_protection(_Cp())
+    bundle = await _build(svc, _utc(MON, 5))
+    assert users.asked == {"u-ben", "u-dora"}
+    assert bundle.statuses == {
+        "u-ben": {"emoji": "🎧", "text": "Focus", "expires_at": None}
+    }
+
+
+async def test_presence_statuses_fail_soft():
+    """A user-repo failure costs the statuses, not the whereabouts."""
+    svc, _ = _svc(users=_BlockingUsers())  # no ``list_by_ids``
+    svc._presence = _Presence()
+    bundle = await _build(svc, _utc(MON, 5))
+    assert len(bundle.presence) == 3
+    assert bundle.statuses == {}
