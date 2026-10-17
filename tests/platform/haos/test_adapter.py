@@ -504,14 +504,14 @@ async def test_dashboard_lan_host_reads_the_primary_ipv4():
     assert sv.calls == 2
 
 
-async def test_dashboard_lan_host_supervisor_failure_warns(caplog):
-    """``get_network_info`` returns ``None`` on an HTTP error."""
+async def test_dashboard_lan_host_supervisor_failure_is_unknown(caplog):
+    """``get_network_info`` returns ``None`` on an HTTP error and has
+    logged it itself — the adapter adds no misleading "no private LAN
+    IPv4" warning on top."""
     adapter = _build_haos_adapter(supervisor_client=_FakeNetworkSupervisor(None))
     with caplog.at_level("WARNING"):
         assert await adapter.dashboard_lan_host() is None
-    assert any(
-        r.levelname == "WARNING" and "LAN" in r.getMessage() for r in caplog.records
-    )
+    assert "no private LAN IPv4" not in caplog.text
 
 
 async def test_dashboard_lan_host_no_private_address_warns(caplog):

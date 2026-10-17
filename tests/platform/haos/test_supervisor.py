@@ -305,6 +305,25 @@ def test_primary_lan_ipv4_skips_loopback_link_local_and_public():
     assert primary_lan_ipv4(data) == "172.16.5.9"
 
 
+def test_primary_lan_ipv4_skips_private_but_non_lan_ranges():
+    """``is_private`` ranges no tablet can reach are not a LAN address."""
+    data = {
+        "interfaces": [
+            _iface(
+                address=[
+                    "0.0.0.1/8",
+                    "198.18.0.5/15",
+                    "192.0.2.7/24",
+                    "240.0.0.9/4",
+                    "100.64.1.2/10",
+                    "10.1.2.3/8",
+                ]
+            )
+        ]
+    }
+    assert primary_lan_ipv4(data) == "10.1.2.3"
+
+
 def test_primary_lan_ipv4_public_only_is_none():
     assert primary_lan_ipv4({"interfaces": [_iface(address=["8.8.8.8/24"])]}) is None
 

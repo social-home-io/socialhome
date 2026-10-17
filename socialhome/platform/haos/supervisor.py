@@ -130,9 +130,19 @@ def _parse_network(raw: object) -> Mapping[str, int | None] | None:
     return MappingProxyType(parsed)
 
 
+#: The RFC 1918 home-network ranges. ``ip.is_private`` is broader — it
+#: also counts ``0.0.0.0/8``, the documentation and benchmark ranges and
+#: ``240.0.0.0/4`` — none of which a wall tablet can reach.
+_LAN_NETWORKS = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
+
+
 def _lan_ipv4(iface: Mapping) -> str | None:
-    """The first private IPv4 address on ``iface`` (prefix stripped), or
-    ``None`` — never a loopback, link-local or public address."""
+    """The first RFC 1918 IPv4 address on ``iface`` (prefix stripped), or
+    ``None`` — never a loopback, link-local, reserved or public address."""
     ipv4 = iface.get("ipv4")
     if not isinstance(ipv4, Mapping):
         return None
@@ -146,12 +156,7 @@ def _lan_ipv4(iface: Mapping) -> str | None:
             ip = ipaddress.ip_interface(raw).ip
         except ValueError:
             continue
-        if (
-            ip.version == 4
-            and ip.is_private
-            and not ip.is_loopback
-            and not ip.is_link_local
-        ):
+        if any(ip in net for net in _LAN_NETWORKS):
             return str(ip)
     return None
 

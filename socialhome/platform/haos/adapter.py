@@ -300,6 +300,9 @@ class HaosAdapter(PlatformAdapter):
                 exc_info=True,
             )
             return None
+        if data is None:
+            # ``get_network_info`` already logged why Supervisor gave no answer.
+            return None
         address = primary_lan_ipv4(data)
         if address is None:
             log.warning(
