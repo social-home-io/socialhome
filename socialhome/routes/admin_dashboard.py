@@ -96,17 +96,30 @@ def _request_hostname(host: str | None) -> str:
     return text.rstrip(".") or "localhost"
 
 
-def dashboard_base_url(address: str | None, request_host: str | None, port: int) -> str:
+def dashboard_base_url(
+    address: str | None,
+    request_host: str | None,
+    port: int,
+    *,
+    lan_host: str | None = None,
+) -> str:
     """Where tablets reach the dashboard.
 
-    The admin-set ``address`` when there is one; otherwise a guess: plain
-    ``http`` on the host name the admin reached Social Home under (its
-    ``Host`` header, port dropped) and the dashboard ``port`` — on the Home
-    Assistant App that is e.g. ``http://homeassistant.local:8100``.
+    The admin-set ``address`` when there is one; otherwise plain ``http``
+    on the dashboard ``port`` and the best host known: the platform's LAN
+    address ``lan_host`` (an IP literal — on the Home Assistant App the HA
+    host's primary LAN IPv4 from Supervisor, e.g.
+    ``http://192.168.1.10:8100``), else a guess from the host name the
+    admin reached Social Home under (its ``Host`` header, port dropped) —
+    which is useless when that's a remote URL such as Nabu Casa's.
     """
     if address:
         return address
-    return f"http://{_request_hostname(request_host)}:{port}"
+    if lan_host:
+        host = f"[{lan_host}]" if ":" in lan_host else lan_host
+    else:
+        host = _request_hostname(request_host)
+    return f"http://{host}:{port}"
 
 
 #: Host names a wall panel can never reach the dashboard under.
@@ -266,17 +279,26 @@ class _DashboardAdminView(BaseView):
         ).dashboard_host_port()
         return result
 
-    def base_url(
+    async def base_url(
         self, settings: DashboardSettings, host_port: DashboardHostPort | None
     ) -> str:
-        """The tablet URL — on the port the platform publishes the
+        """The tablet URL (:func:`dashboard_base_url`): the admin-set
+        address, else the platform's LAN address (Home Assistant App: the
+        HA host's LAN IP — only asked when no address is set), else the
+        admin's request host — on the port the platform publishes the
         dashboard on when it maps one (Home Assistant App: the host port
         set under the App's Network settings), else the listen port."""
         port = settings.port
         if host_port is not None and host_port.port is not None:
             port = host_port.port
+        lan_host: str | None = None
+        if not settings.address:
+            lan_host = await self.svc(platform_adapter_key).dashboard_lan_host()
         return dashboard_base_url(
-            settings.address, admin_request_host(self.request), port
+            settings.address,
+            admin_request_host(self.request),
+            port,
+            lan_host=lan_host,
         )
 
     async def state(self) -> web.Response:
@@ -290,7 +312,7 @@ class _DashboardAdminView(BaseView):
             sign_media_urls_in(people, signer)
         running_port = self.controller.running_port
         host_port = await self.host_port()
-        url = self.base_url(settings, host_port)
+        url = await self.base_url(settings, host_port)
         prefs = await self.svc(preferences_service_key).get_household()
         displays = await self.displays.list(actor_is_admin=self.is_admin)
         return self._json(
@@ -406,7 +428,7 @@ class AdminDashboardSetupLinkView(_DashboardAdminView):
             actor_is_admin=self.is_admin, now=now
         )
         settings = await self.settings.get()
-        base = self.base_url(settings, await self.host_port())
+        base = await self.base_url(settings, await self.host_port())
         return self._json(
             {
                 "url": f"{base}/enter?t={token}",
@@ -492,7 +514,8 @@ class AdminDashboardHaPanelConnectView(_DashboardAdminView):
             raise DashboardDisabledError()
         settings = await self.settings.get()
         host_port = await self.host_port()
-        url = panel_url(settings.address, self.base_url(settings, host_port), host_port)
+        guessed = await self.base_url(settings, host_port)
+        url = panel_url(settings.address, guessed, host_port)
         if not await self.controller.url_host_allowed(url):
             # The dashboard would refuse the panel's Host (421).
             raise DashboardAddressRequiredError("no_address")

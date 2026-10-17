@@ -9,6 +9,10 @@ A thin wrapper for the Supervisor-only endpoints used by
   to dashes when it assigns Docker DNS names, so handing that
   hostname over directly spares the integration the substitution
   dance.
+* ``GET /network/info`` — the host's network interfaces, so Admin ›
+  Dashboard can show tablets the Home Assistant host's LAN address
+  (:func:`primary_lan_ipv4`) rather than the name the admin's browser
+  used (a Nabu Casa remote URL is useless to a wall tablet).
 * ``POST /discovery`` — register the add-on with HA's discovery integration
   so the official ``socialhome`` HA integration can pick us up automatically.
 
@@ -27,6 +31,7 @@ add-on environment.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -125,6 +130,81 @@ def _parse_network(raw: object) -> Mapping[str, int | None] | None:
     return MappingProxyType(parsed)
 
 
+def _lan_ipv4(iface: Mapping) -> str | None:
+    """The first private IPv4 address on ``iface`` (prefix stripped), or
+    ``None`` — never a loopback, link-local or public address."""
+    ipv4 = iface.get("ipv4")
+    if not isinstance(ipv4, Mapping):
+        return None
+    addresses = ipv4.get("address")
+    if not isinstance(addresses, list):
+        return None
+    for raw in addresses:
+        if not isinstance(raw, str):
+            continue
+        try:
+            ip = ipaddress.ip_interface(raw).ip
+        except ValueError:
+            continue
+        if (
+            ip.version == 4
+            and ip.is_private
+            and not ip.is_loopback
+            and not ip.is_link_local
+        ):
+            return str(ip)
+    return None
+
+
+def primary_lan_ipv4(data: Mapping | None) -> str | None:
+    """The Home Assistant host's LAN IPv4 from ``GET /network/info``'s
+    ``data`` object, or ``None``.
+
+    Prefers the interface Supervisor marks ``primary`` (the one holding
+    the default route), then any other connected interface; an interface
+    counts only when ``enabled`` and ``connected`` are literally ``true``.
+    Only private addresses qualify — a wall tablet on the LAN can't use a
+    loopback, link-local or public one. A malformed payload is ``None``.
+
+    Supervisor contract (verified against home-assistant/supervisor
+    ``main``, 2026-10-17):
+
+    * ``supervisor/api/__init__.py`` ``_register_network`` routes
+      ``GET /network/info`` to ``APINetwork.info_v1``, which wraps its
+      answer in the usual ``{"result": "ok", "data": {...}}`` envelope.
+    * ``supervisor/api/middleware/security.py``: the default App role may
+      call any path matching ``^(?:|/.+/info)$`` — so ``hassio_api: true``
+      is enough, no ``hassio_role`` bump.
+    * ``supervisor/api/network.py`` ``interface_struct_v1`` /
+      ``ip4config_struct``: ``data.interfaces[]`` items carry
+      ``interface``, ``type``, ``enabled``, ``connected``, ``primary`` and
+      ``ipv4: {method, address: ["192.168.1.10/24", ...], gateway,
+      nameservers, ready}`` (``supervisor/const.py``: ``ATTR_INTERFACES``
+      = ``"interfaces"``, ``ATTR_PRIMARY`` = ``"primary"``,
+      ``ATTR_CONNECTED`` = ``"connected"``, ``ATTR_ENABLED`` =
+      ``"enabled"``, ``ATTR_IPV4`` = ``"ipv4"``, ``ATTR_ADDRESS`` =
+      ``"address"``).
+    """
+    if not isinstance(data, Mapping):
+        return None
+    interfaces = data.get("interfaces")
+    if not isinstance(interfaces, list):
+        return None
+    up = [
+        iface
+        for iface in interfaces
+        if isinstance(iface, Mapping)
+        and iface.get("enabled") is True
+        and iface.get("connected") is True
+    ]
+    # Primary first; ``sorted`` is stable, so Supervisor's order breaks ties.
+    for iface in sorted(up, key=lambda i: i.get("primary") is not True):
+        address = _lan_ipv4(iface)
+        if address is not None:
+            return address
+    return None
+
+
 class SupervisorClient:
     """HTTP client for the Supervisor API (never talks to HA Core)."""
 
@@ -180,6 +260,28 @@ class SupervisorClient:
             log.warning("supervisor: /addons/self/info is malformed: %s", exc)
             return None
 
+    async def get_network_info(self) -> dict | None:
+        """Return ``GET /network/info``'s ``data`` object (see
+        :func:`primary_lan_ipv4` for the contract), or ``None`` if the
+        call failed or the answer carried no data object (logged at
+        WARNING)."""
+        try:
+            async with self._session.get(
+                f"{self._base_url}/network/info",
+                headers=self._headers(),
+            ) as resp:
+                resp.raise_for_status()
+                body = await resp.json()
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            # ValueError covers a body that isn't JSON.
+            log.warning("supervisor: /network/info failed: %s", exc)
+            return None
+        if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
+            log.warning("supervisor: /network/info returned no data object")
+            return None
+        data: dict = body["data"]
+        return data
+
     async def push_discovery(self, payload: dict) -> bool:
         """POST ``/discovery`` — returns ``True`` on 2xx.
 
@@ -205,4 +307,4 @@ class SupervisorClient:
             return False
 
 
-__all__ = ["AddonInfo", "SupervisorClient"]
+__all__ = ["AddonInfo", "SupervisorClient", "primary_lan_ipv4"]

@@ -98,6 +98,36 @@ class _FakeSupervisor:
         return item
 
 
+class _FakeNetworkSupervisor:
+    """``get_network_info`` answers in turn from ``answers`` (an exception
+    instance is raised)."""
+
+    def __init__(self, *answers):
+        self._answers = list(answers)
+        self.calls = 0
+
+    async def get_network_info(self):
+        self.calls += 1
+        item = self._answers.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _network(address: str) -> dict:
+    return {
+        "interfaces": [
+            {
+                "interface": "eth0",
+                "enabled": True,
+                "connected": True,
+                "primary": True,
+                "ipv4": {"address": [f"{address}/24"]},
+            }
+        ]
+    }
+
+
 def _addon_info(**data):
     return AddonInfo.from_response({"hostname": "h", "ingress_port": 8099, **data})
 
@@ -459,6 +489,54 @@ async def test_dashboard_host_port_unexpected_error_degrades(caplog):
 async def test_dashboard_host_port_before_startup_is_unknown(caplog):
     with caplog.at_level("WARNING"):
         assert await _build_haos_adapter().dashboard_host_port() is None
+    assert "before on_startup" in caplog.text
+
+
+# ─── dashboard_lan_host (Supervisor ``/network/info``) ──────────────────────
+
+
+async def test_dashboard_lan_host_reads_the_primary_ipv4():
+    sv = _FakeNetworkSupervisor(_network("192.168.1.10"), _network("192.168.1.11"))
+    adapter = _build_haos_adapter(supervisor_client=sv)
+    assert await adapter.dashboard_lan_host() == "192.168.1.10"
+    # Not cached: a DHCP lease can move the host, and only the admin page asks.
+    assert await adapter.dashboard_lan_host() == "192.168.1.11"
+    assert sv.calls == 2
+
+
+async def test_dashboard_lan_host_supervisor_failure_warns(caplog):
+    """``get_network_info`` returns ``None`` on an HTTP error."""
+    adapter = _build_haos_adapter(supervisor_client=_FakeNetworkSupervisor(None))
+    with caplog.at_level("WARNING"):
+        assert await adapter.dashboard_lan_host() is None
+    assert any(
+        r.levelname == "WARNING" and "LAN" in r.getMessage() for r in caplog.records
+    )
+
+
+async def test_dashboard_lan_host_no_private_address_warns(caplog):
+    adapter = _build_haos_adapter(
+        supervisor_client=_FakeNetworkSupervisor(_network("8.8.8.8"))
+    )
+    with caplog.at_level("WARNING"):
+        assert await adapter.dashboard_lan_host() is None
+    assert any(
+        r.levelname == "WARNING" and "LAN" in r.getMessage() for r in caplog.records
+    )
+
+
+async def test_dashboard_lan_host_unexpected_error_degrades(caplog):
+    adapter = _build_haos_adapter(
+        supervisor_client=_FakeNetworkSupervisor(RuntimeError("boom"))
+    )
+    with caplog.at_level("WARNING"):
+        assert await adapter.dashboard_lan_host() is None
+    assert "boom" in caplog.text
+
+
+async def test_dashboard_lan_host_before_startup_is_unknown(caplog):
+    with caplog.at_level("WARNING"):
+        assert await _build_haos_adapter().dashboard_lan_host() is None
     assert "before on_startup" in caplog.text
 
 

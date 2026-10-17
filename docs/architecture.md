@@ -1743,7 +1743,12 @@ drives it) and is then served by a **separate aiohttp application on its own por
   a new mapping only applies after the App restarts), and the admin API
   reports `host_port_mapped: false` when the App declares the port but the
   user hasn't turned it on (`null` when the App release doesn't declare it
-  — an expected state, logged once at INFO).
+  — an expected state, logged once at INFO). The host part comes from
+  `PlatformAdapter.dashboard_lan_host()` — the HA host's primary private
+  LAN IPv4 from Supervisor's `GET /network/info` (asked on every admin
+  page load, never cached; `None` + WARNING on failure) — so an admin on
+  a remote URL (Nabu Casa) still gets a tablet-usable address. Precedence:
+  admin-set `address` > platform LAN host > the admin's request host.
 
 Settings, password hash, PIN hash, cookie key, epoch and the pending setup token live
 under `dashboard.*` keys of `instance_config` (no table of their own —

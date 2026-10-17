@@ -271,6 +271,12 @@ async def test_dashboard_host_port_defaults_to_unknown():
     assert await _MinimalAdapter().dashboard_host_port() is None
 
 
+async def test_dashboard_lan_host_defaults_to_unknown():
+    """``None`` = no platform-known LAN address: the admin page falls back
+    to the host the admin's browser used."""
+    assert await _MinimalAdapter().dashboard_lan_host() is None
+
+
 def test_dashboard_host_port_mapped_flag():
     assert DashboardHostPort(8100).mapped is True
     assert DashboardHostPort(8100).declared is True
