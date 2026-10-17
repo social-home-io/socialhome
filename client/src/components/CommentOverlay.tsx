@@ -286,7 +286,10 @@ export function CommentOverlay() {
           aria-label={t('comments.close_aria')}
           onClick={closeCommentOverlay}
         />
-        <header class="sh-comment-overlay-header">
+        {/* A <div>, not <header>: the sheet mounts outside <main>, where
+            <header> maps to role=banner and gives the page a second
+            banner next to the topbar. The dialog is the landmark. */}
+        <div class="sh-comment-overlay-header">
           {isBotPost(post) ? (
             <Avatar name={authorName} src={avatarUrl} size={36} />
           ) : (
@@ -320,7 +323,7 @@ export function CommentOverlay() {
             aria-label={t('common.close')}
             onClick={closeCommentOverlay}
           >×</button>
-        </header>
+        </div>
 
         <div class="sh-comment-overlay-count" aria-live="polite">{heading}</div>
 

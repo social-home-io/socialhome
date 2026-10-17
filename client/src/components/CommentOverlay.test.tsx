@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, waitFor, fireEvent } from '@testing-library/preact'
+import {
+  render, waitFor, fireEvent, getByRole, queryAllByRole,
+} from '@testing-library/preact'
 
 vi.mock('@/api', () => {
   const m = { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }
@@ -85,6 +87,26 @@ describe('CommentOverlay', () => {
     })
     expect(container.textContent).toContain('Hello household')
     expect(container.textContent).toContain('u-anna')
+  })
+
+  it('adds no second banner landmark next to the app topbar', async () => {
+    // The sheet mounts at App level, outside <main>; a top-level
+    // <header> there maps to role=banner, so axe flagged the page
+    // with two banners (landmark-no-duplicate-banner / -unique) while
+    // the sheet was open. The dialog is the landmark; its header row
+    // is not.
+    apiMock.get.mockResolvedValue([])
+    openCommentOverlay(fakePost(), null)
+    const { container } = render(<CommentOverlay />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-comment-overlay')).not.toBeNull()
+    })
+    const root = container as HTMLElement
+    expect(queryAllByRole(root, 'banner')).toHaveLength(0)
+    expect(root.querySelector('.sh-comment-overlay-header')).not.toBeNull()
+    const dialog = getByRole(root, 'dialog')
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(dialog.getAttribute('aria-label')).toBeTruthy()
   })
 
   it('renders the close button and drag handle', async () => {
