@@ -24,6 +24,7 @@ from socialhome.domain.federation import GfsConnection
 from socialhome.gfs_proof import PROOF_CAPABILITY
 from socialhome.infrastructure import gfs_reconcile_retry as reconcile_retry_mod
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from tests.app_overrides import REMOVE
 
 from .conftest import _auth
 
@@ -208,17 +209,10 @@ class _StubSupervisor:
         return self._health.get(gfs_id, {"connected": False, "last_error": None})
 
 
-def _stub_supervisor(client, health: dict[str, dict]) -> None:
-    client.app[gfs_ws_supervisor_key] = _StubSupervisor(health)
-
-
-async def test_list_enriches_each_connection_with_live_health(client):
+async def test_list_enriches_each_connection_with_live_health(make_client):
     # A stored ``status='active'`` pairing whose WS is actually down must
     # NOT read as connected — the row carries the supervisor's live signal.
-    await _seed_gfs(client, "gfs-up")
-    await _seed_gfs(client, "gfs-down")
-    _stub_supervisor(
-        client,
+    supervisor = _StubSupervisor(
         {
             "gfs-up": {"connected": True, "last_error": None},
             "gfs-down": {
@@ -227,6 +221,9 @@ async def test_list_enriches_each_connection_with_live_health(client):
             },
         },
     )
+    client = await make_client({gfs_ws_supervisor_key: supervisor})
+    await _seed_gfs(client, "gfs-up")
+    await _seed_gfs(client, "gfs-down")
     r = await client.get("/api/gfs/connections", headers=_auth(client._tok))
     assert r.status == 200
     body = {c["id"]: c for c in await r.json()}
@@ -236,11 +233,11 @@ async def test_list_enriches_each_connection_with_live_health(client):
     assert body["gfs-down"]["last_error"] == "unknown-instance"
 
 
-async def test_list_defaults_health_when_supervisor_unwired(client):
+async def test_list_defaults_health_when_supervisor_unwired(make_client):
     # Defensive: with no supervisor in the app the row still carries the
     # liveness fields, defaulting to disconnected / no error.
+    client = await make_client({gfs_ws_supervisor_key: REMOVE})
     await _seed_gfs(client, "gfs-1")
-    client.app.pop(gfs_ws_supervisor_key, None)
     r = await client.get("/api/gfs/connections", headers=_auth(client._tok))
     assert r.status == 200
     [row] = await r.json()

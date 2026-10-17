@@ -21,7 +21,11 @@ from socialhome.capabilities_sig import (
 )
 from socialhome.csp import build_public_page_csp, build_spa_csp
 from socialhome.global_server import create_gfs_app, server
-from socialhome.global_server.app_keys import gfs_cluster_key, gfs_fed_repo_key
+from socialhome.global_server.app_keys import (
+    gfs_cluster_key,
+    gfs_fed_repo_key,
+    gfs_token_service_key,
+)
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
@@ -41,7 +45,7 @@ async def _fresh_pair_token(app, client_ip: str = "127.0.0.99") -> str:
     The landing page issues these on a per-IP rate limit; in tests we
     bypass the rate limiter by passing a different IP each call.
     """
-    token_svc = app["gfs_token_service"]
+    token_svc = app[gfs_token_service_key]
     token, _wait = await token_svc.generate(client_ip)
     assert token is not None, "token service rate-limited the test"
     return token

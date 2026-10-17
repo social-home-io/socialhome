@@ -7,6 +7,7 @@ from __future__ import annotations
 import sqlite3
 
 from socialhome.db.migrations import discover_migrations
+from tests.db.connections import connect
 
 _VERSION = 89
 
@@ -37,7 +38,7 @@ def _apply_through(conn: sqlite3.Connection, last: int) -> None:
 
 
 def _fresh(tmp_path) -> sqlite3.Connection:
-    c = sqlite3.connect(tmp_path / "t.db", isolation_level=None)
+    c = connect(tmp_path / "t.db", isolation_level=None)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     c.execute(

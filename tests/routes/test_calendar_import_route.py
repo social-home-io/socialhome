@@ -36,8 +36,16 @@ class _FakeAiAdapter:
         return self._reply
 
 
-def _swap_import_service(app, adapter):
-    app[calendar_import_service_key] = CalendarImportService(adapter)
+async def _ai_client(make_client, **reply):
+    """A client whose import service runs on the real adapter wrapped with
+    :class:`_FakeAiAdapter` (swapped in during startup)."""
+    return await make_client(
+        lambda app: {
+            calendar_import_service_key: CalendarImportService(
+                _FakeAiAdapter(app[platform_adapter_key], **reply)
+            )
+        }
+    )
 
 
 async def _create_calendar(client):
@@ -214,10 +222,9 @@ async def test_import_image_503_without_ai_adapter(client):
     assert r.status == 503
 
 
-async def test_import_image_happy_path_with_ai(client):
+async def test_import_image_happy_path_with_ai(make_client):
+    client = await _ai_client(make_client)
     cid = await _create_calendar(client)
-    inner = client.app[platform_adapter_key]
-    _swap_import_service(client.app, _FakeAiAdapter(inner))
     body = base64.b64encode(b"\x89PNG").decode()
     r = await client.post(
         f"/api/calendars/{cid}/import_image",
@@ -228,10 +235,9 @@ async def test_import_image_happy_path_with_ai(client):
     assert len((await r.json())["events"]) == 1
 
 
-async def test_import_image_bad_data_url_422(client):
+async def test_import_image_bad_data_url_422(make_client):
+    client = await _ai_client(make_client)
     cid = await _create_calendar(client)
-    inner = client.app[platform_adapter_key]
-    _swap_import_service(client.app, _FakeAiAdapter(inner))
     r = await client.post(
         f"/api/calendars/{cid}/import_image",
         json={"image_data_url": "not-a-data-url"},
@@ -240,10 +246,9 @@ async def test_import_image_bad_data_url_422(client):
     assert r.status == 422
 
 
-async def test_import_image_ai_returns_no_vcalendar_422(client):
+async def test_import_image_ai_returns_no_vcalendar_422(make_client):
+    client = await _ai_client(make_client, reply="just prose")
     cid = await _create_calendar(client)
-    inner = client.app[platform_adapter_key]
-    _swap_import_service(client.app, _FakeAiAdapter(inner, reply="just prose"))
     body = base64.b64encode(b"\x89PNG").decode()
     r = await client.post(
         f"/api/calendars/{cid}/import_image",
@@ -266,10 +271,9 @@ async def test_import_prompt_503_without_ai_adapter(client):
     assert r.status == 503
 
 
-async def test_import_prompt_happy_path_with_ai(client):
+async def test_import_prompt_happy_path_with_ai(make_client):
+    client = await _ai_client(make_client)
     cid = await _create_calendar(client)
-    inner = client.app[platform_adapter_key]
-    _swap_import_service(client.app, _FakeAiAdapter(inner))
     r = await client.post(
         f"/api/calendars/{cid}/import_prompt",
         json={"prompt": "dentist tomorrow 10am"},
@@ -279,10 +283,9 @@ async def test_import_prompt_happy_path_with_ai(client):
     assert len((await r.json())["events"]) == 1
 
 
-async def test_import_prompt_missing_field_422(client):
+async def test_import_prompt_missing_field_422(make_client):
+    client = await _ai_client(make_client)
     cid = await _create_calendar(client)
-    inner = client.app[platform_adapter_key]
-    _swap_import_service(client.app, _FakeAiAdapter(inner))
     r = await client.post(
         f"/api/calendars/{cid}/import_prompt",
         json={},

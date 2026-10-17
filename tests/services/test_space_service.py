@@ -5122,6 +5122,10 @@ def _invite_fed():
     fed.broadcast_to_space_members = AsyncMock()
     fed.peer_supports = AsyncMock(return_value=True)
     fed.space_member_supports = AsyncMock(return_value=True)
+    # A plain attribute on the real service (bytes). Left to AsyncMock it is
+    # an AsyncMock, so ``own_identity_pk.hex()`` put an un-awaited coroutine
+    # into the invite payload instead of the host key.
+    fed.own_identity_pk = b"\x11" * 32
     return fed, MagicMock()
 
 

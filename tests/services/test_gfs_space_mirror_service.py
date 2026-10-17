@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -2035,6 +2037,12 @@ async def test_a_subscribe_undone_inside_the_grace_window_is_rechecked(
     the grace window protects it; the re-check after the window releases
     the seat and runs the stub teardown."""
     monkeypatch.setattr(mirror_mod, "SEAT_GRACE_S", 0.05)
+    # Freeze the service's grace clock so "still in grace" can't be lost to
+    # a slow runner taking >50 ms between the subscribe and the release
+    # (that flaked under load). The re-check's ``asyncio.sleep`` runs on the
+    # loop clock, which this does not touch.
+    frozen = time.monotonic()
+    monkeypatch.setattr(mirror_mod, "time", SimpleNamespace(monotonic=lambda: frozen))
     await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
     gfs = _StubGfs()
     svc = _mirror(env, _StubSession(), gfs)
@@ -2046,6 +2054,10 @@ async def test_a_subscribe_undone_inside_the_grace_window_is_rechecked(
     svc.attach_teardown(_teardown)
     await svc.subscribe_to_gfs("sp-q", "gfs-1")
     assert await svc.release_unused_seats("sp-q") == 0  # in grace
+    # Grace over: the re-check (after its sleep) must see the seat unwanted.
+    monkeypatch.setattr(
+        mirror_mod, "time", SimpleNamespace(monotonic=lambda: frozen + 1.0)
+    )
     await svc.wait_rechecks()
     assert torn == ["sp-q"]
     assert gfs.unsubscribes == [("sp-q", "gfs-1")]

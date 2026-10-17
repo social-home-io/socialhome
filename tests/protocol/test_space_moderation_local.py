@@ -37,6 +37,7 @@ from tests.routes.test_space_content_access import (
 
 #: The REST suite's real app (standalone, a token-holding admin) and its
 #: seeded host-only space (owner, admin, moderator, member).
+make_client = routes_conftest.make_client
 client = routes_conftest.client
 space = access.space
 

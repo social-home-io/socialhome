@@ -23,8 +23,9 @@ from socialhome.services.map_tile_service import (
     TileCoordinateError,
     TileUnavailableError,
 )
+from tests.app_overrides import REMOVE
 
-from .conftest import _auth
+from .conftest import _auth, client_with_stubs
 
 
 class _StubTileService:
@@ -43,11 +44,15 @@ class _StubTileService:
 
 
 @pytest.fixture
-def stub(client):
-    """Replace the real tile service with a stub for this client."""
-    svc = _StubTileService()
-    client.app[map_tile_service_key] = svc
-    return svc
+def stub():
+    """A stub tile service; the ``client`` of a test that requests it
+    starts with the stub in place of the real one."""
+    return _StubTileService()
+
+
+@pytest.fixture
+async def client(request, make_client):
+    return await client_with_stubs(request, make_client, {"stub": map_tile_service_key})
 
 
 def _signed_tile_url(client, z: int = 3, x: int = 4, y: int = 5) -> str:
@@ -130,10 +135,14 @@ async def test_tile_bad_coordinates_are_400(client, stub, query):
     assert stub.calls == []
 
 
-async def test_tile_out_of_range_coordinates_are_400(client):
+async def test_tile_out_of_range_coordinates_are_400(make_client):
     """``TileCoordinateError`` from the service maps to 400."""
-    client.app[map_tile_service_key] = _StubTileService(
-        exc=TileCoordinateError("zoom out of range: 99"),
+    client = await make_client(
+        {
+            map_tile_service_key: _StubTileService(
+                exc=TileCoordinateError("zoom out of range: 99"),
+            )
+        }
     )
     r = await client.get(
         f"/api/map/tiles?z={MAX_ZOOM + 1}&x=0&y=0",
@@ -142,10 +151,14 @@ async def test_tile_out_of_range_coordinates_are_400(client):
     assert r.status == 400
 
 
-async def test_tile_upstream_failure_is_502(client):
+async def test_tile_upstream_failure_is_502(make_client):
     """``TileUnavailableError`` maps to 502 — the proxy is the gateway."""
-    client.app[map_tile_service_key] = _StubTileService(
-        exc=TileUnavailableError("upstream HTTP 403"),
+    client = await make_client(
+        {
+            map_tile_service_key: _StubTileService(
+                exc=TileUnavailableError("upstream HTTP 403"),
+            )
+        }
     )
     r = await client.get("/api/map/tiles?z=1&x=0&y=0", headers=_auth(client._tok))
     assert r.status == 502
@@ -174,9 +187,8 @@ async def test_map_config_returns_signed_relative_template(client):
     assert body["max_zoom"] == MAX_ZOOM
 
 
-async def test_map_config_signature_verifies(client):
+async def test_map_config_signature_verifies(client, stub):
     """The minted signature actually authorises a tile fetch."""
-    client.app[map_tile_service_key] = _StubTileService()
     r = await client.get("/api/map/config", headers=_auth(client._tok))
     url = (await r.json())["tile_url"]
 
@@ -190,9 +202,9 @@ async def test_map_config_requires_auth(client):
     assert r.status == 401
 
 
-async def test_map_config_fails_closed_without_signer(client):
+async def test_map_config_fails_closed_without_signer(make_client):
     """No signer → 503 rather than an unsigned (unusable) tile URL."""
-    del client.app[media_signer_key]
+    client = await make_client({media_signer_key: REMOVE})
     r = await client.get("/api/map/config", headers=_auth(client._tok))
     assert r.status == 503
     assert (await r.json())["error"]["code"] == "SIGNER_UNAVAILABLE"

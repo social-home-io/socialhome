@@ -16,9 +16,13 @@ from socialhome.app_keys import db_key as _db_key
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
 from socialhome.platform.adapter import Capability, ExternalUser
+from tests.app_overrides import override_app_on_startup
 
 
-async def _build_standalone_app(aiohttp_client, tmp_dir):
+async def _build_standalone_app(aiohttp_client, tmp_dir, *, adapter=None, mode=None):
+    """A standalone app; with ``adapter`` the app starts with that platform
+    adapter and ``config.mode`` set to ``mode`` instead — swapped in during
+    startup, since a started aiohttp app is frozen."""
     cfg = Config(
         data_dir=str(tmp_dir),
         db_path=str(tmp_dir / "t.db"),
@@ -28,6 +32,14 @@ async def _build_standalone_app(aiohttp_client, tmp_dir):
         db_write_batch_timeout_ms=10,
     )
     app = create_app(cfg)
+    if adapter is not None:
+        override_app_on_startup(
+            app,
+            lambda started: {
+                platform_adapter_key: adapter,
+                config_key: replace(started[config_key], mode=mode),
+            },
+        )
     tc = await aiohttp_client(app)
     tc._app = app
     return tc
@@ -311,19 +323,17 @@ class _FakeHaAdapter:
         return f"token-{username}"
 
 
-def _swap_to_ha(app, persons, *, mode="ha"):
-    app[platform_adapter_key] = _FakeHaAdapter(persons)
-    app[config_key] = replace(app[config_key], mode=mode)
-
-
 async def test_ha_persons_lists_via_adapter(aiohttp_client, tmp_dir):
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
-    _swap_to_ha(
-        tc._app,
-        [
-            ExternalUser("alice", "Alice", None, is_admin=False),
-            ExternalUser("bob", "Bob", "https://x/b.png", is_admin=False),
-        ],
+    tc = await _build_standalone_app(
+        aiohttp_client,
+        tmp_dir,
+        adapter=_FakeHaAdapter(
+            [
+                ExternalUser("alice", "Alice", None, is_admin=False),
+                ExternalUser("bob", "Bob", "https://x/b.png", is_admin=False),
+            ]
+        ),
+        mode="ha",
     )
     r = await tc.get("/api/setup/ha/persons")
     assert r.status == 200, await r.text()
@@ -334,8 +344,12 @@ async def test_ha_persons_lists_via_adapter(aiohttp_client, tmp_dir):
 
 
 async def test_ha_owner_setup_persists_household_name(aiohttp_client, tmp_dir):
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
-    _swap_to_ha(tc._app, [ExternalUser("alice", "Alice", None, is_admin=False)])
+    tc = await _build_standalone_app(
+        aiohttp_client,
+        tmp_dir,
+        adapter=_FakeHaAdapter([ExternalUser("alice", "Alice", None, is_admin=False)]),
+        mode="ha",
+    )
     r = await tc.post(
         "/api/setup/ha/owner",
         json={
@@ -350,10 +364,11 @@ async def test_ha_owner_setup_persists_household_name(aiohttp_client, tmp_dir):
 
 
 async def test_ha_owner_setup_happy_path(aiohttp_client, tmp_dir):
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
-    _swap_to_ha(
-        tc._app,
-        [ExternalUser("alice", "Alice", None, is_admin=False)],
+    tc = await _build_standalone_app(
+        aiohttp_client,
+        tmp_dir,
+        adapter=_FakeHaAdapter([ExternalUser("alice", "Alice", None, is_admin=False)]),
+        mode="ha",
     )
     r = await tc.post(
         "/api/setup/ha/owner",
@@ -384,8 +399,12 @@ async def test_ha_owner_setup_derives_cryptographic_user_id(aiohttp_client, tmp_
     (``derive_user_id(author_pk, anchor) == author_user_id``), so every post
     the household admin wrote was dropped by subscribers.
     """
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
-    _swap_to_ha(tc._app, [ExternalUser("alice", "Alice", None, is_admin=False)])
+    tc = await _build_standalone_app(
+        aiohttp_client,
+        tmp_dir,
+        adapter=_FakeHaAdapter([ExternalUser("alice", "Alice", None, is_admin=False)]),
+        mode="ha",
+    )
     r = await tc.post(
         "/api/setup/ha/owner",
         json={"username": "alice", "password": "hunter22"},
@@ -407,15 +426,23 @@ async def test_ha_owner_setup_derives_cryptographic_user_id(aiohttp_client, tmp_
 
 
 async def test_ha_owner_setup_requires_password(aiohttp_client, tmp_dir):
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
-    _swap_to_ha(tc._app, [ExternalUser("alice", "Alice", None, is_admin=False)])
+    tc = await _build_standalone_app(
+        aiohttp_client,
+        tmp_dir,
+        adapter=_FakeHaAdapter([ExternalUser("alice", "Alice", None, is_admin=False)]),
+        mode="ha",
+    )
     r = await tc.post("/api/setup/ha/owner", json={"username": "alice"})
     assert r.status == 422
 
 
 async def test_ha_owner_unknown_username_422(aiohttp_client, tmp_dir):
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
-    _swap_to_ha(tc._app, [ExternalUser("alice", "Alice", None, is_admin=False)])
+    tc = await _build_standalone_app(
+        aiohttp_client,
+        tmp_dir,
+        adapter=_FakeHaAdapter([ExternalUser("alice", "Alice", None, is_admin=False)]),
+        mode="ha",
+    )
     r = await tc.post(
         "/api/setup/ha/owner",
         json={"username": "ghost", "password": "hunter22"},
@@ -437,12 +464,12 @@ class _FakeHaosAdapter(_FakeHaAdapter):
 
 
 async def test_haos_complete_happy_path(aiohttp_client, tmp_dir):
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     adapter = _FakeHaosAdapter(
         [ExternalUser("owner", "The Owner", None, is_admin=True)],
     )
-    tc._app[platform_adapter_key] = adapter
-    tc._app[config_key] = replace(tc._app[config_key], mode="haos")
+    tc = await _build_standalone_app(
+        aiohttp_client, tmp_dir, adapter=adapter, mode="haos"
+    )
     r = await tc.post("/api/setup/haos/complete")
     assert r.status == 200, await r.text()
     body = await r.json()
@@ -451,12 +478,12 @@ async def test_haos_complete_happy_path(aiohttp_client, tmp_dir):
 
 
 async def test_haos_complete_persists_household_name(aiohttp_client, tmp_dir):
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     adapter = _FakeHaosAdapter(
         [ExternalUser("owner", "The Owner", None, is_admin=True)],
     )
-    tc._app[platform_adapter_key] = adapter
-    tc._app[config_key] = replace(tc._app[config_key], mode="haos")
+    tc = await _build_standalone_app(
+        aiohttp_client, tmp_dir, adapter=adapter, mode="haos"
+    )
     r = await tc.post(
         "/api/setup/haos/complete",
         json={"household_name": "Hearth"},
@@ -467,12 +494,12 @@ async def test_haos_complete_persists_household_name(aiohttp_client, tmp_dir):
 
 
 async def test_haos_complete_household_name_too_long_422(aiohttp_client, tmp_dir):
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     adapter = _FakeHaosAdapter(
         [ExternalUser("owner", "The Owner", None, is_admin=True)],
     )
-    tc._app[platform_adapter_key] = adapter
-    tc._app[config_key] = replace(tc._app[config_key], mode="haos")
+    tc = await _build_standalone_app(
+        aiohttp_client, tmp_dir, adapter=adapter, mode="haos"
+    )
     r = await tc.post(
         "/api/setup/haos/complete",
         json={"household_name": "x" * 200},
@@ -483,10 +510,10 @@ async def test_haos_complete_household_name_too_long_422(aiohttp_client, tmp_dir
 
 async def test_haos_complete_no_owner_returns_422(aiohttp_client, tmp_dir):
     """No HA user with ``is_owner=True`` → wizard 422s cleanly."""
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     adapter = _FakeHaosAdapter([])
-    tc._app[platform_adapter_key] = adapter
-    tc._app[config_key] = replace(tc._app[config_key], mode="haos")
+    tc = await _build_standalone_app(
+        aiohttp_client, tmp_dir, adapter=adapter, mode="haos"
+    )
     r = await tc.post("/api/setup/haos/complete")
     assert r.status == 422
     assert (await r.json())["error"]["code"] == "NO_OWNER"
@@ -496,7 +523,6 @@ async def test_haos_complete_persists_display_name(aiohttp_client, tmp_dir):
     """Display name comes straight from the auth list — instances whose
     owner has a display name that differs from their auth username
     provision cleanly (#297)."""
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     adapter = _FakeHaosAdapter(
         [
             ExternalUser(
@@ -507,8 +533,9 @@ async def test_haos_complete_persists_display_name(aiohttp_client, tmp_dir):
             ),
         ],
     )
-    tc._app[platform_adapter_key] = adapter
-    tc._app[config_key] = replace(tc._app[config_key], mode="haos")
+    tc = await _build_standalone_app(
+        aiohttp_client, tmp_dir, adapter=adapter, mode="haos"
+    )
     r = await tc.post("/api/setup/haos/complete")
     assert r.status == 200, await r.text()
     db = tc._app[_db_key]
@@ -538,7 +565,6 @@ async def test_haos_complete_stamps_source_ha_and_external_id(
     rendered as "Not added" against the user who was clearly already
     provisioned.
     """
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     adapter = _FakeHaosAdapter(
         [
             ExternalUser(
@@ -550,8 +576,9 @@ async def test_haos_complete_stamps_source_ha_and_external_id(
             ),
         ],
     )
-    tc._app[platform_adapter_key] = adapter
-    tc._app[config_key] = replace(tc._app[config_key], mode="haos")
+    tc = await _build_standalone_app(
+        aiohttp_client, tmp_dir, adapter=adapter, mode="haos"
+    )
     r = await tc.post("/api/setup/haos/complete")
     assert r.status == 200, await r.text()
 
@@ -566,12 +593,12 @@ async def test_haos_complete_stamps_source_ha_and_external_id(
 
 
 async def test_setup_locked_after_haos_completion(aiohttp_client, tmp_dir):
-    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
     adapter = _FakeHaosAdapter(
         [ExternalUser("owner", "Owner", None, is_admin=True)],
     )
-    tc._app[platform_adapter_key] = adapter
-    tc._app[config_key] = replace(tc._app[config_key], mode="haos")
+    tc = await _build_standalone_app(
+        aiohttp_client, tmp_dir, adapter=adapter, mode="haos"
+    )
     r1 = await tc.post("/api/setup/haos/complete")
     assert r1.status == 200
     r2 = await tc.post("/api/setup/haos/complete")

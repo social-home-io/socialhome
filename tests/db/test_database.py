@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -106,9 +107,9 @@ def test_python_migration(tmp_dir):
     )
     ms = discover_migrations(d)
     assert len(ms) == 1 and ms[0].is_python
-    conn = sqlite3.connect(":memory:")
-    ms[0].apply(conn)
-    conn.execute("SELECT * FROM _test")
+    with closing(sqlite3.connect(":memory:")) as conn:
+        ms[0].apply(conn)
+        conn.execute("SELECT * FROM _test")
 
 
 # ── AsyncDatabase additional paths ────────────────────────────────────────

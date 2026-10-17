@@ -20,7 +20,7 @@ from socialhome.services.highlight_publication_service import (
     HighlightPublicationError,
 )
 
-from .conftest import _auth
+from .conftest import _auth, client_with_stubs
 
 
 class _StubService:
@@ -75,10 +75,17 @@ async def seeded_highlight(client):
 
 
 @pytest.fixture
-def stub_service(client):
-    stub = _StubService()
-    client.app[highlight_publication_service_key] = stub
-    return stub
+def stub_service():
+    return _StubService()
+
+
+@pytest.fixture
+async def client(request, make_client):
+    """``client`` starts with :func:`stub_service` swapped in when a test
+    asks for it."""
+    return await client_with_stubs(
+        request, make_client, {"stub_service": highlight_publication_service_key}
+    )
 
 
 # ── POST publish ────────────────────────────────────────────────────────

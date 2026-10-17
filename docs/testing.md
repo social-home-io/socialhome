@@ -315,6 +315,39 @@ Build-time tooling (`hatchling`/`hatch-vcs` for the wheel, the build
 backend `pip` fetches to compile `aiolibdatachannel` in the App) is not
 part of the lock.
 
+## Warnings are errors
+
+`[tool.pytest.ini_options] filterwarnings = ["error", …]` turns every
+warning into a test failure, so a new one is fixed in the PR that adds it
+instead of joining a summary nobody reads. The only exception is a narrow,
+commented third-party one (aiohttp's advisory about posting a >1 MiB
+`bytes` body, which the upload-limit tests do on purpose). The patterns
+that used to warn, and what to do instead:
+
+- **Close every `sqlite3` connection.** An `AsyncDatabase` a fixture
+  starts is shut down in its teardown (`yield`, then `await
+  db.shutdown()`). Raw connections in `tests/db/` go through
+  `tests.db.connections.connect`, which closes them after the test.
+- **Never mutate a started aiohttp app.** `app[key] = …` after startup is
+  deprecated ("Changing state of started or joined application"). Route
+  tests build the client with the double already in place:
+  `await make_client({key: stub})` (or a callable that receives the
+  started app), `client_with_stubs` for a stub fixture, and
+  `tests.app_overrides.override_app_on_startup` for a hand-built app —
+  the override is the app's last startup step, before the freeze.
+  Patching a method on a service object (`monkeypatch.setattr(db,
+  "fetchone", …)`) is fine; the app dict is what is frozen.
+- **Route tests run the server with production's handler cancellation**
+  (`ProductionLikeTestServer`, `handler_cancellation=False` like
+  `web.run_app`). aiohttp's `TestServer` cancels a handler as soon as its
+  client hangs up, which stranded files that a streaming handler had open
+  mid-read.
+- **Give an `AsyncMock` the plain attributes the code reads.** Every
+  attribute of an `AsyncMock` is another `AsyncMock`; `fed.own_identity_pk.hex()`
+  on one returns a coroutine nobody awaits.
+- `asyncio_mode = "auto"` already marks async tests — a module-level
+  `pytestmark = pytest.mark.asyncio` on a file with sync tests warns.
+
 ## Keeping the suite fast
 
 Nearly all of the suite's historical wall time was tests **waiting**, not

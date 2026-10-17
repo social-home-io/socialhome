@@ -141,6 +141,10 @@ class AuthContext:
         )
 
 
+#: Where :func:`require_auth` puts the request's :class:`AuthContext`.
+USER_KEY: web.RequestKey[AuthContext] = web.RequestKey("user", AuthContext)
+
+
 @runtime_checkable
 class AuthStrategy(Protocol):
     """Strategy interface for authenticating an inbound HTTP request.
@@ -195,7 +199,7 @@ def require_auth(
         ctx = await strategy.authenticate(request)
         if ctx is None:
             return error_response(401, "UNAUTHORIZED", "Authentication required.")
-        request["user"] = ctx
+        request[USER_KEY] = ctx
         return await handler(request)
 
     return middleware
@@ -208,7 +212,7 @@ def current_user(request: web.Request) -> AuthContext:
     run — the route handler registration should guarantee that only
     protected endpoints call this.
     """
-    ctx = request.get("user")
+    ctx = request.get(USER_KEY)
     if ctx is None:
         raise RuntimeError(
             "auth middleware did not populate request['user'] — is this path public?"

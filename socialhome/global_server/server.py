@@ -500,9 +500,7 @@ class GfsApp:
         a[K.gfs_channel_service_key] = self.services.channels
         a[K.gfs_invite_repo_key] = self.repos.invites
         a[K.gfs_invite_service_key] = self.services.invites
-        # Non-typed helpers the admin module reads directly.
-        a["admin_auth"] = self.services.admin_auth
-        a["gfs_token_service"] = self.services.tokens
+        a[K.gfs_token_service_key] = self.services.tokens
 
     def _register_routes(self) -> None:
         """Mount relay / cluster / rtc / admin / public / static routes."""

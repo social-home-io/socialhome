@@ -29,7 +29,7 @@ from socialhome.app import (
     dispatch_gfs_relay_frame,
 )
 from socialhome.app_keys import gfs_connection_service_key, http_session_key
-from socialhome.auth import SIGNED_URL_PRINCIPAL
+from socialhome.auth import SIGNED_URL_PRINCIPAL, USER_KEY
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
@@ -806,7 +806,7 @@ class _PeerTransport:
 
 async def _signed_get(mw, path: str, ip: str) -> int:
     request = make_mocked_request("GET", path, transport=_PeerTransport(ip))
-    request["user"] = type("Ctx", (), {"user_id": SIGNED_URL_PRINCIPAL})()
+    request[USER_KEY] = type("Ctx", (), {"user_id": SIGNED_URL_PRINCIPAL})()
 
     async def handler(_req):
         return web.Response(status=200)

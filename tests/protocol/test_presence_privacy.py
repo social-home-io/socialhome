@@ -28,6 +28,7 @@ from socialhome.services.presence_service import PresenceService
 from tests.routes import conftest as routes_conftest
 
 #: Real app + SQLite + aiohttp TestClient (the routes fixture).
+make_client = routes_conftest.make_client
 client = routes_conftest.client
 _auth = routes_conftest._auth
 

@@ -2,8 +2,6 @@
 
 import pathlib
 
-import pytest
-
 from socialhome.media.cleanup import (
     BATCH_REFERENCE_THRESHOLD,
     media_basename,
@@ -22,9 +20,6 @@ def test_media_basename_rejects_empty_and_traversal():
     assert media_basename(None) is None
     assert media_basename("") is None
     assert media_basename("api/media/..") is None
-
-
-pytestmark = pytest.mark.asyncio
 
 
 async def _touch(d: pathlib.Path, name: str) -> pathlib.Path:

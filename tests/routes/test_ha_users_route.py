@@ -19,6 +19,7 @@ from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
 from socialhome.platform.adapter import ExternalUser
+from tests.app_overrides import override_app_on_startup
 
 
 def _auth(token: str) -> dict:
@@ -50,72 +51,89 @@ class _FakeHaAdapter:
 
 
 @pytest.fixture
-async def client(tmp_dir):
-    cfg = Config(
-        data_dir=str(tmp_dir),
-        db_path=str(tmp_dir / "test.db"),
-        media_path=str(tmp_dir / "media"),
-        mode="standalone",
-        log_level="WARNING",
-        db_write_batch_timeout_ms=10,
+async def make_client(tmp_dir):
+    """Client factory. ``ha_users`` starts the app with a fake HA adapter
+    exposing those users and ``config.mode`` flipped to ``mode`` so the
+    route's mode gate opens — swapped in during startup, since a started
+    aiohttp app is frozen."""
+    clients: list[TestClient] = []
+
+    async def _make(ha_users=None, *, mode: str = "ha") -> TestClient:
+        cfg = Config(
+            data_dir=str(tmp_dir),
+            db_path=str(tmp_dir / "test.db"),
+            media_path=str(tmp_dir / "media"),
+            mode="standalone",
+            log_level="WARNING",
+            db_write_batch_timeout_ms=10,
+        )
+        app = create_app(cfg)
+        if ha_users is not None:
+            override_app_on_startup(
+                app,
+                lambda started: {
+                    platform_adapter_key: _FakeHaAdapter(ha_users),
+                    config_key: replace(started[config_key], mode=mode),
+                },
+            )
+        tc = TestClient(TestServer(app))
+        await tc.start_server()
+        clients.append(tc)
+        return await _seed(app, tc)
+
+    yield _make
+    for tc in clients:
+        await tc.close()
+
+
+@pytest.fixture
+async def client(make_client):
+    return await make_client()
+
+
+async def _seed(app, tc: TestClient) -> TestClient:
+    db = app[_db_key]
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'",
     )
-    app = create_app(cfg)
-    async with TestClient(TestServer(app)) as tc:
-        db = app[_db_key]
-        row = await db.fetchone(
-            "SELECT identity_public_key FROM instance_identity WHERE id='self'",
-        )
-        pk = bytes.fromhex(row["identity_public_key"])
+    pk = bytes.fromhex(row["identity_public_key"])
 
-        class _KP:
-            public_key = pk
+    class _KP:
+        public_key = pk
 
-        admin_uid = derive_user_id(_KP.public_key, "pascal")
-        bob_uid = derive_user_id(_KP.public_key, "bob")
-        await db.enqueue(
-            "INSERT INTO users(username, user_id, display_name, is_admin,"
-            " source) VALUES(?,?,?,1,'ha')",
-            ("pascal", admin_uid, "Pascal"),
-        )
-        await db.enqueue(
-            "INSERT INTO users(username, user_id, display_name, is_admin)"
-            " VALUES(?,?,?,0)",
-            ("bob", bob_uid, "Bob"),
-        )
-        await db.enqueue(
-            "INSERT INTO api_tokens(token_id, user_id, label, token_hash)"
-            " VALUES(?,?,?,?)",
-            ("tid-admin", admin_uid, "t", sha256_token_hash("admin-token")),
-        )
-        await db.enqueue(
-            "INSERT INTO api_tokens(token_id, user_id, label, token_hash)"
-            " VALUES(?,?,?,?)",
-            ("tid-bob", bob_uid, "t", sha256_token_hash("bob-token")),
-        )
-        tc._admin_token = "admin-token"
-        tc._bob_token = "bob-token"
-        yield tc
-
-
-def _swap_to_ha_adapter(app, users):
-    """Replace the standalone adapter with a fake HA adapter exposing users.
-
-    Also flips ``config.mode`` to ``'ha'`` so the route's mode gate opens.
-    """
-    app[platform_adapter_key] = _FakeHaAdapter(users)
-    app[config_key] = replace(app[config_key], mode="ha")
+    admin_uid = derive_user_id(_KP.public_key, "pascal")
+    bob_uid = derive_user_id(_KP.public_key, "bob")
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin,"
+        " source) VALUES(?,?,?,1,'ha')",
+        ("pascal", admin_uid, "Pascal"),
+    )
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
+        ("bob", bob_uid, "Bob"),
+    )
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("tid-admin", admin_uid, "t", sha256_token_hash("admin-token")),
+    )
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("tid-bob", bob_uid, "t", sha256_token_hash("bob-token")),
+    )
+    tc._admin_token = "admin-token"
+    tc._bob_token = "bob-token"
+    return tc
 
 
 # ── Happy-path tests ─────────────────────────────────────────────────
 
 
-async def test_list_ha_users_includes_synced_flag(client):
-    _swap_to_ha_adapter(
-        client.server.app,
+async def test_list_ha_users_includes_synced_flag(make_client):
+    client = await make_client(
         [
             ExternalUser("pascal", "Pascal", None, is_admin=True),
             ExternalUser("kid", "Little Pascal", None, is_admin=False),
-        ],
+        ]
     )
     resp = await client.get(
         "/api/admin/ha-users",
@@ -129,12 +147,11 @@ async def test_list_ha_users_includes_synced_flag(client):
     assert by_name["kid"]["synced"] is False
 
 
-async def test_provision_ha_user_creates_row(client):
-    _swap_to_ha_adapter(
-        client.server.app,
+async def test_provision_ha_user_creates_row(make_client):
+    client = await make_client(
         [
             ExternalUser("kid", "Little Pascal", None, is_admin=False),
-        ],
+        ]
     )
     resp = await client.post(
         "/api/admin/ha-users/kid/provision",
@@ -160,10 +177,9 @@ async def test_provision_ha_user_creates_row(client):
     assert kid["synced"] is True
 
 
-async def test_provision_ha_user_requires_password_in_ha_mode(client):
-    _swap_to_ha_adapter(
-        client.server.app,
-        [ExternalUser("kid", "Little Pascal", None, is_admin=False)],
+async def test_provision_ha_user_requires_password_in_ha_mode(make_client):
+    client = await make_client(
+        [ExternalUser("kid", "Little Pascal", None, is_admin=False)]
     )
     resp = await client.post(
         "/api/admin/ha-users/kid/provision",
@@ -172,14 +188,9 @@ async def test_provision_ha_user_requires_password_in_ha_mode(client):
     assert resp.status == 422
 
 
-async def test_provision_ha_user_rejects_password_in_haos_mode(client):
-    _swap_to_ha_adapter(
-        client.server.app,
-        [ExternalUser("kid", "Little Pascal", None, is_admin=False)],
-    )
-    client.server.app[config_key] = replace(
-        client.server.app[config_key],
-        mode="haos",
+async def test_provision_ha_user_rejects_password_in_haos_mode(make_client):
+    client = await make_client(
+        [ExternalUser("kid", "Little Pascal", None, is_admin=False)], mode="haos"
     )
     resp = await client.post(
         "/api/admin/ha-users/kid/provision",
@@ -189,15 +200,10 @@ async def test_provision_ha_user_rejects_password_in_haos_mode(client):
     assert resp.status == 422
 
 
-async def test_provision_ha_user_in_haos_mode_no_password(client):
+async def test_provision_ha_user_in_haos_mode_no_password(make_client):
     """haos: provisioning with no password works; ingress is the auth path."""
-    _swap_to_ha_adapter(
-        client.server.app,
-        [ExternalUser("kid", "Little Pascal", None, is_admin=False)],
-    )
-    client.server.app[config_key] = replace(
-        client.server.app[config_key],
-        mode="haos",
+    client = await make_client(
+        [ExternalUser("kid", "Little Pascal", None, is_admin=False)], mode="haos"
     )
     resp = await client.post(
         "/api/admin/ha-users/kid/provision",
@@ -209,8 +215,8 @@ async def test_provision_ha_user_in_haos_mode_no_password(client):
     assert "kid" not in adapter.passwords
 
 
-async def test_provision_unknown_ha_user_404(client):
-    _swap_to_ha_adapter(client.server.app, [])
+async def test_provision_unknown_ha_user_404(make_client):
+    client = await make_client([])
     resp = await client.post(
         "/api/admin/ha-users/ghost/provision",
         headers=_auth(client._admin_token),
@@ -219,12 +225,11 @@ async def test_provision_unknown_ha_user_404(client):
     assert resp.status == 404
 
 
-async def test_deprovision_ha_user(client):
-    _swap_to_ha_adapter(
-        client.server.app,
+async def test_deprovision_ha_user(make_client):
+    client = await make_client(
         [
             ExternalUser("kid", "Little Pascal", None, is_admin=False),
-        ],
+        ]
     )
     await client.post(
         "/api/admin/ha-users/kid/provision",
@@ -247,12 +252,11 @@ async def test_deprovision_ha_user(client):
     assert kid["synced"] is False
 
 
-async def test_forbidden_for_non_admin(client):
-    _swap_to_ha_adapter(
-        client.server.app,
+async def test_forbidden_for_non_admin(make_client):
+    client = await make_client(
         [
             ExternalUser("kid", "Little Pascal", None, is_admin=False),
-        ],
+        ]
     )
     resp = await client.get(
         "/api/admin/ha-users",

@@ -13,7 +13,7 @@ from socialhome.csp import MEDIA_CSP
 from socialhome.domain.moment_public import MomentPublicFollow, MomentPublicRegistration
 from socialhome.services.moment_public_service import MomentPublicError
 
-from .conftest import _auth
+from .conftest import _auth, client_with_stubs
 
 
 class _StubService:
@@ -97,10 +97,16 @@ class _StubService:
 
 
 @pytest.fixture
-def stub(client):
-    s = _StubService()
-    client.app[moment_public_service_key] = s
-    return s
+def stub():
+    return _StubService()
+
+
+@pytest.fixture
+async def client(request, make_client):
+    """``client`` starts with :func:`stub` swapped in when a test asks for it."""
+    return await client_with_stubs(
+        request, make_client, {"stub": moment_public_service_key}
+    )
 
 
 # ── Registrations ───────────────────────────────────────────────────────

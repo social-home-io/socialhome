@@ -193,6 +193,22 @@ testpaths = ["tests"]
 # rare case where a module-level fixture isn't reset between runs.
 # Disable with ``-p no:xdist`` for noisier output during debugging.
 addopts = "-n auto --dist=loadfile"
+# Every async fixture is function-scoped; say so rather than lean on
+# pytest-asyncio's default (it warns that the default will change).
+asyncio_default_fixture_loop_scope = "function"
+# Any warning fails the run — an unclosed sqlite3 connection, a mock
+# coroutine nobody awaited, an aiohttp deprecation. They were 498 lines of
+# noise nobody read; as errors a new one is fixed in the PR that adds it.
+# Add an exception only for a third-party warning that cannot be fixed
+# here, narrowly (category + message + module) and with a reason.
+filterwarnings = [
+    "error",
+    # aiohttp's client advises against posting a >1 MiB ``bytes`` body (it
+    # is serialised on the event loop). The upload-limit tests post such
+    # bodies on purpose — that is what they test — from a test client
+    # whose loop blocking is irrelevant.
+    "ignore:Sending a large body directly with raw bytes:ResourceWarning:aiohttp.payload",
+]
 markers = [
     "security: spec §27 release-blocker protocol/security test",
     "integration: real DB / real aiohttp client (§27.5)",

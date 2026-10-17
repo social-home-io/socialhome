@@ -13,12 +13,20 @@ from socialhome.config import Config
 from socialhome.db import database as db_module
 from socialhome.db.database import AsyncDatabase
 from socialhome.db.migrations import discover_migrations, run_migrations
+from tests.db.connections import close_all, connect
 from tests.migration_template import MigrationTemplateCache
+
+
+@pytest.fixture(autouse=True)
+def _close_connections():
+    """Every connection below is opened via ``connect`` and closed here."""
+    yield
+    close_all()
 
 
 def _open(path: Path) -> sqlite3.Connection:
     # Same connection shape as ``AsyncDatabase.startup``.
-    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    conn = connect(path, isolation_level=None, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
@@ -88,7 +96,7 @@ def test_restore_persists_to_disk(tmp_path):
         conn = _open(tmp_path / "restored.db")
         cache(conn)
         conn.close()
-        reopened = sqlite3.connect(tmp_path / "restored.db")
+        reopened = connect(tmp_path / "restored.db")
         assert _versions(reopened)
         # A second open runs the REAL runner (non-empty DB) and is a no-op.
         assert run_migrations(reopened) == []
