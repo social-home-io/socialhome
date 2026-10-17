@@ -7,19 +7,25 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  test-shard:
+    # The Python suite, split across parallel runners by recorded per-file
+    # duration (``tests/sharding.py``, ``tests/shard_durations.json``), with
+    # xdist (``-n auto --dist=loadfile`` from pyproject) inside each shard.
+    # The ``test (3.14)`` job below merges coverage and enforces the gates;
+    # it is the one check to require.
+    name: test shard ${{ matrix.shard }}/6
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.14"]
-
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.14
         uses: actions/setup-python@v7
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.14"
 
       - uses: astral-sh/setup-uv@v10.2.0
         with:
@@ -34,50 +40,120 @@ jobs:
           uv sync --locked --extra dev
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
-      - name: Run tests with branch coverage
-        # §27.5 — branch coverage gate. Default ``--cov-precision=0``
-        # means the displayed rounded percent is what the gate compares
-        # against; locally the precise figure is ~89.84% (rounds to 90).
-        # This PR added six test files covering the previously-lowest-
-        # covered modules: profile / comment / space-member-profile
-        # federation outbound (~58–74% → 100%), peer_directory_service
-        # (70% → 100%), household_features_service (69% → 99%),
-        # space_crypto_service (76% → 100%), and the
-        # federation_inbound/space_membership defensive paths
-        # (77% → 99%). Total precise coverage rose from 89.71% → 89.84%.
-        # Ratchet the integer gate upward as more modules get covered;
-        # never lower this number — add missing tests instead.
+      - name: Run this shard with branch coverage
+        # Coverage data only (``--cov-report=``) — the gate runs on the
+        # merged data in ``test (3.14)``; a single shard covers a fraction
+        # of the code, so ``--cov-fail-under=0`` overrides pyproject's
+        # ``fail_under`` here. ``coverage`` is ``parallel = true`` so the
+        # xdist workers' files merge into ``.coverage`` when pytest-cov
+        # finalises.
         #
-        # ``pytest-xdist`` parallelism comes from
-        # ``[tool.pytest.ini_options].addopts = "-n auto"`` in
-        # ``pyproject.toml`` — runs across every available runner core
-        # without an extra CLI flag here. ``coverage`` is already
-        # ``parallel = true`` in ``[tool.coverage.run]`` so the
-        # per-worker ``.coverage.*`` files merge cleanly when
-        # ``pytest-cov`` finalises.
-        #
-        # ``--durations=25`` prints the slowest tests every run, so a new
-        # test that waits out a real timeout shows up in review instead of
-        # quietly adding minutes (see docs/testing.md, "Keeping the suite
-        # fast").
+        # ``--durations=25`` prints the shard's slowest tests every run, so
+        # a new test that waits out a real timeout shows up in review (see
+        # docs/testing.md, "Keeping the suite fast").
         #
         # ``--security-manifest`` records the outcome of every
-        # ``security``-marked test (the §27 release blockers, all of
-        # ``tests/protocol/`` included); the next step checks it. The run
-        # itself already fails if one of them is skipped or xfailed
-        # (``tests/security_guard.py``).
+        # ``security``-marked test this shard ran (the §27 release
+        # blockers); ``test (3.14)`` checks the union. A skipped or
+        # xfailed one already fails the shard (``tests/security_guard.py``).
+        #
+        # ``--store-shard-durations`` feeds the merged
+        # ``shard-durations`` artifact used to rebalance the split.
         run: |
-          pytest --cov=socialhome --cov-branch --cov-fail-under=90 --tb=short -q --durations=25 \
-            --security-manifest=security-manifest/full.json
+          pytest --shard=${{ matrix.shard }}/6 \
+            --cov=socialhome --cov-branch --cov-report= --cov-fail-under=0 \
+            --tb=short -q --durations=25 \
+            --security-manifest=shard-out/security-manifest/shard-${{ matrix.shard }}.json \
+            --store-shard-durations=shard-out/durations/shard-${{ matrix.shard }}.json
+          mkdir -p shard-out/coverage
+          mv .coverage shard-out/coverage/.coverage.shard-${{ matrix.shard }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: test-shard-${{ matrix.shard }}
+          path: shard-out
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    # Keeps the historical check name. Fails if any shard failed or was
+    # cancelled, then enforces the gates on the shards' combined results.
+    name: test (3.14)
+    needs: test-shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        if: ${{ needs.test-shard.result != 'success' }}
+        run: |
+          echo "test-shard result: ${{ needs.test-shard.result }}"
+          exit 1
+
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.10"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies (exactly the locked set)
+        run: |
+          uv sync --locked --extra dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: test-shard-*
+          path: shard-out
+          merge-multiple: true
+
+      - name: Branch coverage gate on the merged shards
+        # §27.5 — ``[tool.coverage.report] fail_under = 90``; default
+        # precision 0, so the displayed rounded percent is what the gate
+        # compares. Ratchet it upward as more modules get covered; never
+        # lower it — add missing tests instead. A missing shard's data
+        # shows up here as a coverage drop.
+        run: |
+          ls -a shard-out/coverage
+          coverage combine shard-out/coverage
+          coverage report --skip-covered --sort=cover
+          coverage report --format=total
 
       - name: Release blockers all ran and passed
-        # Replaces re-running ``pytest tests/protocol/ -m security`` (~3 100
-        # tests, ~7 min) after the full run had already run them: collect
-        # the tree and fail unless every collected ``security`` test is
-        # ``passed`` in the manifest — a deselected, skipped or never-run
-        # release blocker fails here.
+        # Collect the whole tree and fail unless every collected
+        # ``security`` test is ``passed`` in the union of the shards'
+        # manifests — a deselected, skipped or never-run release blocker,
+        # or a shard that never ran, fails here. Replaces re-running
+        # ``pytest tests/protocol/ -m security`` (~3 100 tests, ~7 min).
         run: |
-          pytest --collect-only -qq -n 0 --security-verify=security-manifest
+          pytest --collect-only -qq -n 0 --security-verify=shard-out/security-manifest
+
+      - name: Merged per-file durations (to rebalance the shards)
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          merged = {}
+          for p in sorted(pathlib.Path("shard-out/durations").glob("*.json")):
+              data = json.loads(p.read_text())
+              print(f"{p.stem}: {sum(data.values()):.0f} s of test time in {len(data)} files")
+              merged.update(data)
+          out = pathlib.Path("shard-durations/shard_durations.json")
+          out.parent.mkdir()
+          out.write_text(json.dumps(dict(sorted(merged.items())), indent=1) + "\n")
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shard-durations
+          path: shard-durations
+          retention-days: 30
 
   lint:
     runs-on: ubuntu-latest

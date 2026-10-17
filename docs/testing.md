@@ -248,16 +248,27 @@ failure or add a check are in the skill's `SKILL.md`. Not part of
 
 ## CI
 
-`.github/workflows/ci.yml` runs seven jobs in parallel. `test` and
-`typecheck` install with `uv sync --locked --extra dev`, i.e. exactly the
-versions in `uv.lock` (see [Dependency lock](#dependency-lock)).
+`.github/workflows/ci.yml` runs these jobs in parallel (the test shards
+fan in to `test (3.14)`). The test jobs and `typecheck` install with
+`uv sync --locked --extra dev`, i.e. exactly the versions in `uv.lock`
+(see [Dependency lock](#dependency-lock)).
 
-1. **`test (3.14)`** — `pytest --cov=socialhome --cov-branch
-   --cov-fail-under=90 --durations=25 --security-manifest=…` (the whole
-   suite, `tests/protocol/` included, parallel via xdist), then
-   `pytest --collect-only --security-verify=…`: the release-blocker gate
-   checks that every `security` test passed in that run instead of running
-   them a second time (see [Release-blocker guard](#release-blocker-guard))
+1. **`test shard 1/6` … `test shard 6/6`** — the Python suite split
+   across six runners (`pytest --shard=K/6 --cov=socialhome --cov-branch --cov-fail-under=0
+   --durations=25 --security-manifest=… --store-shard-durations=…`), xdist
+   inside each. `tests/sharding.py` assigns whole test files to shards by
+   longest-first bin packing on the per-file seconds in
+   `tests/shard_durations.json` (a file not listed weighs the median), so
+   every shard computes the same disjoint split. **`test (3.14)`** — the
+   check to require — fails if any shard failed or was cancelled, then
+   combines the shards' coverage data and enforces the 90 % branch gate on
+   the merged result (`coverage report`, `fail_under` from
+   `pyproject.toml`), and runs `pytest --collect-only --security-verify=…`
+   over the union of the shards' security manifests (see
+   [Release-blocker guard](#release-blocker-guard)). It also uploads a
+   merged `shard-durations` artifact; when the shards' wall times drift
+   apart, replace `tests/shard_durations.json` with it. Locally,
+   `pytest --shard=K/N` reproduces one shard
 2. **`lint`** — `ruff check .` + `ruff format --check .`
 3. **`typecheck`** — `mypy socialhome/`
 4. **`lock`** — `scripts/lock.sh --check`: fails when `uv.lock` no

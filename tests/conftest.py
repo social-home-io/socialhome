@@ -376,8 +376,9 @@ from socialhome.services.user_service import UserService
 from tests import migration_chain
 from tests.migration_template import MigrationTemplateCache
 
-#: Release-blocker guard for ``security``-marked tests — see the module.
-pytest_plugins = ["pytester", "tests.security_guard"]
+#: Release-blocker guard for ``security``-marked tests and the CI shard
+#: split — see each module.
+pytest_plugins = ["pytester", "tests.security_guard", "tests.sharding"]
 
 #: Write-coalescing window every test database runs with; see
 #: ``_fast_test_databases``.
