@@ -20,7 +20,7 @@ Everyone else is unaffected.
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -142,7 +142,7 @@ async def _dispatch(app, event_type, payload) -> None:
                 event_type=event_type,
                 from_instance=PEER,
                 to_instance="self",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )
@@ -156,7 +156,7 @@ def _dm(conv_id: str, message_id: str, to: str) -> dict:
         "sender_display_name": "Rex",
         "type": "text",
         "content": "hi",
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
         "recipient_user_ids": [to],
     }
 

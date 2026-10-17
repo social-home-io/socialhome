@@ -36,23 +36,23 @@ class GfsWebSocketSupervisor:
     """
 
     __slots__ = (
-        "_repo",
+        "_client_urls",
+        "_clients",
         "_instance_id",
-        "_signing_key",
-        "_session_factory",
+        "_interval",
+        "_lock",
+        "_on_connected",
+        "_on_envelope",
+        "_on_follow_changed",
+        "_on_highlight_signal",
+        "_on_moment_public",
+        "_on_moment_signal",
+        "_on_new_subscriber",
         "_on_relay",
         "_on_relay_seen",
-        "_on_highlight_signal",
-        "_on_moment_signal",
-        "_on_moment_public",
-        "_on_follow_changed",
-        "_on_new_subscriber",
-        "_on_envelope",
-        "_on_connected",
-        "_interval",
-        "_clients",
-        "_client_urls",
-        "_lock",
+        "_repo",
+        "_session_factory",
+        "_signing_key",
         "_stop",
         "_task",
     )
@@ -177,7 +177,7 @@ class GfsWebSocketSupervisor:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
         async with self._lock:
@@ -219,12 +219,14 @@ class GfsWebSocketSupervisor:
                     timeout=self._interval,
                 )
                 return  # _stop fired
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             try:
                 await self._reconcile_once()
             except Exception as exc:  # pragma: no cover - defensive
-                log.warning("gfs.ws.supervisor: reconcile failed: %s", exc)
+                log.warning(
+                    "gfs.ws.supervisor: reconcile failed: %s", exc, exc_info=True
+                )
 
     async def _reconcile_once(self) -> None:
         """Sync the running-client set with the repo's active pairings."""

@@ -15,14 +15,14 @@ permissions (admins only for household, space admins for a space).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 
 # Domain dataclasses + validators live in ``socialhome/domain/theme.py``;
 # re-exported here so existing repo-level imports keep working.
-from ..domain.theme import (  # noqa: F401
+from ..domain.theme import (
     ALLOWED_DENSITIES,
     ALLOWED_FONTS,
     ALLOWED_MODES,
@@ -120,7 +120,7 @@ class SqliteThemeRepo:
         corner_radius = validate_corner_radius(
             patch.get("corner_radius", current.corner_radius),
         )
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO household_theme(
@@ -221,7 +221,7 @@ class SqliteThemeRepo:
             ALLOWED_POST_LAYOUTS,
             "post_layout",
         )
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO space_themes(

@@ -148,15 +148,15 @@ class SyncSessionManager:
     """
 
     __slots__ = (
-        "_federation_repo",
-        "_sessions",
-        "_rate_buckets",
-        "_get_max_seq",
         "_check_member",
-        "_reject_reason",
-        "_owner_statement_for",
+        "_federation_repo",
+        "_get_max_seq",
         "_on_local_ice",
+        "_owner_statement_for",
+        "_rate_buckets",
+        "_reject_reason",
         "_requests",
+        "_sessions",
     )
 
     def __init__(
@@ -379,6 +379,10 @@ class SyncSessionManager:
             try:
                 space_max = int(await self._get_max_seq(space_id))
             except Exception:
+                log.debug(
+                    "SyncSessionManager.clamp_request_more: fail-soft error ignored",
+                    exc_info=True,
+                )
                 space_max = before_seq
             before_seq = min(before_seq, space_max) if before_seq > 0 else space_max
 
@@ -455,6 +459,10 @@ class SyncSessionManager:
             try:
                 ok = await self._check_member(space_id, requester_instance_id)
             except Exception:
+                log.debug(
+                    "SyncSessionManager.begin_session: fail-soft error ignored",
+                    exc_info=True,
+                )
                 ok = False
             if not ok:
                 if self._reject_reason is None:
@@ -463,6 +471,10 @@ class SyncSessionManager:
                 try:
                     reason = await self._reject_reason(space_id, requester_instance_id)
                 except Exception:
+                    log.debug(
+                        "SyncSessionManager.begin_session: fail-soft error ignored",
+                        exc_info=True,
+                    )
                     reason = "dissolved"
                 if reason is None:
                     return SyncDecision(accepted=False, reason="not_a_member")

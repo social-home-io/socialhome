@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,6 +16,7 @@ from socialhome.domain.events import (
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.moment import Moment
 from socialhome.domain.user import RemoteUser
+from socialhome.federation.moment_origin import sign_moment_origin
 from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,
@@ -23,7 +24,6 @@ from socialhome.repositories import (
     SqliteUserRepo,
 )
 from socialhome.repositories.moment_repo import SqliteMomentRepo
-from socialhome.federation.moment_origin import sign_moment_origin
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
 )
@@ -76,7 +76,7 @@ def _event(event_type, payload, *, from_instance="peer-a"):
         event_type=event_type,
         from_instance=from_instance,
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
     )
 
@@ -91,8 +91,8 @@ def _create_payload(**over):
         "duration_ms": None,
         "parent_moment_id": None,
         "origin_instance_id": "peer-a",
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
-        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
         "hop_count": 1,
     }
     base.update(over)
@@ -101,7 +101,7 @@ def _create_payload(**over):
 
 async def _seed_local_moment(svc) -> None:
     """``m-fed-1`` authored by our own ``uid-local`` (reactions go home)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await svc._moment_repo.save(
         Moment(
             id="m-fed-1",
@@ -246,7 +246,7 @@ async def test_moment_deleted_removes_and_relays(db, bus, inbound):
 
 
 async def test_moment_reacted_persists_and_publishes(db, bus, inbound):
-    svc, relay = inbound
+    svc, _relay = inbound
     await _seed_local_moment(svc)
     captured: list[MomentReactionChanged] = []
     bus.subscribe(MomentReactionChanged, captured.append)
@@ -267,7 +267,7 @@ async def test_moment_reacted_persists_and_publishes(db, bus, inbound):
 
 
 async def test_moment_reaction_removed_clears(db, bus, inbound):
-    svc, relay = inbound
+    svc, _relay = inbound
     await _seed_local_moment(svc)
     # Seed a reaction first.
     await svc._on_moment_reacted(

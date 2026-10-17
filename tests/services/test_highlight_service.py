@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -14,8 +14,8 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.highlight import HighlightAudience, HighlightFrameType
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.highlight_service import (
     MAX_FRAMES_PER_HIGHLIGHT,
@@ -172,7 +172,7 @@ async def test_retention_uses_author_preferences(db, svc):
     # than the 30-day default.
     assert highlight.expires_at is not None
     expires = datetime.fromisoformat(highlight.expires_at)
-    cutoff_30d = datetime.now(timezone.utc) + timedelta(days=29)
+    cutoff_30d = datetime.now(UTC) + timedelta(days=29)
     assert expires < cutoff_30d
 
 
@@ -394,7 +394,7 @@ async def test_expire_due_drops_expired(db, svc):
     await _seed_user(db, "u1", "pascal")
     repo = service._highlights
     # Inject one stale row by hand so prune_expired finds work.
-    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     await repo.find_or_create_today(
         author_user_id="u1",
         audience_kind=HighlightAudience.ALL_PAIRED,
@@ -416,7 +416,7 @@ async def test_expire_due_runs_over_max_pass_per_author(db, svc):
     # ``parse_highlights_preferences``) so 11 rows trigger one prune.
     await _seed_user(db, "u1", "pascal", prefs_json='{"highlights": {"max_count": 10}}')
     repo = service._highlights
-    future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    future = (datetime.now(UTC) + timedelta(days=7)).isoformat()
     for i in range(11):
         await repo.find_or_create_today(
             author_user_id="u1",
@@ -448,7 +448,7 @@ async def test_expire_due_removes_expired_frame_files(db, tmp_dir):
         frame_type=HighlightFrameType.IMAGE,
         media_url="api/media/e.webp",
     )
-    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     await db.enqueue("UPDATE highlights SET expires_at=? WHERE id=?", (past, h.id))
     assert (media_dir / "e.webp").exists()
     expired, _ = await service.expire_due()
@@ -470,7 +470,7 @@ async def test_expire_due_removes_over_max_frame_files(db, tmp_dir):
     # max_count is clamped to a floor of 10, so 11 rows trigger one prune.
     await _seed_user(db, "u1", "pascal", prefs_json='{"highlights": {"max_count": 10}}')
     repo = service._highlights
-    future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    future = (datetime.now(UTC) + timedelta(days=7)).isoformat()
     (media_dir / "old.webp").write_bytes(b"x")
     # Oldest date sorts last under DESC ordering → it's the one dropped.
     oldest = await repo.find_or_create_today(

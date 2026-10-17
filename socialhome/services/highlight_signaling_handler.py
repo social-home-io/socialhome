@@ -96,17 +96,17 @@ class HighlightSignalingHandler:
     """Drives the author-side half of §highlights_public WebRTC."""
 
     __slots__ = (
-        "_highlights",
         "_gfs_repo",
+        "_highlights",
         "_http_client",
-        "_signing_key",
+        "_ice_servers",
+        "_lock",
+        "_media_dir",
         "_own_instance_id",
         "_peer_factory",
-        "_ice_servers",
-        "_media_dir",
-        "_sessions",
         "_relay_tasks",
-        "_lock",
+        "_sessions",
+        "_signing_key",
     )
 
     def __init__(
@@ -222,7 +222,7 @@ class HighlightSignalingHandler:
         try:
             await sess.peer.add_ice_candidate(candidate)
         except Exception as exc:  # defensive — bad candidates shouldn't kill
-            log.debug("highlight_signal ice: %s", exc)
+            log.debug("highlight_signal ice: %s", exc, exc_info=True)
 
     # ── Streaming ──────────────────────────────────────────────────────
 
@@ -238,12 +238,12 @@ class HighlightSignalingHandler:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # defensive
-            log.warning("highlight_signal serve %s: %s", session_id, exc)
+            log.warning("highlight_signal serve %s: %s", session_id, exc, exc_info=True)
         finally:
             try:
                 await peer.close()
             except Exception:  # defensive
-                pass
+                log.debug("highlight_signal: peer close failed", exc_info=True)
             async with self._lock:
                 self._sessions.pop(session_id, None)
 
@@ -539,7 +539,7 @@ class HighlightSignalingHandler:
             try:
                 await sess.peer.close()
             except Exception:  # defensive
-                pass
+                log.debug("highlight_signal: peer close failed", exc_info=True)
         for task in list(self._relay_tasks):
             if not task.done():
                 task.cancel()
@@ -587,7 +587,7 @@ class _AiolibAnswererPeer:
     auto-cancelled via :meth:`pc.spawn_task` ownership).
     """
 
-    __slots__ = ("_pc", "_channel", "_channel_event")
+    __slots__ = ("_channel", "_channel_event", "_pc")
 
     def __init__(self, ice_servers: list[dict[str, Any]]) -> None:
         cfg = rtc.RTCConfiguration(

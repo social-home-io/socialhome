@@ -23,8 +23,8 @@ Limits:
 from __future__ import annotations
 
 import hashlib
-from datetime import date, datetime, timezone
-from typing import Iterable
+from collections.abc import Iterable
+from datetime import UTC, date, datetime
 
 from ..domain.calendar import CalendarEvent, EventReminder
 
@@ -94,7 +94,7 @@ def _event_block(
 ) -> list[str]:
     lines: list[str] = ["BEGIN:VEVENT"]
     lines.append(f"UID:{_escape(event.id)}")
-    lines.append(f"DTSTAMP:{_dt(datetime.now(timezone.utc))}")
+    lines.append(f"DTSTAMP:{_dt(datetime.now(UTC))}")
     if event.all_day:
         lines.append(f"DTSTART;VALUE=DATE:{_d(event.start)}")
         lines.append(f"DTEND;VALUE=DATE:{_d(event.end)}")
@@ -124,9 +124,9 @@ def _event_block(
 def _dt(value: datetime) -> str:
     """``YYYYMMDDTHHMMSSZ`` form per RFC 5545."""
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=UTC)
     else:
-        value = value.astimezone(timezone.utc)
+        value = value.astimezone(UTC)
     return value.strftime("%Y%m%dT%H%M%SZ")
 
 

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
-
+from socialhome.domain.federation import FederationEventType
 from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     JITTER_RATIO,
@@ -17,8 +17,6 @@ from socialhome.infrastructure.outbox_processor import (
     RetryAfter,
 )
 from socialhome.repositories.outbox_repo import OutboxEntry
-from socialhome.domain.federation import FederationEventType
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -32,8 +30,8 @@ def _make_entry(attempts: int = 0, entry_id: str = "e1") -> OutboxEntry:
         payload_json="{}",
         status="pending",
         attempts=attempts,
-        next_attempt_at=datetime.now(timezone.utc).isoformat(),
-        created_at=datetime.now(timezone.utc).isoformat(),
+        next_attempt_at=datetime.now(UTC).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
     )
 
 
@@ -423,10 +421,8 @@ async def test_prune_once_purges_rows_of_households_that_are_gone():
 
 def _next_at_delay_s(repo) -> float:
     """Seconds between now and the ``next_at`` the processor rescheduled to."""
-    (_entry_id, next_at), kwargs = repo.reschedule.await_args
-    return (
-        datetime.fromisoformat(next_at) - datetime.now(timezone.utc)
-    ).total_seconds()
+    (_entry_id, next_at), _kwargs = repo.reschedule.await_args
+    return (datetime.fromisoformat(next_at) - datetime.now(UTC)).total_seconds()
 
 
 async def test_retry_after_floors_the_backoff_delay():

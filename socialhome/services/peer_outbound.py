@@ -47,8 +47,8 @@ class ConfirmedPeerBroadcaster:
 
     __slots__ = ()
 
-    _federation: "FederationService | None"
-    _federation_repo: "AbstractFederationRepo | None"
+    _federation: FederationService | None
+    _federation_repo: AbstractFederationRepo | None
 
     async def confirmed_peers(self) -> list[Any]:
         """Return confirmed peer rows, excluding our own instance + nulls.
@@ -65,7 +65,9 @@ class ConfirmedPeerBroadcaster:
             # social peer, so read the social list, not every CONFIRMED row.
             peers = await repo.list_social_instances()
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("%s: list peers failed: %s", type(self).__name__, exc)
+            log.debug(
+                "%s: list peers failed: %s", type(self).__name__, exc, exc_info=True
+            )
             return []
         own = getattr(self._federation, "own_instance_id", "")
         return [
@@ -89,12 +91,12 @@ class SingleTargetSender:
 
     __slots__ = ()
 
-    _federation: "FederationService | None"
+    _federation: FederationService | None
 
     async def send_to_instance(
         self,
         instance_id: str,
-        event_type: "FederationEventType",
+        event_type: FederationEventType,
         payload: dict,
         *,
         space_id: str | None = None,
@@ -120,4 +122,5 @@ class SingleTargetSender:
                 type(self).__name__,
                 instance_id,
                 exc,
+                exc_info=True,
             )

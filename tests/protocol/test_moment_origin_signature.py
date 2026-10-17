@@ -19,7 +19,7 @@ SQLite:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -45,7 +45,7 @@ ORIGIN = "peer-origin"  # paired; its key is pinned
 RELAY = "peer-relay"  # paired; delivers the relayed moments
 ONWARD = "peer-onward"  # paired; observes onward relay
 FOF = derive_instance_id(FOF_KEY.public_key)
-EXPIRES = (datetime.now(timezone.utc) + timedelta(days=5)).isoformat()
+EXPIRES = (datetime.now(UTC) + timedelta(days=5)).isoformat()
 
 
 def _config(tmp_dir) -> Config:
@@ -156,7 +156,7 @@ async def _send(app, event_type, payload, *, from_instance=RELAY) -> None:
                 event_type=event_type,
                 from_instance=from_instance,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )
@@ -173,7 +173,7 @@ def _create(moment_id="m-new", author="u-olga", origin=ORIGIN, **extra) -> dict:
         "duration_ms": None,
         "parent_moment_id": None,
         "expires_at": EXPIRES,
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
         "hop_count": 1,
         **extra,
     }
@@ -184,7 +184,7 @@ def _delete(moment_id="m-olga", author="u-olga", origin=ORIGIN) -> dict:
         "moment_id": moment_id,
         "author_user_id": author,
         "origin_instance_id": origin,
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
         "hop_count": 1,
     }
 

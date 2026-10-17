@@ -29,7 +29,6 @@ from socialhome.services.task_service import (
     _next_occurrence,
 )
 
-
 # ─── RRULE evaluator ─────────────────────────────────────────────────
 
 

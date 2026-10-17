@@ -13,7 +13,6 @@ import pytest
 
 from socialhome.security import SENSITIVE_FIELDS, sanitise_for_api
 
-
 pytestmark = pytest.mark.security
 
 

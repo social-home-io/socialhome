@@ -6,15 +6,7 @@ import pathlib
 
 import pytest
 
-from socialhome.federation.owner_bound_id import (
-    GALLERY_ALBUM_KIND,
-    GALLERY_ITEM_KIND,
-    OwnerBinding,
-    check_owner_bound_id,
-    is_owner_bound,
-)
 from socialhome.config import Config
-from socialhome.media.video_processor import VideoProcessor
 from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
@@ -22,17 +14,25 @@ from socialhome.crypto import (
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import GalleryAlbumDeleted, GalleryAlbumUpdated
 from socialhome.domain.space import SpaceMember
+from socialhome.federation.owner_bound_id import (
+    GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+    is_owner_bound,
+)
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.media.video_processor import VideoProcessor
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.media_transcode_repo import SqliteMediaTranscodeRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.gallery_service import (
     DESCRIPTION_MAX,
+    NAME_MAX,
     GalleryNotFoundError,
     GalleryPermissionError,
     GalleryService,
-    NAME_MAX,
 )
 from socialhome.services.media_transcode_service import MediaTranscodeService
 

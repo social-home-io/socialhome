@@ -16,7 +16,7 @@ event — broken cards for every pre-existing listing.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..exporter import PagedExporterMixin
 from ..window import SYNC_PAGE_SIZE, SyncWindows, iter_pages
@@ -34,7 +34,7 @@ class BazaarExporter(PagedExporterMixin):
 
     __slots__ = ("_repo", "_windows")
 
-    def __init__(self, bazaar_repo: "AbstractBazaarRepo", windows: SyncWindows) -> None:
+    def __init__(self, bazaar_repo: AbstractBazaarRepo, windows: SyncWindows) -> None:
         self._repo = bazaar_repo
         self._windows = windows
 
@@ -53,7 +53,7 @@ class BazaarExporter(PagedExporterMixin):
     ) -> AsyncIterator[list[dict[str, Any]]]:
         window = await self._windows.for_space(space_id)
 
-        async def fetch(cursor: int | None) -> tuple[list["BazaarListing"], int | None]:
+        async def fetch(cursor: int | None) -> tuple[list[BazaarListing], int | None]:
             return await self._repo.list_sync_page(
                 space_id,
                 cutoff=window.cutoff,
@@ -67,7 +67,7 @@ class BazaarExporter(PagedExporterMixin):
             yield _records(listings)
 
 
-def _records(listings: list["BazaarListing"]) -> list[dict[str, Any]]:
+def _records(listings: list[BazaarListing]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for lst in listings:
         out.append(

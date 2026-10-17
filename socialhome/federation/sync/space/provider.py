@@ -19,7 +19,7 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ....domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
@@ -29,9 +29,9 @@ from ....domain.federation import (
 )
 from ....domain.federation_capabilities import FederationCapability
 from .exporter import (
+    RESOURCE_ORDER,
     ChunkBuilder,
     ConditionalExporter,
-    RESOURCE_ORDER,
     serialise_chunk,
 )
 from .exporters.calendar import CalendarExporter
@@ -110,19 +110,19 @@ class SpaceSyncService:
     """Streams encrypted space content over a negotiated DataChannel."""
 
     __slots__ = (
-        "_builder",
-        "_exporters",
-        "_sig_suite",
-        "_media_sync",
-        "_space_post_repo",
-        "_gallery_repo",
         "_bazaar_repo",
-        "_federation",
+        "_builder",
         "_chat_gate",
-        "_windows",
-        "_watermarks",
-        "_owner_statement_for",
+        "_exporters",
+        "_federation",
+        "_gallery_repo",
         "_inviter_proof_for",
+        "_media_sync",
+        "_owner_statement_for",
+        "_sig_suite",
+        "_space_post_repo",
+        "_watermarks",
+        "_windows",
     )
 
     async def _sentinel_proof(self, space_id: str) -> dict | None:
@@ -147,16 +147,16 @@ class SpaceSyncService:
         self,
         *,
         builder: ChunkBuilder,
-        exporters: dict[str, "ResourceExporter"],
+        exporters: dict[str, ResourceExporter],
         sig_suite: str = "ed25519",
         media_sync=None,
         space_post_repo=None,
         gallery_repo=None,
         bazaar_repo=None,
         windows: SyncWindows | None = None,
-        watermarks: "SyncWatermarks | None" = None,
-        owner_statement_for: "Callable[[str], Awaitable[dict | None]] | None" = None,
-        inviter_proof_for: "Callable[[str], Awaitable[dict | None]] | None" = None,
+        watermarks: SyncWatermarks | None = None,
+        owner_statement_for: Callable[[str], Awaitable[dict | None]] | None = None,
+        inviter_proof_for: Callable[[str], Awaitable[dict | None]] | None = None,
     ) -> None:
         self._builder = builder
         #: Migration 0093 — the owner statement each stream's sentinel
@@ -201,8 +201,8 @@ class SpaceSyncService:
         self._chat_gate = gate
 
     async def _exporter_for(
-        self, resource: str, session: "SyncSessionRecord"
-    ) -> "ResourceExporter | None":
+        self, resource: str, session: SyncSessionRecord
+    ) -> ResourceExporter | None:
         """The exporter for ``resource``, shaped for this requester.
 
         v_41: a requester below ``MIN_FOR_SPACE_MODERATOR_ROLE`` (or one we
@@ -244,7 +244,7 @@ class SpaceSyncService:
         )
         return exporter if supports else PreModeratorMembersExporter(exporter)
 
-    async def _session_version(self, session: "SyncSessionRecord") -> int:
+    async def _session_version(self, session: SyncSessionRecord) -> int:
         """The requester's protocol version (a space member household, which
         may be mesh-only), read once per session and kept on it: every
         version gate of the session — the exporters, the shape, the chunk
@@ -260,7 +260,7 @@ class SpaceSyncService:
         stream chunks via ``SPACE_SYNC_CHUNK`` events."""
         self._federation = federation_service
 
-    async def stream_initial(self, session: "SyncSessionRecord") -> None:
+    async def stream_initial(self, session: SyncSessionRecord) -> None:
         """Send every resource for ``session.space_id`` over the channel
         in :data:`RESOURCE_ORDER`, then a ``__complete__`` sentinel.
 
@@ -376,7 +376,7 @@ class SpaceSyncService:
             # stream died is garbage, and holding it blocks the retry.
             self._close_session(sync_id)
 
-    async def _plan(self, session: "SyncSessionRecord") -> list["ResourceExporter"]:
+    async def _plan(self, session: SyncSessionRecord) -> list[ResourceExporter]:
         """The exporters this session streams, in :data:`RESOURCE_ORDER`,
         and — with watermarks wired — its snapshot, shape and ``since``.
 
@@ -384,7 +384,7 @@ class SpaceSyncService:
         while the stream runs is stamped above it, so it streams next time
         whether or not this stream's keyset paging caught it.
         """
-        exporters: list["ResourceExporter"] = []
+        exporters: list[ResourceExporter] = []
         for resource in RESOURCE_ORDER:
             exporter = await self._exporter_for(resource, session)
             if exporter is None:
@@ -439,7 +439,7 @@ class SpaceSyncService:
             return 0
         return int(await self._federation.space_member_version(instance_id))
 
-    async def confirm_complete(self, session: "SyncSessionRecord") -> None:
+    async def confirm_complete(self, session: SyncSessionRecord) -> None:
         """The requester confirmed our stream (``SPACE_SYNC_COMPLETE`` from
         the household it went to): advance its watermark to the session's
         snapshot — only for a stream that shipped every chunk. Fail-soft: a
@@ -705,7 +705,7 @@ class SpaceSyncService:
 
     async def stream_request_more(
         self,
-        session: "SyncSessionRecord",
+        session: SyncSessionRecord,
         cleaned: dict[str, Any],
     ) -> None:
         """Stream the specific resource slice the peer asked for.
@@ -842,7 +842,7 @@ def _series_rows(version: int) -> bool:
     return version >= FederationCapability.MIN_FOR_SYNC_SERIES_ROWS
 
 
-def _allocator(session: "SyncSessionRecord") -> Callable[[], int]:
+def _allocator(session: SyncSessionRecord) -> Callable[[], int]:
     """The session's one ``chunk_index`` counter (v_56): every chunk of the
     session — the stream's and any REQUEST_MORE slice's — takes the next
     value, never a reassigned one."""

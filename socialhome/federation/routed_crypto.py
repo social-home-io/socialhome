@@ -109,7 +109,6 @@ from ..crypto import (
     x25519_exchange,
 )
 
-
 #: Default TTL on the target's cached ephemeral private half, measured
 #: from the moment the key is MINTED (never extended on use — that would
 #: trade away the forward-secrecy bound documented above). Must stay

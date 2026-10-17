@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import base64
 import io
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -80,7 +80,7 @@ def _event(event_type, payload, *, space_id=None) -> FederationEvent:
         event_type=event_type,
         from_instance=PEER,
         to_instance=OWN,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=space_id,
     )

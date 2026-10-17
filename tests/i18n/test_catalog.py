@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 
-
 from socialhome.i18n import Catalog
-
 
 # ─── Construction ────────────────────────────────────────────────────────
 
@@ -101,6 +99,7 @@ def test_from_directory_skips_invalid_json(tmp_path):
 def test_bundled_messages_loadable():
     """Sanity: the bundled en/de/fr files all parse."""
     from pathlib import Path
+
     import socialhome
 
     base = Path(socialhome.__file__).parent / "i18n" / "messages"

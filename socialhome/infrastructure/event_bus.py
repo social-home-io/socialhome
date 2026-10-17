@@ -20,7 +20,6 @@ from typing import TypeVar
 
 from ..domain.events import DomainEvent
 
-
 log = logging.getLogger(__name__)
 
 
@@ -47,7 +46,7 @@ class EventBus:
     def subscribe(
         self,
         event_type: type[E],
-        handler: "Handler[E]",
+        handler: Handler[E],
     ) -> None:
         """Register ``handler`` for ``event_type``.
 
@@ -60,7 +59,7 @@ class EventBus:
     def unsubscribe(
         self,
         event_type: type[E],
-        handler: "Handler[E]",
+        handler: Handler[E],
     ) -> None:
         """Remove ``handler`` from ``event_type``.
 

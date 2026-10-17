@@ -19,15 +19,14 @@ from aiohttp.test_utils import TestServer
 from socialhome.capabilities_sig import sign_capabilities
 from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.federation import GfsConnection
-from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.domain.space import SpacePermissionError
 from socialhome.federation.invite_bootstrap import EnvelopeRelayThrottled
+from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_envelope_sender import (
     EnvelopeRelayUnavailable,
     GfsEnvelopeSender,
     normalize_gfs_base,
 )
-
 
 try:
     import pytest_socket  # noqa: F401
@@ -287,7 +286,7 @@ async def test_skips_a_suspended_connection(gfs, http_session):
 
 
 async def test_no_gfs_url_falls_back_to_the_single_connection(gfs, http_session):
-    sender, _conn_ = _wire(gfs, http_session)
+    sender, _ = _wire(gfs, http_session)
     ok = await sender.send_sealed_envelope(
         to_instance_id="b" * 32,
         envelope=ENVELOPE,

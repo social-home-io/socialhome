@@ -11,17 +11,11 @@ import logging
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import aiohttp
 import pytest
-
-from socialhome.domain.space import SpaceType
-from socialhome.domain.errors import (
-    SpaceNotPublishableError,
-    TierChangeRequiredError,
-)
 from aiohttp.test_utils import TestClient, TestServer
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
@@ -29,6 +23,10 @@ from yarl import URL
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     sign_authority_event,
+)
+from socialhome.capabilities_sig import (
+    CAPS_SIG_SUITE_ED25519,
+    sign_capabilities,
 )
 from socialhome.crypto import (
     b64url_decode,
@@ -39,20 +37,19 @@ from socialhome.crypto import (
     verify_ed25519,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.errors import (
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
+)
 from socialhome.domain.federation import GfsConnection
+from socialhome.domain.gfs_server import GfsServer
+from socialhome.domain.space import SpaceType
+from socialhome.gfs_proof import sign_possession_proof
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server import create_gfs_app
 from socialhome.global_server.app_keys import gfs_fed_repo_key, gfs_ws_registry_key
-from socialhome.capabilities_sig import (
-    CAPS_SIG_SUITE_ED25519,
-    sign_capabilities,
-)
-from socialhome.domain.gfs_server import GfsServer
-from socialhome.gfs_proof import sign_possession_proof
-from socialhome.outbound_fetch import OutboundFetchRefused
-from socialhome.services.gfs_publish_retry import GfsPublish
-from socialhome.services.gfs_server_targets import listing_target, listing_target_id
-from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server.domain import ClientInstance
+from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services import gfs_connection_service
@@ -64,7 +61,8 @@ from socialhome.services.gfs_connection_service import (
     GfsSignupError,
     _remote_detail,
 )
-
+from socialhome.services.gfs_publish_retry import GfsPublish
+from socialhome.services.gfs_server_targets import listing_target, listing_target_id
 
 # ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -85,7 +83,7 @@ class _Content:
 
 
 class _StubResp:
-    __slots__ = ("status", "_body", "_text", "content", "content_length", "headers")
+    __slots__ = ("_body", "_text", "content", "content_length", "headers", "status")
 
     def __init__(self, status: int, body: dict | None = None, text: str = ""):
         self.status = status
@@ -116,7 +114,7 @@ class _StubSession:
     when the method has no override.
     """
 
-    __slots__ = ("_status", "_body", "method_responses", "calls", "_last_body")
+    __slots__ = ("_body", "_last_body", "_status", "calls", "method_responses")
 
     def __init__(
         self,
@@ -515,10 +513,10 @@ class _TimeoutSession:
     """
 
     def post(self, *a, **kw):
-        raise asyncio.TimeoutError
+        raise TimeoutError
 
     def delete(self, *a, **kw):
-        raise asyncio.TimeoutError
+        raise TimeoutError
 
 
 async def test_publish_space_maps_timeout_to_gfs_error(env):
@@ -1422,7 +1420,7 @@ async def test_publish_body_carries_fresh_signed_ts(env):
     body = session._last_body  # type: ignore[attr-defined]
     parsed = datetime.fromisoformat(body["ts"])
     assert parsed.tzinfo is not None, "ts must be tz-aware (a naive one is rejected)"
-    assert abs((datetime.now(timezone.utc) - parsed).total_seconds()) < 60
+    assert abs((datetime.now(UTC) - parsed).total_seconds()) < 60
     # ``ts`` is covered by the signature, not bolted on beside it.
     sig_b64 = body.pop("signature")
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -1570,7 +1568,7 @@ async def test_update_display_name_skips_transport_errors(env):
             if "err.example" in url:
                 raise aiohttp.ClientError("boom")
             if "slow.example" in url:
-                raise asyncio.TimeoutError
+                raise TimeoutError
             return _StubResp(200, {"status": "ok"})
 
     session = _MixedSession()
@@ -1863,7 +1861,7 @@ class _RecordingSession:
 async def _publish_event_svc(env, session, *, space_id: str, gfs_ids: list[str]):
     """Service wired for publish_space_event, with the space published to
     each of *gfs_ids* (so ``list_gfs_for_space`` returns them)."""
-    db, conn_repo = env
+    _db, conn_repo = env
     for gid in gfs_ids:
         await conn_repo.save(
             _make_conn(
@@ -2734,7 +2732,7 @@ class _SeedSpaceRepo:
 def _ws_hello(instance_id: str, seed: bytes) -> dict:
     """The signed ``hello`` a household opens its GFS push socket with."""
     ts = int(time.time())
-    msg = f"{instance_id}|{ts}".encode("utf-8")
+    msg = f"{instance_id}|{ts}".encode()
     return {
         "type": "hello",
         "instance_id": instance_id,
@@ -2868,7 +2866,7 @@ async def test_e2e_new_household_relays_identity_free_through_a_real_gfs(e2e_sen
     the GFS accepts it on the space-authority signature alone, and the frame it
     fans out to subscribers is identity-free too."""
     svc, seed, sub_ws = e2e_sender
-    svc._anon_publish["gfs-e2e"] = True  # noqa: SLF001 — pin the capability
+    svc._anon_publish["gfs-e2e"] = True
     delivered = await svc.publish_space_event(
         space_id=_E2E_SPACE_ID,
         event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
@@ -2891,7 +2889,7 @@ async def test_e2e_a_gfs_without_the_capability_gets_nothing_from_this_sender(
     accepts, verifies and discards the legacy fields from OLDER households;
     that is covered in ``tests/global_server/``.)"""
     svc, seed, sub_ws = e2e_sender
-    svc._anon_publish["gfs-e2e"] = False  # noqa: SLF001 — pin the capability
+    svc._anon_publish["gfs-e2e"] = False
     delivered = await svc.publish_space_event(
         space_id=_E2E_SPACE_ID,
         event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
@@ -2933,10 +2931,10 @@ async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
             )
             # Learned from the signed block, not the bare flag: the pinned key
             # verified the signature over {gfs_instance_id, capabilities}.
-            assert svc._anon_publish[conn.id] is True  # noqa: SLF001
+            assert svc._anon_publish[conn.id] is True
             # A refresh re-verifies the same block and must not downgrade.
             await svc.refresh_connection_metadata(conn.id)
-            assert svc._anon_publish[conn.id] is True  # noqa: SLF001
+            assert svc._anon_publish[conn.id] is True
     finally:
         await db.shutdown()
 
@@ -3549,7 +3547,7 @@ async def _publish_and_settle(svc, *, space_id: str, payload: dict) -> int:
 
 @pytest.mark.parametrize(
     "first_failure",
-    [aiohttp.ClientError("connection refused"), asyncio.TimeoutError(), 503, 408],
+    [aiohttp.ClientError("connection refused"), TimeoutError(), 503, 408],
 )
 async def test_a_transient_gfs_publish_failure_is_retried_identically(
     env, fast_gfs_retry, first_failure
@@ -5027,7 +5025,7 @@ async def test_a_ratcheted_key_must_prove_as_a_listing_target_too(env, caplog):
 async def test_the_owner_relays_only_to_live_listing_rows(env):
     """L5: on the OWNER the signed list trails a withdrawal by one snapshot;
     a server it just unpublished from gets no relay meanwhile."""
-    db, conn_repo = env
+    _db, conn_repo = env
     session = _RecordingSession()
     await conn_repo.save(
         _make_conn(

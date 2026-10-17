@@ -22,18 +22,18 @@ if TYPE_CHECKING:
 
 
 def iter_comment_pages(
-    repo: "AbstractSpacePostRepo",
+    repo: AbstractSpacePostRepo,
     space_id: str,
     window: SyncWindow,
     *,
     deleted: bool = False,
     since: int | None = None,
-) -> AsyncIterator[list["Comment"]]:
+) -> AsyncIterator[list[Comment]]:
     """The space's comments in ``window`` — live ones on live posts, or
     (``deleted``) the tombstones on any post — page by page; ``since``:
     only those changed after that stamp."""
 
-    async def fetch(cursor: int | None) -> tuple[list["Comment"], int | None]:
+    async def fetch(cursor: int | None) -> tuple[list[Comment], int | None]:
         return await repo.list_comments_sync_page(
             space_id,
             deleted=deleted,
@@ -53,7 +53,7 @@ class CommentsExporter(PagedExporterMixin):
     __slots__ = ("_repo", "_windows")
 
     def __init__(
-        self, space_post_repo: "AbstractSpacePostRepo", windows: SyncWindows
+        self, space_post_repo: AbstractSpacePostRepo, windows: SyncWindows
     ) -> None:
         self._repo = space_post_repo
         self._windows = windows

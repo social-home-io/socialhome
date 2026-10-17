@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ..repositories.pairing_relay_repo import AbstractPairingRelayRepo
 
@@ -28,12 +28,12 @@ class PairingRelayRetentionScheduler:
     """Background task that prunes stale pairing_relay rows."""
 
     __slots__ = (
-        "_repo",
         "_interval",
         "_pending_window",
+        "_repo",
         "_resolved_window",
-        "_task",
         "_stop",
+        "_task",
     )
 
     def __init__(
@@ -64,7 +64,7 @@ class PairingRelayRetentionScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -75,18 +75,18 @@ class PairingRelayRetentionScheduler:
                 if pruned:
                     log.debug("pairing-relay: pruned %d stale rows", pruned)
             except Exception as exc:  # pragma: no cover
-                log.warning("pairing-relay prune failed: %s", exc)
+                log.warning("pairing-relay prune failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _prune_once(self) -> int:
         """Run one prune pass. Exposed for tests."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         pending_cutoff = (now - self._pending_window).isoformat()
         resolved_cutoff = (now - self._resolved_window).isoformat()
         purged = 0

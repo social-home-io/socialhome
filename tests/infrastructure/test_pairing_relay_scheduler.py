@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -50,7 +50,7 @@ async def _seed(env, *, request_id, status, received_at):
 
 
 async def test_sweep_drops_old_resolved_rows_keeps_recent(env):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sched = PairingRelayRetentionScheduler(
         env.repo,
         pending_window=timedelta(days=30),
@@ -91,7 +91,7 @@ async def test_sweep_drops_old_resolved_rows_keeps_recent(env):
 
 
 async def test_sweep_drops_very_old_pending(env):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sched = PairingRelayRetentionScheduler(
         env.repo,
         pending_window=timedelta(days=30),

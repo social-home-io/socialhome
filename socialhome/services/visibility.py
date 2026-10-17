@@ -54,7 +54,7 @@ class VisibilityMixin:
 
     __slots__ = ("_visibility_repo",)
 
-    _visibility_repo: "AbstractPeerUserVisibilityRepo | None"
+    _visibility_repo: AbstractPeerUserVisibilityRepo | None
 
     async def hidden_for_peer(self, peer_id: str) -> frozenset[str]:
         """Return the set of local user_ids hidden from ``peer_id``.
@@ -73,5 +73,6 @@ class VisibilityMixin:
                 "VisibilityMixin.hidden_for_peer: lookup failed for %s: %s",
                 peer_id,
                 exc,
+                exc_info=True,
             )
             return frozenset()

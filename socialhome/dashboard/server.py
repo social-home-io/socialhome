@@ -50,7 +50,7 @@ class DashboardServer:
     listener: announced on every successful bind, withdrawn on stop.
     """
 
-    __slots__ = ("_build_app", "_host", "_advertiser", "_runner", "_port", "_lock")
+    __slots__ = ("_advertiser", "_build_app", "_host", "_lock", "_port", "_runner")
 
     def __init__(
         self,

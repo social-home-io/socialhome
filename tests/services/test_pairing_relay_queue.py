@@ -5,12 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from types import SimpleNamespace
 
-
 from socialhome.domain.events import PairingIntroRelayReceived
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.pairing_relay_queue import (
-    PairingRelayQueue,
     _MAX_PENDING_ROWS,
+    PairingRelayQueue,
 )
 
 

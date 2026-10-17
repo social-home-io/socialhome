@@ -27,11 +27,9 @@ import pytest
 
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
+    AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
     strip_authority_sig_fields,
     verify_authority_event,
-)
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
 )
 from socialhome.crypto import (
     b64url_encode,
@@ -436,7 +434,7 @@ async def test_reconcile_pulls_and_relays_per_subscriber(recon_env):
     assert "target_instance_id" not in call["payload"]
     assert sub_iid not in json.dumps(call["payload"])
     # The subscriber can open the seal.
-    epoch, raw_key = await recon_env["crypto"].export_current_key("sp-rec")
+    epoch, _raw_key = await recon_env["crypto"].export_current_key("sp-rec")
     pt = open_keywrap(
         sealed=call["payload"]["sealed"], recipient_keywrap_priv=kw_kp.private_key
     )

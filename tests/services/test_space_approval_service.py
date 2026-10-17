@@ -9,22 +9,22 @@ isolation.
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.child_protection import AccountProtectedError
+from socialhome.domain.errors import GfsSelectionInvalidError
+from socialhome.domain.events import SpaceProposalUpdated
 from socialhome.domain.space import (
     SpaceMember,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
 )
-from socialhome.domain.child_protection import AccountProtectedError
-from socialhome.domain.errors import GfsSelectionInvalidError
-from socialhome.domain.events import SpaceProposalUpdated
 from socialhome.domain.space_proposal import ProposalAction, ProposalStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
@@ -271,7 +271,7 @@ async def test_expire_due_marks_expired(stack):
         space.id, actor_username="alice", action=ProposalAction.DISSOLVE
     )
     # Force the row's expiry into the past.
-    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     await stack.db.enqueue(
         "UPDATE space_admin_proposals SET expires_at=? WHERE id=?",
         (past, view["id"]),
@@ -424,8 +424,8 @@ async def test_mirror_update_shows_host_tally_not_local_recompute(stack):
         # ``expires_at`` is in the past (service.py ``_now()`` check), so a
         # hardcoded date silently rots the test the day it lapses. Keep the
         # proposal active by anchoring on the run time.
-        "created_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
-        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        "created_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
     }
     await stack.approvals.apply_mirror_update(stub.id, host_view)
     listed = await stack.approvals.list_for_space(stub.id)
@@ -467,8 +467,8 @@ async def test_mirror_update_drops_resolved_proposal(stack):
         # ``expires_at`` is in the past (service.py ``_now()`` check), so a
         # hardcoded date silently rots the test the day it lapses. Keep the
         # proposal active by anchoring on the run time.
-        "created_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
-        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        "created_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
     }
     await stack.approvals.apply_mirror_update(stub.id, {**base, "status": "pending"})
     assert len(await stack.approvals.list_for_space(stub.id)) == 1
@@ -531,7 +531,7 @@ async def test_enqueue_owner_approval_no_dedup(stack):
     )
     listed = await stack.approvals.list_for_space(space.id)
     assert len(listed) == 2
-    assert {p["id"] for p in listed} == set(p["id"] for p in listed)
+    assert {p["id"] for p in listed} == {p["id"] for p in listed}
     assert len({p["id"] for p in listed}) == 2
 
 

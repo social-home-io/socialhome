@@ -8,7 +8,7 @@ sender as a remote member before persisting the message.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -114,7 +114,7 @@ async def test_dm_message_auto_creates_conversation_on_receiver(db, bus, inbound
         event_type=FederationEventType.DM_MESSAGE,
         from_instance="peer-a",
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={
             "conversation_id": conv_id,
             "message_id": "msg-1",
@@ -122,7 +122,7 @@ async def test_dm_message_auto_creates_conversation_on_receiver(db, bus, inbound
             "sender_display_name": "Alice",
             "type": "text",
             "content": "hi carol",
-            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "occurred_at": datetime.now(UTC).isoformat(),
             "recipient_user_ids": [carol_user_id],
         },
     )
@@ -170,7 +170,7 @@ async def test_dm_message_idempotent_on_existing_conversation(db, bus, inbound):
         "sender_user_id": alice_user_id,
         "sender_display_name": "Alice",
         "type": "text",
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
         "recipient_user_ids": [carol_user_id],
     }
 
@@ -180,7 +180,7 @@ async def test_dm_message_idempotent_on_existing_conversation(db, bus, inbound):
             event_type=FederationEventType.DM_MESSAGE,
             from_instance="peer-a",
             to_instance="self",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload={
                 **base_payload,
                 "message_id": f"msg-{i}",

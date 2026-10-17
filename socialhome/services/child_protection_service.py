@@ -28,9 +28,9 @@ shape and can be enabled when the matching UX lands.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from datetime import date as _date
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING
 
 from ..domain.child_protection import (
     PROTECTED_ACCOUNT_RESTRICTIONS,
@@ -103,22 +103,17 @@ def _age_on(dob: _date, today: _date) -> int:
     return today.year - dob.year - (0 if had_birthday else 1)
 
 
-@runtime_checkable
-class _PublishesEvents(Protocol):
-    async def publish(self, event) -> None: ...
-
-
 class ChildProtectionService:
     """V1 child-protection coordinator."""
 
     __slots__ = (
-        "_repo",
-        "_users",
         "_bus",
-        "_space_repo",
         "_conv_repo",
         "_gates",
         "_household",
+        "_repo",
+        "_space_repo",
+        "_users",
     )
 
     def __init__(
@@ -137,10 +132,10 @@ class ChildProtectionService:
         #: protection or guardian block through the
         #: :class:`~socialhome.services.protection_gate.ProtectionGateMixin`
         #: hooks, so what was set up *before* reacts too (§CP.R retroactive).
-        self._gates: dict[type, "ProtectionGateMixin"] = {}
-        self._household: "PreferencesService | None" = None
+        self._gates: dict[type, ProtectionGateMixin] = {}
+        self._household: PreferencesService | None = None
 
-    def register_gate(self, gate: "ProtectionGateMixin") -> None:
+    def register_gate(self, gate: ProtectionGateMixin) -> None:
         """Called by :meth:`ProtectionGateMixin.attach_child_protection`."""
         self._gates[type(gate)] = gate
 
@@ -150,7 +145,7 @@ class ChildProtectionService:
         while still emitting ``SpaceMemberLeft`` via the bus)."""
         self._space_repo = space_repo
 
-    def attach_household_features(self, svc: "PreferencesService") -> None:
+    def attach_household_features(self, svc: PreferencesService) -> None:
         """Wire :class:`PreferencesService` so age-from-birthday checks
         count in the household's time zone (``HouseholdPreferences.tz``),
         not the server's clock.
@@ -164,7 +159,7 @@ class ChildProtectionService:
         try:
             return (await self._household.get_household()).tz
         except Exception as exc:  # defensive — fall back to UTC
-            log.warning("child protection: household tz failed: %s", exc)
+            log.warning("child protection: household tz failed: %s", exc, exc_info=True)
             return DEFAULT_TZ
 
     def attach_conversation_repo(self, conv_repo) -> None:
@@ -206,7 +201,7 @@ class ChildProtectionService:
                 dob = _date.fromisoformat(date_of_birth)
             except ValueError as exc:
                 raise ValueError(f"Invalid date_of_birth format: {exc}") from exc
-            instant = now or datetime.now(timezone.utc)
+            instant = now or datetime.now(UTC)
             today = local_date(instant, await self._household_tz())
             age_from_dob = _age_on(dob, today)
             if abs(age_from_dob - declared_age) > 1:
@@ -368,7 +363,7 @@ class ChildProtectionService:
                 blocked_user_id=blocked_user_id,
             )
         except Exception as exc:  # defensive — schema may vary
-            log.debug("CP.F2 space auto-removal skipped: %s", exc)
+            log.debug("CP.F2 space auto-removal skipped: %s", exc, exc_info=True)
 
     async def list_blocks_for_minor(
         self,
@@ -380,11 +375,12 @@ class ChildProtectionService:
 
         Callable by the assigned guardian or a household admin (§CP.A2).
         """
-        if not await self._repo.is_guardian_of(actor_user_id, minor_user_id):
-            if not await self._repo.is_admin(actor_user_id):
-                raise GuardianRequiredError(
-                    "caller must be a guardian of this minor",
-                )
+        if not await self._repo.is_guardian_of(
+            actor_user_id, minor_user_id
+        ) and not await self._repo.is_admin(actor_user_id):
+            raise GuardianRequiredError(
+                "caller must be a guardian of this minor",
+            )
         return await self._repo.list_blocks_for_minor(minor_user_id)
 
     async def list_spaces_for_minor(
@@ -398,11 +394,12 @@ class ChildProtectionService:
         Guardian-or-admin only. Powers the Parent Dashboard's per-minor
         "Joined spaces" list + the per-space kick action.
         """
-        if not await self._repo.is_guardian_of(actor_user_id, minor_user_id):
-            if not await self._repo.is_admin(actor_user_id):
-                raise GuardianRequiredError(
-                    "caller must be a guardian of this minor",
-                )
+        if not await self._repo.is_guardian_of(
+            actor_user_id, minor_user_id
+        ) and not await self._repo.is_admin(actor_user_id):
+            raise GuardianRequiredError(
+                "caller must be a guardian of this minor",
+            )
         if self._space_repo is None:
             return []
         spaces = await self._space_repo.list_for_user(minor_user_id)
@@ -894,9 +891,12 @@ class ChildProtectionService:
         homes: set[str] = set()
         for row in await self._repo.list_blocks_for_minor(minor_user_id):
             home = await self._users.get_instance_for_user(str(row["blocked_user_id"]))
-            if home and home not in homes:
-                if await self.guardian_blocks_household(minor_user_id, home):
-                    homes.add(home)
+            if (
+                home
+                and home not in homes
+                and await self.guardian_blocks_household(minor_user_id, home)
+            ):
+                homes.add(home)
         return frozenset(homes)
 
     async def _lift(self, minor_user_id: str, instance_ids: frozenset[str]) -> None:
@@ -920,7 +920,11 @@ class ChildProtectionService:
             except Exception as exc:
                 failed.append(type(gate).__name__)
                 log.warning(
-                    "§CP %s hook failed in %s: %s", hook, type(gate).__name__, exc
+                    "§CP %s hook failed in %s: %s",
+                    hook,
+                    type(gate).__name__,
+                    exc,
+                    exc_info=True,
                 )
         return failed
 

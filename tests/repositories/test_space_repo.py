@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
 from socialhome.domain.gfs_server import GfsServer, SignedGfsServerList
-from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -18,13 +16,15 @@ from socialhome.domain.space import (
     SpaceMember,
     SpaceType,
 )
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
+from socialhome.infrastructure.key_manager import KeyManagerError
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 
 
 @pytest.fixture
 async def env(tmp_dir):
     """Env with a space repo and a seeded user."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
@@ -198,7 +198,7 @@ async def test_space_seed_is_bound_to_space_id_at_rest(env):
     )
     # sp-a still decrypts; sp-b's stolen blob fails the AD check.
     assert await env.repo.get_space_seed("sp-a") == kp.private_key
-    with pytest.raises(Exception):
+    with pytest.raises(KeyManagerError):
         await env.repo.get_space_seed("sp-b")
 
 
@@ -706,10 +706,10 @@ async def test_consume_expired_tz_aware_token_returns_none(env):
     expiry looked like it was in the future and no invite token ever
     expired — including the 5-minute ones minted for remote invites.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     await env.repo.save(_space("sp-expired"))
-    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
     token = await env.repo.create_invite_token(
         "sp-expired",
         "uid-alice",
@@ -720,10 +720,10 @@ async def test_consume_expired_tz_aware_token_returns_none(env):
 
 
 async def test_consume_future_tz_aware_token_succeeds(env):
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     await env.repo.save(_space("sp-live"))
-    soon = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    soon = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
     token = await env.repo.create_invite_token(
         "sp-live",
         "uid-alice",
@@ -1003,7 +1003,7 @@ def _expired_today_iso() -> str:
     comparison once the date digits tie). Using it makes the regression
     fire deterministically instead of only when the clock cooperates.
     """
-    return f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00.000001+00:00"
+    return f"{datetime.now(UTC).date().isoformat()}T00:00:00.000001+00:00"
 
 
 async def _expiry_token(env, space_id: str, expires_at: str | None) -> str:
@@ -1030,14 +1030,14 @@ async def test_consume_rejects_expired_tz_aware_token(env):
 
 async def test_consume_rejects_expired_token_minted_minutes_ago(env):
     """The real ``invite_remote_user`` shape: a 5-minute TTL, 10 min old."""
-    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
     token = await _expiry_token(env, "sp-exp-5min", past)
     assert await env.repo.consume_invite_token(token) is None
 
 
 async def test_consume_accepts_future_tz_aware_token(env):
     """A tz-aware expiry in the future is still consumable."""
-    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     token = await _expiry_token(env, "sp-exp-future", future)
     result = await env.repo.consume_invite_token(token)
     assert result is not None
@@ -1057,7 +1057,7 @@ async def test_consume_handles_naive_sqlite_shaped_expiry(env):
     ``created_at`` carries ``DEFAULT (datetime('now'))``, so a future
     SQL-side writer could. ``datetime()`` normalises it either way.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     past = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     future = (now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     expired = await _expiry_token(env, "sp-naive-past", past)
@@ -1068,7 +1068,7 @@ async def test_consume_handles_naive_sqlite_shaped_expiry(env):
 
 async def test_consume_handles_fractional_seconds(env):
     """Fractional seconds don't break the comparison in either direction."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expired = await _expiry_token(env, "sp-frac-past", _expired_today_iso())
     live = await _expiry_token(
         env, "sp-frac-future", (now + timedelta(minutes=30)).isoformat()
@@ -1085,7 +1085,7 @@ async def test_consume_handles_non_utc_offset(env):
     at 15:52 UTC even though its wall-clock digits read as the future.
     SQLite's ``datetime()`` applies the offset, so the token is rejected.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     plus2 = timezone(timedelta(hours=2))
     minus5 = timezone(timedelta(hours=-5))
     # Past instant, but wall-clock digits an hour ahead of UTC "now".
@@ -1113,7 +1113,7 @@ async def test_list_expired_join_requests_sees_same_day_expiry(env):
     )
     await env.db.enqueue(
         "UPDATE space_join_requests SET expires_at=? WHERE id=?",
-        ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), rid),
+        ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), rid),
     )
     rows = await env.repo.list_expired_join_requests()
     assert [r["id"] for r in rows] == [rid]
@@ -1283,13 +1283,13 @@ async def test_list_live_invite_tokens_returns_the_gfs_triple(env):
 async def test_list_live_invite_tokens_excludes_spent_links(env):
     """An expired or exhausted token grants nothing; listing it would
     only invite an owner to 'revoke' something already dead."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     await env.repo.save(_space("sp-live-list"))
     live = await env.repo.create_invite_token("sp-live-list", "uid-alice", uses=2)
     exhausted = await env.repo.create_invite_token("sp-live-list", "uid-alice", uses=1)
     await env.repo.consume_invite_token(exhausted)
-    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
     await env.repo.create_invite_token(
         "sp-live-list",
         "uid-alice",
@@ -1418,7 +1418,7 @@ def _mod_item(
 ):
     from socialhome.domain.space import ModerationStatus, SpaceModerationItem
 
-    now = submitted_at or datetime.now(timezone.utc)
+    now = submitted_at or datetime.now(UTC)
     return SpaceModerationItem(
         id=item_id,
         space_id=space_id,
@@ -1583,7 +1583,7 @@ async def test_a_tombstone_is_filled_counted_and_purged(env):
         payload={},
         current_snapshot='{"tombstone_from": "h-c"}',
         status=ModerationStatus.REJECTED,
-        reviewed_at=datetime.now(timezone.utc) - timedelta(days=20),
+        reviewed_at=datetime.now(UTC) - timedelta(days=20),
     )
     assert await env.repo.insert_moderation_item_if_absent(tomb)
     assert await env.repo.count_moderation_tombstones("h-c") == 1
@@ -1595,7 +1595,7 @@ async def test_a_tombstone_is_filled_counted_and_purged(env):
     assert await env.repo.count_moderation_tombstones("h-c") == 0
     stale = replace(tomb, id="m2")
     await env.repo.insert_moderation_item_if_absent(stale)
-    assert await env.repo.delete_stale_tombstones(datetime.now(timezone.utc)) == 1
+    assert await env.repo.delete_stale_tombstones(datetime.now(UTC)) == 1
     assert await env.repo.get_moderation_item("m1") is not None
 
 
@@ -1624,10 +1624,10 @@ async def test_expire_due_marks_and_returns_only_overdue_pending(env):
     from socialhome.domain.space import ModerationStatus
 
     await env.repo.save(_space())
-    old = datetime.now(timezone.utc) - timedelta(days=8)
+    old = datetime.now(UTC) - timedelta(days=8)
     await env.repo.insert_moderation_item(_mod_item("old", submitted_at=old))
     await env.repo.insert_moderation_item(_mod_item("fresh"))
-    expired = await env.repo.expire_due(datetime.now(timezone.utc))
+    expired = await env.repo.expire_due(datetime.now(UTC))
     assert [i.id for i in expired] == ["old"]
     assert expired[0].status is ModerationStatus.EXPIRED
     assert (
@@ -1637,14 +1637,14 @@ async def test_expire_due_marks_and_returns_only_overdue_pending(env):
         await env.repo.get_moderation_item("fresh")
     ).status is ModerationStatus.PENDING
     # A second sweep finds nothing new.
-    assert await env.repo.expire_due(datetime.now(timezone.utc)) == []
+    assert await env.repo.expire_due(datetime.now(UTC)) == []
 
 
 async def test_purge_payloads_nulls_decided_rows_only(env):
     from socialhome.domain.space import ModerationStatus
 
     await env.repo.save(_space())
-    old = datetime.now(timezone.utc) - timedelta(days=10)
+    old = datetime.now(UTC) - timedelta(days=10)
     await env.repo.insert_moderation_item(
         _mod_item("done", submitted_at=old, status=ModerationStatus.REJECTED)
     )
@@ -1652,7 +1652,7 @@ async def test_purge_payloads_nulls_decided_rows_only(env):
     await env.repo.insert_moderation_item(
         _mod_item("recent", status=ModerationStatus.APPROVED)
     )
-    n = await env.repo.purge_payloads(datetime.now(timezone.utc) - timedelta(days=7))
+    n = await env.repo.purge_payloads(datetime.now(UTC) - timedelta(days=7))
     assert n == 1
     done = await env.repo.get_moderation_item("done")
     assert done.payload == {} and done.current_snapshot is None

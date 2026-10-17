@@ -69,7 +69,7 @@ class AdminAuth:
 
     __slots__ = ("_admin_repo",)
 
-    def __init__(self, admin_repo: "AbstractGfsAdminRepo") -> None:
+    def __init__(self, admin_repo: AbstractGfsAdminRepo) -> None:
         self._admin_repo = admin_repo
 
     async def login(
@@ -169,7 +169,7 @@ async def handle_login(request: web.Request) -> web.Response:
     try:
         body = await request.json()
         password = str(body.get("password") or "")
-    except Exception:
+    except ValueError, AttributeError:
         raise web.HTTPBadRequest(reason="Invalid JSON body")
 
     # The login throttle keys on the client address, so it must come from the

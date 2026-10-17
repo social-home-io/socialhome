@@ -57,8 +57,8 @@ class HighlightFederationOutbound(
     """Publish Highlight mutations to paired peer instances."""
 
     __slots__ = (
-        "_child_protection",
         "_bus",
+        "_child_protection",
         "_federation",
         "_federation_repo",
         "_user_repo",
@@ -66,16 +66,16 @@ class HighlightFederationOutbound(
 
     # Narrow the mixins' optional ``_federation`` — this service requires it
     # at construction, so direct attribute access elsewhere is non-None.
-    _federation: "FederationService"
+    _federation: FederationService
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
-        user_repo: "AbstractUserRepo",
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
+        user_repo: AbstractUserRepo,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -234,7 +234,7 @@ class HighlightFederationOutbound(
         try:
             return await self._user_repo.get_instance_for_user(user_id)
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("highlight-outbound: user lookup failed: %s", exc)
+            log.debug("highlight-outbound: user lookup failed: %s", exc, exc_info=True)
             return None
 
     async def _resolve_audience(
@@ -258,6 +258,7 @@ class HighlightFederationOutbound(
                         "highlight-outbound: instance lookup for %s failed: %s",
                         uid,
                         exc,
+                        exc_info=True,
                     )
                     continue
                 if home and home != own:

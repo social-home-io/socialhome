@@ -354,10 +354,10 @@ async def test_0042_username_rename_cascades(tmp_path):
 
     for table, col in _LOCAL_CASCADE_TABLES.items():
         new = conn.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE {col}='alice2'"  # noqa: S608
+            f"SELECT COUNT(*) FROM {table} WHERE {col}='alice2'"
         ).fetchone()[0]
         old = conn.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE {col}='alice'"  # noqa: S608
+            f"SELECT COUNT(*) FROM {table} WHERE {col}='alice'"
         ).fetchone()[0]
         assert new == 1, f"{table}.{col} did not cascade the rename"
         assert old == 0, f"{table}.{col} still holds the old username"
@@ -463,7 +463,7 @@ async def test_0042_on_delete_still_cascades(tmp_path):
 
     for table, col in _LOCAL_CASCADE_TABLES.items():
         remaining = conn.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE {col}='bob'"  # noqa: S608
+            f"SELECT COUNT(*) FROM {table} WHERE {col}='bob'"
         ).fetchone()[0]
         assert remaining == 0, f"{table}.{col} did not ON DELETE CASCADE"
 

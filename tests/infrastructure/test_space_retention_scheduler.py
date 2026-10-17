@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from socialhome.db.database import AsyncDatabase
-from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.infrastructure.space_retention_scheduler import (
     SpaceRetentionScheduler,
 )
+from socialhome.repositories.conversation_repo import SqliteConversationRepo
 
 
 @pytest.fixture
@@ -30,9 +30,9 @@ async def env(tmp_dir):
 
 
 async def _seed_post(db, post_id, *, days_old, type_="text"):
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    created = (datetime.now(timezone.utc) - timedelta(days=days_old)).strftime(
+    created = (datetime.now(UTC) - timedelta(days=days_old)).strftime(
         "%Y-%m-%d %H:%M:%S",
     )
     await db.enqueue(
@@ -124,7 +124,7 @@ async def test_prune_handles_tz_aware_created_at_on_the_boundary_day(env):
     tied the post read as "not old enough" and never expired.
     """
     db = env
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cutoff_day = (now - timedelta(days=7)).date().isoformat()
     await _seed_iso_post(db, "old", created_at=f"{cutoff_day}T00:00:00.000001+00:00")
     await _seed_iso_post(db, "fresh", created_at=now.isoformat())
@@ -143,7 +143,7 @@ async def test_prune_boundary_day_respects_exempt_types(env):
     await db.enqueue(
         "UPDATE spaces SET retention_exempt_json='[\"poll\"]' WHERE id='sp-1'"
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cutoff_day = (now - timedelta(days=7)).date().isoformat()
     stamp = f"{cutoff_day}T00:00:00.000001+00:00"
     await _seed_iso_post(db, "old-text", created_at=stamp)
@@ -172,9 +172,7 @@ async def test_mirrored_space_is_never_pruned_here(env):
         "VALUES('sp-mirror', 't', 'other-iid', 'u', ?, 7, '[]')",
         ("bb" * 32,),
     )
-    old = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    old = (datetime.now(UTC) - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
     await db.enqueue(
         "INSERT INTO space_posts(id, space_id, author, type, content, created_at) "
         "VALUES('mirror-old', 'sp-mirror', 'u-author', 'text', 'hi', ?)",
@@ -209,7 +207,7 @@ async def _seed_chat(db, space_id, conv_id, msgs):
         (conv_id, space_id),
     )
     for msg_id, days_old in msgs:
-        created = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat()
+        created = (datetime.now(UTC) - timedelta(days=days_old)).isoformat()
         await db.enqueue(
             "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
             " content, created_at) VALUES(?, ?, 'u-author', 'hi', ?)",
@@ -266,7 +264,7 @@ async def test_space_chat_without_retention_and_dms_are_untouched(env):
     )
     await _seed_chat(db, "sp-keep", "chat-k", [("k-old", 400)])
     await db.enqueue("INSERT INTO conversations(id, type) VALUES('dm-1', 'dm')")
-    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=400)).isoformat()
     await db.enqueue(
         "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
         " content, created_at) VALUES('dm-old', 'dm-1', 'u-author', 'hi', ?)",

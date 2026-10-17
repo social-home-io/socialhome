@@ -40,7 +40,7 @@ from ..domain.space import SpaceConfigEventType
 from ..infrastructure.event_bus import EventBus
 from .space_authority_pin import owner_authority_cert_via, owner_statement_via
 from .space_crypto_service import sign_authority_event, strip_authority_sig_fields
-from .space_service import space_metadata_for_federation, embed_space_images
+from .space_service import embed_space_images, space_metadata_for_federation
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -70,16 +70,16 @@ _ROSTER_EVENT_TYPES = {
 class SpaceConfigOutbound:
     """Bus-event → federation broadcaster for space config changes."""
 
-    __slots__ = ("_bus", "_federation", "_space_repo", "_cover_repo", "_icon_repo")
+    __slots__ = ("_bus", "_cover_repo", "_federation", "_icon_repo", "_space_repo")
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        space_repo: "AbstractSpaceRepo",
-        cover_repo: "AbstractSpaceCoverRepo | None" = None,
-        icon_repo: "AbstractSpaceIconRepo | None" = None,
+        federation_service: FederationService,
+        space_repo: AbstractSpaceRepo,
+        cover_repo: AbstractSpaceCoverRepo | None = None,
+        icon_repo: AbstractSpaceIconRepo | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service

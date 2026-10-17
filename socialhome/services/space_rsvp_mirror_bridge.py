@@ -70,9 +70,9 @@ class SpaceRsvpMirrorBridge:
         self,
         *,
         bus: EventBus,
-        calendar_repo: "AbstractCalendarRepo",
-        space_calendar_repo: "AbstractSpaceCalendarRepo",
-        user_repo: "AbstractUserRepo",
+        calendar_repo: AbstractCalendarRepo,
+        space_calendar_repo: AbstractSpaceCalendarRepo,
+        user_repo: AbstractUserRepo,
     ) -> None:
         self._bus = bus
         self._calendar_repo = calendar_repo

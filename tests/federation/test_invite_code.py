@@ -23,17 +23,17 @@ from socialhome.routes.spaces import _bootstrap_hint
 
 
 def _payload(**over):
-    base = dict(
-        token="tok-1",
-        space_id="sp-1",
-        space_display_hint="Pascal's family",
-        issuer_instance_id="ISSUERINSTANCEID",
-        issuer_identity_pk="aa" * 32,
-        issuer_keywrap_pk="bb" * 32,
-        issuer_keywrap_sig="c" * 43,
-        issuer_proto_version=28,
-        expires_at="2026-10-01T12:00:00+00:00",
-    )
+    base = {
+        "token": "tok-1",
+        "space_id": "sp-1",
+        "space_display_hint": "Pascal's family",
+        "issuer_instance_id": "ISSUERINSTANCEID",
+        "issuer_identity_pk": "aa" * 32,
+        "issuer_keywrap_pk": "bb" * 32,
+        "issuer_keywrap_sig": "c" * 43,
+        "issuer_proto_version": 28,
+        "expires_at": "2026-10-01T12:00:00+00:00",
+    }
     base.update(over)
     return build_invite_payload(**base)
 

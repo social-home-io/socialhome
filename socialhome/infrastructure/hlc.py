@@ -17,15 +17,15 @@ class HLC:
     physical_ms: int = 0
     counter: int = 0
 
-    def tick(self, now_ms: int) -> "HLC":
+    def tick(self, now_ms: int) -> HLC:
         """Advance for a LOCAL event at wall-clock ``now_ms``."""
         p = max(self.physical_ms, now_ms)
         c = self.counter + 1 if p == self.physical_ms else 0
         return HLC(p, c)
 
     def merge(
-        self, remote: "HLC", now_ms: int, *, max_drift_ms: int = HLC_MAX_DRIFT_MS
-    ) -> "HLC":
+        self, remote: HLC, now_ms: int, *, max_drift_ms: int = HLC_MAX_DRIFT_MS
+    ) -> HLC:
         """Advance on RECEIVING ``remote``, clamping its physical to ``now+max_drift``."""
         rp = min(remote.physical_ms, now_ms + max_drift_ms)
         p = max(self.physical_ms, rp, now_ms)
@@ -43,7 +43,7 @@ class HLC:
         return f"{self.physical_ms}-{self.counter}"
 
     @classmethod
-    def parse(cls, raw: object) -> "HLC":
+    def parse(cls, raw: object) -> HLC:
         """Fail-soft parse of ``"<physical>-<counter>"``; garbage / None → zero."""
         if isinstance(raw, HLC):
             return raw

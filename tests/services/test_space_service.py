@@ -7,26 +7,32 @@ import base64
 import dataclasses
 import io
 import logging
+import os
 import random
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from PIL import Image
 
-from socialhome.domain.errors import InvalidMediaRefError
-from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.crypto import (
+    b64url_encode,
+    derive_instance_id,
+    ed25519_public_key,
+    generate_identity_keypair,
+)
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.events import (
-    SpaceRemoteSeatLive,
+    PeerProtoVersionRaised,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
     SpaceModerationQueued,
     SpacePostCreated,
+    SpaceRemoteSeatLive,
 )
-from socialhome.domain.writer_cert import WriterEntitlement
 from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
@@ -37,33 +43,42 @@ from socialhome.domain.federation_capabilities import (
     FederationCapability,
     space_feature_keys_missing_below,
 )
-from socialhome.domain.post import PostType
-from socialhome.federation.owner_bound_id import (
-    SPACE_COMMENT_KIND,
-    SPACE_POST_KIND,
-    OwnerBinding,
-    check_owner_bound_id,
+from socialhome.domain.media_constraints import (
+    SPACE_COVER_SNAPSHOT_MAX_BYTES,
+    SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
+from socialhome.domain.post import PostType
 from socialhome.domain.space import (
-    PeersTooOldError,
     ContentAction,
     ContentQueuedForReview,
     HostTooOldError,
     HostUnreachableError,
     HouseholdUpgradeRequiredError,
     JoinMode,
+    PeersTooOldError,
+    PrivateGfsOffError,
     Space,
     SpaceFeatureAccess,
     SpaceFeatures,
     SpaceMember,
     SpacePermissionError,
-    PrivateGfsOffError,
     SpaceRole,
     SpaceType,
 )
+from socialhome.domain.space_key import SpaceKey
+from socialhome.domain.writer_cert import WriterCert, WriterEntitlement
+from socialhome.domain.writer_key import WriterKeyGrant
+from socialhome.federation.owner_bound_id import (
+    SPACE_COMMENT_KIND,
+    SPACE_POST_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+)
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.cp_repo import SqliteCpRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
+from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
@@ -71,10 +86,8 @@ from socialhome.repositories.space_remote_member_repo import (
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.child_protection_service import ChildProtectionService
-from socialhome.domain.media_constraints import (
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    SPACE_ICON_SNAPSHOT_MAX_BYTES,
-)
+from socialhome.services.gfs_connection_service import GfsConnectionError
+from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_moderation_service import SpaceModerationService
 from socialhome.services.space_post_moderation import PostModerationHandler
 from socialhome.services.space_service import (
@@ -83,21 +96,10 @@ from socialhome.services.space_service import (
     build_space_snapshot_for_federation,
     normalize_category,
 )
-from socialhome.services.user_service import UserService
-from socialhome.services.gfs_connection_service import GfsConnectionError
-import os
-from socialhome.crypto import ed25519_public_key
-from socialhome.domain.space_key import SpaceKey
-from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.services.space_writer_cert_service import (
     SpaceWriterCertService,
 )
-from socialhome.domain.writer_cert import WriterCert
-from socialhome.domain.writer_key import WriterKeyGrant
-from socialhome.crypto import b64url_encode
-from socialhome.infrastructure.key_manager import KeyManager
-from socialhome.services.space_crypto_service import SpaceContentEncryption
-from socialhome.domain.events import PeerProtoVersionRaised
+from socialhome.services.user_service import UserService
 
 
 @pytest.fixture
@@ -1360,6 +1362,9 @@ async def test_delegated_admin_local_edit_converges_with_member(stack, tmp_dir):
     to the SAME deterministic (seq, author) winner — regardless of which author
     sorts higher. Before the fix the admin's NULL author fell back to
     owner_instance_id, mis-ordering the tie-break and diverging permanently."""
+    from dataclasses import replace as _replace
+    from datetime import datetime
+
     from socialhome.crypto import generate_space_keypair
     from socialhome.db.database import AsyncDatabase
     from socialhome.domain.federation import FederationEvent, FederationEventType
@@ -1373,9 +1378,6 @@ async def test_delegated_admin_local_edit_converges_with_member(stack, tmp_dir):
         sign_authority_event,
         strip_authority_sig_fields,
     )
-    from datetime import datetime, timezone
-
-    from dataclasses import replace as _replace
 
     kp = generate_space_keypair()
     sid = await _seat_remote_delegated_space(stack, actor="anna", seed=kp.private_key)
@@ -1432,7 +1434,7 @@ async def test_delegated_admin_local_edit_converges_with_member(stack, tmp_dir):
             event_type=FederationEventType.SPACE_CONFIG_CHANGED,
             from_instance=peer_author,
             to_instance="self",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload={
                 "space_id": space_id,
                 "sequence": 4,
@@ -1509,7 +1511,7 @@ async def test_delegated_admin_local_edit_converges_with_member(stack, tmp_dir):
             event_type=FederationEventType.SPACE_CONFIG_CHANGED,
             from_instance=stack.iid,
             to_instance="self",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload={
                 "space_id": space_id,
                 "sequence": 4,
@@ -2116,8 +2118,8 @@ async def test_public_space_coordinate_truncation(stack):
 
 def test_coerce_space_type_string():
     """String space type is coerced to enum."""
-    from socialhome.services.space_service import _coerce_space_type
     from socialhome.domain.space import SpaceType
+    from socialhome.services.space_service import _coerce_space_type
 
     assert _coerce_space_type("private") is SpaceType.PRIVATE
     assert _coerce_space_type(SpaceType.PUBLIC) is SpaceType.PUBLIC
@@ -2133,8 +2135,8 @@ def test_coerce_space_type_invalid():
 
 def test_coerce_join_mode_string():
     """String join mode is coerced to enum."""
-    from socialhome.services.space_service import _coerce_join_mode
     from socialhome.domain.space import JoinMode
+    from socialhome.services.space_service import _coerce_join_mode
 
     assert _coerce_join_mode("open") is JoinMode.OPEN
     assert _coerce_join_mode(JoinMode.INVITE_ONLY) is JoinMode.INVITE_ONLY
@@ -2160,8 +2162,8 @@ def test_coerce_post_type():
 
 def test_coerce_comment_type():
     """Comment type coercion works."""
-    from socialhome.services.space_service import _coerce_comment_type
     from socialhome.domain.post import CommentType
+    from socialhome.services.space_service import _coerce_comment_type
 
     assert _coerce_comment_type("text") is CommentType.TEXT
     assert _coerce_comment_type(CommentType.IMAGE) is CommentType.IMAGE
@@ -3219,12 +3221,12 @@ async def test_min_age_federates_via_space_meta_and_persists(stack):
     """§CP.F1 — the host's age gate rides the federation metadata, the stub
     carries it, and a save()/get() round-trip persists it (so a member
     household's join paths can enforce the host's gate locally)."""
+    import dataclasses
+
     from socialhome.services.space_service import (
         space_metadata_for_federation,
         stub_space_from_metadata,
     )
-
-    import dataclasses
 
     await stack.provision_user("anna", is_admin=True)
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
@@ -5164,11 +5166,11 @@ async def test_offline_owner_delegated_admin_invite_works(stack):
     a remote user (owner offline) — the invite envelope ships the content key,
     and the seat-time JOINED gossip is authority-signed (verifies against the
     space pubkey)."""
+    from unittest.mock import AsyncMock
+
     from socialhome.crypto import b64url_decode
     from socialhome.domain.federation import FederationEventType
     from socialhome.services.space_crypto_service import verify_authority_event
-
-    from unittest.mock import AsyncMock
 
     space = await _make_delegated_admin_space(stack, delegation=True)
     fed, fed_repo = _invite_fed()
@@ -7173,7 +7175,7 @@ async def test_an_invite_link_takes_the_default_ttl(stack):
     await stack.provision_user("anna", is_admin=True)
     space = await stack.space_svc.create_space(owner_username="anna", name="TtlDef")
     link = await stack.space_svc.create_invite_link(space.id, actor_username="anna")
-    delta = datetime.fromisoformat(link["expires_at"]) - datetime.now(timezone.utc)
+    delta = datetime.fromisoformat(link["expires_at"]) - datetime.now(UTC)
     assert timedelta(days=6) < delta <= timedelta(days=7)
 
 
@@ -7215,8 +7217,8 @@ def test_the_published_ttl_cap_clears_the_connection_server_boundary():
         validate_expires_at,
     )
     from socialhome.services.space_service import (
-        PUBLISHED_INVITE_MAX_TTL_SECONDS,
         PUBLISHED_INVITE_CLOCK_MARGIN_SECONDS,
+        PUBLISHED_INVITE_MAX_TTL_SECONDS,
         _invite_expiry_epoch,
     )
 
@@ -7396,6 +7398,7 @@ async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
     through ``set_remote_member_role``.
     """
     from unittest.mock import AsyncMock, MagicMock
+
     from socialhome.domain.federation import InstanceSource
     from socialhome.domain.space import SpaceFeatures, SpaceRole
 
@@ -7585,7 +7588,7 @@ async def test_roster_snapshot_entries_are_signed_off_the_event_loop(
         return real_sign(**kwargs)
 
     monkeypatch.setattr(space_service_mod, "sign_authority_event", _spy)
-    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    _owner, space, _fed, remote = await _hosted_space_with_seats(stack)
     await _seat(remote, space.id, "peer-early", "u-early")
     await _seat(remote, space.id, "peer-new", "u-new")
     threads.clear()
@@ -7611,7 +7614,7 @@ async def test_an_invite_link_redeem_sends_no_snapshot(stack):
 
 
 async def test_no_roster_snapshot_to_a_household_below_v32(stack):
-    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    _owner, space, fed, _remote = await _hosted_space_with_seats(stack)
 
     async def _supports(instance_id, *, min_version):
         return min_version < 32
@@ -7753,7 +7756,7 @@ async def test_an_upgrade_to_v32_triggers_a_snapshot(stack):
 
 
 async def test_only_the_host_sends_a_roster_snapshot(stack):
-    _owner, space, fed, _remote = await _hosted_space_with_seats(stack)
+    _owner, space, _fed, _remote = await _hosted_space_with_seats(stack)
     await stack.db.enqueue(
         "UPDATE spaces SET owner_instance_id='someone-else' WHERE id=?", (space.id,)
     )
@@ -9773,7 +9776,7 @@ async def test_mesh_only_member_of_unknown_version_gets_no_snapshot(stack):
 
 
 async def test_seating_a_household_delivers_its_cert_with_the_snapshot(stack):
-    space, fed, remote, pks = await _cert_space(stack)
+    space, fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     await stack.space_svc.broadcast_remote_member_joined(
         space.id, instance_id="peer-a", user_id="u-a", user_pk=None, display_name="A"
@@ -9787,7 +9790,7 @@ async def test_seating_a_household_delivers_its_cert_with_the_snapshot(stack):
 
 
 async def test_rekey_fan_out_decorates_each_member_with_its_own_cert(stack):
-    space, fed, remote, pks = await _cert_space(stack)
+    space, fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     stack.space_svc._space_crypto = SpaceContentEncryption(
         SqliteSpaceKeyRepo(stack.db),
@@ -9808,7 +9811,7 @@ async def test_rekey_fan_out_decorates_each_member_with_its_own_cert(stack):
 
 
 async def test_role_change_that_alters_rights_redelivers_the_cert(stack):
-    space, fed, remote, pks = await _cert_space(stack)
+    space, fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a", role=SpaceRole.SUBSCRIBER.value)
     target = await remote.get(space.id, "peer-a", "u-a")
     fed.send_with_mesh_fallback.reset_mock()
@@ -9863,7 +9866,7 @@ async def test_a_scope_reducing_remote_role_change_rotates(stack, monkeypatch):
     """write → comment: the household's old write cert must die with the
     epoch, so the content key rotates."""
 
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, remote, _pks = await _cert_space(stack)
     await stack.db.enqueue(
         "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (space.id,)
     )
@@ -9879,7 +9882,7 @@ async def test_a_scope_reducing_remote_role_change_rotates(stack, monkeypatch):
 
 
 async def test_a_promotion_does_not_rotate(stack, monkeypatch):
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
     rekeys = await _rekeys(stack, monkeypatch)
     target = await remote.get(space.id, "peer-a", "u-a")
@@ -9893,7 +9896,7 @@ async def test_a_scope_reducing_local_role_change_rotates(stack, monkeypatch):
     """The local role path checks our own household's scope before and after
     the write (today's local roles all write — the guard is for any future
     one that does not)."""
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, _remote, _pks = await _cert_space(stack)
     member = await stack.provision_user("loc")
     await stack.space_svc.add_member(
         space.id, actor_username="hosty", user_id=member.user_id
@@ -9916,7 +9919,7 @@ async def test_a_scope_reducing_local_role_change_rotates(stack, monkeypatch):
 
 
 async def test_rotate_if_scope_weakened_needs_a_weaker_scope(stack, monkeypatch):
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     rekeys = await _rekeys(stack, monkeypatch)
     svc = stack.space_svc
@@ -9928,7 +9931,7 @@ async def test_rotate_if_scope_weakened_needs_a_weaker_scope(stack, monkeypatch)
 
 
 async def test_comment_rights_off_with_followers_rotates(stack, monkeypatch):
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, remote, _pks = await _cert_space(stack)
     await stack.space_svc.update_config(
         space.id,
         actor_username="hosty",
@@ -9945,7 +9948,7 @@ async def test_comment_rights_off_with_followers_rotates(stack, monkeypatch):
 
 
 async def test_comment_rights_off_without_followers_does_not_rotate(stack, monkeypatch):
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, _remote, _pks = await _cert_space(stack)
     await stack.space_svc.update_config(
         space.id,
         actor_username="hosty",
@@ -10072,7 +10075,7 @@ async def test_host_applies_a_leave_tombstone_drop_instance_then_rotate(
 async def test_a_forged_leave_for_another_households_seat_changes_nothing(
     stack, monkeypatch
 ):
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     await stack.space_repo.add_space_instance(space.id, "peer-a")
     rekeys = await _rekeys(stack, monkeypatch)
@@ -10087,7 +10090,7 @@ async def test_a_forged_leave_for_another_households_seat_changes_nothing(
 async def test_a_leave_with_another_seat_left_keeps_the_household(stack, monkeypatch):
     """The household keeps its seat, but its cert's user binding shrank
     (u-a left) — rotate, so u-a can no longer post under the old cert."""
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     await _seat(remote, space.id, "peer-a", "u-a2")
     await stack.space_repo.add_space_instance(space.id, "peer-a")
@@ -10100,7 +10103,7 @@ async def test_a_leave_with_another_seat_left_keeps_the_household(stack, monkeyp
 async def test_a_leave_ending_the_last_admin_seat_rotates_once(stack, monkeypatch):
     """Delegation on: the v_44 authority rotation rotates the content key, so
     the scope-drop rotation is skipped (one epoch, not two)."""
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, remote, _pks = await _cert_space(stack)
     await stack.db.enqueue(
         "UPDATE spaces SET delegated_admin_authority=1 WHERE id=?", (space.id,)
     )
@@ -10115,7 +10118,7 @@ async def test_a_leave_ending_the_last_admin_seat_rotates_once(stack, monkeypatc
 
 
 async def test_a_leave_for_a_space_we_do_not_host_is_not_ours(stack):
-    space, leaver, fed, _owner = await _stub_space_with_member(stack)
+    space, _leaver, _fed, _owner = await _stub_space_with_member(stack)
     assert not await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u")
 
 
@@ -10124,7 +10127,7 @@ async def test_admin_demotion_with_v44_rotation_skips_the_scope_rotation(
 ):
     """Minor: when an admin seat ends together with a scope drop and the v_44
     rotation will rotate anyway, the scope rotation is skipped."""
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, remote, _pks = await _cert_space(stack)
     await stack.db.enqueue(
         "UPDATE spaces SET delegated_admin_authority=1, allow_subscriber_comment=1"
         " WHERE id=?",
@@ -10144,7 +10147,7 @@ async def test_admin_demotion_with_v44_rotation_skips_the_scope_rotation(
 
 async def _crypto_space(stack, *, delegation: bool, shared_seed: bool = False):
     """A cert space with a real content key, an admin seat on peer-a."""
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, remote, _pks = await _cert_space(stack)
     stack.space_svc._space_crypto = SpaceContentEncryption(
         SqliteSpaceKeyRepo(stack.db),
         KeyManager(b"\x0a" * 32),
@@ -10306,7 +10309,7 @@ async def _posts_cert_space(stack):
 async def test_narrowing_posts_access_rotates(stack, monkeypatch):
     """OPEN → ADMIN_ONLY: a plain member household's ``write`` cert must die
     with the epoch, or it keeps posting over the GFS (P1)."""
-    space, fed, remote, _pks = await _posts_cert_space(stack)
+    space, _fed, remote, _pks = await _posts_cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     rekeys = await _rekeys(stack, monkeypatch)
     await stack.space_svc.update_config(
@@ -10318,7 +10321,7 @@ async def test_narrowing_posts_access_rotates(stack, monkeypatch):
 
 
 async def test_moderating_posts_rotates_for_plain_members(stack, monkeypatch):
-    space, fed, remote, _pks = await _posts_cert_space(stack)
+    space, _fed, remote, _pks = await _posts_cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     rekeys = await _rekeys(stack, monkeypatch)
     await stack.space_svc.update_config(
@@ -10330,7 +10333,7 @@ async def test_moderating_posts_rotates_for_plain_members(stack, monkeypatch):
 
 
 async def test_opening_posts_does_not_rotate_but_re_issues(stack, monkeypatch):
-    space, fed, remote, _pks = await _posts_cert_space(stack)
+    space, _fed, remote, _pks = await _posts_cert_space(stack)
     await stack.space_svc.update_config(
         space.id,
         actor_username="hosty",
@@ -10356,7 +10359,7 @@ async def test_opening_posts_does_not_rotate_but_re_issues(stack, monkeypatch):
 async def test_a_new_seat_in_a_seated_household_re_issues_its_cert(stack, monkeypatch):
     """v2: the household's cert binding does not name a newly seated user
     yet — the host sends it a roster snapshot (with the re-issued cert)."""
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, _fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     snapshots: list[str] = []
 
@@ -10378,7 +10381,7 @@ async def test_a_new_seat_in_a_seated_household_re_issues_its_cert(stack, monkey
 async def test_a_new_seat_in_a_space_we_do_not_host_re_issues_nothing(
     stack, monkeypatch
 ):
-    space, leaver, fed, _owner = await _stub_space_with_member(stack)
+    space, _leaver, _fed, _owner = await _stub_space_with_member(stack)
     await _cert_space(stack)
     snapshots: list[str] = []
 
@@ -10558,7 +10561,7 @@ async def test_strict_rekey_delivers_the_new_writer_key_only_to_publishers(stack
 async def test_strict_rotation_tells_the_gfs_before_the_members(stack):
     """mint (derived) → GFS notice with the pin → member rekey: the pin is at
     the GFS before any member can sign at the new epoch."""
-    space, fed, remote, _pks = await _cert_space(stack, version=50)
+    space, fed, _remote, _pks = await _cert_space(stack, version=50)
     await _strict(stack, space.id)
     order: list[str] = []
 

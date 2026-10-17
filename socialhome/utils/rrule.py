@@ -31,9 +31,8 @@ naive); this is the legacy behaviour kept for ICS round-trip code.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
-
 
 _WEEKDAYS = {
     "MO": 0,
@@ -55,17 +54,17 @@ def _parse_until(value: str) -> datetime | None:
     if "T" in v and v.endswith("Z") and "-" not in v:
         try:
             return datetime.strptime(v, "%Y%m%dT%H%M%SZ").replace(
-                tzinfo=timezone.utc,
+                tzinfo=UTC,
             )
         except ValueError:
             return None
     if len(v) == 8 and v.isdigit():
         try:
-            return datetime.strptime(v, "%Y%m%d").replace(tzinfo=timezone.utc)
+            return datetime.strptime(v, "%Y%m%d").replace(tzinfo=UTC)
         except ValueError:
             return None
     try:
-        return datetime.fromisoformat(v.replace("Z", "+00:00"))
+        return datetime.fromisoformat(v)
     except ValueError:
         return None
 
@@ -178,8 +177,8 @@ def expand_rrule(
         if zone is None:
             return s, e
         return (
-            s.replace(tzinfo=zone).astimezone(timezone.utc),
-            e.replace(tzinfo=zone).astimezone(timezone.utc),
+            s.replace(tzinfo=zone).astimezone(UTC),
+            e.replace(tzinfo=zone).astimezone(UTC),
         )
 
     if freq is None:
@@ -204,9 +203,7 @@ def expand_rrule(
     def _terminator_hit(s: datetime) -> bool:
         if count is not None and emitted >= count:
             return True
-        if until is not None and s > until:
-            return True
-        return False
+        return bool(until is not None and s > until)
 
     if freq == "DAILY":
         step = timedelta(days=interval)

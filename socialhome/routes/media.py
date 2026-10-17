@@ -139,7 +139,7 @@ class MediaUploadView(BaseView):
     """``POST /api/media/upload`` — accept multipart upload and process."""
 
     async def post(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
 
         config = self.svc(config_key)
         quota = self.request.app.get(storage_quota_service_key)
@@ -150,7 +150,7 @@ class MediaUploadView(BaseView):
         try:
             reader = await self.request.multipart()
         except Exception as exc:
-            log.warning("media upload: multipart parse error: %s", exc)
+            log.warning("media upload: multipart parse error: %s", exc, exc_info=True)
             return error_response(400, "BAD_REQUEST", "Malformed multipart body.")
 
         field = await reader.next()

@@ -10,7 +10,7 @@ from socialhome.repositories.shopping_repo import SqliteShoppingRepo
 @pytest.fixture
 async def env(tmp_dir):
     """Env with a shopping repo over a real SQLite database."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()

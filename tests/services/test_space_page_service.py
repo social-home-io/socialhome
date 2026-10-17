@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.events import PageCreated, PageDeleted, PageUpdated
+from socialhome.domain.page_version import version_hash
 from socialhome.domain.space import (
     AccessAdminOnlyError,
     ContentAction,
@@ -20,7 +21,6 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.page_repo import SqlitePageRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
-from socialhome.domain.page_version import version_hash
 from socialhome.services.page_conflict_service import (
     NoActiveConflictError,
     PageConflictService,

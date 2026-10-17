@@ -6,7 +6,7 @@ are never gated."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -109,7 +109,7 @@ async def _seed_content(client, space) -> dict:
     )
     assert r.status == 201, await r.text()
     ids["sticky"] = (await r.json())["id"]
-    start = datetime.now(timezone.utc) + timedelta(days=1)
+    start = datetime.now(UTC) + timedelta(days=1)
     r = await client.post(
         f"/api/spaces/{SID}/calendar/events",
         json={
@@ -126,7 +126,7 @@ async def _seed_content(client, space) -> dict:
 
 def _writes(ids: dict) -> list[tuple[str, str, str, dict | None]]:
     """(feature, method, path, body) for every gated write."""
-    start = datetime.now(timezone.utc) + timedelta(days=2)
+    start = datetime.now(UTC) + timedelta(days=2)
     ev = {
         "summary": "N",
         "start": start.isoformat(),
@@ -285,7 +285,7 @@ async def test_a_dropped_announcement_is_reported_to_its_creator(
     keeps the creator from posting — and the response says so (and why).
     Under MODERATED posts the card waits in the review queue instead."""
     await _set_access(client, "posts", level)
-    start = datetime.now(timezone.utc) + timedelta(days=1)
+    start = datetime.now(UTC) + timedelta(days=1)
     r = await client.post(
         f"/api/spaces/{SID}/calendar/events",
         json={
@@ -325,7 +325,7 @@ async def test_the_space_event_list_says_whether_the_viewer_may_edit(client, spa
     calendar's Edit / Delete controls. Open: every writer; ADMIN_ONLY: the
     owner / admins only; a subscriber never."""
     ids = await _seed_content(client, space)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     url = (
         f"/api/spaces/{SID}/calendar/events?start={now.date().isoformat()}"
         f"&end={(now + timedelta(days=3)).date().isoformat()}"

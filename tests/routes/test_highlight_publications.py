@@ -7,7 +7,7 @@ GFS round-trip. The auth + match-info wiring is what's under test.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -55,7 +55,7 @@ class _StubService:
 
 
 def _expires(days: int = 7) -> str:
-    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    return (datetime.now(UTC) + timedelta(days=days)).isoformat()
 
 
 @pytest.fixture
@@ -182,7 +182,7 @@ async def test_get_publish_state_when_published(client, seeded_highlight):
     await repo.mark_published(
         seeded_highlight,
         gfs_id="gfs-abc",
-        published_at=datetime.now(timezone.utc).isoformat(),
+        published_at=datetime.now(UTC).isoformat(),
     )
     r = await client.get(
         f"/api/highlights/{seeded_highlight}/publish",

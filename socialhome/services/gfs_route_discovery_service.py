@@ -49,7 +49,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ..domain.federation import (
@@ -114,7 +114,7 @@ ROUTE_MAX_AGE: timedelta = timedelta(seconds=3 * ROUTE_DISCOVERY_INTERVAL_S)
 
 def _utc_now_iso() -> str:
     """Tz-aware UTC ISO 8601 — the shape ``peer_gfs_routes`` stores."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _nonce_of(payload: object) -> str | None:
@@ -140,21 +140,21 @@ class GfsRouteDiscoveryService:
     """Probe / ack logic for shared-GFS route discovery."""
 
     __slots__ = (
+        "_clock",
         "_federation",
         "_federation_repo",
         "_gfs_repo",
-        "_relay_supported",
-        "_clock",
+        "_last_answer_at",
+        "_last_probe_at",
         "_now_iso",
         "_pending",
-        "_last_probe_at",
-        "_last_answer_at",
+        "_relay_supported",
     )
 
     def __init__(
         self,
         *,
-        federation: "FederationService",
+        federation: FederationService,
         federation_repo: AbstractFederationRepo,
         gfs_connection_repo: AbstractGfsConnectionRepo,
         envelope_relay_supported: Callable[[GfsConnection], Awaitable[bool]],
@@ -173,13 +173,13 @@ class GfsRouteDiscoveryService:
         self._last_probe_at: dict[str, float] = {}
         self._last_answer_at: dict[tuple[str, str], float] = {}
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         """Register the probe and ack handlers on the inbound registry."""
-        federation_service._event_registry.register(  # noqa: SLF001
+        federation_service._event_registry.register(
             FederationEventType.GFS_RELAY_PROBE,
             self._on_probe,
         )
-        federation_service._event_registry.register(  # noqa: SLF001
+        federation_service._event_registry.register(
             FederationEventType.GFS_RELAY_PROBE_ACK,
             self._on_probe_ack,
         )
@@ -313,7 +313,7 @@ class GfsRouteDiscoveryService:
             try:
                 if await self._relay_supported(conn):
                     out.append(conn)
-            except Exception:  # noqa: BLE001 — one bad server must not stop the round
+            except Exception:
                 log.warning(
                     "gfs routes: capability check failed for connection %s",
                     conn.id,
@@ -481,7 +481,7 @@ class GfsRouteDiscoveryService:
 
     async def expire_stale_routes(self) -> int:
         """Drop every route not refreshed within :data:`ROUTE_MAX_AGE`."""
-        cutoff = (datetime.now(timezone.utc) - ROUTE_MAX_AGE).isoformat()
+        cutoff = (datetime.now(UTC) - ROUTE_MAX_AGE).isoformat()
         removed = await self._federation_repo.delete_gfs_routes_older_than(cutoff)
         if removed:
             log.info("gfs routes: expired %d stale relay route(s)", removed)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -26,7 +26,7 @@ async def repo(db):
 
 
 def _ev(eid: str) -> CalendarEvent:
-    at = datetime(2020, 1, 1, tzinfo=timezone.utc)  # long past: no window
+    at = datetime(2020, 1, 1, tzinfo=UTC)  # long past: no window
     return CalendarEvent(
         id=eid,
         calendar_id="sp",

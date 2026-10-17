@@ -348,7 +348,7 @@ class MemberPublishRequest:
         }
 
     @classmethod
-    def from_wire(cls, raw: object) -> "MemberPublishRequest":
+    def from_wire(cls, raw: object) -> MemberPublishRequest:
         """Parse a request body; :class:`InvalidMemberPublish` on any
         missing, extra or malformed field."""
         if not isinstance(raw, dict):
@@ -442,7 +442,7 @@ class MemberPublishAnonRequest:
         }
 
     @classmethod
-    def from_wire(cls, raw: object) -> "MemberPublishAnonRequest":
+    def from_wire(cls, raw: object) -> MemberPublishAnonRequest:
         """Parse a request body; :class:`InvalidMemberPublish` on any
         missing, extra or malformed field — so a body carrying
         ``instance_id``, a household ``signature`` or a ``writer_cert`` is
@@ -503,7 +503,7 @@ class SpaceItemFrame:
         return wire
 
     @classmethod
-    def from_wire(cls, raw: object) -> "SpaceItemFrame":
+    def from_wire(cls, raw: object) -> SpaceItemFrame:
         """Parse a fan-out frame. The WS ``type`` key (and any key an older
         or newer GFS adds) is ignored — receivers authenticate the item by
         the cert and the author signature inside, never by outer fields. A

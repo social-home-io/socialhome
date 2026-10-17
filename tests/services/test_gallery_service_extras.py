@@ -333,7 +333,7 @@ async def test_delete_album_random_user_403(env):
 
 
 async def test_get_album_resolves_cover_from_explicit_item(env):
-    svc, repo = env
+    svc, _repo = env
     a = await svc.create_album(
         space_id=None,
         owner_user_id="a-id",

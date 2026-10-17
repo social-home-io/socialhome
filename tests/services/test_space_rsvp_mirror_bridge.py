@@ -8,11 +8,9 @@ all mirrors.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
-from socialhome.repositories.space_repo import SqliteSpaceRepo
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
@@ -25,6 +23,7 @@ from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
 )
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.calendar_service import (
     CalendarService,
@@ -113,7 +112,7 @@ async def _create_space_event(
     the event with a different ``created_by`` and let the test trigger
     the going-RSVP explicitly.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ev = await space_cal_svc.create_event(
         space_id="space-1",
         summary=summary,
@@ -166,7 +165,7 @@ async def test_remove_rsvp_removes_mirror(env):
 async def test_source_update_refreshes_mirror(env):
     event_id = await _create_space_event(env.space_cal_svc)
     mirror_id = _mint_mirror_id("u-anna", event_id)
-    new_start = datetime.now(timezone.utc) + timedelta(days=1)
+    new_start = datetime.now(UTC) + timedelta(days=1)
     new_end = new_start + timedelta(hours=3)
     await env.space_cal_svc.update_event(
         event_id,
@@ -216,7 +215,7 @@ async def test_idempotent_under_redelivered_rsvp(env):
             event_id=event_id,
             space_id="space-1",
             user_id="u-anna",
-            occurrence_at=datetime.now(timezone.utc).isoformat(),
+            occurrence_at=datetime.now(UTC).isoformat(),
             status="going",
         )
     )
@@ -234,7 +233,7 @@ async def test_remote_user_rsvp_does_not_create_local_mirror(env):
             event_id=event_id,
             space_id="space-1",
             user_id="u-bob-remote",
-            occurrence_at=datetime.now(timezone.utc).isoformat(),
+            occurrence_at=datetime.now(UTC).isoformat(),
             status="going",
         )
     )

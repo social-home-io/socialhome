@@ -11,7 +11,6 @@ constants to produce conformant output.  Inbound federation validation
 
 from __future__ import annotations
 
-
 # ─── Image constraints ──────────────────────────────────────────────────────
 
 #: Longest-side cap for uploaded photos / post images. 2560 px is a

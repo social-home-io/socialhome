@@ -16,7 +16,7 @@ access patterns (a background retry loop, not the request/response path).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -265,7 +265,7 @@ class SqliteFederationRepo:
         """
         await self._db.enqueue(
             "UPDATE remote_instances SET capabilities_seen_at=? WHERE id=?",
-            (datetime.now(timezone.utc).isoformat(), instance_id),
+            (datetime.now(UTC).isoformat(), instance_id),
         )
 
     async def list_instances(
@@ -488,11 +488,13 @@ class SqliteFederationRepo:
         """
 
         def _run(conn) -> bool:
-            if token is not None:
-                if not conn.execute(
+            if (
+                token is not None
+                and not conn.execute(
                     "DELETE FROM pending_pairings WHERE token=?", (token,)
-                ).rowcount:
-                    raise _NotPending()
+                ).rowcount
+            ):
+                raise _NotPending()
             if not conn.execute(_PROMOTE_PENDING_SQL, _promote_params(inst)).rowcount:
                 raise _NotPending()
             return True

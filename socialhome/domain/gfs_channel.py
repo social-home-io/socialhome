@@ -303,7 +303,7 @@ class ChannelCert:
         return {**self.signing_body(), "cert_sig": self.cert_sig}
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelCert":
+    def from_wire(cls, raw: object) -> ChannelCert:
         body = _exact(raw, CHANNEL_CERT_KEYS, "channel cert")
         scope = body.get("scope")
         if scope not in WRITER_SCOPES:
@@ -352,7 +352,7 @@ class ChannelPass:
         return {**self.signing_body(), "pass_sig": self.pass_sig}
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelPass":
+    def from_wire(cls, raw: object) -> ChannelPass:
         body = _exact(raw, CHANNEL_PASS_KEYS, "channel pass")
         issued_at = body.get("issued_at")
         if not _is_int(issued_at):
@@ -405,7 +405,7 @@ class ChannelWriterKeyCert:
         return {**self.signing_body(), "cert_sig": self.cert_sig}
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelWriterKeyCert":
+    def from_wire(cls, raw: object) -> ChannelWriterKeyCert:
         body = _exact(raw, CHANNEL_WRITER_KEY_CERT_KEYS, "channel writer key cert")
         return cls(
             writer_key_suite=_str(body, "writer_key_suite", _MAX_ID_CHARS),
@@ -443,7 +443,7 @@ class ChannelWriterKeyGrant:
         }
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelWriterKeyGrant":
+    def from_wire(cls, raw: object) -> ChannelWriterKeyGrant:
         body = _exact(raw, CHANNEL_WRITER_KEY_GRANT_KEYS, "channel writer key")
         return cls(
             writer_key_suite=_str(body, "writer_key_suite", _MAX_ID_CHARS),
@@ -529,7 +529,7 @@ class GfsChannelGrant:
         return wire
 
     @classmethod
-    def from_wire(cls, raw: object) -> "GfsChannelGrant":
+    def from_wire(cls, raw: object) -> GfsChannelGrant:
         body = _exact_optional(raw, GRANT_REQUIRED_KEYS, GRANT_OPTIONAL_KEYS, "grant")
         gfs_ids = body.get("gfs_ids")
         if (
@@ -620,7 +620,7 @@ class ChannelRegisterRequest:
         return {**self.signing_body(), "channel_sig": self.channel_sig}
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelRegisterRequest":
+    def from_wire(cls, raw: object) -> ChannelRegisterRequest:
         body = _exact_optional(raw, REGISTER_REQUIRED_KEYS, GFS_KEY_FIELD, "register")
         return cls(
             gfs_key=_gfs_key(body),
@@ -687,7 +687,7 @@ class ChannelEpochNotice:
         return {**self.signing_body(), "channel_sig": self.channel_sig}
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelEpochNotice":
+    def from_wire(cls, raw: object) -> ChannelEpochNotice:
         body = _exact_optional(
             raw,
             NOTICE_REQUIRED_KEYS,
@@ -751,7 +751,7 @@ class ChannelUnregisterRequest:
         return {**self.signing_body(), "channel_sig": self.channel_sig}
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelUnregisterRequest":
+    def from_wire(cls, raw: object) -> ChannelUnregisterRequest:
         body = _exact_optional(raw, UNREGISTER_KEYS, GFS_KEY_FIELD, "unregister")
         return cls(
             gfs_key=_gfs_key(body),
@@ -808,7 +808,7 @@ class ChannelSubscribeRequest:
         return body
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelSubscribeRequest":
+    def from_wire(cls, raw: object) -> ChannelSubscribeRequest:
         body = _exact_optional(raw, SUBSCRIBE_KEYS, GFS_KEY_FIELD, "subscribe")
         return cls(
             gfs_key=_gfs_key(body),
@@ -859,7 +859,7 @@ class ChannelUnsubscribeRequest:
         return body
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelUnsubscribeRequest":
+    def from_wire(cls, raw: object) -> ChannelUnsubscribeRequest:
         body = _exact_optional(raw, UNSUBSCRIBE_KEYS, GFS_KEY_FIELD, "unsubscribe")
         return cls(
             gfs_key=_gfs_key(body),
@@ -934,7 +934,7 @@ class ChannelPublishRequest:
         return channel_frame(self.channel_id, self.epoch, self.payload)
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelPublishRequest":
+    def from_wire(cls, raw: object) -> ChannelPublishRequest:
         body = _exact_optional(raw, PUBLISH_KEYS, GFS_KEY_FIELD, "publish")
         _event_type(body)
         return cls(
@@ -1005,7 +1005,7 @@ class ChannelPublishAnonRequest:
         return channel_frame(self.channel_id, self.epoch, self.payload)
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelPublishAnonRequest":
+    def from_wire(cls, raw: object) -> ChannelPublishAnonRequest:
         body = _exact_optional(raw, PUBLISH_ANON_KEYS, GFS_KEY_FIELD, "publish-anon")
         _event_type(body)
         return cls(
@@ -1049,7 +1049,7 @@ class ChannelItemFrame:
     payload: str
 
     @classmethod
-    def from_wire(cls, raw: object) -> "ChannelItemFrame":
+    def from_wire(cls, raw: object) -> ChannelItemFrame:
         """Parse a fan-out frame; the WS ``type`` key (and any key a newer
         server adds) is ignored — the item authenticates itself inside the
         ciphertext."""

@@ -85,12 +85,12 @@ class ReconnectSyncQueue:
 
     __slots__ = (
         "_concurrency",
-        "_heap",
-        "_seq",
-        "_workers",
         "_event",
-        "_stop",
+        "_heap",
         "_lock",
+        "_seq",
+        "_stop",
+        "_workers",
     )
 
     def __init__(self, concurrency: int = SYNC_CONCURRENCY) -> None:
@@ -144,8 +144,10 @@ class ReconnectSyncQueue:
     async def _await_safely(task: asyncio.Task) -> None:
         try:
             await task
-        except asyncio.CancelledError, Exception:
+        except asyncio.CancelledError:
             pass
+        except Exception:
+            log.debug("reconnect: task ended with an error", exc_info=True)
 
     # ─── Public API ───────────────────────────────────────────────────────
 
@@ -189,6 +191,7 @@ class ReconnectSyncQueue:
                     item.description,
                     item.priority,
                     exc,
+                    exc_info=True,
                 )
 
     async def _next_item(self) -> _QueueItem | None:

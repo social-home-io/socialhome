@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -13,13 +13,6 @@ from socialhome.domain.space_item import (
     AUTHORITY_KIND_REMOVAL,
     GENERIC_ITEM_TYPES,
     ITEM_SIZE_BUCKETS,
-    PAD_FIELD,
-    REMOVAL_TARGET_COMMENT,
-    REMOVAL_TARGET_POST,
-    REMOVAL_TARGETS,
-    SUPPORTED_AUTHORITY_KINDS,
-    AuthorityRemoval,
-    pad_json_object,
     ITEM_TYPE_COMMENT,
     ITEM_TYPE_COMMENT_DELETE,
     ITEM_TYPE_COMMENT_EDIT,
@@ -29,9 +22,16 @@ from socialhome.domain.space_item import (
     ITEM_TYPE_REACTION_ADD,
     ITEM_TYPE_REACTION_REMOVE,
     MAX_ITEM_CLOCK_SKEW_S,
+    PAD_FIELD,
     POST_SHAPED_ITEM_TYPES,
+    REMOVAL_TARGET_COMMENT,
+    REMOVAL_TARGET_POST,
+    REMOVAL_TARGETS,
+    SUPPORTED_AUTHORITY_KINDS,
     SUPPORTED_ITEM_TYPES,
+    AuthorityRemoval,
     item_stamp,
+    pad_json_object,
     required_scope,
     stamp_to_db,
 )
@@ -67,7 +67,7 @@ def test_an_unknown_type_has_no_scope():
 
 
 def test_item_stamp_parses_a_tz_aware_stamp_within_the_skew():
-    now = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 3, 12, tzinfo=UTC)
     stamp = (now - timedelta(seconds=5)).isoformat()
     assert item_stamp(stamp, now=now) == now - timedelta(seconds=5)
 
@@ -81,13 +81,13 @@ def test_item_stamp_parses_a_tz_aware_stamp_within_the_skew():
         "not a date",
         "2026-10-03T12:00:00",  # naive — the wire field is tz-aware
         (
-            datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+            datetime(2026, 10, 3, 12, tzinfo=UTC)
             + timedelta(seconds=MAX_ITEM_CLOCK_SKEW_S + 1)
         ).isoformat(),
     ],
 )
 def test_item_stamp_refuses_malformed_naive_and_future_stamps(raw):
-    now = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 3, 12, tzinfo=UTC)
     assert item_stamp(raw, now=now) is None
 
 

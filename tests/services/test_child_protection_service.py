@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+from datetime import UTC, datetime
+
 import pytest
 
 from socialhome.crypto import (
@@ -14,24 +17,20 @@ from socialhome.domain.child_protection import (
     AccountProtectedError,
     ProtectedCapability,
 )
+from socialhome.domain.conversation import Conversation, ConversationType
+from socialhome.domain.preferences import HouseholdPreferences
 from socialhome.domain.space import SpacePermissionError
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.security import SENSITIVE_FIELDS
-import logging
-from datetime import datetime, timezone
-
-from socialhome.domain.preferences import HouseholdPreferences
-
-from socialhome.domain.conversation import Conversation, ConversationType
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.cp_repo import SqliteCpRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.security import SENSITIVE_FIELDS
 from socialhome.services.child_protection_service import (
     ChildProtectionService,
-    _age_on,
     GuardianRequiredError,
     ProtectionIncompleteError,
     UserNotFoundError,
+    _age_on,
 )
 
 
@@ -167,7 +166,7 @@ async def test_dob_check_uses_household_date_east_of_utc(env):
             declared_age=11,
             actor_user_id="admin-id",
             date_of_birth=_DOB_13TH,
-            now=datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 10, 11, 12, 0, tzinfo=UTC),
         )
 
 
@@ -180,7 +179,7 @@ async def test_dob_check_same_instant_in_utc_household_is_day_before(env):
         declared_age=11,
         actor_user_id="admin-id",
         date_of_birth=_DOB_13TH,
-        now=datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2026, 10, 11, 12, 0, tzinfo=UTC),
     )
     row = await db.fetchone("SELECT declared_age FROM users WHERE username='lila'")
     assert row["declared_age"] == 11
@@ -195,7 +194,7 @@ async def test_dob_check_uses_household_date_west_of_utc(env):
         declared_age=11,
         actor_user_id="admin-id",
         date_of_birth=_DOB_13TH,
-        now=datetime(2026, 10, 12, 3, 0, tzinfo=timezone.utc),
+        now=datetime(2026, 10, 12, 3, 0, tzinfo=UTC),
     )
     row = await db.fetchone("SELECT declared_age FROM users WHERE username='lila'")
     assert row["declared_age"] == 11
@@ -212,7 +211,7 @@ async def test_dob_check_day_before_birthday_counts_previous_age(env):
             declared_age=14,
             actor_user_id="admin-id",
             date_of_birth=_DOB_13TH,
-            now=datetime(2026, 10, 11, 23, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 10, 11, 23, 0, tzinfo=UTC),
         )
 
 
@@ -231,22 +230,24 @@ async def test_dob_check_without_preferences_uses_utc(env):
             declared_age=11,
             actor_user_id="admin-id",
             date_of_birth=_DOB_13TH,
-            now=datetime(2026, 10, 12, 3, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 10, 12, 3, 0, tzinfo=UTC),
         )
 
 
 async def test_dob_check_prefs_failure_falls_back_to_utc_with_warning(env, caplog):
     svc, _ = env
     svc.attach_household_features(_BrokenPrefs())
-    with caplog.at_level(logging.WARNING):
-        with pytest.raises(ValueError, match="computed 13"):
-            await svc.enable_protection(
-                minor_username="lila",
-                declared_age=11,
-                actor_user_id="admin-id",
-                date_of_birth=_DOB_13TH,
-                now=datetime(2026, 10, 12, 3, 0, tzinfo=timezone.utc),
-            )
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(ValueError, match="computed 13"),
+    ):
+        await svc.enable_protection(
+            minor_username="lila",
+            declared_age=11,
+            actor_user_id="admin-id",
+            date_of_birth=_DOB_13TH,
+            now=datetime(2026, 10, 12, 3, 0, tzinfo=UTC),
+        )
     assert any(
         r.levelno == logging.WARNING and "household tz" in r.getMessage()
         for r in caplog.records
@@ -599,7 +600,7 @@ async def test_dm_allowed_for_minor_to_directly_paired_remote(env):
 
 
 async def test_record_action_persists_entry(env):
-    svc, db = env
+    svc, _db = env
     await svc.record_action(
         minor_id="lila-id",
         guardian_id="mom-id",
@@ -612,7 +613,7 @@ async def test_record_action_persists_entry(env):
 
 
 async def test_block_user_records_audit_entry(env):
-    svc, db = env
+    svc, _db = env
     await svc.enable_protection(
         minor_username="lila",
         declared_age=12,
@@ -634,7 +635,7 @@ async def test_block_user_records_audit_entry(env):
 
 
 async def test_unblock_user_records_audit_entry(env):
-    svc, db = env
+    svc, _db = env
     await svc.enable_protection(
         minor_username="lila",
         declared_age=12,
@@ -660,7 +661,7 @@ async def test_unblock_user_records_audit_entry(env):
 
 
 async def test_get_audit_log_allows_guardian(env):
-    svc, db = env
+    svc, _db = env
     await svc.enable_protection(
         minor_username="lila",
         declared_age=12,
@@ -684,7 +685,7 @@ async def test_get_audit_log_allows_guardian(env):
 
 
 async def test_get_audit_log_allows_admin(env):
-    svc, db = env
+    svc, _db = env
     await svc.record_action(
         minor_id="lila-id",
         guardian_id="mom-id",
@@ -698,7 +699,7 @@ async def test_get_audit_log_allows_admin(env):
 
 
 async def test_get_audit_log_denies_stranger(env):
-    svc, db = env
+    svc, _db = env
     await svc.record_action(
         minor_id="lila-id",
         guardian_id="mom-id",
@@ -755,7 +756,7 @@ async def _seed_conv(db, *, conv_id: str, members: list[str]) -> None:
     c = Conversation(
         id=conv_id,
         type=ConversationType.DM,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     await db.enqueue(
         "INSERT INTO conversations(id, type, name, created_at,"

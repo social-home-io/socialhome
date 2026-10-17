@@ -34,7 +34,7 @@ Privacy:
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.federation import PairingStatus
@@ -72,11 +72,11 @@ class FriendsService:
     """
 
     __slots__ = (
-        "_users",
-        "_federation",
-        "_child_protection",
-        "_online",
         "_aliases",
+        "_child_protection",
+        "_federation",
+        "_online",
+        "_users",
     )
 
     def __init__(
@@ -84,9 +84,9 @@ class FriendsService:
         user_repo: AbstractUserRepo,
         federation_repo: AbstractFederationRepo,
         *,
-        child_protection: "ChildProtectionService | None" = None,
-        online_status: "OnlineStatusService | None" = None,
-        alias_resolver: "AliasResolver | None" = None,
+        child_protection: ChildProtectionService | None = None,
+        online_status: OnlineStatusService | None = None,
+        alias_resolver: AliasResolver | None = None,
     ) -> None:
         self._users = user_repo
         self._federation = federation_repo
@@ -97,7 +97,7 @@ class FriendsService:
     async def overview(self, viewer_user_id: str) -> dict:
         """The Friends payload for *viewer_user_id* (unsigned picture URLs)."""
         hidden = await self._hidden_for(viewer_user_id)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         local_id = await self._federation.get_local_identity()
         local_users = [
@@ -169,7 +169,7 @@ class FriendsService:
         """
         if user_id in await self._hidden_for(viewer_user_id):
             raise FriendNotFoundError("person not found")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         aliases: dict[str, str] = {}
         if self._aliases is not None:
             aliases = await self._aliases.resolve_users(viewer_user_id, [user_id])

@@ -7,11 +7,10 @@ member removed, plus the missing-field skip branches.
 
 from __future__ import annotations
 
-import json
-
+import base64
 import io
-
-from datetime import datetime, timedelta, timezone
+import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -36,7 +35,6 @@ from socialhome.services.space_service import (
     resolve_join_owner,
     seat_join_stub,
 )
-import base64
 
 
 class _RecordingBus:
@@ -81,7 +79,7 @@ def _invitation(
     so a test row that omits them is a test that cannot pass.
     """
     if expires_at is None:
-        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+        expires_at = (datetime.now(UTC) + timedelta(minutes=15)).isoformat()
     return {
         "id": invitation_id,
         "space_id": space_id,
@@ -268,7 +266,7 @@ async def test_accept_records_the_mesh_claim_before_the_seat_snapshot(handler):
     class _Fed:
         own_instance_id = "host"
 
-        class _event_registry:  # noqa: N801 — attribute shape only
+        class _event_registry:
             @staticmethod
             def register(*_a, **_k):
                 return None
@@ -1705,7 +1703,7 @@ async def test_a_late_accept_of_a_pending_invitation_still_seats(handler):
     so the one-shot ``status`` is the guard, not the clock."""
     handler.space_repo.get_invitation_by_token.return_value = _invitation(
         4,
-        expires_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+        expires_at=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
     )
     ev = _event(
         "SPACE_PRIVATE_INVITE_ACCEPT",

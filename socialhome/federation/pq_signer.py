@@ -20,10 +20,14 @@ household-scale federation.
 
 from __future__ import annotations
 
+import logging
+
 try:
     import oqs as _oqs
 except ImportError:
     _oqs = None
+
+log = logging.getLogger(__name__)
 
 
 #: Canonical algorithm name for liboqs lookups. The wire-format short
@@ -88,6 +92,7 @@ class PqSigner:
             with oqs.Signature(_MLDSA_ALG) as verifier:
                 return bool(verifier.verify(message, signature, public_key))
         except Exception:
+            log.debug("PqSigner.verify: fail-soft error ignored", exc_info=True)
             return False
 
     @staticmethod

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from socialhome.infrastructure.hlc import HLC, HLC_MAX_DRIFT_MS
 
-
 # ─── Ordering ──────────────────────────────────────────────────────────────
 
 

@@ -14,7 +14,6 @@ from socialhome.federation.sync_rtc import (
     _build_rtc_config,
 )
 
-
 # ─── _build_rtc_config ──────────────────────────────────────────────────
 
 

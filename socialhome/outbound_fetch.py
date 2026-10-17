@@ -322,7 +322,7 @@ async def _vet_target(
 class OutboundFetcher:
     """Guarded GET for user-supplied URLs (see the module docstring)."""
 
-    __slots__ = ("_resolve", "_total_timeout", "_ssl")
+    __slots__ = ("_resolve", "_ssl", "_total_timeout")
 
     def __init__(
         self,
@@ -420,41 +420,43 @@ class OutboundFetcher:
             "Accept-Language": "en",
         }
         try:
-            async with aiohttp.ClientSession(
-                connector=connector,
-                timeout=timeout,
-                cookie_jar=aiohttp.DummyCookieJar(),
-                trust_env=False,
-                headers=headers,
-            ) as session:
-                async with session.get(
+            async with (
+                aiohttp.ClientSession(
+                    connector=connector,
+                    timeout=timeout,
+                    cookie_jar=aiohttp.DummyCookieJar(),
+                    trust_env=False,
+                    headers=headers,
+                ) as session,
+                session.get(
                     target.url,
                     allow_redirects=False,
                     max_redirects=0,
-                ) as resp:
-                    if resp.status in _REDIRECT_STATUSES:
-                        location = resp.headers.get("Location")
-                        if not location:
-                            raise OutboundFetchRefused("bad_redirect")
-                        return location
-                    if resp.status != 200:
-                        raise OutboundFetchRefused("status", str(resp.status))
-                    ctype = (resp.content_type or "").lower()
-                    if ctype not in accept:
-                        raise OutboundFetchRefused("content_type", ctype)
-                    declared = resp.content_length
-                    if declared is not None and declared > max_bytes and not truncate:
-                        raise OutboundFetchRefused("too_large")
-                    body, cut = await _read_capped(
-                        resp.content, max_bytes=max_bytes, truncate=truncate
-                    )
-                    return FetchResult(
-                        url=str(resp.url),
-                        content_type=ctype,
-                        charset=resp.charset,
-                        body=body,
-                        truncated=cut,
-                    )
+                ) as resp,
+            ):
+                if resp.status in _REDIRECT_STATUSES:
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise OutboundFetchRefused("bad_redirect")
+                    return location
+                if resp.status != 200:
+                    raise OutboundFetchRefused("status", str(resp.status))
+                ctype = (resp.content_type or "").lower()
+                if ctype not in accept:
+                    raise OutboundFetchRefused("content_type", ctype)
+                declared = resp.content_length
+                if declared is not None and declared > max_bytes and not truncate:
+                    raise OutboundFetchRefused("too_large")
+                body, cut = await _read_capped(
+                    resp.content, max_bytes=max_bytes, truncate=truncate
+                )
+                return FetchResult(
+                    url=str(resp.url),
+                    content_type=ctype,
+                    charset=resp.charset,
+                    body=body,
+                    truncated=cut,
+                )
         except OutboundFetchRefused:
             raise
         except (aiohttp.ClientError, OSError, ValueError) as exc:

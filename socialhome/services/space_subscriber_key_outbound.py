@@ -62,7 +62,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -90,20 +90,20 @@ class SpaceSubscriberKeyOutbound:
     """``new_subscriber`` GFS frame → sealed content-key handoff producer."""
 
     __slots__ = (
-        "_spaces",
         "_crypto",
         "_gfs",
-        "_own_instance_id",
         "_gfs_conn_repo",
         "_http_session",
+        "_own_instance_id",
+        "_spaces",
     )
 
     def __init__(
         self,
         *,
-        space_repo: "AbstractSpaceRepo",
-        space_crypto: "SpaceContentEncryption",
-        gfs_service: "GfsConnectionService",
+        space_repo: AbstractSpaceRepo,
+        space_crypto: SpaceContentEncryption,
+        gfs_service: GfsConnectionService,
     ) -> None:
         self._spaces = space_repo
         self._crypto = space_crypto
@@ -112,7 +112,7 @@ class SpaceSubscriberKeyOutbound:
         # Reconcile-only deps, wired lazily (the GFS-connection repo + the
         # shared HTTP session aren't available at the same step as the rest).
         # Until attached, :meth:`reconcile` no-ops.
-        self._gfs_conn_repo: "AbstractGfsConnectionRepo | None" = None
+        self._gfs_conn_repo: AbstractGfsConnectionRepo | None = None
         self._http_session: aiohttp.ClientSession | None = None
 
     def attach_identity(self, *, own_instance_id: str) -> None:
@@ -121,7 +121,7 @@ class SpaceSubscriberKeyOutbound:
     def attach_reconcile_context(
         self,
         *,
-        gfs_conn_repo: "AbstractGfsConnectionRepo",
+        gfs_conn_repo: AbstractGfsConnectionRepo,
         http_session: aiohttp.ClientSession,
     ) -> None:
         """Wire the Phase-5b-c reconcile dependencies (the GFS-connection repo
@@ -416,7 +416,7 @@ class SpaceSubscriberKeyOutbound:
         if seed is None:
             return
 
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         sig = sign_authority_event(
             event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
             space_id=space_id,

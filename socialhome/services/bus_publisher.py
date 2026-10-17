@@ -46,9 +46,9 @@ class BusPublisherMixin:
 
     __slots__ = ()
 
-    _bus: "EventBus | None"
+    _bus: EventBus | None
 
-    async def _emit(self, event: "DomainEvent") -> None:
+    async def _emit(self, event: DomainEvent) -> None:
         """Publish ``event`` if a bus is wired; otherwise no-op.
 
         Mirrors the long-standing ``if self._bus is not None`` guard so a

@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import orjson
 
@@ -46,13 +46,13 @@ class SpaceRetentionScheduler:
     """Background loop that prunes expired space content per space."""
 
     __slots__ = (
-        "_db",
-        "_own_instance_id",
-        "_interval",
-        "_task",
-        "_stop",
         "_convos",
+        "_db",
+        "_interval",
         "_on_chat_pruned",
+        "_own_instance_id",
+        "_stop",
+        "_task",
     )
 
     def __init__(
@@ -85,7 +85,7 @@ class SpaceRetentionScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -99,13 +99,13 @@ class SpaceRetentionScheduler:
                         pruned,
                     )
             except Exception as exc:  # pragma: no cover
-                log.warning("space-retention loop failed: %s", exc)
+                log.warning("space-retention loop failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _prune_once(self) -> int:
@@ -131,7 +131,7 @@ class SpaceRetentionScheduler:
             # above " " (0x20), so a raw compare against this naive cutoff
             # judged same-day posts "not old enough" and never expired them.
             cutoff = (
-                datetime.now(timezone.utc) - timedelta(days=int(s["retention_days"]))
+                datetime.now(UTC) - timedelta(days=int(s["retention_days"]))
             ).strftime("%Y-%m-%d %H:%M:%S")
             # Build the type filter as ``NOT IN``; sqlite needs the
             # placeholder list to match exempt cardinality.
@@ -183,9 +183,7 @@ class SpaceRetentionScheduler:
         ``on_chat_pruned`` (the search index) which ones went."""
         if self._convos is None:
             return 0
-        pruned = await self._convos.prune_space_chat_messages(
-            now=datetime.now(timezone.utc)
-        )
+        pruned = await self._convos.prune_space_chat_messages(now=datetime.now(UTC))
         if pruned and self._on_chat_pruned is not None:
             await self._on_chat_pruned(pruned)
         return len(pruned)

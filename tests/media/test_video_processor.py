@@ -1,6 +1,7 @@
 """Tests for socialhome.media.video_processor."""
 
 import pytest
+
 from socialhome.media.video_processor import VideoProcessor
 
 
@@ -38,6 +39,7 @@ async def test_thumbnail_caps_longest_side_at_thumbnail_px():
     grid tile is many times the bytes for no UX gain.
     """
     import io
+
     import av
     from PIL import Image
 

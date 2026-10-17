@@ -26,6 +26,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from ..app_keys import space_repo_key, sticky_service_key
+from ..domain.errors import WrongTypeError
 from ..domain.sticky import DEFAULT_STICKY_COLOR, Sticky
 from ..security import error_response
 from .base import BaseView
@@ -47,7 +48,7 @@ def _sticky_dict(s: Sticky) -> dict:
 
 def _create_kwargs(body: object) -> dict:
     if not isinstance(body, dict):
-        raise ValueError("sticky body must be a JSON object")
+        raise WrongTypeError("sticky body must be a JSON object")
     return {
         "content": body.get("content", ""),
         "color": body.get("color", DEFAULT_STICKY_COLOR),
@@ -58,7 +59,7 @@ def _create_kwargs(body: object) -> dict:
 
 def _update_kwargs(body: object) -> dict:
     if not isinstance(body, dict):
-        raise ValueError("sticky body must be a JSON object")
+        raise WrongTypeError("sticky body must be a JSON object")
     return {
         "content": body.get("content"),
         "color": body.get("color"),
@@ -71,7 +72,7 @@ class StickyCollectionView(BaseView):
     """``GET /api/stickies`` + ``POST /api/stickies`` — household scope."""
 
     async def get(self) -> web.Response:
-        self.user
+        self.require_user()
         await self.require_household_feature("stickies")
         stickies = await self.svc(sticky_service_key).list(space_id=None)
         return self._json([_sticky_dict(s) for s in stickies])

@@ -10,7 +10,7 @@ payload, must leave every other pairing intact.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import orjson
 import pytest
@@ -125,7 +125,7 @@ def _unpair_envelope(
         "event_type": FederationEventType.UNPAIR.value,
         "from_instance": from_instance,
         "to_instance": to_instance,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "encrypted_payload": signer.encrypt_payload(
             orjson.dumps(payload).decode(), _SESSION_KEY
         ),

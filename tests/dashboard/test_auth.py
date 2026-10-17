@@ -12,30 +12,30 @@ from unittest.mock import patch
 import pytest
 
 from socialhome.dashboard.auth import (
-    PAIR_CODE_MAX_FAILURES,
-    PAIR_CODE_WINDOW_S,
+    ACK_MAX,
+    ACK_WINDOW_S,
+    COOKIE_NAME,
     DISPLAY_IMAGE_MAX,
     DISPLAY_READ_MAX,
     DISPLAY_WINDOW_S,
+    GLOBAL_MAX_FAILURES,
     HA_UNLOCK_MAX,
     HA_UNLOCK_WINDOW_S,
+    KEEP_TTL_S,
     MAP_RENDER_MAX,
+    PAIR_CODE_MAX_FAILURES,
+    PAIR_CODE_WINDOW_S,
     PAIR_MAX,
     PAIR_WINDOW_S,
-    ACK_MAX,
-    ACK_WINDOW_S,
-    TILE_MAX,
-    TILE_WINDOW_S,
-    COOKIE_NAME,
-    GLOBAL_MAX_FAILURES,
     PRUNE_INTERVAL_S,
-    KEEP_TTL_S,
     RENEW_AFTER_S,
     REVOKED_LOCKED,
     REVOKED_SIGNED_OUT,
     SESSION_TTL_S,
     THROTTLE_MAX_FAILURES,
     THROTTLE_WINDOW_S,
+    TILE_MAX,
+    TILE_WINDOW_S,
     DashboardAuth,
     SessionClaims,
     StaleSessionError,
@@ -136,14 +136,14 @@ async def test_five_key_cookie_with_lock_verifies_locked(auth, settings_service,
 
 async def test_tampered_payload_rejected(auth, clock):
     raw = await auth.issue(False)
-    body, sig = raw.split(".")
+    _body, sig = raw.split(".")
     forged = json.dumps({"v": 1, "e": 0, "i": int(clock.now), "k": True}).encode()
     assert await auth.verify(f"{_b64(forged)}.{sig}") is None
 
 
 async def test_tampered_signature_rejected(auth):
     raw = await auth.issue(True)
-    body, sig = raw.split(".")
+    body, _sig = raw.split(".")
     bad = _b64(bytes(32))
     assert await auth.verify(f"{body}.{bad}") is None
 

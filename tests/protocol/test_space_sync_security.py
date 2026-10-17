@@ -53,7 +53,7 @@ class _AadCheckingCrypto:
     async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
         import base64
 
-        aad = f"{space_id}:{self.epoch}:{sync_id}".encode("utf-8")
+        aad = f"{space_id}:{self.epoch}:{sync_id}".encode()
         blob = aad + b"|" + plaintext
         return self.epoch, base64.urlsafe_b64encode(blob).decode("ascii")
 
@@ -61,7 +61,7 @@ class _AadCheckingCrypto:
         import base64
 
         blob = base64.urlsafe_b64decode(ciphertext)
-        expected = f"{space_id}:{epoch}:{sync_id}".encode("utf-8")
+        expected = f"{space_id}:{epoch}:{sync_id}".encode()
         aad, _, body = blob.partition(b"|")
         if aad != expected:
             raise RuntimeError("AAD mismatch (tampered sync_id or epoch)")

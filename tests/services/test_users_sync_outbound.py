@@ -11,7 +11,7 @@ profiles. The receiver-side handler already exists at
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -62,7 +62,6 @@ class _FakeFederationService:
 
     async def send_event(self, *, to_instance_id, event_type, payload):
         self.sent.append((to_instance_id, event_type, payload))
-        return None
 
 
 class _FakeUser:
@@ -415,7 +414,7 @@ async def _sync_payload(users, *, visibility=None, peer="peer-new") -> dict | No
 async def test_current_status_rides_the_snapshot():
     """A user's current status ships as ``{emoji, text, expires_at}`` so
     the peer shows it right after pairing."""
-    later = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    later = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
     payload = await _sync_payload(
         [
             _FakeUser(
@@ -443,7 +442,7 @@ async def test_current_status_rides_the_snapshot():
 async def test_expired_status_ships_as_explicit_clear():
     """A status past its deadline (not yet swept) goes out as ``null`` —
     never resurrected on the peer — and so does no status at all."""
-    earlier = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    earlier = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     payload = await _sync_payload(
         [
             _FakeUser(

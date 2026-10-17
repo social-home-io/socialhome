@@ -22,8 +22,8 @@ import base64
 import io
 
 import pytest
-from PIL import Image
 from aiohttp.test_utils import TestClient, TestServer
+from PIL import Image
 
 from socialhome.app import create_app
 from socialhome.app_keys import db_key as _db_key
@@ -158,7 +158,7 @@ async def _dispatch_event(
     """Synthesize a :class:`FederationEvent` and dispatch it through the
     registry the same way the inbound pipeline would."""
     fed = app[federation_service_key]
-    registry = fed._event_registry  # noqa: SLF001
+    registry = fed._event_registry
     event = FederationEvent(
         msg_id=f"msg-{event_type.value}-{from_instance}",
         event_type=event_type,
@@ -168,7 +168,7 @@ async def _dispatch_event(
         payload=payload,
         space_id=payload.get("space_id"),
     )
-    handlers = registry._handlers.get(event_type, [])  # noqa: SLF001
+    handlers = registry._handlers.get(event_type, [])
     for h in handlers:
         await h(event)
 

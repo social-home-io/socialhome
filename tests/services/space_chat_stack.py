@@ -11,7 +11,7 @@ follower-only household.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
@@ -123,7 +123,7 @@ class FakeFederation:
                     event_type=event_type,
                     from_instance=sender,
                     to_instance="us",
-                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    timestamp=datetime.now(UTC).isoformat(),
                     payload={"space_id": space_id, **payload},
                     space_id=space_id,
                 )

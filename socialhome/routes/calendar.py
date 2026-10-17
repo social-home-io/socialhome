@@ -172,7 +172,7 @@ class CalendarInviteesView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         fed_repo = self.svc(federation_repo_key)
         user_repo = self.svc(user_repo_key)
         # §CP.F2: a guardian-block counterpart shows by name only.
@@ -247,7 +247,7 @@ class CalendarEventsView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         calendar_id = self.match("id")
         start = self.request.query.get("start")
         end = self.request.query.get("end")
@@ -346,14 +346,14 @@ class CalendarEventDeleteView(BaseView):
         return web.json_response(_sign_payload(self.request, payload))
 
     async def delete(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         event_id = self.match("id")
         svc = self.svc(calendar_service_key)
         await svc.delete_event(event_id)
         return web.json_response({"ok": True})
 
     async def patch(self) -> web.Response:
-        self.user
+        self.require_user()
         event_id = self.match("id")
         body = await self.body()
         svc = self.svc(calendar_service_key)
@@ -368,7 +368,7 @@ class CalendarEventDeleteView(BaseView):
         )
         # Tri-state again for ``location``: omitted = leave; ``null`` =
         # clear; string = set. The service trims + clamps the value.
-        location = body["location"] if "location" in body else UNSET_LOCATION
+        location = body.get("location", UNSET_LOCATION)
         event = await svc.update_event(
             event_id,
             summary=body.get("summary"),
@@ -493,7 +493,7 @@ class CalendarImportImageView(BaseView):
                 header, b64 = data_url.split(",", 1)
                 mime = header.split(":", 1)[1].split(";", 1)[0]
                 body = base64.b64decode(b64)
-            except Exception as exc:
+            except (ValueError, IndexError) as exc:
                 return error_response(
                     422,
                     "UNPROCESSABLE",
@@ -693,7 +693,7 @@ class SpaceCalendarEventDetailView(_SpaceCalendarBase):
                 if "cover_url" in body
                 else UNSET_COVER
             )
-            location = body["location"] if "location" in body else UNSET_LOCATION
+            location = body.get("location", UNSET_LOCATION)
             event = await space_cal_svc.update_event(
                 event_id,
                 space_id=space_id,

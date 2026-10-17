@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from socialhome.domain.user import (
-    DisplayableUser,
-    PersonSummary,
-    MemberRef,
     RESERVED_USERNAMES,
     STATUS_TEXT_MAX_CHARS,
+    DisplayableUser,
+    MemberRef,
+    PersonSummary,
     RemoteUser,
     User,
     UserIdentityAssertion,
@@ -147,7 +147,7 @@ def test_user_identity_assertion_wire_roundtrip_legacy_omits_binding():
 
 
 def test_user_status_is_set_and_expired():
-    now = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
     assert UserStatus().is_set is False
     assert UserStatus(text="hi").is_set is True
     assert UserStatus(text="hi").is_expired(now) is False
@@ -178,7 +178,7 @@ def test_user_status_from_json_tolerates_garbage(raw):
 
 
 def test_user_status_visible_dict_drops_unset_and_expired():
-    now = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
     assert UserStatus().visible_dict(now) is None
     assert (
         UserStatus(text="hi", expires_at="2026-09-28T11:00:00+00:00").visible_dict(now)

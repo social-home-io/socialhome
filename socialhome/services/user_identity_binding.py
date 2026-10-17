@@ -50,7 +50,7 @@ the key-handling and the suite stay in one place.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..crypto import USER_SIG_SUITE_ED25519, build_user_identity_assertion
@@ -65,8 +65,8 @@ log = logging.getLogger(__name__)
 
 async def user_identity_binding_fields(
     *,
-    federation_service: "FederationService",
-    user_repo: "AbstractUserRepo | None",
+    federation_service: FederationService,
+    user_repo: AbstractUserRepo | None,
     peer_instance_id: str,
     user_id: str,
     username: str,
@@ -106,6 +106,7 @@ async def user_identity_binding_fields(
             "user-identity-binding: keypair lookup for %s failed: %s",
             username,
             exc,
+            exc_info=True,
         )
         return {}
     if keypair is None:
@@ -131,10 +132,11 @@ async def user_identity_binding_fields(
                 "user-identity-binding: anchor lookup for %s failed: %s",
                 username,
                 exc,
+                exc_info=True,
             )
             identity_anchor = None
 
-    issued_at = datetime.now(timezone.utc).isoformat()
+    issued_at = datetime.now(UTC).isoformat()
     assertion = build_user_identity_assertion(
         instance_seed=federation_service.own_identity_seed,
         user_id=user_id,
@@ -173,7 +175,7 @@ async def user_identity_binding_fields(
     return fields
 
 
-async def _plain_anchor(user_repo: "AbstractUserRepo", username: str) -> dict[str, str]:
+async def _plain_anchor(user_repo: AbstractUserRepo, username: str) -> dict[str, str]:
     """The bare ``identity_anchor`` when no binding carries it.
 
     A receiver only takes a user it has never seen when the ``user_id``
@@ -184,6 +186,8 @@ async def _plain_anchor(user_repo: "AbstractUserRepo", username: str) -> dict[st
     try:
         anchor = await user_repo.get_user_identity_anchor(username)
     except Exception as exc:  # pragma: no cover — defensive, fail-soft
-        log.warning("identity-anchor lookup for %s failed: %s", username, exc)
+        log.warning(
+            "identity-anchor lookup for %s failed: %s", username, exc, exc_info=True
+        )
         return {}
     return {"identity_anchor": anchor} if anchor else {}

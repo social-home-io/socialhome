@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-
-import pytest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
-from socialhome.crypto import generate_identity_keypair, derive_instance_id
+import pytest
+
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.errors import InvalidMediaRefError
+from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import FileMeta, Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
@@ -647,7 +647,7 @@ async def test_delete_removes_the_card_image(tmp_dir):
         id="p1",
         author="u",
         type=PostType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content="https://example.com/",
         link_preview=LinkPreview(
             url="https://example.com/", title="T", thumbnail_url="api/media/lp.webp"

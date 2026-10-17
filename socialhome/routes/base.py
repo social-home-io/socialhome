@@ -28,19 +28,27 @@ from ..app_keys import (
     space_repo_key,
 )
 from ..auth import SIGNED_URL_PRINCIPAL, current_user
+from ..domain.apps import (
+    AppAgeRestrictedError,
+    AppAlreadyInstalledError,
+    AppContactNotFoundError,
+    AppIntegrityError,
+    AppNotEnabledError,
+    AppNotFoundError,
+    AppQuotaExceededError,
+)
 from ..domain.child_protection import AccountProtectedError
 from ..domain.errors import CodedError
 from ..domain.preferences import FeatureDisabledError
-from ..services.preferences_service import ScopeMismatchError
 from ..domain.space import (
     AccessAdminOnlyError,
     ContentQueuedForReview,
+    HostTooOldError,
+    HostUnreachableError,
     HouseholdUpgradeRequiredError,
     ModerationAlreadyDecidedError,
     ModerationExpiredError,
     ModerationInProgressError,
-    HostTooOldError,
-    HostUnreachableError,
     ModerationPayloadTooLargeError,
     ModerationQueueFullError,
     ModerationStaleError,
@@ -53,6 +61,12 @@ from ..domain.space import (
     SpaceModerationItem,
     SpacePermissionError,
 )
+from ..domain.space_bot import (
+    BotPostsReviewedError,
+    SpaceBotDisabledError,
+    SpaceBotError,
+    SpaceBotSlugTakenError,
+)
 from ..domain.theme import ThemeValidationError
 from ..domain.timetable import (
     TimetableConflictError,
@@ -60,29 +74,37 @@ from ..domain.timetable import (
     TimetableOrphanError,
     TimetableValidationError,
 )
-from ..domain.space_bot import (
-    BotPostsReviewedError,
-    SpaceBotDisabledError,
-    SpaceBotError,
-    SpaceBotSlugTakenError,
-)
+from ..peer_url import InvalidPeerUrlError
 from ..repositories.page_repo import PageLockError, PageNotFoundError
 from ..security import error_response, sanitise_for_api
 from ..services.bazaar_service import BazaarServiceError, ListingNotFoundError
-from ..peer_url import InvalidPeerUrlError
-from ..services.dm_service import MediaRequiresDirectPairingError
 from ..services.child_protection_service import (
     ChildProtectionError,
     GuardianRequiredError,
+)
+from ..services.child_protection_service import (
     UserNotFoundError as CpUserNotFoundError,
 )
+from ..services.dm_service import MediaRequiresDirectPairingError
+from ..services.friends_service import FriendNotFoundError
 from ..services.gallery_service import GalleryNotFoundError, GalleryPermissionError
+from ..services.gfs_connection_service import GfsConnectionError
+from ..services.highlight_publication_service import (
+    HighlightNotFoundError as HighlightPublicationNotFoundError,
+)
+from ..services.highlight_publication_service import HighlightPublicationError
+from ..services.highlight_service import (
+    HighlightFrameLimitError,
+    HighlightNotFoundError,
+)
+from ..services.map_tile_service import TileCoordinateError, TileUnavailableError
+from ..services.moment_service import MomentNotFoundError, MomentRateLimitError
 from ..services.page_conflict_service import (
     NoActiveConflictError,
     PageConflictStaleError,
 )
-from ..services.friends_service import FriendNotFoundError
 from ..services.poll_service import PollNotFoundError
+from ..services.preferences_service import ScopeMismatchError
 from ..services.presence_service import UserNotFoundError as PresenceUserNotFoundError
 from ..services.space_zone_service import (
     SpaceZoneLimitError,
@@ -90,26 +112,6 @@ from ..services.space_zone_service import (
     SpaceZoneNotFoundError,
 )
 from ..services.storage_quota_service import StorageQuotaExceeded
-from ..domain.apps import (
-    AppAgeRestrictedError,
-    AppAlreadyInstalledError,
-    AppContactNotFoundError,
-    AppIntegrityError,
-    AppNotEnabledError,
-    AppNotFoundError,
-    AppQuotaExceededError,
-)
-from ..services.moment_service import MomentNotFoundError, MomentRateLimitError
-from ..services.highlight_publication_service import (
-    HighlightNotFoundError as HighlightPublicationNotFoundError,
-)
-from ..services.gfs_connection_service import GfsConnectionError
-from ..services.highlight_publication_service import HighlightPublicationError
-from ..services.map_tile_service import TileCoordinateError, TileUnavailableError
-from ..services.highlight_service import (
-    HighlightFrameLimitError,
-    HighlightNotFoundError,
-)
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +129,14 @@ class BaseView(web.View):
     def user(self):
         """Authenticated user context (calls ``current_user``)."""
         return current_user(self.request)
+
+    def require_user(self) -> None:
+        """Assert the auth middleware authenticated this request.
+
+        For a handler that never reads :attr:`user` itself — fails exactly
+        like reading it would (``current_user`` raises on a public path).
+        """
+        current_user(self.request)
 
     def svc(self, key: web.AppKey) -> Any:
         """Fetch a service from the app container by typed key."""

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ..db import AsyncDatabase
 
@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 class PostDraftCleanupScheduler:
     """Background loop that prunes stale rows from ``post_drafts``."""
 
-    __slots__ = ("_db", "_interval", "_ttl_days", "_task", "_stop")
+    __slots__ = ("_db", "_interval", "_stop", "_task", "_ttl_days")
 
     def __init__(
         self,
@@ -49,7 +49,7 @@ class PostDraftCleanupScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -60,13 +60,13 @@ class PostDraftCleanupScheduler:
                 if pruned:
                     log.info("post-drafts: pruned %d stale drafts", pruned)
             except Exception as exc:  # pragma: no cover
-                log.warning("post-draft loop failed: %s", exc)
+                log.warning("post-draft loop failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _prune_once(self) -> int:
@@ -77,7 +77,7 @@ class PostDraftCleanupScheduler:
         # so the first Python writer (``…isoformat()`` → tz-aware, the
         # other shape used across this codebase) can't silently break the
         # prune: a raw TEXT compare puts "T" (0x54) above " " (0x20).
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._ttl_days)).strftime(
+        cutoff = (datetime.now(UTC) - timedelta(days=self._ttl_days)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
         row = await self._db.fetchone(

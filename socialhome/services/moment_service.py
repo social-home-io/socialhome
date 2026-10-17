@@ -18,10 +18,9 @@ realtime push pick them up.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from ..federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
 from ..domain.events import (
     MomentCreated,
     MomentDeleted,
@@ -33,6 +32,7 @@ from ..domain.moment import (
     MOMENT_RETENTION_DAYS,
     Moment,
 )
+from ..federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
 from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from .inbound_media_store import optional_local_media_ref
@@ -68,22 +68,22 @@ class MomentService:
     """Create + react + delete moments and drive their lifecycle."""
 
     __slots__ = (
-        "_moments",
-        "_users",
         "_bus",
-        "_own_instance_id",
         "_media_dir",
         "_media_refs",
+        "_moments",
+        "_own_instance_id",
+        "_users",
     )
 
     def __init__(
         self,
-        moment_repo: "AbstractMomentRepo",
-        user_repo: "AbstractUserRepo",
-        bus: "EventBus",
+        moment_repo: AbstractMomentRepo,
+        user_repo: AbstractUserRepo,
+        bus: EventBus,
         *,
         own_instance_id: str = "",
-        media_dir: "pathlib.Path | None" = None,
+        media_dir: pathlib.Path | None = None,
         media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._moments = moment_repo
@@ -154,7 +154,7 @@ class MomentService:
 
         # Rate-limit only top-level moments (replies are exempt).
         if parent_moment_id is None:
-            since = datetime.now(timezone.utc) - MOMENT_RATE_WINDOW
+            since = datetime.now(UTC) - MOMENT_RATE_WINDOW
             recent = await self._moments.count_recent_for_author(
                 author_user_id,
                 since_iso=since.isoformat(),
@@ -165,7 +165,7 @@ class MomentService:
                     "Replies and reactions don't count."
                 )
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         moment = Moment(
             # Owner-bound (v_36): no other household can announce this id
             # first — as a moment or a delete — for its own user.

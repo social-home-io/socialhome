@@ -59,22 +59,24 @@ never stored as pending.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.post import BAZAAR_MAX_IMAGES, FEED_POST_MAX_IMAGES
+from ..domain.presence import truncate_coord
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
+    PUBLIC_SPACE_TIERS,
+    WRITER_ROLES,
     ContentAction,
     HostTooOldError,
-    PUBLIC_SPACE_TIERS,
     ModerationStatus,
     Space,
     SpaceFeatureAccess,
     SpaceModerationItem,
     SpaceRole,
-    WRITER_ROLES,
 )
 from ..federation.owner_bound_id import (
     SPACE_CALENDAR_EVENT_KIND,
@@ -86,17 +88,10 @@ from ..federation.owner_bound_id import (
     is_owner_bound,
     owner_bound_id_refused,
 )
-from ..domain.post import BAZAAR_MAX_IMAGES, FEED_POST_MAX_IMAGES
-from ..domain.presence import truncate_coord
 from ..federation.space_scope import resolve_space_id
 from ..repositories.base import dump_json
 from ..utils.datetime import parse_iso8601_optional
 from .inbound_media_store import verbatim_local_media_ref
-from .space_post_moderation import post_from_queue_payload
-from .space_public_author import (
-    build_signed_author_inner,
-    verify_signed_author_inner,
-)
 from .space_moderation_service import (
     MAX_PAYLOAD_BYTES,
     MAX_PENDING_PER_SPACE,
@@ -104,6 +99,11 @@ from .space_moderation_service import (
     MAX_REJECT_REASON,
     MODERATION_TTL,
     feature_on,
+)
+from .space_post_moderation import post_from_queue_payload
+from .space_public_author import (
+    build_signed_author_inner,
+    verify_signed_author_inner,
 )
 
 if TYPE_CHECKING:
@@ -154,58 +154,58 @@ class SpaceModerationFederation:
     """Send and receive moderation items and decisions (v_43)."""
 
     __slots__ = (
-        "_federation",
-        "_spaces",
-        "_seats",
         "_authorship",
+        "_federation",
         "_media_sync",
         "_moderation",
         "_own_pk",
         "_own_seed",
+        "_seats",
+        "_spaces",
         "_users",
     )
 
     def __init__(
         self,
         *,
-        federation_service: "FederationService",
-        space_repo: "AbstractSpaceRepo",
-        remote_member_repo: "AbstractSpaceRemoteMemberRepo",
-        authorship: "SpaceAuthorship",
-        media_sync: "SpaceMediaSyncService | None" = None,
+        federation_service: FederationService,
+        space_repo: AbstractSpaceRepo,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo,
+        authorship: SpaceAuthorship,
+        media_sync: SpaceMediaSyncService | None = None,
     ) -> None:
         self._federation = federation_service
         self._spaces = space_repo
         self._seats = remote_member_repo
         self._authorship = authorship
         self._media_sync = media_sync
-        self._moderation: "SpaceModerationService | None" = None
+        self._moderation: SpaceModerationService | None = None
         #: Our household identity + local users — to author-sign a queued
         #: public post's inner for the GFS followers (see
         #: :meth:`_public_relay_for`). Unset → no signed copy is attached.
         self._own_pk: bytes = b""
         self._own_seed: bytes = b""
-        self._users: "AbstractUserRepo | None" = None
+        self._users: AbstractUserRepo | None = None
 
     def attach_identity(
         self,
         *,
         own_instance_pk: bytes,
         own_identity_seed: bytes,
-        user_repo: "AbstractUserRepo",
+        user_repo: AbstractUserRepo,
     ) -> None:
         """Wire what author-signing a queued public post needs."""
         self._own_pk = own_instance_pk
         self._own_seed = own_identity_seed
         self._users = user_repo
 
-    def bind(self, moderation: "SpaceModerationService") -> None:
+    def bind(self, moderation: SpaceModerationService) -> None:
         """Wire both directions: the queue sends through us, and what we
         receive is stored through it."""
         self._moderation = moderation
         moderation.attach_federation(self)
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         registry = federation_service._event_registry
         registry.register(FET.SPACE_MODERATION_SUBMITTED, self._on_submitted)
         registry.register(FET.SPACE_MODERATION_DECIDED, self._on_decided)
@@ -364,7 +364,7 @@ class SpaceModerationFederation:
             "item_id": item.id,
             "decision": decision.value,
             "decided_by": decided_by,
-            "decided_at": datetime.now(timezone.utc).isoformat(),
+            "decided_at": datetime.now(UTC).isoformat(),
         }
         if reason:
             payload["reason"] = reason
@@ -403,7 +403,7 @@ class SpaceModerationFederation:
                 "item_id": item.id,
                 "decision": ModerationStatus.APPROVED.value,
                 "decided_by": decided_by,
-                "decided_at": datetime.now(timezone.utc).isoformat(),
+                "decided_at": datetime.now(UTC).isoformat(),
             },
             space_id=space.id,
         )
@@ -434,7 +434,7 @@ class SpaceModerationFederation:
 
     # ── Inbound ──────────────────────────────────────────────────────────
 
-    async def _on_submitted(self, event: "FederationEvent") -> None:
+    async def _on_submitted(self, event: FederationEvent) -> None:
         item = await self._admit_submission(event)
         if item is None or self._moderation is None:
             return
@@ -448,7 +448,7 @@ class SpaceModerationFederation:
             )
 
     async def _admit_submission(
-        self, event: "FederationEvent"
+        self, event: FederationEvent
     ) -> SpaceModerationItem | None:
         """The item an inbound submission describes, or ``None`` (WARNING)
         when any receiver check fails — see the module docstring."""
@@ -541,6 +541,10 @@ class SpaceModerationFederation:
                 space, feature, action, sanitize_remote_payload(feature, body)
             )
         except Exception as exc:
+            log.debug(
+                "SpaceModerationFederation._admit_submission: fail-soft error ignored",
+                exc_info=True,
+            )
             return self._refuse(event, space_id, item_id, f"invalid payload ({exc})")
         relay = _signed_copy(
             p.get(PUBLIC_RELAY_KEY),
@@ -576,7 +580,7 @@ class SpaceModerationFederation:
             return self._refuse(event, space_id, item_id, "household cap reached")
         if await self._spaces.count_pending(space_id) >= MAX_PENDING_PER_SPACE:
             return self._refuse(event, space_id, item_id, "space queue full")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = min(
             _when(p.get("expires_at")) or now + MODERATION_TTL, now + MAX_EXPIRY
         )
@@ -609,7 +613,7 @@ class SpaceModerationFederation:
             for m in await self._spaces.list_members(space.id)
         )
 
-    async def _on_decided(self, event: "FederationEvent") -> None:
+    async def _on_decided(self, event: FederationEvent) -> None:
         p = event.payload
         space_id = resolve_space_id(event) or ""
         item_id = _bounded(p.get("item_id"))
@@ -681,7 +685,7 @@ class SpaceModerationFederation:
         )
 
     async def _release_for(
-        self, event: "FederationEvent", space_id: str, item_id: str, decided_by: str
+        self, event: FederationEvent, space_id: str, item_id: str, decided_by: str
     ) -> None:
         """The host applies a remote moderator's approval (their seat on the
         sender is verified above) — from its own copy of the item."""
@@ -703,11 +707,15 @@ class SpaceModerationFederation:
         except Exception as exc:
             # Every gate of a local approve applies; a refusal is final for
             # this request (the reviewer may approve again).
+            log.debug(
+                "SpaceModerationFederation._release_for: fail-soft error ignored",
+                exc_info=True,
+            )
             self._refuse(event, space_id, item_id, f"not released: {exc!r}")
 
     @staticmethod
     def _refuse(
-        event: "FederationEvent", space_id: str, item_id: str, reason: str
+        event: FederationEvent, space_id: str, item_id: str, reason: str
     ) -> None:
         log.warning(
             "%s from %s: moderation item %r in space %r refused — %s",
@@ -717,7 +725,6 @@ class SpaceModerationFederation:
             space_id,
             reason,
         )
-        return None
 
 
 #: The queue-payload key of a queued public post's author-signed inner — the
@@ -798,9 +805,12 @@ def sanitize_remote_payload(feature: str, payload: dict) -> dict:
             else:
                 out["location"] = None
             lp = out.get("link_preview")
-            if isinstance(lp, dict) and lp.get("thumbnail_url"):
-                if not verbatim_local_media_ref(lp.get("thumbnail_url")):
-                    out["link_preview"] = {**lp, "thumbnail_url": None}
+            if (
+                isinstance(lp, dict)
+                and lp.get("thumbnail_url")
+                and not verbatim_local_media_ref(lp.get("thumbnail_url"))
+            ):
+                out["link_preview"] = {**lp, "thumbnail_url": None}
             attachments = out.get("attachments")
             if isinstance(attachments, dict) and isinstance(
                 attachments.get("bazaar"), dict
@@ -846,11 +856,11 @@ def _when(value: object) -> datetime | None:
     when = parse_iso8601_optional(value) if isinstance(value, str) else None
     if when is None:
         return None
-    return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
 
 
 def _aware(value: datetime) -> datetime:
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _post_media_urls(payload: dict) -> list[str]:
@@ -863,9 +873,12 @@ def _post_media_urls(payload: dict) -> list[str]:
     if isinstance(fm, dict) and isinstance(fm.get("url"), str) and fm["url"]:
         urls.append(fm["url"])
     lp = payload.get("link_preview")
-    if isinstance(lp, dict) and isinstance(lp.get("thumbnail_url"), str):
-        if lp["thumbnail_url"]:
-            urls.append(lp["thumbnail_url"])
+    if (
+        isinstance(lp, dict)
+        and isinstance(lp.get("thumbnail_url"), str)
+        and lp["thumbnail_url"]
+    ):
+        urls.append(lp["thumbnail_url"])
     bazaar = (payload.get("attachments") or {}).get("bazaar")
     if isinstance(bazaar, dict):
         for url in bazaar.get("image_urls") or ():

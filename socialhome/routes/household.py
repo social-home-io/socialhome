@@ -14,7 +14,7 @@ class HouseholdPreferencesView(BaseView):
     """``GET /api/household/preferences`` + ``PUT /api/household/preferences``."""
 
     async def get(self) -> web.Response:
-        self.user
+        self.require_user()
         svc = self.svc(K.preferences_service_key)
         prefs = await svc.get_household()
         return self._json(asdict(prefs))

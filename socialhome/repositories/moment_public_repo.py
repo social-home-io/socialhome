@@ -25,7 +25,6 @@ from ..db import AsyncDatabase
 from ..domain.moment_public import MomentPublicFollow, MomentPublicRegistration
 from .base import rows_to_dicts
 
-
 # ── Registrations ────────────────────────────────────────────────────────
 
 

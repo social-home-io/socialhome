@@ -9,7 +9,7 @@ translation; we assert events here, frames in the realtime tests.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from socialhome.domain.events import (
     UserCameOnline,
@@ -21,7 +21,6 @@ from socialhome.domain.federation import FederationEventType as _Evt
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.ws_manager import WebSocketManager
 from socialhome.services.online_status_service import OnlineStatusService
-
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
 
@@ -111,7 +110,7 @@ async def test_scan_marks_user_idle_after_threshold():
     svc, _bus, _repo, captured = _make()
     await svc.user_session_opened("alice", ws_id=1)
     # Backdate the session so the scan triggers idle.
-    svc._sessions["alice"][1] = datetime.now(timezone.utc) - timedelta(minutes=10)
+    svc._sessions["alice"][1] = datetime.now(UTC) - timedelta(minutes=10)
     captured.clear()
     await svc._scan_once()
     assert svc.is_idle("alice")
@@ -121,7 +120,7 @@ async def test_scan_marks_user_idle_after_threshold():
 async def test_idle_does_not_double_publish():
     svc, _bus, _repo, captured = _make()
     await svc.user_session_opened("alice", ws_id=1)
-    svc._sessions["alice"][1] = datetime.now(timezone.utc) - timedelta(minutes=10)
+    svc._sessions["alice"][1] = datetime.now(UTC) - timedelta(minutes=10)
     await svc._scan_once()
     captured.clear()
     await svc._scan_once()
@@ -131,7 +130,7 @@ async def test_idle_does_not_double_publish():
 async def test_touch_resumes_idle_user():
     svc, _bus, _repo, captured = _make()
     await svc.user_session_opened("alice", ws_id=1)
-    svc._sessions["alice"][1] = datetime.now(timezone.utc) - timedelta(minutes=10)
+    svc._sessions["alice"][1] = datetime.now(UTC) - timedelta(minutes=10)
     await svc._scan_once()
     assert svc.is_idle("alice")
     captured.clear()
@@ -145,7 +144,7 @@ async def test_idle_only_when_all_sessions_idle():
     await svc.user_session_opened("alice", ws_id=1)
     await svc.user_session_opened("alice", ws_id=2)
     # Tab 1 idle, tab 2 still active.
-    svc._sessions["alice"][1] = datetime.now(timezone.utc) - timedelta(minutes=10)
+    svc._sessions["alice"][1] = datetime.now(UTC) - timedelta(minutes=10)
     await svc._scan_once()
     assert not svc.is_idle("alice")
 
@@ -153,7 +152,7 @@ async def test_idle_only_when_all_sessions_idle():
 async def test_new_session_resumes_idle_user():
     svc, _bus, _repo, captured = _make()
     await svc.user_session_opened("alice", ws_id=1)
-    svc._sessions["alice"][1] = datetime.now(timezone.utc) - timedelta(minutes=10)
+    svc._sessions["alice"][1] = datetime.now(UTC) - timedelta(minutes=10)
     await svc._scan_once()
     captured.clear()
     await svc.user_session_opened("alice", ws_id=2)
@@ -166,7 +165,6 @@ async def test_new_session_resumes_idle_user():
 
 async def test_persist_debounce_suppresses_close_writes():
     svc, _bus, repo, _captured = _make()
-    svc.PERSIST_DEBOUNCE  # touch class attr to satisfy reader
     await svc.user_session_opened("alice", ws_id=1)
     await svc.user_session_closed("alice", ws_id=1)
     assert len(repo.last_seen_calls) == 1
@@ -184,7 +182,7 @@ async def test_online_user_ids_and_idle_user_ids():
     svc, _bus, _repo, _captured = _make()
     await svc.user_session_opened("alice", ws_id=1)
     await svc.user_session_opened("bob", ws_id=2)
-    svc._sessions["alice"][1] = datetime.now(timezone.utc) - timedelta(minutes=10)
+    svc._sessions["alice"][1] = datetime.now(UTC) - timedelta(minutes=10)
     await svc._scan_once()
     assert svc.online_user_ids() == {"alice", "bob"}
     assert svc.idle_user_ids() == {"alice"}
@@ -194,7 +192,7 @@ async def test_last_seen_returns_most_recent_session_activity():
     svc, _bus, _repo, _captured = _make()
     await svc.user_session_opened("alice", ws_id=1)
     await svc.user_session_opened("alice", ws_id=2)
-    older = datetime.now(timezone.utc) - timedelta(minutes=3)
+    older = datetime.now(UTC) - timedelta(minutes=3)
     svc._sessions["alice"][1] = older
     last = svc.last_seen("alice")
     assert last is not None and last > older
@@ -652,7 +650,7 @@ async def test_block_lifted_shows_an_online_account_online_again():
 async def test_block_lifted_sends_idle_for_an_idle_account():
     svc, fed = _lifted_env()
     await svc.user_session_opened("kid", ws_id=1)
-    svc._sessions["kid"][1] = datetime.now(timezone.utc) - timedelta(minutes=10)
+    svc._sessions["kid"][1] = datetime.now(UTC) - timedelta(minutes=10)
     await svc._scan_once()
     assert svc.is_idle("kid")
     fed.sent.clear()

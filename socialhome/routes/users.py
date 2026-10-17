@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from aiohttp import web
 from aiohttp.multipart import BodyPartReader
@@ -79,7 +79,7 @@ def _user_to_dict(user) -> dict:
         raw = dict(user)
     # A status past its "clear after" deadline reads as unset even before
     # the expiry sweep clears the row.
-    if isinstance(user, User) and user.status.is_expired(datetime.now(timezone.utc)):
+    if isinstance(user, User) and user.status.is_expired(datetime.now(UTC)):
         raw["status"] = dataclasses.asdict(UserStatus())
     raw["picture_url"] = _picture_url(
         str(raw.get("user_id") or ""),
@@ -178,7 +178,7 @@ class MeView(BaseView):
             if current is None:
                 return error_response(404, "NOT_FOUND", "User not found.")
             cur = current.status
-            if cur.is_expired(datetime.now(timezone.utc)):
+            if cur.is_expired(datetime.now(UTC)):
                 cur = UserStatus()
             try:
                 user = await svc.set_status(
@@ -351,7 +351,7 @@ class UserPictureView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         user_id = self.match("user_id")
         repo = self.svc(profile_picture_repo_key)
         got = await repo.get_user_picture(user_id)

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -255,7 +255,7 @@ def _inbound(message_id: str, content: str, **extra) -> FederationEvent:
         event_type=FederationEventType.DM_MESSAGE,
         from_instance="peer-a",
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={
             "conversation_id": "conv-loc",
             "message_id": message_id,
@@ -263,7 +263,7 @@ def _inbound(message_id: str, content: str, **extra) -> FederationEvent:
             "sender_display_name": "Remote",
             "type": "location",
             "content": content,
-            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "occurred_at": datetime.now(UTC).isoformat(),
             "recipient_user_ids": ["u-local"],
             **extra,
         },
@@ -299,7 +299,7 @@ async def test_inbound_raw_precision_is_rerounded_before_storing(receiver):
         _inbound(
             "m-raw",
             json.dumps({"lat": -33.856784123, "lon": 151.215297987}),
-            edited_at=datetime.now(timezone.utc).isoformat(),
+            edited_at=datetime.now(UTC).isoformat(),
         )
     )
     edited = await repo.get_message("m-raw")

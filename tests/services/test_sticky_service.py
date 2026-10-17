@@ -199,7 +199,7 @@ async def test_coordinates_overflow_is_valueerror_and_values_clamp(env):
 async def test_content_capped_and_sanitised(env):
     with pytest.raises(ValueError):
         await env.svc.create(author="alice", content="y" * 2001, space_id=None)
-    s = await env.svc.create(author="alice", content="a‮b\x00", space_id=None)
+    s = await env.svc.create(author="alice", content="a\u202eb\x00", space_id=None)
     assert s.content == "ab"
     with pytest.raises(ValueError):
         await env.svc.update(

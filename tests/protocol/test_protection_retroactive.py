@@ -17,7 +17,7 @@ owner.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -133,7 +133,7 @@ async def hh(aiohttp_client, tmp_dir):
         " inbox_url, status, paired_at) VALUES('gfs-1','gi-1','GFS','00',"
         " 'https://gfs.invalid','suspended', datetime('now'))"
     )
-    expires = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    expires = (datetime.now(UTC) + timedelta(days=3)).isoformat()
     await db.enqueue(
         "INSERT INTO highlights(id, author_user_id, highlight_date, audience_kind,"
         " audience_json, created_at, expires_at, public_gfs_id, public_published_at)"

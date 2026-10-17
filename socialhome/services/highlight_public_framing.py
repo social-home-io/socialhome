@@ -40,8 +40,8 @@ Both sides agree on these wire constants:
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
 
 import orjson
 

@@ -82,7 +82,7 @@ class AudioTranscriptionService:
                 None, _decode_to_pcm16, audio_bytes
             )
         except Exception as exc:  # decode-side failures
-            log.warning("audio transcribe: decode failed: %s", exc)
+            log.warning("audio transcribe: decode failed: %s", exc, exc_info=True)
             return None
 
         if not pcm:
@@ -95,7 +95,7 @@ class AudioTranscriptionService:
             # as a misconfiguration the user can't usefully act on.
             return None
         except Exception as exc:
-            log.warning("audio transcribe: provider failed: %s", exc)
+            log.warning("audio transcribe: provider failed: %s", exc, exc_info=True)
             return None
 
         text = (text or "").strip()

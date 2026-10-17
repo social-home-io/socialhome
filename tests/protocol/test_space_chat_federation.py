@@ -38,7 +38,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
-from socialhome.domain.federation_capabilities import FederationCapability, OURS
+from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.owner_bound_id import (
     SPACE_CHAT_MESSAGE_KIND,

@@ -12,7 +12,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -24,45 +25,48 @@ from socialhome.authority_sig import (
 )
 from socialhome.crypto import (
     b64url_decode,
+    derive_instance_id,
     derive_user_id,
     generate_identity_keypair,
     generate_space_keypair,
     verify_ed25519,
 )
-from socialhome.services.space_public_author import (
-    author_signing_bytes,
-    build_signed_author_inner,
-    verify_signed_author_inner,
-)
-from tests.services.test_space_public_author import _v25_author_signing_bytes
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import CommentDeleted, PostDeleted, SpacePostCreated
+from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.space import (
+    JoinMode,
+    Space,
+    SpaceFeatureAccess,
+    SpaceFeatures,
+    SpaceMember,
+    SpaceType,
+)
 from socialhome.domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
     ITEM_SIZE_BUCKETS,
     PAD_FIELD,
 )
+from socialhome.domain.writer_cert import WriterCert
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
-from socialhome.crypto import derive_instance_id
-from socialhome.domain.space import SpaceFeatureAccess
-from socialhome.services.space_public_authority import is_approved
-from socialhome.domain.post import Comment, CommentType, Post, PostType
-from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
-from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_crypto_service import SpaceContentEncryption
+from socialhome.services.space_public_author import (
+    author_signing_bytes,
+    build_signed_author_inner,
+    verify_signed_author_inner,
+)
+from socialhome.services.space_public_authority import is_approved
 from socialhome.services.space_public_outbound import SpacePublicOutbound
-from types import SimpleNamespace
-from socialhome.domain.space import SpaceMember
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
-from socialhome.writer_cert import verify_writer_cert
-from socialhome.domain.writer_cert import WriterCert
-from socialhome.writer_cert import sign_writer_cert
+from socialhome.writer_cert import sign_writer_cert, verify_writer_cert
+from tests.services.test_space_public_author import _v25_author_signing_bytes
 
 
 def _unpadded(inner: dict) -> dict:
@@ -169,7 +173,7 @@ def _post(author: str) -> Post:
         author=author,
         type=PostType.TEXT,
         content="hello public space",
-        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
     )
 
 
@@ -281,7 +285,7 @@ def _remote_relay(*, post_id="rpost-1", content="remote authored", space_id="sp-
         author=author_user_id,
         type=PostType.TEXT,
         content=content,
-        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
     )
     inner = build_signed_author_inner(
         post=post,
@@ -447,7 +451,7 @@ async def test_calendar_event_post_not_relayed(env):
         author=env["author_user_id"],
         type=PostType.EVENT,
         content="event",
-        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
         linked_event_id="evt-1",
     )
     await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-cal"))
@@ -1155,7 +1159,7 @@ async def _approved_env(env, *, seats=("member",)):
         author=author_user_id,
         type=PostType.TEXT,
         content="reviewed and released",
-        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
     )
     # Signed by the submitter at submission time (created_at = submitted).
     relay = build_signed_author_inner(
@@ -1323,7 +1327,7 @@ async def test_a_comment_removal_carries_the_author_from_the_held_row(env):
             author="comment-author",
             type=CommentType.TEXT,
             content="hi",
-            created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 10, tzinfo=UTC),
         ),
         space_id="sp-pub",
     )

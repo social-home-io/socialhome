@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 class MomentPublicRegistry:
     """Per-GFS facade over registrations + follows + fan-out."""
 
-    __slots__ = ("_users", "_follows", "_ws_registry")
+    __slots__ = ("_follows", "_users", "_ws_registry")
 
     def __init__(
         self,

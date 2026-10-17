@@ -37,7 +37,7 @@ from __future__ import annotations
 import base64
 import uuid
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import orjson
@@ -53,12 +53,12 @@ from socialhome.app_keys import (
     space_sync_service_key,
 )
 from socialhome.config import Config
+from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.events import SpaceSyncComplete
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem
-from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.page import Page
+from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.task import Task, TaskList, TaskStatus
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
@@ -85,7 +85,7 @@ HOST = "the-host"
 MEMBER = "the-member"
 AUTHOR = "u-anna"  # the host's user
 CORA = "u-cora"  # C's user
-_NOW = datetime.now(timezone.utc)
+_NOW = datetime.now(UTC)
 
 #: Resources streamed whole on every session (the roster, small state).
 KEPT_FULL = {"bans", "members", "member_pictures"}
@@ -892,7 +892,7 @@ async def test_a_virtual_occurrence_from_an_older_provider_is_not_stored(houses)
     """An older provider still streams a series expanded — the occurrence
     rows (``<id>@<start>``) are views of the series, never rows of their
     own: the receiver skips them."""
-    h, c = houses
+    _h, c = houses
     eid = _bound(SPACE_CALENDAR_EVENT_KIND)
     at = _NOW + timedelta(days=1)
     occurrence = {
@@ -1191,7 +1191,7 @@ async def test_a_held_album_by_an_unknown_owner_is_refused_not_held(houses):
     """A member household streaming an album this household already holds
     is refused by rule (it only ever adds) — before the owner check, so an
     owner this space no longer knows (they left) cannot hold the stream."""
-    h, c = houses
+    h, _c = houses
     aid = mint_owner_bound_id(
         GALLERY_ALBUM_KIND, space_id=SPACE, owner_user_id="u-gone"
     )

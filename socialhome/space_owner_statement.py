@@ -39,7 +39,7 @@ from __future__ import annotations
 import binascii
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .authority_sig import (
     UnsupportedAuthoritySuite,
@@ -116,7 +116,7 @@ class VerifiedOwnerStatement:
 
 
 def _now_ms() -> int:
-    return int(datetime.now(timezone.utc).timestamp() * 1000)
+    return int(datetime.now(UTC).timestamp() * 1000)
 
 
 def _is_int(value: object) -> bool:

@@ -38,7 +38,6 @@ from ..authority_cert import (
     sign_authority_cert,
     verify_authority_cert,
 )
-
 from ..space_owner_statement import sign_owner_statement
 
 if TYPE_CHECKING:
@@ -60,7 +59,7 @@ class AuthorityPinRefresher(Protocol):
 
 
 def owner_authority_cert(
-    space: "Space",
+    space: Space,
     *,
     own_instance_id: str | None,
     owner_seed: object,
@@ -95,7 +94,7 @@ def owner_authority_cert(
     )
 
 
-def owner_statement_via(federation: object, space: "Space") -> dict | None:
+def owner_statement_via(federation: object, space: Space) -> dict | None:
     """The owner household's ownership statement for ``space`` to ship in a
     snapshot (migration 0093, :mod:`socialhome.space_owner_statement`).
 
@@ -126,7 +125,7 @@ def owner_statement_via(federation: object, space: "Space") -> dict | None:
 
 
 def owner_statement_for_delegated(
-    federation: object, space: "Space", *, owned_only: bool = False
+    federation: object, space: Space, *, owned_only: bool = False
 ) -> dict | None:
     """:func:`owner_statement_via`, but only for a space with delegated
     admins — the only case a statement is needed (a household seated through
@@ -141,7 +140,7 @@ def owner_statement_for_delegated(
     return owner_statement_via(federation, space)
 
 
-def owner_authority_cert_via(federation: object, space: "Space") -> dict | None:
+def owner_authority_cert_via(federation: object, space: Space) -> dict | None:
     """:func:`owner_authority_cert` with the identity read off a
     :class:`FederationService` (``None`` when federation is not wired)."""
     if federation is None:
@@ -177,7 +176,7 @@ class AuthorityCertOutcome(StrEnum):
 
 
 async def _remember(
-    space_repo: "AbstractSpaceRepo",
+    space_repo: AbstractSpaceRepo,
     space_id: str,
     verified: VerifiedAuthorityCert,
     cert: object,
@@ -199,8 +198,8 @@ async def _remember(
 
 
 async def apply_authority_cert(
-    space_repo: "AbstractSpaceRepo",
-    space: "Space",
+    space_repo: AbstractSpaceRepo,
+    space: Space,
     cert: object,
     *,
     own_instance_id: str,

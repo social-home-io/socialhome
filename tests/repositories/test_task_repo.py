@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import copy
+from datetime import UTC, date, datetime
 
 import pytest
-
-import copy
 
 from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
 from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
@@ -15,7 +14,7 @@ from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRep
 @pytest.fixture
 async def env(tmp_dir):
     """Env with task repos over a real SQLite database."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
@@ -58,7 +57,7 @@ def _task(
     title: str = "Do something",
     status: TaskStatus = TaskStatus.TODO,
 ) -> Task:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return Task(
         id=task_id,
         list_id=list_id,
@@ -158,7 +157,7 @@ async def test_list_by_status(env):
 async def test_list_by_assignee(env):
     """list_by_assignee returns tasks assigned to the given user_id."""
     await env.repo.save_list(_list_("lst-assign"))
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     assigned = Task(
         id="t-assigned",
         list_id="lst-assign",
@@ -182,7 +181,7 @@ async def test_list_due_on(env):
     """list_due_on returns non-done tasks due on the exact date."""
     await env.repo.save_list(_list_("lst-due"))
     today = date(2025, 7, 4)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     due_task = Task(
         id="t-due",
         list_id="lst-due",
@@ -226,7 +225,7 @@ async def test_space_save_and_get_task(env):
     """SqliteSpaceTaskRepo save / get task roundtrip."""
     tl = _list_("spl-t", "ST")
     await env.space_repo.save_list(tl, space_id="sp-1")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     task = Task(
         id="sp-t1",
         list_id="spl-t",
@@ -249,7 +248,7 @@ async def test_space_list_by_list(env):
     """list_by_list on space repo returns tasks in the list."""
     tl = _list_("spl-lbl")
     await env.space_repo.save_list(tl, space_id="sp-1")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for i in range(3):
         t = Task(
             id=f"sp-tlbl-{i}",
@@ -279,7 +278,7 @@ async def test_space_list_by_space(env):
     tl2 = _list_("spl-bs2")
     await env.space_repo.save_list(tl1, space_id="sp-1")
     await env.space_repo.save_list(tl2, space_id="sp-1")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     t1 = Task(
         id="sp-tbs1",
         list_id="spl-bs1",
@@ -311,7 +310,7 @@ async def test_space_delete_task(env):
     """delete on space task repo removes the task."""
     tl = _list_("spl-del")
     await env.space_repo.save_list(tl, space_id="sp-1")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     task = Task(
         id="sp-tdel",
         list_id="spl-del",
@@ -487,7 +486,7 @@ async def test_space_list_lists_since_includes_the_same_second(env):
 async def _archive(env, table: str, task_id: str) -> None:
     await env.db.enqueue(
         f"UPDATE {table} SET archived_at=? WHERE id=?",
-        (datetime.now(timezone.utc).isoformat(), task_id),
+        (datetime.now(UTC).isoformat(), task_id),
     )
 
 

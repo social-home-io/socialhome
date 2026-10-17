@@ -117,7 +117,7 @@ class SchedulePollCollectionView(BaseView):
     """
 
     async def post(self) -> web.Response:
-        self.user
+        self.require_user()
         post_id = self.match("id")
         body = await self.body()
         svc = self.svc(poll_service_key)
@@ -209,7 +209,7 @@ class SchedulePollSummaryView(BaseView):
     """``GET /api/schedule-polls/{id}/summary``."""
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         poll_id = self.match("id")
         svc = self.svc(poll_service_key)
         return web.json_response(await svc.schedule_summary(poll_id))

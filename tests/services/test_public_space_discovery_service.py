@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -27,7 +26,6 @@ from socialhome.services.gfs_http import (
 from socialhome.services.public_space_discovery_service import (
     PublicSpaceDiscoveryService,
 )
-
 
 # ─── DB fixture ──────────────────────────────────────────────────────────
 
@@ -144,12 +142,12 @@ async def test_purge_older_than(env):
     db, repo, _ = env
     await repo.upsert(_listing("sp-1"))
     # Manually backdate.
-    old_iso = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    old_iso = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     await db.enqueue(
         "UPDATE public_space_cache SET cached_at=? WHERE space_id=?",
         (old_iso, "sp-1"),
     )
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     n = await repo.purge_older_than(cutoff)
     assert n == 1
 
@@ -462,7 +460,7 @@ async def test_poll_once_purges_stale_cache(env):
     db, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1"))
     await repo.upsert(_listing("sp-old"))
-    old_iso = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    old_iso = (datetime.now(UTC) - timedelta(days=5)).isoformat()
     await db.enqueue(
         "UPDATE public_space_cache SET cached_at=? WHERE space_id=?",
         (old_iso, "sp-old"),

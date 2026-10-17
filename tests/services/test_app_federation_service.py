@@ -28,15 +28,14 @@ from socialhome.domain.apps import (
     InstalledApp,
 )
 from socialhome.domain.federation import (
-    InstanceSource,
     FederationEvent,
     FederationEventType,
+    InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
 from socialhome.domain.user import RemoteUser, User
 from socialhome.services.app_federation_service import AppFederationService
-
 
 # ─── Stubs ────────────────────────────────────────────────────────────────────
 
@@ -1359,7 +1358,7 @@ async def test_list_contacts_local_member_shape():
     """A local household member appears with is_local=True and the own instance_id."""
     alice = _make_user("u-alice", "alice", "Alice")
     bob = _make_user("u-bob", "bob", "Bob")
-    svc, _, ws = _make_svc(
+    svc, _, _ws = _make_svc(
         users=[alice, bob],
         online_user_ids={"u-bob"},
         own_instance_id="own-inst",
@@ -1964,7 +1963,7 @@ async def test_per_user_open_needs_an_initiator_of_the_sending_household(from_us
 async def test_open_dedup_is_per_sending_household():
     """Another household reusing a session id never suppresses the real open."""
     app = _make_installed_app("chess")
-    svc, _, ws = _make_svc(
+    svc, _, _ws = _make_svc(
         apps={"chess": app},
         users=[_make_user("u2", "bob")],
         remote_users=[

@@ -30,12 +30,11 @@ from ..domain.events import (
 from ..domain.shopping import ShoppingStore, StoreRenameResult
 from ..infrastructure.event_bus import EventBus
 from ..repositories.shopping_repo import (
+    UNSET_FIELD,
     AbstractShoppingRepo,
     ShoppingItem,
-    UNSET_FIELD,
 )
 from .bus_publisher import BusPublisherMixin
-
 
 #: Upper bound on the free-form store name. Keeps the chip / pill
 #: real estate sensible across the UI; the autosuggest dropdown also
@@ -78,7 +77,7 @@ def _clean_store(value: str | None) -> str | None:
 class ShoppingService(BusPublisherMixin):
     """Household shopping list operations."""
 
-    __slots__ = ("_repo", "_bus")
+    __slots__ = ("_bus", "_repo")
 
     def __init__(
         self,

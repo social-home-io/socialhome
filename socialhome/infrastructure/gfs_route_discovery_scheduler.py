@@ -50,16 +50,16 @@ class GfsRouteDiscoveryScheduler:
     """Background loop: periodic + triggered probe rounds, route expiry."""
 
     __slots__ = (
-        "_service",
+        "_clock",
+        "_coalesce",
         "_interval",
         "_jitter",
-        "_coalesce",
-        "_uniform",
-        "_min_gap",
-        "_clock",
         "_last_round_at",
-        "_task",
+        "_min_gap",
+        "_service",
         "_stop",
+        "_task",
+        "_uniform",
         "_wake",
     )
 
@@ -118,7 +118,7 @@ class GfsRouteDiscoveryScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -127,7 +127,7 @@ class GfsRouteDiscoveryScheduler:
             triggered = True
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=self.next_delay())
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 triggered = False
             if self._stop.is_set():
                 break
@@ -137,7 +137,7 @@ class GfsRouteDiscoveryScheduler:
                     await asyncio.wait_for(
                         self._stop.wait(), timeout=self.trigger_delay()
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 if self._stop.is_set():
                     break

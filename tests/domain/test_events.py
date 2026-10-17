@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from socialhome.domain.events import (
     DomainEvent,
@@ -17,7 +17,7 @@ from socialhome.domain.post import Post, PostType
 
 def test_post_created_is_domain_event():
     """PostCreated is a DomainEvent with a valid occurred_at timestamp."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     p = Post(id="p1", author="u1", type=PostType.TEXT, created_at=now)
     e = PostCreated(post=p)
     assert isinstance(e, DomainEvent)
@@ -70,6 +70,7 @@ def test_app_challenge_received_is_frozen_slots():
     assert e.to_user_id == "u-local"
     assert e.from_display == "Alice"
     import dataclasses
+
     import pytest
 
     with pytest.raises(dataclasses.FrozenInstanceError):

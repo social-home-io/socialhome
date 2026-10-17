@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from socialhome.crypto import (
-    generate_identity_keypair,
     derive_instance_id,
     derive_user_id,
+    generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import UserStatusChanged
@@ -755,7 +755,7 @@ async def test_apply_ha_username_only_matches_ha_source(stack):
 
 # ─── Status: validation, clear-after, expiry ─────────────────────────────
 
-_NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
 
 
 async def test_set_status_publishes_status_changed(stack):

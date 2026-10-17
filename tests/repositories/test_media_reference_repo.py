@@ -93,31 +93,51 @@ async def test_collects_the_remaining_media_sources(db):
     and drafts reference media too — none of them may be swept."""
     await _seed_parents(db)
     stmts = [
-        "INSERT INTO post_comments(id, post_id, author, media_url) "
-        "VALUES('c1', 'fp0', 'u1', 'api/media/fcomment.webp')",
-        "INSERT INTO space_post_comments(id, post_id, author, media_url) "
-        "VALUES('c2', 'sp0', 'u1', 'api/media/scomment.webp')",
-        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode, "
-        "title, end_time, currency, image_urls_json) VALUES('sp0', 'sp1', 'u1', "
-        "'fixed', 'T', '2099-01-01', 'USD', '[\"api/media/bazaar.webp\"]')",
-        "INSERT INTO calendar_events(id, calendar_id, summary, start_dt, end_dt, "
-        "created_by, cover_url) VALUES('e1', 'cal1', 'S', '2026-01-01', "
-        "'2026-01-02', 'u1', '/api/media/calcover.webp')",
-        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, "
-        "end_dt, created_by, cover_url) VALUES('e2', 'sp1', 'S', '2026-01-01', "
-        "'2026-01-02', 'u1', '/api/media/spcalcover.webp')",
-        "INSERT INTO pages(id, title, created_by, cover_image_url) "
-        "VALUES('pg1', 'P', 'u1', 'api/media/pagecover.webp')",
-        "INSERT INTO space_pages(id, space_id, title, created_by, cover_image_url) "
-        "VALUES('pg2', 'sp1', 'P', 'u1', 'api/media/spagecover.webp')",
-        "INSERT INTO page_edit_history(id, page_id, title, content, edited_by, "
-        "version, cover_image_url) VALUES('h1', 'pg1', 'P', '', 'u1', 1, "
-        "'api/media/oldcover.webp')",
-        "INSERT INTO task_attachments(id, task_id, uploaded_by, url, filename, "
-        "mime, size_bytes) VALUES('a1', 't1', 'u1', 'api/media/attach.pdf', "
-        "'report.pdf', 'application/pdf', 1)",
-        "INSERT INTO post_drafts(id, username, context, media_url) "
-        "VALUES('d1', 'u1', 'feed', 'api/media/draft.webp')",
+        (
+            "INSERT INTO post_comments(id, post_id, author, media_url) "
+            "VALUES('c1', 'fp0', 'u1', 'api/media/fcomment.webp')"
+        ),
+        (
+            "INSERT INTO space_post_comments(id, post_id, author, media_url) "
+            "VALUES('c2', 'sp0', 'u1', 'api/media/scomment.webp')"
+        ),
+        (
+            "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode, "
+            "title, end_time, currency, image_urls_json) VALUES('sp0', 'sp1', 'u1', "
+            "'fixed', 'T', '2099-01-01', 'USD', '[\"api/media/bazaar.webp\"]')"
+        ),
+        (
+            "INSERT INTO calendar_events(id, calendar_id, summary, start_dt, end_dt, "
+            "created_by, cover_url) VALUES('e1', 'cal1', 'S', '2026-01-01', "
+            "'2026-01-02', 'u1', '/api/media/calcover.webp')"
+        ),
+        (
+            "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, "
+            "end_dt, created_by, cover_url) VALUES('e2', 'sp1', 'S', '2026-01-01', "
+            "'2026-01-02', 'u1', '/api/media/spcalcover.webp')"
+        ),
+        (
+            "INSERT INTO pages(id, title, created_by, cover_image_url) "
+            "VALUES('pg1', 'P', 'u1', 'api/media/pagecover.webp')"
+        ),
+        (
+            "INSERT INTO space_pages(id, space_id, title, created_by, cover_image_url) "
+            "VALUES('pg2', 'sp1', 'P', 'u1', 'api/media/spagecover.webp')"
+        ),
+        (
+            "INSERT INTO page_edit_history(id, page_id, title, content, edited_by, "
+            "version, cover_image_url) VALUES('h1', 'pg1', 'P', '', 'u1', 1, "
+            "'api/media/oldcover.webp')"
+        ),
+        (
+            "INSERT INTO task_attachments(id, task_id, uploaded_by, url, filename, "
+            "mime, size_bytes) VALUES('a1', 't1', 'u1', 'api/media/attach.pdf', "
+            "'report.pdf', 'application/pdf', 1)"
+        ),
+        (
+            "INSERT INTO post_drafts(id, username, context, media_url) "
+            "VALUES('d1', 'u1', 'feed', 'api/media/draft.webp')"
+        ),
     ]
     for sql in stmts:
         await db.enqueue(sql)

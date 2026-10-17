@@ -28,7 +28,7 @@ Coverage:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -101,7 +101,7 @@ def _write(event_type, payload=None, *, sender=FOLLOWER, space_id=SPACE_ID):
         event_type=event_type,
         from_instance=sender,
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload if payload is not None else {"author": "u-follower"},
         space_id=space_id,
     )

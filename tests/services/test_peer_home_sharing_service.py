@@ -17,7 +17,6 @@ from socialhome.services.peer_home_sharing_service import (
     UnknownInstanceError,
 )
 
-
 pytestmark = pytest.mark.asyncio
 
 

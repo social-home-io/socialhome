@@ -22,9 +22,10 @@ all, so this module owns the round trip:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ..domain.errors import WrongTypeError
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.post import FileMeta, LocationData, Post, PostType
 from ..domain.space import Space, SpaceModerationItem
@@ -163,7 +164,7 @@ def post_from_queue_payload(
         id=post_id,
         author=item.submitted_by,
         type=PostType(str(p.get("type") or "text")),
-        created_at=created_at or datetime.now(timezone.utc),
+        created_at=created_at or datetime.now(UTC),
         content=p.get("content"),
         media_url=p.get("media_url"),
         image_urls=tuple(str(u) for u in (p.get("image_urls") or ())),
@@ -198,12 +199,12 @@ def _text(value: object, what: str, *, limit: int = MAX_POLL_TEXT) -> str:
 class SpacePostAttachments:
     """Validates and creates the things that ride with a space post."""
 
-    __slots__ = ("_polls", "_bazaar")
+    __slots__ = ("_bazaar", "_polls")
 
     def __init__(
         self,
         *,
-        poll_service: "PollService | None" = None,
+        poll_service: PollService | None = None,
         bazaar_service: _ListingCreator | None = None,
     ) -> None:
         self._polls = poll_service
@@ -218,7 +219,7 @@ class SpacePostAttachments:
         if not attachments:
             return {}
         if not isinstance(attachments, dict):
-            raise ValueError("attachments must be an object")
+            raise WrongTypeError("attachments must be an object")
         out: dict[str, Any] = {}
         poll = attachments.get("poll")
         if poll is not None:
@@ -248,7 +249,7 @@ class SpacePostAttachments:
             slots = []
             for i, slot in enumerate(raw_slots):
                 if not isinstance(slot, dict):
-                    raise ValueError("each slot must be an object")
+                    raise WrongTypeError("each slot must be an object")
                 slots.append(
                     {
                         "slot_date": _text(
@@ -338,7 +339,7 @@ class PostModerationHandler:
 
     __slots__ = ("_svc",)
 
-    def __init__(self, service: "SpaceService") -> None:
+    def __init__(self, service: SpaceService) -> None:
         self._svc = service
 
     def validate(self, space: Space, payload: dict) -> dict:
@@ -346,7 +347,7 @@ class PostModerationHandler:
             raise ValueError("not a post submission")
         post_type = PostType(str(payload.get("type") or "text"))
         if not isinstance(payload.get("target_id"), str):
-            raise ValueError("queued post has no id")
+            raise WrongTypeError("queued post has no id")
         out = dict(payload)
         out["post_id"] = payload.get("post_id") or payload["target_id"]
         out["attachments"] = self._svc.post_attachments().validate(

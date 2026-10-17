@@ -97,7 +97,7 @@ class _TimetableView(BaseView):
     """Shared plumbing: feature gate, service, body/version, response."""
 
     async def _household(self) -> TimetableService:
-        self.user  # auth check
+        self.require_user()
         await self.require_household_feature(_SECTION)
         return self.svc(timetable_service_key)
 

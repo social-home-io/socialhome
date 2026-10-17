@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import AsyncIterable, Mapping
+from collections.abc import AsyncIterable, Mapping
 from urllib.parse import quote
 
 import aiohttp
@@ -54,13 +54,13 @@ class HaClient:
     """HTTP + WS client for the Home Assistant Core API."""
 
     __slots__ = (
-        "_session",
-        "_base_url",
-        "_token",
         "_auth_list_cache",
         "_auth_list_cached_at",
+        "_base_url",
         "_notify_cache",
         "_notify_cached_at",
+        "_session",
+        "_token",
     )
 
     def __init__(

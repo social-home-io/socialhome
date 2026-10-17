@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .errors import WrongTypeError
 from .user import UserIdentityAssertion
 
 
@@ -75,11 +76,11 @@ class MoveLink:
         }
 
     @classmethod
-    def from_wire_dict(cls, data: dict[str, object]) -> "MoveLink":
+    def from_wire_dict(cls, data: dict[str, object]) -> MoveLink:
         """Reconstruct from the wire shape produced by :meth:`to_wire_dict`."""
         assertion_data = data["new_home_assertion"]
         if not isinstance(assertion_data, dict):
-            raise ValueError("new_home_assertion must be a wire dict")
+            raise WrongTypeError("new_home_assertion must be a wire dict")
         return cls(
             suite=str(data["suite"]),
             user_public_key=str(data["user_public_key"]),

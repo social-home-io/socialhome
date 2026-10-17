@@ -19,7 +19,7 @@ registry and SQLite:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -55,7 +55,7 @@ PEER_REMOTE_TWIN = "peer-event-0000000000000000000002"
 OTHER_REMOTE = "other-event-01"
 CRAFTED_REMOTE = "crafted-01"
 
-START = datetime(2026, 6, 10, 18, 0, tzinfo=timezone.utc)
+START = datetime(2026, 6, 10, 18, 0, tzinfo=UTC)
 OCC = START.isoformat()
 
 
@@ -203,7 +203,7 @@ async def _send(app, event_type, payload, *, from_instance=PEER) -> None:
                 event_type=event_type,
                 from_instance=from_instance,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )

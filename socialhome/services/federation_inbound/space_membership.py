@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ...domain.events import (
@@ -57,9 +57,9 @@ class SpaceMembershipInboundHandlers:
 
     __slots__ = (
         "_bus",
-        "_space_repo",
-        "_seat_repo",
         "_federation",
+        "_seat_repo",
+        "_space_repo",
         "_space_service",
     )
 
@@ -67,8 +67,8 @@ class SpaceMembershipInboundHandlers:
         self,
         *,
         bus: EventBus,
-        space_repo: "AbstractSpaceRepo",
-        seat_repo: "AbstractSpaceRemoteMemberRepo | None" = None,
+        space_repo: AbstractSpaceRepo,
+        seat_repo: AbstractSpaceRemoteMemberRepo | None = None,
     ) -> None:
         self._bus = bus
         self._space_repo = space_repo
@@ -77,16 +77,16 @@ class SpaceMembershipInboundHandlers:
         #: (:mod:`socialhome.federation.host_equivalence`). ``None``: only
         #: the owner's bans apply.
         self._seat_repo = seat_repo
-        self._federation: "FederationService | None" = None
+        self._federation: FederationService | None = None
         #: v_49 — the host side of a member household's leave. Built after
         #: these handlers, so wired late; absent → the old row-only drop.
-        self._space_service: "SpaceService | None" = None
+        self._space_service: SpaceService | None = None
 
-    def attach_space_service(self, space_service: "SpaceService") -> None:
+    def attach_space_service(self, space_service: SpaceService) -> None:
         """Wire :class:`SpaceService` (built downstream of this handler)."""
         self._space_service = space_service
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         self._federation = federation_service
         registry = federation_service._event_registry
         registry.register(FederationEventType.SPACE_CREATED, self._on_created)
@@ -104,7 +104,7 @@ class SpaceMembershipInboundHandlers:
 
     # ─── Handlers ────────────────────────────────────────────────────────
 
-    async def _on_created(self, event: "FederationEvent") -> None:
+    async def _on_created(self, event: FederationEvent) -> None:
         """A paired peer created a new space — mirror the row locally."""
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         if not space_id:
@@ -160,7 +160,7 @@ class SpaceMembershipInboundHandlers:
             )
         )
 
-    async def _on_dissolved(self, event: "FederationEvent") -> None:
+    async def _on_dissolved(self, event: FederationEvent) -> None:
         """The owner host dissolved a space — ARCHIVE our local copy
         read-only; never hard-delete a member's local data.
 
@@ -194,7 +194,7 @@ class SpaceMembershipInboundHandlers:
         await self._space_repo.set_archived(space_id, True, reason="dissolved")
         await self._bus.publish(RemoteSpaceDissolved(space_id=space_id))
 
-    async def _on_sync_rejected(self, event: "FederationEvent") -> None:
+    async def _on_sync_rejected(self, event: FederationEvent) -> None:
         """The host rejected our reconnect sync because we're no longer a
         member — ARCHIVE our local copy read-only (the §S-1 reconnect
         backstop). Same archive-not-delete treatment as a remote dissolve:
@@ -273,7 +273,7 @@ class SpaceMembershipInboundHandlers:
         return any(j is not None and j > removed for j in joined)
 
     async def _apply_owner_statement_answer(
-        self, event: "FederationEvent", space_id: str
+        self, event: FederationEvent, space_id: str
     ) -> None:
         """The OWNER answered our catch-up with its current ownership
         statement (it never seated us). When it names the key we pin, it is
@@ -331,7 +331,7 @@ class SpaceMembershipInboundHandlers:
         ):
             await store_owner_statement(self._space_repo, space_id, statement_json)
 
-    async def _on_instance_left(self, event: "FederationEvent") -> None:
+    async def _on_instance_left(self, event: FederationEvent) -> None:
         """A member household left (all its seats, or ``user_id``'s).
 
         On the space's host (v_49) the service ends that household's seat(s)
@@ -352,7 +352,7 @@ class SpaceMembershipInboundHandlers:
                 return
         await self._space_repo.remove_space_instance(space_id, event.from_instance)
 
-    async def _is_from_the_host(self, event: "FederationEvent", space_id: str) -> bool:
+    async def _is_from_the_host(self, event: FederationEvent, space_id: str) -> bool:
         """Whether the §24.11-authenticated sender hosts ``space_id``.
 
         A ban is a statement about somebody else's standing in a space,
@@ -396,7 +396,7 @@ class SpaceMembershipInboundHandlers:
         return True
 
     async def _names_the_owner_household(
-        self, event: "FederationEvent", space_id: str, user_id: str
+        self, event: FederationEvent, space_id: str, user_id: str
     ) -> bool:
         """A ban / unban from anyone but the owner (a trusted inviting
         admin) that names a user of the owner household: refused — only the
@@ -416,7 +416,7 @@ class SpaceMembershipInboundHandlers:
             return True
         return False
 
-    async def _on_banned(self, event: "FederationEvent") -> None:
+    async def _on_banned(self, event: FederationEvent) -> None:
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         user_id = str(event.payload.get("user_id") or "")
         if not space_id or not user_id:
@@ -441,7 +441,7 @@ class SpaceMembershipInboundHandlers:
             )
         )
 
-    async def _on_unbanned(self, event: "FederationEvent") -> None:
+    async def _on_unbanned(self, event: FederationEvent) -> None:
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         user_id = str(event.payload.get("user_id") or "")
         if not space_id or not user_id:
@@ -452,7 +452,7 @@ class SpaceMembershipInboundHandlers:
             return
         await self._space_repo.unban_member(space_id, user_id)
 
-    async def _on_age_gate(self, event: "FederationEvent") -> None:
+    async def _on_age_gate(self, event: FederationEvent) -> None:
         """§CP.F1 — the host set/changed the space's min_age.
 
         Older peers may still ship ``target_audience`` in the payload; we
@@ -501,7 +501,7 @@ class SpaceMembershipInboundHandlers:
             return
         await self._space_repo.update_age_gate(space_id, min_age=coerced_min_age)
 
-    async def _on_catch_up(self, event: "FederationEvent") -> None:
+    async def _on_catch_up(self, event: FederationEvent) -> None:
         """§13 ``SPACE_CONFIG_CATCH_UP`` — a peer announces the sequence
         number of the latest config it has.
 
@@ -547,7 +547,7 @@ class SpaceMembershipInboundHandlers:
     async def _push_config_to(
         self,
         to_instance_id: str,
-        space: "Space",
+        space: Space,
     ) -> None:
         """Send ``SPACE_CONFIG_CHANGED`` to *to_instance_id* so they can
         catch their cached copy up to our sequence number."""
@@ -586,7 +586,7 @@ class SpaceMembershipInboundHandlers:
                 payload=payload,
             )
         except Exception as exc:  # pragma: no cover
-            log.warning("SPACE_CONFIG_CATCH_UP push failed: %s", exc)
+            log.warning("SPACE_CONFIG_CATCH_UP push failed: %s", exc, exc_info=True)
 
 
 def _utc(value: object) -> datetime | None:
@@ -595,7 +595,7 @@ def _utc(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

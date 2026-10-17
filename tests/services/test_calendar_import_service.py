@@ -13,7 +13,6 @@ from socialhome.services.calendar_import_service import (
 )
 from socialhome.services.calendar_service import _clean_client_event_uuid
 
-
 # ─── Fakes ────────────────────────────────────────────────────────────────
 
 

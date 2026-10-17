@@ -14,7 +14,7 @@ back through anybody's stream or a re-announced create.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -57,7 +57,7 @@ AUTHOR = "u-anna"  # the host's user who made the lists
 S2 = "sp-two"  # a second space M holds, hosted by H2 (the C1 squat target)
 H2 = "host-two"
 H2_USER = "u-bob"
-_NOW = datetime.now(timezone.utc) - timedelta(days=1)
+_NOW = datetime.now(UTC) - timedelta(days=1)
 
 
 def _config(tmp_path, name: str) -> Config:
@@ -218,7 +218,7 @@ async def _resume(host, member, since: str) -> list[FederationEventType]:
             event_type=event_type,
             from_instance=HOST,
             to_instance=MEMBER,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload=dict(payload),
             space_id=SPACE,
         )
@@ -236,7 +236,7 @@ async def _task_lists_of(app) -> set[str]:
 
 
 def _since() -> str:
-    return (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    return (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
 
 
 # ── Deletes ──────────────────────────────────────────────────────────────
@@ -308,7 +308,7 @@ async def test_a_reannounced_create_of_a_deleted_list_is_refused(households):
                 event_type=FET.SPACE_TASK_LIST_CREATED,
                 from_instance=OTHER,
                 to_instance=MEMBER,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=task_list_to_wire_dict(lst, SPACE),
                 space_id=SPACE,
             )
@@ -412,7 +412,7 @@ async def test_a_hosts_tombstone_for_another_spaces_list_id_records_nothing(
 async def test_a_hosts_tombstone_for_a_list_held_in_another_space_is_refused(
     households, caplog
 ):
-    host, member = households
+    _host, member = households
     await _seed_space(member[db_key], S2, H2, (H2,))
     x = mint_owner_bound_id(SPACE_TASK_LIST_KIND, space_id=S2, owner_user_id=H2_USER)
     assert await _repo(member).save_list(
@@ -555,7 +555,7 @@ async def test_a_replayed_delete_from_a_v42_member_in_an_admin_only_space(
                 event_type=FET.SPACE_TASK_LIST_DELETED,
                 from_instance=OTHER,
                 to_instance=MEMBER,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
                 space_id=SPACE,
             )

@@ -137,13 +137,13 @@ def svc(repo, bus):
 
 
 async def _create(svc, name="School", **kw):
-    args = dict(latitude=52.52, longitude=13.405, radius_m=150)
+    args = {"latitude": 52.52, "longitude": 13.405, "radius_m": 150}
     args.update(kw)
     return await svc.create_zone(actor_is_admin=True, name=name, **args)
 
 
 def _ext(eid, name, **kw) -> ExternalHouseholdZone:
-    args = dict(latitude=52.52, longitude=13.405, radius_m=100)
+    args = {"latitude": 52.52, "longitude": 13.405, "radius_m": 100}
     args.update(kw)
     return ExternalHouseholdZone(external_id=eid, name=name, **args)
 
@@ -508,7 +508,7 @@ async def sql_svc(db):
 async def _miss(_self, _name):
     """Stand-in lookup that misses — a concurrent write slipped in
     between the service's name check and its insert."""
-    return None
+    return
 
 
 async def test_create_name_race_is_name_taken(sql_svc, monkeypatch):

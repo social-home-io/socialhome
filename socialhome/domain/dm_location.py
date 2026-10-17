@@ -30,6 +30,8 @@ import math
 import unicodedata
 from dataclasses import dataclass
 
+from .errors import WrongTypeError
+
 #: Label cap — matches the location-post label cap (``LOCATION_LABEL_MAX``).
 DM_LOCATION_LABEL_MAX: int = 80
 
@@ -73,7 +75,7 @@ def _reject_constant(name: str) -> float:
 
 def _coord(raw: object, name: str, limit: float) -> float:
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        raise ValueError(f"location {name} must be a number")
+        raise WrongTypeError(f"location {name} must be a number")
     value = float(raw)
     if not math.isfinite(value) or not -limit <= value <= limit:
         raise ValueError(f"location {name} out of range")
@@ -85,7 +87,7 @@ def _label(raw: object) -> str | None:
     if raw is None:
         return None
     if not isinstance(raw, str):
-        raise ValueError("location label must be a string")
+        raise WrongTypeError("location label must be a string")
     cleaned = "".join(ch for ch in raw if unicodedata.category(ch) != "Cc").strip()
     if not cleaned:
         return None
@@ -100,7 +102,7 @@ def _accuracy(raw: object) -> int | None:
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        raise ValueError("location accuracy_m must be a number")
+        raise WrongTypeError("location accuracy_m must be a number")
     value = float(raw)
     if not math.isfinite(value) or value < 0:
         raise ValueError("location accuracy_m out of range")
@@ -119,7 +121,7 @@ def parse_location_content(content: str) -> DmLocation:
     except json.JSONDecodeError as exc:
         raise ValueError("location content must be a JSON object") from exc
     if not isinstance(data, dict):
-        raise ValueError("location content must be a JSON object")
+        raise WrongTypeError("location content must be a JSON object")
     if "lat" not in data or "lon" not in data:
         raise ValueError("location content requires lat and lon")
     return DmLocation(

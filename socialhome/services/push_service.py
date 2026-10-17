@@ -98,7 +98,7 @@ class PushService:
         to contact the operator if their endpoint is being abused.
     """
 
-    __slots__ = ("_sub_repo", "_vapid", "_contact_email")
+    __slots__ = ("_contact_email", "_sub_repo", "_vapid")
 
     def __init__(
         self,
@@ -185,7 +185,7 @@ class PushService:
             log.warning("push: failed status=%s endpoint=%s", status, sub.endpoint[:40])
             return False
         except Exception as exc:  # pragma: no cover
-            log.warning("push: unexpected error: %s", exc)
+            log.warning("push: unexpected error: %s", exc, exc_info=True)
             return False
 
 

@@ -38,22 +38,22 @@ class GfsAdminService:
     """Admin-portal operations surface."""
 
     __slots__ = (
-        "_fed_repo",
         "_admin_repo",
+        "_cluster",
+        "_fed_repo",
         "_federation",
         "_fraud_threshold",
-        "_cluster",
         "_ws_registry",
     )
 
     def __init__(
         self,
         *,
-        fed_repo: "AbstractGfsFederationRepo",
-        admin_repo: "AbstractGfsAdminRepo",
-        federation: "GfsFederationService",
+        fed_repo: AbstractGfsFederationRepo,
+        admin_repo: AbstractGfsAdminRepo,
+        federation: GfsFederationService,
         fraud_threshold: int = 5,
-        ws_registry: "GfsWebSocketRegistry | None" = None,
+        ws_registry: GfsWebSocketRegistry | None = None,
     ) -> None:
         self._fed_repo = fed_repo
         self._admin_repo = admin_repo

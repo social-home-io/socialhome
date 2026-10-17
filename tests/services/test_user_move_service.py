@@ -8,7 +8,7 @@ so the binding checks are genuinely run, not mocked away.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -83,7 +83,7 @@ def _build_scenario(*, username: str = "pascal", display_name: str = "Pascal"):
     new_instance_id = derive_instance_id(new_home_kp.public_key)
     old_user_id = derive_user_id(old_home_kp.public_key, anchor)
     new_user_id = derive_user_id(new_home_kp.public_key, anchor)
-    issued = datetime.now(timezone.utc).isoformat()
+    issued = datetime.now(UTC).isoformat()
 
     new_home_assertion = build_user_identity_assertion(
         instance_seed=new_home_kp.private_key,
@@ -221,7 +221,7 @@ def _moved_event(scenario, *, payload: dict | None = None) -> FederationEvent:
         event_type=FederationEventType.USER_MOVED,
         from_instance=scenario["old_instance_id"],
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload
         if payload is not None
         else {"move_link": scenario["link"].to_wire_dict()},
@@ -336,7 +336,7 @@ async def test_on_resolve_request_sends_link_back_to_confirmed_peer(env):
         event_type=FederationEventType.USER_IDENTITY_RESOLVE,
         from_instance="asker",
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"old_user_id": s["old_user_id"]},
     )
     await env.fed._event_registry.dispatch(resolve_evt)
@@ -363,7 +363,7 @@ async def test_on_resolve_request_drops_non_confirmed_peer(env, caplog):
         event_type=FederationEventType.USER_IDENTITY_RESOLVE,
         from_instance="asker",
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"old_user_id": s["old_user_id"]},
     )
     with caplog.at_level("WARNING"):

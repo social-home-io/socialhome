@@ -57,18 +57,18 @@ class GalleryFederationOutbound:
         "_bus",
         "_federation",
         "_gallery_repo",
-        "_space_repo",
         "_media_sync",
+        "_space_repo",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        gallery_repo: "AbstractGalleryRepo",
-        space_repo: "AbstractSpaceRepo",
-        media_sync: "SpaceMediaSyncService | None" = None,
+        federation_service: FederationService,
+        gallery_repo: AbstractGalleryRepo,
+        space_repo: AbstractSpaceRepo,
+        media_sync: SpaceMediaSyncService | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -211,7 +211,7 @@ class GalleryFederationOutbound:
         try:
             album = await self._gallery_repo.get_album(album_id)
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("gallery-outbound: album lookup failed: %s", exc)
+            log.debug("gallery-outbound: album lookup failed: %s", exc, exc_info=True)
             return None
         if album is None:
             return None
@@ -242,4 +242,5 @@ class GalleryFederationOutbound:
                 event_type,
                 space_id,
                 exc,
+                exc_info=True,
             )

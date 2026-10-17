@@ -132,7 +132,7 @@ class SpaceChatAccess:
     their messages carry their names.
     """
 
-    __slots__ = ("_spaces", "_remote_members")
+    __slots__ = ("_remote_members", "_spaces")
 
     #: A space chat can be busy; a new seat rings only on an @-mention.
     default_notif_level = "mentions"
@@ -216,7 +216,7 @@ class SpaceChatAccess:
 class SystemChatPolicy:
     """Live read / write decisions for system chats, one strategy per scope."""
 
-    __slots__ = ("_users", "_scopes")
+    __slots__ = ("_scopes", "_users")
 
     def __init__(
         self,

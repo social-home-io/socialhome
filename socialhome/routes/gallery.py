@@ -18,6 +18,8 @@ Household-level albums (no parent space) live under
 
 from __future__ import annotations
 
+import logging
+
 from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
@@ -27,6 +29,8 @@ from ..hardening import read_body_capped, read_part_capped
 from ..media_signer import sign_media_urls_in
 from .base import BaseView
 from .media_status import READY, media_filename
+
+log = logging.getLogger(__name__)
 
 _GALLERY_SECTION = "gallery"
 
@@ -210,7 +214,7 @@ class AlbumRetentionView(BaseView):
         await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
         try:
             body = await self.body()
-        except Exception:
+        except web.HTTPBadRequest:
             body = {}
         exempt = bool(body.get("retention_exempt"))
         await self.svc(K.gallery_service_key).set_retention_exempt(
@@ -281,6 +285,10 @@ class AlbumItemCollectionView(BaseView):
                 reader = await self.request.multipart()
                 field = await reader.next()
             except Exception:
+                log.debug(
+                    "AlbumItemCollectionView.post: fail-soft error ignored",
+                    exc_info=True,
+                )
                 return web.json_response({"error": "bad_multipart"}, status=400)
             if field is None:
                 return web.json_response({"error": "missing file"}, status=422)

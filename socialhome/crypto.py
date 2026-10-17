@@ -23,9 +23,10 @@ import os
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
@@ -34,12 +35,10 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
-from cryptography.hazmat.primitives import serialization
 
 from .domain.move_link import MoveLink
 from .domain.user import UserIdentityAssertion
 from .utils.datetime import parse_iso8601_strict
-
 
 # ─── Base helpers ──────────────────────────────────────────────────────────
 
@@ -99,7 +98,7 @@ def derive_space_id(space_public_key_bytes: bytes) -> str:
     return base64.b32encode(digest[:20]).decode("ascii").lower().rstrip("=")
 
 
-def generate_space_keypair() -> "Ed25519Keypair":
+def generate_space_keypair() -> Ed25519Keypair:
     """Generate a fresh Ed25519 keypair for a new space (§4.3.2).
 
     Same algorithm as :func:`generate_identity_keypair` — a separate
@@ -660,7 +659,7 @@ def verify_move_link(
     #    is fine, the new-home assertion gate above already bounds clock skew).
     if max_age is not None:
         issued = parse_iso8601_strict(link.issued_at)
-        current = now if now is not None else datetime.now(timezone.utc)
+        current = now if now is not None else datetime.now(UTC)
         if (current - issued).total_seconds() > max_age.total_seconds():
             raise MoveLinkError("move-link is older than max_age")
 
@@ -857,7 +856,7 @@ def build_user_identity_assertion(
 
 
 def verify_user_identity_assertion(
-    assertion: "UserIdentityAssertion",
+    assertion: UserIdentityAssertion,
     sender_instance_public_key: bytes,
     *,
     now: datetime | None = None,
@@ -954,7 +953,7 @@ def verify_user_identity_assertion(
             raise ValueError("Invalid user identity binding self-signature")
 
     issued = parse_iso8601_strict(assertion.issued_at)
-    current = now if now is not None else datetime.now(timezone.utc)
+    current = now if now is not None else datetime.now(UTC)
     if abs((current - issued).total_seconds()) > max_age.total_seconds():
         raise ValueError("User identity assertion is expired or future-dated")
 
@@ -1036,7 +1035,7 @@ class ReplayCache:
         accepted for caller context but is not part of the dedup key (see
         the class docstring) — the durable replay table is ``msg_id``-keyed.
         """
-        current = now if now is not None else datetime.now(timezone.utc)
+        current = now if now is not None else datetime.now(UTC)
         self._prune(current)
         if msg_id in self._seen:
             return True
@@ -1044,7 +1043,7 @@ class ReplayCache:
         return False
 
     def prune(self, *, now: datetime | None = None) -> None:
-        self._prune(now if now is not None else datetime.now(timezone.utc))
+        self._prune(now if now is not None else datetime.now(UTC))
 
     def load(self, entries: list[tuple[str, str]]) -> None:
         """Warm the cache from persisted ``(msg_id, received_at)`` rows.
@@ -1073,7 +1072,7 @@ class ReplayCache:
         # so the prune step doesn't ``TypeError`` on a freshly-warmed
         # cache.
         def _aware(t: datetime) -> datetime:
-            return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+            return t if t.tzinfo is not None else t.replace(tzinfo=UTC)
 
         stale = [k for k, t in self._seen.items() if _aware(t) < cutoff]
         for k in stale:

@@ -15,7 +15,6 @@ from socialhome.crypto import generate_identity_keypair
 from socialhome.federation import routed_crypto as rc
 from socialhome.federation.route_discovery import _route_found_signing_bytes
 
-
 # ── Round-trip ─────────────────────────────────────────────────────────
 
 
@@ -142,7 +141,7 @@ def test_forward_ciphertext_cannot_be_replayed_as_ack():
     """A forward-direction ciphertext can't be passed off as a reply —
     forward uses origin→target key, reply uses target→origin key, and
     the AAD has an ``|ack`` suffix on the reply side."""
-    o_priv, o_pub, t_priv, t_pub = _ephemeral_pair()
+    o_priv, o_pub, _t_priv, t_pub = _ephemeral_pair()
     sealed = rc.seal_inner_payload(
         inner_payload_json='{"token":"t-1"}',
         origin_eph_priv_b64=o_priv,

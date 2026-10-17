@@ -6,7 +6,6 @@ import pytest
 
 from socialhome.repositories._spec import Spec, spec_to_sql
 
-
 # ─── spec_to_sql purity ──────────────────────────────────────────────────
 
 

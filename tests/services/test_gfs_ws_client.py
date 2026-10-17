@@ -17,7 +17,6 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from socialhome.crypto import b64url_decode, verify_ed25519
 from socialhome.services.gfs_ws_client import GfsWebSocketClient, _to_ws_url
 
-
 try:
     import pytest_socket  # noqa: F401
 
@@ -164,12 +163,13 @@ class _FakeGfsServer:
                         self.outbound.get(),
                         timeout=0.05,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     if ws.closed:
                         break
                     continue
                 await ws.send_json(frame)
-        except Exception:
+        except ConnectionResetError:
+            # The client went away mid-send.
             pass
         finally:
             reader.cancel()
@@ -233,7 +233,7 @@ async def test_client_sends_signed_hello(fake_gfs, http_session):
         assert abs(hello["ts"] - int(time.time())) < 5
         # Verify the signature against the test's pub key.
         sig = b64url_decode(hello["sig"])
-        msg = f"sh-1|{hello['ts']}".encode("utf-8")
+        msg = f"sh-1|{hello['ts']}".encode()
         assert verify_ed25519(pub, msg, sig)
     finally:
         await client.stop()

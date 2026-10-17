@@ -14,7 +14,7 @@ real application registry and SQLite:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -32,7 +32,7 @@ FET = FederationEventType
 
 INVITED = "peer-invited"  # household the event was shared with
 OTHER = "peer-other"  # a paired household the event was never shared with
-START = datetime(2026, 6, 10, 18, 0, tzinfo=timezone.utc)
+START = datetime(2026, 6, 10, 18, 0, tzinfo=UTC)
 OCC = START.isoformat()
 
 
@@ -150,7 +150,7 @@ async def _send(app, event_type, payload, *, from_instance=INVITED) -> None:
                 event_type=event_type,
                 from_instance=from_instance,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )

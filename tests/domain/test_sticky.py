@@ -73,9 +73,9 @@ def test_parse_sticky_coord_refuses_non_finite_or_non_numbers(raw):
 
 
 def test_sanitize_sticky_content_strips_control_and_bidi_keeps_newlines():
-    raw = "  buy‮ milk\x00\n\ttomorrow‏  "
+    raw = "  buy\u202e milk\x00\n\ttomorrow\u200f  "
     assert sanitize_sticky_content(raw) == "buy milk\n\ttomorrow"
-    assert sanitize_sticky_content("​ \x07") == ""
+    assert sanitize_sticky_content("\u200b \x07") == ""
 
 
 def test_content_cap_leaves_headroom_over_the_spa_limit():
@@ -84,7 +84,7 @@ def test_content_cap_leaves_headroom_over_the_spa_limit():
 
 def test_coerce_peer_sticky_replaces_bad_values_never_keeps_raw():
     f = coerce_peer_sticky(
-        content="hi‮ there\x00",
+        content="hi\u202e there\x00",
         color="url(https://evil.example/t.png)",
         position_x=10**400,
         position_y="12",

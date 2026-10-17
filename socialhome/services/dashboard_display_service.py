@@ -66,7 +66,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import NoReturn
 
 from ..dashboard.auth import THROTTLE_MAX_FAILURES, DashboardAuth
@@ -217,15 +217,15 @@ class DashboardDisplayService:
     """Pairs wall panels and checks their bearer tokens."""
 
     __slots__ = (
-        "_settings",
+        "_audit",
         "_auth",
+        "_claim_lock",
+        "_claims",
         "_clock",
         "_directory",
-        "_audit",
         "_pending",
-        "_claims",
-        "_claim_lock",
         "_seen",
+        "_settings",
     )
 
     def __init__(
@@ -378,7 +378,7 @@ class DashboardDisplayService:
                 id=secrets.token_hex(_DISPLAY_ID_BYTES),
                 name=clean,
                 token_hash=_token_hash(token),
-                created_at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
+                created_at=datetime.fromtimestamp(now, UTC).isoformat(),
                 model=match.model,
                 firmware=match.firmware,
                 mac=match.mac,
@@ -533,7 +533,7 @@ class DashboardDisplayService:
                 id=secrets.token_hex(_DISPLAY_ID_BYTES),
                 name=spent.name,
                 token_hash=_token_hash(token),
-                created_at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
+                created_at=datetime.fromtimestamp(now, UTC).isoformat(),
                 model=clean_info(model),
                 firmware=clean_info(firmware),
                 mac=spent.mac,
@@ -804,7 +804,7 @@ class DashboardDisplayService:
         self._seen[display.id] = now
         await self._settings.record_display_seen(
             display.id,
-            at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
+            at=datetime.fromtimestamp(now, UTC).isoformat(),
             firmware=clean_info(firmware),
             model=clean_info(model),
             # Write-once: a self-reported MAC fills a gap (a panel paired

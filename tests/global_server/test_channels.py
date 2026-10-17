@@ -12,7 +12,7 @@ import json
 import os
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -32,6 +32,18 @@ from socialhome.domain.gfs_channel import (
     ChannelSubscribeRequest,
     ChannelUnsubscribeRequest,
 )
+from socialhome.gfs_channel import (
+    channel_pk_of,
+    derive_channel_seed,
+    issue_channel_cert,
+    issue_channel_pass,
+    issue_channel_writer_key,
+    new_channel_id,
+    sign_notice,
+    sign_publish_anon,
+    sign_register,
+    sign_unregister,
+)
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_channel_service_key,
@@ -47,18 +59,6 @@ from socialhome.global_server.channels import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
-from socialhome.gfs_channel import (
-    channel_pk_of,
-    derive_channel_seed,
-    issue_channel_cert,
-    issue_channel_pass,
-    issue_channel_writer_key,
-    new_channel_id,
-    sign_notice,
-    sign_publish_anon,
-    sign_register,
-    sign_unregister,
-)
 
 GFS_ID = "gfs-node-a"
 SPACE_SEED = os.urandom(32)
@@ -82,7 +82,7 @@ class _Household:
         )
 
     def hello(self) -> dict:
-        ts = int(datetime.now(timezone.utc).timestamp())
+        ts = int(datetime.now(UTC).timestamp())
         sig = sign_ed25519(self.seed, f"{self.instance_id}|{ts}".encode())
         return {
             "type": "hello",
@@ -93,7 +93,7 @@ class _Household:
 
 
 def _now(delta_s: int = 0) -> str:
-    return (datetime.now(timezone.utc) + timedelta(seconds=delta_s)).isoformat()
+    return (datetime.now(UTC) + timedelta(seconds=delta_s)).isoformat()
 
 
 class _Channel:

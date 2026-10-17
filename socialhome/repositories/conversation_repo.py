@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.conversation import (
+    TOMBSTONE_MESSAGE_TYPE,
     Conversation,
     ConversationMember,
     ConversationMessage,
@@ -30,8 +31,8 @@ from ..domain.conversation import (
     RemoteConversationMember,
     SpaceChatSeatUnread,
     SystemChatScope,
-    TOMBSTONE_MESSAGE_TYPE,
 )
+from ..utils.datetime import as_utc
 from .base import (
     bool_col,
     changed_since_sql,
@@ -40,7 +41,6 @@ from .base import (
     rows_to_dicts,
     sync_page_cursor,
 )
-from ..utils.datetime import as_utc
 from .cp_repo import guardian_block_counterparts_sql
 
 
@@ -393,7 +393,7 @@ class SqliteConversationRepo:
         if (scope is SystemChatScope.SPACE) != (space_id is not None):
             raise ValueError("a space chat needs a space_id, and only it")
         conv_id = uuid.uuid4().hex
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         def _run(conn) -> dict | None:
             conn.execute(
@@ -506,7 +506,7 @@ class SqliteConversationRepo:
         removed one (``deleted_at``) is reactivated with the watermark at
         ``at`` and keeps the member's own level and mute.
         """
-        stamp = at or datetime.now(timezone.utc).isoformat()
+        stamp = at or datetime.now(UTC).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO conversation_members(
@@ -1207,7 +1207,7 @@ class SqliteConversationRepo:
                     conversation_id,
                     sender_user_id,
                     TOMBSTONE_MESSAGE_TYPE,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                 ),
             )
             == 1
@@ -1556,7 +1556,7 @@ class SqliteConversationRepo:
                 message_id=r["message_id"],
                 user_id=r["user_id"],
                 emoji=r["emoji"],
-                reacted_at=_parse(r["reacted_at"]) or datetime.now(timezone.utc),
+                reacted_at=_parse(r["reacted_at"]) or datetime.now(UTC),
             )
             for r in rows
         ]
@@ -1580,7 +1580,7 @@ class SqliteConversationRepo:
                 message_id=r["message_id"],
                 user_id=r["user_id"],
                 emoji=r["emoji"],
-                reacted_at=_parse(r["reacted_at"]) or datetime.now(timezone.utc),
+                reacted_at=_parse(r["reacted_at"]) or datetime.now(UTC),
             )
             for r in rows
         ]
@@ -1603,7 +1603,7 @@ class SqliteConversationRepo:
         """
         if state not in ("delivered", "read"):
             raise ValueError(f"invalid delivery state: {state!r}")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._db.enqueue(
             """
             INSERT INTO conversation_delivery_state(
@@ -1675,7 +1675,7 @@ class SqliteConversationRepo:
             (conversation_id, user_id, up_to_at),
         )
         count = 0
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         for row in rows:
             await self._db.enqueue(
                 """
@@ -1707,7 +1707,7 @@ def _parse(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -1718,7 +1718,7 @@ def _row_to_conv(row: dict | None) -> Conversation | None:
     return Conversation(
         id=row["id"],
         type=ConversationType(row["type"]),
-        created_at=_parse(row["created_at"]) or datetime.now(timezone.utc),
+        created_at=_parse(row["created_at"]) or datetime.now(UTC),
         name=row.get("name"),
         last_message_at=_parse(row.get("last_message_at")),
         bot_enabled=bool_col(row.get("bot_enabled", 0)),
@@ -1738,7 +1738,7 @@ def _row_to_message(row: dict | None) -> ConversationMessage | None:
         conversation_id=row["conversation_id"],
         sender_user_id=row["sender_user_id"],
         content=row.get("content") or "",
-        created_at=_parse(row["created_at"]) or datetime.now(timezone.utc),
+        created_at=_parse(row["created_at"]) or datetime.now(UTC),
         type=row.get("type", "text"),
         media_url=row.get("media_url"),
         file_name=row.get("file_name"),
@@ -1763,5 +1763,5 @@ def new_conversation(
         id=uuid.uuid4().hex,
         type=type,
         name=name,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )

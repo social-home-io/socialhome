@@ -34,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import aiofiles
@@ -75,13 +75,13 @@ class MediaTranscodeService(BusPublisherMixin):
     """
 
     __slots__ = (
-        "_repo",
-        "_media_dir",
-        "_processor",
         "_bus",
         "_interval",
-        "_task",
+        "_media_dir",
+        "_processor",
+        "_repo",
         "_stop",
+        "_task",
         "_wake",
     )
 
@@ -91,7 +91,7 @@ class MediaTranscodeService(BusPublisherMixin):
         repo: AbstractMediaTranscodeRepo,
         media_dir: pathlib.Path,
         processor: VideoProcessor,
-        bus: "EventBus | None" = None,
+        bus: EventBus | None = None,
         interval_seconds: float = 5.0,
     ) -> None:
         self._repo = repo
@@ -135,7 +135,7 @@ class MediaTranscodeService(BusPublisherMixin):
                     stuck,
                 )
         except Exception as exc:  # pragma: no cover — defensive
-            log.warning("media-transcode: reclaim failed: %s", exc)
+            log.warning("media-transcode: reclaim failed: %s", exc, exc_info=True)
         self._stop.clear()
         self._task = asyncio.create_task(self._loop())
 
@@ -146,7 +146,7 @@ class MediaTranscodeService(BusPublisherMixin):
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -161,12 +161,12 @@ class MediaTranscodeService(BusPublisherMixin):
                 if done:
                     log.debug("media-transcode: transcoded %d job(s)", done)
             except Exception as exc:  # pragma: no cover — defensive
-                log.warning("media-transcode flush failed: %s", exc)
+                log.warning("media-transcode flush failed: %s", exc, exc_info=True)
             if self._stop.is_set():
                 break
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=self._interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     # ── Flush ──────────────────────────────────────────────────────────
@@ -206,6 +206,7 @@ class MediaTranscodeService(BusPublisherMixin):
                     "media-transcode: transcode failed for %s: %s",
                     job.output_filename,
                     exc,
+                    exc_info=True,
                 )
                 await self._fail(job, str(exc))
                 continue
@@ -217,7 +218,7 @@ class MediaTranscodeService(BusPublisherMixin):
 
     # ── Internals ──────────────────────────────────────────────────────
 
-    async def _fail(self, job: "MediaTranscodeJob", last_error: str) -> None:
+    async def _fail(self, job: MediaTranscodeJob, last_error: str) -> None:
         """Reschedule with jittered exponential backoff; fail at the cap.
 
         At :data:`MAX_ATTEMPTS` the row flips to ``status='failed'`` and
@@ -239,7 +240,7 @@ class MediaTranscodeService(BusPublisherMixin):
             base_seconds=BACKOFF_BASE_SECONDS,
             cap_seconds=BACKOFF_CAP_SECONDS,
         )
-        next_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        next_at = datetime.now(UTC) + timedelta(seconds=delay)
         await self._repo.reschedule(
             job.output_filename,
             attempts=attempts,
@@ -258,7 +259,7 @@ class MediaTranscodeService(BusPublisherMixin):
                 exc,
             )
 
-    async def _publish_ready(self, job: "MediaTranscodeJob") -> None:
+    async def _publish_ready(self, job: MediaTranscodeJob) -> None:
         """Fail-soft publish of :class:`MediaTranscodeReady` on success.
 
         Uses :meth:`BusPublisherMixin._emit` (no-ops when no bus is
@@ -278,9 +279,10 @@ class MediaTranscodeService(BusPublisherMixin):
                 "media-transcode: ready-event publish failed for %s: %s",
                 job.output_filename,
                 exc,
+                exc_info=True,
             )
 
-    async def _publish_failed(self, job: "MediaTranscodeJob") -> None:
+    async def _publish_failed(self, job: MediaTranscodeJob) -> None:
         """Fail-soft publish of :class:`MediaTranscodeFailed` at the cap.
 
         Mirrors :meth:`_publish_ready` — uses :meth:`BusPublisherMixin._emit`
@@ -299,4 +301,5 @@ class MediaTranscodeService(BusPublisherMixin):
                 "media-transcode: failed-event publish failed for %s: %s",
                 job.output_filename,
                 exc,
+                exc_info=True,
             )

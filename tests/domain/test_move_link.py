@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from socialhome.domain.move_link import MoveLink
 from socialhome.domain.user import UserIdentityAssertion
 

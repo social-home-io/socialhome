@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -67,7 +67,7 @@ async def _seed_listing(env, *, mode: BazaarMode, seller="u-seller") -> str:
         "VALUES(?,?,?,?,?)",
         (pid, _DEFAULT_SPACE_ID, seller, "bazaar", ""),
     )
-    end_iso = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    end_iso = (datetime.now(UTC) + timedelta(days=1)).isoformat()
     await env.repo.save_listing(
         BazaarListing(
             post_id=pid,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from socialhome.domain.conversation import ConversationMember, ConversationMessage
@@ -93,7 +93,7 @@ def _event(from_instance: str, payload: dict) -> SimpleNamespace:
 
 
 async def test_streams_messages_in_order_and_emits_complete():
-    now = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 1, tzinfo=UTC)
     messages = [_msg(i, now + timedelta(minutes=i)) for i in range(3)]
     fed = _FakeFederation()
     provider = DmHistoryProvider(
@@ -120,7 +120,7 @@ async def test_streams_messages_in_order_and_emits_complete():
 
 
 async def test_respects_since_cursor():
-    now = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 1, tzinfo=UTC)
     messages = [_msg(i, now + timedelta(minutes=i)) for i in range(3)]
     fed = _FakeFederation()
     repo = _FakeConvRepo(messages)
@@ -142,7 +142,7 @@ async def test_respects_since_cursor():
 
 
 async def test_large_history_is_split_into_multiple_chunks():
-    now = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 1, tzinfo=UTC)
     messages = [_msg(i, now + timedelta(seconds=i)) for i in range(CHUNK_SIZE + 5)]
     fed = _FakeFederation()
     provider = DmHistoryProvider(
@@ -203,7 +203,7 @@ async def test_history_chunks_suppressed_when_local_participant_hidden_from_peer
     """When the local participant is hidden from the requesting peer, no CHUNK
     envelopes are sent but DM_HISTORY_COMPLETE still fires with chunks_sent=0
     so the requester's catch-up state machine terminates cleanly."""
-    now = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 1, tzinfo=UTC)
     messages = [_msg(i, now + timedelta(minutes=i)) for i in range(3)]
 
     local_user = User(
@@ -241,7 +241,7 @@ async def test_history_chunks_suppressed_when_local_participant_hidden_from_peer
 async def test_history_streams_when_no_visibility_repo_back_compat():
     """With visibility_repo=None the original streaming
     behaviour is preserved — no regressions for existing wiring."""
-    now = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 1, tzinfo=UTC)
     messages = [_msg(i, now + timedelta(minutes=i)) for i in range(2)]
     fed = _FakeFederation()
     provider = DmHistoryProvider(
@@ -260,7 +260,7 @@ async def test_history_streams_when_no_visibility_repo_back_compat():
 
 async def test_no_history_for_a_household_without_a_seat():
     """A peer that holds no seat in the conversation gets nothing back."""
-    now = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 1, tzinfo=UTC)
     fed = _FakeFederation()
     provider = DmHistoryProvider(
         conversation_repo=_FakeConvRepo([_msg(0, now)], seats=("peer-b",)),

@@ -27,7 +27,7 @@ CLAUDE.md "Encryption-First Rule").
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -75,25 +75,25 @@ class SpacePostOutbound:
     __slots__ = (
         "_bus",
         "_federation",
-        "_media_sync",
         "_federation_repo",
-        "_spaces",
-        "_users",
+        "_media_sync",
+        "_member_gfs",
+        "_own_identity_seed",
         "_own_instance_id",
         "_own_instance_pk",
-        "_own_identity_seed",
+        "_spaces",
+        "_users",
         "_writer_certs",
-        "_member_gfs",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
-        space_repo: "AbstractSpaceRepo",
-        user_repo: "AbstractUserRepo",
-        media_sync: "SpaceMediaSyncService | None" = None,
+        federation_service: FederationService,
+        space_repo: AbstractSpaceRepo,
+        user_repo: AbstractUserRepo,
+        media_sync: SpaceMediaSyncService | None = None,
         federation_repo=None,
     ) -> None:
         self._bus = bus
@@ -110,10 +110,10 @@ class SpacePostOutbound:
         self._own_identity_seed: bytes = b""
         #: v_49 — when wired, the relay hint carries this household's writer
         #: cert for the current epoch (a seed holder re-checks + re-stamps it).
-        self._writer_certs: "SpaceWriterCertService | None" = None
+        self._writer_certs: SpaceWriterCertService | None = None
         #: v_49 — when wired, a non-seed-holding writer household publishes
         #: its own public/global post to the GFS itself (trusted mode).
-        self._member_gfs: "GfsMemberPublishService | None" = None
+        self._member_gfs: GfsMemberPublishService | None = None
         #: Optional — when wired, ``SPACE_POST_CREATED`` broadcasts
         #: are followed by per-peer outbox enqueues for every
         #: referenced media URL. The sync service's scheduler reads
@@ -139,11 +139,11 @@ class SpacePostOutbound:
         # (space reactions are not federated events).
         self._bus.subscribe(PostReactionChanged, self._on_reaction_changed)
 
-    def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
+    def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert holder for the relay hint."""
         self._writer_certs = writer_certs
 
-    def attach_member_gfs(self, member_gfs: "GfsMemberPublishService") -> None:
+    def attach_member_gfs(self, member_gfs: GfsMemberPublishService) -> None:
         """Wire the v_49 trusted-mode member publisher."""
         self._member_gfs = member_gfs
 
@@ -243,7 +243,7 @@ class SpacePostOutbound:
                 author_identity_seed=self._own_identity_seed,
                 origin_instance_id=self._own_instance_id,
                 author_identity_anchor=author.identity_anchor,
-                ts=datetime.now(timezone.utc).isoformat(),
+                ts=datetime.now(UTC).isoformat(),
                 **fields,
             )
             self._member_gfs.schedule_item(space_id, author_user_id, item_type, inner)
@@ -275,7 +275,7 @@ class SpacePostOutbound:
                 author_identity_anchor=author.identity_anchor,
                 item_type=ITEM_TYPE_POST_EDIT,
                 item_target=post.id,
-                edited_at=edited_at or datetime.now(timezone.utc).isoformat(),
+                edited_at=edited_at or datetime.now(UTC).isoformat(),
             )
             self._member_gfs.schedule_item(
                 space_id, post.author, ITEM_TYPE_POST_EDIT, inner
@@ -529,7 +529,7 @@ class SpacePostOutbound:
         post = event.post
         # One stamp for both paths: receivers order a post's edits by it
         # (last writer wins), whichever path delivers — or replays — them.
-        edited_at = datetime.now(timezone.utc).isoformat()
+        edited_at = datetime.now(UTC).isoformat()
         payload = {
             "id": post.id,
             "post_id": post.id,
@@ -655,7 +655,7 @@ class SpacePostOutbound:
             "space_id": event.space_id,
             "content": c.content,
             # Receivers order a comment's edits by it (last writer wins).
-            "edited_at": datetime.now(timezone.utc).isoformat(),
+            "edited_at": datetime.now(UTC).isoformat(),
         }
         try:
             await self._federation.broadcast_to_space_members(

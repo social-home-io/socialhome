@@ -78,7 +78,7 @@ class BotBridgeSpacePostView(web.View):
             return error_response(401, "UNAUTHORIZED", "Invalid bot token.")
         try:
             body = await self.request.json()
-        except Exception:
+        except ValueError:
             return error_response(400, "BAD_REQUEST", "Invalid JSON body.")
         svc = self.request.app[bot_bridge_service_key]
         try:

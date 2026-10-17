@@ -15,7 +15,6 @@ from socialhome.infrastructure.reconnect_queue import (
     ReconnectSyncQueue,
 )
 
-
 # ─── Construction ────────────────────────────────────────────────────────
 
 
@@ -133,7 +132,7 @@ async def test_concurrency_cap_respected():
     await q.start()
     try:
         await asyncio.wait_for(started.wait(), timeout=2.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pytest.skip("Workers did not reach cap within timeout")
     # Wait drain.
     for _ in range(80):

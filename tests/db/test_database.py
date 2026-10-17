@@ -27,7 +27,7 @@ async def test_enqueue_and_fetchone(tmp_dir):
     """enqueue writes a row that fetchone can retrieve."""
     db = AsyncDatabase(tmp_dir / "test.db", batch_timeout_ms=10)
     await db.startup()
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)

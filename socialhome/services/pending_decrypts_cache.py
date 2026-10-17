@@ -53,11 +53,10 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from ..domain.events import SpaceContentKeyImported
 from ..infrastructure.event_bus import EventBus
-
 
 log = logging.getLogger(__name__)
 

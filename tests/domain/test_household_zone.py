@@ -10,6 +10,7 @@ from socialhome.domain.errors import CodedError
 from socialhome.domain.household_zone import (
     HOME_ZONE_PRESENCE_NAME,
     MAX_HOUSEHOLD_ZONES,
+    ZONE_PALETTE,
     ExternalHouseholdZone,
     HouseholdZone,
     HouseholdZoneIsHomeError,
@@ -19,22 +20,21 @@ from socialhome.domain.household_zone import (
     HouseholdZoneNotFoundError,
     HouseholdZoneReadOnlyError,
     HouseholdZoneSyncStatus,
-    ZONE_PALETTE,
     ZoneSourceUnavailableError,
     zone_color,
 )
 
 
 def _zone(**kw) -> HouseholdZone:
-    base = dict(
-        id="hz_1",
-        name="School",
-        latitude=52.52,
-        longitude=13.405,
-        radius_m=150,
-        created_at="2026-10-13T00:00:00+00:00",
-        updated_at="2026-10-13T00:00:00+00:00",
-    )
+    base = {
+        "id": "hz_1",
+        "name": "School",
+        "latitude": 52.52,
+        "longitude": 13.405,
+        "radius_m": 150,
+        "created_at": "2026-10-13T00:00:00+00:00",
+        "updated_at": "2026-10-13T00:00:00+00:00",
+    }
     base.update(kw)
     return HouseholdZone(**base)
 

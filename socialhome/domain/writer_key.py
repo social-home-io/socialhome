@@ -121,7 +121,7 @@ class WriterKeyCert:
         return {**self.signing_body(), "cert_sig": self.cert_sig}
 
     @classmethod
-    def from_wire(cls, raw: object) -> "WriterKeyCert":
+    def from_wire(cls, raw: object) -> WriterKeyCert:
         """Parse a wire dict; ``ValueError`` on any missing, extra or
         malformed field. An unknown suite STRING parses (the verifier
         rejects it with :class:`UnsupportedWriterKeySuite`)."""
@@ -164,7 +164,7 @@ class WriterKeyGrant:
         }
 
     @classmethod
-    def from_wire(cls, raw: object) -> "WriterKeyGrant":
+    def from_wire(cls, raw: object) -> WriterKeyGrant:
         """Parse a wire dict; ``ValueError`` on any missing, extra or
         malformed field."""
         if not isinstance(raw, dict) or set(raw) != WRITER_KEY_GRANT_KEYS:

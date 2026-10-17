@@ -48,7 +48,7 @@ def _names(*names: str | None) -> tuple[str, ...]:
 class SpaceMentionResolver:
     """Space-member-scoped mention resolution. Stateless; cheap to build."""
 
-    __slots__ = ("_spaces", "_users", "_remote_members")
+    __slots__ = ("_remote_members", "_spaces", "_users")
 
     def __init__(
         self,
@@ -177,7 +177,12 @@ class SpaceMentionResolver:
             ):
                 mentions = tuple(m for m in mentions if m.type is not MentionType.HERE)
         except Exception as exc:  # pragma: no cover - defensive
-            log.warning("mention resolution failed for space %s: %s", space_id, exc)
+            log.warning(
+                "mention resolution failed for space %s: %s",
+                space_id,
+                exc,
+                exc_info=True,
+            )
             return ()
         return mentions
 
@@ -209,6 +214,8 @@ class SpaceMentionResolver:
             lookup = candidate_lookup(await self.candidates(space_id))
             old = MentionParser(lookup_member=lookup).parse(before, space_id)
         except Exception as exc:  # pragma: no cover - defensive
-            log.warning("mention diff failed for space %s: %s", space_id, exc)
+            log.warning(
+                "mention diff failed for space %s: %s", space_id, exc, exc_info=True
+            )
             return ()
         return mentions_added(old, new)

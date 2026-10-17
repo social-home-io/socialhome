@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from socialhome import app_keys as K
 from socialhome.auth import sha256_token_hash
 

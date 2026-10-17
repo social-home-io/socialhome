@@ -64,13 +64,13 @@ class DmScope:
     def __init__(
         self,
         *,
-        conversation_repo: "AbstractConversationRepo",
-        user_repo: "AbstractUserRepo",
+        conversation_repo: AbstractConversationRepo,
+        user_repo: AbstractUserRepo,
     ) -> None:
         self._conversations = conversation_repo
         self._users = user_repo
 
-    async def sent_from(self, event: "FederationEvent", user_id: str) -> bool:
+    async def sent_from(self, event: FederationEvent, user_id: str) -> bool:
         """``user_id`` is a user of the household that signed ``event``.
 
         Unknown users and our own users are refused: a person's words only
@@ -81,7 +81,7 @@ class DmScope:
             return False
         return await self._users.get_instance_for_user(user_id) == sender
 
-    async def seated(self, event: "FederationEvent", conversation_id: str) -> bool:
+    async def seated(self, event: FederationEvent, conversation_id: str) -> bool:
         """The sending household holds a seat in ``conversation_id``."""
         sender = str(event.from_instance or "")
         if not conversation_id or not sender:
@@ -97,10 +97,10 @@ class DmScope:
 
     async def seat_of(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         conversation_id: str,
         user_id: str,
-    ) -> "RemoteConversationMember | None":
+    ) -> RemoteConversationMember | None:
         """The seat ``user_id`` holds in ``conversation_id`` on the sender.
 
         A seat is on the sending household (``instance_id ==
@@ -144,7 +144,7 @@ class DmScope:
 
     async def speaks_for(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         conversation_id: str,
         user_id: str,
     ) -> bool:
@@ -153,7 +153,7 @@ class DmScope:
 
     async def authored_by_sender(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         conversation_id: str,
         user_id: str,
     ) -> bool:
@@ -168,7 +168,7 @@ class DmScope:
 
     async def relayed_by_authority(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         conversation_id: str,
         user_id: str,
     ) -> bool:
@@ -210,7 +210,7 @@ class DmScope:
         return False
 
 
-def refuse(event: "FederationEvent", reason: str, **ids: object) -> None:
+def refuse(event: FederationEvent, reason: str, **ids: object) -> None:
     """Log one refused DM write at WARNING (a peer bug or a misbehaving peer)."""
     detail = " ".join(f"{k}={v}" for k, v in ids.items())
     log.warning(

@@ -27,8 +27,15 @@ from socialhome.domain.federation import (
     GfsConnection,
     InstanceSource,
 )
+from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.writer_cert import WriterEntitlement
+from socialhome.gfs_channel import (
+    channel_pk_of,
+    derive_channel_epoch_offset,
+    derive_channel_seed,
+)
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_envelope_queue_repo_key,
@@ -38,17 +45,10 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
-from socialhome.gfs_channel import (
-    channel_pk_of,
-    derive_channel_epoch_offset,
-    derive_channel_seed,
-)
-from socialhome.domain.gfs_server import GfsServer
-from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
-from socialhome.services import gfs_channel_service as chan_mod
 from socialhome.outbound_fetch import OutboundFetchRefused
+from socialhome.services import gfs_channel_service as chan_mod
 from socialhome.services.gfs_channel_service import GfsChannelService
 from socialhome.services.gfs_server_targets import listing_target
 

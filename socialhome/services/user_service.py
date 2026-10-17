@@ -17,7 +17,7 @@ import logging
 import secrets
 import uuid
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import orjson
@@ -105,7 +105,7 @@ def _resolve_clear_after(value: object, *, now: datetime, tz: str) -> str | None
         next_day = local.date() + timedelta(days=1)
         deadline = datetime(
             next_day.year, next_day.month, next_day.day, tzinfo=zone
-        ).astimezone(timezone.utc)
+        ).astimezone(UTC)
     else:
         try:
             deadline = datetime.fromisoformat(value)
@@ -119,19 +119,19 @@ def _resolve_clear_after(value: object, *, now: datetime, tz: str) -> str | None
             raise ValueError("The clear-after time must be in the future.")
         if deadline - now > STATUS_MAX_LIFETIME:
             raise ValueError("A status can be set to clear at most 7 days ahead.")
-    return deadline.astimezone(timezone.utc).isoformat(timespec="seconds")
+    return deadline.astimezone(UTC).isoformat(timespec="seconds")
 
 
 class UserService(ProtectionGateMixin):
     """Provision, update, and query local users."""
 
     __slots__ = (
-        "_repo",
         "_bus",
+        "_child_protection",
+        "_key_manager",
         "_own_instance_pk",
         "_pictures",
-        "_key_manager",
-        "_child_protection",
+        "_repo",
     )
 
     def __init__(
@@ -177,7 +177,7 @@ class UserService(ProtectionGateMixin):
         display_name: str,
         is_admin: bool = False,
         email: str | None = None,
-        picture_url: str | None = None,  # noqa: ARG002 — deprecated, ignored
+        picture_url: str | None = None,
         source: str = "manual",
     ) -> User:
         """Create a new local user or reactivate a soft-deleted one.
@@ -234,7 +234,7 @@ class UserService(ProtectionGateMixin):
             display_name=display,
             is_admin=is_admin,
             email=email,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             source=source,
             identity_anchor=identity_anchor,
             handle=username,
@@ -633,7 +633,7 @@ class UserService(ProtectionGateMixin):
         user = await self._repo.get(username)
         if user is None:
             raise KeyError(f"user {username!r} not found")
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         clean_emoji = clean_status_emoji(emoji)
         clean_text = clean_status_text(text)
         if clean_emoji is None and clean_text is None:
@@ -663,7 +663,7 @@ class UserService(ProtectionGateMixin):
         :meth:`set_status` publishes ``UserStatusChanged`` so open tabs
         and paired households drop the status too. Returns the count.
         """
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         cleared = 0
         for user in await self._repo.list_with_expired_status(
             now.isoformat(timespec="seconds")

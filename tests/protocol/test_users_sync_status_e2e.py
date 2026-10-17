@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -130,7 +130,7 @@ async def _pair_and_deliver(monkeypatch, a, b, a_id: str, b_id: str) -> dict:
                 event_type=FET.USERS_SYNC,
                 from_instance=a_id,
                 to_instance=b_id,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )
@@ -146,8 +146,8 @@ async def _status_on(app, user_id: str):
 
 async def test_a_friends_status_lands_with_the_pairing_roster(houses, monkeypatch):
     a, b, a_id, a_pk, b_id = houses
-    later = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
-    earlier = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    later = (datetime.now(UTC) + timedelta(hours=3)).isoformat()
+    earlier = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     alice = await _add_member(
         a, a_pk, "alice", emoji="🌴", text="On holiday", expires_at=later
     )

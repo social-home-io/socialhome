@@ -8,7 +8,7 @@ proof (real app, real registry, table snapshots) lives in
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from socialhome.domain.conversation import (
@@ -61,7 +61,7 @@ def _event(from_instance: str = PEER) -> FederationEvent:
         event_type=FederationEventType.DM_MESSAGE,
         from_instance=from_instance,
         to_instance=US,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={},
     )
 
@@ -116,7 +116,7 @@ async def test_a_system_chat_seats_no_household_whatever_its_rows_say():
             return Conversation(
                 id="c-bob",
                 type=ConversationType.GROUP_DM,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
                 system_scope=SystemChatScope.HOUSEHOLD,
             )
 

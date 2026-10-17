@@ -13,7 +13,6 @@ import logging
 import os
 import re
 from dataclasses import replace
-
 from unittest.mock import patch
 
 import pytest
@@ -24,6 +23,7 @@ from socialhome.dashboard.auth import (
     THROTTLE_MAX_FAILURES,
     DashboardAuth,
 )
+from socialhome.dashboard.claim_seal import SealedClaimInvalid, open_sealed_claim
 from socialhome.domain.household_dashboard import (
     CLAIM_TTL_SECONDS,
     MAX_DISPLAYS,
@@ -35,10 +35,10 @@ from socialhome.domain.household_dashboard import (
     DashboardDisabledError,
     DashboardDisplayLimitError,
     DashboardDisplayNotFoundError,
-    DashboardPairingCodeInvalidError,
     DashboardDisplayPinThrottledError,
     DashboardDisplayPinWrongError,
     DashboardDisplaySignedOutError,
+    DashboardPairingCodeInvalidError,
     DashboardPairingThrottledError,
     DashboardPinRequiredError,
     DashboardSettingsInvalidError,
@@ -51,7 +51,6 @@ from socialhome.domain.household_dashboard import (
     ExternalDisplayPanel,
     parse_panel_key,
 )
-from socialhome.dashboard.claim_seal import SealedClaimInvalid, open_sealed_claim
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.dashboard_display_service import (
     SEEN_INTERVAL_S,
@@ -514,7 +513,7 @@ async def test_lock_needs_a_pin(svc, settings):
 
 
 async def test_lock_is_stored_and_survives_a_restart(svc, settings, repo):
-    display, token = await _locked(svc, settings)
+    _display, token = await _locked(svc, settings)
     fresh = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
     again = DashboardDisplayService(fresh, DashboardAuth(fresh))
     found = await again.authenticate(token)
@@ -942,13 +941,15 @@ async def test_ha_unlock_racing_a_removal_is_signed_out(svc, settings):
     await _allow_ha(settings)
     # Removed between the read and the write (the service is slotted:
     # patch its class).
-    with patch.object(
-        DashboardSettingsService,
-        "update_display",
-        side_effect=DashboardDisplayNotFoundError(),
+    with (
+        patch.object(
+            DashboardSettingsService,
+            "update_display",
+            side_effect=DashboardDisplayNotFoundError(),
+        ),
+        pytest.raises(DashboardDisplaySignedOutError),
     ):
-        with pytest.raises(DashboardDisplaySignedOutError):
-            await svc.unlock_from_ha(display)
+        await svc.unlock_from_ha(display)
 
 
 async def test_rename_and_unlock_is_one_write(svc, settings, repo):
@@ -1565,7 +1566,7 @@ async def test_reconnecting_at_the_limit_still_works(hsvc, directory, settings):
     [
         ("  Kitchen panel ", "Kitchen panel"),
         ("A" * 60, "A" * 40),
-        ("bad‮name", "Wall panel"),
+        ("bad\u202ename", "Wall panel"),
     ],
 )
 async def test_the_display_is_named_after_the_panel(

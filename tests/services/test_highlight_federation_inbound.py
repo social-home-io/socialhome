@@ -12,7 +12,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -29,6 +29,7 @@ from socialhome.domain.events import (
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.highlight import HighlightFrameType
 from socialhome.domain.user import RemoteUser
+from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,
@@ -36,7 +37,6 @@ from socialhome.repositories import (
     SqliteUserRepo,
 )
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
-from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound_service import FederationInboundService
 from socialhome.services.highlight_federation_outbound import (
     HighlightFederationOutbound,
@@ -87,7 +87,7 @@ def _event(event_type, payload, *, from_instance="peer-a"):
         event_type=event_type,
         from_instance=from_instance,
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
     )
 
@@ -107,7 +107,7 @@ def _create_payload(**over):
         "caption_emoji": None,
         "duration_ms": None,
         "expires_at": "2026-06-04T00:00:00Z",
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
     }
     base.update(over)
     return base

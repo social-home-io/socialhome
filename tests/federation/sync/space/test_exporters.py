@@ -8,24 +8,30 @@ so the receiver has JSON-serialisable input.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
-
 from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.conversation import ConversationMessage, SystemChatScope
 from socialhome.domain.page import Page
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceMember
 from socialhome.domain.sticky import Sticky
-from socialhome.domain.task import RecurrenceRule, Task, TaskPriority, TaskStatus
-from socialhome.federation.sync.space.window import SyncWindows
-from socialhome.domain.conversation import ConversationMessage, SystemChatScope
+from socialhome.domain.task import (
+    RecurrenceRule,
+    Task,
+    TaskList,
+    TaskPriority,
+    TaskStatus,
+)
+from socialhome.domain.timetable import Timetable
 from socialhome.federation.sync.space.exporter import (
     IncrementalExporter,
     collect_batches,
     record_batches,
 )
 from socialhome.federation.sync.space.exporters import (
+    BansExporter,
     BazaarExporter,
     CalendarDeletedExporter,
     CalendarExporter,
@@ -34,14 +40,13 @@ from socialhome.federation.sync.space.exporters import (
     CommentsDeletedExporter,
     CommentsExporter,
     GalleryExporter,
+    MembersExporter,
+    PagesDeletedExporter,
+    PagesExporter,
     PollsExporter,
     PostsDeletedExporter,
     PostsExporter,
     SchedulesExporter,
-    BansExporter,
-    MembersExporter,
-    PagesDeletedExporter,
-    PagesExporter,
     StickiesDeletedExporter,
     StickiesExporter,
     TaskListsDeletedExporter,
@@ -52,20 +57,19 @@ from socialhome.federation.sync.space.exporters import (
     TimetablesExporter,
     ZonesExporter,
 )
-from socialhome.domain.task import TaskList
-from socialhome.domain.timetable import Timetable
-from socialhome.repositories.page_repo import SqlitePageRepo
-from socialhome.repositories.space_zone_repo import SqliteSpaceZoneRepo
-from socialhome.repositories.task_repo import SqliteSpaceTaskRepo
-from socialhome.repositories.timetable_repo import SqliteSpaceTimetableRepo
+from socialhome.federation.sync.space.window import SyncWindows
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
 from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.repositories.page_repo import SqlitePageRepo
 from socialhome.repositories.space_poll_repo import SqliteSpacePollRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.space_zone_repo import SqliteSpaceZoneRepo
 from socialhome.repositories.sticky_repo import SqliteStickyRepo
+from socialhome.repositories.task_repo import SqliteSpaceTaskRepo
+from socialhome.repositories.timetable_repo import SqliteSpaceTimetableRepo
 
 
 class _NoSpaces:
@@ -226,7 +230,7 @@ async def test_posts_exporter_serialises_enums_and_datetimes():
         id="p-1",
         author="u-1",
         type=PostType.TEXT,
-        created_at=datetime(2026, 4, 18, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 18, tzinfo=UTC),
         content="hi",
     )
     ex = PostsExporter(_FakeSpacePostRepo([post]), _WINDOWS)
@@ -247,7 +251,7 @@ async def test_posts_exporter_ships_hidden_anchor_posts_with_their_flag():
     """
     from socialhome.federation.sync.space.exporters import PostsExporter
 
-    when = datetime(2026, 9, 19, tzinfo=timezone.utc)
+    when = datetime(2026, 9, 19, tzinfo=UTC)
     shown = Post(
         id="p-shown", author="u-1", type=PostType.TEXT, created_at=when, content="hi"
     )
@@ -273,14 +277,14 @@ async def test_comments_exporter_walks_posts():
         id="p-1",
         author="u-1",
         type=PostType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     comment = Comment(
         id="c-1",
         post_id="p-1",
         author="u-2",
         type=CommentType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content="nice",
     )
     repo = _FakeSpacePostRepo([post], {"p-1": [comment]})
@@ -294,7 +298,7 @@ async def test_comments_exporter_walks_posts():
 async def test_tasks_exporter_normalises_status_and_assignees():
     from socialhome.federation.sync.space.exporters import TasksExporter
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     task = Task(
         id="t-1",
         list_id="list-1",
@@ -328,7 +332,7 @@ async def test_tasks_exporter_normalises_status_and_assignees():
 async def test_tasks_exporters_carry_priority_labels_and_archived_at():
     from socialhome.federation.sync.space.exporters import TasksArchivedExporter
 
-    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 1, tzinfo=UTC)
     task = Task(
         id="t-9",
         list_id="l",
@@ -363,7 +367,7 @@ async def test_tasks_archived_filters_to_archived_at():
         TasksExporter,
     )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     active = Task(
         id="t-1",
         list_id="l",
@@ -462,8 +466,8 @@ async def test_calendar_exporter_serialises_datetimes():
         id="e-1",
         calendar_id="cal-1",
         summary="Sync meeting",
-        start=datetime(2026, 4, 18, 10, tzinfo=timezone.utc),
-        end=datetime(2026, 4, 18, 11, tzinfo=timezone.utc),
+        start=datetime(2026, 4, 18, 10, tzinfo=UTC),
+        end=datetime(2026, 4, 18, 11, tzinfo=UTC),
         created_by="u-1",
     )
 
@@ -740,7 +744,8 @@ async def test_member_pictures_exporter_skips_when_picture_missing():
 async def test_schedules_exporter_emits_slot_defs():
     """F5: schedule polls catch up via the ``schedules`` resource so a
     remote member's slot picker isn't empty after §25.6 sync."""
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from socialhome.domain.post import Post, PostType
     from socialhome.federation.sync.space.exporters import SchedulesExporter
 
@@ -748,7 +753,7 @@ async def test_schedules_exporter_emits_slot_defs():
         id="p-sched",
         author="u",
         type=PostType.SCHEDULE,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
     class _PostRepo:
@@ -818,7 +823,7 @@ async def test_covered_exporters_stream_only_rows_changed_since_a_stamp(db):
                 id=pid,
                 author="u",
                 type=PostType.TEXT,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
                 content=pid,
             ),
         )
@@ -836,7 +841,7 @@ async def test_covered_exporters_stream_only_rows_changed_since_a_stamp(db):
                 post_id=pid,
                 author="u",
                 type=CommentType.TEXT,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
                 content=cid,
             ),
             space_id="sp",
@@ -913,7 +918,7 @@ async def test_chat_exporters_stream_only_changed_messages(db):
                 conversation_id=chat.id,
                 sender_user_id="u",
                 content=f"hi {i}",
-                created_at=datetime(2026, 1, 1, 0, i, tzinfo=timezone.utc),
+                created_at=datetime(2026, 1, 1, 0, i, tzinfo=UTC),
             )
         )
     mark = await _seq(db)
@@ -938,7 +943,7 @@ async def test_productivity_exporters_stream_only_rows_changed_since_a_stamp(db)
     timetables = SqliteSpaceTimetableRepo(db)
     stickies = SqliteStickyRepo(db)
     zones = SqliteSpaceZoneRepo(db)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for lid in ("l-quiet", "l-rename", "l-gone"):
         await tasks.save_list(TaskList(id=lid, name=lid, created_by="u"), space_id="sp")
     for tid in ("t-quiet", "t-edit", "t-archive", "t-gone"):

@@ -1,6 +1,9 @@
 """Full route tests for media serve + upload endpoints."""
 
 import os
+
+import aiofiles
+
 from .conftest import _auth
 
 
@@ -14,8 +17,8 @@ async def test_media_serve_file(client):
     media_dir = config.media_path
     os.makedirs(media_dir, exist_ok=True)
     test_file = os.path.join(media_dir, "test.txt")
-    with open(test_file, "w") as f:
-        f.write("hello media")
+    async with aiofiles.open(test_file, "w") as f:
+        await f.write("hello media")
 
     r = await client.get("/api/media/test.txt", headers=h)
     assert r.status == 200
@@ -49,8 +52,9 @@ async def test_media_upload_image(client):
     """POST /api/media/upload with a small JPEG uploads successfully."""
     h = _auth(client._tok)
     # Create a minimal JPEG
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     img = Image.new("RGB", (50, 50), color="red")
     buf = io.BytesIO()
@@ -99,8 +103,9 @@ async def test_media_upload_invalid_image(client):
 async def test_media_serve_webp(client):
     """Serve a .webp file that was just uploaded."""
     h = _auth(client._tok)
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     img = Image.new("RGB", (30, 30), color="blue")
     buf = io.BytesIO()

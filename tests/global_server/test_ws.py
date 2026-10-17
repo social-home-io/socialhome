@@ -11,17 +11,18 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import UTC
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from socialhome import crypto as crypto_mod
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     sign_authority_event,
 )
-from socialhome import crypto as crypto_mod
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
@@ -33,7 +34,6 @@ from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.repositories import SqliteGfsFederationRepo
 from socialhome.global_server.routes import ws as ws_routes
 from socialhome.global_server.server import create_gfs_app
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -58,15 +58,15 @@ def _gen_ed25519() -> tuple[bytes, str]:
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _hello(instance_id: str, seed: bytes, *, ts: int | None = None) -> dict:
     if ts is None:
         ts = int(time.time())
-    msg = f"{instance_id}|{ts}".encode("utf-8")
+    msg = f"{instance_id}|{ts}".encode()
     return {
         "type": "hello",
         "instance_id": instance_id,

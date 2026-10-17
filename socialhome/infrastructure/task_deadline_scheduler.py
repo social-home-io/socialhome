@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ..domain.events import TaskDeadlineDue
@@ -39,15 +39,15 @@ DEADLINE_NOTIF_RETENTION_DAYS = 30
 class TaskDeadlineScheduler:
     """Background task that publishes ``TaskDeadlineDue`` events."""
 
-    __slots__ = ("_repo", "_db", "_bus", "_preferences", "_interval", "_task", "_stop")
+    __slots__ = ("_bus", "_db", "_interval", "_preferences", "_repo", "_stop", "_task")
 
     def __init__(
         self,
-        repo: "AbstractTaskRepo",
-        db: "AsyncDatabase",
-        bus: "EventBus",
+        repo: AbstractTaskRepo,
+        db: AsyncDatabase,
+        bus: EventBus,
         *,
-        preferences: "PreferencesService | None" = None,
+        preferences: PreferencesService | None = None,
         interval_seconds: float = 300.0,  # 5 min
     ) -> None:
         self._repo = repo
@@ -69,7 +69,7 @@ class TaskDeadlineScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -80,13 +80,13 @@ class TaskDeadlineScheduler:
                 if fired:
                     log.debug("task-deadline: fired %d", fired)
             except Exception as exc:  # pragma: no cover
-                log.warning("task-deadline tick failed: %s", exc)
+                log.warning("task-deadline tick failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def tick_once(
@@ -104,7 +104,7 @@ class TaskDeadlineScheduler:
         household date, so each task notifies once per local day.
         """
         if today is None:
-            instant = now or datetime.now(timezone.utc)
+            instant = now or datetime.now(UTC)
             today = local_date(instant, await self._household_tz())
         due_today = await self._repo.list_due_on(today)
         fired = 0
@@ -130,7 +130,7 @@ class TaskDeadlineScheduler:
         try:
             return (await self._preferences.get_household()).tz
         except Exception as exc:  # defensive — fall back to UTC
-            log.warning("task-deadline: household tz failed: %s", exc)
+            log.warning("task-deadline: household tz failed: %s", exc, exc_info=True)
             return DEFAULT_TZ
 
     async def _prune_old(self, today: date) -> None:

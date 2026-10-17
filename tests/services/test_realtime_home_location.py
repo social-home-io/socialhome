@@ -15,7 +15,6 @@ from socialhome.domain.user import User
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.realtime_service import RealtimeService
 
-
 pytestmark = pytest.mark.asyncio
 
 

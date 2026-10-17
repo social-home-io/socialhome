@@ -49,25 +49,25 @@ class PageProposalForwarder:
     """Stop-and-wait delivery of page drafts to their host."""
 
     __slots__ = (
-        "_pages",
+        "_bus",
         "_conflicts",
         "_federation",
         "_federation_repo",
-        "_bus",
-        "_outstanding",
         "_interval",
-        "_task",
+        "_outstanding",
+        "_pages",
         "_stop",
+        "_task",
     )
 
     def __init__(
         self,
         *,
-        page_repo: "AbstractPageRepo",
-        conflicts: "PageConflictService",
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
-        bus: "EventBus",
+        page_repo: AbstractPageRepo,
+        conflicts: PageConflictService,
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
+        bus: EventBus,
         interval_seconds: float = FLUSH_INTERVAL_S,
     ) -> None:
         self._pages = page_repo
@@ -101,7 +101,7 @@ class PageProposalForwarder:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -110,10 +110,10 @@ class PageProposalForwarder:
             try:
                 await self.flush(resend=True)
             except Exception as exc:  # pragma: no cover — defensive
-                log.warning("page proposals: flush failed: %s", exc)
+                log.warning("page proposals: flush failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     # ── Triggers ─────────────────────────────────────────────────────────
@@ -218,7 +218,7 @@ class PageProposalForwarder:
                 space_id=space_id,
             )
         except Exception as exc:  # pragma: no cover — defensive
-            log.debug("page proposal to %s failed: %s", host, exc)
+            log.debug("page proposal to %s failed: %s", host, exc, exc_info=True)
             self._outstanding.pop(key, None)
             return False
         if not getattr(result, "ok", True):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from socialhome.services.visibility import VisibilityMixin
 
 

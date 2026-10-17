@@ -27,7 +27,7 @@ class TasksDeletedExporter(PagedExporterMixin):
 
     __slots__ = ("_repo",)
 
-    def __init__(self, space_task_repo: "AbstractSpaceTaskRepo") -> None:
+    def __init__(self, space_task_repo: AbstractSpaceTaskRepo) -> None:
         self._repo = space_task_repo
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:

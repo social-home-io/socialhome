@@ -123,42 +123,42 @@ class SpaceSyncScheduler:
     """Orchestrates sync initiation across pairs + spaces."""
 
     __slots__ = (
-        "_bus",
-        "_federation",
-        "_federation_repo",
-        "_space_repo",
-        "_seat_repo",
-        "_queue",
-        "_sync_manager",
-        "_own_instance_id",
-        "_interval",
-        "_task",
-        "_stop",
-        "_startup_task",
-        "_mesh_catchup_done",
-        "_mesh_catchup_attempts",
-        "_roster_refresh",
+        "_applied_seqs",
         "_authority_echo",
+        "_bus",
         "_deferred_attempts",
         "_deferred_tasks",
+        "_federation",
+        "_federation_repo",
+        "_interval",
         "_mesh_announce",
         "_mesh_announced",
-        "_applied_seqs",
+        "_mesh_catchup_attempts",
+        "_mesh_catchup_done",
+        "_own_instance_id",
+        "_queue",
+        "_roster_refresh",
+        "_seat_repo",
+        "_space_repo",
+        "_startup_task",
+        "_stop",
+        "_sync_manager",
+        "_task",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation: "FederationService",
-        federation_repo: "AbstractFederationRepo",
-        space_repo: "AbstractSpaceRepo",
-        queue: "ReconnectSyncQueue",
-        sync_manager: "SyncSessionManager",
+        federation: FederationService,
+        federation_repo: AbstractFederationRepo,
+        space_repo: AbstractSpaceRepo,
+        queue: ReconnectSyncQueue,
+        sync_manager: SyncSessionManager,
         own_instance_id: str,
         interval_seconds: float = PERIODIC_INTERVAL_SECONDS,
-        applied_seqs: "AbstractSpaceSyncWatermarkRepo | None" = None,
-        seat_repo: "AbstractSpaceRemoteMemberRepo | None" = None,
+        applied_seqs: AbstractSpaceSyncWatermarkRepo | None = None,
+        seat_repo: AbstractSpaceRemoteMemberRepo | None = None,
     ) -> None:
         self._bus = bus
         #: The roster mirror: a trusted inviting admin household is a mesh
@@ -327,7 +327,7 @@ class SpaceSyncScheduler:
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=delay)
             return  # stopped while waiting
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         await self.enqueue_sync_for_space(
             space_id=space_id, peer_instance_id=provider, priority=P6_PRODUCTIVITY
@@ -355,13 +355,13 @@ class SpaceSyncScheduler:
             # is enough for it to return on its own.
             try:
                 await asyncio.wait_for(self._startup_task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._startup_task.cancel()
             self._startup_task = None
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -480,7 +480,7 @@ class SpaceSyncScheduler:
                 log.exception("SpaceSyncScheduler tick failed")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _tick_once(self) -> None:
@@ -542,7 +542,7 @@ class SpaceSyncScheduler:
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
                 return  # stopped while waiting
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             try:
                 pending = await self._tick_mesh_catchup()

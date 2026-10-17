@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from socialhome.db.database import AsyncDatabase
@@ -65,7 +67,7 @@ async def test_set_many_empty_is_noop(repo):
 async def test_set_many_is_atomic(repo):
     """A failing row rolls back every row of the batch."""
     await repo.set("a", "old")
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.ProgrammingError):
         await repo.set_many({"a": "new", "b": object()})  # type: ignore[dict-item]
     assert await repo.get("a") == "old"
     assert await repo.get("b") is None

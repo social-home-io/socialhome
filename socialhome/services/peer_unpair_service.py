@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from ..domain.events import PeerUnpaired
@@ -85,7 +85,7 @@ UNPAIR_RETRY_MAX_AGE: timedelta = timedelta(days=30)
 
 
 async def is_unpair_tombstone(
-    federation_repo: "AbstractFederationRepo | None",
+    federation_repo: AbstractFederationRepo | None,
     instance_id: str,
 ) -> bool:
     """Whether *instance_id* is an unpair tombstone.
@@ -115,26 +115,26 @@ class PeerUnpairService:
 
     __slots__ = (
         "_bus",
+        "_dm_media_outbox_repo",
         "_federation",
         "_federation_repo",
+        "_in_progress",
+        "_notify_timeout_s",
         "_outbox_repo",
         "_routing_repo",
-        "_dm_media_outbox_repo",
         "_space_media_outbox_repo",
-        "_notify_timeout_s",
-        "_in_progress",
     )
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation: "FederationService",
-        federation_repo: "AbstractFederationRepo",
-        outbox_repo: "AbstractOutboxRepo",
-        routing_repo: "AbstractDmRoutingRepo",
-        dm_media_outbox_repo: "AbstractDmMediaOutboxRepo",
-        space_media_outbox_repo: "AbstractSpaceMediaOutboxRepo",
+        federation: FederationService,
+        federation_repo: AbstractFederationRepo,
+        outbox_repo: AbstractOutboxRepo,
+        routing_repo: AbstractDmRoutingRepo,
+        dm_media_outbox_repo: AbstractDmMediaOutboxRepo,
+        space_media_outbox_repo: AbstractSpaceMediaOutboxRepo,
         notify_timeout_s: float = UNPAIR_NOTIFY_TIMEOUT_S,
     ) -> None:
         self._bus = bus
@@ -243,7 +243,7 @@ class PeerUnpairService:
         await self._dm_media_outbox_repo.delete_for_instance(instance_id)
         await self._space_media_outbox_repo.delete_for_instance(instance_id)
         await self._routing_repo.forget_discovered_via(instance_id)
-        expires_at = (datetime.now(timezone.utc) + UNPAIR_RETRY_MAX_AGE).isoformat()
+        expires_at = (datetime.now(UTC) + UNPAIR_RETRY_MAX_AGE).isoformat()
         queued = await self._federation.queue_event(
             to_instance_id=instance_id,
             event_type=FederationEventType.UNPAIR,

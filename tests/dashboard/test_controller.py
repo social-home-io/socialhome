@@ -17,7 +17,6 @@ from socialhome.domain.household_dashboard import (
     DashboardPortInUseError,
     DashboardSettings,
 )
-
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
 
 from .conftest import PASSWORD, FakeConfigRepo

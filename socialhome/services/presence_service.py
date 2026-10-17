@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from ..domain.events import PresenceUpdated
@@ -64,7 +64,7 @@ class UserNotFoundError(LookupError):
 class PresenceService(BusPublisherMixin):
     """Read and update household member presence."""
 
-    __slots__ = ("_repo", "_users", "_bus", "_zones")
+    __slots__ = ("_bus", "_repo", "_users", "_zones")
 
     def __init__(
         self,
@@ -183,7 +183,7 @@ class PresenceService(BusPublisherMixin):
             latitude=lat,
             longitude=lon,
             gps_accuracy_m=acc,
-            updated_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(UTC).isoformat(),
         )
         # Real-time fan-out so other household members see the change
         # without polling. The event carries the post-truncation
@@ -200,7 +200,7 @@ class PresenceService(BusPublisherMixin):
                 latitude=lat,
                 longitude=lon,
                 gps_accuracy_m=acc,
-                updated_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=datetime.now(UTC).isoformat(),
             )
         )
 
@@ -215,7 +215,7 @@ class PresenceService(BusPublisherMixin):
             state = str(payload.get("state") or "away")
             username = str(payload.get("username") or "").strip()
         except Exception as exc:
-            log.debug("PRESENCE_UPDATED: malformed payload — %s", exc)
+            log.debug("PRESENCE_UPDATED: malformed payload — %s", exc, exc_info=True)
             return
         if not username:
             return
@@ -246,7 +246,7 @@ class PresenceService(BusPublisherMixin):
             latitude=lat,
             longitude=lon,
             gps_accuracy_m=acc,
-            updated_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(UTC).isoformat(),
         )
 
     async def get_presence(self, username: str) -> PersonPresence | None:

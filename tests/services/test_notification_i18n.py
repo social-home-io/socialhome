@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+import socialhome.i18n as i18n_pkg
 from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-import socialhome.i18n as i18n_pkg
 from socialhome.domain.events import (
     PostCreated,
     SpaceAdminSeedsRetiredAfterRestore,
@@ -90,7 +90,7 @@ def _post():
         author="a-id",
         type=PostType.TEXT,
         content="hi",
-        created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 15, tzinfo=UTC),
     )
 
 
@@ -109,7 +109,7 @@ async def test_post_created_alice_gets_english(env):
     bus, repo, _ = env
     # Alice is the author — she shouldn't get her own notification.
     # Make Bob the author instead.
-    await repo._db.enqueue(  # noqa: SLF001
+    await repo._db.enqueue(
         "INSERT INTO feed_posts(id, author, type, content) VALUES('p2', 'b-id', 'text', 'hi')",
     )
     p2 = Post(
@@ -117,7 +117,7 @@ async def test_post_created_alice_gets_english(env):
         author="b-id",
         type=PostType.TEXT,
         content="hi",
-        created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 15, tzinfo=UTC),
     )
     await bus.publish(PostCreated(post=p2))
     alice = await repo.list("a-id")
@@ -127,7 +127,7 @@ async def test_post_created_alice_gets_english(env):
 
 async def test_task_assigned_uses_recipient_locale(env):
     bus, repo, _ = env
-    now = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 15, tzinfo=UTC)
     task = Task(
         id="t1",
         list_id="l1",

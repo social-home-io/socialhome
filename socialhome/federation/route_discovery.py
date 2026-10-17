@@ -204,29 +204,29 @@ class RouteDiscoveryService:
     """
 
     __slots__ = (
+        "_cache_ttl_s",
+        "_caller_cache",
+        "_discovery_timeout_s",
         "_federation",
         "_federation_repo",
-        "_max_hops",
-        "_cache_ttl_s",
-        "_seen_ttl_s",
-        "_discovery_timeout_s",
-        "_target_eph_ttl_s",
-        "_pending",
-        "_seen_requests",
-        "_caller_cache",
-        "_route_cache",
-        "_target_eph_state",
         "_inflight",
+        "_max_hops",
         "_negative_until",
         "_origin_requests",
+        "_pending",
+        "_route_cache",
         "_route_learned_listeners",
+        "_seen_requests",
+        "_seen_ttl_s",
+        "_target_eph_state",
+        "_target_eph_ttl_s",
     )
 
     def __init__(
         self,
         *,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
         max_hops: int = 3,
         cache_ttl_s: float = ROUTE_CACHE_TTL_S,
         seen_ttl_s: float = 60.0,
@@ -289,9 +289,9 @@ class RouteDiscoveryService:
 
     # ── Attach ─────────────────────────────────────────────────────────
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         """Wire the two inbound event-type handlers into the registry."""
-        registry = federation_service._event_registry  # noqa: SLF001
+        registry = federation_service._event_registry
         registry.register(
             FederationEventType.SPACE_FIND_ROUTE,
             self._on_find_route,
@@ -481,7 +481,7 @@ class RouteDiscoveryService:
                 fut,
                 timeout=self._discovery_timeout_s * 2,
             )
-        except asyncio.TimeoutError, asyncio.CancelledError:
+        except TimeoutError, asyncio.CancelledError:
             result = None
         finally:
             # Mark the pending entry as resolved so a late ROUTE_FOUND
@@ -674,7 +674,7 @@ class RouteDiscoveryService:
 
     # ── Inbound handlers ───────────────────────────────────────────────
 
-    async def _on_find_route(self, event: "FederationEvent") -> None:
+    async def _on_find_route(self, event: FederationEvent) -> None:
         """Relay-side: forward / respond to a discovery probe.
 
         Rules (in order):
@@ -789,7 +789,7 @@ class RouteDiscoveryService:
                     exc_info=True,
                 )
 
-    async def _on_route_found(self, event: "FederationEvent") -> None:
+    async def _on_route_found(self, event: FederationEvent) -> None:
         """Forward a ROUTE_FOUND response back along the chain, or
         collect it if we're the origin.
         """
@@ -1079,7 +1079,7 @@ class RouteDiscoveryService:
         self,
         *,
         exclude: set[str],
-    ) -> list["RemoteInstance"]:
+    ) -> list[RemoteInstance]:
         """Return **social** confirmed peers whose ``proto_version >= v_6``,
         minus anything in ``exclude``.
 
@@ -1102,7 +1102,7 @@ class RouteDiscoveryService:
         consequence of the other end's gate.
         """
         instances = await self._federation_repo.list_social_instances()
-        out: list["RemoteInstance"] = []
+        out: list[RemoteInstance] = []
         for inst in instances:
             if inst.id in exclude:
                 continue

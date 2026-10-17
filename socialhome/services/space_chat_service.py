@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..domain.conversation import (
     Conversation,
@@ -62,7 +62,7 @@ log = logging.getLogger(__name__)
 class SpaceChatService:
     """Create a space's chat and keep its seats in step with who may read it."""
 
-    __slots__ = ("_convos", "_users", "_spaces", "_access", "_policy", "_bus")
+    __slots__ = ("_access", "_bus", "_convos", "_policy", "_spaces", "_users")
 
     def __init__(
         self,
@@ -179,7 +179,7 @@ class SpaceChatService:
             return SystemChatSummary(enabled=False)
         muted_until = (
             seat.muted_until
-            if mute_active(seat.muted_until, now=datetime.now(timezone.utc))
+            if mute_active(seat.muted_until, now=datetime.now(UTC))
             else None
         )
         return SystemChatSummary(
@@ -218,7 +218,7 @@ class SpaceChatService:
         rows = await self._convos.list_space_chat_unread(
             username, writer_roles=frozenset(r.value for r in WRITER_ROLES)
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         resolver = DmMentionResolver(self._convos, self._users, self._policy)
         out: dict[str, SpaceChatSeatUnread] = {}
         for row in rows:

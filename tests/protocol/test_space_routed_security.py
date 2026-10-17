@@ -55,6 +55,7 @@ from types import SimpleNamespace
 
 import orjson
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.federation import FederationEvent, FederationEventType
@@ -101,7 +102,7 @@ def test_relay_cannot_unseal_routed_space_content():
     sealed = _seal({"body": secret, "post_id": "p1"}, target_pub=target_pub)
 
     # The relay's own key must not open it.
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         routed_crypto.unseal_inner_payload(
             sealed=sealed,
             target_eph_priv_b64=relay_priv,
@@ -131,14 +132,14 @@ def test_seal_is_bound_to_route_id_and_inner_event_type():
     target_priv, target_pub = routed_crypto.generate_ephemeral_keypair()
     sealed = _seal({"post_id": "p1"}, target_pub=target_pub)
 
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         routed_crypto.unseal_inner_payload(
             sealed=sealed,
             target_eph_priv_b64=target_priv,
             route_id="route-a-different-one",
             inner_event_type=INNER_EVENT,
         )
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         routed_crypto.unseal_inner_payload(
             sealed=sealed,
             target_eph_priv_b64=target_priv,
@@ -161,7 +162,7 @@ def test_wrong_ephemeral_private_half_cannot_unseal():
 
     sealed = _seal({"post_id": "p1"}, target_pub=dead_pub)
 
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         routed_crypto.unseal_inner_payload(
             sealed=sealed,
             target_eph_priv_b64=fresh_priv,
@@ -388,7 +389,6 @@ class _RecordingRouteService:
 
     async def discover_route(self, target_instance_id: str):
         self.discover_calls.append(target_instance_id)
-        return None
 
     def cached_target_identity_pk(self, target_instance_id: str) -> str | None:
         return None

@@ -28,7 +28,7 @@ class PagesDeletedExporter(PagedExporterMixin):
 
     __slots__ = ("_repo",)
 
-    def __init__(self, page_repo: "AbstractPageRepo") -> None:
+    def __init__(self, page_repo: AbstractPageRepo) -> None:
         self._repo = page_repo
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:

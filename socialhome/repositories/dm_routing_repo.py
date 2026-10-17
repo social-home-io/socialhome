@@ -16,8 +16,9 @@ Tables touched:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Iterable, Protocol, runtime_checkable
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import Protocol, runtime_checkable
 
 import orjson
 
@@ -589,7 +590,7 @@ class SqliteDmRoutingRepo:
 
 def utcnow_iso() -> str:
     """Helper used by callers that need the same timestamp the repo uses."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def normalize_peers(peer_ids: Iterable[str], *, cap: int = 50) -> list[str]:

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..domain.conversation import ConversationMessage
 from ..domain.events import DmMessageCreated, SpacePostCreated
@@ -76,11 +76,11 @@ class BotBridgeService(ContentAccessMixin):
     """
 
     __slots__ = (
+        "_bus",
+        "_conversations",
+        "_mentions",
         "_space_posts",
         "_spaces",
-        "_conversations",
-        "_bus",
-        "_mentions",
     )
 
     def __init__(
@@ -149,7 +149,7 @@ class BotBridgeService(ContentAccessMixin):
             id=str(uuid.uuid4()),
             author=SYSTEM_AUTHOR,
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content=content,
             bot_id=bot.bot_id,
         )
@@ -206,7 +206,7 @@ class BotBridgeService(ContentAccessMixin):
             conversation_id=conversation_id,
             sender_user_id=SYSTEM_AUTHOR,
             content=content,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         saved = await self._conversations.save_message(msg)
         await self._bus.publish(

@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Hashable
 from dataclasses import dataclass
-from typing import Hashable
 
 
 @dataclass(slots=True)
@@ -45,7 +45,7 @@ class IdempotencyCache:
         ~28 hours at 1 event/second.
     """
 
-    __slots__ = ("_ttl", "_max", "_entries", "_index")
+    __slots__ = ("_entries", "_index", "_max", "_ttl")
 
     def __init__(
         self, *, ttl_seconds: float = 3600, max_entries: int = 100_000

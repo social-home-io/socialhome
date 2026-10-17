@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import asdict
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..exporter import PagedExporterMixin
 from ..window import SYNC_PAGE_SIZE, iter_pages
@@ -29,7 +29,7 @@ class GalleryExporter(PagedExporterMixin):
 
     __slots__ = ("_repo",)
 
-    def __init__(self, gallery_repo: "AbstractGalleryRepo") -> None:
+    def __init__(self, gallery_repo: AbstractGalleryRepo) -> None:
         self._repo = gallery_repo
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
@@ -46,7 +46,7 @@ class GalleryExporter(PagedExporterMixin):
         # The system album rides along so the receiver creates it
         # pre-populated; without it, mirrored items from forthcoming posts
         # would have nowhere to live until the first local feed event.
-        async def albums(cursor: int | None) -> tuple[list["GalleryAlbum"], int | None]:
+        async def albums(cursor: int | None) -> tuple[list[GalleryAlbum], int | None]:
             return await self._repo.list_albums_sync_page(
                 space_id, cursor=cursor, limit=SYNC_PAGE_SIZE, since=since
             )
@@ -54,7 +54,7 @@ class GalleryExporter(PagedExporterMixin):
         async for album_page in iter_pages(albums):
             yield [{"kind": "album", **asdict(a)} for a in album_page]
 
-        async def items(cursor: int | None) -> tuple[list["GalleryItem"], int | None]:
+        async def items(cursor: int | None) -> tuple[list[GalleryItem], int | None]:
             return await self._repo.list_items_sync_page(
                 space_id, cursor=cursor, limit=SYNC_PAGE_SIZE, since=since
             )

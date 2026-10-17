@@ -10,7 +10,7 @@ is mocked with :class:`AsyncMock`.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -393,9 +393,9 @@ async def test_on_intro_from_peer_stale_ts(coord, fed_service):
 
 
 async def test_on_intro_from_peer_unknown_sender(coord, fed_service):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     await coord.on_intro_from_peer(
         _evt(
             "no-sender",
@@ -413,12 +413,12 @@ async def test_on_intro_from_peer_unknown_sender(coord, fed_service):
 
 
 async def test_on_intro_from_peer_unknown_target(coord, fed_repo, fed_service):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     a_kp = generate_identity_keypair()
     a = _make_peer_remote_instance(a_kp.public_key.hex())
     fed_repo.instances[a.id] = a
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     await coord.on_intro_from_peer(
         _evt(
             a.id,
@@ -436,7 +436,7 @@ async def test_on_intro_from_peer_unknown_target(coord, fed_repo, fed_service):
 
 
 async def test_on_intro_from_peer_forwards_to_c(coord, fed_repo, fed_service):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     a_kp = generate_identity_keypair()
     a = _make_peer_remote_instance(a_kp.public_key.hex())
@@ -444,7 +444,7 @@ async def test_on_intro_from_peer_forwards_to_c(coord, fed_repo, fed_service):
     c_kp = generate_identity_keypair()
     c = _make_peer_remote_instance(c_kp.public_key.hex())
     fed_repo.instances[c.id] = c
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     await coord.on_intro_from_peer(
         _evt(
             a.id,
@@ -552,10 +552,12 @@ async def test_full_auto_pair_handshake(
     kek_manager, fed_repo, bus, fed_service, identity, inbox, coord
 ):
     """Exercise the complete A → B → C → A flow with real crypto."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from socialhome.crypto import (
         derive_instance_id as _diid,
+    )
+    from socialhome.crypto import (
         generate_identity_keypair as _gik,
     )
 
@@ -578,7 +580,7 @@ async def test_full_auto_pair_handshake(
     from socialhome.crypto import generate_x25519_keypair
 
     a_dh = generate_x25519_keypair()
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     await coord.on_intro_from_peer(
         _evt(
             a_id,
@@ -773,7 +775,7 @@ async def test_on_intro_from_peer_refuses_to_vouch_for_invalid_inbox_url(
             {
                 "target_id": c.id,
                 "a_dh_pk": "dd" * 16,
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": datetime.now(UTC).isoformat(),
                 "nonce": "n" * 16,
                 "token": "tk",
                 "a_inbox_url": bad_url,
@@ -787,7 +789,7 @@ async def test_on_intro_from_peer_refuses_to_vouch_for_invalid_inbox_url(
 def _vouched_intro(b_kp, *, c_id: str, a_inbox_url: str) -> dict:
     a_kp = generate_identity_keypair()
     a_id = derive_instance_id(a_kp.public_key)
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     a_dh = "dd" * 32
     sig = sign_ed25519(
         b_kp.private_key,
@@ -979,7 +981,7 @@ def _queued_request(inbox, *, ts: str | None = None, a_id: str = "a1"):
         from_a_dh_pk=generate_x25519_keypair().public_key.hex(),
         via_b_id="b1",
         vouch_sig="vv",
-        ts=ts or datetime.now(timezone.utc).isoformat(),
+        ts=ts or datetime.now(UTC).isoformat(),
         nonce="n",
         token="tk",
         from_a_display="A",
@@ -1030,8 +1032,7 @@ async def test_approving_a_request_from_a_paired_household_changes_nothing(
 
 async def test_a_stale_request_cannot_be_approved(coord, inbox, fed_repo, fed_service):
     old = (
-        datetime.now(timezone.utc)
-        - timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS + 60)
+        datetime.now(UTC) - timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS + 60)
     ).isoformat()
     req = _queued_request(inbox, ts=old)
     fed_service.send_event.reset_mock()
@@ -1066,8 +1067,7 @@ async def test_an_ack_for_a_request_past_its_ttl_is_ignored(coord, fed_repo, ide
     c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity)
     session = coord._pending[ack["token"]]
     session.ts = (
-        datetime.now(timezone.utc)
-        - timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS + 60)
+        datetime.now(UTC) - timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS + 60)
     ).isoformat()
 
     await coord.on_ack_at_originator(_evt("b", ack))
@@ -1120,7 +1120,7 @@ async def _forged_intro(
     a_id = a_id or derive_instance_id(attacker.public_key)
     a_dh = generate_x25519_keypair()
     c_id = derive_instance_id(identity.public_key)
-    ts = ts or datetime.now(timezone.utc).isoformat()
+    ts = ts or datetime.now(UTC).isoformat()
     url = "https://evil.example/federation/inbox/x"
     vouch = sign_ed25519(
         b_kp.private_key,
@@ -1191,7 +1191,7 @@ async def test_a_future_dated_introduction_is_refused_at_the_target(
     coord, fed_repo, inbox, identity
 ):
     """A stamp far in the future would never expire."""
-    far = (datetime.now(timezone.utc) + timedelta(days=3650)).isoformat()
+    far = (datetime.now(UTC) + timedelta(days=3650)).isoformat()
     await _forged_intro(coord, fed_repo, identity, ts=far)
     assert inbox.list_pending() == []
 
@@ -1202,7 +1202,7 @@ async def test_a_future_dated_intro_is_not_vouched_for(coord, fed_repo, fed_serv
     c = _make_peer_remote_instance(generate_identity_keypair().public_key.hex())
     fed_repo.instances[a.id] = a
     fed_repo.instances[c.id] = c
-    far = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    far = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     await coord.on_intro_from_peer(
         _evt(
             a.id,

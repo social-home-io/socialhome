@@ -38,7 +38,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -104,20 +104,20 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
     SCHEDULER_INTERVAL: float = 60.0
 
     __slots__ = (
-        "_ws",
-        "_user_repo",
         "_bus",
         "_child_protection",
         "_federation",
         "_federation_repo",
-        "_own_instance_id",
-        "_sessions",
         "_idle_users",
         "_last_persisted",
-        "_remote",
         "_lock",
-        "_task",
+        "_own_instance_id",
+        "_remote",
+        "_sessions",
         "_stop",
+        "_task",
+        "_user_repo",
+        "_ws",
     )
 
     def __init__(
@@ -152,10 +152,10 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
 
     def attach_federation(
         self,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
         own_instance_id: str,
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
     ) -> None:
         """Attach federation so transitions fan out to paired peers
         and inbound `USER_ONLINE` / `USER_IDLE` / `USER_OFFLINE` events
@@ -170,7 +170,7 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
     # ─── Inspection (used by route handlers + RealtimeService) ────────────
 
     def is_online(self, user_id: str) -> bool:
-        if user_id in self._sessions and self._sessions[user_id]:
+        if self._sessions.get(user_id):
             return True
         remote = self._remote.get(user_id)
         return remote is not None and remote.is_online
@@ -305,7 +305,7 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -314,13 +314,13 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
             try:
                 await self._scan_once()
             except Exception as exc:  # pragma: no cover - defensive
-                log.warning("online-status scan failed: %s", exc)
+                log.warning("online-status scan failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self.SCHEDULER_INTERVAL,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _scan_once(self) -> None:
@@ -356,7 +356,7 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
         try:
             await self._user_repo.set_last_seen(user_id, ts.isoformat())
         except Exception as exc:  # pragma: no cover - defensive
-            log.debug("set_last_seen failed for %s: %s", user_id, exc)
+            log.debug("set_last_seen failed for %s: %s", user_id, exc, exc_info=True)
 
     async def _publish(self, event: DomainEvent) -> None:
         if self._bus is None:
@@ -364,7 +364,7 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
         try:
             await self._bus.publish(event)
         except Exception as exc:  # pragma: no cover - defensive
-            log.debug("online-status publish failed: %s", exc)
+            log.debug("online-status publish failed: %s", exc, exc_info=True)
 
     # ─── Federation ────────────────────────────────────────────────────────
 
@@ -394,7 +394,9 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
             # social peer, so read the social list, not every CONFIRMED row.
             instances = await self._federation_repo.list_social_instances()
         except Exception as exc:  # pragma: no cover - defensive
-            log.debug("online-status fan-out: list_confirmed failed: %s", exc)
+            log.debug(
+                "online-status fan-out: list_confirmed failed: %s", exc, exc_info=True
+            )
             return
         payload: dict = {"user_id": user_id}
         if last_seen_at is not None:
@@ -571,4 +573,4 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)

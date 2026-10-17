@@ -12,7 +12,7 @@ import aiolibdatachannel as rtc
 import orjson
 import pytest
 
-from socialhome.domain.federation import RemoteInstance, PairingStatus
+from socialhome.domain.federation import PairingStatus, RemoteInstance
 from socialhome.federation import app_framing as af
 from socialhome.federation import media_framing as mf
 from socialhome.federation.transport import FederationTransport, _RtcPeer

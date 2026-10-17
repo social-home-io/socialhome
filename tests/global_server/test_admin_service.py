@@ -12,9 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-
 from socialhome.global_server.admin_service import GfsAdminService
-
 
 # ── Stubs ────────────────────────────────────────────────────────────────────
 

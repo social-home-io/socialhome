@@ -35,8 +35,8 @@ import orjson
 from aiohttp import web
 
 from .. import app_keys as K
-from ..rate_limiter import client_bucket
 from ..domain.federation import FederationEventType
+from ..rate_limiter import client_bucket
 from .base import BaseView
 
 log = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ def _is_expected_replay(reason: str, raw_body: bytes) -> bool:
         return False
     try:
         envelope = orjson.loads(raw_body)
-    except Exception:
+    except ValueError:
         return False
     event_type = envelope.get("event_type")
     if not isinstance(event_type, str):
@@ -211,7 +211,7 @@ class FederationInboxView(BaseView):
         try:
             raw_body = await self.request.read()
         except Exception as exc:
-            log.debug("federation inbox: body read error: %s", exc)
+            log.debug("federation inbox: body read error: %s", exc, exc_info=True)
             return web.json_response(
                 {"error": _GENERIC_ERROR_BY_STATUS[400]},
                 status=400,
@@ -307,7 +307,7 @@ class FederationInboxView(BaseView):
         """
         try:
             body = orjson.loads(raw_body)
-        except Exception:
+        except ValueError:
             return None
         if not isinstance(body, dict):
             return None

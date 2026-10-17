@@ -7,9 +7,7 @@ routes/calendar.py, routes/presence.py, routes/conversations.py.
 
 from __future__ import annotations
 
-
 from .conftest import _auth
-
 
 # ─── /api/me + tokens ────────────────────────────────────────────────────
 

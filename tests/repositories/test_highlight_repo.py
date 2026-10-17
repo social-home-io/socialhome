@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -30,7 +30,7 @@ async def repo(db):
 
 
 def _expires(days: int = 7) -> str:
-    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    return (datetime.now(UTC) + timedelta(days=days)).isoformat()
 
 
 async def test_find_or_create_today_is_idempotent(db, repo):
@@ -107,7 +107,7 @@ async def test_view_and_reaction_round_trip(db, repo):
 
 async def test_prune_expired_drops_only_old_rows(db, repo):
     await _seed_user(db)
-    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     future = _expires(7)
     expired = await repo.find_or_create_today(
         author_user_id="u1",
@@ -390,7 +390,7 @@ def _expired_today_iso() -> str:
     ``datetime('now')`` — the only window where a raw TEXT compare went
     wrong ("T" 0x54 outranks " " 0x20 only once the date digits tie).
     """
-    return f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00.000001+00:00"
+    return f"{datetime.now(UTC).date().isoformat()}T00:00:00.000001+00:00"
 
 
 async def _dated_highlight(repo, *, date: str, expires_at: str):

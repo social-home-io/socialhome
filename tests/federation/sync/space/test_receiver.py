@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from unittest.mock import AsyncMock
+from datetime import UTC
 from types import SimpleNamespace
-
+from unittest.mock import AsyncMock
 
 import orjson
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.events import SpaceContentKeyImported, SpaceSyncComplete
-from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space.exporter import (
     SENTINEL_RESOURCE,
@@ -232,7 +232,7 @@ async def _sign_as_peer(kp, envelope):
 
 async def test_on_chunk_persists_members(receiver, peer_setup):
     r, space_repo, _ = receiver
-    peer, kp = peer_setup
+    _peer, kp = peer_setup
     crypto = _FakeCrypto()
     # Build an encrypted payload for "members" resource.
     plaintext = orjson.dumps(
@@ -272,7 +272,7 @@ async def test_on_chunk_persists_members(receiver, peer_setup):
 
 async def test_on_chunk_sentinel_publishes_completion(bus, receiver, peer_setup):
     r, _, _ = receiver
-    peer, kp = peer_setup
+    _peer, kp = peer_setup
     captured: list[SpaceSyncComplete] = []
     bus.subscribe(SpaceSyncComplete, captured.append)
     sentinel = {
@@ -298,7 +298,7 @@ async def test_on_chunk_rejects_unknown_peer(receiver, peer_setup):
     sender we hold no verified key for stays unauthenticated.
     """
     r, space_repo, _ = receiver
-    peer, kp = peer_setup
+    _peer, kp = peer_setup
     envelope = {
         "sync_id": "sync-1",
         "resource": "members",
@@ -319,7 +319,7 @@ async def test_on_chunk_rejects_unknown_peer(receiver, peer_setup):
 
 async def test_on_chunk_rejects_tampered_signature(receiver, peer_setup):
     r, space_repo, _ = receiver
-    peer, kp = peer_setup
+    _peer, _kp = peer_setup
     envelope = {
         "sync_id": "sync-1",
         "resource": "members",
@@ -345,8 +345,8 @@ async def test_on_chunk_rejects_malformed_json(receiver):
 
 
 async def test_on_chunk_unknown_resource_drops(receiver, peer_setup):
-    r, space_repo, _ = receiver
-    peer, kp = peer_setup
+    r, _space_repo, _ = receiver
+    _peer, kp = peer_setup
     envelope = {
         "sync_id": "sync-1",
         "resource": "banana",
@@ -653,7 +653,7 @@ async def test_persist_album_failure_is_logged_not_swallowed(receiver, caplog):
     ``owner_user_id REFERENCES users``, so members got image bytes and no
     rows.
     """
-    r, space_repo, _ = receiver
+    r, _space_repo, _ = receiver
     r._gallery_repo.create_album = AsyncMock(side_effect=RuntimeError("boom"))
 
     held_back = HeldBack()
@@ -849,7 +849,7 @@ async def test_bazaar_catchup_save_failure_is_a_warning_naming_the_listing(
 def test_synced_post_record_keeps_a_validated_link_preview():
     """A sync record round-trips the author-built card (exporter → receiver);
     the receiver re-validates it and keeps only a local image reference."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from socialhome.domain.link_preview import LinkPreview
     from socialhome.domain.post import Post, PostType
@@ -863,7 +863,7 @@ def test_synced_post_record_keeps_a_validated_link_preview():
         id="p-sync",
         author="u",
         type=PostType.TEXT,
-        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
         content="https://example.com/",
         link_preview=card,
     )
@@ -919,7 +919,7 @@ def test_sticky_from_record_clamps_coords_and_survives_overflow():
 def test_sticky_from_record_truncates_content_with_warning(caplog):
     with caplog.at_level(logging.WARNING):
         s = _sticky_from_record(
-            {"id": "st-1", "author": "u", "content": "‮" + "y" * 3000},
+            {"id": "st-1", "author": "u", "content": "\u202e" + "y" * 3000},
             "sp-1",
         )
     assert s is not None and s.content == "y" * MAX_STICKY_CONTENT_LENGTH
@@ -928,7 +928,9 @@ def test_sticky_from_record_truncates_content_with_warning(caplog):
 
 def test_sticky_from_record_invisible_content_is_dropped():
     assert (
-        _sticky_from_record({"id": "st-1", "author": "u", "content": "​\x00"}, "sp-1")
+        _sticky_from_record(
+            {"id": "st-1", "author": "u", "content": "\u200b\x00"}, "sp-1"
+        )
         is None
     )
 

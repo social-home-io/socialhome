@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
 
 from socialhome.app_keys import app_federation_service_key, instance_id_key
 from socialhome.auth import sha256_token_hash
@@ -14,17 +15,16 @@ from socialhome.domain.apps import (
     AppContactNotFoundError,
     AppIntegrityError,
     AppManifest,
-    AppNotFoundError,
     AppNotEnabledError,
+    AppNotFoundError,
     AppPendingSession,
     InstalledApp,
 )
 from socialhome.repositories.app_repo import SqliteAppRepo
-from socialhome.services.app_service import AppService
 from socialhome.services.app_federation_service import AppFederationService
+from socialhome.services.app_service import AppService
 
 from .conftest import _auth
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 

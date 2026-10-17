@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -26,7 +26,7 @@ from socialhome.federation.moderation_approval import (
 )
 
 FET = FederationEventType
-NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
+NOW = datetime(2026, 6, 1, tzinfo=UTC)
 
 
 def _item(feature: str, action: str, payload: dict) -> SpaceModerationItem:
@@ -412,21 +412,21 @@ def _sweep(item, event_type, wire, held=None):
 
 
 def _full_task(**over) -> Task:
-    base = dict(
-        id="t-1",
-        list_id="l-1",
-        title="Buy milk",
-        status=TaskStatus.TODO,
-        position=4,
-        created_by="u-a",
-        created_at=NOW,
-        updated_at=NOW,
-        description="Oat",
-        due_date=date(2026, 6, 10),
-        assignees=("u-a",),
-        priority=TaskPriority.HIGH,
-        labels=("shop",),
-    )
+    base = {
+        "id": "t-1",
+        "list_id": "l-1",
+        "title": "Buy milk",
+        "status": TaskStatus.TODO,
+        "position": 4,
+        "created_by": "u-a",
+        "created_at": NOW,
+        "updated_at": NOW,
+        "description": "Oat",
+        "due_date": date(2026, 6, 10),
+        "assignees": ("u-a",),
+        "priority": TaskPriority.HIGH,
+        "labels": ("shop",),
+    }
     base.update(over)
     return Task(**base)
 

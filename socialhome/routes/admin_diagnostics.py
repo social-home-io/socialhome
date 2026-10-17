@@ -29,9 +29,10 @@ Deliberately excluded, beyond the obvious keys and tokens:
 
 from __future__ import annotations
 
+import logging
 import platform
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 from aiohttp import web
@@ -50,6 +51,8 @@ from ..domain.federation_capabilities import OURS
 from ..security import error_response, sanitise_for_api
 from .admin_federation import _redact_ice_server
 from .base import BaseView
+
+log = logging.getLogger(__name__)
 
 
 def _host_only(url: str | None) -> str | None:
@@ -83,7 +86,7 @@ class AdminDiagnosticsView(BaseView):
         if self.user is None or not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         config = self.svc(config_key)
         db = self.svc(db_key)
 
@@ -111,6 +114,9 @@ class AdminDiagnosticsView(BaseView):
             bundle["deployment"]["federation_base_configured"] = bool(base)
             bundle["deployment"]["federation_base_host"] = _host_only(base)
         except Exception as exc:  # pragma: no cover — never fail the bundle
+            log.debug(
+                "AdminDiagnosticsView.get: fail-soft error ignored", exc_info=True
+            )
             bundle["deployment"]["error"] = type(exc).__name__
 
         # ── Peers ────────────────────────────────────────────────────
@@ -152,6 +158,9 @@ class AdminDiagnosticsView(BaseView):
                     }
                 )
         except Exception as exc:  # pragma: no cover
+            log.debug(
+                "AdminDiagnosticsView.get: fail-soft error ignored", exc_info=True
+            )
             bundle["peers_error"] = type(exc).__name__
         bundle["peers"] = peers
 
@@ -176,12 +185,15 @@ class AdminDiagnosticsView(BaseView):
                 for r in rows
             ]
         except Exception as exc:  # pragma: no cover
+            log.debug(
+                "AdminDiagnosticsView.get: fail-soft error ignored", exc_info=True
+            )
             bundle["outbox_error"] = type(exc).__name__
 
         # ── WebRTC ───────────────────────────────────────────────────
         try:
             fed = self.svc(federation_service_key)
-            raw = list(getattr(fed, "_ice_servers", []) or [])  # noqa: SLF001
+            raw = list(getattr(fed, "_ice_servers", []) or [])
             servers = [_redact_ice_server(s) for s in raw if isinstance(s, dict)]
             bundle["webrtc"] = {
                 "ice_servers": servers,
@@ -197,6 +209,9 @@ class AdminDiagnosticsView(BaseView):
                 ),
             }
         except Exception as exc:  # pragma: no cover
+            log.debug(
+                "AdminDiagnosticsView.get: fail-soft error ignored", exc_info=True
+            )
             bundle["webrtc_error"] = type(exc).__name__
 
         try:
@@ -206,13 +221,16 @@ class AdminDiagnosticsView(BaseView):
                     1 for p in peers if transport.is_ready(p["instance_id"])
                 )
         except Exception:  # pragma: no cover
-            pass
+            log.debug("diagnostics: RTC peer count failed", exc_info=True)
 
         # ── Schema ───────────────────────────────────────────────────
         try:
             row = await db.fetchone("SELECT max(version) AS v FROM schema_version")
             bundle["database"] = {"migration_version": row["v"] if row else None}
         except Exception as exc:  # pragma: no cover
+            log.debug(
+                "AdminDiagnosticsView.get: fail-soft error ignored", exc_info=True
+            )
             bundle["database_error"] = type(exc).__name__
 
         # Belt-and-braces: the bundle is allow-listed above, so this is a

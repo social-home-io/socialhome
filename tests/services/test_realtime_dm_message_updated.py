@@ -7,14 +7,13 @@ WS broadcast that patches the open thread tabs.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from socialhome.domain.events import DmMessageUpdated
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.realtime_service import RealtimeService
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -56,8 +55,8 @@ def realtime():
 
 async def test_dm_message_updated_broadcasts_to_sender_and_recipients(realtime):
     """Every distinct user_id receives the patched frame once."""
-    svc, bus, ws = realtime
-    edited_at = datetime.now(timezone.utc)
+    _svc, bus, ws = realtime
+    edited_at = datetime.now(UTC)
     await bus.publish(
         DmMessageUpdated(
             conversation_id="conv-1",
@@ -74,8 +73,8 @@ async def test_dm_message_updated_broadcasts_to_sender_and_recipients(realtime):
 
 async def test_dm_message_updated_frame_shape(realtime):
     """Frame carries id + content + edited_at, no ``message`` blob."""
-    svc, bus, ws = realtime
-    edited_at = datetime.now(timezone.utc)
+    _svc, bus, ws = realtime
+    edited_at = datetime.now(UTC)
     await bus.publish(
         DmMessageUpdated(
             conversation_id="conv-1",
@@ -96,8 +95,8 @@ async def test_dm_message_updated_frame_shape(realtime):
 
 async def test_dm_message_updated_dedupes_when_sender_in_recipient_list(realtime):
     """Defensive: sender appearing in ``recipient_user_ids`` doesn't double-send."""
-    svc, bus, ws = realtime
-    edited_at = datetime.now(timezone.utc)
+    _svc, bus, ws = realtime
+    edited_at = datetime.now(UTC)
     await bus.publish(
         DmMessageUpdated(
             conversation_id="conv-1",
@@ -115,8 +114,8 @@ async def test_dm_message_updated_dedupes_when_sender_in_recipient_list(realtime
 
 async def test_dm_message_updated_skips_blank_user_ids(realtime):
     """Empty-string sender / recipient (a defensive seed) is filtered."""
-    svc, bus, ws = realtime
-    edited_at = datetime.now(timezone.utc)
+    _svc, bus, ws = realtime
+    edited_at = datetime.now(UTC)
     await bus.publish(
         DmMessageUpdated(
             conversation_id="conv-1",

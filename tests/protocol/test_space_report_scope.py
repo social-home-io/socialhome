@@ -35,7 +35,7 @@ from __future__ import annotations
 import copy
 import itertools
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -140,7 +140,7 @@ async def mesh(aiohttp_client, tmp_dir, monkeypatch):
             headers={"Authorization": f"Bearer {token}"},
         )
     host = houses["H"]
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     for house in houses.values():
         db = house.db
         for sid in (SID, "sp-other"):
@@ -198,7 +198,7 @@ def _event(
         event_type=et,
         from_instance=sender.iid,
         to_instance=to.iid,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=copy.deepcopy(payload),
         space_id=payload.get("space_id"),
     )
@@ -253,7 +253,7 @@ def _payload(mesh, **over) -> dict:
         "category": "spam",
         "notes": None,
         "reporter_user_id": mesh["A"].user_id,
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
         "space_id": SID,
     }
     p.update(over)

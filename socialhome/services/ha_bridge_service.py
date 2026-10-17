@@ -59,7 +59,7 @@ class HaBridgeService:
         too if they want HA compatibility.
     """
 
-    __slots__ = ("_bus", "_adapter")
+    __slots__ = ("_adapter", "_bus")
 
     def __init__(self, bus: EventBus, ha_adapter) -> None:
         self._bus = bus
@@ -233,4 +233,6 @@ class HaBridgeService:
         try:
             await self._adapter.fire_event(event_type, data)
         except Exception as exc:  # defensive
-            log.debug("ha_bridge: fire_event %s failed: %s", event_type, exc)
+            log.debug(
+                "ha_bridge: fire_event %s failed: %s", event_type, exc, exc_info=True
+            )

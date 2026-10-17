@@ -18,14 +18,14 @@ that satisfies the :class:`PlatformAdapter` ABC. See
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
 from ... import app_keys as K
 from ...identity_bootstrap import derive_local_user_id
-from ..federation_base import INBOX_PATH, manual_federation_base
 from ..adapter import (
     Capability,
     ExternalUser,
@@ -34,9 +34,14 @@ from ..adapter import (
     PlatformAdapter,
     _extract_bearer,
 )
+from ..federation_base import INBOX_PATH, manual_federation_base
 from ..local_credentials import (
     LocalCredentialStore,
+)
+from ..local_credentials import (
     hash_password as _hash_password,
+)
+from ..local_credentials import (
     verify_password as _verify_password_fn,
 )
 
@@ -65,7 +70,7 @@ class StandaloneAuthProvider:
 
     async def authenticate(
         self,
-        request: "web.Request",
+        request: web.Request,
     ) -> ExternalUser | None:
         token = _extract_bearer(request)
         if not token:
@@ -82,7 +87,7 @@ class StandaloneUserDirectory:
 
     __slots__ = ("_db",)
 
-    def __init__(self, db: "AsyncDatabase") -> None:
+    def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
 
     async def list_users(self) -> list[ExternalUser]:
@@ -143,7 +148,7 @@ class StandalonePushProvider:
 
     def __init__(
         self,
-        db: "AsyncDatabase",
+        db: AsyncDatabase,
         session: aiohttp.ClientSession | None,
     ) -> None:
         self._db = db
@@ -222,27 +227,27 @@ class StandaloneAdapter(PlatformAdapter):
     """
 
     __slots__ = (
+        "_config",
+        "_credentials",
         "_db",
         "_instance_config",
-        "_config",
         "_options",
         "_session",
-        "_credentials",
+        "ai",
         "auth",
-        "users",
+        "events",
         "push",
         "stt",
-        "ai",
-        "events",
+        "users",
     )
 
     def __init__(
         self,
-        db: "AsyncDatabase",
-        config: "Config",
+        db: AsyncDatabase,
+        config: Config,
         options: Mapping[str, Any] | None = None,
         *,
-        instance_config: "AbstractInstanceConfigRepo",
+        instance_config: AbstractInstanceConfigRepo,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         self._db = db
@@ -380,7 +385,7 @@ class StandaloneAdapter(PlatformAdapter):
 
     # ── Lifecycle hooks ────────────────────────────────────────────────────
 
-    async def on_startup(self, app: "web.Application") -> None:
+    async def on_startup(self, app: web.Application) -> None:
         """Standalone-mode startup wiring.
 
         Picks up the shared aiohttp session and forwards it to
@@ -465,7 +470,7 @@ class StandaloneAdapter(PlatformAdapter):
         )
         return True
 
-    async def on_cleanup(self, app: "web.Application") -> None:  # noqa: RUF029
+    async def on_cleanup(self, app: web.Application) -> None:
         """No-op — the shared session is owned by :mod:`socialhome.app`."""
 
     def get_extra_services(self) -> dict:

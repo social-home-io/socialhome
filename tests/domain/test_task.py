@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from socialhome.domain.task import (
     MAX_TASK_ASSIGNEES,
     MAX_TASK_DESCRIPTION_LENGTH,
-    MAX_TASK_LIST_NAME_LENGTH,
-    MAX_TASK_TITLE_LENGTH,
     MAX_TASK_LABEL_LENGTH,
     MAX_TASK_LABELS,
+    MAX_TASK_LIST_NAME_LENGTH,
+    MAX_TASK_TITLE_LENGTH,
     UNSET,
     RecurrenceRule,
     Task,
@@ -32,7 +32,7 @@ from socialhome.domain.task import (
 
 def test_task_lifecycle():
     """Task moves through todo → in_progress → done → todo via status helpers."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     t = Task(
         id="t1",
         list_id="l1",
@@ -64,7 +64,7 @@ def test_task_update_fields():
 
 def test_task_with_assignees_returns_new_instance():
     """with_assignees returns a new Task without mutating the original."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     t = Task(
         id="t",
         list_id="l",
@@ -92,17 +92,17 @@ def test_recurrence_mark_spawned_does_not_mutate_original():
 
 
 def _task(**kw) -> Task:
-    now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
-    base = dict(
-        id="t1",
-        list_id="l1",
-        title="Pack",
-        status=TaskStatus.TODO,
-        position=3,
-        created_by="u1",
-        created_at=now,
-        updated_at=now,
-    )
+    now = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    base = {
+        "id": "t1",
+        "list_id": "l1",
+        "title": "Pack",
+        "status": TaskStatus.TODO,
+        "position": 3,
+        "created_by": "u1",
+        "created_at": now,
+        "updated_at": now,
+    }
     base.update(kw)
     return Task(**base)
 
@@ -155,10 +155,10 @@ def test_wire_round_trip_carries_every_field():
         assignees=("u1", "u2"),
         recurrence=RecurrenceRule(
             rrule="FREQ=WEEKLY",
-            last_spawned_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+            last_spawned_at=datetime(2026, 9, 2, tzinfo=UTC),
         ),
         recurrence_parent_id="p0",
-        archived_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+        archived_at=datetime(2026, 9, 5, tzinfo=UTC),
         priority=TaskPriority.HIGH,
         labels=("Move", "Garage"),
     )
@@ -226,7 +226,7 @@ def test_wire_v39_payload_does_not_wipe_held_fields():
     wipe ours, and it can't touch priority or labels."""
     existing = _task(
         due_date=date(2026, 10, 3),
-        archived_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+        archived_at=datetime(2026, 9, 5, tzinfo=UTC),
         recurrence=RecurrenceRule(rrule="FREQ=DAILY"),
         priority=TaskPriority.HIGH,
         labels=("keep",),
@@ -307,7 +307,7 @@ def test_wire_tolerates_garbage_scalars():
     assert got.recurrence is None
     assert got.labels == ()
     assert got.assignees == ("u1",)
-    assert got.updated_at == datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert got.updated_at == datetime(2026, 9, 1, tzinfo=UTC)
 
 
 def test_task_list_wire_round_trip():
@@ -356,20 +356,22 @@ def test_wire_assignees_are_capped_and_strings_only():
 
 def test_sanitize_line_strips_spoofing_and_rejects_invisible():
     """M4: control, bidi and invisible characters never reach a title."""
-    assert sanitize_line("‮evil‎‏؜ x\n y") == "evilx y"
-    assert sanitize_line("​‌⁠﻿  ") == ""
+    assert sanitize_line("\u202eevil\u200e\u200f\u061c\u2028x\n y") == "evilx y"
+    assert sanitize_line("\u200b‌⁠﻿  ") == ""
     family = "\U0001f468‍\U0001f469"
     assert sanitize_line(family) == family
 
 
 def test_sanitize_block_keeps_newlines_and_tabs():
-    assert sanitize_block("a\n\tb‮\x00 c") == "a\n\tbc"
-    assert sanitize_block("​\n ") == ""
+    assert sanitize_block("a\n\tb\u202e\x00 c") == "a\n\tbc"
+    assert sanitize_block("\u200b\n ") == ""
 
 
 def test_labels_reject_zero_width_only_and_strip_marks():
-    assert normalize_labels(["a​b", "‎‏x", "؜" * 3 + "y", "​"]) == (
-        "a​b",
+    assert normalize_labels(
+        ["a\u200bb", "\u200e\u200fx", "\u061c" * 3 + "y", "\u200b"]
+    ) == (
+        "a\u200bb",
         "x",
         "y",
     )
@@ -379,7 +381,7 @@ def test_wire_title_description_are_sanitised_and_capped():
     wire = {
         "id": "t1",
         "list_id": "l1",
-        "title": "‮" + "T" * 500,
+        "title": "\u202e" + "T" * 500,
         "description": "d" * 9000,
         "priority": None,
     }
@@ -391,11 +393,11 @@ def test_wire_title_description_are_sanitised_and_capped():
 
 
 def test_wire_invisible_title_is_refused():
-    wire = {"id": "t1", "list_id": "l1", "title": "​‮ ", "priority": None}
+    wire = {"id": "t1", "list_id": "l1", "title": "\u200b\u202e ", "priority": None}
     assert task_from_wire_dict(wire, existing=None) is None
 
 
 def test_list_wire_name_is_sanitised_and_capped():
-    got = task_list_from_wire_dict({"id": "l", "name": "‮" + "N" * 100000})
+    got = task_list_from_wire_dict({"id": "l", "name": "\u202e" + "N" * 100000})
     assert got is not None and got.name == "N" * MAX_TASK_LIST_NAME_LENGTH
-    assert task_list_from_wire_dict({"id": "l", "name": "⁦​"}) is None
+    assert task_list_from_wire_dict({"id": "l", "name": "\u2066\u200b"}) is None

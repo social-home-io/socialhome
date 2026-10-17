@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.federation.pending_seat_buffer import (
@@ -24,7 +24,7 @@ def _ev(
         event_type=et,
         from_instance=sender,
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"id": f"p{n}", "content": "x" * size},
         space_id="sp",
     )

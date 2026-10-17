@@ -15,8 +15,8 @@ from types import MappingProxyType
 import pytest
 from aiohttp.test_utils import TestServer
 
-from socialhome.app import create_app
 from socialhome import config as config_mod
+from socialhome.app import create_app
 from socialhome.app_keys import config_key, db_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config

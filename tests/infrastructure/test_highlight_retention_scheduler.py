@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -31,7 +31,7 @@ async def test_expire_due_drops_expired_rows(db):
     service = HighlightService(repo, user_repo, bus)
 
     # Hand-craft a highlight with expires_at in the past so the prune fires.
-    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     expired = await repo.find_or_create_today(
         author_user_id="u1",
         audience_kind=HighlightAudience.ALL_PAIRED,

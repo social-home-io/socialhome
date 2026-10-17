@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ...domain.calendar import CalendarEvent, CalendarRSVP
@@ -46,14 +46,14 @@ class PersonalCalendarInboundHandlers:
         self,
         *,
         bus: EventBus,
-        calendar_repo: "AbstractCalendarRepo",
-        user_repo: "AbstractUserRepo",
+        calendar_repo: AbstractCalendarRepo,
+        user_repo: AbstractUserRepo,
     ) -> None:
         self._bus = bus
         self._calendar_repo = calendar_repo
         self._user_repo = user_repo
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         registry = federation_service._event_registry
         registry.register(
             FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
@@ -96,7 +96,7 @@ class PersonalCalendarInboundHandlers:
     @staticmethod
     def _foreign_row_reason(
         existing: CalendarEvent,
-        event: "FederationEvent",
+        event: FederationEvent,
         remote_event_id: str,
     ) -> str | None:
         """Why ``existing`` is not ``from_instance``'s mirror of ``remote_event_id``.
@@ -117,7 +117,7 @@ class PersonalCalendarInboundHandlers:
 
     @staticmethod
     def _refuse(
-        event: "FederationEvent",
+        event: FederationEvent,
         reason: str,
         remote_event_id: str,
         detail: str,
@@ -141,7 +141,7 @@ class PersonalCalendarInboundHandlers:
 
     # ─── Event lifecycle ─────────────────────────────────────────────────
 
-    async def _on_event_saved(self, event: "FederationEvent") -> None:
+    async def _on_event_saved(self, event: FederationEvent) -> None:
         p = event.payload
         remote_event_id = str(p.get("event_id") or p.get("id") or "")
         summary = str(p.get("summary") or "")
@@ -288,12 +288,12 @@ class PersonalCalendarInboundHandlers:
                         event_id=mirrored.id,
                         user_id=recipient_user_id,
                         status="tentative",
-                        updated_at=datetime.now(timezone.utc).isoformat(),
+                        updated_at=datetime.now(UTC).isoformat(),
                         occurrence_at=start.isoformat(),
                     )
                 )
 
-    async def _on_event_deleted(self, event: "FederationEvent") -> None:
+    async def _on_event_deleted(self, event: FederationEvent) -> None:
         p = event.payload
         remote_event_id = str(p.get("event_id") or p.get("id") or "")
         attendee_ids = [str(uid) for uid in (p.get("attendee_user_ids") or []) if uid]
@@ -336,7 +336,7 @@ class PersonalCalendarInboundHandlers:
 
     async def _authorised_rsvp_event(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         local_event_id: str,
         user_id: str,
     ) -> CalendarEvent | None:
@@ -384,13 +384,13 @@ class PersonalCalendarInboundHandlers:
             return None
         return existing
 
-    async def _on_rsvp_updated(self, event: "FederationEvent") -> None:
+    async def _on_rsvp_updated(self, event: FederationEvent) -> None:
         p = event.payload
         local_event_id = str(p.get("event_id") or "")
         user_id = str(p.get("user_id") or "")
         status = str(p.get("status") or "")
         occurrence_at = str(p.get("occurrence_at") or "")
-        updated_at = str(p.get("updated_at") or datetime.now(timezone.utc).isoformat())
+        updated_at = str(p.get("updated_at") or datetime.now(UTC).isoformat())
         if not local_event_id or not user_id or not status:
             return
         if status not in ("accepted", "declined", "tentative"):
@@ -413,7 +413,7 @@ class PersonalCalendarInboundHandlers:
             )
         )
 
-    async def _on_rsvp_deleted(self, event: "FederationEvent") -> None:
+    async def _on_rsvp_deleted(self, event: FederationEvent) -> None:
         p = event.payload
         local_event_id = str(p.get("event_id") or "")
         user_id = str(p.get("user_id") or "")

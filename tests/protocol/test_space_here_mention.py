@@ -20,7 +20,7 @@ the notification rows a local member ends up with.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -159,7 +159,7 @@ async def _post(stack, author, content="@here meeting now", **extra):
             event_type=FederationEventType.SPACE_POST_CREATED,
             from_instance=HOST,
             to_instance=OWN,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload={
                 "id": pid,
                 "author": author,

@@ -13,7 +13,6 @@ from socialhome.config import Config
 from socialhome.db import database as db_module
 from socialhome.db.database import AsyncDatabase
 from socialhome.db.migrations import discover_migrations, run_migrations
-
 from tests.migration_template import MigrationTemplateCache
 
 

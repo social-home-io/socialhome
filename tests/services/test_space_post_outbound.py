@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -127,7 +127,7 @@ async def test_space_post_created_broadcasts_to_space_members():
         author="uid-alice",
         type=PostType.TEXT,
         content="hello space members",
-        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
@@ -165,7 +165,7 @@ async def test_inbound_replay_does_not_loop_back_via_outbound():
         author="uid-pascal",
         type=PostType.TEXT,
         content="hi",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(
         SpacePostCreated(
@@ -199,7 +199,7 @@ async def test_calendar_event_post_not_re_federated_via_space_bridge():
         author="uid-pascal",
         type=PostType.EVENT,
         content="Summary",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
         linked_event_id="cal-event-1",
     )
     await bus.publish(SpacePostCreated(post=bridge_post, space_id="sp-1"))
@@ -219,7 +219,7 @@ async def test_household_post_does_not_federate_via_space_bridge():
         id="p",
         author="uid-alice",
         type=PostType.TEXT,
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id=""))
     federation.broadcast_to_space_members.assert_not_awaited()
@@ -242,7 +242,7 @@ async def test_broadcast_failure_logged_but_swallowed():
         id="p",
         author="u",
         type=PostType.TEXT,
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     # Should not raise.
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
@@ -267,7 +267,7 @@ async def test_post_edited_in_space_broadcasts_update():
         author="uid-alice",
         type=PostType.TEXT,
         content="updated body",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(PostEdited(post=post, space_id="sp-1"))
     federation.broadcast_to_space_members.assert_awaited_once()
@@ -293,7 +293,7 @@ async def test_post_edited_household_only_skipped():
         id="p",
         author="u",
         type=PostType.TEXT,
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(PostEdited(post=post))
     federation.broadcast_to_space_members.assert_not_awaited()
@@ -312,7 +312,7 @@ async def test_post_edited_inbound_replay_does_not_loop():
         id="p",
         author="u",
         type=PostType.TEXT,
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(
         PostEdited(post=post, space_id="sp-1", origin_instance_id="peer-x"),
@@ -336,7 +336,7 @@ async def test_post_edited_calendar_post_not_re_federated():
         author="uid-pascal",
         type=PostType.EVENT,
         content="New summary",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
         linked_event_id="cal-event-2",
     )
     await bus.publish(PostEdited(post=bridge_post, space_id="sp-1"))
@@ -354,7 +354,7 @@ async def test_post_edited_broadcast_failure_swallowed():
         id="p",
         author="u",
         type=PostType.TEXT,
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(PostEdited(post=post, space_id="sp-1"))
 
@@ -425,7 +425,7 @@ async def test_payload_carries_media_fields(type_, extra):
         id="p",
         author="u",
         type=type_,
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
         **extra,
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
@@ -467,7 +467,7 @@ async def test_space_post_created_enqueues_outbox_per_peer_per_blob():
         type=PostType.IMAGE,
         image_urls=("api/media/img-a.webp", "api/media/img-b.webp"),
         media_url="api/media/cover.webp",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
@@ -503,7 +503,7 @@ async def test_space_post_created_no_media_skips_enqueue():
         author="u",
         type=PostType.TEXT,
         content="hi",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
     media_sync.enqueue_for_post.assert_not_awaited()
@@ -522,7 +522,7 @@ async def test_space_post_created_no_media_sync_wired_is_noop():
         author="u",
         type=PostType.IMAGE,
         image_urls=("api/media/whatever.webp",),
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     # Should not raise.
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
@@ -563,7 +563,7 @@ async def test_public_space_post_attaches_signed_public_relay(tier):
         author=anchored_uid,
         type=PostType.TEXT,
         content="public hello",
-        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
@@ -615,7 +615,7 @@ async def test_legacy_username_anchored_author_relay_hint_is_v25_compatible(tier
         author=legacy_uid,
         type=PostType.TEXT,
         content="public hello",
-        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
@@ -654,7 +654,7 @@ async def test_private_space_post_omits_public_relay():
         author="uid-alice",
         type=PostType.TEXT,
         content="private",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
@@ -684,7 +684,7 @@ async def test_public_space_without_identity_omits_public_relay():
         author="uid-alice",
         type=PostType.TEXT,
         content="public",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
@@ -730,7 +730,7 @@ async def test_space_without_subscribers_omits_public_relay(tier):
         author=uid,
         type=PostType.TEXT,
         content="members only",
-        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
@@ -771,7 +771,7 @@ async def test_space_without_subscribers_still_broadcasts_to_members(tier):
         author=uid,
         type=PostType.TEXT,
         content="members only",
-        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
@@ -820,7 +820,7 @@ async def test_join_mode_never_gates_the_relay_hint(join_mode):
         author=uid,
         type=PostType.TEXT,
         content="broadcast",
-        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
@@ -858,7 +858,7 @@ async def test_link_preview_rides_inside_the_member_payload_and_its_image_syncs(
         type=PostType.TEXT,
         content="see https://example.com/a",
         link_preview=card,
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
     payload = federation.broadcast_to_space_members.call_args.args[2]
@@ -883,7 +883,7 @@ async def test_post_without_link_preview_has_no_key():
         author="u",
         type=PostType.TEXT,
         content="hi",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
     payload = federation.broadcast_to_space_members.call_args.args[2]
@@ -903,7 +903,7 @@ async def test_post_writes_carry_their_actor():
         author="uid-alice",
         type=PostType.TEXT,
         content="hi",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
     await bus.publish(PostEdited(post=post, space_id="sp-1", actor_user_id="uid-mod"))
@@ -929,7 +929,7 @@ async def test_an_approved_posts_actor_is_its_approver():
         author="uid-bob",
         type=PostType.TEXT,
         content="queued",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     await bus.publish(
         SpacePostCreated(post=post, space_id="sp-1", approved_by="uid-olga")
@@ -951,7 +951,7 @@ async def test_a_released_post_names_its_author_and_the_release():
         author="uid-bob",
         type=PostType.TEXT,
         content="reviewed",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
     )
     with release_scope("item-1", "uid-mod"):
         await bus.publish(
@@ -975,7 +975,7 @@ async def test_an_approved_announce_card_federates_with_its_event_link():
         author="uid-bob",
         type=PostType.EVENT,
         content="Picnic",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
         linked_event_id="ev-1",
     )
     with release_scope("item-2", "uid-mod"):
@@ -1002,7 +1002,7 @@ async def test_a_bridge_card_minted_during_an_event_release_stays_local():
         author="uid-bob",
         type=PostType.EVENT,
         content="Picnic",
-        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, tzinfo=UTC),
         linked_event_id="ev-1",
     )
     with release_scope("item-3", "uid-mod"):
@@ -1043,7 +1043,7 @@ async def _relay_hint_with(certs):
         author=uid,
         type=PostType.TEXT,
         content="hi",
-        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
     return federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
@@ -1108,7 +1108,7 @@ def _member_setup(member_gfs):
         author=uid,
         type=PostType.TEXT,
         content="member hello",
-        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+        created_at=datetime(2026, 10, 3, tzinfo=UTC),
     )
     return bus, federation, post
 
@@ -1162,7 +1162,7 @@ async def test_a_private_space_post_is_scheduled_only_with_a_channel(channel):
                 author=uid,
                 type=PostType.TEXT,
                 content="x",
-                created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+                created_at=datetime(2026, 10, 3, tzinfo=UTC),
             ),
             space_id="sp-1",
         )
@@ -1215,7 +1215,7 @@ def _comment_obj(uid, cid="c-1", content="nice"):
         post_id="post-1",
         author=uid,
         type=CommentType.TEXT,
-        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+        created_at=datetime(2026, 10, 3, tzinfo=UTC),
         content=content,
     )
 
@@ -1226,7 +1226,7 @@ def _post_obj(uid, content="edited"):
         author=uid,
         type=PostType.TEXT,
         content=content,
-        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+        created_at=datetime(2026, 10, 3, tzinfo=UTC),
     )
 
 
@@ -1325,7 +1325,7 @@ async def test_a_local_space_reaction_is_scheduled():
             added=False,
         )
     )
-    space_id, author, item_type, inner = member.scheduled[0]
+    _space_id, _author, item_type, inner = member.scheduled[0]
     assert (item_type, inner["emoji"], inner["item_target"]) == (
         "reaction_remove",
         "👍",

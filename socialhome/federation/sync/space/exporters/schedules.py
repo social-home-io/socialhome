@@ -10,7 +10,7 @@ the wrapper post but the slot picker rendered empty.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..exporter import PagedExporterMixin
 from ..window import SyncWindows
@@ -28,8 +28,8 @@ class SchedulesExporter(PagedExporterMixin):
 
     def __init__(
         self,
-        poll_repo: "AbstractPollRepo",
-        space_post_repo: "AbstractSpacePostRepo",
+        poll_repo: AbstractPollRepo,
+        space_post_repo: AbstractSpacePostRepo,
         windows: SyncWindows,
     ) -> None:
         self._poll_repo = poll_repo

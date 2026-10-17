@@ -39,8 +39,8 @@ from socialhome.crypto import (
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
-    PairingStatus,
     InstanceSource,
+    PairingStatus,
 )
 from socialhome.federation import route_discovery, routed_crypto
 from socialhome.federation.route_discovery import (
@@ -51,7 +51,6 @@ from socialhome.federation.route_discovery import (
     _PendingDiscovery,
     _route_found_signing_bytes,
 )
-
 
 # ── Test doubles ──────────────────────────────────────────────────────
 
@@ -108,9 +107,9 @@ class _Node:
 
     instance_id: str
     repo: _FakeFederationRepo
-    fed: "_LinkedFederationService"
+    fed: _LinkedFederationService
     service: RouteDiscoveryService
-    neighbours: dict[str, "_Node"] = field(default_factory=dict)
+    neighbours: dict[str, _Node] = field(default_factory=dict)
 
 
 class _LinkedFederationService:
@@ -1818,7 +1817,7 @@ async def test_late_route_found_pins_the_identity_pk_too():
     target_id = nodes["b"].instance_id
     nodes["a"].fed.peers.clear()
     assert await origin.discover_route(target_id) is None
-    request_id = list(origin._origin_requests)[0]
+    request_id = next(iter(origin._origin_requests))
     eph_pk = nodes["b"].service._generate_target_eph(time.monotonic())
     payload = _signed_route_found_payload(
         request_id=request_id,

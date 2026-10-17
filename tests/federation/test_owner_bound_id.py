@@ -8,8 +8,8 @@ import pytest
 
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
-    GROUP_CONVERSATION_KIND,
     GALLERY_ITEM_KIND,
+    GROUP_CONVERSATION_KIND,
     MOMENT_KIND,
     OWNER_BOUND_ID_SUITE_SHA256,
     SPACE_CALENDAR_EVENT_KIND,
@@ -20,8 +20,8 @@ from socialhome.federation.owner_bound_id import (
     SPACE_STICKY_KIND,
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
-    UNSCOPED_KINDS,
     SUPPORTED_OWNER_BOUND_ID_SUITES,
+    UNSCOPED_KINDS,
     OwnerBinding,
     UnsupportedOwnerBoundIdSuite,
     check_owner_bound_id,

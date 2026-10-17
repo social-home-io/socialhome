@@ -14,7 +14,6 @@ import pytest
 from socialhome.domain.federation import GfsConnection
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 
-
 pytestmark = pytest.mark.asyncio
 
 

@@ -12,7 +12,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +25,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
+from socialhome.domain.events import ConnectionReachable, PairingConfirmed
 from socialhome.domain.federation import (
     DELIVERY_ERROR_MESH_DEFER_FULL,
     DELIVERY_ERROR_MESH_DEFERRED,
@@ -40,22 +41,20 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import FederationCapability
-from socialhome.domain.events import ConnectionReachable, PairingConfirmed
 from socialhome.federation import FederationService
 from socialhome.federation import federation_service as federation_service_mod
-from socialhome.federation.invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
-from socialhome.federation.transport import (
-    FederationTransport,
-    _TransportSendResult,
-)
 from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
 from socialhome.federation.media_framing import (
     MEDIA_AEAD_SUITE_AESGCM_256,
     UnsupportedMediaAeadSuite,
 )
+from socialhome.federation.transport import (
+    FederationTransport,
+    _TransportSendResult,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
-
 
 # ─── Shared fixtures & stubs ──────────────────────────────────────────────
 
@@ -271,7 +270,7 @@ class InMemoryFederationRepo:
         return list(self._replay.items())
 
     async def insert_replay_id(self, msg_id: str) -> None:
-        self._replay[msg_id] = datetime.now(timezone.utc).isoformat()
+        self._replay[msg_id] = datetime.now(UTC).isoformat()
 
     async def prune_replay_cache(self, cutoff_iso: str) -> int:
         return 0
@@ -395,7 +394,7 @@ def _make_service(
     key_manager: KeyManager | None = None,
     bus: EventBus | None = None,
     http_client=None,
-) -> "tuple[FederationService, object]":
+) -> tuple[FederationService, object]:
     own_kp = generate_identity_keypair()
     own_id = derive_instance_id(own_kp.public_key)
     km = key_manager or _make_kek_manager()
@@ -489,7 +488,7 @@ async def test_send_event_to_peer():
     outbox_repo = InMemoryOutboxRepo()
     peer_kp = generate_identity_keypair()
 
-    inst, session_key = _make_remote_instance(km, peer_kp=peer_kp)
+    inst, _session_key = _make_remote_instance(km, peer_kp=peer_kp)
     await fed_repo.save_instance(inst)
 
     # Mock HTTP client.
@@ -502,7 +501,7 @@ async def test_send_event_to_peer():
     mock_http = MagicMock()
     mock_http.post = mock_post
 
-    svc, own_kp = _make_service(
+    svc, _own_kp = _make_service(
         federation_repo=fed_repo,
         outbox_repo=outbox_repo,
         key_manager=km,
@@ -551,7 +550,7 @@ async def test_send_event_failure_enqueues_outbox():
     outbox_repo = InMemoryOutboxRepo()
     peer_kp = generate_identity_keypair()
 
-    inst, session_key = _make_remote_instance(km, peer_kp=peer_kp)
+    inst, _session_key = _make_remote_instance(km, peer_kp=peer_kp)
     await fed_repo.save_instance(inst)
 
     # Simulate HTTP error.
@@ -602,7 +601,7 @@ async def test_queue_event_seals_for_a_tombstone_and_only_queues():
     )
     mock_http = MagicMock()
     mock_http.post = MagicMock(side_effect=AssertionError("no delivery attempt"))
-    svc, own_kp = _make_service(
+    svc, _own_kp = _make_service(
         federation_repo=fed_repo,
         outbox_repo=outbox_repo,
         key_manager=km,
@@ -787,7 +786,7 @@ def _make_valid_envelope(
 ) -> bytes:
     """Produce a valid raw JSON envelope bytes that the inbound pipeline will accept."""
     if timestamp is None:
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
     if msg_id is None:
         msg_id = str(uuid.uuid4())
     if payload is None:
@@ -798,6 +797,7 @@ def _make_valid_envelope(
 
     payload_json = _dumps(payload)
     import os
+
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     nonce = os.urandom(12)
@@ -841,7 +841,7 @@ async def test_inbound_inbox_validation():
     inst, _ = _make_remote_instance(km, peer_kp=peer_kp, session_key=session_key)
     await fed_repo.save_instance(inst)
 
-    svc, own_kp = _make_service(federation_repo=fed_repo, key_manager=km)
+    svc, _own_kp = _make_service(federation_repo=fed_repo, key_manager=km)
 
     raw_body = _make_valid_envelope(
         svc=svc,
@@ -914,7 +914,7 @@ async def test_inbound_timestamp_skew_rejected():
     svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
 
     # Timestamp 10 minutes in the past.
-    old_ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    old_ts = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     raw_body = _make_valid_envelope(
         svc=svc,
         peer_kp=peer_kp,
@@ -981,7 +981,7 @@ async def test_inbound_unknown_inbox_rejected():
             "event_type": "user_updated",
             "from_instance": "abc",
             "to_instance": svc._own_instance_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "encrypted_payload": "nonce:ct",
             "sig_suite": "ed25519",
             "signatures": {"ed25519": "sig"},
@@ -1034,7 +1034,7 @@ async def test_accept_pairing():
     """accept_pairing processes a QR payload and creates a RemoteInstance."""
     km = _make_kek_manager()
     fed_repo = InMemoryFederationRepo()
-    svc, own_kp = _make_service(federation_repo=fed_repo, key_manager=km)
+    svc, _own_kp = _make_service(federation_repo=fed_repo, key_manager=km)
 
     # Simulate the peer's QR payload.
     peer_kp = generate_identity_keypair()
@@ -1065,7 +1065,7 @@ async def test_confirm_pairing():
     """confirm_pairing with correct code moves instance to CONFIRMED."""
     km = _make_kek_manager()
     fed_repo = InMemoryFederationRepo()
-    svc, own_kp = _make_service(federation_repo=fed_repo, key_manager=km)
+    svc, _own_kp = _make_service(federation_repo=fed_repo, key_manager=km)
 
     peer_kp = generate_identity_keypair()
     peer_dh = generate_x25519_keypair()
@@ -1193,7 +1193,7 @@ async def test_broadcast_to_peers_partial_failure():
         # First call succeeds, second fails.
         if call_count == 1:
             return _Resp(200)
-        raise Exception("timeout")
+        raise TimeoutError("timeout")
 
     mock_http = MagicMock()
     mock_http.post = _post
@@ -1840,7 +1840,7 @@ async def test_dispatch_users_sync():
         event_type=FederationEventType.USERS_SYNC,
         from_instance="peer",
         to_instance="test-instance",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"users": [{"username": "bob"}]},
     )
     await svc._dispatch_event(event)
@@ -1857,7 +1857,7 @@ async def test_dispatch_user_updated():
         event_type=FederationEventType.USER_UPDATED,
         from_instance="peer",
         to_instance="test-instance",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"user_id": "u1", "display_name": "Bob"},
     )
     await svc._dispatch_event(event)
@@ -1874,7 +1874,7 @@ async def test_dispatch_user_removed():
         event_type=FederationEventType.USER_REMOVED,
         from_instance="peer",
         to_instance="test-instance",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"user_id": "u1"},
     )
     await svc._dispatch_event(event)
@@ -1891,7 +1891,7 @@ async def test_dispatch_space_post_created():
         event_type=FederationEventType.SPACE_POST_CREATED,
         from_instance="peer",
         to_instance="test-instance",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"post_id": "p1"},
         space_id="s1",
     )
@@ -1909,7 +1909,7 @@ async def test_dispatch_space_member_joined():
         event_type=FederationEventType.SPACE_MEMBER_JOINED,
         from_instance="peer",
         to_instance="test-instance",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"user_id": "u1"},
         space_id="s1",
     )
@@ -1935,7 +1935,7 @@ async def test_dispatch_space_config_changed():
         event_type=FederationEventType.SPACE_CONFIG_CHANGED,
         from_instance="peer",
         to_instance="test-instance",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"sequence": 5, "name": "Updated"},
         space_id="s1",
     )
@@ -1955,7 +1955,7 @@ async def test_dispatch_dm_message():
         event_type=FederationEventType.DM_MESSAGE,
         from_instance="peer",
         to_instance="test-instance",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"content": "hi"},
     )
     await svc._dispatch_event(event)
@@ -1972,7 +1972,7 @@ async def test_dispatch_presence_updated():
         event_type=FederationEventType.PRESENCE_UPDATED,
         from_instance="peer",
         to_instance="test-instance",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={"state": "home"},
     )
     await svc._dispatch_event(event)
@@ -1995,7 +1995,7 @@ async def test_dispatch_pairing_event():
             event_type=etype,
             from_instance="peer",
             to_instance="test-instance",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload={},
         )
         await svc._dispatch_event(event)
@@ -2012,7 +2012,7 @@ async def test_dispatch_unknown_event():
         event_type=FederationEventType.NETWORK_SYNC,
         from_instance="peer",
         to_instance="test-instance",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={},
     )
     await svc._dispatch_event(event)
@@ -2024,12 +2024,12 @@ async def test_dispatch_unknown_event():
 # (receiver) end-to-end across two services A→B that share a session key,
 # plus the §24.11 + per-chunk-binding negative paths.
 
-import hashlib  # noqa: E402
-import types  # noqa: E402
+import hashlib
+import types
 
-import orjson  # noqa: E402
+import orjson
 
-from socialhome.crypto import b64url_encode as _b64url_encode  # noqa: E402
+from socialhome.crypto import b64url_encode as _b64url_encode
 
 
 class _CaptureMediaTransport:
@@ -2142,7 +2142,7 @@ def _make_frame(
         "event_type": event_type.value,
         "from_instance": p.a_id,
         "to_instance": p.b_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "encrypted_payload": encrypted_payload,
         "space_id": space_id,
         "proto_version": 1,
@@ -2428,7 +2428,7 @@ async def test_media_frame_idempotency_short_circuits_before_assembly():
 # (receiver) end-to-end, plus the gating logic (binary vs JSON fallback).
 
 
-import types as _types  # noqa: E402
+import types as _types
 
 
 class _CaptureAppTransport(_CaptureMediaTransport):
@@ -2497,7 +2497,7 @@ def _paired_app(*, peer_proto_version: int = FederationCapability.MIN_FOR_APP_CH
     )
 
 
-from socialhome.federation.app_framing import (  # noqa: E402
+from socialhome.federation.app_framing import (
     APP_AEAD_SUITE_AESGCM_256,
     UnsupportedAppAeadSuite,
 )
@@ -2724,7 +2724,7 @@ async def test_app_inbound_handler_rejects_unknown_aead_suite():
         "event_type": FederationEventType.APP_MESSAGE.value,
         "from_instance": p.a_id,
         "to_instance": p.b_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "encrypted_payload": encrypted_payload,
         "space_id": None,
         "proto_version": 1,
@@ -2856,9 +2856,9 @@ def _build_stored_envelope(svc, peer_kp, *, timestamp_iso, msg_id="msg-fixed-1")
 def test_resign_for_redelivery_refreshes_timestamp_keeps_identity():
     """resign_for_redelivery: fresh timestamp, same msg_id /
     encrypted_payload / sig_suite / space_id, non-empty signatures."""
-    svc, own_kp = _make_service()
+    svc, _own_kp = _make_service()
     peer_kp = generate_identity_keypair()
-    stale_iso = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    stale_iso = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     stored = _build_stored_envelope(svc, peer_kp, timestamp_iso=stale_iso)
     payload_json = _dumps(stored)
 
@@ -2876,7 +2876,7 @@ def test_resign_for_redelivery_refreshes_timestamp_keeps_identity():
 
     # Fresh timestamp: within a couple of seconds of now.
     new_ts = datetime.fromisoformat(parsed["timestamp"])
-    skew = abs((datetime.now(timezone.utc) - new_ts).total_seconds())
+    skew = abs((datetime.now(UTC) - new_ts).total_seconds())
     assert skew < 5, f"expected fresh timestamp, skew was {skew}s"
 
     # Non-empty signatures map with the ed25519 entry.
@@ -2891,7 +2891,7 @@ def test_resign_for_redelivery_preserves_msg_id_for_replay_dedup():
     receiver's replay cache still dedupes a genuinely-redelivered event."""
     svc, _ = _make_service()
     peer_kp = generate_identity_keypair()
-    stale_iso = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    stale_iso = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     stored = _build_stored_envelope(
         svc, peer_kp, timestamp_iso=stale_iso, msg_id="unique-msg-id-42"
     )
@@ -2911,6 +2911,7 @@ async def test_resign_for_redelivery_passes_real_inbound_timestamp_and_sig():
     signature verification below fails.
     """
     import orjson
+
     from socialhome.federation.inbound_validator import (
         InboundContext,
         make_check_timestamp,
@@ -2922,7 +2923,7 @@ async def test_resign_for_redelivery_passes_real_inbound_timestamp_and_sig():
 
     # Build a stale (10-minute-old) signed envelope exactly as the outbox
     # would have stored it from the original send_event call.
-    stale_iso = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    stale_iso = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     stored = _build_stored_envelope(svc, peer_kp, timestamp_iso=stale_iso)
     payload_json = _dumps(stored)
 
@@ -3105,7 +3106,7 @@ async def test_routed_ship_failure_gives_up_after_one_retry():
         key_manager=km,
     )
     path = [svc.own_instance_id, "hop", inst.id]
-    route_service, routed_handler, discover_route, send_routed = _make_mesh_pair(
+    route_service, routed_handler, _discover_route, send_routed = _make_mesh_pair(
         route=(path, "eph"),
     )
     send_routed.side_effect = RuntimeError("still broken")
@@ -4436,7 +4437,7 @@ async def test_a_relay_acceptance_is_remembered_for_the_operator():
     assert ts is not None
     # Naive UTC "YYYY-MM-DD HH:MM:SS" — SQLite ``datetime('now')`` shape.
     parsed = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(UTC).replace(tzinfo=None)
     assert abs((now - parsed).total_seconds()) < 5
 
 

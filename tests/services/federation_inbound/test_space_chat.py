@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -152,13 +152,13 @@ async def test_reply_kept_only_inside_the_chat_and_future_clamped(stack):
     first = chat_id("u-rb")
     await _create(stack, first)
     reply = chat_id("u-rb")
-    future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    future = (datetime.now(UTC) + timedelta(days=30)).isoformat()
     await _create(stack, reply, reply_to_id=first, created_at=future)
     stray = chat_id("u-rb")
     await _create(stack, stray, reply_to_id="not-a-message")
     got = await stack.convos.get_message(reply)
     assert got is not None and got.reply_to_id == first
-    assert got.created_at <= datetime.now(timezone.utc)
+    assert got.created_at <= datetime.now(UTC)
     stray_msg = await stack.convos.get_message(stray)
     assert stray_msg is not None and stray_msg.reply_to_id is None
 

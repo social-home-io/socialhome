@@ -20,5 +20,5 @@ class CalendarDeletedExporter(RowTombstonesExporter):
 
     __slots__ = ()
 
-    def __init__(self, space_calendar_repo: "AbstractSpaceCalendarRepo") -> None:
+    def __init__(self, space_calendar_repo: AbstractSpaceCalendarRepo) -> None:
         super().__init__(space_calendar_repo.list_event_tombstones_page)

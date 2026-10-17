@@ -193,7 +193,7 @@ async def test_rotate_token_invalidates_old_hash(env):
     )
     result = await env.bot_repo.rotate_token("b1")
     assert result is not None
-    bot, raw2 = result
+    _bot, raw2 = result
     assert raw1 != raw2
     assert await env.bot_repo.get_by_token_hash(_hash_token(raw1)) is None
     found = await env.bot_repo.get_by_token_hash(_hash_token(raw2))
@@ -202,7 +202,7 @@ async def test_rotate_token_invalidates_old_hash(env):
 
 async def test_update_only_changes_provided_fields(env):
     """update() leaves unspecified fields untouched."""
-    bot, _ = await env.bot_repo.create(
+    _bot, _ = await env.bot_repo.create(
         bot_id="b1",
         space_id="sp-1",
         scope=BotScope.SPACE,

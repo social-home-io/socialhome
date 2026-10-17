@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-
 from .conftest import _auth
-
 
 _VALID_SUB = {
     "endpoint": "https://push.example.com/abc",

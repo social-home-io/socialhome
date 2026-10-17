@@ -21,13 +21,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from ..crypto import b64url_decode, verify_ed25519
-from ..federation.owner_bound_id import MOMENT_KIND, owner_bound_id_refused
 from ..domain.events import MomentCreated, MomentDeleted
 from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
+from ..federation.owner_bound_id import MOMENT_KIND, owner_bound_id_refused
 from ..infrastructure.event_bus import EventBus
 from .inbound_media_store import verbatim_local_media_ref
 
@@ -41,14 +41,14 @@ log = logging.getLogger(__name__)
 
 
 class MomentPublicInbound:
-    __slots__ = ("_bus", "_moments", "_follows")
+    __slots__ = ("_bus", "_follows", "_moments")
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        moment_repo: "AbstractMomentRepo",
-        follow_repo: "AbstractMomentPublicFollowRepo",
+        moment_repo: AbstractMomentRepo,
+        follow_repo: AbstractMomentPublicFollowRepo,
     ) -> None:
         self._bus = bus
         self._moments = moment_repo
@@ -167,7 +167,7 @@ class MomentPublicInbound:
             author_user_id=author_user_id,
             origin_instance_id=origin_instance_id,
             expires_at=(
-                datetime.now(timezone.utc) + timedelta(days=MOMENT_RETENTION_DAYS)
+                datetime.now(UTC) + timedelta(days=MOMENT_RETENTION_DAYS)
             ).isoformat(),
         )
         if existing is None:

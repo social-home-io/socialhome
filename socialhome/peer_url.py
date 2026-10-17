@@ -131,7 +131,7 @@ def validate_peer_url(
             field=field,
         )
     try:
-        parts.port
+        _ = parts.port  # urllib parses the port lazily; raises ValueError
     except ValueError as exc:
         raise InvalidPeerUrlError(
             f"{field} is not a valid household address: it has an invalid port",

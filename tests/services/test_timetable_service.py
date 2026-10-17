@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import orjson
@@ -11,7 +11,7 @@ import pytest
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import TimetableDeleted, TimetableSaved
 from socialhome.domain.preferences import FeatureDisabledError, HouseholdPreferences
-from socialhome.domain.timetable import entry_to_dict as td_entry_to_dict
+from socialhome.domain.space import SpacePermissionError
 from socialhome.domain.timetable import (
     EntryKind,
     LessonStatus,
@@ -24,7 +24,7 @@ from socialhome.domain.timetable import (
     TimetableValidationError,
     week_anchor,
 )
-from socialhome.domain.space import SpacePermissionError
+from socialhome.domain.timetable import entry_to_dict as td_entry_to_dict
 from socialhome.federation.owner_bound_id import (
     SPACE_TIMETABLE_KIND,
     OwnerBinding,
@@ -682,7 +682,7 @@ async def test_household_today_uses_household_tz(env):
 async def test_clock_seam_is_utc_aware():
     now = ts._utcnow()
     assert now.tzinfo is not None
-    assert abs(now - datetime.now(timezone.utc)) < timedelta(days=366)
+    assert abs(now - datetime.now(UTC)) < timedelta(days=366)
 
 
 async def test_add_entry_and_override_are_strict_about_keys(env):
@@ -793,7 +793,7 @@ async def test_duplicate_drops_no_longer_active_assignees(env):
 def _at(d, hhmm="07:00"):
     """``hhmm`` UTC on date ``d`` as an aware datetime."""
     h, m = hhmm.split(":")
-    return datetime(d.year, d.month, d.day, int(h), int(m), tzinfo=timezone.utc)
+    return datetime(d.year, d.month, d.day, int(h), int(m), tzinfo=UTC)
 
 
 async def _titled(env, **kw) -> Timetable:

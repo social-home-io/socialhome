@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import orjson
@@ -79,15 +79,15 @@ class HighlightFrameLimitError(ValueError):
 class HighlightService:
     """Personal highlights: create / view / react / share / expire."""
 
-    __slots__ = ("_highlights", "_users", "_bus", "_media_dir", "_media_refs")
+    __slots__ = ("_bus", "_highlights", "_media_dir", "_media_refs", "_users")
 
     def __init__(
         self,
-        repo: "AbstractHighlightRepo",
-        user_repo: "AbstractUserRepo",
-        bus: "EventBus",
+        repo: AbstractHighlightRepo,
+        user_repo: AbstractUserRepo,
+        bus: EventBus,
         *,
-        media_dir: "pathlib.Path | None" = None,
+        media_dir: pathlib.Path | None = None,
         media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._highlights = repo
@@ -150,7 +150,7 @@ class HighlightService:
             else HighlightFrameType(frame_type)
         )
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         highlight_date = now.strftime("%Y-%m-%d")
         expires_at = (now + timedelta(days=prefs.retention_days)).isoformat()
 

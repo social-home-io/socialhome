@@ -12,7 +12,7 @@ need a writable seat (subscribers → 403) in a non-archived space (→ 403).
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from aiohttp import web
 
@@ -23,7 +23,6 @@ from ..app_keys import (
     space_page_service_key,
     space_repo_key,
 )
-from ..domain.page import MAX_PAGE_TITLE_LENGTH
 from ..domain.events import (
     PageConflictEmitted,
     PageCreated,
@@ -32,6 +31,8 @@ from ..domain.events import (
     PageEditLockReleased,
     PageUpdated,
 )
+from ..domain.page import MAX_PAGE_TITLE_LENGTH
+from ..domain.page_version import PageConflictSide, version_hash
 from ..media_signer import (
     MediaUrlSigner,
     sign_media_urls_in_markdown,
@@ -45,7 +46,6 @@ from ..repositories.page_repo import (
     new_page,
 )
 from ..security import error_response
-from ..domain.page_version import PageConflictSide, version_hash
 from ..services.inbound_media_store import (
     optional_local_media_ref,
     verbatim_local_media_ref,
@@ -53,7 +53,6 @@ from ..services.inbound_media_store import (
 from ..services.page_conflict_service import RESOLUTIONS
 from ..services.space_page_service import PageStaleError, snapshot_page_version
 from .base import BaseView
-
 
 _TITLE_TOO_LONG = f"title must be at most {MAX_PAGE_TITLE_LENGTH} characters."
 
@@ -90,7 +89,7 @@ def _page_dict(page, *, signer: MediaUrlSigner | None = None) -> dict:
     if signer is not None:
         if content:
             content = sign_media_urls_in_markdown(content, signer)
-        if cover and (cover.startswith("/api/") or cover.startswith("api/")):
+        if cover and (cover.startswith(("/api/", "api/"))):
             cover = signer.sign(cover)
     return {
         "id": page.id,
@@ -165,7 +164,7 @@ class PageCollectionView(BaseView):
     """GET/POST /api/pages — list or create pages."""
 
     async def get(self) -> web.Response:
-        self.user  # auth gate
+        self.require_user()
         repo = self.svc(page_repo_key)
         pages = await repo.list(space_id=None)
         return web.json_response([_signed_page_dict(self.request, p) for p in pages])
@@ -206,7 +205,7 @@ class PageDetailView(BaseView):
     """GET/PATCH/DELETE /api/pages/{id} — get, update, delete a page."""
 
     async def get(self) -> web.Response:
-        self.user  # auth gate
+        self.require_user()
         repo = self.svc(page_repo_key)
         page_id = self.match("id")
         p = await repo.get_household_page(page_id)
@@ -247,7 +246,7 @@ class PageDetailView(BaseView):
                 },
                 status=409,
             )
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         kwargs: dict = {
             "updated_at": now_iso,
             "last_editor_user_id": ctx.user_id,
@@ -286,7 +285,7 @@ class PageDetailView(BaseView):
         return web.json_response(_signed_page_dict(self.request, updated))
 
     async def delete(self) -> web.Response:
-        self.user  # auth gate
+        self.require_user()
         repo = self.svc(page_repo_key)
         bus = self.svc(event_bus_key)
         page_id = self.match("id")
@@ -301,7 +300,7 @@ class PageLockView(BaseView):
     """GET/POST/DELETE /api/pages/{id}/lock — inspect, acquire, release."""
 
     async def get(self) -> web.Response:
-        self.user  # auth gate
+        self.require_user()
         repo = self.svc(page_repo_key)
         page_id = self.match("id")
         if await repo.get_household_page(page_id) is None:
@@ -375,7 +374,7 @@ class PageVersionView(BaseView):
     """GET /api/pages/{id}/versions — list edit history."""
 
     async def get(self) -> web.Response:
-        self.user  # auth gate
+        self.require_user()
         repo = self.svc(page_repo_key)
         page_id = self.match("id")
         if await repo.get_household_page(page_id) is None:
@@ -421,7 +420,7 @@ class PageRevertView(BaseView):
         if target is None:
             return error_response(404, "NOT_FOUND", f"Version {version_num} not found.")
         await snapshot_page_version(repo, previous=current, editor_user_id=ctx.user_id)
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         reverted = replace(
             current,
             title=target.title,

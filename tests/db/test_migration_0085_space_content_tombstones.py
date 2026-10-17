@@ -120,12 +120,16 @@ def _poll_rows(conn, pid: str) -> int:
         for sql in (
             "SELECT COUNT(*) FROM space_polls WHERE post_id=?",
             "SELECT COUNT(*) FROM space_poll_options WHERE post_id=?",
-            "SELECT COUNT(*) FROM space_poll_votes WHERE option_id IN"
-            " (SELECT id FROM space_poll_options WHERE post_id=?)",
+            (
+                "SELECT COUNT(*) FROM space_poll_votes WHERE option_id IN"
+                " (SELECT id FROM space_poll_options WHERE post_id=?)"
+            ),
             "SELECT COUNT(*) FROM space_schedule_poll_meta WHERE post_id=?",
             "SELECT COUNT(*) FROM space_schedule_slots WHERE post_id=?",
-            "SELECT COUNT(*) FROM space_schedule_responses WHERE slot_id IN"
-            " (SELECT id FROM space_schedule_slots WHERE post_id=?)",
+            (
+                "SELECT COUNT(*) FROM space_schedule_responses WHERE slot_id IN"
+                " (SELECT id FROM space_schedule_slots WHERE post_id=?)"
+            ),
         )
     )
 

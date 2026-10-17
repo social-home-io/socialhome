@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
-from socialhome.repositories.space_repo import SqliteSpaceRepo
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
@@ -17,10 +15,11 @@ from socialhome.domain.events import (
 from socialhome.domain.post import PostType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
-from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.calendar_feed_bridge import CalendarFeedBridge
 from socialhome.services.calendar_service import SpaceCalendarService
 
@@ -79,7 +78,7 @@ async def env(tmp_dir):
 
 async def test_create_event_creates_feed_post(env):
     """A new calendar event spawns a PostType.EVENT post with linked_event_id."""
-    now = datetime(2026, 6, 1, 18, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 1, 18, 0, tzinfo=UTC)
     event = await env.cal_svc.create_event(
         space_id="sp-feed",
         summary="Summer party",
@@ -100,7 +99,7 @@ async def test_create_event_creates_feed_post(env):
 async def test_event_without_announce_makes_no_feed_post(env):
     """§23.15 — the feed mirror is opt-in. An event created without
     announce_in_feed lives only in the Calendar tab; the bridge skips it."""
-    now = datetime(2026, 6, 1, 18, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 1, 18, 0, tzinfo=UTC)
     await env.cal_svc.create_event(
         space_id="sp-feed",
         summary="Quiet event",
@@ -115,7 +114,7 @@ async def test_event_without_announce_makes_no_feed_post(env):
 
 async def test_event_update_rewrites_post_body(env):
     """Renaming the event updates the linked post's content."""
-    now = datetime(2026, 6, 5, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 5, tzinfo=UTC)
     event = await env.cal_svc.create_event(
         space_id="sp-feed",
         summary="Old title",
@@ -135,7 +134,7 @@ async def test_event_update_rewrites_post_body(env):
 
 async def test_event_update_no_body_change_is_noop(env):
     """If the title didn't change, the post isn't touched."""
-    now = datetime(2026, 6, 5, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 5, tzinfo=UTC)
     event = await env.cal_svc.create_event(
         space_id="sp-feed",
         summary="Same title",
@@ -154,7 +153,7 @@ async def test_event_update_no_body_change_is_noop(env):
 
 async def test_event_delete_soft_deletes_post(env):
     """Deleting the event soft-deletes the linked post."""
-    now = datetime(2026, 6, 10, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 10, tzinfo=UTC)
     event = await env.cal_svc.create_event(
         space_id="sp-feed",
         summary="Cancelled event",
@@ -175,7 +174,7 @@ async def test_duplicate_create_is_idempotent(env):
     """Receiving the same CalendarEventCreated twice doesn't double-post."""
     from socialhome.domain.calendar import CalendarEvent
 
-    now = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 1, tzinfo=UTC)
     ev = CalendarEvent(
         id="ev-twice",
         calendar_id="sp-feed",
@@ -200,7 +199,7 @@ async def test_get_by_linked_event_id_returns_none_for_no_match(env):
 
 async def test_recurring_event_creates_one_post(env):
     """A weekly recurring event yields one feed post, not one per occurrence."""
-    seed = datetime(2026, 8, 3, 9, 0, tzinfo=timezone.utc)
+    seed = datetime(2026, 8, 3, 9, 0, tzinfo=UTC)
     await env.cal_svc.create_event(
         space_id="sp-feed",
         summary="Weekly meet",
@@ -231,7 +230,7 @@ async def _announced(env, *, created_by: str, event_id: str) -> list:
     the repo, then ``CalendarEventCreated`` — and the feed is read back."""
     from socialhome.domain.calendar import CalendarEvent
 
-    now = datetime(2026, 6, 1, 18, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 1, 18, 0, tzinfo=UTC)
     ev = CalendarEvent(
         id=event_id,
         calendar_id="sp-feed",

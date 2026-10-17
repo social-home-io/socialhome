@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -22,7 +22,7 @@ from socialhome.repositories.conversation_repo import SqliteConversationRepo
 @pytest.fixture
 async def env(tmp_dir):
     """Env with a conversation repo and seeded users."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
 
     kp = generate_identity_keypair()
@@ -56,14 +56,14 @@ async def env(tmp_dir):
 def _conv(
     conv_id: str = "c1", type: ConversationType = ConversationType.DM
 ) -> Conversation:
-    return Conversation(id=conv_id, type=type, created_at=datetime.now(timezone.utc))
+    return Conversation(id=conv_id, type=type, created_at=datetime.now(UTC))
 
 
 def _member(conv_id: str, username: str) -> ConversationMember:
     return ConversationMember(
         conversation_id=conv_id,
         username=username,
-        joined_at=datetime.now(timezone.utc).isoformat(),
+        joined_at=datetime.now(UTC).isoformat(),
     )
 
 
@@ -75,7 +75,7 @@ def _message(
         conversation_id=conv_id,
         sender_user_id=sender,
         content=content,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -190,7 +190,7 @@ async def test_add_and_list_remote_members(env):
         conversation_id="conv-remote",
         instance_id="inst-far",
         remote_username="carol",
-        joined_at=datetime.now(timezone.utc).isoformat(),
+        joined_at=datetime.now(UTC).isoformat(),
     )
     await env.repo.add_remote_member(remote)
     remotes = await env.repo.list_remote_members("conv-remote")
@@ -439,7 +439,7 @@ async def test_list_conversations_with_remote_member(env):
             conversation_id="conv-a",
             instance_id="peer-x",
             remote_username="x1",
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         )
     )
     await env.repo.add_remote_member(
@@ -447,7 +447,7 @@ async def test_list_conversations_with_remote_member(env):
             conversation_id="conv-a",
             instance_id="peer-x",
             remote_username="x2",
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         )
     )
     await env.repo.add_remote_member(
@@ -455,7 +455,7 @@ async def test_list_conversations_with_remote_member(env):
             conversation_id="conv-b",
             instance_id="peer-y",
             remote_username="y1",
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         )
     )
     result = await env.repo.list_conversations_with_remote_member("peer-x")
@@ -472,7 +472,7 @@ async def _seed_conv_with_msg(env, *, conv_id="c1", msg_id="m1"):
         conversation_id=conv_id,
         sender_user_id="uid-alice",
         content="hi",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     await env.repo.save_message(msg)
 
@@ -527,7 +527,7 @@ async def test_list_delivery_states_filters_by_message_ids(env):
             conversation_id="c1",
             sender_user_id="uid-alice",
             content="hi2",
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
     await env.repo.upsert_delivery_state(
@@ -557,10 +557,10 @@ async def test_mark_conversation_read_skips_own_messages(env):
                 conversation_id="c1",
                 sender_user_id=sender,
                 content="x",
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
         )
-    up_to = datetime.now(timezone.utc).isoformat()
+    up_to = datetime.now(UTC).isoformat()
     marked = await env.repo.mark_conversation_read(
         conversation_id="c1", user_id="uid-alice", up_to_at=up_to
     )
@@ -655,7 +655,7 @@ def _group(version: int, name: str | None = "Crew") -> Conversation:
         id="g1",
         type=ConversationType.GROUP_DM,
         name=name,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         membership_version=version,
     )
 
@@ -871,7 +871,7 @@ async def test_list_messages_sync_page_pages_the_live_chat_oldest_first(env):
                 conversation_id="c-live",
                 sender_user_id="uid-alice",
                 content=f"hi {i}",
-                created_at=datetime(2026, 1, 1, 0, i, tzinfo=timezone.utc),
+                created_at=datetime(2026, 1, 1, 0, i, tzinfo=UTC),
             )
         )
     await env.repo.soft_delete_message("m3")
@@ -899,7 +899,7 @@ async def test_create_round_trips_system_columns(env):
     conv = Conversation(
         id="c-sys",
         type=ConversationType.GROUP_DM,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         system_scope=SystemChatScope.HOUSEHOLD,
     )
     await env.repo.create(conv)
@@ -971,7 +971,7 @@ async def test_a_tombstone_is_deleted_invisible_and_blocks_its_id(env):
             conversation_id="c-tomb",
             sender_user_id="u-x",
             content="back",
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
     # It does not bump the conversation's last activity.
@@ -988,7 +988,7 @@ async def test_prune_space_chat_messages_clears_only_expired_chat_rows(env):
         " identity_public_key, retention_days) VALUES('sp-r','S','h','a','ab',7)"
     )
     chat = await env.repo.create_system_chat(SystemChatScope.SPACE, space_id="sp-r")
-    now = datetime(2026, 6, 30, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 30, tzinfo=UTC)
     for mid, day in (("old", 1), ("new", 29)):
         await env.repo.save_message(
             ConversationMessage(
@@ -996,7 +996,7 @@ async def test_prune_space_chat_messages_clears_only_expired_chat_rows(env):
                 conversation_id=chat.id,
                 sender_user_id="uid-alice",
                 content="hi",
-                created_at=datetime(2026, 6, day, tzinfo=timezone.utc),
+                created_at=datetime(2026, 6, day, tzinfo=UTC),
             )
         )
     assert await env.repo.prune_space_chat_messages(now=now) == ["old"]
@@ -1032,7 +1032,7 @@ async def test_list_space_chat_unread_one_row_per_live_seat(env):
         await env.repo.save_message(_message(f"s1-{i}", one))
     await env.repo.save_message(_message("s1-own", one, sender="uid-bob"))
     await env.repo.save_message(_message("s2-0", two))
-    await env.repo.set_last_read(two, "bob", at=datetime.now(timezone.utc).isoformat())
+    await env.repo.set_last_read(two, "bob", at=datetime.now(UTC).isoformat())
     rows = await env.repo.list_space_chat_unread("bob", writer_roles=_WRITERS)
     assert [(r.space_id, r.conversation_id, r.unread) for r in rows] == [
         ("sp1", one, 3),
@@ -1051,8 +1051,10 @@ async def test_list_space_chat_unread_one_row_per_live_seat(env):
         "UPDATE spaces SET dissolved=1 WHERE id='sp1'",
         "UPDATE space_members SET role='subscriber' WHERE space_id='sp1'",
         "DELETE FROM space_members WHERE space_id='sp1'",
-        "INSERT INTO space_bans(space_id, user_id, banned_by) "
-        "VALUES('sp1','uid-bob','uid-alice')",
+        (
+            "INSERT INTO space_bans(space_id, user_id, banned_by) "
+            "VALUES('sp1','uid-bob','uid-alice')"
+        ),
         "UPDATE conversation_members SET deleted_at=datetime('now')",
     ],
 )
@@ -1073,7 +1075,7 @@ async def test_list_messages_sync_page_since_a_stamp(env):
                 conversation_id="c-inc",
                 sender_user_id="uid-alice",
                 content=f"hi {i}",
-                created_at=datetime(2026, 1, 1, 0, i, tzinfo=timezone.utc),
+                created_at=datetime(2026, 1, 1, 0, i, tzinfo=UTC),
             )
         )
     row = await env.db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
@@ -1092,7 +1094,7 @@ async def test_list_messages_sync_page_since_a_stamp(env):
 
 # ── Recent messages (the household dashboard's read-only glance) ──────────
 
-_NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 _UNTIL = _NOW + timedelta(minutes=2)
 
 
@@ -1247,8 +1249,8 @@ async def test_list_recent_messages_reads_nothing_for_empty_filters(
     await env.repo.save_message(_message("m1", "c1"))
     rows = await env.repo.list_recent_messages(
         "c1",
-        since=datetime(2000, 1, 1, tzinfo=timezone.utc),
-        until=datetime(2100, 1, 1, tzinfo=timezone.utc),
+        since=datetime(2000, 1, 1, tzinfo=UTC),
+        until=datetime(2100, 1, 1, tzinfo=UTC),
         types=types,
         senders=senders,
         limit=limit,

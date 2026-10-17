@@ -7,6 +7,7 @@ fallback. Each test calls the handler directly with a mock repo stack.
 
 from __future__ import annotations
 
+from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -255,14 +256,14 @@ async def test_space_comment_updated_missing_fields(svc):
 
 
 async def test_space_comment_updated_happy_path(svc):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     fake_comment = Comment(
         id="c",
         post_id="p",
         author="u",
         type=CommentType.TEXT,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         content="hi",
     )
     svc.sp_post.get_comment.return_value = fake_comment

@@ -10,7 +10,7 @@ view hides. Everyone else still gets them.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -116,7 +116,7 @@ def _got(socks, frame_type):
     }
 
 
-_NOW = datetime.now(timezone.utc)
+_NOW = datetime.now(UTC)
 
 
 @pytest.mark.parametrize(

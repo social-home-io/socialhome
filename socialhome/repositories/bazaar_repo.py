@@ -16,7 +16,7 @@ value from :data:`~socialhome.domain.post.BAZAAR_CURRENCIES`.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -39,7 +39,6 @@ from .base import (
     rows_to_dicts,
     sync_page_cursor,
 )
-
 
 #: §23.15 auction anti-snipe: bids arriving within this window of the
 #: close-time push the close-time back by :data:`SNIPE_EXTEND_SECONDS`.
@@ -422,7 +421,7 @@ class SqliteBazaarRepo:
         *,
         now_iso: str | None = None,
     ) -> list[BazaarListing]:
-        cutoff = now_iso or datetime.now(timezone.utc).isoformat()
+        cutoff = now_iso or datetime.now(UTC).isoformat()
         rows = await self._db.fetchall(
             """
             SELECT * FROM bazaar_listings
@@ -543,7 +542,7 @@ class SqliteBazaarRepo:
                     # DESC, created_at ASC`` tie-break (ASCII ' ' < 'T'), so
                     # the SQL-side default must match the same shape, not
                     # just be non-empty.
-                    bid.created_at or datetime.now(timezone.utc).isoformat(),
+                    bid.created_at or datetime.now(UTC).isoformat(),
                 ),
             )
             # Anti-snipe for auction mode (§23.15).
@@ -551,13 +550,13 @@ class SqliteBazaarRepo:
                 end_time = row[2]
                 try:
                     end_dt = datetime.fromisoformat(
-                        end_time.replace("Z", "+00:00"),
+                        end_time,
                     )
                     if end_dt.tzinfo is None:
-                        end_dt = end_dt.replace(tzinfo=timezone.utc)
+                        end_dt = end_dt.replace(tzinfo=UTC)
                 except ValueError, AttributeError:
                     return
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 if end_dt > now and (end_dt - now) <= timedelta(
                     seconds=SNIPE_WINDOW_SECONDS
                 ):
@@ -774,7 +773,7 @@ class SqliteBazaarRepo:
                     f"cannot transition offer {offer_id!r} "
                     f"from {current!r} to {new_status!r}"
                 )
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             conn.execute(
                 "UPDATE bazaar_offers SET status=?, responded_at=? WHERE id=?",
                 (new_status, now, offer_id),
@@ -795,7 +794,7 @@ class SqliteBazaarRepo:
         ``except_offer_id``. Used when the seller accepts one offer —
         the others fall out as rejected automatically.
         """
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         row = await self._db.fetchone(
             "SELECT COUNT(*) AS n FROM bazaar_offers "
             "WHERE listing_post_id=? AND status='pending' AND id<>?",
@@ -923,7 +922,7 @@ def new_bid(
         listing_post_id=listing_post_id,
         bidder_user_id=bidder_user_id,
         amount=int(amount),
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
         message=message,
     )
 
@@ -955,6 +954,6 @@ def new_offer(
         listing_post_id=listing_post_id,
         offerer_user_id=offerer_user_id,
         amount=int(amount),
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
         message=message,
     )

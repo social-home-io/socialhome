@@ -12,9 +12,9 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.services.data_export_service import (
+    EXPORTABLE_QUERIES,
     DataExport,
     DataExportService,
-    EXPORTABLE_QUERIES,
 )
 
 

@@ -9,8 +9,9 @@ covered indirectly by the integration suite (PR3 → real-peer).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
+import aiofiles
 import pytest
 
 from socialhome.domain.highlight import HighlightAudience, HighlightFrameType
@@ -21,7 +22,6 @@ from socialhome.services.highlight_signaling_handler import (
     MAX_CONCURRENT_VIEWERS_PER_HIGHLIGHT,
     HighlightSignalingHandler,
 )
-
 
 # ─── Stub peer ───────────────────────────────────────────────────────────
 
@@ -119,7 +119,7 @@ class _RecordingSession:
 
 
 def _expires(days: int = 7) -> str:
-    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    return (datetime.now(UTC) + timedelta(days=days)).isoformat()
 
 
 @pytest.fixture
@@ -168,12 +168,14 @@ async def published_highlight(repos):
     )
     # Drop the bytes for both frames into the test media dir.
     media_dir = repos["media_dir"]
-    (open(f"{media_dir}/a.jpg", "wb")).write(b"A" * 1000)
-    (open(f"{media_dir}/b.jpg", "wb")).write(b"B" * 200_000)  # big-ish
+    async with aiofiles.open(f"{media_dir}/a.jpg", "wb") as f:
+        await f.write(b"A" * 1000)
+    async with aiofiles.open(f"{media_dir}/b.jpg", "wb") as f:
+        await f.write(b"B" * 200_000)  # big-ish
     await repos["highlights"].mark_published(
         highlight.id,
         gfs_id="gfs-abc",
-        published_at=datetime.now(timezone.utc).isoformat(),
+        published_at=datetime.now(UTC).isoformat(),
     )
     return highlight.id, f1.id, f2.id
 
@@ -353,7 +355,7 @@ async def test_relay_offer_signature_verifies_against_instance_key(
 
     from socialhome.global_server.admin_service import verify_report_signature
 
-    highlight_id, *_ = published_highlight
+    _highlight_id, *_ = published_highlight
     handler, _ = _make_handler(repos)
     headers = handler._relay_auth_headers("r-42")
 
@@ -634,7 +636,7 @@ async def test_offer_missing_fields_is_no_op(repos):
 
 
 async def test_ice_with_non_dict_candidate_is_dropped(repos, published_highlight):
-    highlight_id, *_ = published_highlight
+    _highlight_id, *_ = published_highlight
     handler, _ = _make_handler(repos)
     # No exception, no crash.
     await handler.handle_signal(
@@ -743,8 +745,8 @@ async def test_handler_requires_identity_attach_to_sign():
     handler = HighlightSignalingHandler.__new__(HighlightSignalingHandler)
     # Call private _sign through the handler's protocol — but easier:
     # construct a real handler and skip attach_identity.
-    from socialhome.repositories.highlight_repo import SqliteHighlightRepo
     from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+    from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 
     handler = HighlightSignalingHandler(
         SqliteHighlightRepo.__new__(SqliteHighlightRepo),

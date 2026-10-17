@@ -45,7 +45,7 @@ INBOX_PATH = "/federation/inbox"
 
 
 async def read_manual_base(
-    instance_config: "AbstractInstanceConfigRepo | None",
+    instance_config: AbstractInstanceConfigRepo | None,
 ) -> str | None:
     """Return the admin-set base URL, or ``None`` when unset/blank.
 
@@ -59,7 +59,7 @@ async def read_manual_base(
 
 
 async def manual_federation_base(
-    instance_config: "AbstractInstanceConfigRepo | None",
+    instance_config: AbstractInstanceConfigRepo | None,
 ) -> str | None:
     """The admin-set base with Social Home's inbox path appended.
 

@@ -50,13 +50,13 @@ log = logging.getLogger(__name__)
 class UserMoveService:
     """Inbound USER_MOVED / USER_IDENTITY_RESOLVE handler + outbound push."""
 
-    __slots__ = ("_user_repo", "_federation_service")
+    __slots__ = ("_federation_service", "_user_repo")
 
-    def __init__(self, *, user_repo: "AbstractUserRepo") -> None:
+    def __init__(self, *, user_repo: AbstractUserRepo) -> None:
         self._user_repo = user_repo
-        self._federation_service: "FederationService | None" = None
+        self._federation_service: FederationService | None = None
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         """Stash the federation service and register both event handlers."""
         self._federation_service = federation_service
         registry = federation_service._event_registry
@@ -156,6 +156,10 @@ class UserMoveService:
         try:
             confirmed = await fed.is_confirmed_peer(event.from_instance)
         except Exception:  # pragma: no cover — is_confirmed_peer is fail-soft
+            log.debug(
+                "UserMoveService._on_resolve_request: fail-soft error ignored",
+                exc_info=True,
+            )
             confirmed = False
         if not confirmed:
             log.warning(

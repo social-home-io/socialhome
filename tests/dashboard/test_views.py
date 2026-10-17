@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import UTC, datetime, timedelta
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from html import unescape
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -21,13 +21,13 @@ from socialhome.dashboard.app import build_dashboard_app, build_dashboard_csp
 from socialhome.dashboard.auth import (
     ACK_MAX,
     ACK_WINDOW_S,
-    TILE_MAX,
     COOKIE_NAME,
     RENEW_AFTER_S,
     REVOKED_LOCKED,
     REVOKED_SIGNED_OUT,
     THROTTLE_MAX_FAILURES,
     THROTTLE_WINDOW_S,
+    TILE_MAX,
     DashboardAuth,
     SessionClaims,
 )
@@ -42,6 +42,10 @@ from socialhome.dashboard.views import (
     pin_tries_note,
     safe_next,
 )
+from socialhome.domain.household_dashboard import DashboardSticky
+from socialhome.domain.theme import HouseholdTheme
+from socialhome.i18n import Catalog
+from socialhome.services.dashboard_display_service import DashboardDisplayService
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
 from socialhome.services.map_tile_service import (
     MAP_ATTRIBUTION_TEXT,
@@ -49,22 +53,18 @@ from socialhome.services.map_tile_service import (
     Tile,
     TileUnavailableError,
 )
-from socialhome.domain.household_dashboard import DashboardSticky
-from socialhome.domain.theme import HouseholdTheme
-from socialhome.i18n import Catalog
-from socialhome.services.dashboard_display_service import DashboardDisplayService
 
 from .conftest import PASSWORD, default_theme
 from .factories import (
     ANNA,
+    DINNER,
     FOR_LEO,
     FOR_MIA,
     HERE,
     LEO,
-    MIA,
-    DINNER,
     MENTIONS,
     MESSAGES,
+    MIA,
     MIA_SCHOOL,
     NOW,
     PASCAL,
@@ -987,7 +987,7 @@ async def test_renewal_after_a_racing_sign_out_issues_nothing(race_client, auth,
 
 async def test_lock_page_form_works_without_js(pin_client, auth):
     html = await (await pin_client.get("/", headers=await _locked(auth))).text()
-    form = re.search(r'<form[^>]*action="/unlock"[^>]*>.*?</form>', html, re.S)
+    form = re.search(r'<form[^>]*action="/unlock"[^>]*>.*?</form>', html, re.DOTALL)
     assert form is not None
     assert 'method="post"' in form.group(0)
     field = re.search(r'<input[^>]*name="pin"[^>]*>', form.group(0)).group(0)
@@ -1764,7 +1764,7 @@ async def test_login_signed_out_notice_is_localised(client, settings_service):
 
 
 def _board_style(html: str) -> list[str]:
-    return re.findall(r"<style>(.*?)</style>", html, re.S)
+    return re.findall(r"<style>(.*?)</style>", html, re.DOTALL)
 
 
 def _assert_board_csp(resp, html: str) -> None:
@@ -2010,9 +2010,9 @@ def _visible_text(html: str) -> str:
     """What a sighted viewer can read: no <head>, style or script, no
     visually-hidden or ``hidden`` text, no tags (so no attributes —
     aria-label and data-say text is for screen readers and speech)."""
-    html = re.sub(r"<head>.*?</head>", "", html, flags=re.S)
+    html = re.sub(r"<head>.*?</head>", "", html, flags=re.DOTALL)
     html = re.sub(r"<span\b[^>]*\shidden>[^<]*</span>", "", html)
-    html = re.sub(r"<(style|script)\b.*?</\1>", "", html, flags=re.S)
+    html = re.sub(r"<(style|script)\b.*?</\1>", "", html, flags=re.DOTALL)
     html = re.sub(
         r'<span class="[^"]*\bdash-visually-hidden\b[^"]*">[^<]*</span>', "", html
     )

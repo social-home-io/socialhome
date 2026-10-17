@@ -28,10 +28,10 @@ pipeline.
 from __future__ import annotations
 
 import asyncio
-import orjson
 import logging
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
+import orjson
 from aiohttp import WSMsgType, web
 
 from .. import app_keys as K
@@ -113,7 +113,9 @@ class SttStreamView(BaseView):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.warning("stt: adapter error for %s: %s", ctx.user_id, exc)
+            log.warning(
+                "stt: adapter error for %s: %s", ctx.user_id, exc, exc_info=True
+            )
             await _send_error(ws, "Transcription failed.")
             await ws.close()
             return ws
@@ -170,4 +172,4 @@ async def _send_error(ws: web.WebSocketResponse, detail: str) -> None:
     try:
         await ws.send_str(orjson.dumps({"type": "error", "detail": detail}).decode())
     except Exception:
-        pass
+        log.debug("stt: could not send the error frame", exc_info=True)

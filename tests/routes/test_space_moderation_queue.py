@@ -10,7 +10,7 @@ content authority.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -167,7 +167,7 @@ async def test_pending_content_is_invisible_to_other_members(client, space):
     for feature in ("posts", *_FEATURES):
         await _set_access(client, feature, "moderated")
     secret = "SECRET-PENDING"
-    start = datetime.now(timezone.utc) + timedelta(days=3)
+    start = datetime.now(UTC) + timedelta(days=3)
     submissions = [
         ("post", f"/api/spaces/{SID}/posts", {"type": "text", "content": secret}),
         ("post", f"/api/spaces/{SID}/pages", {"title": secret, "content": secret}),
@@ -207,9 +207,11 @@ async def test_pending_content_is_invisible_to_other_members(client, space):
         f"/api/spaces/{SID}/tasks/lists",
         f"/api/spaces/{SID}/tasks/lists/{ids['list']}/tasks",
         f"/api/spaces/{SID}/stickies",
-        f"/api/spaces/{SID}/calendar/events?start="
-        f"{(start - timedelta(days=10)).isoformat().replace('+', '%2B')}"
-        f"&end={end.isoformat().replace('+', '%2B')}",
+        (
+            f"/api/spaces/{SID}/calendar/events?start="
+            f"{(start - timedelta(days=10)).isoformat().replace('+', '%2B')}"
+            f"&end={end.isoformat().replace('+', '%2B')}"
+        ),
         f"/api/search?q={secret}",
         f"/api/spaces/{SID}/moderation/mine",
         "/api/notifications",
@@ -542,7 +544,7 @@ async def test_highlight_share_queues_with_item_id(client, space):
 
 async def test_calendar_announce_queues_its_card(client, space):
     await _set_access(client, "posts", "moderated")
-    start = datetime.now(timezone.utc) + timedelta(days=1)
+    start = datetime.now(UTC) + timedelta(days=1)
     r = await client.post(
         f"/api/spaces/{SID}/calendar/events",
         json={
@@ -857,7 +859,7 @@ async def test_double_click_fresh_approve_publishes_once(client, space):
     )
     statuses = sorted(r.status for r in rs)
     assert statuses == [200, 409], statuses
-    loser = [r for r in rs if r.status == 409][0]
+    loser = next(r for r in rs if r.status == 409)
     assert (await loser.json())["error"]["code"] in ("IN_PROGRESS", "ALREADY_DECIDED")
     assert await _count(client, "space_poll_options") == 2
     assert await _count(client, "space_posts WHERE type='poll'") == 1

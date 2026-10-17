@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome.domain.errors import CodedError
+from socialhome.domain.post import PostType
 from socialhome.domain.space import (
     ACCESS_FEATURES,
-    owner_seat_from_roster,
-    parse_have_seq,
     CONTENT_AUTHORITY_ROLES,
+    MAX_ZONE_NAME_LENGTH,
     MIRRORABLE_REMOTE_ROLES,
     SETTINGS_AUTHORITY_ROLES,
     WRITER_ROLES,
@@ -16,6 +17,7 @@ from socialhome.domain.space import (
     AccessDecision,
     ContentAction,
     HouseholdFeatures,
+    InvalidSpaceLinkError,
     JoinMode,
     RemoteAdminOutcome,
     SpaceConfigGapError,
@@ -23,24 +25,22 @@ from socialhome.domain.space import (
     SpaceFeatures,
     SpacePermissionError,
     SpaceRole,
+    SpaceZone,
     mirrorable_remote_role,
     normalize_join_mode,
-    role_change_allowed,
     normalize_min_age,
     normalize_retention_exempt_types,
+    owner_seat_from_roster,
+    parse_have_seq,
     restricted_access_changes,
-    MAX_ZONE_NAME_LENGTH,
-    SpaceZone,
+    role_change_allowed,
+    validate_space_link_url,
     validate_zone_color,
     validate_zone_coord,
     validate_zone_icon,
     validate_zone_name,
     validate_zone_radius,
-    InvalidSpaceLinkError,
-    validate_space_link_url,
 )
-from socialhome.domain.post import PostType
-from socialhome.domain.errors import CodedError
 
 
 def test_remote_admin_outcome_values():

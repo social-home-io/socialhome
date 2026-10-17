@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import AsyncIterable
-
 import asyncio
 import json
+from collections.abc import AsyncIterable
+
 import aiohttp
 import pytest
 from aiohttp import web
@@ -24,7 +24,6 @@ from socialhome.platform.adapter import Capability
 from socialhome.platform.ha.adapter import HomeAssistantAdapter
 from socialhome.platform.ha.displays import HaDisplayDirectory
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
-
 
 # ─── Fake HaClient ───────────────────────────────────────────────────────
 
@@ -812,7 +811,7 @@ async def test_on_startup_does_not_provision_users(tmp_path, monkeypatch):
     # that branch still runs without resolving ``ha.local`` for real.
     built: list[dict] = []
 
-    def _fake_build(session, **kwargs):  # noqa: ARG001
+    def _fake_build(session, **kwargs):
         built.append(kwargs)
         return _FakeHaClient()
 
@@ -1005,7 +1004,7 @@ class _IceHaClient(_FakeHaClient):
             ]
         )
 
-    async def ws_command(self, type_: str, **fields):  # noqa: ARG002
+    async def ws_command(self, type_: str, **fields):
         return {"result": self._ice_result}
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -29,7 +29,6 @@ from socialhome.services.federation_inbound_service import (
     _mime_to_ext,
 )
 
-
 pytestmark = pytest.mark.asyncio
 
 
@@ -42,7 +41,7 @@ def _event(event_type, payload):
         event_type=event_type,
         from_instance="peer-a",
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
     )
 
@@ -329,7 +328,7 @@ async def test_dm_media_blob_chunked_writes_parts_then_concats(
 ):
     """Three-chunk payload: each ``part<idx>`` lands, final
     triggers concat, parts are cleaned up, row updates."""
-    svc, media_dir, db = inbound_with_media
+    svc, media_dir, _db = inbound_with_media
     full = b"chunk0_" + b"chunk1_" + b"chunk2_"
     parts = [b"chunk0_", b"chunk1_", b"chunk2_"]
     for i, p in enumerate(parts):
@@ -368,7 +367,7 @@ async def test_dm_media_blob_malformed_chunk_meta_defaults_to_single(
     """Garbage ``chunk_index`` / ``chunk_count`` values fall back
     to single-chunk handling so a sender on a different language
     runtime can't poison the receiver."""
-    svc, media_dir, db = inbound_with_media
+    svc, media_dir, _db = inbound_with_media
     await svc._on_dm_media_blob(
         _event(
             FederationEventType.DM_MEDIA_BLOB,
@@ -513,7 +512,7 @@ def _blob_event(payload, *, from_instance="peer-a", body=_WEBP_HEADER):
         event_type=FederationEventType.DM_MEDIA_BLOB,
         from_instance=from_instance,
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload={
             "mime_type": "image/webp",
             "bytes_b64": base64.b64encode(body).decode("ascii"),

@@ -19,7 +19,7 @@ peer's identity key and session keys, so it must grant **no** trust:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import orjson
@@ -144,7 +144,7 @@ def _envelope(
         "event_type": event_type.value,
         "from_instance": from_instance,
         "to_instance": to_instance,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "encrypted_payload": signer.encrypt_payload(
             orjson.dumps({}).decode(), _SESSION_KEY
         ),
@@ -214,7 +214,7 @@ async def test_refused_envelope_pulls_the_queued_unpair_forward(env):
     with pytest.raises(ValueError):
         await env["svc"].handle_inbound_envelope("wh-c", body)
     due = datetime.fromisoformat(await _next_attempt(env))
-    assert due <= datetime.now(timezone.utc)
+    assert due <= datetime.now(UTC)
 
 
 async def test_forged_envelope_does_not_pull_the_unpair_forward(env):

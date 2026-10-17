@@ -23,8 +23,9 @@ HaPushProvider / HaSTTProvider / HaAIProvider / HaEventSink) with
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from ... import app_keys as K
 from ...domain.household_dashboard import DEFAULT_DASHBOARD_PORT
@@ -36,8 +37,8 @@ from ..adapter import (
     InstanceConfig,
     PlatformAdapter,
 )
-from ..ha_home_location import persist_home_location_from_ha
 from ..ha.client import HaClient, build_ha_client
+from ..ha.displays import HaDisplayDirectory
 from ..ha.ice_servers_sync import HaIceServerSync
 from ..ha.providers import (
     HaAIProvider,
@@ -46,8 +47,8 @@ from ..ha.providers import (
     HaSTTProvider,
     HaUserDirectory,
 )
-from ..ha.displays import HaDisplayDirectory
 from ..ha.zones import HaZoneSource
+from ..ha_home_location import persist_home_location_from_ha
 from .bootstrap import HaBootstrap
 from .supervisor import SupervisorClient
 
@@ -77,12 +78,12 @@ class HaIngressAuthProvider:
 
     __slots__ = ("_adapter",)
 
-    def __init__(self, adapter: "HaosAdapter") -> None:
+    def __init__(self, adapter: HaosAdapter) -> None:
         self._adapter = adapter
 
     async def authenticate(
         self,
-        request: "web.Request",
+        request: web.Request,
     ) -> ExternalUser | None:
         # Gate on the canonical "came through HA Core's ingress proxy"
         # marker first. HA Core sets ``X-Hass-Source: core.ingress`` by
@@ -117,25 +118,25 @@ class HaosAdapter(PlatformAdapter):
     """
 
     __slots__ = (
-        "_supervisor_url",
-        "_supervisor_token",
-        "_data_dir",
-        "_options",
-        "_ha_client",
-        "_supervisor_client",
-        "_ha_bridge",
-        "_ice_sync",
-        "_db",
-        "_instance_config",
         "_dashboard_host_port",
+        "_data_dir",
+        "_db",
+        "_ha_bridge",
+        "_ha_client",
+        "_ice_sync",
+        "_instance_config",
+        "_options",
+        "_supervisor_client",
+        "_supervisor_token",
+        "_supervisor_url",
+        "ai",
         "auth",
-        "users",
+        "displays",
+        "events",
         "push",
         "stt",
-        "ai",
-        "events",
+        "users",
         "zones",
-        "displays",
     )
 
     def __init__(
@@ -157,7 +158,7 @@ class HaosAdapter(PlatformAdapter):
         self._ha_bridge: HaBridgeService | None = None
         self._ice_sync: HaIceServerSync | None = None
         self._db: Any | None = None
-        self._instance_config: "AbstractInstanceConfigRepo | None" = None
+        self._instance_config: AbstractInstanceConfigRepo | None = None
         self._dashboard_host_port: DashboardHostPort | None = None
 
         # HAOS-specific auth — ingress header trust, no bearer fallback.
@@ -244,7 +245,11 @@ class HaosAdapter(PlatformAdapter):
         try:
             info = await self._supervisor_client.get_self_info()
         except Exception as exc:  # defensive — never break the admin page
-            log.warning("haos_adapter: dashboard host port lookup failed: %s", exc)
+            log.warning(
+                "haos_adapter: dashboard host port lookup failed: %s",
+                exc,
+                exc_info=True,
+            )
             return None
         if info is None:
             log.warning(
@@ -336,7 +341,7 @@ class HaosAdapter(PlatformAdapter):
             currency=base.currency,
         )
 
-    async def on_startup(self, app: "web.Application") -> None:
+    async def on_startup(self, app: web.Application) -> None:
         """Wire HaClient + SupervisorClient + HaBridge; run the one-time
         :class:`HaBootstrap` so the HA owner becomes the SH admin and
         the integration discovery record is published."""
@@ -410,6 +415,7 @@ class HaosAdapter(PlatformAdapter):
             log.warning(
                 "haos_adapter: admin picture sync failed: %s",
                 exc,
+                exc_info=True,
             )
         self._ha_bridge = HaBridgeService(app[K.event_bus_key], self)
         self._ha_bridge.wire()
@@ -425,7 +431,9 @@ class HaosAdapter(PlatformAdapter):
             try:
                 cfg = await self._ha_client.get_config()
             except Exception as exc:  # pragma: no cover
-                log.warning("haos_adapter: initial tz fetch failed: %s", exc)
+                log.warning(
+                    "haos_adapter: initial tz fetch failed: %s", exc, exc_info=True
+                )
             else:
                 tz = (cfg or {}).get("time_zone")
                 if isinstance(tz, str) and tz.strip():
@@ -443,7 +451,7 @@ class HaosAdapter(PlatformAdapter):
 
     async def _sync_admin_picture_from_ha(
         self,
-        app: "web.Application",
+        app: web.Application,
     ) -> None:
         user_service = app.get(K.user_service_key)
         user_repo = app.get(K.user_repo_key)
@@ -469,7 +477,7 @@ class HaosAdapter(PlatformAdapter):
             return
         await user_service.set_picture(local.user_id, bytes_)
 
-    async def on_cleanup(self, app: "web.Application") -> None:  # noqa: ARG002
+    async def on_cleanup(self, app: web.Application) -> None:
         """Stop the daily ICE-server sync. The HaClient session is
         owned by the app's shared aiohttp ClientSession and torn
         down by its own cleanup hook."""

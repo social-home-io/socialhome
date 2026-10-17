@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -71,7 +71,7 @@ async def test_consume_already_used_returns_none(db):
 
 async def test_consume_expired_returns_none(db):
     repo = SqlitePasswordResetRepo(db)
-    past = datetime.now(timezone.utc) - timedelta(hours=2)
+    past = datetime.now(UTC) - timedelta(hours=2)
     raw, _ = await repo.create_token(
         "alice",
         "admin",
@@ -84,7 +84,7 @@ async def test_consume_expired_returns_none(db):
 
 async def test_cleanup_expired_drops_only_expired(db):
     repo = SqlitePasswordResetRepo(db)
-    past = datetime.now(timezone.utc) - timedelta(hours=2)
+    past = datetime.now(UTC) - timedelta(hours=2)
     await repo.create_token("alice", "admin", ttl_seconds=3600, now=past)
     await repo.create_token("alice", "admin")
     n = await repo.cleanup_expired()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -246,7 +246,7 @@ class SqliteGalleryRepo:
         return self._row_to_album(dict(row)) if row else None
 
     async def create_album(self, album: GalleryAlbum) -> GalleryAlbum:
-        now = album.created_at or datetime.now(timezone.utc).isoformat()
+        now = album.created_at or datetime.now(UTC).isoformat()
         # ``ON CONFLICT DO NOTHING`` is the race guard for the system
         # album path: the partial unique index on (space_id, is_system)
         # prevents two concurrent ``ensure_system_album`` callers from
@@ -284,7 +284,7 @@ class SqliteGalleryRepo:
         await self._db.enqueue(
             f"UPDATE gallery_albums SET {set_clause}, updated_at=?"
             " WHERE id=? AND deleted_at IS NULL",
-            (*safe.values(), datetime.now(timezone.utc).isoformat(), album_id),
+            (*safe.values(), datetime.now(UTC).isoformat(), album_id),
         )
 
     async def delete_album(self, album_id: str, *, deleted_by: str = "") -> None:
@@ -322,7 +322,7 @@ class SqliteGalleryRepo:
         space, of the household gallery, or of another owner is never taken
         over (``False``).
         """
-        now = album.created_at or datetime.now(timezone.utc).isoformat()
+        now = album.created_at or datetime.now(UTC).isoformat()
 
         def _run(conn) -> bool:
             row = conn.execute(
@@ -411,7 +411,7 @@ class SqliteGalleryRepo:
                     " WHERE id=? AND space_id=?",
                     (
                         *changed.values(),
-                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(UTC).isoformat(),
                         album_id,
                         space_id,
                     ),
@@ -647,7 +647,7 @@ class SqliteGalleryRepo:
             item.taken_at,
             item.sort_order,
             item.source_post_id,
-            item.created_at or datetime.now(timezone.utc).isoformat(),
+            item.created_at or datetime.now(UTC).isoformat(),
         )
 
     async def delete_item(self, item_id: str, *, deleted_by: str = "") -> None:

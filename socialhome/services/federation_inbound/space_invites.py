@@ -43,12 +43,12 @@ class SpaceInviteInboundHandlers:
         self,
         *,
         bus: EventBus,
-        space_repo: "AbstractSpaceRepo",
+        space_repo: AbstractSpaceRepo,
     ) -> None:
         self._bus = bus
         self._space_repo = space_repo
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         registry = federation_service._event_registry
         registry.register(FederationEventType.SPACE_INVITE, self._on_invite)
         registry.register(FederationEventType.SPACE_INVITE_VIA, self._on_invite_via)
@@ -81,7 +81,7 @@ class SpaceInviteInboundHandlers:
 
     # ─── Invitations ────────────────────────────────────────────────────
 
-    async def _on_invite(self, event: "FederationEvent") -> None:
+    async def _on_invite(self, event: FederationEvent) -> None:
         """A peer invited a local user to their space."""
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         invitee = str(event.payload.get("invitee_user_id") or "")
@@ -103,13 +103,13 @@ class SpaceInviteInboundHandlers:
             )
         )
 
-    async def _on_invite_via(self, event: "FederationEvent") -> None:
+    async def _on_invite_via(self, event: FederationEvent) -> None:
         """Relayed invite via an intermediary. Same persistence as _on_invite."""
         await self._on_invite(event)
 
     # ─── Join requests ──────────────────────────────────────────────────
 
-    async def _on_join_request(self, event: "FederationEvent") -> None:
+    async def _on_join_request(self, event: FederationEvent) -> None:
         """A remote user wants to join a local space."""
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         user_id = str(event.payload.get("user_id") or "")
@@ -134,11 +134,11 @@ class SpaceInviteInboundHandlers:
             )
         )
 
-    async def _on_join_request_via(self, event: "FederationEvent") -> None:
+    async def _on_join_request_via(self, event: FederationEvent) -> None:
         """Relayed join request via an intermediary."""
         await self._on_join_request(event)
 
-    async def _on_join_request_status(self, event: "FederationEvent") -> None:
+    async def _on_join_request_status(self, event: FederationEvent) -> None:
         """SPACE_JOIN_REQUEST_APPROVED / DENIED / EXPIRED / WITHDRAWN /
         REPLY_VIA. For REPLY_VIA the body carries the final status as a
         payload field so the intermediary can forward.

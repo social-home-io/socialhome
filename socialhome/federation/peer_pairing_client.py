@@ -40,13 +40,15 @@ and hands the inner body to the very same handler the inbox uses.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import aiohttp
 import orjson
 
 from ..crypto import sign_ed25519
+from ..domain.errors import WrongTypeError
 from ..domain.federation import FederationEventType
 from ..domain.space_item import pad_json_object
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
@@ -127,7 +129,7 @@ def pairing_body_from_relay(body: dict) -> tuple[str, dict]:
         raise ValueError(f"not a relayed pairing body: kind={kind!r}")
     inner = body.get("pairing")
     if not isinstance(inner, dict):
-        raise ValueError("relayed pairing body missing its signed body")
+        raise WrongTypeError("relayed pairing body missing its signed body")
     if inner.get("event_type") != kind:
         raise ValueError("relayed pairing kind does not match its event_type")
     return str(kind), inner
@@ -154,7 +156,7 @@ class PeerPairingClient:
       across outbound federation traffic.
     """
 
-    __slots__ = ("_client_factory", "_client", "_own_identity_seed", "_timeout_s")
+    __slots__ = ("_client", "_client_factory", "_own_identity_seed", "_timeout_s")
 
     def __init__(
         self,
@@ -299,6 +301,7 @@ class PeerPairingClient:
                 event_type,
                 peer_inbox_url,
                 exc,
+                exc_info=True,
             )
             return PeerPairingResult(ok=False, status_code=None, error=str(exc))
 
@@ -308,5 +311,6 @@ async def _read_brief(resp: Any) -> str:
     try:
         raw = await resp.content.read(256)
     except Exception:
+        log.debug("_read_brief: fail-soft error ignored", exc_info=True)
         return ""
     return raw.decode("utf-8", errors="replace")

@@ -36,7 +36,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..domain.conversation import ConversationType, SystemChatScope, mute_active
 from ..domain.events import (
@@ -50,21 +50,21 @@ from ..domain.events import (
     CalendarEventUpdated,
     CommentAdded,
     CommentUpdated,
-    EventReminderDue,
     DmContactRequested,
     DmMessageCreated,
     DmMessageDeleted,
     DmMessageUpdated,
+    EventReminderDue,
     MomentCreated,
     MomentReactionChanged,
     NotificationCreated,
     PostCreated,
     PostEdited,
     RemoteSpaceDissolved,
-    ReportFiled,
-    SpaceAdminSeedsRetiredAfterRestore,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
+    ReportFiled,
+    SpaceAdminSeedsRetiredAfterRestore,
     SpaceJoinApproved,
     SpaceJoinDenied,
     SpaceJoinRequested,
@@ -74,9 +74,9 @@ from ..domain.events import (
     SpaceModerationExpired,
     SpaceModerationQueued,
     SpaceModerationRejected,
-    SpaceRemoteSeatLive,
     SpacePostCreated,
     SpacePostModerated,
+    SpaceRemoteSeatLive,
     TaskAssigned,
     TaskCompleted,
     TaskDeadlineDue,
@@ -84,7 +84,6 @@ from ..domain.events import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.mention import Mention, MentionType
-from ..repositories._spec import Spec
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
@@ -93,6 +92,7 @@ from ..domain.space import (
 )
 from ..i18n import Catalog
 from ..infrastructure.event_bus import EventBus
+from ..repositories._spec import Spec
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.notification_repo import (
     AbstractNotificationRepo,
@@ -102,7 +102,6 @@ from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .protection_gate import ProtectionGateMixin
 from .push_service import PushPayload
-
 
 log = logging.getLogger(__name__)
 
@@ -169,22 +168,22 @@ class NotificationService(ProtectionGateMixin):
     """
 
     __slots__ = (
-        "_child_protection",
-        "_notifs",
-        "_users",
-        "_spaces",
-        "_bus",
-        "_i18n",
-        "_push",
         "_adapter",
+        "_bus",
         "_calendar_repo",
-        "_personal_calendar_repo",
-        "_ws_manager",
+        "_child_protection",
         "_clock",
-        "_here_last",
         "_convos",
-        "_remote_members",
+        "_here_last",
+        "_i18n",
         "_instances",
+        "_notifs",
+        "_personal_calendar_repo",
+        "_push",
+        "_remote_members",
+        "_spaces",
+        "_users",
+        "_ws_manager",
     )
 
     def __init__(
@@ -323,7 +322,7 @@ class NotificationService(ProtectionGateMixin):
                     ),
                 )
             except Exception as exc:
-                log.debug("web push fan-out failed: %s", exc)
+                log.debug("web push fan-out failed: %s", exc, exc_info=True)
         # Platform adapter (HA mobile app / standalone inbox).
         if self._adapter is not None:
             try:
@@ -336,7 +335,7 @@ class NotificationService(ProtectionGateMixin):
                         data={"type": saved.type, "url": saved.link_url},
                     )
             except Exception as exc:
-                log.debug("platform push fan-out failed: %s", exc)
+                log.debug("platform push fan-out failed: %s", exc, exc_info=True)
         return saved
 
     async def _fan_push(
@@ -364,7 +363,7 @@ class NotificationService(ProtectionGateMixin):
         try:
             await self._push.push_to_users(list(user_ids), payload)
         except Exception as exc:
-            log.debug("push fan-out failed: %s", exc)
+            log.debug("push fan-out failed: %s", exc, exc_info=True)
 
     def _t(self, key: str, *, locale: str | None, fallback: str, **fmt) -> str:
         if self._i18n is None:
@@ -746,7 +745,7 @@ class NotificationService(ProtectionGateMixin):
                 continue
             await self.mark_read_for_dm(user_id, event.conversation_id)
 
-    def _chat_name(self, prefs: "_SeatPrefs", recipient) -> str | None:
+    def _chat_name(self, prefs: _SeatPrefs, recipient) -> str | None:
         """The name a bell gives the conversation: the group's own, or for
         the household chat its localised label, for a space chat the space's
         name."""
@@ -841,13 +840,13 @@ class NotificationService(ProtectionGateMixin):
         remote = await self._users.get_remote(user_id)
         return remote.display_name if remote and remote.display_name else "Someone"
 
-    async def _seat_prefs(self, conversation_id: str) -> "_SeatPrefs":
+    async def _seat_prefs(self, conversation_id: str) -> _SeatPrefs:
         """This conversation's per-member bell settings, read once per
         message: who muted it right now, who is at level ``mentions``, and
         whether it is a group (only groups have mentions / levels)."""
         if self._convos is None:
             return _SeatPrefs()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         members = await self._convos.list_members(conversation_id)
         conv = await self._convos.get(conversation_id)
         group = conv is not None and conv.type is ConversationType.GROUP_DM
@@ -1427,6 +1426,10 @@ class NotificationService(ProtectionGateMixin):
                     cal_event.calendar_id,
                 )
             except Exception:
+                log.debug(
+                    "NotificationService.on_calendar_event_created: fail-soft error ignored",
+                    exc_info=True,
+                )
                 cal = None
             if cal is not None:
                 owner = await self._users.get(cal.owner_username)
@@ -1542,6 +1545,10 @@ class NotificationService(ProtectionGateMixin):
         try:
             rsvps = await self._calendar_repo.list_rsvps(cal_event.id)
         except Exception:
+            log.debug(
+                "NotificationService.on_calendar_event_updated: fail-soft error ignored",
+                exc_info=True,
+            )
             return
         cohort = {
             r.user_id

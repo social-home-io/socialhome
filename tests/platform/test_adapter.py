@@ -5,11 +5,9 @@ from __future__ import annotations
 import pytest
 
 from socialhome.platform import build_platform_adapter
-from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
-
 from socialhome.platform.adapter import (
-    DashboardHostPort,
     Capability,
+    DashboardHostPort,
     DisplayDirectory,
     ExternalUser,
     InstanceConfig,
@@ -17,7 +15,7 @@ from socialhome.platform.adapter import (
     ZoneSource,
     _extract_bearer,
 )
-
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 
 # ── InstanceConfig ────────────────────────────────────────────────────────────
 

@@ -18,9 +18,10 @@ import calendar
 import logging
 import uuid
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from ..domain.errors import WrongTypeError
 from ..domain.events import (
     TaskAssigned,
     TaskCompleted,
@@ -30,6 +31,15 @@ from ..domain.events import (
     TaskListDeleted,
     TaskListUpdated,
     TaskUpdated,
+)
+from ..domain.space import (
+    AccessDecision,
+    ContentAction,
+    ModerationTargetGoneError,
+    Space,
+    SpaceArchivedError,
+    SpaceModerationItem,
+    SpacePermissionError,
 )
 from ..domain.task import (
     MAX_TASK_ASSIGNEES,
@@ -53,15 +63,6 @@ from ..domain.task import (
     sanitize_line,
     task_to_wire_dict,
 )
-from ..domain.space import (
-    AccessDecision,
-    ContentAction,
-    ModerationTargetGoneError,
-    Space,
-    SpaceModerationItem,
-    SpaceArchivedError,
-    SpacePermissionError,
-)
 from ..federation.owner_bound_id import (
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
@@ -69,12 +70,12 @@ from ..federation.owner_bound_id import (
 )
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ..repositories.space_repo import AbstractSpaceRepo
-from ..repositories.task_repo import AbstractTaskRepo, AbstractSpaceTaskRepo
+from ..repositories.task_repo import AbstractSpaceTaskRepo, AbstractTaskRepo
 from ..repositories.user_repo import AbstractUserRepo
+from ..utils.timezones import DEFAULT_TZ, local_date
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .space_moderation_service import ApplyResult, item_payload_snapshot
-from ..utils.timezones import DEFAULT_TZ, local_date
 from .space_service import SpaceService
 
 if TYPE_CHECKING:
@@ -95,7 +96,7 @@ def parse_assignees(value: object) -> tuple[str, ...] | None:
     if value is None:
         return None
     if not isinstance(value, (list, tuple)):
-        raise ValueError("assignees must be a list of user ids")
+        raise WrongTypeError("assignees must be a list of user ids")
     if len(value) > MAX_TASK_ASSIGNEES:
         raise ValueError(f"at most {MAX_TASK_ASSIGNEES} assignees per task")
     out: list[str] = []
@@ -110,7 +111,7 @@ def parse_assignees(value: object) -> tuple[str, ...] | None:
 
 def _parse_line(value: object, *, what: str, limit: int) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{what} must be a string")
+        raise WrongTypeError(f"{what} must be a string")
     text = sanitize_line(value)
     if not text:
         raise ValueError(f"{what} must not be empty")
@@ -137,7 +138,7 @@ def parse_description(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("description must be a string")
+        raise WrongTypeError("description must be a string")
     text = sanitize_block(value)
     if len(text) > MAX_TASK_DESCRIPTION_LENGTH:
         raise ValueError(
@@ -150,7 +151,7 @@ def parse_position(value: object) -> int:
     """A client-supplied position: an integer (or integer string) within
     SQLite's signed 64-bit range. Anything else → :class:`ValueError`."""
     if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise ValueError(f"invalid position: {value!r}")
+        raise WrongTypeError(f"invalid position: {value!r}")
     try:
         position = int(value)
     except ValueError as exc:
@@ -176,7 +177,7 @@ def parse_priority(value: object) -> TaskPriority | None:
     if value is None or value == "":
         return None
     if not isinstance(value, str):
-        raise ValueError(f"invalid priority: {value!r}")
+        raise WrongTypeError(f"invalid priority: {value!r}")
     try:
         return TaskPriority(value)
     except ValueError as exc:
@@ -194,12 +195,12 @@ def parse_labels(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, (list, tuple)):
-        raise ValueError("labels must be a list of strings")
+        raise WrongTypeError("labels must be a list of strings")
     if len(value) > MAX_TASK_LABELS:
         raise ValueError(f"at most {MAX_TASK_LABELS} labels per task")
     for item in value:
         if not isinstance(item, str):
-            raise ValueError("labels must be a list of strings")
+            raise WrongTypeError("labels must be a list of strings")
         if len(item.strip()) > MAX_TASK_LABEL_LENGTH:
             raise ValueError(
                 f"a label is at most {MAX_TASK_LABEL_LENGTH} characters long"
@@ -245,7 +246,7 @@ def _apply_edits(
     others ``None`` means "no change", as it always has; ``labels: None``
     clears the labels.
     """
-    kwargs: dict = {"updated_at": datetime.now(timezone.utc)}
+    kwargs: dict = {"updated_at": datetime.now(UTC)}
     if not isinstance(title, Unset) and title is not None:
         kwargs["title"] = parse_title(title)
     if not isinstance(description, Unset):
@@ -268,7 +269,7 @@ def _apply_edits(
 class TaskService(BusPublisherMixin):
     """Household task list operations."""
 
-    __slots__ = ("_repo", "_bus", "_household", "_users")
+    __slots__ = ("_bus", "_household", "_repo", "_users")
 
     def __init__(
         self,
@@ -299,7 +300,7 @@ class TaskService(BusPublisherMixin):
         try:
             return (await self._household.get_household()).tz
         except Exception as exc:  # defensive — fall back to UTC
-            log.warning("tasks: household tz failed: %s", exc)
+            log.warning("tasks: household tz failed: %s", exc, exc_info=True)
             return DEFAULT_TZ
 
     # ── Lists ────────────────────────────────────────────────────────────
@@ -398,7 +399,7 @@ class TaskService(BusPublisherMixin):
             raise KeyError(f"task list {list_id!r} not found")
         await self._require_local_assignees(parsed_assignees)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         task = Task(
             id=uuid.uuid4().hex,
             list_id=list_id,
@@ -596,7 +597,7 @@ class TaskService(BusPublisherMixin):
     ) -> Task:
         task = await self.get_task(task_id)
         await self._require_editor(task, actor_user_id)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         updated = replace(
             task,
             archived_at=now if archived else None,
@@ -658,7 +659,7 @@ class TaskService(BusPublisherMixin):
             new_task = replace(
                 task,
                 position=idx,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
             saved = await self._repo.save(new_task)
             updated.append(saved)
@@ -673,7 +674,7 @@ class TaskService(BusPublisherMixin):
         *,
         author_user_id: str,
         content: str,
-    ) -> "TaskComment":
+    ) -> TaskComment:
         """Attach a comment to a task. Author must exist; content non-empty."""
         await self._require_tasks_enabled()
         content = content.strip()
@@ -685,11 +686,11 @@ class TaskService(BusPublisherMixin):
             task_id=task_id,
             author=author_user_id,
             content=content,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         return await self._repo.add_comment(comment)
 
-    async def list_comments(self, task_id: str) -> list["TaskComment"]:
+    async def list_comments(self, task_id: str) -> list[TaskComment]:
         await self.get_task(task_id)
         return await self._repo.list_comments(task_id)
 
@@ -711,7 +712,7 @@ class TaskService(BusPublisherMixin):
         filename: str,
         mime: str,
         size_bytes: int,
-    ) -> "TaskAttachment":
+    ) -> TaskAttachment:
         await self._require_tasks_enabled()
         await self.get_task(task_id)
         if size_bytes <= 0:
@@ -724,14 +725,14 @@ class TaskService(BusPublisherMixin):
             filename=filename,
             mime=mime,
             size_bytes=size_bytes,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         return await self._repo.add_attachment(attachment)
 
     async def list_attachments(
         self,
         task_id: str,
-    ) -> list["TaskAttachment"]:
+    ) -> list[TaskAttachment]:
         await self.get_task(task_id)
         return await self._repo.list_attachments(task_id)
 
@@ -756,7 +757,7 @@ class TaskService(BusPublisherMixin):
         due today stays today's until the household's midnight.
         """
         if today is None:
-            instant = now or datetime.now(timezone.utc)
+            instant = now or datetime.now(UTC)
             today = local_date(instant, await self._household_tz())
         overdue = await self._repo.list_recurring_overdue(today)
         spawned: list[Task] = []
@@ -781,7 +782,7 @@ class TaskService(BusPublisherMixin):
         )
         if next_due is None:
             return None
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         spawned_rec = rec.mark_spawned(now)
         child = Task(
             id=uuid.uuid4().hex,
@@ -872,7 +873,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
     the actor's.
     """
 
-    __slots__ = ("_repo", "_bus", "_spaces", "_remote_members", "_moderation")
+    __slots__ = ("_bus", "_moderation", "_remote_members", "_repo", "_spaces")
 
     def __init__(
         self,
@@ -888,7 +889,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         # Optional: without it only local members are valid assignees
         # (fail-closed for cross-household assignment).
         self._remote_members = remote_member_repo
-        self._moderation: "ModerationSubmitter | None" = None
+        self._moderation: ModerationSubmitter | None = None
 
     # ── Writer gate ──────────────────────────────────────────────────────
 
@@ -1171,7 +1172,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
                     "labels": list(task_labels),
                 },
             )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         task = Task(
             # Owner-bound (v_36): only the creator's household can
             # announce this id.
@@ -1369,9 +1370,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
             task = held[1]
             if task.list_id != list_id or task.position == idx:
                 continue
-            new_task = replace(
-                task, position=idx, updated_at=datetime.now(timezone.utc)
-            )
+            new_task = replace(task, position=idx, updated_at=datetime.now(UTC))
             if not await self._repo.save(new_task, space_id=space_id):
                 continue
             updated.append(new_task)
@@ -1476,7 +1475,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
                 },
                 snapshot=_task_dict(task),
             )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         updated = replace(
             task,
             archived_at=now if archived else None,

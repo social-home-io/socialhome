@@ -1740,11 +1740,8 @@ def _as_dict(row: Any) -> dict:
         return {}
     if isinstance(row, dict):
         return row
-    # sqlite3.Row supports keys() + indexing.
-    try:
-        return {k: row[k] for k in row.keys()}
-    except Exception:
-        return dict(row)
+    # sqlite3.Row supports keys() + indexing, which is what dict() reads.
+    return dict(row)
 
 
 def _row_to_highlight_pub(row: dict) -> GfsHighlightPublication | None:

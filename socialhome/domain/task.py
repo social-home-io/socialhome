@@ -21,7 +21,7 @@ import copy
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any, Final
 
@@ -160,10 +160,10 @@ class RecurrenceRule:
     rrule: str
     last_spawned_at: datetime | None = None
 
-    def mark_spawned(self, now: datetime | None = None) -> "RecurrenceRule":
+    def mark_spawned(self, now: datetime | None = None) -> RecurrenceRule:
         return copy.replace(
             self,
-            last_spawned_at=now or datetime.now(timezone.utc),
+            last_spawned_at=now or datetime.now(UTC),
         )
 
 
@@ -225,34 +225,34 @@ class Task:
     def is_recurring(self) -> bool:
         return self.recurrence is not None
 
-    def complete(self, now: datetime | None = None) -> "Task":
+    def complete(self, now: datetime | None = None) -> Task:
         return copy.replace(
             self,
             status=TaskStatus.DONE,
-            updated_at=now or datetime.now(timezone.utc),
+            updated_at=now or datetime.now(UTC),
         )
 
-    def reopen(self, now: datetime | None = None) -> "Task":
+    def reopen(self, now: datetime | None = None) -> Task:
         return copy.replace(
             self,
             status=TaskStatus.TODO,
-            updated_at=now or datetime.now(timezone.utc),
+            updated_at=now or datetime.now(UTC),
         )
 
-    def start(self, now: datetime | None = None) -> "Task":
+    def start(self, now: datetime | None = None) -> Task:
         return copy.replace(
             self,
             status=TaskStatus.IN_PROGRESS,
-            updated_at=now or datetime.now(timezone.utc),
+            updated_at=now or datetime.now(UTC),
         )
 
     def with_assignees(
         self, assignees: tuple[str, ...], *, now: datetime | None = None
-    ) -> "Task":
+    ) -> Task:
         return copy.replace(
             self,
             assignees=assignees,
-            updated_at=now or datetime.now(timezone.utc),
+            updated_at=now or datetime.now(UTC),
         )
 
 
@@ -327,11 +327,11 @@ def _wire_datetime(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -402,7 +402,7 @@ def task_from_wire_dict(d: Mapping[str, Any], *, existing: Task | None) -> Task 
     title = _capped_line(d.get("title"), MAX_TASK_TITLE_LENGTH)
     if not task_id or not list_id or not title:
         return None
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     legacy = "priority" not in d
 
     def present(key: str) -> bool:

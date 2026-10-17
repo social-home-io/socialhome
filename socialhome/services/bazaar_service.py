@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ..domain.child_protection import ProtectedCapability
@@ -37,11 +37,12 @@ from ..domain.post import (
     BazaarBid,
     BazaarListing,
     BazaarMode,
+    BazaarOffer,
     BazaarStatus,
+    Post,
 )
-from ..infrastructure.event_bus import EventBus
-from ..domain.post import BazaarOffer, Post
 from ..domain.space import ContentAction, SpacePermissionError
+from ..infrastructure.event_bus import EventBus
 from ..repositories.bazaar_repo import (
     AbstractBazaarRepo,
     BidStateError,
@@ -124,7 +125,7 @@ class BazaarService(ProtectionGateMixin):
     the space's membership / federation rules.
     """
 
-    __slots__ = ("_repo", "_bus", "_spaces", "_child_protection")
+    __slots__ = ("_bus", "_child_protection", "_repo", "_spaces")
 
     def __init__(self, repo: AbstractBazaarRepo, bus: EventBus) -> None:
         self._repo = repo
@@ -132,7 +133,7 @@ class BazaarService(ProtectionGateMixin):
         self._spaces: SpaceService | None = None
         self._child_protection = None
 
-    def attach_spaces(self, space_service: "SpaceService") -> None:
+    def attach_spaces(self, space_service: SpaceService) -> None:
         """Wire :class:`SpaceService` so ``create_listing`` can mint the
         matching ``PostType.BAZAAR`` post inside the listing's space."""
         self._spaces = space_service
@@ -295,7 +296,7 @@ class BazaarService(ProtectionGateMixin):
         duration_days = max(
             1, min(int(fields.get("duration_days") or 7), BAZAAR_MAX_DURATION_DAYS)
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         listing = BazaarListing(
             post_id=post.id,
             space_id=space_id,
@@ -838,9 +839,10 @@ def _validate_price_fields(
     start_price: int | None,
     step_price: int | None,
 ) -> None:
-    if mode in (BazaarMode.FIXED, BazaarMode.NEGOTIABLE):
-        if price is None or price <= 0:
-            raise ValueError(f"{mode.value} listing requires a positive price")
+    if mode in (BazaarMode.FIXED, BazaarMode.NEGOTIABLE) and (
+        price is None or price <= 0
+    ):
+        raise ValueError(f"{mode.value} listing requires a positive price")
     if mode in (BazaarMode.AUCTION, BazaarMode.BID_FROM):
         if start_price is None or start_price <= 0:
             raise ValueError(
@@ -856,7 +858,7 @@ def _validate_price_fields(
 class BazaarExpiryScheduler:
     """Background loop that closes due auctions on a fixed cadence."""
 
-    __slots__ = ("_svc", "_interval", "_task", "_stop")
+    __slots__ = ("_interval", "_stop", "_svc", "_task")
 
     def __init__(
         self,
@@ -880,7 +882,7 @@ class BazaarExpiryScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -891,13 +893,13 @@ class BazaarExpiryScheduler:
                 if n:
                     log.info("bazaar: closed %d expired listings", n)
             except Exception as exc:  # pragma: no cover
-                log.warning("bazaar expiry loop failed: %s", exc)
+                log.warning("bazaar expiry loop failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
 

@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 class ProfileSyncService:
     """Re-pushes display_name / bio / avatar to every active GFS."""
 
-    __slots__ = ("_bus", "_regs", "_public")
+    __slots__ = ("_bus", "_public", "_regs")
 
     def __init__(
         self,

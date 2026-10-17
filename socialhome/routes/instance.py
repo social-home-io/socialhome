@@ -11,6 +11,8 @@ Public path — no auth required, intentionally. The SPA needs this
 
 from __future__ import annotations
 
+import logging
+
 from aiohttp import web
 
 from ..app_keys import (
@@ -22,6 +24,8 @@ from ..app_keys import (
 from .base import BaseView
 from .spa import _static_dir_key as _spa_static_dir_key
 from .spa import get_spa_bundle_hash
+
+log = logging.getLogger(__name__)
 
 
 class InstanceConfigView(BaseView):
@@ -58,6 +62,9 @@ class InstanceConfigView(BaseView):
                     instance_id = identity.get("instance_id")
                     instance_display_name = identity.get("display_name")
             except Exception:
+                log.debug(
+                    "InstanceConfigView.get: fail-soft error ignored", exc_info=True
+                )
                 instance_id = None
         return web.json_response(
             {

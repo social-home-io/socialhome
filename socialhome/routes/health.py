@@ -42,7 +42,7 @@ class HealthView(BaseView):
                     "ok" if row and row["one"] == 1 else "degraded"
                 )
             except Exception as exc:  # pragma: no cover
-                log.warning("healthz: db probe failed: %s", exc)
+                log.warning("healthz: db probe failed: %s", exc, exc_info=True)
                 body["subsystems"]["db"] = "fail"
                 overall_ok = False
         else:
@@ -70,7 +70,7 @@ class HealthView(BaseView):
             except AttributeError:
                 body["subsystems"]["outbox_depth"] = "ok"
             except Exception as exc:  # pragma: no cover
-                log.debug("healthz: outbox probe failed: %s", exc)
+                log.debug("healthz: outbox probe failed: %s", exc, exc_info=True)
                 body["subsystems"]["outbox_depth"] = "unknown"
 
         if not overall_ok:

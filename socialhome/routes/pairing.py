@@ -39,8 +39,8 @@ from ..app_keys import (
     pairing_relay_queue_key,
     peer_gfs_relay_service_key,
     peer_home_sharing_service_key,
-    peer_user_visibility_repo_key,
     peer_unpair_service_key,
+    peer_user_visibility_repo_key,
     platform_adapter_key,
     profile_federation_outbound_key,
     user_repo_key,
@@ -389,7 +389,7 @@ class PairingConnectionCollectionView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         instances = await self.svc(federation_repo_key).list_instances()
         transport = self.request.app.get(federation_transport_key)
         outbox = self.svc(outbox_repo_key)

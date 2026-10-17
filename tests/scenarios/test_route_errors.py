@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import pytest
 
-
 from socialhome.app import create_app
 from socialhome.app_keys import db_key as _db_key
 from socialhome.auth import sha256_token_hash

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import builtins
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -18,7 +18,6 @@ from ..domain.sticky import DEFAULT_STICKY_COLOR, Sticky, normalize_sticky_color
 from ..domain.tombstone import SpaceRowTombstone
 from ..federation.owner_bound_id import SPACE_STICKY_KIND, mint_owner_bound_id
 from .base import changed_since_sql, row_to_dict, rows_to_dicts, sync_page_cursor
-
 
 # Domain dataclass + field rules live in ``socialhome/domain/sticky.py``;
 # ``Sticky`` / ``DEFAULT_COLOR`` stay importable from here for existing
@@ -139,7 +138,7 @@ class SqliteStickyRepo:
         content = content.strip()
         if not content:
             raise ValueError("sticky content must not be empty")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         sticky = Sticky(
             # A space sticky federates, so its id is owner-bound (v_36):
             # only the author's household can announce it.

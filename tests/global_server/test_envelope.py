@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import b64url_encode, sign_ed25519
+from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server.app_keys import (
     gfs_cluster_key,
     gfs_db_key,
@@ -30,7 +31,6 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
-from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server.envelope_relay import (
     ENVELOPE_MAX_BODY_BYTES,
     ENVELOPE_MAX_PER_MINUTE,
@@ -74,7 +74,7 @@ def _hello(instance_id: str, seed: bytes) -> dict:
         "type": "hello",
         "instance_id": instance_id,
         "ts": ts,
-        "sig": b64url_encode(sign_ed25519(seed, f"{instance_id}|{ts}".encode("utf-8"))),
+        "sig": b64url_encode(sign_ed25519(seed, f"{instance_id}|{ts}".encode())),
     }
 
 

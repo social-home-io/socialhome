@@ -1,10 +1,11 @@
 """Tests for socialhome.services.presence_service."""
 
 import pytest
+
 from socialhome.crypto import (
-    generate_identity_keypair,
     derive_instance_id,
     derive_user_id,
+    generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import PresenceUpdated

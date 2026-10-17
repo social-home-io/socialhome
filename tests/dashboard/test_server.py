@@ -33,9 +33,11 @@ def _build() -> web.Application:
 
 
 async def _get(port: int) -> str:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"http://{HOST}:{port}/") as resp:
-            return await resp.text()
+    async with (
+        aiohttp.ClientSession() as session,
+        session.get(f"http://{HOST}:{port}/") as resp,
+    ):
+        return await resp.text()
 
 
 @pytest.fixture

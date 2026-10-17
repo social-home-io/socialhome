@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -53,14 +53,14 @@ async def env(tmp_dir):
 
 async def _group(env, conv_id, *usernames, type=ConversationType.GROUP_DM):
     await env.convos.create(
-        Conversation(id=conv_id, type=type, created_at=datetime.now(timezone.utc))
+        Conversation(id=conv_id, type=type, created_at=datetime.now(UTC))
     )
     for u in usernames:
         await env.convos.add_member(
             ConversationMember(
                 conversation_id=conv_id,
                 username=u,
-                joined_at=datetime.now(timezone.utc).isoformat(),
+                joined_at=datetime.now(UTC).isoformat(),
             )
         )
 
@@ -86,7 +86,7 @@ async def test_resolves_local_and_remote_seats(env):
             conversation_id="g1",
             instance_id="peer-b",
             remote_username="carol",
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         )
     )
     await env.convos.add_remote_member(
@@ -94,7 +94,7 @@ async def test_resolves_local_and_remote_seats(env):
             conversation_id="g1",
             instance_id="peer-z",
             remote_username="erin",
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
             user_id="seat-erin-1",
             display_name="Erin",
         )
@@ -175,7 +175,7 @@ async def test_remote_seat_without_any_name_is_skipped(env):
             conversation_id="d1",
             instance_id="peer-b",
             remote_username="ghost",
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
         )
     )
     assert await env.resolver.resolve("d1", "@ghost") == ()
@@ -196,7 +196,7 @@ async def _system_chat(env, conv_id, *usernames):
         Conversation(
             id=conv_id,
             type=ConversationType.GROUP_DM,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             system_scope=SystemChatScope.HOUSEHOLD,
         )
     )
@@ -205,7 +205,7 @@ async def _system_chat(env, conv_id, *usernames):
             ConversationMember(
                 conversation_id=conv_id,
                 username=u,
-                joined_at=datetime.now(timezone.utc).isoformat(),
+                joined_at=datetime.now(UTC).isoformat(),
             )
         )
 
@@ -242,7 +242,7 @@ async def test_system_chat_resolves_the_policys_remote_roster(env):
             conversation_id="sys",
             instance_id="peer-b",
             remote_username="erin",
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
             user_id="seat-erin-1",
         )
     )
@@ -289,7 +289,7 @@ async def test_a_seat_without_a_login_is_looked_up_by_user_id(env):
             conversation_id="g9",
             instance_id="peer-b",
             remote_username="",
-            joined_at=datetime.now(timezone.utc).isoformat(),
+            joined_at=datetime.now(UTC).isoformat(),
             user_id="remote-gus-1",
         )
     )

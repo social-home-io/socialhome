@@ -665,9 +665,11 @@ async def test_failed_proof_warning_names_what_the_server_reported(
 ):
     server, _ = await _impostor(aiohttp_server, gfs, forward_proof=True)
     svc = GfsConnectionService(repo, http_client=session)
-    with caplog.at_level(logging.WARNING, logger=svc_mod.__name__):
-        with pytest.raises(GfsSignupError):
-            await svc.pair({"gfs_url": _url(server), "token": "t"}, **OWN)
+    with (
+        caplog.at_level(logging.WARNING, logger=svc_mod.__name__),
+        pytest.raises(GfsSignupError),
+    ):
+        await svc.pair({"gfs_url": _url(server), "token": "t"}, **OWN)
     text = " ".join(r.getMessage() for r in caplog.records)
     assert "gfs-real" in text  # the reported instance id
     assert _url(gfs) in text  # the reported base_url

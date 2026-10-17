@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import AsyncIterable
+from collections.abc import AsyncIterable
 
 import pytest
 

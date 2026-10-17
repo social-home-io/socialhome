@@ -26,7 +26,7 @@ def test_single_emoji_accepted(value):
         " 🔢",  # non-ASCII whitespace
         "",
         "日本",  # a word in another script
-        "‮🔢",  # bidi override
+        "\u202e🔢",  # bidi override
         "a⃣",  # a keycap on a letter is not a keycap
         "‍",  # a bare ZWJ
         "́️",  # marks only

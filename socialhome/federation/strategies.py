@@ -30,7 +30,6 @@ from typing import Protocol, runtime_checkable
 
 from ..domain.federation import RemoteInstance
 
-
 # ─── Transport ───────────────────────────────────────────────────────────
 
 

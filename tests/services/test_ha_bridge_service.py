@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -49,12 +49,12 @@ def _post():
         author="u1",
         type=PostType.TEXT,
         content="hi",
-        created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 15, tzinfo=UTC),
     )
 
 
 def _task():
-    now = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 15, tzinfo=UTC)
     return Task(
         id="t1",
         list_id="l1",

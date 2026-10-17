@@ -70,7 +70,7 @@ class SpaceChatAudience:
     household never gets a chat message, live or streamed.
     """
 
-    __slots__ = ("_seats", "_own_instance_id")
+    __slots__ = ("_own_instance_id", "_seats")
 
     def __init__(
         self,
@@ -94,13 +94,13 @@ class SpaceChatAudience:
 class SpaceChatOutbound:
     """Bus events of a space chat → ``SPACE_CHAT_*`` to its writer households."""
 
-    __slots__ = ("_bus", "_federation", "_convos", "_audience")
+    __slots__ = ("_audience", "_bus", "_convos", "_federation")
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        federation_service: "FederationService",
+        federation_service: FederationService,
         conversation_repo: AbstractConversationRepo,
         audience: SpaceChatAudience,
     ) -> None:

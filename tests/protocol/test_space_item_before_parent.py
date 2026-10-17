@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -111,7 +111,7 @@ class _Clock:
 
 
 def _ts(seconds: float = -1) -> str:
-    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
 
 
 # ── The GFS member-publish door ───────────────────────────────────────────
@@ -226,7 +226,7 @@ async def _send_post(env, post_id: str, author: _Author = BOB) -> None:
             id=post_id,
             author=author.user_id,
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="the post",
         ),
         space_id=SPACE,
@@ -385,7 +385,7 @@ async def _deliver(app, event_type, payload, *, sender, timestamp=None) -> None:
             event_type=event_type,
             from_instance=sender,
             to_instance="us",
-            timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
+            timestamp=timestamp or datetime.now(UTC).isoformat(),
             payload=dict(payload),
             space_id=SP,
         ),
@@ -553,7 +553,7 @@ async def test_direct_a_reply_chain_deeper_than_300_all_lands(direct):
 
 
 def _ago(seconds: float) -> str:
-    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    return (datetime.now(UTC) - timedelta(seconds=seconds)).isoformat()
 
 
 async def _post_content(db, pid: str) -> str:

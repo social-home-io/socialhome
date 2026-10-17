@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import secrets
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives import hashes as _hashes
@@ -39,11 +39,6 @@ from ..domain.events import (
     PairingAcceptReceived,
     PairingConfirmed,
 )
-from ..utils.datetime import parse_iso8601_strict
-from .crypto_suite import DEFAULT_SUITE, negotiate
-from .peer_pairing_client import PeerPairingResult, _canonical_body_bytes
-from .transport import https_failure_is_relayable
-from ..peer_url import validate_peer_url
 from ..domain.federation import (
     PAIRING_REACH_GFS,
     PAIRING_REACH_URL,
@@ -56,15 +51,20 @@ from ..domain.federation import (
     RemoteInstance,
 )
 from ..domain.federation_capabilities import OURS
+from ..infrastructure.event_bus import EventBus
+from ..infrastructure.key_manager import KeyManager
+from ..peer_url import validate_peer_url
+from ..repositories.federation_repo import AbstractFederationRepo
+from ..utils.datetime import parse_iso8601_strict
+from .crypto_suite import DEFAULT_SUITE, negotiate
 from .pairing_gfs_reach import (
     PairingGfsReach,
     gfs_block,
     parse_reach,
     verified_peer_keywrap,
 )
-from ..infrastructure.event_bus import EventBus
-from ..infrastructure.key_manager import KeyManager
-from ..repositories.federation_repo import AbstractFederationRepo
+from .peer_pairing_client import PeerPairingResult, _canonical_body_bytes
+from .transport import https_failure_is_relayable
 
 if TYPE_CHECKING:
     from .peer_pairing_client import PeerPairingClient
@@ -100,14 +100,14 @@ class PairingCoordinator:
     """§11 QR-code pairing handshake."""
 
     __slots__ = (
-        "_repo",
+        "_bus",
+        "_gfs_reach",
         "_key_manager",
         "_own_identity_pk",
         "_own_pq_pk",
         "_own_sig_suite",
-        "_bus",
         "_peer_pairing_client",
-        "_gfs_reach",
+        "_repo",
     )
 
     def __init__(
@@ -128,7 +128,7 @@ class PairingCoordinator:
         #: Lazily attached by :class:`FederationService` after construction
         #: (circular-dep-free). ``None`` in unit tests that exercise
         #: ``initiate()`` / ``accept()`` without the outbound wire.
-        self._peer_pairing_client: "PeerPairingClient | None" = None
+        self._peer_pairing_client: PeerPairingClient | None = None
         #: GFS reach (``url_gfs`` / ``gfs`` codes). ``None`` until the app
         #: wires the connection-server pieces; a code asking for a GFS
         #: reach is then refused with ``GFS_NOT_CONNECTED``.
@@ -140,7 +140,7 @@ class PairingCoordinator:
 
     def attach_peer_pairing_client(
         self,
-        client: "PeerPairingClient",
+        client: PeerPairingClient,
     ) -> None:
         """Wire the outbound client. Called from the service after both
         objects are constructed.
@@ -190,7 +190,7 @@ class PairingCoordinator:
             if inbox_base_url and reach != PAIRING_REACH_GFS
             else ""
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = (now + timedelta(seconds=PAIRING_TTL_SECONDS)).isoformat()
 
         session = PairingSession(
@@ -404,7 +404,7 @@ class PairingCoordinator:
         # 6-digit SAS verification code.
         verification_code = str(secrets.randbelow(10**SAS_DIGITS)).zfill(SAS_DIGITS)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = (now + timedelta(seconds=PAIRING_TTL_SECONDS)).isoformat()
 
         # Compose our own externally-reachable inbox URL so A learns
@@ -573,15 +573,18 @@ class PairingCoordinator:
             await self._repo.upsert_gfs_route(
                 peer_instance_id,
                 gfs_connection_id,
-                now=datetime.now(timezone.utc).isoformat(),
+                now=datetime.now(UTC).isoformat(),
             )
-        if isinstance(proto_version, int) and not isinstance(proto_version, bool):
-            if proto_version >= 1:
-                # A newer peer states a version we can't know the meaning
-                # of; what we may rely on is everything up to our own.
-                await self._repo.set_proto_version(
-                    peer_instance_id, min(proto_version, OURS)
-                )
+        if (
+            isinstance(proto_version, int)
+            and not isinstance(proto_version, bool)
+            and proto_version >= 1
+        ):
+            # A newer peer states a version we can't know the meaning
+            # of; what we may rely on is everything up to our own.
+            await self._repo.set_proto_version(
+                peer_instance_id, min(proto_version, OURS)
+            )
 
     async def _clear_stale_relay(self, peer_instance_id: str) -> None:
         """A classic ``url`` pairing means no GFS: switch off a relay opt-in
@@ -621,7 +624,7 @@ class PairingCoordinator:
         else (or when that fails) sealed through the bootstrap GFS."""
         assert self._peer_pairing_client is not None
         client = self._peer_pairing_client
-        result: "PeerPairingResult | None" = None
+        result: PeerPairingResult | None = None
         if peer_inbox_url:
             if event_type is FederationEventType.PAIRING_PEER_ACCEPT:
                 result = await client.send_peer_accept(
@@ -778,7 +781,7 @@ class PairingCoordinator:
             )
         if session.expires_at:
             expires = parse_iso8601_strict(session.expires_at)
-            if datetime.now(timezone.utc) > expires:
+            if datetime.now(UTC) > expires:
                 raise ValueError("Pairing session has expired")
 
         # Verify the Ed25519 signature — TOFU, using the identity_pk
@@ -843,7 +846,7 @@ class PairingCoordinator:
         peer_pq_alg = body.get("pq_algorithm")
         negotiated = negotiate(self._own_sig_suite, peer_suite)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         remote_inst = RemoteInstance(
             id=peer_instance_id,
             display_name=str(body.get("display_name") or peer_instance_id[:8]),
@@ -974,7 +977,7 @@ class PairingCoordinator:
             )
         if session.expires_at:
             expires = parse_iso8601_strict(session.expires_at)
-            if datetime.now(timezone.utc) > expires:
+            if datetime.now(UTC) > expires:
                 raise ValueError("Pairing session has expired")
         # The token names a session with ONE household: the confirm must be
         # signed by that household, not by another one we also hold a
@@ -1056,7 +1059,7 @@ class PairingCoordinator:
 
         if session.expires_at:
             expires = parse_iso8601_strict(session.expires_at)
-            if datetime.now(timezone.utc) > expires:
+            if datetime.now(UTC) > expires:
                 raise ValueError("Pairing session has expired")
 
         if session.peer_identity_pk is None:

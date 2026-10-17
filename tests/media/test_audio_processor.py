@@ -10,7 +10,6 @@ import pytest
 from socialhome.domain.media_constraints import AUDIO_MAX_DURATION_SECONDS
 from socialhome.media.audio_processor import AudioProcessor
 
-
 # ── Fixtures ───────────────────────────────────────────────────────────
 
 

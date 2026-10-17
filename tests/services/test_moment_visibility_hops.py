@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -16,7 +16,7 @@ def _moment(*, moment_id: str, hop_count: int, author_id: str = "u-author") -> M
     # 24 h after whichever date was committed, so build the timestamp
     # relative to ``now`` instead. ``expires_at`` stays comfortably in
     # the future on the same relative footing.
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(UTC).replace(tzinfo=None)
     return Moment(
         id=moment_id,
         author_user_id=author_id,

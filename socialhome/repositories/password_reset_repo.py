@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from ..db import AsyncDatabase
@@ -78,7 +78,7 @@ class SqlitePasswordResetRepo:
         """
         raw = secrets.token_urlsafe(_TOKEN_BYTES)
         token_hash = _hash_token(raw)
-        when = now or datetime.now(timezone.utc)
+        when = now or datetime.now(UTC)
         expires_at = (when + timedelta(seconds=ttl_seconds)).isoformat()
         await self._db.enqueue(
             """
@@ -103,7 +103,7 @@ class SqlitePasswordResetRepo:
         password update; this repo only handles token state.
         """
         token_hash = _hash_token(raw_token)
-        when = (now or datetime.now(timezone.utc)).isoformat()
+        when = (now or datetime.now(UTC)).isoformat()
 
         def _run(conn):
             cur = conn.execute(
@@ -135,7 +135,7 @@ class SqlitePasswordResetRepo:
         Idempotent. Used tokens stay around for a short audit trail
         until their TTL also passes — keeps the table tiny.
         """
-        when = (now or datetime.now(timezone.utc)).isoformat()
+        when = (now or datetime.now(UTC)).isoformat()
 
         def _run(conn):
             cur = conn.execute(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from socialhome.domain.space_bot import (
     BOT_TOKEN_PREFIX,
@@ -34,7 +34,7 @@ def test_space_bot_is_frozen_dataclass():
         icon="🔔",
         created_by="u1",
         token_hash="deadbeef",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     # frozen=True → AttributeError on any field mutation.
     try:

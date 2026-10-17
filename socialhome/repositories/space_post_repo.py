@@ -17,15 +17,14 @@ Scope:
 from __future__ import annotations
 
 import json
-
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.post import (
+    MAX_DISTINCT_REACTIONS_PER_POST,
     Comment,
     CommentType,
-    MAX_DISTINCT_REACTIONS_PER_POST,
     Post,
     PostTombstone,
     PostType,
@@ -41,16 +40,16 @@ from .base import (
     sync_page_cursor,
 )
 from .post_repo import (  # reuse the household post helpers verbatim
-    _decode_reactions,
-    _encode_reactions,
-    _encode_file_meta,
     _decode_file_meta,
+    _decode_image_urls,
     _decode_link_preview,
+    _decode_location,
+    _decode_reactions,
+    _encode_file_meta,
+    _encode_image_urls,
     _encode_link_preview,
     _encode_location,
-    _decode_location,
-    _encode_image_urls,
-    _decode_image_urls,
+    _encode_reactions,
     _iso_or_none,
     _to_frozenset,
 )
@@ -599,7 +598,7 @@ class SqliteSpacePostRepo:
         stamp: str | None,
         added: bool,
     ) -> Post:
-        at = stamp or stamp_to_db(datetime.now(timezone.utc))
+        at = stamp or stamp_to_db(datetime.now(UTC))
 
         def _run(conn):
             where = "id=? AND space_id=?" + (" AND deleted=0" if added else "")
@@ -609,7 +608,7 @@ class SqliteSpacePostRepo:
             ).fetchone()
             if row is None:
                 raise KeyError(f"space post {post_id!r} not found")
-            row_dict = {k: row[k] for k in row.keys()}
+            row_dict = dict(row)
             stamps = _decode_stamps(row_dict.get("reaction_stamps_json"))
             key = f"{user_id}\x00{emoji}"
             held = stamps.get(key)
@@ -644,7 +643,7 @@ class SqliteSpacePostRepo:
                 "SELECT * FROM space_posts WHERE id=? AND space_id=?",
                 (post_id, space_id),
             ).fetchone()
-            return {k: row[k] for k in row.keys()}
+            return dict(row)
 
         row = await self._db.transact(_run)
         return _row_to_space_post(row)
@@ -886,8 +885,7 @@ def _row_to_space_post(row: dict) -> Post:
         id=row["id"],
         author=row["author"],
         type=PostType(row["type"]),
-        created_at=parse_iso8601_optional(row.get("created_at"))
-        or datetime.now(timezone.utc),
+        created_at=parse_iso8601_optional(row.get("created_at")) or datetime.now(UTC),
         content=row.get("content"),
         media_url=row.get("media_url"),
         image_urls=_decode_image_urls(row.get("image_urls_json")),
@@ -916,8 +914,7 @@ def _row_to_space_comment(row: dict | None) -> Comment | None:
         post_id=row["post_id"],
         author=row["author"],
         type=CommentType(row.get("type", "text")),
-        created_at=parse_iso8601_optional(row.get("created_at"))
-        or datetime.now(timezone.utc),
+        created_at=parse_iso8601_optional(row.get("created_at")) or datetime.now(UTC),
         parent_id=row.get("parent_id"),
         content=row.get("content"),
         media_url=row.get("media_url"),
@@ -962,7 +959,7 @@ def _encode_stamps(stamps: dict[str, list]) -> str:
     :data:`REACTION_TOMBSTONE_HORIZON_S` — then per user, then per post;
     each cap evicts tombstones before live entries, oldest first."""
     cutoff = stamp_to_db(
-        datetime.now(timezone.utc) - timedelta(seconds=REACTION_TOMBSTONE_HORIZON_S)
+        datetime.now(UTC) - timedelta(seconds=REACTION_TOMBSTONE_HORIZON_S)
     )
     for k in [k for k, (at, added) in stamps.items() if not added and at < cutoff]:
         del stamps[k]

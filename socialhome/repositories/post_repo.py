@@ -24,28 +24,27 @@ reused by that module.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..utils.datetime import parse_iso8601_optional
 from ..domain.link_preview import (
     LinkPreview,
     link_preview_from_dict,
     link_preview_to_dict,
 )
 from ..domain.post import (
+    MAX_DISTINCT_REACTIONS_PER_POST,
     Comment,
     CommentType,
     FileMeta,
     LocationData,
-    MAX_DISTINCT_REACTIONS_PER_POST,
     Post,
     PostType,
 )
+from ..utils.datetime import parse_iso8601_optional
 from ._spec import Spec, spec_to_sql
 from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
-
 
 #: Columns the Specification pattern is allowed to filter / order on
 #: when ``find()`` is called against ``feed_posts``.
@@ -292,7 +291,7 @@ class SqlitePostRepo:
             ).fetchone()
             if row is None:
                 raise KeyError(f"post {post_id!r} not found or deleted")
-            row_dict = {k: row[k] for k in row.keys()}
+            row_dict = dict(row)
             reactions = _decode_reactions(row_dict["reactions"])
             if (
                 emoji not in reactions
@@ -308,7 +307,7 @@ class SqlitePostRepo:
                 "SELECT * FROM feed_posts WHERE id=?",
                 (post_id,),
             ).fetchone()
-            return {k: row[k] for k in row.keys()}
+            return dict(row)
 
         row = await self._db.transact(_run)
         return _row_to_post(row)  # type: ignore[return-value]
@@ -334,7 +333,7 @@ class SqlitePostRepo:
             ).fetchone()
             if row is None:
                 raise KeyError(f"post {post_id!r} not found")
-            row_dict = {k: row[k] for k in row.keys()}
+            row_dict = dict(row)
             reactions = _decode_reactions(row_dict["reactions"])
             bucket = reactions.get(emoji)
             if bucket and user_id in bucket:
@@ -349,7 +348,7 @@ class SqlitePostRepo:
                     "SELECT * FROM feed_posts WHERE id=?",
                     (post_id,),
                 ).fetchone()
-            return {k: row[k] for k in row.keys()}
+            return dict(row)
 
         row = await self._db.transact(_run)
         return _row_to_post(row)  # type: ignore[return-value]
@@ -649,8 +648,7 @@ def _row_to_post(row: dict | None) -> Post | None:
         id=row["id"],
         author=row["author"],
         type=PostType(row["type"]),
-        created_at=parse_iso8601_optional(row.get("created_at"))
-        or datetime.now(timezone.utc),
+        created_at=parse_iso8601_optional(row.get("created_at")) or datetime.now(UTC),
         content=row.get("content"),
         media_url=row.get("media_url"),
         image_urls=_decode_image_urls(row.get("image_urls_json")),
@@ -676,8 +674,7 @@ def _row_to_comment(row: dict | None) -> Comment | None:
         post_id=row["post_id"],
         author=row["author"],
         type=CommentType(row.get("type", "text")),
-        created_at=parse_iso8601_optional(row.get("created_at"))
-        or datetime.now(timezone.utc),
+        created_at=parse_iso8601_optional(row.get("created_at")) or datetime.now(UTC),
         parent_id=row.get("parent_id"),
         content=row.get("content"),
         media_url=row.get("media_url"),

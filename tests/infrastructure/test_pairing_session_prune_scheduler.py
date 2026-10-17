@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -43,7 +43,7 @@ async def env(tmp_dir):
 
 
 async def _seed_expired_pair(env, *, token: str, local_inbox_id: str) -> None:
-    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     await env.repo.create_pairing(
         PairingSession(
             token=token,
@@ -86,7 +86,7 @@ async def test_prune_once_drops_expired_sessions_and_their_orphan_instances(env)
 
 
 async def test_prune_once_keeps_fresh_sessions(env):
-    future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    future = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
     await env.repo.create_pairing(
         PairingSession(
             token="fresh",
@@ -95,7 +95,7 @@ async def test_prune_once_keeps_fresh_sessions(env):
             own_dh_sk="cc" * 32,
             inbox_url="https://local/inbox/fresh",
             own_local_inbox_id="fresh",
-            issued_at=datetime.now(timezone.utc).isoformat(),
+            issued_at=datetime.now(UTC).isoformat(),
             expires_at=future,
             status=PairingStatus.PENDING_SENT,
         ),

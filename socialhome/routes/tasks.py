@@ -84,7 +84,7 @@ class TaskListCollectionView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         svc = self.svc(task_service_key)
         lists = await svc.list_lists()
         return web.json_response(_roster(lists, await svc.open_counts()))
@@ -111,7 +111,7 @@ class TaskListDetailView(BaseView):
     """``GET`` / ``PATCH`` / ``DELETE /api/tasks/lists/{id}``."""
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         list_id = self.match("id")
         svc = self.svc(task_service_key)
         task_list = await svc.get_list(list_id)
@@ -124,7 +124,7 @@ class TaskListDetailView(BaseView):
         )
 
     async def patch(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         list_id = self.match("id")
         body = await self.body()
         svc = self.svc(task_service_key)
@@ -139,7 +139,7 @@ class TaskListDetailView(BaseView):
         )
 
     async def delete(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         list_id = self.match("id")
         svc = self.svc(task_service_key)
         await svc.delete_list(list_id)
@@ -153,7 +153,7 @@ class TaskListTasksView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         list_id = self.match("id")
         q = self.request.query
         include_done = q.get("include_done", "true").lower() != "false"
@@ -282,7 +282,7 @@ class TaskCommentCollectionView(BaseView):
     """``GET /api/tasks/{id}/comments`` + ``POST /api/tasks/{id}/comments`` (§23.68)."""
 
     async def get(self) -> web.Response:
-        self.user  # auth gate
+        self.require_user()
         svc = self.svc(task_service_key)
         comments = await svc.list_comments(self.match("id"))
         return web.json_response(
@@ -340,7 +340,7 @@ class TaskAttachmentCollectionView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.user
+        self.require_user()
         svc = self.svc(task_service_key)
         atts = await svc.list_attachments(self.match("id"))
         signer = self.request.app.get(media_signer_key)
@@ -393,7 +393,7 @@ class TaskAttachmentDetailView(BaseView):
     """``DELETE /api/tasks/{id}/attachments/{attachment_id}``."""
 
     async def delete(self) -> web.Response:
-        self.user
+        self.require_user()
         svc = self.svc(task_service_key)
         await svc.delete_attachment(self.match("attachment_id"))
         return web.json_response({"ok": True})

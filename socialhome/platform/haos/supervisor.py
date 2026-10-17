@@ -128,7 +128,7 @@ def _parse_network(raw: object) -> Mapping[str, int | None] | None:
 class SupervisorClient:
     """HTTP client for the Supervisor API (never talks to HA Core)."""
 
-    __slots__ = ("_session", "_base_url", "_token")
+    __slots__ = ("_base_url", "_session", "_token")
 
     def __init__(
         self,

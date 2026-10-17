@@ -3,7 +3,7 @@ introductions awaiting its admin (§11 simple pairing)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from socialhome.federation.inbound_validator import TIMESTAMP_SKEW_SECONDS
 from socialhome.infrastructure.event_bus import EventBus
@@ -15,7 +15,7 @@ from socialhome.services.auto_pair_inbox import (
 
 
 def _past(seconds: int) -> str:
-    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    return (datetime.now(UTC) - timedelta(seconds=seconds)).isoformat()
 
 
 def _enqueue(inbox: AutoPairInbox, a_id: str = "a1"):
@@ -26,7 +26,7 @@ def _enqueue(inbox: AutoPairInbox, a_id: str = "a1"):
         from_a_dh_pk="dd",
         via_b_id="b1",
         vouch_sig="vv",
-        ts=datetime.now(timezone.utc).isoformat(),
+        ts=datetime.now(UTC).isoformat(),
         nonce="n",
         token="tk",
     )
@@ -56,7 +56,7 @@ def test_request_expiry():
     assert auto_pair_request_expired(_past(60)) is False
     assert auto_pair_request_expired(_past(AUTO_PAIR_REQUEST_TTL_SECONDS + 1)) is True
     # A naive stamp is read as UTC.
-    naive = (datetime.now(timezone.utc) - timedelta(seconds=60)).replace(tzinfo=None)
+    naive = (datetime.now(UTC) - timedelta(seconds=60)).replace(tzinfo=None)
     assert auto_pair_request_expired(naive.isoformat()) is False
     # Fail closed on garbage.
     assert auto_pair_request_expired("not-a-date") is True
@@ -65,7 +65,7 @@ def test_request_expiry():
 def test_a_future_dated_request_counts_as_expired():
     """Past the federation clock-skew window a stamp is not from a real
     clock — and would otherwise never expire."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     future = now + timedelta(seconds=TIMESTAMP_SKEW_SECONDS + 60)
     assert auto_pair_request_expired(future.isoformat()) is True
     near = now + timedelta(seconds=60)

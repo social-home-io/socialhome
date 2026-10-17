@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta, timezone
+from datetime import UTC, timedelta
 from pathlib import Path
 
 import pytest
@@ -259,7 +259,7 @@ def test_chat_days_group_today_and_yesterday_in_household_time():
 
 def test_chat_days_use_the_household_day_for_a_utc_stamp():
     """00:30 in Berlin is 22:30 UTC the day before: it is today's."""
-    utc = at(0, 30).astimezone(timezone.utc)
+    utc = at(0, 30).astimezone(UTC)
     (today,) = chat_days(message_rows([_at_msg("x", utc)], _fmt()), _fmt())
     assert today.key == "today" and today.rows[0].time == "00:30"
 

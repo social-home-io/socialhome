@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-
 import pytest
 
 from socialhome.domain.events import SchedulePollFinalized
-from socialhome.infrastructure.event_bus import EventBus
 from socialhome.domain.preferences import (
     FeatureDisabledError,
     HouseholdPreferences,
 )
+from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.schedule_calendar_bridge import (
     ScheduleCalendarBridge,
 )
@@ -50,16 +49,16 @@ def env(request):
 
 
 def _finalized(**kw) -> SchedulePollFinalized:
-    base = dict(
-        post_id="sp-1",
-        slot_id="slot-A",
-        slot_date="2026-05-01",
-        start_time="18:00",
-        end_time="20:00",
-        title="Pizza night",
-        finalized_by="alice",
-        space_id="sp-A",
-    )
+    base = {
+        "post_id": "sp-1",
+        "slot_id": "slot-A",
+        "slot_date": "2026-05-01",
+        "start_time": "18:00",
+        "end_time": "20:00",
+        "title": "Pizza night",
+        "finalized_by": "alice",
+        "space_id": "sp-A",
+    }
     base.update(kw)
     return SchedulePollFinalized(**base)
 

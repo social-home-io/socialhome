@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -12,7 +12,7 @@ from socialhome.domain.user import RemoteUser, UserStatus
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with a user repo over a real SQLite database."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
     from socialhome.infrastructure.event_bus import EventBus
     from socialhome.repositories.user_repo import SqliteUserRepo
@@ -903,7 +903,7 @@ def _expired_today_iso() -> str:
     it makes the regression fire deterministically rather than only when
     the wall clock happens to cooperate.
     """
-    return f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00.000001+00:00"
+    return f"{datetime.now(UTC).date().isoformat()}T00:00:00.000001+00:00"
 
 
 async def _token_for(env, expires_at):
@@ -931,7 +931,7 @@ async def test_expired_api_token_does_not_authenticate(env):
 
 async def test_future_api_token_authenticates(env):
     """A token with an expiry in the future still resolves."""
-    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     user = await _token_for(env, future)
     got = await env.user_repo.get_user_by_token_hash("hash-exp")
     assert got is not None
@@ -970,7 +970,7 @@ async def test_api_token_with_unparseable_expiry_fails_closed(env):
 
 async def test_list_with_expired_status(env):
     """Only rows whose ``status_expires_at`` is at/before ``now`` come back."""
-    now = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
     for name in ("gone", "later", "forever", "blank"):
         await env.user_svc.provision(username=name, display_name=name)
     await env.user_svc.set_status("gone", text="a", clear_after="30m", now=now)

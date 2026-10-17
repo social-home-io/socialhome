@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+from typing import Self
 
 import orjson
 import pytest
@@ -40,10 +41,10 @@ class _FakeResponse:
             return self._body[:n] if n > 0 else self._body
 
     @property
-    def content(self) -> "_FakeResponse._Content":
+    def content(self) -> _FakeResponse._Content:
         return _FakeResponse._Content(self._body)
 
-    async def __aenter__(self) -> "_FakeResponse":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc) -> None:

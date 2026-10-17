@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,6 +19,12 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.errors import (
+    GfsSelectionInvalidError,
+    GfsSelectionRequiredError,
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
+)
 from socialhome.domain.events import SpaceConfigChanged
 from socialhome.domain.federation import (
     FederationEvent,
@@ -26,12 +32,6 @@ from socialhome.domain.federation import (
     GfsConnection,
 )
 from socialhome.domain.gfs_server import MAX_GFS_SERVERS, GfsServer
-from socialhome.domain.errors import (
-    GfsSelectionInvalidError,
-    GfsSelectionRequiredError,
-    SpaceNotPublishableError,
-    TierChangeRequiredError,
-)
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -188,7 +188,7 @@ async def test_issued_at_only_goes_up(env):
     """A list signed after a small clock step back still outranks the
     stored one."""
     await env.space()
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     ahead = sign_gfs_server_list(
         space_id="sp-1",
         servers=(),
@@ -217,7 +217,7 @@ async def test_a_runaway_stored_issued_at_does_not_wedge_the_owner(env, caplog):
     with caplog.at_level(logging.WARNING):
         await env.svc.sync_snapshot("sp-1")
     space = await env.spaces.get("sp-1")
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     assert space is not None and space.gfs_servers is not None
     assert space.gfs_servers.issued_at <= now_ms
     assert "far ahead" in caplog.text
@@ -465,7 +465,7 @@ async def test_owner_snapshot_reaches_a_member_household(env, tmp_dir):
                 event_type=FederationEventType.SPACE_CONFIG_CHANGED,
                 from_instance=OWN,
                 to_instance="member-i",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
                 space_id="sp-1",
             )

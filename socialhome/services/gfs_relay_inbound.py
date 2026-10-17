@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from ..domain.errors import WrongTypeError
 from ..federation.gfs_relay_transport import is_relay_envelope_body
 from ..federation.inbound_validator import TRANSPORT_GFS_RELAY
 from ..federation.invite_bootstrap import unseal_envelope_body
@@ -118,20 +119,20 @@ class GfsRelayInbound:
 
     __slots__ = (
         "_federation",
-        "_keywrap_private_key",
-        "_invite",
         "_gfs_repo",
+        "_invite",
+        "_keywrap_private_key",
         "_rate_limiter",
     )
 
     def __init__(
         self,
         *,
-        federation: "FederationService",
+        federation: FederationService,
         keywrap_private_key: bytes,
-        invite_coordinator: "SpaceInviteTokenRedeemCoordinator",
+        invite_coordinator: SpaceInviteTokenRedeemCoordinator,
         gfs_connection_repo: AbstractGfsConnectionRepo,
-        rate_limiter: "RateLimiter | None" = None,
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         self._federation = federation
         self._keywrap_private_key = keywrap_private_key
@@ -230,7 +231,7 @@ class GfsRelayInbound:
         """
         inner = body.get("envelope")
         if not isinstance(inner, dict):
-            raise ValueError("relayed federation envelope missing envelope body")
+            raise WrongTypeError("relayed federation envelope missing envelope body")
         from_instance = inner.get("from_instance")
         if not isinstance(from_instance, str) or not from_instance:
             raise ValueError("relayed federation envelope missing from_instance")

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import logging
-
 import base64
 import hashlib
 import hmac
+import logging
 
 from socialhome.webrtc_ice import (
     build_ice_servers,
@@ -14,7 +13,6 @@ from socialhome.webrtc_ice import (
     warn_if_no_turn,
     warn_if_turn_unusable,
 )
-
 
 # ─── HMAC TURN credentials ────────────────────────────────────────────────
 

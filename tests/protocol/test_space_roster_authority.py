@@ -36,7 +36,7 @@ registry means the next duplicate fails here instead of in the wild.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -173,7 +173,7 @@ def _event(event_type, payload, *, sender=FOLLOWER, space_id=None):
         event_type=event_type,
         from_instance=sender,
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=space_id,
     )

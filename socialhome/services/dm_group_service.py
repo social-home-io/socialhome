@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.conversation import (
@@ -117,15 +117,15 @@ class DmGroupService:
     """Membership authority for group conversations, and its receiver side."""
 
     __slots__ = (
-        "_convos",
-        "_users",
         "_bus",
+        "_convos",
         "_federation",
         "_federation_repo",
-        "_own_instance_id",
         "_history",
-        "_scope",
+        "_own_instance_id",
         "_pending",
+        "_scope",
+        "_users",
     )
 
     def __init__(
@@ -139,17 +139,17 @@ class DmGroupService:
         self._convos = conversation_repo
         self._users = user_repo
         self._bus = bus
-        self._federation: "FederationService | None" = None
-        self._federation_repo: "AbstractFederationRepo | None" = None
+        self._federation: FederationService | None = None
+        self._federation_repo: AbstractFederationRepo | None = None
         self._own_instance_id = own_instance_id
-        self._history: "DmHistoryScheduler | None" = None
+        self._history: DmHistoryScheduler | None = None
         self._scope = DmScope(conversation_repo=conversation_repo, user_repo=user_repo)
-        self._pending: "PendingSeatBuffer | None" = None
+        self._pending: PendingSeatBuffer | None = None
 
     def attach_federation(
         self,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
         own_instance_id: str,
     ) -> None:
         """Late-bind federation (built after the DM stack in ``create_app``)."""
@@ -157,11 +157,11 @@ class DmGroupService:
         self._federation_repo = federation_repo
         self._own_instance_id = own_instance_id
 
-    def attach_history(self, scheduler: "DmHistoryScheduler") -> None:
+    def attach_history(self, scheduler: DmHistoryScheduler) -> None:
         """Wire the DM history scheduler so a newly seated household catches up."""
         self._history = scheduler
 
-    def attach_pending(self, buffer: "PendingSeatBuffer") -> None:
+    def attach_pending(self, buffer: PendingSeatBuffer) -> None:
         """Hold a roster naming an authority user this household hasn't synced.
 
         Released (and re-applied through the same rules) when that user's
@@ -170,7 +170,7 @@ class DmGroupService:
         """
         self._pending = buffer
 
-    def attach_to(self, federation_service: "FederationService") -> None:
+    def attach_to(self, federation_service: FederationService) -> None:
         """Register the inbound roster / leave handlers."""
         registry = federation_service._event_registry
         registry.register(FederationEventType.DM_GROUP_ROSTER, self._on_roster)
@@ -437,7 +437,7 @@ class DmGroupService:
 
     # ── Inbound ─────────────────────────────────────────────────────────
 
-    async def _on_roster(self, event: "FederationEvent") -> None:
+    async def _on_roster(self, event: FederationEvent) -> None:
         """Apply an authority's member-list snapshot (receiver rules above)."""
         p = event.payload if isinstance(event.payload, dict) else {}
         conv_id = str(p.get("conversation_id") or "")
@@ -482,7 +482,7 @@ class DmGroupService:
             id=conv_id,
             type=ConversationType.GROUP_DM,
             name=name,
-            created_at=existing.created_at if existing else datetime.now(timezone.utc),
+            created_at=existing.created_at if existing else datetime.now(UTC),
             membership_version=version,
         )
         before = await self._local_member_ids(conv_id)
@@ -520,7 +520,7 @@ class DmGroupService:
 
     async def _seats_from(
         self,
-        event: "FederationEvent",
+        event: FederationEvent,
         conv_id: str,
         raw_members: list,
     ) -> tuple[list[str], list[RemoteConversationMember], list[str]] | None:
@@ -623,7 +623,7 @@ class DmGroupService:
             )
         return local_usernames, list(remote.values()), stale_leavers
 
-    async def _on_leave(self, event: "FederationEvent") -> None:
+    async def _on_leave(self, event: FederationEvent) -> None:
         """Authority side: a member household's own user left the group."""
         p = event.payload if isinstance(event.payload, dict) else {}
         conv_id = str(p.get("conversation_id") or "")
@@ -823,4 +823,4 @@ def _parse_member(raw: object) -> GroupRosterMember | None:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

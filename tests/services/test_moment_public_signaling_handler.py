@@ -9,8 +9,9 @@ exercises the framing + orchestration without an
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
+import aiofiles
 import pytest
 
 from socialhome.domain.moment import Moment
@@ -21,7 +22,6 @@ from socialhome.services.moment_public_signaling_handler import (
     MAX_CONCURRENT_VIEWERS_PER_USER,
     MomentPublicSignalingHandler,
 )
-
 
 # ─── Stub peer ───────────────────────────────────────────────────────────
 
@@ -115,7 +115,7 @@ class _RecordingSession:
 
 
 def _expires(days: int = 7) -> str:
-    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    return (datetime.now(UTC) + timedelta(days=days)).isoformat()
 
 
 def _moment(
@@ -137,7 +137,7 @@ def _moment(
         parent_moment_id=None,
         origin_instance_id="self",
         created_at=(
-            datetime.now(timezone.utc) + timedelta(minutes=created_offset_min)
+            datetime.now(UTC) + timedelta(minutes=created_offset_min)
         ).isoformat(),
         expires_at=_expires(),
         is_public=is_public,
@@ -172,7 +172,8 @@ async def repos(db, tmp_dir):
 async def public_moments(repos):
     """Two public moments: one text-only, one with image media."""
     media_dir = repos["media_dir"]
-    open(f"{media_dir}/a.jpg", "wb").write(b"A" * 200_000)
+    async with aiofiles.open(f"{media_dir}/a.jpg", "wb") as f:
+        await f.write(b"A" * 200_000)
     await repos["moments"].save(_moment(id="m-text", created_offset_min=-1))
     await repos["moments"].save(
         _moment(
@@ -351,7 +352,7 @@ async def test_handler_posts_signed_answer_to_correct_gfs(repos, public_moments)
 async def test_relay_offer_posts_framed_stream_with_signed_headers(
     repos, public_moments
 ):
-    m_text, m_media = public_moments
+    _m_text, _m_media = public_moments
     handler, _peers = _make_handler(repos)
     sess = _RecordingSession()
     handler._http_client = sess  # type: ignore[assignment]

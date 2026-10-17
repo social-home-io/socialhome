@@ -9,9 +9,9 @@ import pytest
 
 from socialhome.dashboard.icons import (
     FALLBACK_ICON,
-    _needle,
     GENERAL_KEYWORDS,
     LESSON_KEYWORDS,
+    _needle,
     normalized_words,
     suggest_icon,
     title_icon,
@@ -262,10 +262,10 @@ def _spa_tables() -> list[tuple[str, tuple[str, ...]]]:
     ``$``-marked and ≤ 3-letter keywords are whole words (``=``), the
     rest word starts (``^``) — with each row's preset emoji."""
     ts = ICONS_TS.read_text(encoding="utf-8")
-    emoji = dict((key, e) for e, key in re.findall(r"preset\('([^']+)', '(\w+)'\)", ts))
+    emoji = {key: e for e, key in re.findall(r"preset\('([^']+)', '(\w+)'\)", ts)}
     block = ts[ts.index("const KEYWORDS") : ts.index("export function suggestIcon")]
     rows = []
-    for key, body in re.findall(r"\['(\w+)',\s*\[(.*?)\]\]", block, flags=re.S):
+    for key, body in re.findall(r"\['(\w+)',\s*\[(.*?)\]\]", block, flags=re.DOTALL):
         words = []
         for k in re.findall(r"'([^']+)'", body):
             if k.endswith("$"):

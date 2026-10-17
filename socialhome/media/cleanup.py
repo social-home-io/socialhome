@@ -76,7 +76,7 @@ async def unlink_media(media_dir: pathlib.Path, media_url: str | None) -> bool:
 
 async def unlink_unreferenced(
     media_dir: pathlib.Path | None,
-    refs: "AbstractMediaReferenceRepo | None",
+    refs: AbstractMediaReferenceRepo | None,
     media_urls: Iterable[str | None],
 ) -> int:
     """Delete each file in ``media_urls`` that no DB row still references.

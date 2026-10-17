@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 
 import orjson
 import pytest
 
 from socialhome.crypto import derive_instance_id
 from socialhome.global_server import envelope_relay as envelope_relay_mod
+from socialhome.global_server import ws_registry as ws_registry_mod
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.envelope_relay import (
     ENVELOPE_FRAME_TYPE,
@@ -34,7 +36,6 @@ from socialhome.global_server.envelope_relay import (
     InvalidEnvelope,
     validate_envelope,
 )
-from socialhome.global_server import ws_registry as ws_registry_mod
 from socialhome.global_server.repositories import (
     SqliteGfsEnvelopeQueueRepo,
     SqliteGfsFederationRepo,
@@ -456,7 +457,7 @@ async def test_a_full_queue_still_answers_the_uniform_202_and_warns(
 
 
 async def test_the_cap_is_per_recipient_not_global(wiring):
-    fed_repo, queue_repo, _registry, _relay = wiring
+    _fed_repo, queue_repo, _registry, _relay = wiring
     for instance in (
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -690,7 +691,7 @@ async def test_an_item_over_the_caps_on_its_own_is_not_queued(
 
 
 async def test_a_corrupt_frame_type_is_refused_by_the_database(gfs_db):
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.IntegrityError):
         await gfs_db.transact(
             lambda conn: conn.execute(
                 "INSERT INTO gfs_envelope_queue(to_instance, sealed_json,"
@@ -756,7 +757,7 @@ class _FakeCluster:
 async def test_submit_returns_before_the_db_work_runs(wiring, monkeypatch):
     """The route answers without awaiting ``accept`` — a blocked lookup must
     not hold the caller, or response timing becomes the oracle."""
-    _fed, queue_repo, _registry, relay = wiring
+    _fed, _queue_repo, _registry, relay = wiring
     release = asyncio.Event()
     started = asyncio.Event()
 

@@ -40,6 +40,7 @@ import hashlib
 import hmac
 import re
 import time
+
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 
@@ -142,7 +143,7 @@ class MediaUrlSigner:
         return hmac.compare_digest(expected, sig)
 
     def _compute(self, canonical_path: str, exp: int) -> str:
-        message = f"{canonical_path}|{exp}".encode("utf-8")
+        message = f"{canonical_path}|{exp}".encode()
         digest = hmac.new(self._key, message, hashlib.sha256).digest()
         return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
@@ -220,7 +221,7 @@ def sign_media_urls_in(
         # Both forms are legitimate inputs: ``/api/...`` is the legacy /
         # request-side canonical, ``api/...`` is the ingress-safe relative
         # form emitted by ``_picture_url`` and the gallery URL helpers.
-        return isinstance(u, str) and (u.startswith("/api/") or u.startswith("api/"))
+        return isinstance(u, str) and (u.startswith(("/api/", "api/")))
 
     if isinstance(payload, dict):
         for k, v in payload.items():

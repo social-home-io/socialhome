@@ -38,9 +38,9 @@ log = logging.getLogger(__name__)
 
 async def collect_space_media_urls(
     *,
-    post_repo: "AbstractSpacePostRepo",
-    gallery_repo: "AbstractGalleryRepo | None",
-    bazaar_repo: "AbstractBazaarRepo | None" = None,
+    post_repo: AbstractSpacePostRepo,
+    gallery_repo: AbstractGalleryRepo | None,
+    bazaar_repo: AbstractBazaarRepo | None = None,
     space_id: str,
 ) -> list[str]:
     """Deduped media references (post + comment + gallery + bazaar) for a space.
@@ -70,12 +70,12 @@ async def collect_space_media_urls(
 
 async def purge_space_and_media(
     *,
-    space_repo: "AbstractSpaceRepo",
-    post_repo: "AbstractSpacePostRepo",
-    gallery_repo: "AbstractGalleryRepo | None",
-    bazaar_repo: "AbstractBazaarRepo | None" = None,
+    space_repo: AbstractSpaceRepo,
+    post_repo: AbstractSpacePostRepo,
+    gallery_repo: AbstractGalleryRepo | None,
+    bazaar_repo: AbstractBazaarRepo | None = None,
     media_dir: pathlib.Path | None,
-    media_refs: "AbstractMediaReferenceRepo | None" = None,
+    media_refs: AbstractMediaReferenceRepo | None = None,
     space_id: str,
 ) -> int:
     """Hard-delete ``space_id``: collect media → drop rows → unlink files.

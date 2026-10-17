@@ -40,11 +40,11 @@ class AppUpdateScheduler:
         (24 hours).
     """
 
-    __slots__ = ("_app_service", "_interval", "_task", "_stop")
+    __slots__ = ("_app_service", "_interval", "_stop", "_task")
 
     def __init__(
         self,
-        app_service: "AppService",
+        app_service: AppService,
         *,
         interval: float = CATALOG_TTL_S,
     ) -> None:
@@ -66,7 +66,7 @@ class AppUpdateScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -83,11 +83,11 @@ class AppUpdateScheduler:
                 else:
                     log.debug("app-update check: all apps are up to date")
             except Exception as exc:  # pragma: no cover
-                log.warning("app-update check failed: %s", exc)
+                log.warning("app-update check failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue

@@ -14,7 +14,7 @@ enforces (see ``docs/protocol/media.md``):
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -51,7 +51,7 @@ def _blob(
         event_type=FET.SPACE_MEDIA_BLOB,
         from_instance=from_instance,
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=p,
         space_id=space_id,
     )
@@ -400,8 +400,10 @@ async def test_link_preview_image_of_the_post_is_written(env, db):
             "u-a",
             "text",
             "https://example.com/",
-            '{"url": "https://example.com/", "title": "T",'
-            ' "thumbnail_url": "api/media/lp1.webp"}',
+            (
+                '{"url": "https://example.com/", "title": "T",'
+                ' "thumbnail_url": "api/media/lp1.webp"}'
+            ),
         ),
     )
     await svc._on_space_media_blob(

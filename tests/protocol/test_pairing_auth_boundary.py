@@ -10,7 +10,7 @@ refused before any pairing state exists or any outbound request is made.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 from urllib.parse import urlparse
 
@@ -263,7 +263,7 @@ async def _dispatch(app, event_type, payload, *, from_instance: str) -> None:
                 event_type=event_type,
                 from_instance=from_instance,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )

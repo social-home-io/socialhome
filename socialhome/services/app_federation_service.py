@@ -43,9 +43,9 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from datetime import datetime, timezone
-from uuid import uuid4
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from ..domain.apps import (
     AppAgeRestrictedError,
@@ -62,11 +62,11 @@ if TYPE_CHECKING:
     from ..domain.events import DomainEvent
     from ..domain.user import RemoteUser
     from ..infrastructure.event_bus import EventBus
+    from ..infrastructure.ws_manager import WebSocketManager
     from ..repositories.app_repo import AbstractAppRepo
     from ..repositories.cp_repo import AbstractCpRepo
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.user_repo import AbstractUserRepo
-    from ..infrastructure.ws_manager import WebSocketManager
 
 #: Cap on the bounded inbound de-dupe of ``APP_SESSION`` opens — keeps memory
 #: flat (LRU eviction of the oldest session id) while still suppressing the
@@ -103,13 +103,13 @@ class AppFederationService:
 
     __slots__ = (
         "_app_repo",
-        "_user_repo",
-        "_ws",
+        "_bus",
+        "_cp_repo",
         "_federation",
         "_federation_repo",
-        "_cp_repo",
-        "_bus",
         "_seen_open_sessions",
+        "_user_repo",
+        "_ws",
     )
 
     def __init__(
@@ -120,8 +120,8 @@ class AppFederationService:
         ws: WebSocketManager,
         federation: Any,
         federation_repo: AbstractFederationRepo,
-        cp_repo: "AbstractCpRepo | None" = None,
-        bus: "EventBus | None" = None,
+        cp_repo: AbstractCpRepo | None = None,
+        bus: EventBus | None = None,
     ) -> None:
         self._app_repo = app_repo
         self._user_repo = user_repo
@@ -137,7 +137,7 @@ class AppFederationService:
         #: ``open_session`` always mints a fresh uuid so it never dedupes.
         self._seen_open_sessions: OrderedDict[tuple[str, str], None] = OrderedDict()
 
-    async def _emit(self, event: "DomainEvent") -> None:
+    async def _emit(self, event: DomainEvent) -> None:
         """Publish ``event`` fail-soft; no-op without a bus.
 
         Mirrors :meth:`socialhome.services.bus_publisher.BusPublisherMixin._emit`
@@ -539,7 +539,7 @@ class AppFederationService:
 
     async def _resolve_remote_initiator(
         self, from_instance: str, from_user: str | None
-    ) -> "RemoteUser | None":
+    ) -> RemoteUser | None:
         """Resolve the remote challenge initiator's local ``RemoteUser`` row.
 
         Returns ``None`` when ``from_user`` is absent or the remote can't be
@@ -555,7 +555,7 @@ class AppFederationService:
         from_instance: str,
         from_user: str | None,
         *,
-        remote: "RemoteUser | None" = None,
+        remote: RemoteUser | None = None,
     ) -> str:
         """Resolve a human label for a remote challenge initiator.
 
@@ -861,7 +861,7 @@ class AppFederationService:
                                 from_instance=from_instance,
                                 from_user=from_user,
                                 payload=payload,
-                                created_at=datetime.now(timezone.utc).isoformat(),
+                                created_at=datetime.now(UTC).isoformat(),
                             )
                         )
                     await self._ws.broadcast_to_user(recipient.user_id, frame)
@@ -916,7 +916,7 @@ class AppFederationService:
 
     async def drain_pending_sessions(
         self, app_id: str, user_id: str
-    ) -> list["AppPendingSession"]:
+    ) -> list[AppPendingSession]:
         """Return + clear this user's pending session invites for the app
         (replayed by the app on open)."""
         return await self._app_repo.drain_pending_sessions(app_id, user_id)

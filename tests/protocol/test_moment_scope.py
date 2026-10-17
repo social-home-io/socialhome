@@ -16,7 +16,7 @@ registry and SQLite:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -34,7 +34,7 @@ FET = FederationEventType
 PEER = "peer-bob"
 OTHER = "peer-dora"
 THIRD = "peer-third"  # paired, no users — a relay target
-EXPIRES = (datetime.now(timezone.utc) + timedelta(days=5)).isoformat()
+EXPIRES = (datetime.now(UTC) + timedelta(days=5)).isoformat()
 
 
 def _config(tmp_dir) -> Config:
@@ -137,7 +137,7 @@ async def _send(app, event_type, payload, *, from_instance=PEER) -> None:
                 event_type=event_type,
                 from_instance=from_instance,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )
@@ -149,7 +149,7 @@ def _moment(moment_id, author, origin, **extra) -> dict:
         "author_user_id": author,
         "origin_instance_id": origin,
         "content": "forged",
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(UTC).isoformat(),
         "expires_at": EXPIRES,
         "hop_count": 1,
         **extra,

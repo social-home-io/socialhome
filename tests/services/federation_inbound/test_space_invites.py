@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -73,7 +73,7 @@ def _event(event_type, payload, *, from_instance="peer-a", space_id=None):
         event_type=event_type,
         from_instance=from_instance,
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=space_id,
     )

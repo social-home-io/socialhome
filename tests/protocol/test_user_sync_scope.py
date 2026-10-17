@@ -15,9 +15,9 @@ application registry and SQLite:
 from __future__ import annotations
 
 import base64
-import json
 import io
-from datetime import datetime, timedelta, timezone
+import json
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
@@ -145,7 +145,7 @@ async def _send(app, event_type, payload, *, from_instance=PEER) -> None:
                 event_type=event_type,
                 from_instance=from_instance,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
         )
@@ -340,7 +340,7 @@ async def test_synced_status_of_the_home_household_lands_and_clears(env):
     """The home household's snapshot stores a status, ``null`` clears it, and
     an entry without the key (an older sender) leaves it as is."""
     app, db, published = env
-    later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    later = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     status = {"emoji": "🌴", "text": "On holiday", "expires_at": later}
     bob = {"user_id": "u-bob", "username": "bob"}
     await _send(app, FET.USERS_SYNC, {"users": [{**bob, "status": status}]})
@@ -396,7 +396,7 @@ async def test_synced_status_breaking_the_caps_is_refused(env, status):
 
 async def test_synced_status_already_past_its_deadline_is_stored_as_clear(env):
     app, db, _ = env
-    earlier = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    earlier = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
     bob = {"user_id": "u-bob", "username": "bob"}
     await _send(app, FET.USER_STATUS_UPDATED, {"user_id": "u-bob", "text": "hi"})
     assert await _status_json(db, "u-bob") is not None

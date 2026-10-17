@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -104,7 +104,7 @@ class _Keys:
     def __init__(self, epoch: int | None = 2, *, previous: int | None = None):
         self.epoch = epoch
         self.previous = previous
-        self.arrived = datetime.now(timezone.utc).isoformat()
+        self.arrived = datetime.now(UTC).isoformat()
         self.certs: dict[tuple[str, int], str] = {}
         self.writer_keys: dict[tuple[str, int], str] = {}
         self.epochs = {epoch} if epoch is not None else set()
@@ -410,13 +410,13 @@ async def test_channel_grant_failures_never_cost_the_payload():
 
 
 def _issued(pk: bytes = OWN_PK, **over) -> dict:
-    kw = dict(
-        space_seed=SEED,
-        space_id="sp-1",
-        epoch=2,
-        instance_pk=pk,
-        scope=WRITER_SCOPE_WRITE,
-    )
+    kw = {
+        "space_seed": SEED,
+        "space_id": "sp-1",
+        "epoch": 2,
+        "instance_pk": pk,
+        "scope": WRITER_SCOPE_WRITE,
+    }
     kw.update(over)
     return sign_writer_cert(**kw).to_wire()
 
@@ -478,7 +478,7 @@ async def test_own_cert_none_without_cert_or_seed():
 
 
 async def test_current_own_cert_wire():
-    svc, keys = _svc(seed=None)
+    svc, _keys = _svc(seed=None)
     assert await svc.current_own_cert_wire("sp-1") is None
     wire = _issued()
     await svc.accept("sp-1", wire)
@@ -554,7 +554,7 @@ def test_scope_weakened():
 
 
 async def test_accept_keeps_a_newer_or_stronger_cert():
-    svc, keys = _svc(seed=None)
+    svc, _keys = _svc(seed=None)
     assert await svc.accept("sp-1", _issued(issued_at=200))
     # Older → kept out.
     assert not await svc.accept("sp-1", _issued(issued_at=100, scope="comment"))
@@ -567,7 +567,7 @@ async def test_accept_keeps_a_newer_or_stronger_cert():
 
 
 async def test_a_stored_cert_from_a_retired_key_is_replaced_or_dropped():
-    svc, keys = _svc(seed=None)
+    svc, _keys = _svc(seed=None)
     assert await svc.accept("sp-1", _issued(issued_at=500))
     seed2 = os.urandom(32)
     svc._spaces.space = replace(  # type: ignore[attr-defined]
@@ -592,7 +592,7 @@ async def test_epoch_freshness():
     assert await svc.epoch_is_fresh("sp-1", 3)
     assert not await svc.epoch_is_fresh("sp-1", 4)
     assert not await svc.epoch_is_fresh("sp-1", 1)
-    late = datetime.now(timezone.utc) + timedelta(seconds=WRITER_CERT_EPOCH_GRACE_S + 1)
+    late = datetime.now(UTC) + timedelta(seconds=WRITER_CERT_EPOCH_GRACE_S + 1)
     assert not await svc.epoch_is_fresh("sp-1", 3, now=late)
     keys.arrived = "2020-01-01 10:00:00"  # SQLite's naive UTC shape parses
     assert not await svc.epoch_is_fresh("sp-1", 3)
@@ -974,7 +974,7 @@ async def test_accept_writer_key_needs_a_kek():
 
 
 async def test_a_stored_writer_key_dies_with_an_authority_repin():
-    svc, keys = _strict_svc(seed=None)
+    svc, _keys = _strict_svc(seed=None)
     grant = issue_writer_key_grant(space_seed=SEED, space_id="sp-1", epoch=2).to_wire()
     await svc.accept_writer_key("sp-1", grant)
     svc._spaces.space = replace(

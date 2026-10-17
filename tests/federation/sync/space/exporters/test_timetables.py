@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 
 import orjson
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -33,7 +33,7 @@ from socialhome.federation.sync.space.exporters import TimetablesExporter
 async def test_timetables_exporter_streams_live_wire_dicts():
     """Space timetables ride the chunked sync as their domain wire dict —
     the same shape as the live SPACE_TIMETABLE_UPSERTED event."""
-    at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    at = datetime(2026, 6, 1, tzinfo=UTC)
     tt = Timetable(id="tt-1", name="5b", created_by="u-a", created_at=at, updated_at=at)
 
     class _Repo:
@@ -97,7 +97,7 @@ def _max_size_record() -> dict:
         for wd in days
         for i in range(24)
     ][:MAX_ENTRIES]
-    at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    at = datetime(2026, 6, 1, tzinfo=UTC)
     while True:
         tt = Timetable(
             id="a" * 32,

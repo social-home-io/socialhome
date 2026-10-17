@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -194,7 +194,7 @@ async def test_a_legacy_local_group_takes_no_remote_people(stack):
         Conversation(
             id="legacy-group",
             type=ConversationType.GROUP_DM,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             membership_version=1,
         ),
         local_usernames=["ann", "ben", "cid"],
@@ -273,7 +273,7 @@ async def _apply_peer_roster(stack, conv_id, version, local_names):
             event_type=FET.DM_GROUP_ROSTER,
             from_instance=PEER,
             to_instance=stack.iid,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload={
                 "conversation_id": conv_id,
                 "version": version,

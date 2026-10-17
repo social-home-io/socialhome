@@ -297,7 +297,7 @@ async def test_security_headers_on_html(client, auth):
         await client.get("/", headers=await _cookie(auth)),
     ):
         # A board page admits its one inline <style> by hash; nothing else.
-        styles = re.findall(r"<style>(.*?)</style>", await resp.text(), re.S)
+        styles = re.findall(r"<style>(.*?)</style>", await resp.text(), re.DOTALL)
         assert resp.headers["Content-Security-Policy"] == build_dashboard_csp(styles)
         assert resp.headers["Cache-Control"] == "no-store"
         assert resp.headers["Referrer-Policy"] == "same-origin"

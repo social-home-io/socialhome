@@ -13,7 +13,7 @@ well under it.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -52,7 +52,7 @@ async def test_report_older_than_window_is_not_counted(repo):
     hours')`` — the only window where the raw TEXT compare went wrong, so
     the regression fires regardless of the wall clock.
     """
-    cutoff_day = (datetime.now(timezone.utc) - timedelta(hours=24)).date()
+    cutoff_day = (datetime.now(UTC) - timedelta(hours=24)).date()
     stale = datetime.fromisoformat(f"{cutoff_day.isoformat()}T00:00:00.000001+00:00")
     await repo.save(_report("r-stale", stale))
     assert await repo.count_recent_by_reporter("u-reporter", hours=24) == 0
@@ -60,14 +60,14 @@ async def test_report_older_than_window_is_not_counted(repo):
 
 async def test_report_inside_window_is_counted(repo):
     """A report filed minutes ago still counts toward the cap."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await repo.save(_report("r-fresh", now - timedelta(minutes=5)))
     assert await repo.count_recent_by_reporter("u-reporter", hours=24) == 1
 
 
 async def test_window_counts_only_the_reporters_own_reports(repo):
     """The cap is per-reporter, not global."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await repo.save(_report("r-mine", now - timedelta(minutes=5)))
     other = _report("r-theirs", now - timedelta(minutes=5))
     await repo.save(
@@ -94,7 +94,7 @@ def _scoped(rid: str, space_id: str | None, **kw) -> ContentReport:
         category=ReportCategory.SPAM,
         notes=None,
         status=ReportStatus.PENDING,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         space_id=space_id,
     )
 

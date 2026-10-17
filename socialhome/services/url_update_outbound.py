@@ -37,13 +37,13 @@ class UrlUpdateOutbound(ConfirmedPeerBroadcaster):
 
     # Narrow the broadcaster's optional ``_federation`` — required at
     # construction, so the direct ``send_event`` access below is non-None.
-    _federation: "FederationService"
+    _federation: FederationService
 
     def __init__(
         self,
         *,
-        federation_service: "FederationService",
-        federation_repo: "AbstractFederationRepo",
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
     ) -> None:
         self._federation = federation_service
         self._federation_repo = federation_repo
@@ -86,6 +86,7 @@ class UrlUpdateOutbound(ConfirmedPeerBroadcaster):
                     "url-update-outbound: send to %s failed: %s",
                     instance_id,
                     exc,
+                    exc_info=True,
                 )
         log.info("url-update-outbound: notified %d peer(s) of new base %s", sent, base)
         return sent

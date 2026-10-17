@@ -15,7 +15,6 @@ from ..repositories.theme_repo import (
     SpaceTheme,
 )
 
-
 #: Household fields callers are permitted to patch.
 _HOUSEHOLD_ALLOWED = frozenset(
     {

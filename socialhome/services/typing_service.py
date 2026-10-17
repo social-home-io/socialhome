@@ -31,11 +31,11 @@ from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
     from ..domain.conversation import Conversation
-    from .system_chat_policy import SystemChatPolicy
     from ..repositories.peer_user_visibility_repo import (
         AbstractPeerUserVisibilityRepo,
     )
     from ..repositories.space_repo import AbstractSpaceRepo
+    from .system_chat_policy import SystemChatPolicy
 
 log = logging.getLogger(__name__)
 
@@ -60,17 +60,17 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
     """
 
     __slots__ = (
-        "_child_protection",
-        "_convo_repo",
-        "_user_repo",
-        "_dm_scope",
-        "_space_repo",
-        "_ws",
-        "_federation",
-        "_own_instance_id",
         "_active",
         "_active_comments",
+        "_child_protection",
+        "_convo_repo",
+        "_dm_scope",
+        "_federation",
+        "_own_instance_id",
+        "_space_repo",
         "_system_chats",
+        "_user_repo",
+        "_ws",
     )
 
     def __init__(
@@ -81,8 +81,8 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
         ws_manager,
         federation_service=None,
         own_instance_id: str = "",
-        space_repo: "AbstractSpaceRepo | None" = None,
-        visibility_repo: "AbstractPeerUserVisibilityRepo | None" = None,
+        space_repo: AbstractSpaceRepo | None = None,
+        visibility_repo: AbstractPeerUserVisibilityRepo | None = None,
     ) -> None:
         self._convo_repo = conversation_repo
         self._user_repo = user_repo
@@ -104,9 +104,9 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
         self._active_comments: dict[tuple[str, str], _TypingState] = {}
         #: Live read access to system chats (household / space chat);
         #: without it nobody types into one.
-        self._system_chats: "SystemChatPolicy | None" = None
+        self._system_chats: SystemChatPolicy | None = None
 
-    def attach_system_chats(self, policy: "SystemChatPolicy") -> None:
+    def attach_system_chats(self, policy: SystemChatPolicy) -> None:
         """Wire the system-chat policy: typing in the household (or a
         space's) chat is shown only while the typist may read it."""
         self._system_chats = policy
@@ -115,7 +115,7 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
         self._federation = federation_service
         self._own_instance_id = own_instance_id
 
-    def attach_space_repo(self, space_repo: "AbstractSpaceRepo") -> None:
+    def attach_space_repo(self, space_repo: AbstractSpaceRepo) -> None:
         """Wire :class:`AbstractSpaceRepo` post-construction.
 
         Tests may build a bare service first and attach later. The
@@ -181,7 +181,7 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
 
     async def _system_chat_typing(
         self,
-        conv: "Conversation",
+        conv: Conversation,
         *,
         sender_user_id: str,
         sender_username: str,
@@ -256,6 +256,10 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
             try:
                 local_users = await self._user_repo.list_active()
             except Exception:
+                log.debug(
+                    "TypingService.user_typing_on_comment: fail-soft error ignored",
+                    exc_info=True,
+                )
                 local_users = []
             for u in local_users:
                 if u.user_id and u.user_id != sender_user_id:
@@ -264,6 +268,10 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
             try:
                 members = await self._space_repo.list_members(space_id)
             except Exception:
+                log.debug(
+                    "TypingService.user_typing_on_comment: fail-soft error ignored",
+                    exc_info=True,
+                )
                 members = []
             for m in members:
                 uid = getattr(m, "user_id", None)
@@ -320,6 +328,9 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
         try:
             user = await self._user_repo.get(username)
         except Exception:
+            log.debug(
+                "TypingService._resolve_user_id: fail-soft error ignored", exc_info=True
+            )
             return None
         return user.user_id if user else None
 
@@ -418,6 +429,10 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
                 conversation_id,
             )
         except Exception:
+            log.debug(
+                "TypingService._fan_to_remote_members: fail-soft error ignored",
+                exc_info=True,
+            )
             return
         blocked = await self._guardian_block_counterparts(sender_user_id)
         # A household whose every seat here is someone a guardian block

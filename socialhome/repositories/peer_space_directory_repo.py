@@ -10,7 +10,7 @@ space browser.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db.database import AsyncDatabase
@@ -70,7 +70,7 @@ class SqlitePeerSpaceDirectoryRepo:
         instance_id: str,
         entries: list[PeerSpaceDirectoryEntry],
     ) -> None:
-        cached = datetime.now(timezone.utc).isoformat()
+        cached = datetime.now(UTC).isoformat()
         rows = [
             (
                 instance_id,

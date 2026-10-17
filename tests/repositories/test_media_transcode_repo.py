@@ -13,7 +13,6 @@ from socialhome.repositories.media_transcode_repo import (
     SqliteMediaTranscodeRepo,
 )
 
-
 pytestmark = pytest.mark.asyncio
 
 

@@ -81,7 +81,7 @@ class AliasService:
     def __init__(
         self,
         alias_repo: AbstractAliasRepo,
-        user_repo: "AbstractUserRepo",
+        user_repo: AbstractUserRepo,
     ) -> None:
         self._alias_repo = alias_repo
         self._user_repo = user_repo

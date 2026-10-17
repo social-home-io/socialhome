@@ -30,7 +30,7 @@ somebody writes its cross-space case.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -122,7 +122,7 @@ def timetable_wire(
     **extra,
 ) -> dict:
     """A complete, valid ``SPACE_TIMETABLE_UPSERTED`` timetable wire dict."""
-    at = datetime(2026, 6, 2, 10, 0, tzinfo=timezone.utc)
+    at = datetime(2026, 6, 2, 10, 0, tzinfo=UTC)
     return to_wire_dict(
         Timetable(
             id=tt_id,
@@ -585,8 +585,10 @@ _SEED = [
     ],
     *[
         (
-            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
-            " identity_public_key) VALUES(?,?,?,?,?)",
+            (
+                "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+                " identity_public_key) VALUES(?,?,?,?,?)"
+            ),
             (sid, sid, "the-host", "anna", "00" * 32),
         )
         for sid in (GATED, VICTIM)
@@ -595,16 +597,20 @@ _SEED = [
     # every user the victim rows name — but only in GATED.
     *[
         (
-            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
-            " VALUES(?,?,?,?)",
+            (
+                "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+                " VALUES(?,?,?,?)"
+            ),
             (GATED, SENDER, uid, "admin" if uid == "u-evil" else "member"),
         )
         for uid in SEATED_IN_GATED
     ],
     *[
         (
-            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
-            " VALUES(?,?,?,?)",
+            (
+                "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+                " VALUES(?,?,?,?)"
+            ),
             (VICTIM, VICTIM_HOUSE, uid, role),
         )
         for uid, role in (("u-b", "member"), ("u-b-admin", "admin"))
@@ -612,8 +618,10 @@ _SEED = [
     # Posts: one per space (poll + schedule wrapper), one listing anchor in B.
     *[
         (
-            "INSERT INTO space_posts(id, space_id, author, type, content)"
-            " VALUES(?,?,?,?,?)",
+            (
+                "INSERT INTO space_posts(id, space_id, author, type, content)"
+                " VALUES(?,?,?,?,?)"
+            ),
             (pid, sid, "u-" + sid[-1], "poll", "body"),
         )
         for pid, sid in (
@@ -623,61 +631,83 @@ _SEED = [
         )
     ],
     (
-        "INSERT INTO space_post_comments(id, post_id, author, type, content)"
-        " VALUES('cmt-b', 'post-b', 'u-b', 'text', 'B comment')",
+        (
+            "INSERT INTO space_post_comments(id, post_id, author, type, content)"
+            " VALUES('cmt-b', 'post-b', 'u-b', 'text', 'B comment')"
+        ),
         (),
     ),
     *[
         (
-            "INSERT INTO space_task_lists(id, space_id, name, created_by)"
-            " VALUES(?,?,?,?)",
+            (
+                "INSERT INTO space_task_lists(id, space_id, name, created_by)"
+                " VALUES(?,?,?,?)"
+            ),
             (lid, sid, "L", "u-x"),
         )
         for lid, sid in (("list-a", GATED), ("list-b", VICTIM))
     ],
     (
-        "INSERT INTO space_tasks(id, list_id, space_id, title, created_by)"
-        " VALUES('task-b', 'list-b', ?, 'B task', 'u-b')",
+        (
+            "INSERT INTO space_tasks(id, list_id, space_id, title, created_by)"
+            " VALUES('task-b', 'list-b', ?, 'B task', 'u-b')"
+        ),
         (VICTIM,),
     ),
     (
-        "INSERT INTO space_pages(id, space_id, title, content, created_by)"
-        " VALUES('page-b', ?, 'B page', 'body', 'u-b')",
+        (
+            "INSERT INTO space_pages(id, space_id, title, content, created_by)"
+            " VALUES('page-b', ?, 'B page', 'body', 'u-b')"
+        ),
         (VICTIM,),
     ),
     (
-        "INSERT INTO pages(id, title, content, created_by)"
-        " VALUES('page-home', 'Personal', 'body', ?)",
+        (
+            "INSERT INTO pages(id, title, content, created_by)"
+            " VALUES('page-home', 'Personal', 'body', ?)"
+        ),
         (LOCAL_USER,),
     ),
     (
-        "INSERT INTO stickies(id, space_id, author, content)"
-        " VALUES('sticky-b', ?, 'u-b', 'B sticky')",
+        (
+            "INSERT INTO stickies(id, space_id, author, content)"
+            " VALUES('sticky-b', ?, 'u-b', 'B sticky')"
+        ),
         (VICTIM,),
     ),
     (
-        "INSERT INTO stickies(id, space_id, author, content)"
-        " VALUES('sticky-home', NULL, ?, 'Household sticky')",
+        (
+            "INSERT INTO stickies(id, space_id, author, content)"
+            " VALUES('sticky-home', NULL, ?, 'Household sticky')"
+        ),
         (LOCAL_USER,),
     ),
     (
-        "INSERT INTO calendars(id, name, owner_username)"
-        " VALUES('cal-home', 'Home', 'local')",
+        (
+            "INSERT INTO calendars(id, name, owner_username)"
+            " VALUES('cal-home', 'Home', 'local')"
+        ),
         (),
     ),
     (
-        "INSERT INTO calendar_events(id, calendar_id, summary, start_dt, end_dt,"
-        " created_by) VALUES('ev-home', 'cal-home', 'Dentist', ?, ?, ?)",
+        (
+            "INSERT INTO calendar_events(id, calendar_id, summary, start_dt, end_dt,"
+            " created_by) VALUES('ev-home', 'cal-home', 'Dentist', ?, ?, ?)"
+        ),
         (_OCC, "2026-06-10T19:00:00+00:00", LOCAL_USER),
     ),
     (
-        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
-        " end_dt, created_by) VALUES('ev-b', ?, 'B event', ?, ?, 'u-b')",
+        (
+            "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
+            " end_dt, created_by) VALUES('ev-b', ?, 'B event', ?, ?, 'u-b')"
+        ),
         (VICTIM, _OCC, "2026-06-10T19:00:00+00:00"),
     ),
     (
-        "INSERT INTO space_calendar_rsvps(event_id, user_id, status,"
-        " occurrence_at, updated_at) VALUES('ev-b', 'u-b', 'going', ?, ?)",
+        (
+            "INSERT INTO space_calendar_rsvps(event_id, user_id, status,"
+            " occurrence_at, updated_at) VALUES('ev-b', 'u-b', 'going', ?, ?)"
+        ),
         (_OCC, "2026-05-01T00:00:00+00:00"),
     ),
     *[
@@ -707,21 +737,27 @@ _SEED = [
     ],
     *[
         (
-            "INSERT INTO space_schedule_slots(id, post_id, slot_date)"
-            " VALUES(?, ?, '2026-07-01')",
+            (
+                "INSERT INTO space_schedule_slots(id, post_id, slot_date)"
+                " VALUES(?, ?, '2026-07-01')"
+            ),
             (slot, pid),
         )
         for slot, pid in (("slot-a", "post-a"), ("slot-b", "post-b"))
     ],
     (
-        "INSERT INTO space_schedule_responses(slot_id, user_id, availability)"
-        " VALUES('slot-b', 'u-b', 'yes')",
+        (
+            "INSERT INTO space_schedule_responses(slot_id, user_id, availability)"
+            " VALUES('slot-b', 'u-b', 'yes')"
+        ),
         (),
     ),
     *[
         (
-            "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
-            " item_count) VALUES(?, ?, ?, 'Album', 1)",
+            (
+                "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
+                " item_count) VALUES(?, ?, ?, 'Album', 1)"
+            ),
             (aid, sid, LOCAL_USER),
         )
         for aid, sid in (
@@ -732,29 +768,37 @@ _SEED = [
     ],
     *[
         (
-            "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
-            " filename, thumbnail_filename, width, height)"
-            " VALUES(?, ?, ?, 'photo', 'f.webp', 't.webp', 1, 1)",
+            (
+                "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
+                " filename, thumbnail_filename, width, height)"
+                " VALUES(?, ?, ?, 'photo', 'f.webp', 't.webp', 1, 1)"
+            ),
             (iid, aid, LOCAL_USER),
         )
         for iid, aid in (("gi-b", "album-b"), ("gi-home", "album-home"))
     ],
     (
-        "INSERT INTO space_zones(id, space_id, name, latitude, longitude,"
-        " radius_m, created_by, created_at, updated_at)"
-        " VALUES('zone-b', ?, 'Home', 47.1, 8.5, 100, 'u-b', ?, ?)",
+        (
+            "INSERT INTO space_zones(id, space_id, name, latitude, longitude,"
+            " radius_m, created_by, created_at, updated_at)"
+            " VALUES('zone-b', ?, 'Home', 47.1, 8.5, 100, 'u-b', ?, ?)"
+        ),
         (VICTIM, _NOW, _NOW),
     ),
     (
-        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode,"
-        " title, end_time, currency) VALUES('post-b-listing', ?, 'u-b', 'offer',"
-        " 'Bike', '2099-01-01T00:00:00', 'EUR')",
+        (
+            "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode,"
+            " title, end_time, currency) VALUES('post-b-listing', ?, 'u-b', 'offer',"
+            " 'Bike', '2099-01-01T00:00:00', 'EUR')"
+        ),
         (VICTIM,),
     ),
     (
-        "INSERT INTO space_timetables(id, space_id, name, created_by, updated_by,"
-        " created_at, updated_at) VALUES('tt-b', ?, 'B plan', 'u-b-admin',"
-        " 'u-b-admin', ?, ?)",
+        (
+            "INSERT INTO space_timetables(id, space_id, name, created_by, updated_by,"
+            " created_at, updated_at) VALUES('tt-b', ?, 'B plan', 'u-b-admin',"
+            " 'u-b-admin', ?, ?)"
+        ),
         (
             VICTIM,
             "2026-06-01T10:00:00.000000+00:00",
@@ -762,8 +806,10 @@ _SEED = [
         ),
     ),
     (
-        "INSERT INTO bazaar_bids(id, listing_post_id, bidder_user_id, amount)"
-        " VALUES('bid-b', 'post-b-listing', 'u-b2', 50)",
+        (
+            "INSERT INTO bazaar_bids(id, listing_post_id, bidder_user_id, amount)"
+            " VALUES('bid-b', 'post-b-listing', 'u-b2', 50)"
+        ),
         (),
     ),
     # Space chats (v_55): our local user writes in both spaces, so each
@@ -778,8 +824,10 @@ _SEED = [
     ],
     *[
         (
-            "INSERT INTO conversations(id, type, system_scope, space_id)"
-            " VALUES(?, 'group_dm', ?, ?)",
+            (
+                "INSERT INTO conversations(id, type, system_scope, space_id)"
+                " VALUES(?, 'group_dm', ?, ?)"
+            ),
             (cid, scope, sid),
         )
         for cid, scope, sid in (
@@ -790,15 +838,19 @@ _SEED = [
     ],
     *[
         (
-            "INSERT INTO conversation_messages(id, conversation_id,"
-            " sender_user_id, content) VALUES(?, ?, 'u-b', 'hello')",
+            (
+                "INSERT INTO conversation_messages(id, conversation_id,"
+                " sender_user_id, content) VALUES(?, ?, 'u-b', 'hello')"
+            ),
             (mid, cid),
         )
         for mid, cid in ((CHAT_MSG_B, "chat-b"), ("dm-msg-home", "dm-home"))
     ],
     (
-        "INSERT INTO message_reactions(message_id, user_id, emoji)"
-        " VALUES(?, 'u-b', '👍')",
+        (
+            "INSERT INTO message_reactions(message_id, user_id, emoji)"
+            " VALUES(?, 'u-b', '👍')"
+        ),
         (CHAT_MSG_B,),
     ),
 ]
@@ -828,7 +880,7 @@ def _event(event_type, payload, *, space_id=GATED, sender=SENDER) -> FederationE
         event_type=event_type,
         from_instance=sender,
         to_instance="us",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=space_id,
     )

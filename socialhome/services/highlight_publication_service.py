@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiohttp
 
@@ -58,12 +58,12 @@ class HighlightPublicationService(ProtectionGateMixin):
     """SH-side orchestrator for the publish / revoke / unpublish flow."""
 
     __slots__ = (
-        "_highlights",
-        "_gfs",
-        "_http_client",
-        "_signing_key",
-        "_own_instance_id",
         "_child_protection",
+        "_gfs",
+        "_highlights",
+        "_http_client",
+        "_own_instance_id",
+        "_signing_key",
     )
 
     def __init__(
@@ -160,7 +160,7 @@ class HighlightPublicationService(ProtectionGateMixin):
         await self._highlights.mark_published(
             highlight.id,
             gfs_id=gfs_id,
-            published_at=datetime.now(timezone.utc).isoformat(),
+            published_at=datetime.now(UTC).isoformat(),
         )
         return {"token": token, "url": url, "label": label}
 

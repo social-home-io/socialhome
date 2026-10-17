@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -907,22 +907,22 @@ class _ModSpaces(_Spaces):
 
 
 def _queued(**over):
-    base = dict(
-        id="item-1",
-        space_id=SPACE,
-        feature="tasks",
-        action="create",
-        submitted_by="u-author",
-        payload={
+    base = {
+        "id": "item-1",
+        "space_id": SPACE,
+        "feature": "tasks",
+        "action": "create",
+        "submitted_by": "u-author",
+        "payload": {
             "entity": "list",
             "target_id": "list-1",
             "name": "Groceries",
         },
-        current_snapshot=None,
-        submitted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        expires_at=datetime(2026, 1, 8, tzinfo=timezone.utc),
-        status=ModerationStatus.PENDING,
-    )
+        "current_snapshot": None,
+        "submitted_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "expires_at": datetime(2026, 1, 8, tzinfo=UTC),
+        "status": ModerationStatus.PENDING,
+    }
     base.update(over)
     return SpaceModerationItem(**base)
 

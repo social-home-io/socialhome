@@ -20,17 +20,18 @@ Entry point: ``python -m socialhome.app`` (or via ``socialhome/__main__.py``).
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
-from typing import Any
 import pathlib
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import aiohttp
 import aiolibdatachannel as rtc
 import orjson
 from aiohttp import web
 
+from . import __version__
 from . import app_keys as K
 from .access_log import RedactingAccessLogger
 from .auth import (
@@ -40,279 +41,46 @@ from .auth import (
     SignedMediaStrategy,
     require_auth,
 )
-from .exception_text import describe_exception
 from .config import Config
 from .crypto import REPLAY_CACHE_WINDOW
+from .dashboard.advertiser import DisplayAdvertiser
+from .dashboard.app import build_dashboard_app
+from .dashboard.auth import DashboardAuth
+from .dashboard.controller import DashboardController, address_hosts, local_hostnames
+from .dashboard.render import DashboardRenderer
+from .dashboard.server import DashboardServer
 from .db import AsyncDatabase
+from .domain.conversation import SystemChatScope
+from .domain.events import PeerProtoVersionRaised
 from .domain.federation import (
     DELIVERY_ERROR_RELAY_TOO_LARGE,
     FederationEventType,
     InstanceSource,
     PairingStatus,
 )
+from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
+from .domain.space import ContentAction
+from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
-from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
-from .federation.transport import (
-    FederationTransport,
-    HttpsInboxTransport,
-    https_failure_is_relayable,
-)
-from .hardening import (
-    DEFAULT_JSON_MAX_BYTES,
-    build_body_size_middleware,
-    build_cors_deny_middleware,
-    install_security_headers,
-)
-from .i18n import Catalog
-from .identity_bootstrap import ensure_instance_identity
-from .infrastructure.user_identity import ensure_user_identities
-from .media_signer import MediaUrlSigner, derive_signing_key
-from .outbound_fetch import OutboundFetcher
-from .peer_http import post_to_peer
-from . import __version__
-from .infrastructure import (
-    PAIR_WINDOW_404_ATTEMPTS,
-    DeliveryOutcome,
-    EventBus,
-    IdempotencyCache,
-    KeyManager,
-    OutboxProcessor,
-    ReconnectSyncQueue,
-    RetryAfter,
-    WebSocketManager,
-)
-from .infrastructure.page_lock_scheduler import PageLockExpiryScheduler
-from .infrastructure.calendar_reminder_scheduler import (
-    CalendarReminderScheduler,
-)
-from .infrastructure.task_deadline_scheduler import TaskDeadlineScheduler
-from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
-from .infrastructure.post_draft_scheduler import PostDraftCleanupScheduler
-from .infrastructure.gfs_capability_warmup import GfsCapabilityWarmup
-from .infrastructure.gfs_info_refresh_scheduler import GfsInfoRefreshScheduler
-from .infrastructure.gfs_reconcile_retry import GfsReconcileRetry
-from .infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
-from .infrastructure.dm_gc_scheduler import DmGcScheduler
-from .infrastructure.media_orphan_sweep_scheduler import MediaOrphanSweepScheduler
-from .infrastructure.dm_relay_seen_scheduler import DmRelaySeenPruneScheduler
-from .infrastructure.pairing_relay_scheduler import PairingRelayRetentionScheduler
-from .infrastructure.pairing_session_prune_scheduler import (
-    PairingSessionPruneScheduler,
-)
-from .infrastructure.auth_audit_cleanup_scheduler import AuthAuditCleanupScheduler
-from .infrastructure.notification_cleanup_scheduler import (
-    NotificationCleanupScheduler,
-)
-from .infrastructure.password_reset_cleanup_scheduler import (
-    PasswordResetCleanupScheduler,
-)
-from .infrastructure.user_status_expiry_scheduler import UserStatusExpiryScheduler
-from .infrastructure.audio_transcript_scheduler import AudioTranscriptScheduler
-from .infrastructure.app_pending_session_scheduler import (
-    AppPendingSessionPruneScheduler,
-)
-from .infrastructure.replay_cache_scheduler import ReplayCachePruneScheduler
-from .infrastructure.gfs_route_discovery_scheduler import GfsRouteDiscoveryScheduler
-from .infrastructure.moderation_expiry_scheduler import ModerationExpiryScheduler
-from .infrastructure.space_retention_scheduler import SpaceRetentionScheduler
-from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
-from .infrastructure.highlight_retention_scheduler import HighlightRetentionScheduler
-from .platform import build_platform_adapter
-from .platform.adapter import Capability, PlatformAdapter
-from .dashboard.app import build_dashboard_app
-from .dashboard.advertiser import DisplayAdvertiser
-from .dashboard.controller import DashboardController, address_hosts, local_hostnames
-from .dashboard.auth import DashboardAuth
-from .dashboard.render import DashboardRenderer
-from .dashboard.server import DashboardServer
-from .repositories.instance_config_repo import SqliteInstanceConfigRepo
-from .services.dashboard_display_service import DashboardDisplayService
-from .services.dashboard_settings_service import DashboardSettingsService
-from .rate_limiter import RateLimiter, build_rate_limit_middleware
-from .webrtc_ice import build_ice_servers, warn_if_no_turn, warn_if_turn_unusable
-from .repositories import (
-    SqliteBazaarRepo,
-    SqliteCalendarRepo,
-    SqliteConversationRepo,
-    SqliteFederationRepo,
-    SqliteNotificationRepo,
-    SqliteOutboxRepo,
-    SqlitePageRepo,
-    SqlitePeerUserVisibilityRepo,
-    SqlitePostRepo,
-    SqlitePushSubscriptionRepo,
-    SqliteShoppingRepo,
-    SqliteSpaceCalendarRepo,
-    SqliteSpacePostRepo,
-    SqliteSpaceRepo,
-    SqliteSpaceTaskRepo,
-    SqliteStickyRepo,
-    SqliteTaskRepo,
-    SqliteUserRepo,
-)
-from .repositories.call_repo import SqliteCallRepo
-from .repositories.cp_repo import SqliteCpRepo
-from .repositories.federation_repo import AbstractFederationRepo
-from .repositories.gfs_space_seat_repo import SqliteGfsSpaceSeatRepo
-from .repositories.gfs_connection_repo import (
-    AbstractGfsConnectionRepo,
-    SqliteGfsConnectionRepo,
-)
-from .repositories.dm_contact_repo import SqliteDmContactRepo
-from .repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
-from .repositories.space_media_outbox_repo import SqliteSpaceMediaOutboxRepo
-from .repositories.dm_routing_repo import SqliteDmRoutingRepo
-from .repositories.gallery_repo import SqliteGalleryRepo
-from .repositories.media_transcode_repo import SqliteMediaTranscodeRepo
-from .repositories.alias_repo import SqliteAliasRepo
-from .repositories.app_repo import SqliteAppRepo
-from .repositories.preferences_repo import SqlitePreferencesRepo
-from .repositories.pairing_relay_repo import SqlitePairingRelayRepo
-from .repositories.password_reset_repo import SqlitePasswordResetRepo
-from .repositories.auth_audit_log_repo import SqliteAuthAuditLogRepo
-from .repositories.poll_repo import SqlitePollRepo
-from .repositories.space_poll_repo import SqliteSpacePollRepo
-from .repositories.profile_picture_repo import SqliteProfilePictureRepo
-from .repositories.space_bot_repo import SqliteSpaceBotRepo
-from .repositories.space_cover_repo import SqliteSpaceCoverRepo
-from .repositories.space_icon_repo import SqliteSpaceIconRepo
-from .repositories.space_sync_watermark_repo import SqliteSpaceSyncWatermarkRepo
-from .repositories.space_zone_repo import SqliteSpaceZoneRepo
-from .repositories.household_zone_repo import SqliteHouseholdZoneRepo
-from .repositories.moment_repo import SqliteMomentRepo
-from .repositories.highlight_repo import SqliteHighlightRepo
-from .repositories.presence_repo import SqlitePresenceRepo
-from .repositories.peer_space_directory_repo import SqlitePeerSpaceDirectoryRepo
-from .repositories.public_space_repo import SqlitePublicSpaceRepo
-from .repositories.space_remote_location_repo import (
-    SqliteSpaceRemoteLocationRepo,
-)
-from .repositories.space_remote_member_repo import SqliteSpaceRemoteMemberRepo
-from .repositories.space_proposal_repo import SqliteSpaceProposalRepo
-from .services.space_authority_pin import owner_statement_for_delegated
-from .services.space_service import own_inviter_proof
-from .services.space_approval_service import SpaceApprovalService
-from .repositories.report_repo import SqliteReportRepo
-from .repositories.search_repo import SqliteSearchRepo
-from .repositories.space_key_repo import SqliteSpaceKeyRepo
-from .repositories.theme_repo import SqliteThemeRepo
-from .repositories.timetable_repo import (
-    SqliteSpaceTimetableRepo,
-    SqliteTimetableRepo,
-)
-from .routes import setup_routes
-from .services.auto_pair_inbox import AutoPairInbox
-from .services import (
-    DmService,
-    FeedService,
-    NotificationService,
-    SpaceService,
-    UserService,
-)
-from .services.backup_service import BackupService
-from .services.bazaar_service import BazaarExpiryScheduler, BazaarService
-from .services.moment_service import MomentService
-from .services.highlight_publication_service import HighlightPublicationService
-from .services.moment_public_service import MomentPublicService
-from .services.profile_sync_service import ProfileSyncService
-from .services.moment_public_outbound import MomentPublicOutbound
-from .services.space_config_outbound import SpaceConfigOutbound
-from .services.gfs_member_publish_service import GfsMemberPublishService
-from .services.space_post_outbound import SpacePostOutbound
-from .services.space_authority_rotation_service import SpaceAuthorityRotationService
-from .services.space_public_inbound import SpacePublicInbound
-from .services.gfs_channel_service import GfsChannelService
-from .services.space_mentions import SpaceMentionResolver
-from .services.space_public_outbound import SpacePublicOutbound
-from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
-from .services.space_subscriber_key_outbound import SpaceSubscriberKeyOutbound
-from .services.space_writer_cert_service import SpaceWriterCertService
-from .services.moment_public_inbound import MomentPublicInbound
-from .repositories.moment_public_repo import (
-    SqliteMomentPublicFollowRepo,
-    SqliteMomentPublicRegistrationRepo,
-)
-from .services.highlight_service import HighlightService
-from .services.highlight_signaling_handler import HighlightSignalingHandler
-from .services.moment_public_signaling_handler import MomentPublicSignalingHandler
-from .services.bot_bridge_service import BotBridgeService
-from .services.space_bot_service import SpaceBotService
-from .services.calendar_import_service import CalendarImportService
-from .services.calendar_service import (
-    CalendarModerationHandler,
-    CalendarService,
-    SpaceCalendarService,
-)
-from .services.child_protection_service import ChildProtectionService
-from .services.audio_transcription_service import AudioTranscriptionService
-from .services.data_export_service import DataExportService
-from .repositories.media_reference_repo import SqliteMediaReferenceRepo
-from .services.dm_media_sync_service import DmMediaSyncService
-from .services.media_orphan_sweep_service import MediaOrphanSweepService
-from .services.space_media_sync_service import SpaceMediaSyncService
-from .services.dm_routing_service import DmRoutingService
-from .services.federation_inbound_service import FederationInboundService
-from .services.friends_service import FriendsService
-from .services.user_move_service import UserMoveService
-from .services.relay_policy import RelayPolicy
-from .repositories.instance_ban_repo import SqliteHouseholdInstanceBanRepo
-from .services.poll_federation_outbound import PollFederationOutbound
-from .services.calendar_feed_bridge import CalendarFeedBridge
-from .services.space_rsvp_mirror_bridge import SpaceRsvpMirrorBridge
-from .services.schedule_calendar_bridge import ScheduleCalendarBridge
-from .services.space_calendar_reminder_scheduler import (
-    SpaceCalendarReminderScheduler,
-)
-from .services.app_update_scheduler import AppUpdateScheduler
-from .services.schedule_federation_outbound import ScheduleFederationOutbound
-from .services.corner_service import CornerService
-from .federation.peer_directory_handler import PeerDirectoryHandler
+from .federation.gfs_relay_transport import GfsRelayTransport
 from .federation.invite_link_forward import InviteLinkForwardCoordinator
 from .federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
-from .federation.route_discovery import RouteDiscoveryService
-from .federation.gfs_relay_transport import GfsRelayTransport
 from .federation.pairing_gfs_reach import PairingGfsReach
-from .federation.routed_envelope import SpaceRoutedHandler
+from .federation.peer_directory_handler import PeerDirectoryHandler
+from .federation.pending_parent_buffer import PendingParentBuffer
+from .federation.pending_seat_buffer import PendingSeatBuffer
 from .federation.private_invite_handler import PrivateSpaceInviteHandler
-from .services.peer_directory_service import PeerDirectoryService
-from .services.profile_federation_outbound import ProfileFederationOutbound
-from .services.user_status_outbound import UserStatusOutbound
-from .services.users_sync_outbound import UsersSyncOutbound
-from .services.capabilities_outbound import CapabilitiesOutbound
-from .services.url_update_outbound import UrlUpdateOutbound
-from .services.space_member_profile_federation_outbound import (
-    SpaceMemberProfileFederationOutbound,
-)
-from .services.bazaar_outbound import BazaarOutbound
-from .services.gallery_federation_outbound import GalleryFederationOutbound
-from .services.sticky_federation_outbound import StickyFederationOutbound
-from .services.moment_federation_outbound import MomentFederationOutbound
-from .services.highlight_federation_outbound import HighlightFederationOutbound
-from .services.space_location_outbound import SpaceLocationOutbound
-from .services.space_zone_outbound import SpaceZoneOutbound
-from .services.space_zone_service import SpaceZoneService
-from .services.page_federation_outbound import PageFederationOutbound
-from .services.pairing_cancel_service import PairingCancelService
-from .services.peer_unpair_service import PeerUnpairService
-from .services.task_federation_outbound import TaskFederationOutbound
-from .services.timetable_federation_outbound import TimetableFederationOutbound
-from .services.federation_inbound import (
-    PairingInboundHandlers,
-    PersonalCalendarInboundHandlers,
-    ResyncInboundHandlers,
-    SpaceChatInboundHandlers,
-    SpaceContentInboundHandlers,
-    SpaceInviteInboundHandlers,
-    SpaceMembershipInboundHandlers,
-)
+from .federation.route_discovery import RouteDiscoveryService
+from .federation.routed_envelope import SpaceRoutedHandler
+from .federation.space_authorship import SpaceAuthorship
 from .federation.sync import (
     BansExporter,
-    ChatMessagesDeletedExporter,
-    ChatMessagesExporter,
     BazaarExporter,
     CalendarDeletedExporter,
     CalendarExporter,
+    ChatMessagesDeletedExporter,
+    ChatMessagesExporter,
     ChunkBuilder,
     CommentsDeletedExporter,
     CommentsExporter,
@@ -347,84 +115,316 @@ from .federation.sync.dm_history import (
     DmHistoryReceiver,
     DmHistoryScheduler,
 )
-from .domain.conversation import SystemChatScope
-from .domain.events import PeerProtoVersionRaised
-from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
-from .domain.space import ContentAction
-from .federation.pending_parent_buffer import PendingParentBuffer
-from .federation.pending_seat_buffer import PendingSeatBuffer
-from .federation.space_authorship import SpaceAuthorship
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
-from .services.legacy_album_deletes import LegacyAlbumDeletes
-from .services.gallery_service import GalleryService
-from .services.media_transcode_service import MediaTranscodeService
+from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
+from .federation.transport import (
+    FederationTransport,
+    HttpsInboxTransport,
+    https_failure_is_relayable,
+)
+from .hardening import (
+    DEFAULT_JSON_MAX_BYTES,
+    build_body_size_middleware,
+    build_cors_deny_middleware,
+    install_security_headers,
+)
+from .i18n import Catalog
+from .identity_bootstrap import ensure_instance_identity
+from .infrastructure import (
+    PAIR_WINDOW_404_ATTEMPTS,
+    DeliveryOutcome,
+    EventBus,
+    IdempotencyCache,
+    KeyManager,
+    OutboxProcessor,
+    ReconnectSyncQueue,
+    RetryAfter,
+    WebSocketManager,
+)
+from .infrastructure.app_pending_session_scheduler import (
+    AppPendingSessionPruneScheduler,
+)
+from .infrastructure.audio_transcript_scheduler import AudioTranscriptScheduler
+from .infrastructure.auth_audit_cleanup_scheduler import AuthAuditCleanupScheduler
+from .infrastructure.calendar_reminder_scheduler import (
+    CalendarReminderScheduler,
+)
+from .infrastructure.dm_gc_scheduler import DmGcScheduler
+from .infrastructure.dm_relay_seen_scheduler import DmRelaySeenPruneScheduler
+from .infrastructure.gfs_capability_warmup import GfsCapabilityWarmup
+from .infrastructure.gfs_info_refresh_scheduler import GfsInfoRefreshScheduler
+from .infrastructure.gfs_reconcile_retry import GfsReconcileRetry
+from .infrastructure.gfs_route_discovery_scheduler import GfsRouteDiscoveryScheduler
+from .infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
+from .infrastructure.highlight_retention_scheduler import HighlightRetentionScheduler
+from .infrastructure.media_orphan_sweep_scheduler import MediaOrphanSweepScheduler
+from .infrastructure.moderation_expiry_scheduler import ModerationExpiryScheduler
+from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
+from .infrastructure.notification_cleanup_scheduler import (
+    NotificationCleanupScheduler,
+)
+from .infrastructure.page_lock_scheduler import PageLockExpiryScheduler
+from .infrastructure.pairing_relay_scheduler import PairingRelayRetentionScheduler
+from .infrastructure.pairing_session_prune_scheduler import (
+    PairingSessionPruneScheduler,
+)
+from .infrastructure.password_reset_cleanup_scheduler import (
+    PasswordResetCleanupScheduler,
+)
+from .infrastructure.post_draft_scheduler import PostDraftCleanupScheduler
+from .infrastructure.replay_cache_scheduler import ReplayCachePruneScheduler
+from .infrastructure.space_retention_scheduler import SpaceRetentionScheduler
+from .infrastructure.task_deadline_scheduler import TaskDeadlineScheduler
+from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
+from .infrastructure.user_identity import ensure_user_identities
+from .infrastructure.user_status_expiry_scheduler import UserStatusExpiryScheduler
 from .media.image_processor import ImageProcessor
 from .media.video_processor import VideoProcessor
-from .services.system_album_bridge import SystemAlbumBridge
-from .services.pairing_relay_queue import PairingRelayQueue
+from .media_signer import MediaUrlSigner, derive_signing_key
+from .outbound_fetch import OutboundFetcher
+from .peer_http import post_to_peer
+from .platform import build_platform_adapter
+from .platform.adapter import Capability, PlatformAdapter
+from .rate_limiter import RateLimiter, build_rate_limit_middleware
+from .repositories import (
+    SqliteBazaarRepo,
+    SqliteCalendarRepo,
+    SqliteConversationRepo,
+    SqliteFederationRepo,
+    SqliteNotificationRepo,
+    SqliteOutboxRepo,
+    SqlitePageRepo,
+    SqlitePeerUserVisibilityRepo,
+    SqlitePostRepo,
+    SqlitePushSubscriptionRepo,
+    SqliteShoppingRepo,
+    SqliteSpaceCalendarRepo,
+    SqliteSpacePostRepo,
+    SqliteSpaceRepo,
+    SqliteSpaceTaskRepo,
+    SqliteStickyRepo,
+    SqliteTaskRepo,
+    SqliteUserRepo,
+)
+from .repositories.alias_repo import SqliteAliasRepo
+from .repositories.app_repo import SqliteAppRepo
+from .repositories.auth_audit_log_repo import SqliteAuthAuditLogRepo
+from .repositories.call_repo import SqliteCallRepo
+from .repositories.cp_repo import SqliteCpRepo
+from .repositories.dm_contact_repo import SqliteDmContactRepo
+from .repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
+from .repositories.dm_routing_repo import SqliteDmRoutingRepo
+from .repositories.federation_repo import AbstractFederationRepo
+from .repositories.gallery_repo import SqliteGalleryRepo
+from .repositories.gfs_connection_repo import (
+    AbstractGfsConnectionRepo,
+    SqliteGfsConnectionRepo,
+)
+from .repositories.gfs_space_seat_repo import SqliteGfsSpaceSeatRepo
+from .repositories.highlight_repo import SqliteHighlightRepo
+from .repositories.household_zone_repo import SqliteHouseholdZoneRepo
+from .repositories.instance_ban_repo import SqliteHouseholdInstanceBanRepo
+from .repositories.instance_config_repo import SqliteInstanceConfigRepo
+from .repositories.media_reference_repo import SqliteMediaReferenceRepo
+from .repositories.media_transcode_repo import SqliteMediaTranscodeRepo
+from .repositories.moment_public_repo import (
+    SqliteMomentPublicFollowRepo,
+    SqliteMomentPublicRegistrationRepo,
+)
+from .repositories.moment_repo import SqliteMomentRepo
+from .repositories.pairing_relay_repo import SqlitePairingRelayRepo
+from .repositories.password_reset_repo import SqlitePasswordResetRepo
+from .repositories.peer_space_directory_repo import SqlitePeerSpaceDirectoryRepo
+from .repositories.poll_repo import SqlitePollRepo
+from .repositories.preferences_repo import SqlitePreferencesRepo
+from .repositories.presence_repo import SqlitePresenceRepo
+from .repositories.profile_picture_repo import SqliteProfilePictureRepo
+from .repositories.public_space_repo import SqlitePublicSpaceRepo
+from .repositories.report_repo import SqliteReportRepo
+from .repositories.search_repo import SqliteSearchRepo
+from .repositories.space_bot_repo import SqliteSpaceBotRepo
+from .repositories.space_cover_repo import SqliteSpaceCoverRepo
+from .repositories.space_icon_repo import SqliteSpaceIconRepo
+from .repositories.space_key_repo import SqliteSpaceKeyRepo
+from .repositories.space_media_outbox_repo import SqliteSpaceMediaOutboxRepo
+from .repositories.space_poll_repo import SqliteSpacePollRepo
+from .repositories.space_proposal_repo import SqliteSpaceProposalRepo
+from .repositories.space_remote_location_repo import (
+    SqliteSpaceRemoteLocationRepo,
+)
+from .repositories.space_remote_member_repo import SqliteSpaceRemoteMemberRepo
+from .repositories.space_sync_watermark_repo import SqliteSpaceSyncWatermarkRepo
+from .repositories.space_zone_repo import SqliteSpaceZoneRepo
+from .repositories.theme_repo import SqliteThemeRepo
+from .repositories.timetable_repo import (
+    SqliteSpaceTimetableRepo,
+    SqliteTimetableRepo,
+)
+from .routes import setup_routes
+from .services import (
+    DmService,
+    FeedService,
+    NotificationService,
+    SpaceService,
+    UserService,
+)
 from .services.alias_service import AliasResolver, AliasService
-from .services.person_summary_service import PersonSummaryService
 from .services.app_catalog_service import AppCatalogService
 from .services.app_federation_service import AppFederationService
 from .services.app_service import AppService
-from .services.resync_on_upgrade import request_capability_resync_if_upgraded
-from .services.preferences_service import PreferencesService
-from .services.household_chat_service import HouseholdChatService
-from .services.household_dashboard_service import HouseholdDashboardService
-from .services.space_chat_outbound import SpaceChatAudience, SpaceChatOutbound
-from .services.space_chat_service import SpaceChatService
-from .services.system_chat_policy import (
-    HouseholdChatAccess,
-    SpaceChatAccess,
-    SystemChatPolicy,
+from .services.app_update_scheduler import AppUpdateScheduler
+from .services.audio_transcription_service import AudioTranscriptionService
+from .services.auto_pair_inbox import AutoPairInbox
+from .services.backup_service import BackupService
+from .services.bazaar_outbound import BazaarOutbound
+from .services.bazaar_service import BazaarExpiryScheduler, BazaarService
+from .services.bot_bridge_service import BotBridgeService
+from .services.calendar_feed_bridge import CalendarFeedBridge
+from .services.calendar_import_service import CalendarImportService
+from .services.calendar_service import (
+    CalendarModerationHandler,
+    CalendarService,
+    SpaceCalendarService,
 )
-from .services.page_conflict_service import PageConflictService
-from .services.page_proposal_forwarder import PageProposalForwarder
-from .services.space_page_service import PageModerationHandler, SpacePageService
-from .services.space_moderation_federation import SpaceModerationFederation
-from .services.space_moderation_service import SpaceModerationService
-from .services.space_post_moderation import PostModerationHandler, SpacePostAttachments
-from .services.poll_service import PollService
-from .services.online_status_service import OnlineStatusService
-from .services.presence_service import PresenceService
-from .services.household_zone_service import HouseholdZoneService
-from .services.household_zone_sync import HouseholdZoneSync
+from .services.call_service import CallSignalingService, StaleCallCleanupScheduler
+from .services.capabilities_outbound import CapabilitiesOutbound
+from .services.child_protection_service import ChildProtectionService
+from .services.corner_service import CornerService
+from .services.dashboard_display_service import DashboardDisplayService
+from .services.dashboard_settings_service import DashboardSettingsService
+from .services.data_export_service import DataExportService
+from .services.dm_media_sync_service import DmMediaSyncService
+from .services.dm_routing_service import DmRoutingService
+from .services.federation_inbound import (
+    PairingInboundHandlers,
+    PersonalCalendarInboundHandlers,
+    ResyncInboundHandlers,
+    SpaceChatInboundHandlers,
+    SpaceContentInboundHandlers,
+    SpaceInviteInboundHandlers,
+    SpaceMembershipInboundHandlers,
+)
+from .services.federation_inbound_service import FederationInboundService
+from .services.friends_service import FriendsService
+from .services.gallery_federation_outbound import GalleryFederationOutbound
+from .services.gallery_service import GalleryService
+from .services.gfs_channel_service import GfsChannelService
 from .services.gfs_connection_service import GfsConnectionService
+from .services.gfs_directory import GfsDirectoryCache
 from .services.gfs_envelope_sender import GfsEnvelopeSender
+from .services.gfs_member_publish_service import GfsMemberPublishService
 from .services.gfs_relay_inbound import GfsRelayInbound
 from .services.gfs_route_discovery_service import GfsRouteDiscoveryService
-from .services.gfs_directory import GfsDirectoryCache
 from .services.gfs_server_selection_service import GfsServerSelectionService
 from .services.gfs_space_mirror_service import GfsSpaceMirrorService
+from .services.highlight_federation_outbound import HighlightFederationOutbound
+from .services.highlight_publication_service import HighlightPublicationService
+from .services.highlight_service import HighlightService
+from .services.highlight_signaling_handler import HighlightSignalingHandler
+from .services.household_chat_service import HouseholdChatService
+from .services.household_dashboard_service import HouseholdDashboardService
+from .services.household_zone_service import HouseholdZoneService
+from .services.household_zone_sync import HouseholdZoneSync
+from .services.legacy_album_deletes import LegacyAlbumDeletes
 from .services.link_preview_service import LinkPreviewService
 from .services.map_tile_service import MapTileService
-from .services.public_space_discovery_service import PublicSpaceDiscoveryService
-from .services.push_service import PushService, load_or_create_vapid
-from .services.recovery_kit_service import RecoveryKitService
-from .services.recovery_reconnect_service import RecoveryReconnectService
-from .services.report_scope import ReportScope
-from .services.report_service import ReportService
-from .services.realtime_service import RealtimeService
-from .services.search_service import SearchService
-from .services.shopping_service import ShoppingService
+from .services.media_orphan_sweep_service import MediaOrphanSweepService
+from .services.media_transcode_service import MediaTranscodeService
+from .services.moment_federation_outbound import MomentFederationOutbound
+from .services.moment_public_inbound import MomentPublicInbound
+from .services.moment_public_outbound import MomentPublicOutbound
+from .services.moment_public_service import MomentPublicService
+from .services.moment_public_signaling_handler import MomentPublicSignalingHandler
+from .services.moment_service import MomentService
+from .services.online_status_service import OnlineStatusService
+from .services.page_conflict_service import PageConflictService
+from .services.page_federation_outbound import PageFederationOutbound
+from .services.page_proposal_forwarder import PageProposalForwarder
+from .services.pairing_cancel_service import PairingCancelService
+from .services.pairing_relay_queue import PairingRelayQueue
+from .services.peer_directory_service import PeerDirectoryService
 from .services.peer_gfs_relay_service import PeerGfsRelayService
 from .services.peer_home_sharing_service import PeerHomeSharingService
+from .services.peer_unpair_service import PeerUnpairService
 from .services.pending_decrypts_cache import PendingDecryptsCache
+from .services.person_summary_service import PersonSummaryService
+from .services.poll_federation_outbound import PollFederationOutbound
+from .services.poll_service import PollService
+from .services.preferences_service import PreferencesService
+from .services.presence_service import PresenceService
+from .services.profile_federation_outbound import ProfileFederationOutbound
+from .services.profile_sync_service import ProfileSyncService
+from .services.public_space_discovery_service import PublicSpaceDiscoveryService
+from .services.push_service import PushService, load_or_create_vapid
+from .services.realtime_service import RealtimeService
+from .services.recovery_kit_service import RecoveryKitService
+from .services.recovery_reconnect_service import RecoveryReconnectService
+from .services.relay_policy import RelayPolicy
+from .services.report_scope import ReportScope
+from .services.report_service import ReportService
+from .services.resync_on_upgrade import request_capability_resync_if_upgraded
+from .services.schedule_calendar_bridge import ScheduleCalendarBridge
+from .services.schedule_federation_outbound import ScheduleFederationOutbound
+from .services.search_service import SearchService
+from .services.setup_service import SetupService
+from .services.shopping_service import ShoppingService
+from .services.space_approval_service import SpaceApprovalService
+from .services.space_authority_pin import owner_statement_for_delegated
+from .services.space_authority_rotation_service import SpaceAuthorityRotationService
+from .services.space_bot_service import SpaceBotService
+from .services.space_calendar_reminder_scheduler import (
+    SpaceCalendarReminderScheduler,
+)
+from .services.space_chat_outbound import SpaceChatAudience, SpaceChatOutbound
+from .services.space_chat_service import SpaceChatService
+from .services.space_config_outbound import SpaceConfigOutbound
 from .services.space_crypto_service import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
     SpaceContentEncryption,
 )
-from .services.storage_quota_service import StorageQuotaService
-from .services.setup_service import SetupService
-from .services.stt_service import SttService
+from .services.space_location_outbound import SpaceLocationOutbound
+from .services.space_media_sync_service import SpaceMediaSyncService
+from .services.space_member_profile_federation_outbound import (
+    SpaceMemberProfileFederationOutbound,
+)
+from .services.space_mentions import SpaceMentionResolver
+from .services.space_moderation_federation import SpaceModerationFederation
+from .services.space_moderation_service import SpaceModerationService
+from .services.space_page_service import PageModerationHandler, SpacePageService
+from .services.space_post_moderation import PostModerationHandler, SpacePostAttachments
+from .services.space_post_outbound import SpacePostOutbound
+from .services.space_public_inbound import SpacePublicInbound
+from .services.space_public_outbound import SpacePublicOutbound
+from .services.space_rsvp_mirror_bridge import SpaceRsvpMirrorBridge
+from .services.space_service import own_inviter_proof
+from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
+from .services.space_subscriber_key_outbound import SpaceSubscriberKeyOutbound
+from .services.space_writer_cert_service import SpaceWriterCertService
+from .services.space_zone_outbound import SpaceZoneOutbound
+from .services.space_zone_service import SpaceZoneService
+from .services.sticky_federation_outbound import StickyFederationOutbound
 from .services.sticky_service import StickyModerationHandler, StickyService
+from .services.storage_quota_service import StorageQuotaService
+from .services.stt_service import SttService
+from .services.system_album_bridge import SystemAlbumBridge
+from .services.system_chat_policy import (
+    HouseholdChatAccess,
+    SpaceChatAccess,
+    SystemChatPolicy,
+)
+from .services.task_federation_outbound import TaskFederationOutbound
 from .services.task_service import SpaceTaskService, TaskModerationHandler, TaskService
-from .services.timetable_service import SpaceTimetableService, TimetableService
 from .services.theme_service import ThemeService
+from .services.timetable_federation_outbound import TimetableFederationOutbound
+from .services.timetable_service import SpaceTimetableService, TimetableService
 from .services.typing_service import TypingService
-from .services.call_service import CallSignalingService, StaleCallCleanupScheduler
+from .services.url_update_outbound import UrlUpdateOutbound
+from .services.user_move_service import UserMoveService
+from .services.user_status_outbound import UserStatusOutbound
+from .services.users_sync_outbound import UsersSyncOutbound
+from .webrtc_ice import build_ice_servers, warn_if_no_turn, warn_if_turn_unusable
 
 log = logging.getLogger(__name__)
 
@@ -450,10 +450,9 @@ async def _download_bytes(url: str) -> bytes:
     fetches in ``AppCatalogService``).  Calls ``raise_for_status()`` so any
     non-2xx response surfaces as an :class:`aiohttp.ClientResponseError`.
     """
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            return await resp.read()
+    async with aiohttp.ClientSession() as session, session.get(url) as resp:
+        resp.raise_for_status()
+        return await resp.read()
 
 
 async def _deliver_outbox_entry(
@@ -508,7 +507,7 @@ def _throttled_outcome(entry, resp) -> DeliveryOutcome | RetryAfter:
         "outbox: %s rate-limited %s (HTTP 429) — retrying %s",
         entry.instance_id,
         entry.id,
-        "after its Retry-After of %ds" % retry_after_s
+        f"after its Retry-After of {int(retry_after_s)}s"
         if retry_after_s is not None
         else "on the backoff schedule",
     )
@@ -618,7 +617,9 @@ async def _redeliver_envelope(
     try:
         body = federation_service.resign_for_redelivery(entry.payload_json)
     except Exception as exc:
-        log.warning("outbox: undecodable entry %s — dropping: %s", entry.id, exc)
+        log.warning(
+            "outbox: undecodable entry %s — dropping: %s", entry.id, exc, exc_info=True
+        )
         return DeliveryOutcome.PERMANENT
 
     if instance.source is InstanceSource.SPACE_SESSION or (
@@ -696,6 +697,10 @@ async def _redeliver_envelope(
                         body_text = (await resp.text())[:200]
                         peer_rejected = "unknown_inbox" in body_text
                     except Exception:  # pragma: no cover — diagnostics only
+                        log.debug(
+                            "_redeliver_envelope: fail-soft error ignored",
+                            exc_info=True,
+                        )
                         body_text = ""
                     # Bounded, not indefinite. The race this covers clears
                     # in seconds; beyond that the peer genuinely cannot
@@ -777,6 +782,7 @@ async def _redeliver_envelope(
             entry.id,
             entry.instance_id,
             describe_exception(exc),
+            exc_info=True,
         )
     # Every 2xx and 4xx answered above. On a network error / timeout or a
     # 5xx the peer's inbox was NOT reached, so a paired peer we opted into
@@ -2107,7 +2113,7 @@ def _build_space_chat_federation(
     *,
     app: web.Application,
     bus: EventBus,
-    federation_service: "FederationService",
+    federation_service: FederationService,
     authorship: SpaceAuthorship,
     space_repo,
     remote_member_repo,
@@ -3472,7 +3478,7 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── Startup / cleanup hooks ───────────────────────────────────────────
 
-    async def _on_startup(app: web.Application) -> None:  # noqa: RUF029
+    async def _on_startup(app: web.Application) -> None:
         nonlocal key_manager, federation_service, outbox_processor
         log.info("socialhome: starting up (mode=%s)", config.mode)
         await db.startup()
@@ -4076,7 +4082,7 @@ def create_app(config: Config | None = None) -> web.Application:
         routed_handler = SpaceRoutedHandler(
             federation_service=federation_service,
             federation_repo=federation_repo,
-            event_dispatcher=federation_service._dispatch_event,  # noqa: SLF001
+            event_dispatcher=federation_service._dispatch_event,
             # The discovery service holds the target-side ephemeral
             # privates it minted in response to FIND_ROUTE probes;
             # the routed handler asks it for the matching priv when
@@ -4439,7 +4445,7 @@ def create_app(config: Config | None = None) -> web.Application:
             # left the global tier or was dissolved while this GFS was down.
             try:
                 await gfs_server_selection.retry_withdrawals(gfs_id)
-            except Exception:  # noqa: BLE001 — best-effort self-heal
+            except Exception:
                 log.exception("gfs: withdrawal retry failed for %s", gfs_id)
             # Self-heal our SUBSCRIBER seats on the GFS, the mirror image of
             # the pin heal above. ``subscribe_to_space`` POSTs
@@ -4491,7 +4497,7 @@ def create_app(config: Config | None = None) -> web.Application:
                 current_name = (local_identity or {}).get("display_name")
                 if current_name:
                     await gfs_connection_service.push_display_name(gfs_id, current_name)
-            except Exception:  # noqa: BLE001 — best-effort self-heal
+            except Exception:
                 log.warning(
                     "GFS %s: re-pushing household display_name on reconnect failed",
                     gfs_id,
@@ -4903,7 +4909,9 @@ def create_app(config: Config | None = None) -> web.Application:
             try:
                 await cap_outbound.publish()
             except Exception as exc:  # pragma: no cover
-                log.warning("capabilities outbound at startup failed: %s", exc)
+                log.warning(
+                    "capabilities outbound at startup failed: %s", exc, exc_info=True
+                )
 
         # 9b. After an upgrade (OURS increased since last boot), ask confirmed
         # peers to re-advertise their capabilities so our cached proto_version
@@ -4917,14 +4925,14 @@ def create_app(config: Config | None = None) -> web.Application:
                 identity_repo=federation_repo,
             )
         except Exception as exc:  # pragma: no cover
-            log.warning("capability-resync on upgrade failed: %s", exc)
+            log.warning("capability-resync on upgrade failed: %s", exc, exc_info=True)
 
         # 10. Household dashboard listener — last, once everything it reads
         #     is up. A taken port must not stop the main app: the admin UI
         #     shows ``running: false`` and the admin can pick another port.
         await dashboard.controller.start()
 
-    async def _on_shutdown(app: web.Application) -> None:  # noqa: RUF029
+    async def _on_shutdown(app: web.Application) -> None:
         """Tell every connected WebSocket client we're going away.
 
         Runs before ``on_cleanup`` so the handler tasks can exit their
@@ -4936,7 +4944,7 @@ def create_app(config: Config | None = None) -> web.Application:
         log.info("socialhome: shutdown — closing live WebSockets")
         await ws_manager.close_all()
 
-    async def _on_cleanup(app: web.Application) -> None:  # noqa: RUF029
+    async def _on_cleanup(app: web.Application) -> None:
         log.info("socialhome: shutting down")
         # First: the dashboard listener reads the database.
         await dashboard.controller.stop()

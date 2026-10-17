@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ....domain.space import parse_have_seq
@@ -91,22 +91,22 @@ def _parse_utc(value: str) -> datetime | None:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 class SyncWatermarks:
     """Decide a session's ``since`` and record confirmed streams."""
 
-    __slots__ = ("_repo", "_clock")
+    __slots__ = ("_clock", "_repo")
 
     def __init__(
         self,
-        repo: "AbstractSpaceSyncWatermarkRepo",
+        repo: AbstractSpaceSyncWatermarkRepo,
         *,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._repo = repo
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     async def snapshot(self) -> int:
         """The counter now — read before a stream reads any row, so a row

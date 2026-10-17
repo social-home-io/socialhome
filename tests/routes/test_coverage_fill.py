@@ -8,10 +8,9 @@ dependencies.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 from .conftest import _auth
-
 
 # ── peer_spaces (§D1a) ─────────────────────────────────────────────
 
@@ -72,7 +71,7 @@ async def test_calendar_ics_with_event(client):
         headers=_auth(client._tok),
     )
     cid = (await r.json())["id"]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.post(
         f"/api/calendars/{cid}/events",
         json={

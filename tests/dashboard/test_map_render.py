@@ -188,7 +188,7 @@ def test_stale_faces_are_faded():
     x, y = _at(stale_scene, "person:u-leo")
     probe = (x, y - 12 - 12 - 8 - 28)
     assert _close(live.getpixel(probe), (255, 0, 0), tol=10)
-    r, g, b = stale.getpixel(probe)
+    r, g, _b = stale.getpixel(probe)
     assert r - g < 80  # grey-ish and half see-through, no longer red
 
 
@@ -234,6 +234,6 @@ def test_a_huge_empty_zone_ring_is_cheap():
     zones = (replace(ZONE_WORK, radius_m=50_000, latitude=52.52, longitude=13.41),)
     scene = _scene(map_home(people=people, zones=zones))
     start = time.perf_counter()
-    out, img = _render(scene)
+    _out, img = _render(scene)
     assert time.perf_counter() - start < 5
     assert img.size == (W, H)

@@ -9,8 +9,9 @@ The host stores the authoritative rows; member households keep a mirror
 
 from __future__ import annotations
 
-import orjson
 from typing import Protocol, runtime_checkable
+
+import orjson
 
 from ..db.database import AsyncDatabase
 from ..domain.space_proposal import (

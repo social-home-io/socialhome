@@ -9,8 +9,8 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from socialhome.csp import MEDIA_CSP
 from socialhome.crypto import b64url_encode, generate_identity_keypair, sign_ed25519
+from socialhome.csp import MEDIA_CSP
 from socialhome.global_server.app_keys import gfs_fed_repo_key
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance

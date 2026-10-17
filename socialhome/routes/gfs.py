@@ -16,7 +16,6 @@ from ..security import error_response
 from ..services.gfs_connection_service import GfsConnectionError, GfsSignupError
 from .base import BaseView
 
-
 _DEFAULT_HEALTH: dict = {"connected": False, "last_error": None}
 
 
@@ -86,8 +85,10 @@ _CONNECT_ERRORS: dict[str, tuple[int, str, str]] = {
     "closed": (
         409,
         "GFS_SIGNUP_CLOSED",
-        "This GFS doesn't take sign-ups right now. Ask its operator for a "
-        "pairing code instead.",
+        (
+            "This GFS doesn't take sign-ups right now. Ask its operator for a "
+            "pairing code instead."
+        ),
     ),
     "busy": (
         503,
@@ -102,8 +103,10 @@ _CONNECT_ERRORS: dict[str, tuple[int, str, str]] = {
     "unproven": (
         422,
         "GFS_PROOF_FAILED",
-        "The server at this address couldn't prove it is the GFS it claims to "
-        "be. Check the address.",
+        (
+            "The server at this address couldn't prove it is the GFS it claims to "
+            "be. Check the address."
+        ),
     ),
 }
 

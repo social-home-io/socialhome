@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -12,7 +12,7 @@ from socialhome.domain.post import LocationData, Post, PostType
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with post and user repos over a real SQLite database."""
-    from socialhome.crypto import generate_identity_keypair, derive_instance_id
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
     from socialhome.db.database import AsyncDatabase
     from socialhome.infrastructure.event_bus import EventBus
     from socialhome.repositories.post_repo import SqlitePostRepo
@@ -53,7 +53,7 @@ async def test_image_urls_round_trip(env):
             id="post-img-1",
             author=u.user_id,
             type=PostType.IMAGE,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             image_urls=(
                 "/api/media/a.webp",
                 "/api/media/b.webp",
@@ -124,7 +124,7 @@ async def test_location_post_round_trip(env):
             id="post-loc-1",
             author=u.user_id,
             type=PostType.LOCATION,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="Beach day",
             location=LocationData(lat=52.5200, lon=4.0600, label="Marina"),
         ),
@@ -146,7 +146,7 @@ async def test_location_post_label_optional(env):
             id="post-loc-2",
             author=u.user_id,
             type=PostType.LOCATION,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             location=LocationData(lat=10.0, lon=20.0),
         ),
     )
@@ -273,7 +273,7 @@ async def test_link_preview_round_trip_and_cleared_on_delete(env):
             id="post-lp-1",
             author=u.user_id,
             type=PostType.TEXT,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             content="see https://example.com/",
             link_preview=preview,
         )

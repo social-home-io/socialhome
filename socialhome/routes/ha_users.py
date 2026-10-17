@@ -102,7 +102,7 @@ class HaUserProvisionView(BaseView):
         if self.request.can_read_body:
             try:
                 body = await self.request.json()
-            except Exception:
+            except ValueError:
                 body = {}
         password = str(body.get("password") or "")
 

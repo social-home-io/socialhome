@@ -26,7 +26,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import pathlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -78,16 +78,20 @@ _SEED = [
     ),
     *[
         (
-            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
-            " identity_public_key) VALUES(?,?,?,?,?)",
+            (
+                "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+                " identity_public_key) VALUES(?,?,?,?,?)"
+            ),
             (sid, sid, "the-host", "anna", "00" * 32),
         )
         for sid in (GATED, VICTIM)
     ],
     *[
         (
-            "INSERT INTO space_posts(id, space_id, author, type, content,"
-            " media_url) VALUES(?,?,?,?,?,?)",
+            (
+                "INSERT INTO space_posts(id, space_id, author, type, content,"
+                " media_url) VALUES(?,?,?,?,?,?)"
+            ),
             (pid, sid, "u-x", "image", "", f"api/media/{fn}"),
         )
         for pid, sid, fn in (
@@ -97,21 +101,27 @@ _SEED = [
         )
     ],
     (
-        "INSERT INTO gallery_albums(id, space_id, owner_user_id, name, item_count)"
-        " VALUES('album-b', ?, 'u-anna', 'Album', 1)",
+        (
+            "INSERT INTO gallery_albums(id, space_id, owner_user_id, name, item_count)"
+            " VALUES('album-b', ?, 'u-anna', 'Album', 1)"
+        ),
         (VICTIM,),
     ),
     (
-        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type, filename,"
-        " thumbnail_filename, width, height) VALUES('gi-b', 'album-b', 'u-anna',"
-        " 'photo', 'gb.webp', 'gb-t.webp', 1, 1)",
+        (
+            "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type, filename,"
+            " thumbnail_filename, width, height) VALUES('gi-b', 'album-b', 'u-anna',"
+            " 'photo', 'gb.webp', 'gb-t.webp', 1, 1)"
+        ),
         (),
     ),
     *[
         (
-            "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
-            " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
-            " local_inbox_id, status, source) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+                " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+                " local_inbox_id, status, source) VALUES(?,?,?,?,?,?,?,?,?)"
+            ),
             (
                 iid,
                 iid,
@@ -128,22 +138,28 @@ _SEED = [
     ],
     *[
         (
-            "INSERT INTO remote_users(user_id, instance_id, remote_username,"
-            " display_name) VALUES(?,?,?,?)",
+            (
+                "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+                " display_name) VALUES(?,?,?,?)"
+            ),
             (uid, iid, uid, uid),
         )
         for uid, iid in (("u-rem", SENDER), ("u-other", OTHER))
     ],
     (
-        "INSERT INTO conversations(id, type, created_at)"
-        " VALUES('conv-1', 'group_dm', datetime('now'))",
+        (
+            "INSERT INTO conversations(id, type, created_at)"
+            " VALUES('conv-1', 'group_dm', datetime('now'))"
+        ),
         (),
     ),
     *[
         (
-            "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
-            " content, type, media_blob_id, media_url, media_sync_status,"
-            " created_at) VALUES(?,?,?,?,?,?,?,?, datetime('now'))",
+            (
+                "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+                " content, type, media_blob_id, media_url, media_sync_status,"
+                " created_at) VALUES(?,?,?,?,?,?,?,?, datetime('now'))"
+            ),
             (mid, "conv-1", sender, "", "image", blob, url, status),
         )
         for mid, sender, blob, url, status in (
@@ -196,7 +212,7 @@ async def _send(app, event_type, payload, *, from_instance=SENDER, space_id=None
                 event_type=event_type,
                 from_instance=from_instance,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload={
                     "bytes_b64": base64.b64encode(WEBP).decode("ascii"),
                     **payload,
@@ -328,7 +344,7 @@ async def test_a_federated_gallery_items_full_file_and_thumbnail_both_land(env):
                 event_type=FET.SPACE_GALLERY_ITEM_CREATED,
                 from_instance=SENDER,
                 to_instance="us",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 payload={**item.to_federation_dict(), "space_id": GATED},
                 space_id=GATED,
             )

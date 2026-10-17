@@ -32,7 +32,6 @@ from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
 
-
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
 

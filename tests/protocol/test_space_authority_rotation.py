@@ -29,7 +29,7 @@ from __future__ import annotations
 import base64
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 import pytest
@@ -241,7 +241,7 @@ async def _deliver(app, *, sender: str, event_type, payload: dict) -> None:
             event_type=event_type,
             from_instance=sender,
             to_instance=fed.own_instance_id,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             payload=payload,
             space_id=payload.get("space_id"),
         )
@@ -832,7 +832,7 @@ async def _gfs_publish(gfs, owner, owner_id, space_id, pk_hex, cert=None):
 
     from socialhome.crypto import b64url_encode, sign_ed25519
 
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     body = _publish_body(owner_id, space_id, pk_hex, cert=cert, ts=ts)
     sig = b64url_encode(
         sign_ed25519(
@@ -887,7 +887,7 @@ async def test_gfs_refuses_old_key_relays_handoffs_and_queries_after_rotation(gf
             await gfs.publish_event("sp-g", event_type, payload)
         ok = _signed(k2.private_key, event_type, "sp-g", {"blob": event_type})
         assert await gfs.publish_event("sp-g", event_type, ok) == []
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     q = sign_authority_event(
         event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
         space_id="sp-g",

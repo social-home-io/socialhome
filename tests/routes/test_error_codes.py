@@ -8,7 +8,7 @@ ids, post ids, Pillow error text).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import aiohttp
 
@@ -314,7 +314,7 @@ async def test_rsvp_to_an_ended_event_is_422_rsvp_past(client):
         " VALUES('sp-cal', ?, 'admin')",
         (client._uid,),
     )
-    past = datetime.now(timezone.utc) - timedelta(days=2)
+    past = datetime.now(UTC) - timedelta(days=2)
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={

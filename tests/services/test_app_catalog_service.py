@@ -1,7 +1,7 @@
 """Tests for AppCatalogService."""
 
 import json
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
@@ -15,10 +15,10 @@ class _FakeResp:
         self._payload = payload
         self.status = status
 
-    async def __aenter__(self) -> "_FakeResp":
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *a: Any) -> bool:
+    async def __aexit__(self, *a: object) -> bool:
         return False
 
     async def text(self) -> str:
@@ -36,10 +36,10 @@ class _CountingSession:
         self._payload = payload
         self.get_call_count: int = 0
 
-    async def __aenter__(self) -> "_CountingSession":
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *a: Any) -> bool:
+    async def __aexit__(self, *a: object) -> bool:
         return False
 
     def get(self, url: str, **kw: Any) -> _FakeResp:
@@ -53,10 +53,10 @@ class _FakeSession:
     def __init__(self, payload: dict[str, Any]) -> None:
         self._payload = payload
 
-    async def __aenter__(self) -> "_FakeSession":
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *a: Any) -> bool:
+    async def __aexit__(self, *a: object) -> bool:
         return False
 
     def get(self, url: str, **kw: Any) -> _FakeResp:

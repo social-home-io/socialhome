@@ -227,7 +227,7 @@ async def test_fraud_report_happy_path_records_row(client):
     assert body["status"] == "recorded"
     # Listed in admin reports.
     resp = await client.get("/admin/api/reports?status=pending")
-    assert len((await resp.json())) == 1
+    assert len(await resp.json()) == 1
 
 
 async def test_fraud_report_unknown_reporter_is_403(client):
@@ -328,7 +328,7 @@ async def test_report_review_dismiss(client):
     assert resp.status == 200
     # Now dismissed.
     resp = await client.get("/admin/api/reports?status=dismissed")
-    assert len((await resp.json())) == 1
+    assert len(await resp.json()) == 1
 
 
 # ── Audit log ──────────────────────────────────────────────────────────

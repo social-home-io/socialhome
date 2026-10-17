@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -71,8 +71,8 @@ _MUTABLE_COLS: tuple[str, ...] = tuple(
 def _ts(value: datetime) -> str:
     """UTC, fixed-width ISO 8601 — lexicographic order == instant order."""
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def _content_params(tt: Timetable) -> dict[str, Any]:

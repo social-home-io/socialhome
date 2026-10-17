@@ -30,7 +30,7 @@ Two more households exist only as seats: ``OTHER`` (a plain member) and
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import orjson
@@ -81,7 +81,7 @@ SEATS = (
     (OTHER, OLIVER, "member"),
     (MOD, MOLLY, "moderator"),
 )
-_NOW = datetime.now(timezone.utc)
+_NOW = datetime.now(UTC)
 
 
 def _config(tmp_path, name: str) -> Config:
@@ -344,7 +344,7 @@ async def test_a_hosts_tombstone_stubs_an_id_never_held(houses):
 
 
 async def test_a_hosts_comment_tombstone_stubs_on_a_held_post_only(houses):
-    h, _c, d = houses
+    _h, _c, d = houses
     q = _post(_pid(AUTHOR), AUTHOR)
     await _hold((d,), q)
     k = _comment(_cid(CORA), q.id, CORA)
@@ -452,7 +452,7 @@ async def test_a_moderator_household_may_stream_a_delete_in_an_open_space(houses
 
 
 async def test_a_restricted_posts_level_still_takes_the_authors_own_delete(houses):
-    h, c, _d = houses
+    _h, c, _d = houses
     await c[db_key].enqueue(
         "UPDATE spaces SET posts_access='moderated' WHERE id=?", (SPACE,)
     )
@@ -519,7 +519,7 @@ async def test_the_host_stream_names_the_moderator_and_keeps_the_type(houses):
 
 
 async def test_an_older_hosts_deleted_comment_record_is_a_tombstone(houses):
-    h, c, _d = houses
+    _h, c, _d = houses
     q = _post(_pid(AUTHOR), AUTHOR)
     held = _comment(_cid(CORA), q.id, CORA)
     await _hold((c,), q, comments=(held,))
@@ -540,7 +540,7 @@ async def test_an_older_hosts_deleted_comment_record_is_a_tombstone(houses):
 
 async def test_tombstones_land_in_a_space_archived_here(houses):
     h, c, _d = houses
-    p, q, *_ = await _scenario(h, c)
+    p, _q, *_ = await _scenario(h, c)
     await c[db_key].enqueue(
         "UPDATE spaces SET archived=1, archived_reason='removed' WHERE id=?",
         (SPACE,),

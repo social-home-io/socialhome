@@ -26,13 +26,14 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from functools import partial
-from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import aiohttp
 
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
+from ..capabilities_sig import sign_capabilities
 from ..crypto import (
     b64url_decode,
     b64url_encode,
@@ -41,7 +42,6 @@ from ..crypto import (
     verify_ed25519,
 )
 from ..domain.space import normalize_category, normalize_join_mode
-from ..capabilities_sig import sign_capabilities
 from ..gfs_proof import sign_possession_proof
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
 from .envelope_relay import ENVELOPE_INSTANCE_ID_RE
@@ -433,11 +433,11 @@ class ClusterReplayCache:
 
     __slots__ = (
         "_cap",
-        "_per_node_cap",
         "_entries",
-        "_per_node",
         "_expiry_heap",
         "_floor",
+        "_per_node",
+        "_per_node_cap",
     )
 
     def __init__(self, *, cap: int | None, per_node_cap: int) -> None:
@@ -506,52 +506,52 @@ class ClusterService:
     """
 
     __slots__ = (
-        "_repo",
-        "_admin_repo",
-        "_fed_repo",
-        "_node_id",
-        "_instance_id",
-        "_instance_id_aliases",
-        "_identity_mismatches",
-        "_identity_transitional",
-        "_duplicate_node_urls",
-        "_self_url",
-        "_peers",
-        "_signing_key",
-        "_own_pk_hex",
-        "_enabled",
-        "_heartbeat_task",
-        "_announce_task",
-        "_stop",
-        "_fail_counts",
-        "_seen_relays",
         "_active_sync_count",
-        "_local_last_relay_ts",
-        "_partition_gaps",
-        "_ws_registry",
-        "_connected_clients",
+        "_admin_repo",
+        "_announce_task",
         "_clock",
-        "_sync_node_limiter",
-        "_sync_unverified_limiter",
-        "_sync_failed_verify_limiter",
-        "_sync_failed_verify_node_limiter",
-        "_wall_clock",
-        "_process_start",
-        "_seen_frames",
-        "_dup_url_warned",
+        "_connected_clients",
+        "_drain_cb",
         "_drain_hint_pending",
         "_drain_hint_task",
-        "_drain_cb",
+        "_dup_url_warned",
+        "_duplicate_node_urls",
+        "_enabled",
+        "_fail_counts",
+        "_fed_repo",
+        "_heartbeat_task",
         "_hint_drains",
         "_hint_rerun",
+        "_identity_mismatches",
+        "_identity_transitional",
+        "_instance_id",
+        "_instance_id_aliases",
+        "_local_last_relay_ts",
+        "_node_id",
+        "_own_pk_hex",
+        "_partition_gaps",
+        "_peers",
+        "_process_start",
+        "_repo",
+        "_seen_frames",
+        "_seen_relays",
+        "_self_url",
+        "_signing_key",
+        "_stop",
+        "_sync_failed_verify_limiter",
+        "_sync_failed_verify_node_limiter",
+        "_sync_node_limiter",
+        "_sync_unverified_limiter",
+        "_wall_clock",
+        "_ws_registry",
     )
 
     def __init__(
         self,
-        repo: "AbstractClusterRepo",
+        repo: AbstractClusterRepo,
         *,
-        admin_repo: "AbstractGfsAdminRepo | None" = None,
-        fed_repo: "AbstractGfsFederationRepo | None" = None,
+        admin_repo: AbstractGfsAdminRepo | None = None,
+        fed_repo: AbstractGfsFederationRepo | None = None,
         node_id: str = "",
         instance_id: str = "",
         instance_id_aliases: tuple[str, ...] = (),
@@ -560,7 +560,7 @@ class ClusterService:
         signing_key: bytes = b"",
         own_public_key_hex: str = "",
         enabled: bool = False,
-        ws_registry: "GfsWebSocketRegistry | None" = None,
+        ws_registry: GfsWebSocketRegistry | None = None,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
@@ -885,10 +885,10 @@ class ClusterService:
             if task is not None:
                 try:
                     await asyncio.wait_for(task, timeout=5.0)
-                except asyncio.TimeoutError, asyncio.CancelledError:
+                except TimeoutError, asyncio.CancelledError:
                     task.cancel()
                 except Exception:  # pragma: no cover
-                    pass
+                    log.debug("cluster: %s ended with an error", attr, exc_info=True)
                 setattr(self, attr, None)
         self._drain_hint_pending.clear()
         self._hint_rerun.clear()
@@ -1084,6 +1084,7 @@ class ClusterService:
             log.debug(
                 "cluster: failed to persist active_sync_sessions for self: %r",
                 exc,
+                exc_info=True,
             )
 
     # ─── Outbound NODE_* broadcasts ──────────────────────────────────
@@ -1204,6 +1205,7 @@ class ClusterService:
                         "cluster: drain hint for %d household(s) not sent: %r",
                         len(chunk),
                         exc,
+                        exc_info=True,
                     )
 
     async def apply_drain_hint(self, instances: object) -> int:
@@ -1261,7 +1263,12 @@ class ClusterService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.warning("cluster: hint drain failed for %s: %r", instance_id, exc)
+                log.warning(
+                    "cluster: hint drain failed for %s: %r",
+                    instance_id,
+                    exc,
+                    exc_info=True,
+                )
             if instance_id not in self._hint_rerun or self._stop.is_set():
                 return
 
@@ -1289,9 +1296,12 @@ class ClusterService:
             (n for n in await self._repo.list_nodes() if n.node_id == node_id),
             None,
         )
-        if existing is not None and existing.approved_key:
-            if existing.approved_key.lower() != key:
-                raise ClusterPeerKeyMismatch(node_id)
+        if (
+            existing is not None
+            and existing.approved_key
+            and existing.approved_key.lower() != key
+        ):
+            raise ClusterPeerKeyMismatch(node_id)
         await self._repo.approve_node(node_id, url, key)
         # The read above and the write are not atomic: another approval may
         # have landed in between. The SQL keeps whichever key was stored
@@ -1326,7 +1336,9 @@ class ClusterService:
         except Exception as exc:
             # Expected until the operator approves us on the other side too;
             # its own add-peer HELLO then reaches us and we answer it.
-            log.debug("cluster: initial NODE_HELLO to %r failed: %r", url, exc)
+            log.debug(
+                "cluster: initial NODE_HELLO to %r failed: %r", url, exc, exc_info=True
+            )
         return node
 
     async def remove_peer(self, node_id: str) -> None:
@@ -1463,7 +1475,12 @@ class ClusterService:
                     session=None,
                 )
             except Exception as exc:
-                log.debug("cluster: reply NODE_HELLO to %r failed: %r", url, exc)
+                log.debug(
+                    "cluster: reply NODE_HELLO to %r failed: %r",
+                    url,
+                    exc,
+                    exc_info=True,
+                )
 
     def _sibling_url_refresh(self, row: ClusterNode, url: object) -> str:
         """The URL to move a shared-seed sibling's *row* to, or ``""``.
@@ -1739,6 +1756,7 @@ class ClusterService:
                     "cluster: NODE_PARTITION_GAP to %r failed: %r",
                     peer_url,
                     exc,
+                    exc_info=True,
                 )
         return gaps
 
@@ -1800,6 +1818,7 @@ class ClusterService:
                 "cluster: NODE_PARTITION_CATCHUP to %r failed: %r",
                 peer_url,
                 exc,
+                exc_info=True,
             )
 
     async def _lookup_node_url(self, node_id: str) -> str:
@@ -1835,7 +1854,7 @@ class ClusterService:
                     timeout=SYNC_RETRY_DELAY_S,
                 )
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     def _hello_payload(self) -> dict:
@@ -2008,7 +2027,9 @@ class ClusterService:
                     session=None,
                 )
             except Exception as exc:
-                log.debug("cluster: NODE_HELLO to %r failed: %r", peer_url, exc)
+                log.debug(
+                    "cluster: NODE_HELLO to %r failed: %r", peer_url, exc, exc_info=True
+                )
 
     async def _heartbeat_loop(self) -> None:
         try:
@@ -2019,7 +2040,7 @@ class ClusterService:
                         timeout=HEARTBEAT_INTERVAL_S,
                     )
                     return
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 await self._heartbeat_tick()
         except asyncio.CancelledError:
@@ -2086,6 +2107,7 @@ class ClusterService:
                         "cluster: NODE_HEARTBEAT to %r failed: %r",
                         url,
                         exc,
+                        exc_info=True,
                     )
             else:
                 self._fail_counts[url] = fails + 1
@@ -2106,7 +2128,7 @@ class ClusterService:
         if not self._own_pk_hex:
             return
         cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=CLUSTER_STALE_SIBLING_S)
+            datetime.now(UTC) - timedelta(seconds=CLUSTER_STALE_SIBLING_S)
         ).strftime("%Y-%m-%d %H:%M:%S")
         try:
             removed = await self._repo.remove_stale_siblings(
@@ -2115,7 +2137,7 @@ class ClusterService:
                 keep_node_id=self._node_id,
             )
         except Exception as exc:
-            log.warning("cluster: stale sibling cleanup failed: %r", exc)
+            log.warning("cluster: stale sibling cleanup failed: %r", exc, exc_info=True)
             return
         if removed:
             log.info("cluster: dropped %d stale shared-seed sibling row(s)", removed)
@@ -2139,7 +2161,13 @@ class ClusterService:
                 self._fail_counts[url] = 0
             except Exception as exc:
                 if ignore_errors:
-                    log.debug("cluster: %s to %r failed: %r", msg_type, url, exc)
+                    log.debug(
+                        "cluster: %s to %r failed: %r",
+                        msg_type,
+                        url,
+                        exc,
+                        exc_info=True,
+                    )
                     continue
                 await asyncio.sleep(SYNC_RETRY_DELAY_S)
                 try:
@@ -2156,6 +2184,7 @@ class ClusterService:
                         msg_type,
                         url,
                         exc2,
+                        exc_info=True,
                     )
 
     def _signed_frame(
@@ -2221,14 +2250,19 @@ class ClusterService:
 
     async def _ping_peer(self, peer_url: str) -> bool:
         try:
-            async with aiohttp.ClientSession() as sess:
-                async with sess.get(
+            async with (
+                aiohttp.ClientSession() as sess,
+                sess.get(
                     f"{peer_url.rstrip('/')}/cluster/health",
                     allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    return 200 <= resp.status < 300
+                ) as resp,
+            ):
+                return 200 <= resp.status < 300
         except Exception:
+            log.debug(
+                "ClusterService._ping_peer: fail-soft error ignored", exc_info=True
+            )
             return False
 
     def _gc_seen(self) -> None:
@@ -2294,7 +2328,7 @@ def _now_iso() -> str:
     the other. A tz-aware ``isoformat()`` value used to slip in here
     while ``added_at`` stayed naive; naive-format both to match.
     """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _client_to_wire(c: ClientInstance) -> dict:

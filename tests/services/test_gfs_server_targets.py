@@ -9,8 +9,8 @@ import pytest
 
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.gfs_server import GFS_KEY_SUITE_ED25519, GfsServer
-from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
+from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.services.gfs_server_targets import (
     LISTING_TARGET_PREFIX,
     connections_on_list,

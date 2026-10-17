@@ -27,7 +27,7 @@ plus an :class:`EventBus` for fan-out.
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..domain.events import SpaceZoneDeleted, SpaceZoneUpserted
 from ..domain.space import (
@@ -85,7 +85,7 @@ class SpaceZoneNameConflictError(Exception):
 class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
     """Admin-gated CRUD for per-space zones (§23.8.7)."""
 
-    __slots__ = ("_zones", "_spaces", "_users", "_bus")
+    __slots__ = ("_bus", "_spaces", "_users", "_zones")
 
     def __init__(
         self,
@@ -140,7 +140,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         clean_icon = validate_zone_icon(icon)
         clean_lat = validate_zone_coord(latitude, name="latitude", limit=90)
         clean_lon = validate_zone_coord(longitude, name="longitude", limit=180)
-        assert clean_lat is not None and clean_lon is not None  # noqa: S101
+        assert clean_lat is not None and clean_lon is not None
 
         existing = await self._zones.count_for_space(space_id)
         if existing >= MAX_ZONES_PER_SPACE:
@@ -180,8 +180,8 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         latitude: float | None = None,
         longitude: float | None = None,
         radius_m: int | None = None,
-        color: "str | None | object" = _UNSET,
-        icon: "str | None | object" = _UNSET,
+        color: str | None | object = _UNSET,
+        icon: str | None | object = _UNSET,
     ) -> SpaceZone:
         """Partial update. Admin/owner-only.
 
@@ -212,7 +212,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
             if longitude is None
             else validate_zone_coord(longitude, name="longitude", limit=180)
         )
-        assert new_lat is not None and new_lon is not None  # noqa: S101
+        assert new_lat is not None and new_lon is not None
 
         if new_name != existing.name:
             clash = await self._zones.get_by_name(space_id, new_name)
@@ -310,4 +310,4 @@ def _validate_radius(radius_m: int) -> int:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

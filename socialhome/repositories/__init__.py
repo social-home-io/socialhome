@@ -23,11 +23,6 @@ from .conversation_repo import (
     new_conversation,
 )
 from .federation_repo import AbstractFederationRepo, SqliteFederationRepo
-from .peer_user_visibility_repo import (
-    AbstractPeerUserVisibilityRepo,
-    PeerUserVisibilityRow,
-    SqlitePeerUserVisibilityRepo,
-)
 from .notification_repo import (
     AbstractNotificationRepo,
     Notification,
@@ -43,6 +38,11 @@ from .page_repo import (
     PageVersion,
     SqlitePageRepo,
     new_page,
+)
+from .peer_user_visibility_repo import (
+    AbstractPeerUserVisibilityRepo,
+    PeerUserVisibilityRow,
+    SqlitePeerUserVisibilityRepo,
 )
 from .post_repo import AbstractPostRepo, SqlitePostRepo
 from .push_subscription_repo import (
@@ -75,11 +75,10 @@ __all__ = [
     "AbstractCalendarRepo",
     "AbstractConversationRepo",
     "AbstractFederationRepo",
-    "AbstractPeerUserVisibilityRepo",
-    "PeerUserVisibilityRow",
     "AbstractNotificationRepo",
     "AbstractOutboxRepo",
     "AbstractPageRepo",
+    "AbstractPeerUserVisibilityRepo",
     "AbstractPostRepo",
     "AbstractPushSubscriptionRepo",
     "AbstractShoppingRepo",
@@ -97,16 +96,17 @@ __all__ = [
     "PageLockError",
     "PageNotFoundError",
     "PageVersion",
+    "PeerUserVisibilityRow",
     "PushSubscription",
     "ShoppingItem",
     "SqliteBazaarRepo",
     "SqliteCalendarRepo",
     "SqliteConversationRepo",
     "SqliteFederationRepo",
-    "SqlitePeerUserVisibilityRepo",
     "SqliteNotificationRepo",
     "SqliteOutboxRepo",
     "SqlitePageRepo",
+    "SqlitePeerUserVisibilityRepo",
     "SqlitePostRepo",
     "SqlitePushSubscriptionRepo",
     "SqliteShoppingRepo",

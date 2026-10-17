@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.move_errors import StaleMoveLink
 from ..domain.user import RemoteUser, User, UserStatus
 from .base import bool_col, row_to_dict, rows_to_dicts
-
 
 # ─── Abstract interface ───────────────────────────────────────────────────
 
@@ -438,9 +437,9 @@ class SqliteUserRepo:
         return str(anchor) if anchor is not None else None
 
     async def soft_delete(self, username: str, grace_days: int = 30) -> None:
-        now = datetime.now(timezone.utc).isoformat()
-        grace = datetime.now(timezone.utc).timestamp() + grace_days * 86400
-        grace_iso = datetime.fromtimestamp(grace, tz=timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
+        grace = datetime.now(UTC).timestamp() + grace_days * 86400
+        grace_iso = datetime.fromtimestamp(grace, tz=UTC).isoformat()
         await self._db.enqueue(
             "UPDATE users SET state='inactive', deleted_at=?, grace_until=? "
             "WHERE username=?",

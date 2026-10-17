@@ -45,8 +45,8 @@ class RelayPolicy:
     def __init__(
         self,
         *,
-        ban_repo: "AbstractHouseholdInstanceBanRepo",
-        report_repo: "AbstractReportRepo",
+        ban_repo: AbstractHouseholdInstanceBanRepo,
+        report_repo: AbstractReportRepo,
     ) -> None:
         self._bans = ban_repo
         self._reports = report_repo

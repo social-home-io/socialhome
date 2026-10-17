@@ -177,21 +177,21 @@ class DisplayAdvertiser:
     """
 
     __slots__ = (
-        "_host",
-        "_short_id",
-        "_zc",
         "_addresses",
-        "_scanned",
-        "_name",
-        "_info",
-        "_warned",
-        "_noted_loopback",
-        "_want",
-        "_requested",
         "_applied",
+        "_host",
+        "_info",
+        "_name",
+        "_noted_loopback",
         "_progress",
-        "_wake",
+        "_requested",
+        "_scanned",
+        "_short_id",
         "_task",
+        "_wake",
+        "_want",
+        "_warned",
+        "_zc",
     )
 
     def __init__(self, *, host: str) -> None:
@@ -302,6 +302,9 @@ class DisplayAdvertiser:
             async with asyncio.timeout(_REGISTER_TIMEOUT_S):
                 announced = await self._announce(port, short_id, rescan=rescan)
         except Exception as exc:  # fail-soft by contract
+            log.debug(
+                "DisplayAdvertiser._reconcile: fail-soft error ignored", exc_info=True
+            )
             self._warn(f"could not announce the dashboard on the network: {exc!r}")
             await self._close()
             return
@@ -316,7 +319,7 @@ class DisplayAdvertiser:
         try:
             await zc.async_close()
         except Exception as exc:  # fail-soft by contract
-            log.debug("dashboard mDNS: close failed: %r", exc)
+            log.debug("dashboard mDNS: close failed: %r", exc, exc_info=True)
 
     async def _scan(self) -> list[str]:
         if _is_specific_ip(self._host):

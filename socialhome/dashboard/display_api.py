@@ -125,15 +125,15 @@ from .views import ack_id, lock_is_night
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "DISPLAY_API_PREFIX",
     "CLAIM_PATH",
+    "DISPLAY_API_PREFIX",
     "DISPLAY_CACHE",
     "HA_UNLOCK_PATH",
     "IMAGE_PREFIXES",
+    "LOCK_EMOJI_PATH",
     "LOCK_PATH",
     "MAP_PNG_PATH",
     "PAIR_PATH",
-    "LOCK_EMOJI_PATH",
     "UNLOCK_PATH",
     "bearer_token",
     "guard_display_request",

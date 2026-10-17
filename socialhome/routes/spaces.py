@@ -7,12 +7,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
+from urllib.parse import quote
 
 from aiohttp import web
-
 from aiohttp.multipart import BodyPartReader
-
-from urllib.parse import quote
 
 from ..app_keys import (
     alias_resolver_key,
@@ -28,15 +26,15 @@ from ..app_keys import (
     presence_service_key,
     profile_picture_repo_key,
     rate_limiter_key,
+    space_approval_service_key,
     space_bot_repo_key,
+    space_chat_service_key,
     space_cover_repo_key,
     space_icon_repo_key,
+    space_moderation_service_key,
     space_remote_location_repo_key,
-    space_approval_service_key,
     space_remote_member_repo_key,
     space_repo_key,
-    space_moderation_service_key,
-    space_chat_service_key,
     space_service_key,
     space_sync_scheduler_key,
     space_zone_repo_key,
@@ -44,10 +42,12 @@ from ..app_keys import (
 )
 from ..csp import MEDIA_CSP
 from ..domain.child_protection import name_only
-from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.errors import ImageTooLargeError
 from ..domain.events import SpaceMemberLocationOptedIn
+from ..domain.federation import PairingStatus
+from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.link_preview import link_preview_to_dict
+from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..domain.post import LocationData, PostType
 from ..domain.space import (
     INVITE_VIA_INTERNAL,
@@ -58,20 +58,18 @@ from ..domain.space import (
     SpaceRole,
 )
 from ..domain.space_proposal import ProposalAction
-from ..domain.zone_geo import match_zone
 from ..domain.user import SYSTEM_AUTHOR
-from ..domain.federation import PairingStatus
+from ..domain.zone_geo import match_zone
 from ..federation.invite_bootstrap import InviteBootstrapHint
-from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..rate_limiter import client_bucket
 from ..security import error_response, sanitise_for_api
 from ..services.gfs_connection_service import GfsConnectionError
 from ..services.space_service import (
+    _UNSET_MEMBER_PROFILE,
     DEFAULT_INVITE_TOKEN_TTL_SECONDS,
     INVITE_LINK_ROLES,
     INVITE_ROLE_ERROR,
-    _UNSET_MEMBER_PROFILE,
     normalize_category,
 )
 from .base import BaseView
@@ -358,11 +356,7 @@ class SpaceDetailView(BaseView):
             join_mode=body.get("join_mode"),
             retention_days=body.get("retention_days"),
             retention_exempt_types=body.get("retention_exempt_types"),
-            about_markdown=(
-                body["about_markdown"]
-                if "about_markdown" in body
-                else _UNSET_MEMBER_PROFILE
-            ),
+            about_markdown=(body.get("about_markdown", _UNSET_MEMBER_PROFILE)),
             bot_enabled=body.get("bot_enabled"),
             category=body.get("category"),
             allow_here_mention=(
@@ -1082,7 +1076,7 @@ class SpaceMemberPictureView(BaseView):
     """``GET /api/spaces/{id}/members/{user_id}/picture`` — stream WebP."""
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         space_id = self.match("id")
         user_id = self.match("user_id")
         repo = self.svc(profile_picture_repo_key)
@@ -2769,7 +2763,7 @@ class SpacePostCommentView(BaseView):
         return web.json_response(_serialise_comment(comment), status=201)
 
     async def get(self) -> web.Response:
-        self.user  # auth gate
+        self.require_user()
         svc = self.svc(space_service_key)
         post_id = self.match("post_id")
         try:

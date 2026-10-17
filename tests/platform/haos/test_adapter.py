@@ -12,7 +12,6 @@ from socialhome.platform.haos.adapter import HaosAdapter
 from socialhome.platform.haos.supervisor import AddonInfo
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 
-
 # ─── Fake HaClient (mirrors the one in tests/platform/ha/test_adapter.py) ──
 
 
@@ -39,7 +38,6 @@ class _FakeHaClient:
 
     async def verify_token(self, token):
         self.calls.append(("verify_token", token))
-        return None
 
     async def get_states(self):
         self.calls.append(("get_states",))
@@ -478,7 +476,7 @@ class _IceHaClient(_FakeHaClient):
         super().__init__(config_response={})
         self._ice_result = [] if result is None else result
 
-    async def ws_command(self, type_: str, **fields):  # noqa: ARG002
+    async def ws_command(self, type_: str, **fields):
         return {"result": self._ice_result}
 
 

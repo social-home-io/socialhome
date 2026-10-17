@@ -90,7 +90,7 @@ import logging
 import secrets
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -112,17 +112,17 @@ from ..domain.gfs_member_publish import (
     MemberPublishRequest,
     owner_epoch_notice_signing_payload,
 )
-from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, SpaceType
 from ..domain.space_item import (
-    ITEM_SIZE_BUCKETS as ITEM_SIZE_BUCKETS,
     ITEM_TYPE_POST,
     SUPPORTED_ITEM_TYPES,
     pad_json_object,
     required_scope,
 )
 from ..domain.writer_cert import WriterCert, scope_permits
+from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..outbound_fetch import OutboundFetchRefused
+from ..writer_key import sign_with_writer_key
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
 from .gfs_directory import GfsDirectoryCache
 from .gfs_http import refused_gfs_key
@@ -133,7 +133,6 @@ from .gfs_publish_retry import (
     classify_publish_status,
 )
 from .gfs_server_targets import is_listing_target_id, refusal_outcome
-from ..writer_key import sign_with_writer_key
 from .space_writer_cert_service import WRITER_CERT_FIELD
 
 if TYPE_CHECKING:
@@ -189,13 +188,13 @@ def _anon_ts() -> str:
     jitter of up to :data:`ANON_TS_JITTER_S` either way."""
     now = int(time.time())
     jitter = secrets.randbelow(2 * ANON_TS_JITTER_S + 1) - ANON_TS_JITTER_S
-    return datetime.fromtimestamp(now + jitter, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(now + jitter, tz=UTC).isoformat()
 
 
 def build_item_plaintext(item_type: str, inner: dict) -> bytes:
     """The bytes a member publish encrypts: the real type + the inner,
     padded with ASCII ``0`` in :data:`~socialhome.domain.space_item.PAD_FIELD` to exactly the smallest
-    :data:`ITEM_SIZE_BUCKETS` size that fits. An item larger than the
+    :data:`~socialhome.domain.space_item.ITEM_SIZE_BUCKETS` size that fits. An item larger than the
     largest bucket is left unpadded (its size is then its own)."""
     return pad_json_object({"item_type": item_type, "inner": inner})
 
@@ -224,15 +223,15 @@ class GfsMemberPublishService:
         "_channels",
         "_conn_repo",
         "_crypto",
-        "_gfs",
         "_directories",
+        "_gfs",
         "_own_identity_seed",
         "_own_instance_id",
         "_retry",
         "_seats",
         "_spaces",
-        "_subscribed",
         "_stopping",
+        "_subscribed",
         "_tasks",
         "_writer_certs",
     )
@@ -240,11 +239,11 @@ class GfsMemberPublishService:
     def __init__(
         self,
         *,
-        gfs: "GfsConnectionService",
-        conn_repo: "AbstractGfsConnectionRepo",
-        space_repo: "AbstractSpaceRepo",
-        space_crypto: "SpaceContentEncryption",
-        writer_certs: "SpaceWriterCertService",
+        gfs: GfsConnectionService,
+        conn_repo: AbstractGfsConnectionRepo,
+        space_repo: AbstractSpaceRepo,
+        space_crypto: SpaceContentEncryption,
+        writer_certs: SpaceWriterCertService,
         own_instance_id: str,
         own_identity_seed: bytes,
         directories: GfsDirectoryCache | None = None,
@@ -265,7 +264,7 @@ class GfsMemberPublishService:
         )
         #: The keeper of this household's GFS subscriber seats; every
         #: auto-subscribe is recorded there so a leave can tear it down.
-        self._seats: "GfsSpaceMirrorService | None" = None
+        self._seats: GfsSpaceMirrorService | None = None
         self._retry = GfsPublishRetryQueue(self._retry_send)
         #: (conn id, space id) pairs this process already subscribed.
         self._subscribed: set[tuple[str, str]] = set()
@@ -275,14 +274,14 @@ class GfsMemberPublishService:
         #: v_51 — opaque channels for PRIVATE spaces whose owner turned
         #: ``private_gfs`` on. ``None`` → private spaces always take the host
         #: path.
-        self._channels: "GfsChannelService | None" = None
+        self._channels: GfsChannelService | None = None
 
-    def attach_seats(self, seats: "GfsSpaceMirrorService") -> None:
+    def attach_seats(self, seats: GfsSpaceMirrorService) -> None:
         """Wire the seat keeper: auto-subscribes go through
         :meth:`GfsSpaceMirrorService.take_seat`, which records the seat."""
         self._seats = seats
 
-    def attach_channels(self, channels: "GfsChannelService") -> None:
+    def attach_channels(self, channels: GfsChannelService) -> None:
         """Wire the private-space channel service (v_51)."""
         self._channels = channels
 
@@ -319,7 +318,7 @@ class GfsMemberPublishService:
         if self._channels is not None and await self._private(space_id):
             await self._channels.on_rotation(space_id)
 
-    def wire(self, bus: "EventBus") -> None:
+    def wire(self, bus: EventBus) -> None:
         """Subscribe a newly seated local writer to the GFS fan-out at once
         (the reconnect hook would otherwise only catch it next connect)."""
         bus.subscribe(SpaceMemberJoined, self._on_member_joined)
@@ -363,7 +362,7 @@ class GfsMemberPublishService:
             return False
 
     @staticmethod
-    def _publicly_readable(space: "Space | None") -> bool:
+    def _publicly_readable(space: Space | None) -> bool:
         return (
             space is not None
             and space.space_type in PUBLIC_SPACE_TIERS
@@ -668,7 +667,7 @@ class GfsMemberPublishService:
             instance_id=self._own_instance_id,
             gfs_instance_id=conn.gfs_instance_id,
             gfs_key=self._gfs.addressee_key_for(conn),
-            ts=datetime.now(timezone.utc).isoformat(),
+            ts=datetime.now(UTC).isoformat(),
             signature="",
             target=space_id,
             epoch=int(data["epoch"]),
@@ -855,7 +854,7 @@ class GfsMemberPublishService:
         if data.get("owner"):
             if not conn.registered:
                 return PublishOutcome.permanent()
-            ts = datetime.now(timezone.utc).isoformat()
+            ts = datetime.now(UTC).isoformat()
             mode = data.get("publish_mode") if strict_ok else None
             payload = owner_epoch_notice_signing_payload(
                 owning_instance=self._own_instance_id,
@@ -930,7 +929,7 @@ class GfsMemberPublishService:
                         outcome.kind,
                     )
                 return outcome
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             log.warning(
                 "gfs.member_publish: GFS %s unreachable: %s",
                 conn.id,
@@ -960,17 +959,16 @@ class GfsMemberPublishService:
             self._retry.enqueue(conn.id, item)
             return False
         outcome = await self._send(conn, item)
-        if outcome.kind == "transient":
-            if not self._retry.enqueue(
-                conn.id, item, retry_after_s=outcome.retry_after_s
-            ):
-                log.warning(
-                    "gfs.member_publish: %s for space %s to GFS %s is lost — "
-                    "the retry queue refused it",
-                    item.event_type,
-                    item.space_id,
-                    conn.id,
-                )
+        if outcome.kind == "transient" and not self._retry.enqueue(
+            conn.id, item, retry_after_s=outcome.retry_after_s
+        ):
+            log.warning(
+                "gfs.member_publish: %s for space %s to GFS %s is lost — "
+                "the retry queue refused it",
+                item.event_type,
+                item.space_id,
+                conn.id,
+            )
         return outcome.kind == "delivered"
 
     async def _retry_send(self, conn_id: str, item: GfsPublish) -> PublishOutcome:
@@ -1054,6 +1052,7 @@ class GfsMemberPublishService:
                     space_id,
                     conn.id,
                     exc,
+                    exc_info=True,
                 )
                 continue
             self._subscribed.add((conn.id, space_id))

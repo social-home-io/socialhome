@@ -26,7 +26,6 @@ class _FakeFederationService:
         space_id=None,
     ):
         self.sent.append((to_instance_id, event_type, payload, space_id))
-        return None
 
 
 class _FakeSpaceRepo:

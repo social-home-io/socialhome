@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from socialhome.domain.calendar import CalendarEvent, EventReminder
 from socialhome.serialization.ics import (
@@ -13,14 +13,14 @@ from socialhome.serialization.ics import (
 
 
 def _ev(**kw) -> CalendarEvent:
-    defaults = dict(
-        id="ev-1",
-        calendar_id="sp-1",
-        summary="Meeting",
-        start=datetime(2030, 1, 5, 10, 0, tzinfo=timezone.utc),
-        end=datetime(2030, 1, 5, 11, 0, tzinfo=timezone.utc),
-        created_by="uid-alice",
-    )
+    defaults = {
+        "id": "ev-1",
+        "calendar_id": "sp-1",
+        "summary": "Meeting",
+        "start": datetime(2030, 1, 5, 10, 0, tzinfo=UTC),
+        "end": datetime(2030, 1, 5, 11, 0, tzinfo=UTC),
+        "created_by": "uid-alice",
+    }
     defaults.update(kw)
     return CalendarEvent(**defaults)
 
@@ -61,8 +61,8 @@ def test_serialize_event_all_day_emits_value_date():
     payload = serialize_event(
         _ev(
             all_day=True,
-            start=datetime(2030, 6, 1, tzinfo=timezone.utc),
-            end=datetime(2030, 6, 2, tzinfo=timezone.utc),
+            start=datetime(2030, 6, 1, tzinfo=UTC),
+            end=datetime(2030, 6, 2, tzinfo=UTC),
         ),
     ).decode("utf-8")
     assert "DTSTART;VALUE=DATE:20300601" in payload
@@ -111,8 +111,8 @@ def test_serialize_feed_emits_multiple_vevents():
     b = _ev(
         id="b",
         summary="Second",
-        start=datetime(2030, 2, 1, 10, 0, tzinfo=timezone.utc),
-        end=datetime(2030, 2, 1, 11, 0, tzinfo=timezone.utc),
+        start=datetime(2030, 2, 1, 10, 0, tzinfo=UTC),
+        end=datetime(2030, 2, 1, 11, 0, tzinfo=UTC),
     )
     payload = serialize_feed([a, b]).decode("utf-8")
     assert payload.count("BEGIN:VEVENT") == 2

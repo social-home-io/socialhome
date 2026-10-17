@@ -207,7 +207,7 @@ class BazaarDetailView(BaseView):
     """``GET/PATCH/DELETE /api/bazaar/{id}``."""
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         listing_id = self.match("id")
         repo = self.svc(bazaar_repo_key)
         listing = await repo.get_listing(listing_id)
@@ -259,7 +259,7 @@ class BazaarBidCollectionView(BaseView):
     """``GET/POST /api/bazaar/{id}/bids``."""
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        self.require_user()
         svc = self.svc(bazaar_service_key)
         bids = await svc.list_bids(self.match("id"))
         return web.json_response([_bid_dict(b) for b in bids])

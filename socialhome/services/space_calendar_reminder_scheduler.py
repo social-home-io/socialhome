@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import EventReminderDue
@@ -35,12 +35,12 @@ class SpaceCalendarReminderScheduler:
     reminders stored in ``space_calendar_rsvp_reminders``.
     """
 
-    __slots__ = ("_repo", "_bus", "_interval", "_batch", "_task", "_stop")
+    __slots__ = ("_batch", "_bus", "_interval", "_repo", "_stop", "_task")
 
     def __init__(
         self,
         *,
-        calendar_repo: "AbstractSpaceCalendarRepo",
+        calendar_repo: AbstractSpaceCalendarRepo,
         bus: EventBus,
         interval_seconds: float = 30.0,
         batch_size: int = 100,
@@ -63,7 +63,7 @@ class SpaceCalendarReminderScheduler:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError, asyncio.CancelledError:
+            except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 
@@ -73,7 +73,7 @@ class SpaceCalendarReminderScheduler:
         Exposed for tests so we can drive the scheduler synchronously
         without sleeping.
         """
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         due = await self._repo.list_due_reminders(
             now_iso=now_iso,
             limit=self._batch,
@@ -123,5 +123,5 @@ class SpaceCalendarReminderScheduler:
                     self._stop.wait(),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue

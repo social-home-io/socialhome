@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -27,7 +27,7 @@ from socialhome.services.space_post_moderation import (
     post_to_queue_payload,
 )
 
-_NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
+_NOW = datetime(2026, 10, 1, tzinfo=UTC)
 
 
 def _space() -> Space:

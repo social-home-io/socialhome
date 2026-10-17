@@ -23,20 +23,20 @@ from socialhome.services.moderation_release import release_scope
 
 
 def _make_listing(**overrides) -> BazaarListing:
-    defaults = dict(
-        post_id="bzr-1",
-        space_id="sp-1",
-        seller_user_id="u-seller",
-        mode=BazaarMode.FIXED,
-        title="Vintage chair",
-        end_time="2026-06-01T00:00:00+00:00",
-        currency="USD",
-        status=BazaarStatus.ACTIVE,
-        created_at="2026-05-23T10:00:00+00:00",
-        description="A nice chair",
-        image_urls=("api/media/chair-1.webp", "api/media/chair-2.webp"),
-        price=4500,
-    )
+    defaults = {
+        "post_id": "bzr-1",
+        "space_id": "sp-1",
+        "seller_user_id": "u-seller",
+        "mode": BazaarMode.FIXED,
+        "title": "Vintage chair",
+        "end_time": "2026-06-01T00:00:00+00:00",
+        "currency": "USD",
+        "status": BazaarStatus.ACTIVE,
+        "created_at": "2026-05-23T10:00:00+00:00",
+        "description": "A nice chair",
+        "image_urls": ("api/media/chair-1.webp", "api/media/chair-2.webp"),
+        "price": 4500,
+    }
     defaults.update(overrides)
     return BazaarListing(**defaults)
 

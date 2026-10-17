@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
+import pytest
 
 from socialhome.domain.federation import (
     InstanceSource,
@@ -10,8 +12,6 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.user import RemoteUser, User, UserStatus
-import pytest
-
 from socialhome.services.friends_service import FriendNotFoundError, FriendsService
 
 _FUTURE = "2099-01-01T00:00:00+00:00"
@@ -199,7 +199,7 @@ async def test_reads_are_batched_regardless_of_household_count():
 
 
 async def test_presence_triple_local_and_remote():
-    seen = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+    seen = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
     users = _Users(
         [_u("me", last_seen_at="2026-09-01 10:00:00"), _u("live")],
         [_ru("r-on", "peer-a"), _ru("r-off", "peer-a")],

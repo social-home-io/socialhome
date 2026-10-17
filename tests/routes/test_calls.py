@@ -13,7 +13,6 @@ from socialhome.domain.federation import FederationEventType
 
 from .conftest import _auth
 
-
 # ── Helpers ──────────────────────────────────────────────────────────
 
 

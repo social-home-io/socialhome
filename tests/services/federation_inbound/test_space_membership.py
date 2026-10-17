@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -104,7 +104,7 @@ def _event(event_type, payload, *, from_instance="peer-a", space_id=None):
         event_type=event_type,
         from_instance=from_instance,
         to_instance="self",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         payload=payload,
         space_id=space_id,
     )
@@ -539,13 +539,14 @@ async def test_age_gate_invalid_min_age_is_ignored(repo, handlers):
 
 async def test_config_catch_up_logs_when_behind(repo, handlers, caplog):
     """When remote sequence > local, log that we're behind."""
+    import logging
+
     from socialhome.domain.space import (
         JoinMode,
         Space,
         SpaceFeatures,
         SpaceType,
     )
-    import logging
 
     repo.spaces["sp-1"] = Space(
         id="sp-1",

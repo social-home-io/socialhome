@@ -29,7 +29,7 @@ import hmac
 import logging
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from .adapter import ExternalUser
@@ -94,7 +94,7 @@ class LocalCredentialStore:
 
     __slots__ = ("_db",)
 
-    def __init__(self, db: "AsyncDatabase") -> None:
+    def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
 
     async def authenticate_bearer(self, token: str) -> ExternalUser | None:
@@ -126,8 +126,8 @@ class LocalCredentialStore:
             try:
                 expires = datetime.fromisoformat(row["expires_at"])
                 if expires.tzinfo is None:
-                    expires = expires.replace(tzinfo=timezone.utc)
-                if datetime.now(timezone.utc) > expires:
+                    expires = expires.replace(tzinfo=UTC)
+                if datetime.now(UTC) > expires:
                     return None
             except ValueError:
                 return None

@@ -113,7 +113,7 @@ def verify_capabilities(
     try:
         public_key = bytes.fromhex(public_key_hex)
         sig = b64url_decode(sig_b64url)
-    except Exception:
+    except ValueError, TypeError:
         return False
     return verify_ed25519(
         public_key,
