@@ -21,6 +21,7 @@ import { Spinner } from '@/components/Spinner'
 import { LocationMap, type LocationMarker } from '@/components/LocationMap'
 import { MapOverview, type OverviewPerson } from '@/components/MapOverview'
 import { presenceLabel } from '@/utils/presenceLabel'
+import { statusLine } from '@/utils/statusLine'
 import { personZone } from '@/utils/mapMarkers'
 import type { HouseholdZone, UserStatus } from '@/types'
 
@@ -61,13 +62,6 @@ function humanizeAgo(iso: string | null | undefined): string | null {
 const presenceList = signal<PresenceEntry[]>([])
 const householdZones = signal<HouseholdZone[]>([])
 const loading = signal(true)
-
-/** "🌴 On leave" — null when there is nothing to show. */
-function statusLine(s: UserStatus | null | undefined): string | null {
-  if (!s || (!s.emoji && !s.text)) return null
-  if (s.expires_at && Date.parse(s.expires_at) <= Date.now()) return null
-  return [s.emoji, s.text].filter(Boolean).join(' ')
-}
 
 function presenceDot(state: string): string {
   switch (state) {

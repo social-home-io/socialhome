@@ -4453,7 +4453,6 @@
   "calls.picker.video_hint": "Camera on from the start.",
   "presence.state.in_zone": "In zone",
   "presence.state.unknown": "Unknown",
-  "presence.strip_aria": "Household members",
   "mention.loading": "Loading members…",
   "mention.no_match_space": "No member of this space matches “@{query}”",
   "mention.no_match_chat": "Nobody in this chat matches “@{query}”",

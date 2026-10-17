@@ -171,6 +171,57 @@ describe('DashboardPage', () => {
     expect((mapProps.at(-1)!.markers as Array<Record<string, unknown>>)[0].sub_label).toBe('Home')
   })
 
+  it("shows each person's status under their Home / Away, full text in the title", async () => {
+    const { render, waitFor } = await import('@testing-library/preact')
+    const { default: DashboardPage } = await import('./DashboardPage')
+    const { api } = await import('@/api')
+    const long = 'Out walking the dog around the lake, back before dinner'
+    vi.mocked(api.get).mockImplementation(async (url: string) => (url === '/api/me/corner' ? {
+      unread_notifications: 0, unread_conversations: 0, upcoming_events: [],
+      presence: [
+        {
+          user_id: 'u2', username: 'bob', display_name: 'Bob', state: 'away', zone_name: null,
+          picture_url: null, status: { emoji: '🐕', text: long, expires_at: null },
+        },
+        {
+          user_id: 'u3', username: 'cleo', display_name: 'Cleo', state: 'home', zone_name: 'home',
+          picture_url: null, status: null,
+        },
+        {
+          user_id: 'u4', username: 'dan', display_name: 'Dan', state: 'home', zone_name: 'home',
+          picture_url: null,
+          status: { emoji: null, text: 'Stale', expires_at: '2000-01-01T00:00:00Z' },
+        },
+      ],
+      tasks_due_today: [],
+      bazaar: { active_listings: 0, pending_offers: 0, ending_soon: 0 },
+      followed_space_ids: [], followed_spaces_feed: [], today_events: [], today_timetable: [],
+    } : []) as never)
+    const view = render(<DashboardPage />)
+    await waitFor(() => {
+      expect(view.container.querySelector('.sh-presence-mini__status')).not.toBeNull()
+    })
+    const statuses = view.container.querySelectorAll('.sh-presence-mini__status')
+    // Only Bob has a live status: Cleo has none, Dan's has expired.
+    expect(statuses.length).toBe(1)
+    expect(statuses[0].textContent).toBe(`🐕 ${long}`)
+    expect(statuses[0].getAttribute('title')).toBe(`🐕 ${long}`)
+    expect(view.container.textContent).not.toContain('Stale')
+    // The status sits under the name + Home / Away line, in the same row.
+    const bob = statuses[0].closest('.sh-presence-mini')!
+    expect(bob.querySelector('.sh-presence-mini__line')!.textContent).toBe('BobAway')
+  })
+
+  it("refetches when someone's status changes", async () => {
+    const { render, waitFor } = await import('@testing-library/preact')
+    const { default: DashboardPage } = await import('./DashboardPage')
+    const { api } = await import('@/api')
+    vi.mocked(api.get).mockReturnValue(new Promise(() => {}))
+    wsTypes.length = 0
+    render(<DashboardPage />)
+    await waitFor(() => expect(wsTypes).toContain('user.status_changed'))
+  })
+
   it('module exports a default component', async () => {
     const mod = await import('./DashboardPage')
     expect(mod.default).toBeTruthy()

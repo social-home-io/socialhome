@@ -47,6 +47,8 @@ import { activeTimetables, lessonCount } from '../welcome/schedule'
 import { addBase } from '@/baseUrl'
 import { safeIconSrc } from '@/utils/appIcon'
 import { presenceLabel } from '@/utils/presenceLabel'
+import { statusLine } from '@/utils/statusLine'
+import type { UserStatus } from '@/types'
 
 interface CornerPresence {
   user_id: string
@@ -58,6 +60,8 @@ interface CornerPresence {
   latitude?: number | null
   longitude?: number | null
   gps_accuracy_m?: number | null
+  /** Emoji + text status; null when unset or expired. */
+  status?: UserStatus | null
 }
 
 interface BazaarCornerSummary {
@@ -118,7 +122,7 @@ export default function DashboardPage() {
       'calendar.created', 'calendar.updated',
       'calendar.deleted',
       'timetable.changed', 'timetable.deleted',
-      'presence.updated',
+      'presence.updated', 'user.status_changed',
       'task.created', 'task.updated', 'task.deleted',
       'task.completed', 'task.assigned',
       'bazaar.bid_placed', 'bazaar.listing_created',
@@ -253,8 +257,9 @@ function presenceDotClass(state: string): string {
   }
 }
 
-/** "Who's home" — household member presence + the GPS map underneath
- *  for members who opt in.  Wraps in the same paper-card chrome the
+/** "Who's home" — household member presence (with each person's status
+ *  under their Home / Away / zone) + the GPS map underneath for members
+ *  who opt in.  Wraps in the same paper-card chrome the
  *  Welcome cards use so the corner reads as one stack. */
 function PresenceCard({ presence }: { presence: CornerPresence[] }) {
   const withCoords = presence.filter(
@@ -266,14 +271,24 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
         <span aria-hidden="true">🏠</span> {t('dashboard.whos_home')}
       </h2>
       <div class="sh-presence-overview">
-        {presence.map(p => (
-          <div key={p.user_id} class="sh-presence-mini">
-            <span class={presenceDotClass(p.state)} />
-            <Avatar name={p.display_name} src={p.picture_url} size={28} />
-            <span>{p.display_name}</span>
-            <span class="sh-muted">{presenceLabel(p.state, p.zone_name)}</span>
-          </div>
-        ))}
+        {presence.map(p => {
+          const line = statusLine(p.status)
+          return (
+            <div key={p.user_id} class="sh-presence-mini">
+              <span class={presenceDotClass(p.state)} />
+              <Avatar name={p.display_name} src={p.picture_url} size={28} />
+              <span class="sh-presence-mini__body">
+                <span class="sh-presence-mini__line">
+                  <span class="sh-presence-mini__name">{p.display_name}</span>
+                  <span class="sh-muted">{presenceLabel(p.state, p.zone_name)}</span>
+                </span>
+                {line && (
+                  <span class="sh-presence-mini__status" title={line}>{line}</span>
+                )}
+              </span>
+            </div>
+          )
+        })}
       </div>
       {withCoords.length > 0 && (
         <LocationMap

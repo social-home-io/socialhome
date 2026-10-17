@@ -2139,11 +2139,6 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 /* Layout helpers for the page-shaped skeletons. Reuse existing card
    shells where possible so the placeholder swaps to the real content
    without a layout shift. */
-.sh-feed--skeleton .sh-skeleton-presence-strip {
-  display: flex;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-sm) 0;
-}
 .sh-post--skeleton .sh-post-meta {
   flex: 1;
   min-width: 0;
@@ -2202,118 +2197,6 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 
 /* ───── 7. Feature surfaces ──────────────────────────────────────────── */
-
-/* Household presence strip — pinned-to-the-wall row of household
- * members rendered above the composer on the feed. Each pin reads as
- * a small polaroid: warm paper bg, slight rotation, washi-tape
- * accent at the top, avatar + display name + a one-line status
- * (``Home`` / ``Away`` / ``Not home`` / zone name). Click → route
- * to the full presence page.
- *
- * The whole strip scrolls horizontally on overflow so a 6-member
- * household stays glance-able on phones; on desktop the inner row
- * just stretches.
- */
-.sh-presence-strip {
-  margin: 0 0 var(--sh-space-md);
-  padding: 4px 4px 8px;
-  overflow-x: auto;
-  overflow-y: visible;
-  scrollbar-width: thin;
-}
-.sh-presence-strip-inner {
-  display: flex;
-  gap: var(--sh-space-md);
-  padding: 12px 4px 6px;
-  width: max-content;
-}
-.sh-presence-pin {
-  position: relative;
-  width: 116px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 14px 8px 10px;
-  background: var(--sh-bg-tertiary);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  box-shadow: var(--sh-shadow-pinned);
-  cursor: pointer;
-  font: inherit;
-  color: inherit;
-  text-align: center;
-  /* Rotation cycles through ``PIN_ROTATIONS`` (set inline via the
-   * ``--sh-pin-rot`` custom property). Hover untilts the active pin
-   * and lifts it slightly so the user feels the click affordance. */
-  transform: rotate(var(--sh-pin-rot, 0deg));
-  transition:
-    transform var(--sh-transition-normal),
-    box-shadow var(--sh-transition-fast);
-}
-.sh-presence-pin:hover,
-.sh-presence-pin:focus-visible {
-  transform: rotate(0deg) translateY(-2px);
-  z-index: 2;
-}
-.sh-presence-pin:focus-visible {
-  outline: 2px solid var(--sh-primary);
-  outline-offset: 3px;
-}
-/* Washi-tape strip on top of each pin. Color is keyed off the
- * presence state so a quick glance reads the room before you parse
- * the label below. */
-.sh-presence-pin-tape {
-  position: absolute;
-  top: -8px;
-  left: 50%;
-  width: 56px;
-  height: 14px;
-  border-radius: 2px;
-  transform: translateX(-50%) rotate(-3deg);
-  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  pointer-events: none;
-}
-.sh-presence-pin--home .sh-presence-pin-tape,
-.sh-presence-pin--zone .sh-presence-pin-tape {
-  background: color-mix(in srgb, var(--sh-success) 55%, transparent);
-}
-.sh-presence-pin--away .sh-presence-pin-tape {
-  background: color-mix(in srgb, var(--sh-text-muted) 35%, transparent);
-}
-.sh-presence-pin-name {
-  font-weight: 600;
-  font-size: var(--sh-font-size-sm);
-  color: var(--sh-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-  margin-top: 4px;
-}
-.sh-presence-pin-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--sh-font-size-xs);
-  color: var(--sh-text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-.sh-presence-pin-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--sh-radius-full);
-  background: var(--sh-text-muted);
-  flex-shrink: 0;
-}
-.sh-presence-pin-dot--home,
-.sh-presence-pin-dot--zone { background: var(--sh-success); }
-.sh-presence-pin-dot--away { background: var(--sh-warning); }
-.sh-presence-pin-dot--not_home { background: var(--sh-danger); }
 
 /* Feed + posts + comments
  *
@@ -6328,11 +6211,11 @@ body.sh-dm-thread-open .sh-messages {
   opacity: 0.4;
 }
 
-/* Calendar filter strip — presence-strip-style polaroid pins, one per
- * household member. Each pin owns every calendar that member created;
- * clicking toggles the whole batch on / off. Reuses the same visual
- * vocabulary as `.sh-presence-strip` so the calendar reads as the same
- * surface family as the feed.
+/* Calendar filter strip — polaroid pins, one per household member.
+ * Each pin owns every calendar that member created; clicking toggles
+ * the whole batch on / off. Shares the feed's "taped to the wall"
+ * vocabulary (paper card, washi tape, slight tilt) so the calendar reads
+ * as the same surface family.
  *
  * The card carries the calendar's hue via the inline ``--cal-hue``
  * custom property: washi tape, status dot and (when ON) the outline all
@@ -13943,9 +13826,29 @@ a.sh-welcome-card:hover {
   display: inline-flex;
   align-items: center;
   gap: var(--sh-space-xs);
+  min-width: 0;
   font-size: var(--sh-font-size-xs);
   color: var(--sh-text-muted);
 }
+.sh-presence-mini__body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sh-presence-mini__line {
+  display: flex;
+  gap: var(--sh-space-xs);
+  min-width: 0;
+}
+.sh-presence-mini__name,
+.sh-presence-mini__status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The status line reads in the body colour: it's what the person chose
+ * to say, a step up from the muted Home / Away label beside the name. */
+.sh-presence-mini__status { color: var(--sh-text); }
 .sh-presence-state { font-size: var(--sh-font-size-xs); color: var(--sh-text-muted); text-transform: capitalize; }
 
 /* Status editor */

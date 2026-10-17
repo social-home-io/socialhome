@@ -43,7 +43,8 @@ def _bundle_to_dict(bundle) -> dict:
     d = dataclasses.asdict(bundle)
     # Coerce dataclass tuples → JSON-friendly lists + datetime → ISO.
     d["upcoming_events"] = [_event_to_dict(e) for e in bundle.upcoming_events]
-    d["presence"] = [_presence_to_dict(p) for p in bundle.presence]
+    d.pop("statuses", None)
+    d["presence"] = [_presence_to_dict(p, bundle.statuses) for p in bundle.presence]
     d["tasks_due_today"] = [_task_to_dict(t) for t in bundle.tasks_due_today]
     d["bazaar"] = dataclasses.asdict(bundle.bazaar)
     d["followed_space_ids"] = list(bundle.followed_space_ids)
@@ -69,7 +70,7 @@ def _event_to_dict(e) -> dict:
     }
 
 
-def _presence_to_dict(p) -> dict:
+def _presence_to_dict(p, statuses: dict[str, dict]) -> dict:
     return {
         "username": p.username,
         "user_id": p.user_id,
@@ -80,6 +81,9 @@ def _presence_to_dict(p) -> dict:
         "latitude": getattr(p, "latitude", None),
         "longitude": getattr(p, "longitude", None),
         "gps_accuracy_m": getattr(p, "gps_accuracy_m", None),
+        # Live emoji + text status (``{emoji, text, expires_at}``), same
+        # shape and expiry rule as ``GET /api/presence``; null when unset.
+        "status": statuses.get(p.user_id),
     }
 
 

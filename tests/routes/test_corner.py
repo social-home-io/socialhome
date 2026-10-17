@@ -81,6 +81,79 @@ async def test_corner_requires_auth(client):
     assert r.status in (401, 403)
 
 
+# ─── Presence statuses ──────────────────────────────────────────────
+
+
+async def _seed_bob(
+    client,
+    *,
+    emoji: str | None = None,
+    text: str | None = None,
+    expires_at: str | None = None,
+) -> None:
+    """A second household member at home, optionally with a status."""
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, status_emoji,"
+        " status_text, status_expires_at) VALUES(?,?,?,?,?,?)",
+        ("bob", "uid-bob-corner", "Bob", emoji, text, expires_at),
+    )
+    r = await client.post(
+        "/api/presence/location",
+        json={"username": "bob", "zone_name": "home"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 204
+
+
+async def _corner_presence(client) -> dict[str, dict]:
+    r = await client.get("/api/me/corner", headers=_auth(client._tok))
+    assert r.status == 200
+    return {p["user_id"]: p for p in (await r.json())["presence"]}
+
+
+async def test_corner_presence_carries_live_status(client):
+    """Each whereabouts row carries the person's emoji + text status, so
+    Corner can show it under Home / Away."""
+    await _seed_bob(
+        client, emoji="🎧", text="Focus", expires_at="2099-01-01T00:00:00+00:00"
+    )
+    rows = await _corner_presence(client)
+    assert rows["uid-bob-corner"]["status"] == {
+        "emoji": "🎧",
+        "text": "Focus",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+    }
+
+
+async def test_corner_presence_status_null_when_unset(client):
+    await _seed_bob(client)
+    rows = await _corner_presence(client)
+    assert rows["uid-bob-corner"]["status"] is None
+
+
+async def test_corner_presence_drops_expired_status(client):
+    """An expired status reads as unset even before the sweep clears it —
+    the same rule ``GET /api/presence`` applies."""
+    await _seed_bob(client, text="old", expires_at="2000-01-01T00:00:00+00:00")
+    rows = await _corner_presence(client)
+    assert rows["uid-bob-corner"]["status"] is None
+
+
+async def test_corner_presence_hides_blocked_members_status(client):
+    """A blocked member's row — and so their status — is left out."""
+    await _seed_bob(client, emoji="🏖️", text="Beach day")
+    r = await client.post(
+        "/api/blocks",
+        json={"user_id": "uid-bob-corner"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    r = await client.get("/api/me/corner", headers=_auth(client._tok))
+    body = await r.text()
+    assert "uid-bob-corner" not in body
+    assert "Beach day" not in body
+
+
 # ─── Followed spaces widget ─────────────────────────────────────────
 
 
