@@ -66,15 +66,15 @@ dashboard on, so there is nothing to set up in Home Assistant.
 
 Social Home reads the mapped port and the Home Assistant host's LAN IP
 address from Supervisor (`GET /addons/self/info` and `GET /network/info`;
-the IP comes from the primary connected interface, private addresses
-only) and shows the right address automatically (for example
+the IP comes from the primary connected interface, home-network
+addresses only — `10.x`, `172.16–31.x`, `192.168.x`) and shows the right address automatically (for example
 `http://192.168.1.10:8100`) — whether you opened Home Assistant on the
 LAN or through a remote URL such as Nabu Casa's. The IP is read fresh
 each time you open **Admin › Dashboard**, so a new DHCP lease shows up
 on the next visit (give Home Assistant a fixed IP, or set the address,
 if tablets keep the old one). If Supervisor doesn't report one, the
 address falls back to the host name you reached Home Assistant under
-(logged as a warning).
+(the browser's `X-Forwarded-Host`; logged as a warning).
 If port `8100` is already used on your Home Assistant host, pick another
 host port under **Settings › Apps › Social Home › Network**, save, and
 restart the App when Home Assistant asks — the address follows. If you
