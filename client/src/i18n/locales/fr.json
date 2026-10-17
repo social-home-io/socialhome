@@ -2162,6 +2162,7 @@
   "nav.sidebar": "Barre latérale",
   "nav.signed_in_as": "Connecté en tant que {name}, ouvrir les paramètres",
   "nav.drawer": "Navigation",
+  "nav.drawer_close": "Fermer la navigation",
   "nav.mobile": "Onglets principaux",
   "nav.go_to": "Aller à…",
   "nav.section.home": "À la maison",

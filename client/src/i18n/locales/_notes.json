@@ -285,6 +285,7 @@
   "nav.home": "Bottom tab on phones that opens the welcome page. ≤ 8 chars.",
   "nav.notifications_short": "Bottom tab on phones for notifications. Must fit a narrow tab: ≤ 9 chars.",
   "nav.more": "Bottom tab on phones that opens the full menu. ≤ 8 chars.",
+  "nav.drawer_close": "Screen-reader label for the ✕ button at the top of the phone menu drawer.",
   "nav.unread": "Screen-reader label on an unread badge. {count} = number.",
   "nav.parent_control": "Sidebar link for guardians to manage a child's account. Short.",
   "space.tab.moderation": "Space tab where moderators review reported or held posts. One short word (≤ 11 chars).",

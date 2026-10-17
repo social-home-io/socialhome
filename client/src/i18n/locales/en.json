@@ -2477,6 +2477,7 @@
   "nav.sidebar": "Sidebar",
   "nav.signed_in_as": "Signed in as {name}, open settings",
   "nav.drawer": "Navigation",
+  "nav.drawer_close": "Close navigation",
   "nav.mobile": "Main tabs",
   "nav.go_to": "Go to…",
   "nav.section.home": "At home",

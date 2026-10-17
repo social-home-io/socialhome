@@ -72,7 +72,7 @@ export function Modal({ open, onClose, title, children, class: extraClass, role 
     // immediately — that covers half the bottom-sheet and obscures
     // the form. The user reaches the first input with one Tab or a
     // single tap; the trade-off is a calmer first impression. */
-    const focusables = _focusable(dialog)
+    const focusables = focusableWithin(dialog)
     const isCoarsePointer =
       typeof window !== 'undefined'
       && typeof window.matchMedia === 'function'
@@ -93,7 +93,7 @@ export function Modal({ open, onClose, title, children, class: extraClass, role 
         return
       }
       if (ev.key !== 'Tab') return
-      const items = _focusable(dialog!)
+      const items = focusableWithin(dialog!)
       if (items.length === 0) return
       const first = items[0]
       const last = items[items.length - 1]
@@ -158,7 +158,9 @@ const _FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
-function _focusable(root: HTMLElement): HTMLElement[] {
+/** Tab-reachable descendants of ``root``, in DOM order — the set a
+ *  focus trap cycles through (Modal, the mobile nav drawer). */
+export function focusableWithin(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(_FOCUSABLE_SELECTOR))
     .filter(el => !el.hasAttribute('aria-hidden'))
 }
