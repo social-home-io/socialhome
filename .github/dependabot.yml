@@ -1,0 +1,67 @@
+# Dependabot version updates (docs/testing.md, "Dependency updates").
+#
+# Every ecosystem waits 3 days after a release before proposing it
+# (``cooldown``), runs weekly, and groups patch + minor bumps into one PR
+# per ecosystem; majors come as separate PRs. Patch/minor PRs auto-merge
+# once the required checks pass (.github/workflows/dependabot-automerge.yml);
+# majors wait for a human review.
+#
+# PRs carry the ``dependencies`` label, which .github/release.yml drops from
+# the release notes (Dependabot is excluded as an author there too).
+#
+# Not covered here, bumped deliberately in a PR:
+#   * uv itself (``ghcr.io/astral-sh/uv:<v>`` in both Dockerfiles, the
+#     ``setup-uv`` ``version:`` in CI + publish.yml, and the Home Assistant
+#     App's Dockerfiles) — every occurrence moves together.
+#   * ruff — its ``==`` pin moves with .pre-commit-config.yaml's rev and CI's
+#     ``pip install ruff==``, and a new minor reformats / re-lints the tree.
+#   * the ``python:3.14-slim`` base images — a Python minor is a platform
+#     change, not a dependency bump.
+version: 2
+updates:
+  # Python: pyproject.toml's exact ``==`` pins + uv.lock (transitives too).
+  # ``increase`` rewrites the ``==`` pin to the new version (never widens
+  # it to a range) and re-locks uv.lock, which is the only committed lock.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    versioning-strategy: increase
+    ignore:
+      - dependency-name: ruff
+    labels:
+      - dependencies
+    groups:
+      python-minor-patch:
+        update-types: [minor, patch]
+
+  # SPA (pnpm, client/pnpm-lock.yaml lockfile v9 — Dependabot's npm
+  # ecosystem detects pnpm from the lockfile).
+  - package-ecosystem: npm
+    directory: /client
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    labels:
+      - dependencies
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    labels:
+      - dependencies
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]

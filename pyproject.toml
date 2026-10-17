@@ -7,13 +7,14 @@ license-files = ["LICENSE"]
 # Every direct dependency (here and in every optional-dependencies group)
 # is pinned to an EXACT version so the wheel, the Docker images, CI and dev
 # envs all install the same tested set — Social Home is an application,
-# not a library, so nobody co-installs it with conflicting pins. Pins track
-# the newest release that is at least two weeks old and passes the full
-# suite; bump them deliberately in a PR. Transitive dependencies are locked
-# too: ``uv.lock`` pins every package; the Docker images and the Home
-# Assistant App export it (versions + hashes) with ``uv export --frozen`` at
-# build time. After editing a pin here, run ``scripts/lock.sh`` (see
-# docs/testing.md, "Dependency lock").
+# not a library, so nobody co-installs it with conflicting pins. Dependabot
+# proposes new versions weekly, 3 days after their release (patch/minor
+# auto-merge on green CI, majors are reviewed); a hand bump goes through a
+# PR too (docs/testing.md, "Dependency updates"). Transitive dependencies
+# are locked too: ``uv.lock`` pins every package; the Docker images and the
+# Home Assistant App export it (versions + hashes) with ``uv export
+# --frozen`` at build time. After editing a pin here, run
+# ``scripts/lock.sh`` (see docs/testing.md, "Dependency lock").
 dependencies = [
     "aiohttp==3.14.5",
     "aiosqlite==0.22.1",
