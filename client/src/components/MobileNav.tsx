@@ -120,7 +120,7 @@ export function MobileNav() {
       const last = items[items.length - 1]
       const active = document.activeElement
       // Only while focus is in the drawer: a dialog opened on top of
-      // it (from the identity strip) runs its own trap.
+      // it (the shortcuts sheet) runs its own trap.
       if (!drawer.contains(active)) return
       if (e.shiftKey && (active === first || active === drawer)) {
         e.preventDefault()

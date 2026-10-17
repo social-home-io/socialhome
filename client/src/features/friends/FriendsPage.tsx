@@ -15,7 +15,9 @@
  *     with a link to manage them.
  *
  * Every row opens the shared person sheet (``openPerson``) with the row it
- * already holds, so no extra fetch; our own row opens the status editor.
+ * already holds, so no extra fetch; our own row opens the app-wide status
+ * editor (``openStatusEditor``) and reads its status from ``currentUser``
+ * so a save — here, from the top bar or another device — shows at once.
  *
  * Endpoint: ``GET /api/friends`` returns the whole tree in one shot.
  */
@@ -25,9 +27,8 @@ import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
 import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
-import { Modal } from '@/components/Modal'
 import { Spinner } from '@/components/Spinner'
-import { StatusEditor } from '@/components/StatusEditor'
+import { openStatusEditor } from '@/components/StatusEditor'
 import { LocationMap, type LocationMarker } from '@/components/LocationMap'
 import { openPairing, PairingFlow } from '@/components/PairingFlow'
 import { openPerson } from '@/components/PersonSheet'
@@ -37,7 +38,6 @@ import { askAdmins } from '@/features/connections/AdminContactNote'
 import { householdAdmins, loadHouseholdAdmins } from '@/features/connections/connectionsData'
 import { fillNodes, joinNames } from '@/features/connections/richText'
 import { api } from '@/api'
-import type { User } from '@/types'
 import {
   FIND_OVER, buildModel, fold, matches, pairingSpan, peopleByLetter,
   type FriendsModel, type FriendsPayload, type FriendsView, type Household, type Person,
@@ -242,7 +242,6 @@ export default function FriendsPage() {
   const [attempt, setAttempt] = useState(0)
   const [view, setView] = useState<FriendsView>('households')
   const [query, setQuery] = useState('')
-  const [editingStatus, setEditingStatus] = useState(false)
   const isAdmin = !!currentUser.value?.is_admin
   const selfId = currentUser.value?.user_id ?? null
 
@@ -282,22 +281,9 @@ export default function FriendsPage() {
     })
   }
 
-  /** Our own status changed in the editor — show it without a reload. */
-  const onStatusSaved = (user: User) => {
-    setEditingStatus(false)
-    setData((prev) => prev && {
-      ...prev,
-      instance: {
-        ...prev.instance,
-        members: prev.instance.members.map((m) =>
-          m.user_id === user.user_id ? { ...m, status: user.status ?? null } : m),
-      },
-    })
-  }
-
   const open = (p: Person) => {
     if (p.isSelf) {
-      setEditingStatus(true)
+      openStatusEditor()
       return
     }
     openPerson(p.user_id, {
@@ -333,9 +319,20 @@ export default function FriendsPage() {
   // Reads the block cache during render, so a block made from the person
   // sheet drops the row (and the counts) at once.
   const blockedCount = blockedUsers.value.length
-  const model = buildModel(data, { selfId, locale: formatLocale(), hidden: isBlocked })
+  // Our own status comes from ``currentUser`` (kept live by the editor
+  // and ``user.status_changed``), not the snapshot ``/api/friends`` sent.
+  const me = currentUser.value
+  const live: FriendsPayload = me ? {
+    ...data,
+    instance: {
+      ...data.instance,
+      members: data.instance.members.map((m) =>
+        m.user_id === me.user_id ? { ...m, status: me.status ?? null } : m),
+    },
+  } : data
+  const model = buildModel(live, { selfId, locale: formatLocale(), hidden: isBlocked })
   const alone = data.households.length === 0
-  const markers = markersFor(data, model)
+  const markers = markersFor(live, model)
   const withMap = markers.length > 0
   const activeView: FriendsView = view === 'map' && !withMap ? 'households' : view
   const showFind = model.peopleCount > FIND_OVER && activeView !== 'map'
@@ -462,11 +459,6 @@ export default function FriendsPage() {
         </p>
       )}
 
-      <Modal open={editingStatus} onClose={() => setEditingStatus(false)} title={t('friends.status_title')}>
-        {editingStatus && (
-          <StatusEditor onSave={onStatusSaved} onCancel={() => setEditingStatus(false)} />
-        )}
-      </Modal>
       {/* Mount the pairing dialog so the hero / empty-state CTAs can open
        *  it inline, rather than routing through ``/connections``. */}
       <PairingFlow />

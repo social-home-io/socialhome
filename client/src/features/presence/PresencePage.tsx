@@ -1,5 +1,5 @@
 /**
- * PresencePage — the household's "who is where": your status, the map
+ * PresencePage — the household's "who is where": the map
  * with the household zones (people in a zone share its bubble) and the
  * :component:`MapOverview` beside it (People / Zones; a bottom sheet on
  * phones), then a card per member.
@@ -17,12 +17,9 @@ import { api } from '@/api'
 import { ws } from '@/ws'
 import { Avatar } from '@/components/Avatar'
 import { PersonButton } from '@/components/PersonButton'
-import { StatusEditor, formatClearsAt } from '@/components/StatusEditor'
 import { Spinner } from '@/components/Spinner'
-import { Button } from '@/components/Button'
 import { LocationMap, type LocationMarker } from '@/components/LocationMap'
 import { MapOverview, type OverviewPerson } from '@/components/MapOverview'
-import { currentUser } from '@/store/auth'
 import { presenceLabel } from '@/utils/presenceLabel'
 import { personZone } from '@/utils/mapMarkers'
 import type { HouseholdZone, UserStatus } from '@/types'
@@ -64,7 +61,6 @@ function humanizeAgo(iso: string | null | undefined): string | null {
 const presenceList = signal<PresenceEntry[]>([])
 const householdZones = signal<HouseholdZone[]>([])
 const loading = signal(true)
-const showStatusEditor = signal(false)
 
 /** "🌴 On leave" — null when there is nothing to show. */
 function statusLine(s: UserStatus | null | undefined): string | null {
@@ -134,27 +130,15 @@ export default function PresencePage() {
     const offOnline = ws.on('user.online', refresh)
     const offIdle = ws.on('user.idle', refresh)
     const offOffline = ws.on('user.offline', refresh)
-    // A member's status (set, cleared, or expired by the server's sweep).
-    // Our own status also lands on ``currentUser`` so the "Your status"
-    // line follows a change made from another tab.
-    const offStatus = ws.on('user.status_changed', (e) => {
-      const me = currentUser.value
-      if (me && e.data.user_id === me.user_id) {
-        currentUser.value = {
-          ...me,
-          status: (e.data.status as UserStatus | null)
-            ?? { emoji: null, text: null, expires_at: null },
-        }
-      }
-      refresh()
-    })
+    // A member's status (set, cleared, or expired by the server's sweep)
+    // moves their roster row. Our own ``currentUser`` is kept live
+    // app-wide by ``MeButton``.
+    const offStatus = ws.on('user.status_changed', refresh)
     return () => { offUpdated(); offOnline(); offIdle(); offOffline(); offStatus(); offZones() }
   }, [])
 
   if (loading.value) return <Spinner />
 
-  const myStatus = currentUser.value?.status
-  const myLine = statusLine(myStatus)
   const zones = householdZones.value
 
   // Everyone the map can place: a GPS point, or (no point) a known zone.
@@ -192,30 +176,6 @@ export default function PresencePage() {
 
   return (
     <div class="sh-presence">
-
-      <div class="sh-presence-controls">
-        {showStatusEditor.value ? (
-          <StatusEditor
-            onSave={() => { showStatusEditor.value = false; void loadPresenceList() }}
-            onCancel={() => { showStatusEditor.value = false }}
-          />
-        ) : (
-          <div class="sh-my-status">
-            <span class="sh-my-status__label">{t('presence.your_status')}</span>
-            <span class={myLine ? 'sh-my-status__value' : 'sh-my-status__value sh-muted'}>
-              {myLine ?? t('presence.no_status')}
-              {myLine && myStatus?.expires_at && (
-                <span class="sh-muted">
-                  {` · ${t('presence.clears', { time: formatClearsAt(myStatus.expires_at) })}`}
-                </span>
-              )}
-            </span>
-            <Button variant="secondary" onClick={() => { showStatusEditor.value = true }}>
-              {myLine ? t('presence.edit_status') : t('presence.set_status')}
-            </Button>
-          </div>
-        )}
-      </div>
 
       <div class="sh-presence-map">
         <h2>{t('presence.who_is_where')}</h2>

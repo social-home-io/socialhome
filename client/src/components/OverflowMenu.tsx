@@ -13,10 +13,15 @@
  * Items with ``checked`` set render as ``menuitemradio`` (a pick-one
  * menu such as "which store"). ``bareTrigger`` drops the round ⋯
  * button chrome so the trigger can look like a pill; ``open`` /
- * ``onOpenChange`` make the open state controllable.
+ * ``onOpenChange`` make the open state controllable. ``header`` puts a
+ * non-focusable block above the items: it renders as a sibling just
+ * before the ``role="menu"`` element (a menu may only own menu items),
+ * inside the same popup, and the menu points at it with
+ * ``aria-describedby`` so a screen reader still hears it. Arrow keys and
+ * type-ahead never land on it.
  */
 import type { ComponentChildren, Ref } from 'preact'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { assignRef } from '@/utils/refs'
 
 export interface MenuItem {
@@ -57,6 +62,11 @@ interface Props {
   /** Lands on the trigger button (Preact 11 passes ``ref`` as a prop), the
    *  control a caller hands focus back to. */
   ref?: Ref<HTMLButtonElement>
+  /** Non-focusable content above the items (e.g. who / what state);
+   *  the menu's ``aria-describedby`` points at it. */
+  header?: ComponentChildren
+  /** Width of a ``floating`` menu in px (default 200). */
+  menuWidth?: number
 }
 
 const MENU_W = 200
@@ -64,6 +74,7 @@ const MENU_W = 200
 export function OverflowMenu({
   label, items, triggerClass = '', wrapClass = '', children, floating = false,
   menuClass = '', bareTrigger = false, title, open: openProp, onOpenChange, ref,
+  header, menuWidth = MENU_W,
 }: Props) {
   const [openState, setOpenState] = useState(false)
   const open = openProp ?? openState
@@ -83,6 +94,7 @@ export function OverflowMenu({
   }, [ref])
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
+  const headerId = useId()
 
   const menuItems = () => Array.from(
     menuRef.current?.querySelectorAll<HTMLElement>(
@@ -112,7 +124,7 @@ export function OverflowMenu({
       const r = triggerRef.current?.getBoundingClientRect()
       if (!r) return
       if (r.bottom < 0 || r.top > window.innerHeight) { setOpenRef.current(false); return }
-      const left = Math.max(8, Math.min(r.right - MENU_W, window.innerWidth - MENU_W - 8))
+      const left = Math.max(8, Math.min(r.right - menuWidth, window.innerWidth - menuWidth - 8))
       setPos({ top: r.bottom + 4, left })
     }
     place()
@@ -122,7 +134,7 @@ export function OverflowMenu({
       window.removeEventListener('scroll', place, true)
       window.removeEventListener('resize', place)
     }
-  }, [open, floating])
+  }, [open, floating, menuWidth])
 
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape' && open) {
@@ -166,6 +178,33 @@ export function OverflowMenu({
   // would close the menu before the click lands).
   const keepFocus = (e: PointerEvent) => e.preventDefault()
 
+  const popupClass = `sh-post-menu${floating ? ' sh-timetable-menu--floating' : ''} ${menuClass}`.trim()
+  const popupStyle = floating && pos
+    ? { top: `${pos.top}px`, left: `${pos.left}px`, width: `${menuWidth}px` }
+    : undefined
+  const renderItems = () => (
+    <>
+      {items.map(item => {
+        const radio = item.checked !== undefined
+        const cls = [item.danger ? 'sh-post-menu-danger' : '', item.class ?? '']
+          .filter(Boolean).join(' ')
+        return (
+          <button key={item.key ?? item.label} type="button"
+                  role={radio ? 'menuitemradio' : 'menuitem'}
+                  aria-checked={radio ? (item.checked ? 'true' : 'false') : undefined}
+                  tabIndex={-1}
+                  class={cls || undefined}
+                  aria-disabled={item.disabled ? 'true' : undefined}
+                  title={item.title}
+                  onPointerDown={keepFocus} onClick={pick(item)}>
+            {item.label}
+            {item.checked && <span aria-hidden="true" class="sh-post-menu__check">✓</span>}
+          </button>
+        )
+      })}
+    </>
+  )
+
   return (
     <div
       ref={wrapRef}
@@ -188,31 +227,19 @@ export function OverflowMenu({
       >
         {children}
       </button>
-      {open && (
-        <div ref={menuRef}
-             class={`sh-post-menu${floating ? ' sh-timetable-menu--floating' : ''} ${menuClass}`.trim()}
-             role="menu" aria-label={label}
-             style={floating && pos ? { top: `${pos.top}px`, left: `${pos.left}px`, width: `${MENU_W}px` } : undefined}>
-          {items.map(item => {
-            const radio = item.checked !== undefined
-            const cls = [item.danger ? 'sh-post-menu-danger' : '', item.class ?? '']
-              .filter(Boolean).join(' ')
-            return (
-              <button key={item.key ?? item.label} type="button"
-                      role={radio ? 'menuitemradio' : 'menuitem'}
-                      aria-checked={radio ? (item.checked ? 'true' : 'false') : undefined}
-                      tabIndex={-1}
-                      class={cls || undefined}
-                      aria-disabled={item.disabled ? 'true' : undefined}
-                      title={item.title}
-                      onPointerDown={keepFocus} onClick={pick(item)}>
-                {item.label}
-                {item.checked && <span aria-hidden="true" class="sh-post-menu__check">✓</span>}
-              </button>
-            )
-          })}
+      {open && (header == null ? (
+        <div ref={menuRef} class={popupClass} role="menu" aria-label={label} style={popupStyle}>
+          {renderItems()}
         </div>
-      )}
+      ) : (
+        <div class={`${popupClass} sh-post-menu--with-header`} style={popupStyle}>
+          <div id={headerId} class="sh-post-menu__header">{header}</div>
+          <div ref={menuRef} class="sh-post-menu__items" role="menu" aria-label={label}
+               aria-describedby={headerId}>
+            {renderItems()}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

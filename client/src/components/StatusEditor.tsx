@@ -8,18 +8,25 @@
  * detail, which is shown as a toast while the editor stays open. On
  * success ``currentUser`` takes the returned profile, so the page shows
  * the new status without waiting for the ``user.status_changed`` frame.
+ *
+ * Status is an action, not profile identity: the one editor lives in a
+ * dialog (``StatusEditorHost``, mounted once by the App shell) that the
+ * top bar's "You" menu, the person sheet and the Friends page open with
+ * ``openStatusEditor()``.
  */
+import { signal } from '@preact/signals'
 import { useState } from 'preact/hooks'
 import { api, ApiError } from '@/api'
 import { currentUser } from '@/store/auth'
 import type { User, UserStatus } from '@/types'
 import { Button } from './Button'
+import { Modal } from './Modal'
 import { showToast } from './Toast'
 import { formatLocale, t } from '@/i18n/i18n'
 
 /** ``keep`` = leave an existing deadline as it is (only offered while
  *  the current status has one). */
-export type ClearAfterChoice = 'none' | '30m' | '1h' | '4h' | 'today' | 'keep'
+type ClearAfterChoice = 'none' | '30m' | '1h' | '4h' | 'today' | 'keep'
 
 const CHOICES: { id: Exclude<ClearAfterChoice, 'keep'>; labelKey: string }[] = [
   { id: 'none', labelKey: 'status.clear_never' },
@@ -30,7 +37,7 @@ const CHOICES: { id: Exclude<ClearAfterChoice, 'keep'>; labelKey: string }[] = [
 ]
 
 /** Matches the server caps in ``socialhome/domain/user.py``. */
-export const STATUS_TEXT_MAX = 80
+const STATUS_TEXT_MAX = 80
 /** Code points; a single emoji can span several (skin tone, ZWJ). The
  *  input's ``maxLength`` counts UTF-16 units, hence the headroom. */
 const STATUS_EMOJI_MAX_UNITS = 32
@@ -54,14 +61,14 @@ export function liveStatus(s: UserStatus | null | undefined): UserStatus | null 
 }
 
 /** What the status fields hold while being edited. */
-export interface StatusDraft {
+interface StatusDraft {
   emoji: string
   text: string
   clearAfter: ClearAfterChoice
 }
 
 /** The fields' starting point for *status* (the saved one). */
-export function statusDraftFrom(status: UserStatus | null | undefined): StatusDraft {
+function statusDraftFrom(status: UserStatus | null | undefined): StatusDraft {
   const live = liveStatus(status)
   return {
     emoji: live?.emoji ?? '',
@@ -70,18 +77,9 @@ export function statusDraftFrom(status: UserStatus | null | undefined): StatusDr
   }
 }
 
-/** Whether *draft* says the same as *saved* (whitespace aside). Two
- *  empty statuses are equal whatever their "clear after". */
-export function sameStatus(draft: StatusDraft, saved: StatusDraft): boolean {
-  const de = draft.emoji.trim(), dt = draft.text.trim()
-  const se = saved.emoji.trim(), st = saved.text.trim()
-  if (!de && !dt && !se && !st) return true
-  return de === se && dt === st && draft.clearAfter === saved.clearAfter
-}
-
 /** The ``PATCH /api/me`` body that saves *draft*. ``keepUntil`` is the
  *  saved deadline the "Until …" chip keeps. An empty draft clears. */
-export function statusPatchBody(
+function statusPatchBody(
   draft: StatusDraft,
   keepUntil: string | null,
 ): Record<string, string | null> {
@@ -99,24 +97,52 @@ export function statusPatchBody(
 }
 
 /**
- * StatusFields — the emoji + text inputs and the "clear after" chips,
- * controlled. ``StatusEditor`` wraps them with its own Save; Settings ›
- * Profile embeds them in its one form (decision 8: one editor, two
- * entry points).
+ * Save *body* through ``PATCH /api/me``: ``currentUser`` takes the
+ * returned profile and a toast confirms. Returns the user, or ``null``
+ * after an error toast (a 422's readable detail when there is one).
  */
-export function StatusFields({ value, keepUntil, onChange, onClear, disabled, invalid, describedBy }: {
+async function saveMyStatus(
+  body: Record<string, string | null>,
+  cleared: boolean,
+): Promise<User | null> {
+  try {
+    const user = await api.patch('/api/me', body) as User
+    currentUser.value = user
+    showToast(
+      cleared ? t('status.cleared') : t('status.updated'),
+      cleared ? 'info' : 'success',
+    )
+    return user
+  } catch (err) {
+    showToast(
+      err instanceof ApiError ? err.message : t('status.save_failed'),
+      'error',
+    )
+    return null
+  }
+}
+
+/** Clear the caller's status (emoji + text; the deadline goes with them). */
+export function clearMyStatus(): Promise<User | null> {
+  return saveMyStatus({ status_emoji: null, status_text: null }, true)
+}
+
+/** The app-wide status dialog's open state (``StatusEditorHost``). */
+export const statusEditorOpen = signal(false)
+
+export function openStatusEditor(): void {
+  statusEditorOpen.value = true
+}
+
+/** The emoji + text inputs and the "clear after" chips, controlled. */
+function StatusFields({ value, keepUntil, onChange, disabled }: {
   value: StatusDraft
   /** The saved deadline; offers the "Until …" chip while set. */
   keepUntil: string | null
   onChange: (next: StatusDraft) => void
-  /** Shown as "Clear status" while the fields hold something. */
-  onClear?: () => void
   disabled?: boolean
-  invalid?: boolean
-  describedBy?: string
 }) {
   const set = (patch: Partial<StatusDraft>) => onChange({ ...value, ...patch })
-  const hasValue = !!value.emoji.trim() || !!value.text.trim()
   return (
     <>
       <div class="sh-status-row">
@@ -127,8 +153,6 @@ export function StatusFields({ value, keepUntil, onChange, onClear, disabled, in
           placeholder="😊"
           maxLength={STATUS_EMOJI_MAX_UNITS}
           disabled={disabled}
-          aria-invalid={invalid ? true : undefined}
-          aria-describedby={describedBy}
           onInput={(e) => set({ emoji: (e.target as HTMLInputElement).value })}
         />
         <input
@@ -138,8 +162,6 @@ export function StatusFields({ value, keepUntil, onChange, onClear, disabled, in
           placeholder={t('status.placeholder_text')}
           maxLength={STATUS_TEXT_MAX}
           disabled={disabled}
-          aria-invalid={invalid ? true : undefined}
-          aria-describedby={describedBy}
           onInput={(e) => set({ text: (e.target as HTMLInputElement).value })}
         />
       </div>
@@ -173,16 +195,6 @@ export function StatusFields({ value, keepUntil, onChange, onClear, disabled, in
           ))}
         </div>
       </div>
-      {onClear && hasValue && (
-        <button
-          type="button"
-          class="sh-status-clear"
-          disabled={disabled}
-          onClick={onClear}
-        >
-          {t('status.clear_status')}
-        </button>
-      )}
     </>
   )
 }
@@ -200,18 +212,8 @@ export function StatusEditor({ onSave, onCancel }: {
   const submit = async (body: Record<string, string | null>, cleared: boolean) => {
     setBusy(true)
     try {
-      const user = await api.patch('/api/me', body) as User
-      currentUser.value = user
-      showToast(
-        cleared ? t('status.cleared') : t('status.updated'),
-        cleared ? 'info' : 'success',
-      )
-      onSave?.(user)
-    } catch (err) {
-      showToast(
-        err instanceof ApiError ? err.message : t('status.save_failed'),
-        'error',
-      )
+      const user = await saveMyStatus(body, cleared)
+      if (user) onSave?.(user)
     } finally {
       setBusy(false)
     }
@@ -232,7 +234,7 @@ export function StatusEditor({ onSave, onCancel }: {
       class="sh-status-editor"
       onSubmit={(e) => { e.preventDefault(); save() }}
     >
-      <StatusFields value={draft} keepUntil={keepUntil} onChange={setDraft} />
+      <StatusFields value={draft} keepUntil={keepUntil} onChange={setDraft} disabled={busy} />
       <div class="sh-status-actions">
         {onCancel && (
           <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>
@@ -247,5 +249,21 @@ export function StatusEditor({ onSave, onCancel }: {
         <Button type="submit" disabled={busy || empty}>{t('status.set')}</Button>
       </div>
     </form>
+  )
+}
+
+/**
+ * StatusEditorHost — the "Your status" dialog, mounted once by the App
+ * shell. The editor mounts fresh on every open so it starts from the
+ * saved status; a save or Cancel closes it, and the Modal hands focus
+ * back to whatever opened it.
+ */
+export function StatusEditorHost() {
+  const open = statusEditorOpen.value
+  const close = () => { statusEditorOpen.value = false }
+  return (
+    <Modal open={open} onClose={close} title={t('status.title')}>
+      {open && <StatusEditor onSave={close} onCancel={close} />}
+    </Modal>
   )
 }

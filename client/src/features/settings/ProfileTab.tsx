@@ -2,14 +2,17 @@
  * ProfileTab — Settings › Profile: "Your profile, at a glance".
  *
  * Leads with a slim "How others see you" card (the PersonSheet header
- * anatomy: photo, name, @handle, status, bio) that carries the photo
- * actions, then ONE form — name, status, about you, @handle — with a save
- * bar that only appears while something changed (decision 7).
+ * anatomy: photo, name, @handle, bio) that carries the photo actions,
+ * then ONE form — name, about you, @handle — with a save bar that only
+ * appears while something changed (decision 7).
  *
- * The fields live on three endpoints with their own validation, so Save
+ * Status is not part of the profile: it's a short-lived action, set from
+ * the "You" menu in the top bar (``MeButton`` → ``StatusEditorHost``).
+ *
+ * The fields live on two endpoints with their own validation, so Save
  * sends only what changed, one request per field: ``PATCH /api/me``
- * (``display_name``; ``bio``; the ``status_*`` keys — the route handles
- * one group per call) and ``POST /api/me/handle``. Each failure (a 422
+ * (``display_name``; ``bio`` — the route handles one group per call) and
+ * ``POST /api/me/handle``. Each failure (a 422
  * "handle taken", say) lands on its own field and stays unsaved while the
  * others save — a partial failure never loses the parts that worked.
  *
@@ -23,10 +26,6 @@ import { api, ApiError } from '@/api'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
-import {
-  StatusFields, formatClearsAt, liveStatus, sameStatus, statusDraftFrom,
-  statusPatchBody, type StatusDraft,
-} from '@/components/StatusEditor'
 import { showToast } from '@/components/Toast'
 import { confirmDialog } from '@/components/confirm'
 import { ConnIcon } from '@/features/connections/ConnIcon'
@@ -38,13 +37,12 @@ import { HANDLE_INPUT_ID, HandleEditor, handleBaseline } from './HandleEditor'
 import { ProtectedAccountSection } from './ProtectedAccountSection'
 
 /** The fields of the one form, in save (and focus) order. */
-export type ProfileField = 'name' | 'bio' | 'status' | 'handle'
-const FIELDS: ProfileField[] = ['name', 'bio', 'status', 'handle']
+export type ProfileField = 'name' | 'bio' | 'handle'
+const FIELDS: ProfileField[] = ['name', 'bio', 'handle']
 
 interface ProfileValues {
   name: string
   bio: string
-  status: StatusDraft
   handle: string
 }
 
@@ -53,7 +51,7 @@ const NAME_MAX = 64
 const BIO_MAX = 300
 
 /** Only the fields the user touched; the rest read from ``currentUser``
- *  so a status changed on another device never shows up as "unsaved". */
+ *  so a name changed on another device never shows up as "unsaved". */
 export const profileEdits = signal<Partial<ProfileValues>>({})
 export const profileErrors = signal<Partial<Record<ProfileField, string>>>({})
 const saving = signal(false)
@@ -62,7 +60,6 @@ function savedValues(user: User | null): ProfileValues {
   return {
     name: user?.display_name ?? '',
     bio: user?.bio ?? '',
-    status: statusDraftFrom(user?.status),
     handle: handleBaseline(user),
   }
 }
@@ -72,7 +69,6 @@ function changed(field: ProfileField, edits: Partial<ProfileValues>, saved: Prof
     case 'name': return edits.name !== undefined && edits.name.trim() !== saved.name
     case 'bio': return edits.bio !== undefined && edits.bio.trim() !== saved.bio.trim()
     case 'handle': return edits.handle !== undefined && edits.handle.trim() !== saved.handle
-    case 'status': return edits.status !== undefined && !sameStatus(edits.status, saved.status)
   }
 }
 
@@ -112,12 +108,11 @@ function errorText(err: unknown, fallback: string): string {
 const FOCUS_SELECTOR: Record<ProfileField, string> = {
   name: '#sh-profile-name',
   bio: '#sh-profile-bio',
-  status: '.sh-profile-status .sh-status-text',
   handle: `#${HANDLE_INPUT_ID}`,
 }
 
 /** Send one changed field. Throws a user-facing message on failure. */
-async function saveField(field: ProfileField, v: ProfileValues, keepUntil: string | null): Promise<void> {
+async function saveField(field: ProfileField, v: ProfileValues): Promise<void> {
   switch (field) {
     case 'name': {
       const name = v.name.trim()
@@ -127,9 +122,6 @@ async function saveField(field: ProfileField, v: ProfileValues, keepUntil: strin
     }
     case 'bio':
       mergeUser(await api.patch('/api/me', { bio: v.bio.trim() || null }) as User)
-      return
-    case 'status':
-      mergeUser(await api.patch('/api/me', statusPatchBody(v.status, keepUntil)) as User)
       return
     case 'handle': {
       const handle = v.handle.trim()
@@ -148,14 +140,13 @@ export async function saveProfile(): Promise<ProfileField[]> {
   if (fields.length === 0 || saving.value) return []
   const saved = savedValues(currentUser.value)
   const values: ProfileValues = { ...saved, ...profileEdits.value }
-  const keepUntil = liveStatus(currentUser.value?.status)?.expires_at ?? null
   saving.value = true
   const errors: Partial<Record<ProfileField, string>> = {}
   const done: ProfileField[] = []
   try {
     for (const field of fields) {
       try {
-        await saveField(field, values, keepUntil)
+        await saveField(field, values)
         done.push(field)
       } catch (err) {
         errors[field] = errorText(err, t('settings.profile.field_failed'))
@@ -244,26 +235,6 @@ export function ProfileTab() {
           <FormError id="sh-profile-name-error" message={errors.name} />
         </div>
 
-        <div
-          class="sh-profile-field sh-profile-status"
-          role="group"
-          aria-labelledby="sh-profile-status-label"
-        >
-          <span id="sh-profile-status-label" class="sh-profile-field__label">
-            {t('settings.profile.status')}
-          </span>
-          <StatusFields
-            value={values.status}
-            keepUntil={liveStatus(user?.status)?.expires_at ?? null}
-            onChange={(next) => edit('status', next)}
-            onClear={() => edit('status', { emoji: '', text: '', clearAfter: 'none' })}
-            disabled={busy}
-            invalid={!!errors.status}
-            describedBy={errors.status ? 'sh-profile-status-error' : undefined}
-          />
-          <FormError id="sh-profile-status-error" message={errors.status} />
-        </div>
-
         <div class="sh-profile-field">
           <label class="sh-profile-field__label" for="sh-profile-bio">
             {t('settings.profile.about')}
@@ -316,7 +287,6 @@ export function ProfileTab() {
 function ProfileGlance({ user }: { user: User | null }) {
   const fileRef = useRef<HTMLInputElement | null>(null)
   const name = user?.display_name || '—'
-  const status = liveStatus(user?.status)
   const isHaUser = user?.source === 'ha'
   const picture = user?.picture_url ?? null
 
@@ -399,17 +369,6 @@ function ProfileGlance({ user }: { user: User | null }) {
         <p class="sh-conn-eyebrow">{t('settings.profile.how_others_see')}</p>
         <h2 id="sh-profile-glance-name" class="sh-profile-glance__name">{name}</h2>
         <p class="sh-profile-glance__handle">@{handleBaseline(user)}</p>
-        {status && (
-          <p class="sh-person-sheet__status sh-profile-glance__status" data-testid="profile-glance-status">
-            {status.emoji && <span aria-hidden="true">{status.emoji}</span>}
-            {status.text && <span class="sh-person-sheet__status-text">{status.text}</span>}
-            {status.expires_at && (
-              <span class="sh-person-sheet__until">
-                · {t('person.status_until', { time: formatClearsAt(status.expires_at) })}
-              </span>
-            )}
-          </p>
-        )}
         {user?.bio && <p class="sh-profile-glance__bio">{user.bio}</p>}
         {isHaUser && (
           <span class="sh-profile-source sh-profile-source--ha">

@@ -53,12 +53,9 @@ const bodiesFor = (selector: string, media: 'any' | 'none' = 'any') =>
     .map(r => r.body)
     .join('\n')
 
-describe('desktop sidebar identity footer', () => {
-  it('is never sticky / fixed / absolute (it sits in normal flow under the nav)', () => {
-    const footer = rules.filter(r => r.selectors.some(s => /\.sh-sidenav-identity$/.test(s)))
-    expect(footer.length).toBeGreaterThan(0)
-    for (const r of footer) expect(r.body).not.toMatch(/position\s*:\s*(sticky|fixed|absolute)/)
-    expect(bodiesFor('.sh-sidenav-identity')).toMatch(/flex\s*:\s*0 0 auto/)
+describe('desktop sidebar', () => {
+  it('has no identity footer any more (the top bar\'s "You" menu replaced it)', () => {
+    expect(rules.some(r => r.selectors.some(s => s.includes('.sh-sidenav-identity')))).toBe(false)
   })
 
   it('the nav region owns the scroll and can shrink below its content', () => {
@@ -71,6 +68,29 @@ describe('desktop sidebar identity footer', () => {
     const aside = bodiesFor('.sh-sidenav', 'none')
     expect(aside).toMatch(/overflow\s*:\s*hidden/)
     expect(aside).not.toMatch(/overflow-y\s*:\s*auto/)
+  })
+})
+
+describe('TopBar "You" button', () => {
+  it('is a >= 36px tap target with a visible focus ring', () => {
+    const btn = bodiesFor('.sh-me-btn', 'none')
+    const w = Number(btn.match(/(?:^|[;\s])width\s*:\s*(\d+)px/)?.[1])
+    const h = Number(btn.match(/(?:^|[;\s])height\s*:\s*(\d+)px/)?.[1])
+    expect(w).toBeGreaterThanOrEqual(36)
+    expect(h).toBeGreaterThanOrEqual(36)
+    expect(bodiesFor('.sh-me-btn:focus-visible', 'none')).toMatch(/outline\s*:\s*2px solid/)
+  })
+
+  it('while the "You" menu is open the top bar stacks above the toast layer', () => {
+    expect(bodiesFor('.sh-topbar:has(.sh-me-menu)', 'none'))
+      .toMatch(/z-index\s*:\s*calc\(var\(--sh-z-toast\)\s*\+\s*1\)/)
+  })
+
+  it('toasts stack under the top bar, never over the bell / "You" button', () => {
+    expect(bodiesFor('.sh-toast-container', 'none')).toMatch(/top\s*:\s*calc\(var\(--sh-topbar-height\)/)
+    const phone = rules.filter(r => r.media && r.selectors.includes('.sh-toast-container'))
+    expect(phone.length).toBeGreaterThan(0)
+    for (const r of phone) expect(r.body).toMatch(/top\s*:\s*calc\(var\(--sh-topbar-height-mobile\)/)
   })
 })
 

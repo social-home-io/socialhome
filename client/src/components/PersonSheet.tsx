@@ -46,6 +46,7 @@ import { showToast } from './Toast'
 import { openReport } from './ReportDialog'
 import { openAliasDialog } from './AliasDialog'
 import { openCallTypePicker } from './CallTypePickerDialog'
+import { openStatusEditor } from './StatusEditor'
 
 /** Where a person lives, as ``GET /api/friends/{user_id}`` returns it. */
 export interface PersonHousehold {
@@ -398,6 +399,13 @@ export function PersonSheet() {
                 data-testid="person-edit-profile"
               >
                 {t('person.edit_profile')}
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => { closePerson(); openStatusEditor() }}
+                data-testid="person-edit-status"
+              >
+                {t('person.edit_status')}
               </Button>
             </div>
           ) : (canMessage || (!blocked && !isOwnHousehold)) && (

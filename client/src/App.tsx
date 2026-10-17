@@ -20,6 +20,8 @@ import { routes } from './router'
 import { Button } from '@/components/Button'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { NotificationBell, startNotificationPolling, stopNotificationPolling } from '@/components/NotificationBell'
+import { MeButton } from '@/components/MeButton'
+import { StatusEditorHost } from '@/components/StatusEditor'
 import { SearchBar, openSearchResult } from '@/components/SearchBar'
 import { QuickSwitcher } from '@/components/QuickSwitcher'
 import { KeyboardShortcutsDialog } from '@/components/KeyboardShortcutsDialog'
@@ -101,12 +103,14 @@ function IngressAuthFailed() {
   )
 }
 
-function TopBar() {
+/** The sticky top bar: page heading, search, notifications, the "You" menu. */
+export function TopBar() {
   return (
     <header class="sh-topbar" role="banner">
       <TopBarHeading />
       <SearchBar onSelect={openSearchResult} />
       <NotificationBell />
+      <MeButton />
     </header>
   )
 }
@@ -301,6 +305,7 @@ export function App() {
           <PersonSheet />
           <AliasDialog />
           <HighlightPublishMenu />
+          <StatusEditorHost />
         </div>
       </LocationProvider>
     </ErrorBoundary>

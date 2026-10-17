@@ -49,13 +49,6 @@ function echoPatch() {
     const u = { ...(currentUser.value as User) }
     if ('display_name' in body) u.display_name = body.display_name as string
     if ('bio' in body) u.bio = body.bio as string | null
-    if ('status_emoji' in body || 'status_text' in body) {
-      u.status = {
-        emoji: (body.status_emoji as string | null) ?? null,
-        text: (body.status_text as string | null) ?? null,
-        expires_at: null,
-      }
-    }
     return u
   })
 }
@@ -82,13 +75,21 @@ afterEach(() => {
 })
 
 describe('ProfileTab — how others see you', () => {
-  it('leads with the saved name, @handle, status and bio', () => {
-    const { getByRole, getByText, getByTestId } = render(<ProfileTab />)
+  it('leads with the saved name, @handle and bio', () => {
+    const { getByRole, getByText } = render(<ProfileTab />)
     expect(getByText('How others see you')).toBeTruthy()
     expect(getByRole('heading', { level: 2, name: 'Pascal Vizeli' })).toBeTruthy()
     expect(getByText('@pascal')).toBeTruthy()
-    expect(getByTestId('profile-glance-status').textContent).toContain('Fixing the gate')
     expect(getByText('Fixes the garden gate.', { selector: '.sh-profile-glance__bio' })).toBeTruthy()
+  })
+
+  it('status is not part of the profile: no status line, no status fields', () => {
+    // The fixture user HAS a status — it lives in the top bar's "You" menu now.
+    const { container, queryByLabelText, queryByRole } = render(<ProfileTab />)
+    expect(container.textContent).not.toContain('Fixing the gate')
+    expect(queryByLabelText('Status emoji')).toBeNull()
+    expect(queryByLabelText('Status text')).toBeNull()
+    expect(queryByRole('button', { name: 'Clear status' })).toBeNull()
   })
 
   it('offers Change photo as a button and Remove as the quiet action (P6)', () => {
@@ -165,27 +166,6 @@ describe('ProfileTab — one form, dirty-only save bar (decision 7)', () => {
     expect(currentUser.value?.handle).toBe('pascal_v')
   })
 
-  it('saves the status through the status keys of PATCH /api/me', async () => {
-    const { getByLabelText, getByRole } = render(<ProfileTab />)
-    input(getByLabelText('Status text'), 'Baking bread')
-    fireEvent.click(getByRole('radio', { name: '1 hour' }))
-    fireEvent.click(getByRole('button', { name: 'Save' }))
-    await waitFor(() => expect(apiMock.patch).toHaveBeenCalledWith('/api/me', {
-      status_emoji: '🛠',
-      status_text: 'Baking bread',
-      status_clear_after: '1h',
-    }))
-  })
-
-  it('"Clear status" empties the fields and saving clears it', async () => {
-    const { getByRole } = render(<ProfileTab />)
-    fireEvent.click(getByRole('button', { name: 'Clear status' }))
-    fireEvent.click(getByRole('button', { name: 'Save' }))
-    await waitFor(() => expect(apiMock.patch).toHaveBeenCalledWith('/api/me', {
-      status_emoji: null, status_text: null,
-    }))
-  })
-
   it('a bio emptied to whitespace saves as no bio', async () => {
     const { getByLabelText, getByRole } = render(<ProfileTab />)
     input(getByLabelText('About you'), '   ')
@@ -223,30 +203,6 @@ describe('ProfileTab — errors land on their field', () => {
     // Still unsaved: the bar stays for another try.
     expect(getByRole('region', { name: 'Unsaved changes' })).toBeTruthy()
     expect(currentUser.value?.handle).toBe('pascal')
-  })
-
-  it('a rejected bio shows at the bio while the status still saves', async () => {
-    apiMock.patch.mockImplementation(async (_p: string, body: Record<string, unknown>) => {
-      if ('bio' in body) throw new FakeApiError(422, 'bio must be ≤ 300 chars')
-      return { ...(currentUser.value as User), status: { emoji: '☕', text: 'Fixing the gate', expires_at: null } }
-    })
-    const { getByLabelText, getByRole, findByText } = render(<ProfileTab />)
-    input(getByLabelText('About you'), 'x'.repeat(10))
-    input(getByLabelText('Status emoji'), '☕')
-    fireEvent.click(getByRole('button', { name: 'Save' }))
-    await findByText('bio must be ≤ 300 chars')
-    expect(getByLabelText('About you').getAttribute('aria-invalid')).toBe('true')
-    expect(currentUser.value?.status?.emoji).toBe('☕')
-  })
-
-  it('a status error is shown under the status, not as a lost toast', async () => {
-    apiMock.patch.mockRejectedValue(new FakeApiError(422, 'status_text must be ≤ 80 chars'))
-    const { getByLabelText, getByRole, findByText } = render(<ProfileTab />)
-    input(getByLabelText('Status text'), 'Something else')
-    fireEvent.click(getByRole('button', { name: 'Save' }))
-    const err = await findByText('status_text must be ≤ 80 chars')
-    expect(err.id).toBe('sh-profile-status-error')
-    expect(getByLabelText('Status text').getAttribute('aria-invalid')).toBe('true')
   })
 
   it('an empty name is caught before any request', async () => {

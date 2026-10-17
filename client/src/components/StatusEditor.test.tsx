@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent, waitFor } from '@testing-library/preact'
+import { render, fireEvent, waitFor, act } from '@testing-library/preact'
 import { signal } from '@preact/signals'
 import type { User } from '@/types'
 
@@ -97,5 +97,69 @@ describe('StatusEditor', () => {
       status_emoji: null, status_text: null,
     }))
     expect(toast).toHaveBeenCalledWith('Status cleared', 'info')
+  })
+})
+
+describe('StatusEditorHost', () => {
+  const currentUser = signal<User | null>(null)
+  const toast = vi.fn()
+
+  beforeEach(() => {
+    vi.resetModules()
+    toast.mockReset()
+    currentUser.value = { ...baseUser }
+    vi.doMock('@/store/auth', () => ({ currentUser }))
+    vi.doMock('./Toast', () => ({ showToast: toast }))
+  })
+
+  async function mountHost(patch: ReturnType<typeof vi.fn> = vi.fn()) {
+    vi.doMock('@/api', async () => {
+      const real = await vi.importActual<typeof import('@/api')>('@/api')
+      return { ApiError: real.ApiError, api: { patch } }
+    })
+    const mod = await import('./StatusEditor')
+    const view = render(<mod.StatusEditorHost />)
+    return { view, ...mod }
+  }
+
+  it('renders nothing until openStatusEditor(), then a "Your status" dialog', async () => {
+    const { view, openStatusEditor } = await mountHost()
+    expect(view.queryByRole('dialog')).toBeNull()
+    act(() => { openStatusEditor() })
+    const dialog = view.getByRole('dialog', { name: 'Your status' })
+    expect(dialog.querySelector('input[aria-label="Status text"]')).toBeTruthy()
+  })
+
+  it('Cancel closes it', async () => {
+    const { view, openStatusEditor, statusEditorOpen } = await mountHost()
+    act(() => { openStatusEditor() })
+    fireEvent.click(view.getByRole('button', { name: 'Cancel' }))
+    expect(statusEditorOpen.value).toBe(false)
+    expect(view.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a successful save closes it; a failed one keeps it open', async () => {
+    const { ApiError } = await vi.importActual<typeof import('@/api')>('@/api')
+    const patch = vi.fn()
+      .mockRejectedValueOnce(new ApiError(422, '/api/me', { code: 'UNPROCESSABLE', detail: 'Nope.' }))
+      .mockResolvedValueOnce({ ...baseUser, status: { emoji: '☕', text: null, expires_at: null } })
+    const { view, openStatusEditor, statusEditorOpen } = await mountHost(patch)
+    act(() => { openStatusEditor() })
+    fireEvent.input(view.getByLabelText('Status emoji'), { target: { value: '☕' } })
+    fireEvent.click(view.getByRole('button', { name: 'Set status' }))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('Nope.', 'error'))
+    expect(statusEditorOpen.value).toBe(true)
+    fireEvent.click(view.getByRole('button', { name: 'Set status' }))
+    await waitFor(() => expect(statusEditorOpen.value).toBe(false))
+    expect(currentUser.value?.status?.emoji).toBe('☕')
+  })
+
+  it('reopening starts from the saved status, not the last draft', async () => {
+    const { view, openStatusEditor } = await mountHost()
+    act(() => { openStatusEditor() })
+    fireEvent.input(view.getByLabelText('Status text'), { target: { value: 'draft' } })
+    fireEvent.click(view.getByRole('button', { name: 'Cancel' }))
+    act(() => { openStatusEditor() })
+    expect((view.getByLabelText('Status text') as HTMLInputElement).value).toBe('')
   })
 })

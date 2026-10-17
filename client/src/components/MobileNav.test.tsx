@@ -4,6 +4,7 @@ import { LocationProvider } from 'preact-iso'
 import { MobileNav, mobileSidebarOpen } from './MobileNav'
 import { shortcutsHelpOpen } from '@/lib/shortcuts'
 import { dmUnreadTotal } from '@/store/dms'
+import { currentUser } from '@/store/auth'
 import { KBD_OPEN_CLASS, keyboardOpen } from '@/hooks/useKeyboardOpen'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -125,6 +126,29 @@ describe('MobileNav', () => {
     expect(document.activeElement).toBe(last)
 
     act(() => { mobileSidebarOpen.value = false })
+    container.remove()
+  })
+
+  it('signed in, the drawer ends on the shortcuts entry (no identity strip) and the trap wraps from it', () => {
+    currentUser.value = {
+      user_id: 'u-1', username: 'pascal', display_name: 'Pascal Vizeli', is_admin: false,
+      picture_url: null, picture_hash: null, bio: null, is_new_member: false,
+    }
+    mobileSidebarOpen.value = false
+    const { container } = render(wrap(<MobileNav />), { container: document.body.appendChild(document.createElement('div')) })
+    act(() => { mobileSidebarOpen.value = true })
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!
+    expect(dialog.querySelector('.sh-sidenav-identity')).toBeNull()
+    expect(dialog.textContent).not.toContain('Pascal Vizeli')
+    const items = [...dialog.querySelectorAll<HTMLElement>('a[href], button:not([disabled])')]
+    const last = items[items.length - 1]
+    expect(last.classList.contains('sh-sidenav-action')).toBe(true)
+    last.focus()
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    act(() => { last.dispatchEvent(tab) })
+    expect(document.activeElement).toBe(items[0])
+    act(() => { mobileSidebarOpen.value = false })
+    currentUser.value = null
     container.remove()
   })
 

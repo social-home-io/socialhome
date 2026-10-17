@@ -439,7 +439,6 @@
   "dms.jump_new": "Tiny label under the count on the 'jump to newest' chip (e.g. '3 new'). Very short.",
   "dms.day.aria": "Screen-reader label of a day separator. {day} is 'Today', 'Yesterday', a weekday or a date.",
   "dms.group.home": "Label under a group member who lives in YOUR household (others show 'at <household>').",
-  "presence.clears": "After a status line: when the status expires. {time} is a clock time, or weekday + time (e.g. 'Mon 18:00').",
   "presence.dnd_badge": "Small badge for 'Do Not Disturb'. Keep very short.",
   "search.filter.dms": "Search filter chip for direct (private) messages.",
   "moment.archive.hashtag_hint_before": "Split around a code sample: 'Start a hashtag with #yourtag to make it easy to find later.' hashtag_example is the placeholder tag word (no spaces, no #).",
@@ -509,5 +508,9 @@
   "space.private_gfs.channels_failed": "Info toast: {names} is a comma-separated list of GFS names the channel could not be registered on.",
   "space.private_gfs.channel_suspended": "Note under a chosen channel GFS whose connection is suspended or pending.",
   "space.private_gfs.channel_unsupported": "Note under a chosen channel GFS that does not answer or no longer supports private channels.",
-  "error.gfs_selection.unsupported": "Error when the owner picks a GFS without private-channel support for a private space."
+  "error.gfs_selection.unsupported": "Error when the owner picks a GFS without private-channel support for a private space.",
+  "me.menu_aria": "Accessible name of the top-bar 'You' menu button (the signed-in person's avatar). {name} is their display name.",
+  "me.menu_aria_status": "Same as me.menu_aria while a status is set. {status} is the emoji + text status, e.g. '🌴 On leave'.",
+  "me.set_status": "Menu item in the top-bar 'You' menu; opens the status dialog. The ellipsis signals a dialog follows.",
+  "me.profile_settings": "Menu item in the top-bar 'You' menu; opens personal settings."
 }

@@ -14,7 +14,8 @@ vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 
 const authUser = vi.hoisted(() => ({
   value: { user_id: 'u-me', username: 'pascal', display_name: 'Pascal', is_admin: true } as
-    { user_id: string; username: string; display_name: string; is_admin: boolean },
+    { user_id: string; username: string; display_name: string; is_admin: boolean;
+      status?: { emoji: string | null; text: string | null; expires_at: string | null } | null },
 }))
 vi.mock('@/store/auth', () => ({ currentUser: authUser }))
 
@@ -39,12 +40,9 @@ vi.mock('@/components/PairingFlow', () => ({
   PairingFlow: () => null,
 }))
 
+const openStatusEditorSpy = vi.fn()
 vi.mock('@/components/StatusEditor', () => ({
-  StatusEditor: ({ onSave }: { onSave: (u: unknown) => void }) => (
-    <button type="button" onClick={() => onSave({
-      user_id: 'u-me', status: { emoji: '🛠', text: 'Fixing the gate', expires_at: null },
-    })}>save-status</button>
-  ),
+  openStatusEditor: () => openStatusEditorSpy(),
 }))
 
 const openPersonSpy = vi.fn()
@@ -117,6 +115,7 @@ describe('FriendsPage', () => {
     apiGet.mockReset()
     openPersonSpy.mockReset()
     openPairingSpy.mockReset()
+    openStatusEditorSpy.mockReset()
     _resetBlocksForTest()
     householdAdmins.value = null
     authUser.value = { user_id: 'u-me', username: 'pascal', display_name: 'Pascal', is_admin: true }
@@ -441,14 +440,24 @@ describe('FriendsPage', () => {
       .toBe('Brother, your nickname for Bob')
   })
 
-  it('our own row opens the status editor and shows the saved status', async () => {
+  it('our own row opens the app-wide status editor, not the person sheet', async () => {
     serve(payload([hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')])]))
-    const { container, findByRole } = render(<FriendsPage />)
+    const { findByRole } = render(<FriendsPage />)
     const self = await findByRole('button', { name: /^Pascal \(you\)/ })
     expect(self.getAttribute('aria-label')).toContain('edit your status')
     fireEvent.click(self)
+    expect(openStatusEditorSpy).toHaveBeenCalledTimes(1)
     expect(openPersonSpy).not.toHaveBeenCalled()
-    fireEvent.click(await findByRole('button', { name: 'save-status' }))
+  })
+
+  it('our own row shows the status from currentUser, not the /api/friends snapshot', async () => {
+    authUser.value = {
+      ...authUser.value,
+      status: { emoji: '🛠', text: 'Fixing the gate', expires_at: null },
+    }
+    serve(payload([hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')])]))
+    const { container, findByRole } = render(<FriendsPage />)
+    await findByRole('button', { name: /^Pascal \(you\)/ })
     await waitFor(() =>
       expect(container.querySelector('[data-user-id="u-me"] .sh-friends-row__meta')?.textContent)
         .toBe('🛠 Fixing the gate'))
