@@ -195,11 +195,10 @@ jobs:
         run: mypy socialhome/
 
   lock:
-    # uv.lock and the exported requirements/constraints*.txt must match
-    # pyproject.toml — the Docker images and the Home Assistant App install
-    # from the exports, so a stale export would ship a set CI never tested.
-    # Fix a failure with ``scripts/lock.sh`` (docs/testing.md, "Dependency
-    # lock").
+    # uv.lock must match pyproject.toml — CI, the Docker images and the
+    # Home Assistant App all install from it (the images export it at build
+    # time), so a stale lock would ship a set CI never tested. Fix a
+    # failure with ``scripts/lock.sh`` (docs/testing.md, "Dependency lock").
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -209,7 +208,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.12.10"
-      - name: uv.lock + constraints exports are up to date
+      - name: uv.lock is up to date
         run: scripts/lock.sh --check
 
   images:
@@ -254,14 +253,26 @@ jobs:
           docker run --rm sh-gfs python -c "import socialhome.global_server, bcrypt, qrcode"
       - name: Home Assistant App builder (Alpine / musl)
         # Mirrors the builder stage of social-home-io/ha-app's Dockerfiles:
-        # same base image, same toolchain, same ``pip3 wheel
-        # --require-hashes -r requirements/constraints.txt``.
+        # same base image, same toolchain, same static uv from
+        # ``ghcr.io/astral-sh/uv``, same build-time ``uv export --frozen``
+        # of ``uv.lock`` and ``pip3 wheel --require-hashes -r`` of the result.
+        # Only pyproject.toml + uv.lock go into the build context — exactly
+        # the two files the App fetches for a release tag.
         run: |
-          docker run --rm -v "$PWD/requirements:/req:ro" \
-            ghcr.io/home-assistant/${{ matrix.arch }}-base-python:3.14-alpine3.23 \
-            sh -euc 'apk add --no-cache build-base cmake git linux-headers openssl-dev pkgconf >/dev/null
-                     pip3 wheel --no-cache-dir --require-hashes --wheel-dir=/tmp/wheels -r /req/constraints.txt
-                     ls /tmp/wheels'
+          ctx="$RUNNER_TEMP/app-ctx"
+          mkdir -p "$ctx"
+          cp pyproject.toml uv.lock "$ctx/"
+          docker build --progress=plain -f - "$ctx" <<'EOF'
+          FROM ghcr.io/home-assistant/${{ matrix.arch }}-base-python:3.14-alpine3.23
+          COPY --from=ghcr.io/astral-sh/uv:0.12.10 /uv /usr/local/bin/uv
+          RUN apk add --no-cache build-base cmake git linux-headers openssl-dev pkgconf >/dev/null
+          COPY pyproject.toml uv.lock /tmp/lock/
+          RUN uv export --no-cache --frozen --no-dev --no-emit-project --no-header \
+                --format requirements-txt --project /tmp/lock > /tmp/requirements.txt && \
+              pip3 wheel --no-cache-dir --require-hashes --wheel-dir=/tmp/wheels \
+                -r /tmp/requirements.txt && \
+              ls /tmp/wheels
+          EOF
 
   frontend:
     runs-on: ubuntu-latest

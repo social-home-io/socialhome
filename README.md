@@ -47,7 +47,8 @@ interpreter. Reinstall deps with
 `uv sync --locked --inexact --extra dev` — every Python package,
 transitive ones included, is pinned in `uv.lock`. To change a version,
 edit the pin in `pyproject.toml` (or move a transitive one with
-`scripts/lock.sh --upgrade-package <pkg>`) and run `scripts/lock.sh`;
+`scripts/lock.sh --upgrade-package <pkg>`) and run `scripts/lock.sh`
+(it only updates `uv.lock` — the images export it at build time);
 see [Dependency lock](docs/testing.md#dependency-lock).
 
 ### Manual setup
