@@ -25,7 +25,7 @@
  * reader lands on controls nobody can see, and it returns as soon as
  * the keyboard closes (blur, rotation, keyboard dismissed).
  */
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { SideNav } from '@/components/SideNav'
@@ -72,6 +72,8 @@ export function MobileNav() {
   const loc = useLocation()
   const path = loc.path
   const keyboardUp = useKeyboardOpen()
+  const drawerRef = useRef<HTMLDivElement | null>(null)
+  const moreRef = useRef<HTMLButtonElement | null>(null)
 
   // Auto-close the drawer on route change so tapping a sidebar link
   // dismisses the overlay without a second tap on the scrim. Esc also
@@ -91,13 +93,19 @@ export function MobileNav() {
     }
   }, [shortcutsHelpOpen.value])
 
-  // Esc closes the drawer.
+  // Esc closes the drawer. Opening moves focus onto the drawer (as
+  // Modal does on touch) so Tab walks its links; the closed drawer is
+  // inert, so Esc from inside it hands focus back to the More button
+  // instead of dropping it on <body>.
   useEffect(() => {
     if (!mobileSidebarOpen.value) return
+    drawerRef.current?.focus({ preventScroll: true })
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
+        const hadFocus = drawerRef.current?.contains(document.activeElement)
         mobileSidebarOpen.value = false
+        if (hadFocus) moreRef.current?.focus()
       }
     }
     document.addEventListener('keydown', onKey)
@@ -123,7 +131,14 @@ export function MobileNav() {
           onClick={() => (mobileSidebarOpen.value = false)}
         />
       )}
+      {/* Closed, the drawer only slides off-screen (it stays mounted for
+          the transition), so it is inert + aria-hidden: otherwise its
+          SideNav links sit in the Tab order and screen readers still
+          find a "Navigation" dialog nobody can see. */}
       <div
+        ref={drawerRef}
+        id="sh-mobile-drawer"
+        tabIndex={-1}
         class={
           mobileSidebarOpen.value
             ? 'sh-mobile-drawer sh-mobile-drawer--open'
@@ -132,6 +147,8 @@ export function MobileNav() {
         role="dialog"
         aria-modal={mobileSidebarOpen.value}
         aria-label={t('nav.drawer')}
+        inert={!mobileSidebarOpen.value}
+        aria-hidden={mobileSidebarOpen.value ? undefined : 'true'}
       >
         <SideNav />
       </div>
@@ -170,6 +187,7 @@ export function MobileNav() {
           )
         })}
         <button
+          ref={moreRef}
           type="button"
           class={`sh-mobile-tab sh-mobile-tab--more${moreActive ? ' sh-active' : ''}`}
           aria-expanded={moreActive}
