@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent, waitFor, act } from '@testing-library/preact'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, fireEvent, waitFor, act, cleanup } from '@testing-library/preact'
 
 const apiPost = vi.fn().mockResolvedValue({})
 vi.mock('@/api', () => ({
@@ -10,9 +10,15 @@ vi.mock('@/components/Toast', () => ({
   showToast: (...a: unknown[]) => showToast(...a),
 }))
 const route = vi.fn()
+// Every test gets its own call id. A page left over from the previous
+// test may run its unmount cleanup late (Preact 11 runs effect cleanups
+// after paint): with a shared id it would see the *next* test's live
+// session as its own and hang it up. A fresh id makes the page's own
+// ``sessionCallId === callId`` guard keep it off the new session.
+const ids = vi.hoisted(() => ({ n: 0, callId: 'call-0' }))
 vi.mock('preact-iso', () => ({
-  useRoute: () => ({ params: { callId: 'call-1' } }),
-  useLocation: () => ({ route, url: '/calls/call-1' }),
+  useRoute: () => ({ params: { callId: ids.callId } }),
+  useLocation: () => ({ route, url: `/calls/${ids.callId}` }),
 }))
 
 // A controllable stand-in for the session: the page only renders it.
@@ -45,11 +51,24 @@ vi.mock('./callSession', async () => {
 import InCallPage from './InCallPage'
 import {
   callConversation, callEndReason, callId, callPeers, callPhase, callType, hasCamera,
-  type CallPhase,
+  localStream, type CallPhase,
 } from './callSession'
 
+/** Put every mocked session signal back to its initial value. */
+function resetSession() {
+  callEndReason.value = null
+  callPhase.value = 'idle'
+  callId.value = null
+  callConversation.value = 'conv-1'
+  localStream.value = null
+  callPeers.value = [{ userId: 'uid-bob', name: 'Bob', state: 'connecting', stream: null }]
+  hasCamera.value = true
+  callType.value = 'video'
+  s.live = false
+}
+
 function session(phase: CallPhase) {
-  callId.value = 'call-1'
+  callId.value = ids.callId
   callConversation.value = 'conv-1'
   callPhase.value = phase
   s.live = !['idle', 'ended', 'failed'].includes(phase)
@@ -57,16 +76,19 @@ function session(phase: CallPhase) {
 
 describe('InCallPage', () => {
   beforeEach(() => {
+    ids.n += 1
+    ids.callId = `call-${ids.n}`
     route.mockReset()
     apiPost.mockClear()
     showToast.mockReset()
     s.hangupCall.mockClear()
     s.resetCall.mockClear()
-    callEndReason.value = null
-    callPhase.value = 'idle'
-    callId.value = null
-    callPeers.value = [{ userId: 'uid-bob', name: 'Bob', state: 'connecting', stream: null }]
-    s.live = false
+    resetSession()
+  })
+
+  afterEach(() => {
+    // A failed assertion mid-test must not leave a live session behind.
+    resetSession()
   })
 
   it('says the call is not connected on this device when there is no session', () => {
@@ -81,7 +103,7 @@ describe('InCallPage', () => {
     // may still ring or wait on the other side — leaving must end it.
     const { getByText } = render(<InCallPage />)
     fireEvent.click(getByText('Back to chats'))
-    expect(apiPost).toHaveBeenCalledWith('/api/calls/call-1/hangup', {})
+    expect(apiPost).toHaveBeenCalledWith(`/api/calls/${ids.callId}/hangup`, {})
     expect(apiPost).toHaveBeenCalledTimes(1)
   })
 
@@ -142,7 +164,6 @@ describe('InCallPage', () => {
     hasCamera.value = false
     const { getByLabelText } = render(<InCallPage />)
     expect((getByLabelText('No camera available') as HTMLButtonElement).disabled).toBe(true)
-    hasCamera.value = true
   })
 
   it('an audio call has no camera to switch on — the toggle says why', () => {
@@ -152,8 +173,6 @@ describe('InCallPage', () => {
     const { getByLabelText } = render(<InCallPage />)
     expect((getByLabelText('Camera is off in audio calls') as HTMLButtonElement).disabled)
       .toBe(true)
-    hasCamera.value = true
-    callType.value = 'video'
   })
 
   it('leaving the page mid-call hangs up', () => {
@@ -161,6 +180,20 @@ describe('InCallPage', () => {
     const { unmount } = render(<InCallPage />)
     act(() => { unmount() })
     expect(s.hangupCall).toHaveBeenCalledTimes(1)
+  })
+
+  it('a page left over from an earlier call does not hang up the next one', () => {
+    session('connected')
+    render(<InCallPage />)
+    // Plain cleanup(), no act(): Preact 11 defers the unmount cleanup, so
+    // it runs inside the next render's act() — after the new call started.
+    cleanup()
+    ids.n += 1
+    ids.callId = `call-${ids.n}`
+    session('connected')
+    const { getByLabelText } = render(<InCallPage />)
+    expect(s.hangupCall).not.toHaveBeenCalled()
+    expect(getByLabelText('Connection quality')).toBeTruthy()
   })
 
   it('a group call shows one tile per participant with its own state', () => {
