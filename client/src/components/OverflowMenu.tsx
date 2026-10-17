@@ -13,7 +13,9 @@
  * Items with ``checked`` set render as ``menuitemradio`` (a pick-one
  * menu such as "which store"). ``bareTrigger`` drops the round ⋯
  * button chrome so the trigger can look like a pill; ``open`` /
- * ``onOpenChange`` make the open state controllable.
+ * ``onOpenChange`` make the open state controllable. ``header`` puts a
+ * non-focusable block (``role="none"``) above the items — arrow keys
+ * and type-ahead skip it.
  */
 import type { ComponentChildren, Ref } from 'preact'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
@@ -57,6 +59,10 @@ interface Props {
   /** Lands on the trigger button (Preact 11 passes ``ref`` as a prop), the
    *  control a caller hands focus back to. */
   ref?: Ref<HTMLButtonElement>
+  /** Non-focusable content above the items (e.g. who / what state). */
+  header?: ComponentChildren
+  /** Width of a ``floating`` menu in px (default 200). */
+  menuWidth?: number
 }
 
 const MENU_W = 200
@@ -64,6 +70,7 @@ const MENU_W = 200
 export function OverflowMenu({
   label, items, triggerClass = '', wrapClass = '', children, floating = false,
   menuClass = '', bareTrigger = false, title, open: openProp, onOpenChange, ref,
+  header, menuWidth = MENU_W,
 }: Props) {
   const [openState, setOpenState] = useState(false)
   const open = openProp ?? openState
@@ -112,7 +119,7 @@ export function OverflowMenu({
       const r = triggerRef.current?.getBoundingClientRect()
       if (!r) return
       if (r.bottom < 0 || r.top > window.innerHeight) { setOpenRef.current(false); return }
-      const left = Math.max(8, Math.min(r.right - MENU_W, window.innerWidth - MENU_W - 8))
+      const left = Math.max(8, Math.min(r.right - menuWidth, window.innerWidth - menuWidth - 8))
       setPos({ top: r.bottom + 4, left })
     }
     place()
@@ -122,7 +129,7 @@ export function OverflowMenu({
       window.removeEventListener('scroll', place, true)
       window.removeEventListener('resize', place)
     }
-  }, [open, floating])
+  }, [open, floating, menuWidth])
 
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape' && open) {
@@ -192,7 +199,10 @@ export function OverflowMenu({
         <div ref={menuRef}
              class={`sh-post-menu${floating ? ' sh-timetable-menu--floating' : ''} ${menuClass}`.trim()}
              role="menu" aria-label={label}
-             style={floating && pos ? { top: `${pos.top}px`, left: `${pos.left}px`, width: `${MENU_W}px` } : undefined}>
+             style={floating && pos ? { top: `${pos.top}px`, left: `${pos.left}px`, width: `${menuWidth}px` } : undefined}>
+          {header != null && (
+            <div role="none" class="sh-post-menu__header">{header}</div>
+          )}
           {items.map(item => {
             const radio = item.checked !== undefined
             const cls = [item.danger ? 'sh-post-menu-danger' : '', item.class ?? '']

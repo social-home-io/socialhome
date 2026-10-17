@@ -4,8 +4,8 @@
  * **Talk** (synchronous human comms), **Browse** (cross-cutting
  * context-switchers — Spaces / Bazaar / Corner) and **Local** (admin /
  * Federation / Parent Control — gated entry points for the people
- * who run this household). Personal settings are reached by clicking
- * the user identity strip at the bottom of the sidebar. Empty groups
+ * who run this household). Personal settings are the "Personal" link
+ * in the Settings group (and the "You" menu in the top bar). Empty groups
  * (after feature-flag gating) suppress their header entirely so a
  * minimal household configuration doesn't show empty section labels.
  *
@@ -19,13 +19,11 @@ import { useLocation } from 'preact-iso'
 import { useComputed } from '@preact/signals'
 import { currentUser } from '@/store/auth'
 import { isGuardian } from '@/store/guardian'
-import { isSupervisorAddon } from '@/platform'
 import { active as activeCalls } from '@/store/calls'
 import { dmUnreadTotal } from '@/store/dms'
 import { spaces, loadSpaces } from '@/store/spaces'
 import { toggles } from '@/components/HouseholdToggles'
 import { userPreferences } from '@/store/userPreferences'
-import { Avatar } from '@/components/Avatar'
 import { Wordmark } from '@/components/Wordmark'
 import { SideNavIcon, type SideNavIconName } from '@/components/SideNavIcon'
 import { openShortcutsHelp } from '@/lib/shortcuts'
@@ -159,11 +157,8 @@ const LOCAL_GROUP: SideNavGroup = {
   label: () => t('nav.section.settings'),
   items: [
     // First-class entry to personal settings for every authenticated
-    // user (no ``gate``). Previously the only path was the identity
-    // strip at the bottom of the sidebar — visually unobvious enough
-    // that non-admins reported "I can't find where to change my
-    // profile". Lifting it into the sidebar group makes the path the
-    // same regardless of role.
+    // user (no ``gate``), the same path regardless of role. The top
+    // bar's "You" menu is the other way in.
     { key: 'personal', label: () => t('nav.personal'), href: '/settings', icon: 'person' },
     { key: 'parent-control', label: () => t('nav.parent_control'), href: '/parent', icon: 'parent-control',
       gate: s => s.isGuardian },
@@ -209,13 +204,6 @@ export function SideNav() {
   const view = useComputed(() => {
     const user = currentUser.value
     const tg = toggles.value
-    // The identity strip only renders outside haos mode. In haos mode
-    // the SH SPA is iframed under HA Core's left sidebar, which already
-    // shows the signed-in user — a second avatar in our sidebar
-    // doubles up. ha and standalone modes keep the strip; it's the
-    // user's only "who am I signed in as" cue when SH is the primary
-    // UI surface.
-    const isHaos = isSupervisorAddon()
     const up = userPreferences.value
     const state: SideNavState = {
       isAdmin: !!user?.is_admin,
@@ -250,13 +238,11 @@ export function SideNav() {
         .map(g => ({ group: g, items: filter(g) }))
         .filter(({ items }) => items.length > 0),
       local: { group: LOCAL_GROUP, items: filter(LOCAL_GROUP) },
-      user,
       state,
-      isHaos,
     }
   })
 
-  const { main, local, user, isHaos } = view.value
+  const { main, local } = view.value
   const currentPath = loc.path
 
   const state = view.value.state
@@ -331,9 +317,7 @@ export function SideNav() {
 
   return (
     <aside class="sh-sidenav" aria-label={t('nav.sidebar')}>
-      {/* The brand + nav groups scroll in their own region; the
-       *  identity strip below sits outside it, in normal flow, so it
-       *  can never paint over a nav item at a short window height. */}
+      {/* The brand + nav groups scroll in their own region. */}
       <div class="sh-sidenav-scroll">
         <Wordmark as="a" href={addBase('/')} size={28} class="sh-sidenav-brand" />
         {main.map(({ group, items }) => renderGroup(group, items))}
@@ -358,17 +342,6 @@ export function SideNav() {
           </>
         )}
       </div>
-      {user && !isHaos && (
-        <a
-          href={addBase('/settings')}
-          class="sh-sidenav-identity"
-          aria-label={t('nav.signed_in_as', { name: user.display_name })}
-          aria-current={currentPath === '/settings' ? 'page' : undefined}
-        >
-          <Avatar src={user.picture_url} name={user.display_name} size={32} />
-          <span class="sh-sidenav-identity__name">{user.display_name}</span>
-        </a>
-      )}
     </aside>
   )
 }

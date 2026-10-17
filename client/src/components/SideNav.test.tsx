@@ -62,8 +62,7 @@ beforeEach(() => {
     hide_bazaar: false,
   }
   // Default to standalone for tests that don't care about platform
-  // mode. The identity-strip behaviour test explicitly flips this to
-  // ``'haos'`` to assert the strip disappears under HA Supervisor.
+  // mode; the no-identity-strip test walks every mode.
   instanceConfig.value = {
     mode: 'standalone',
     instance_name: 'Hearth', instance_id: null,
@@ -223,76 +222,29 @@ describe('SideNav', () => {
     expect(link?.getAttribute('href')).toBe('/parent')
   })
 
-  it('renders the identity strip in standalone mode with avatar + display name linking to /settings', () => {
-    instanceConfig.value = {
-      mode: 'standalone',
-      instance_name: 'Hearth', instance_id: null,
-      capabilities: [],
-      setup_required: false,
-    }
-    setUser({ display_name: 'Pascal Vizeli', picture_url: '/pic.jpg' })
-    const { container } = renderAt('/')
-    const strip = container.querySelector('.sh-sidenav-identity')
-    expect(strip).toBeTruthy()
-    expect(strip?.tagName.toLowerCase()).toBe('a')
-    expect(strip?.getAttribute('href')).toBe('/settings')
-    expect(strip?.textContent).toContain('Pascal Vizeli')
-    // The strip itself is the settings entry point — no nested
-    // action surfaces inside it.
-    expect(strip?.querySelector('a, button')).toBeNull()
-  })
-
-  it('keeps the identity strip outside the scrolling nav region (it never covers a nav item)', () => {
-    instanceConfig.value = {
-      mode: 'standalone',
-      instance_name: 'Hearth', instance_id: null,
-      capabilities: [],
-      setup_required: false,
-    }
-    setUser({ display_name: 'Pascal Vizeli', is_admin: true })
-    const { container } = renderAt('/')
-    const aside = container.querySelector('aside.sh-sidenav')!
-    const scroll = aside.querySelector(':scope > .sh-sidenav-scroll')
-    const strip = aside.querySelector(':scope > .sh-sidenav-identity')
-    expect(scroll).toBeTruthy()
-    expect(strip).toBeTruthy()
-    // The region holds the brand + every nav group; the strip comes
-    // after it as a sibling footer, not inside the scroller (where a
-    // sticky strip painted over Corner / Apps at 1280x720).
-    expect(scroll!.querySelector('.sh-sidenav-brand')).toBeTruthy()
-    expect(scroll!.querySelectorAll('nav.sh-sidenav-group').length)
-      .toBe(aside.querySelectorAll('nav.sh-sidenav-group').length)
-    expect(scroll!.contains(strip)).toBe(false)
-    expect(aside.lastElementChild).toBe(strip)
-  })
-
-  it('also renders the identity strip in ha mode (SH is the primary UI surface)', () => {
-    instanceConfig.value = {
-      mode: 'ha',
-      instance_name: 'Hearth', instance_id: null,
-      capabilities: ['ha_person_directory'],
-      setup_required: false,
-    }
-    setUser({ display_name: 'Pascal Vizeli' })
-    const { container } = renderAt('/')
-    expect(container.querySelector('.sh-sidenav-identity')).toBeTruthy()
-  })
-
-  it('hides the identity strip in haos mode (HA Core sidebar already shows the signed-in user)', () => {
-    instanceConfig.value = {
-      mode: 'haos',
-      instance_name: 'Hearth', instance_id: null,
-      capabilities: ['ingress', 'ha_person_directory'],
-      setup_required: false,
-    }
-    setUser({ display_name: 'Pascal Vizeli' })
-    const { container } = renderAt('/')
-    expect(container.querySelector('.sh-sidenav-identity')).toBeNull()
-    // Personal entry in the Settings group remains so users still
-    // have a sidebar path to /settings.
-    const personal = container.querySelector('a[href="/settings"]')
-    expect(personal).toBeTruthy()
-  })
+  it.each(['standalone', 'ha', 'haos'] as const)(
+    'has no identity strip in %s mode — the top bar\'s "You" menu is the way in',
+    (mode) => {
+      instanceConfig.value = {
+        mode,
+        instance_name: 'Hearth', instance_id: null,
+        capabilities: mode === 'standalone' ? [] : ['ha_person_directory'],
+        setup_required: false,
+      }
+      setUser({ display_name: 'Pascal Vizeli', picture_url: '/pic.jpg', is_admin: true })
+      const { container } = renderAt('/')
+      const aside = container.querySelector('aside.sh-sidenav')!
+      expect(container.querySelector('.sh-sidenav-identity')).toBeNull()
+      expect(aside.textContent).not.toContain('Pascal Vizeli')
+      // The brand + every nav group live in the one scrolling region.
+      const scroll = aside.querySelector(':scope > .sh-sidenav-scroll')!
+      expect(aside.children.length).toBe(1)
+      expect(scroll.querySelectorAll('nav.sh-sidenav-group').length)
+        .toBe(aside.querySelectorAll('nav.sh-sidenav-group').length)
+      // The Personal entry in the Settings group stays the sidebar path.
+      expect(container.querySelector('a[href="/settings"]')).toBeTruthy()
+    },
+  )
 
   it('marks the active group with sh-sidenav-group--active when on a child route', () => {
     setUser({ is_admin: true })

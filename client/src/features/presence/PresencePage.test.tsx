@@ -103,11 +103,20 @@ describe('PresencePage', () => {
     const { default: PresencePage } = await import('./PresencePage')
     const view = render(<PresencePage />)
     expect(await view.findByText('🌴 On leave')).toBeTruthy()
-    expect(view.getByText('No status set')).toBeTruthy()
-    expect(view.getByRole('button', { name: 'Set status' })).toBeTruthy()
   })
 
-  it('user.status_changed refetches the roster and updates our own status', async () => {
+  it('has no "Your status" editor — status is set from the top bar', async () => {
+    vi.doMock('@/api', () => ({ api: { get: vi.fn(async () => [row(null)]) } }))
+    const { default: PresencePage } = await import('./PresencePage')
+    const view = render(<PresencePage />)
+    await view.findByText('Bob', { selector: 'strong' })
+    expect(view.queryByText('Your status')).toBeNull()
+    expect(view.queryByText('No status set')).toBeNull()
+    expect(view.queryByRole('button', { name: /status/i })).toBeNull()
+    expect(view.queryByLabelText('Status text')).toBeNull()
+  })
+
+  it('user.status_changed refetches the roster (own-user state is MeButton\'s job)', async () => {
     let rows = [row(null)]
     const get = vi.fn(async () => rows)
     vi.doMock('@/api', () => ({ api: { get } }))
@@ -119,15 +128,13 @@ describe('PresencePage', () => {
     emit('user.status_changed', { user_id: 'u2', status: rows[0].status })
     expect(await view.findByText('🎧 Focus')).toBeTruthy()
 
+    const calls = get.mock.calls.length
     emit('user.status_changed', {
       user_id: 'u1', status: { emoji: '🍽️', text: 'Lunch', expires_at: null },
     })
-    await waitFor(() => expect(currentUser.value?.status?.text).toBe('Lunch'))
-    expect(await view.findByText('🍽️ Lunch')).toBeTruthy()
-    expect(view.getByRole('button', { name: 'Edit status' })).toBeTruthy()
-
-    emit('user.status_changed', { user_id: 'u1', status: null })
-    await waitFor(() => expect(view.getByText('No status set')).toBeTruthy())
+    await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(calls))
+    // The page no longer writes our own status onto ``currentUser``.
+    expect(currentUser.value?.status?.text).toBeNull()
   })
 
   describe('household zones and the map overview', () => {

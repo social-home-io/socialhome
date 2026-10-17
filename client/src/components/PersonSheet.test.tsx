@@ -36,6 +36,7 @@ const { api } = await import('@/api')
 const { PersonSheet, openPerson, closePerson } = await import('./PersonSheet')
 const blocks = await import('@/store/blocks')
 const follows = await import('@/store/follows')
+const { statusEditorOpen } = await import('./StatusEditor')
 
 const apiMock = api as unknown as Record<'get' | 'post' | 'delete', ReturnType<typeof vi.fn>>
 
@@ -396,6 +397,27 @@ describe('PersonSheet', () => {
     expect(q(document, 'person-nickname')).toBeNull()
     await act(async () => { fireEvent.click(q(document, 'person-edit-profile')!) })
     expect(routeSpy).toHaveBeenCalledWith('/settings')
+  })
+
+  it('yourself: Edit status closes the sheet and opens the status dialog', async () => {
+    statusEditorOpen.value = false
+    render(<PersonSheet />)
+    await act(async () => {
+      openPerson('u-me', { person: oma({ display_name: 'Pascal', username: 'pascal' }) })
+    })
+    const edit = q(document, 'person-edit-status')!
+    expect(edit.textContent).toBe('Edit status')
+    await act(async () => { fireEvent.click(edit) })
+    expect(statusEditorOpen.value).toBe(true)
+    await waitFor(() => { expect(q(document, 'person-sheet')).toBeNull() })
+    statusEditorOpen.value = false
+  })
+
+  it('someone else: no Edit status button', async () => {
+    render(<PersonSheet />)
+    await act(async () => { openPerson('u-oma', { person: oma() }) })
+    await waitFor(() => { expect(q(document, 'person-message')).not.toBeNull() })
+    expect(q(document, 'person-edit-status')).toBeNull()
   })
 
   it('a11y: Escape closes and focus returns to the opener; Tab stays inside', async () => {
