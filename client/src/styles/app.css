@@ -2961,6 +2961,14 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   margin-left: var(--sh-space-xs);
   white-space: nowrap;
 }
+/* The post byline is a column flexbox: a flex item is blockified and
+ * stretched across the cross axis by the default ``align-items:
+ * stretch``, so without this the pill spans the whole post header.
+ * Hug the content and line up flush with the author name and time. */
+.sh-post-meta > .sh-online-pill {
+  align-self: flex-start;
+  margin-left: 0;
+}
 .sh-online-pill--online {
   border-left: 3px solid #22c55e;
   padding-left: calc(var(--sh-space-xs) - 2px);
