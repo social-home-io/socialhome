@@ -662,6 +662,9 @@ html.sh-kbd-open .sh-comment-overlay {
     box-shadow: 12px 0 32px -16px rgba(26, 24, 20, 0.45);
     z-index: calc(var(--sh-z-dropdown) + 1);
     overflow-y: auto;
+    /* Focus lands on the drawer itself (tabindex=-1) when it opens;
+     * the container is not a control, so no ring around the panel. */
+    outline: none;
     transform: translateX(-101%);
     transition: transform 220ms cubic-bezier(.22,1,.36,1);
   }

@@ -34,6 +34,43 @@ describe('MobileNav', () => {
     expect(bar.querySelectorAll('button.sh-mobile-tab').length).toBe(1)
   })
 
+  it('the closed drawer is inert + aria-hidden, and the More button controls it', () => {
+    // The closed drawer only slides off-screen (translateX), so without
+    // inert its ~40 SideNav links stayed in the mobile Tab order and
+    // screen readers still found a "Navigation" dialog.
+    mobileSidebarOpen.value = false
+    const { container } = render(wrap(<MobileNav />))
+    const drawer = container.querySelector('.sh-mobile-drawer')!
+    expect(drawer.hasAttribute('inert')).toBe(true)
+    expect(drawer.getAttribute('aria-hidden')).toBe('true')
+    const more = container.querySelector('button.sh-mobile-tab--more')!
+    expect(more.getAttribute('aria-controls')).toBe(drawer.id)
+    expect(drawer.id).toBe('sh-mobile-drawer')
+
+    act(() => { mobileSidebarOpen.value = true })
+    expect(drawer.hasAttribute('inert')).toBe(false)
+    expect(drawer.getAttribute('aria-hidden')).toBeNull()
+    expect(drawer.getAttribute('aria-modal')).toBe('true')
+    act(() => { mobileSidebarOpen.value = false })
+  })
+
+  it('opening moves focus onto the drawer; Esc from inside returns it to More', () => {
+    mobileSidebarOpen.value = false
+    const { container } = render(wrap(<MobileNav />), { container: document.body.appendChild(document.createElement('div')) })
+    const drawer = container.querySelector<HTMLElement>('.sh-mobile-drawer')!
+    const more = container.querySelector<HTMLButtonElement>('button.sh-mobile-tab--more')!
+    more.focus()
+    act(() => { more.click() })
+    expect(mobileSidebarOpen.value).toBe(true)
+    expect(document.activeElement).toBe(drawer)
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    expect(mobileSidebarOpen.value).toBe(false)
+    expect(document.activeElement).toBe(more)
+    container.remove()
+  })
+
   it('closes the drawer when the keyboard-shortcuts dialog opens', () => {
     render(wrap(<MobileNav />))
     act(() => { mobileSidebarOpen.value = true })
