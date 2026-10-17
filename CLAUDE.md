@@ -396,6 +396,16 @@ drop from the notes — use `skip-changelog` for trivial backend cleanup with no
 user-visible effect. An unlabelled PR falls to *Other changes*; reviewers
 should bounce it.
 
+**Dependabot** (`.github/dependabot.yml`: uv, npm `/client`, GitHub Actions;
+weekly, 3-day cooldown, patch+minor grouped per ecosystem) labels its PRs
+`dependencies`. Patch/minor PRs auto-merge once the required checks pass
+(`.github/workflows/dependabot-automerge.yml`, the owner's standing
+authorization); **majors wait for a human review** — don't merge them on a
+green run alone, read the changelog. A failing Dependabot PR is a real
+signal: root-cause it like any other red CI. uv itself, ruff and the
+`python:3.14-slim` base are excluded and bumped by hand (see
+docs/testing.md, "Dependency updates").
+
 ### Encryption-First Rule (§25.8.21)
 
 Every field in every outgoing federation event is encrypted unless the

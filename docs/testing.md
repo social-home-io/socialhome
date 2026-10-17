@@ -361,6 +361,34 @@ Build-time tooling (`hatchling`/`hatch-vcs` for the wheel, the build
 backend `pip` fetches to compile `aiolibdatachannel` in the App) is not
 part of the lock.
 
+## Dependency updates
+
+[Dependabot](../.github/dependabot.yml) keeps the dependencies current:
+
+| Ecosystem | Directory | What moves |
+|---|---|---|
+| `uv` | `/` | `pyproject.toml`'s `==` pins (`versioning-strategy: increase` keeps them exact) + `uv.lock`, transitives included |
+| `npm` (pnpm) | `/client` | `client/package.json` + `client/pnpm-lock.yaml` |
+| `github-actions` | `/` | `uses:` versions in `.github/workflows/` |
+
+Every ecosystem runs weekly with a 3-day `cooldown` (a release is only
+proposed once it is 3 days old) and groups patch + minor bumps into one
+PR; each major is its own PR. All of them carry the `dependencies` label,
+so they stay out of the release notes.
+
+Patch/minor PRs auto-merge: `.github/workflows/dependabot-automerge.yml`
+reads the update type with `dependabot/fetch-metadata` and runs
+`gh pr merge --auto --squash`, so GitHub merges only after every required
+check on `main` passes — a red check leaves the PR open for a human.
+Majors are never auto-merged.
+
+Because `uv.lock` is the only committed lock (see
+[Dependency lock](#dependency-lock)), a Dependabot uv PR is complete on its
+own and passes the `lock` job. Bumped by hand instead: uv itself (every
+pin together, plus the Home Assistant App's), ruff (its pin moves with
+`.pre-commit-config.yaml` and CI, and a new minor re-lints the tree), and
+the `python:3.14-slim` image base.
+
 ## Warnings are errors
 
 `[tool.pytest.ini_options] filterwarnings = ["error", …]` turns every
