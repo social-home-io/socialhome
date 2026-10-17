@@ -46,22 +46,27 @@ WORKDIR /app
 # uv requires. SPA bundle lives inside under ``socialhome/static/``.
 #
 # Dependencies come from the lock, not from a fresh resolve:
-# ``requirements/constraints.txt`` (exported from ``uv.lock`` by ``scripts/lock.sh``)
-# pins every package, transitive ones included, with the sha256 of each
-# published file. Step 1 installs exactly that set — ``--require-hashes``
-# refuses any file whose hash isn't listed. Step 2 adds the wheel itself
-# with ``--no-deps`` (it was built in the same workflow, so it has no
-# published hash), and ``uv pip check`` fails the build if the lock and
-# the wheel's own requirements ever disagree.
+# ``uv export --frozen`` turns the committed ``uv.lock`` into a requirements
+# file (core runtime) that pins every package, transitive ones included,
+# with the sha256 of each published file — the same flags as
+# ``scripts/lock.sh --export core``, which prints it locally. ``--frozen``
+# reads the lock as-is (no resolve, no network). Step 1 installs exactly
+# that set — ``--require-hashes`` refuses any file whose hash isn't listed.
+# Step 2 adds the wheel itself with ``--no-deps`` (it was built in the same
+# workflow, so it has no published hash), and ``uv pip check`` fails the
+# build if the lock and the wheel's own requirements ever disagree.
 # ``--system`` installs into the base image's site-packages directly
 # (no venv); ``--no-cache`` keeps the layer size down.
 ARG WHEEL
-COPY requirements/constraints.txt /tmp/constraints.txt
+COPY pyproject.toml uv.lock /tmp/lock/
 COPY dist/${WHEEL} /tmp/${WHEEL}
-RUN uv pip install --system --no-cache --require-hashes -r /tmp/constraints.txt && \
+RUN uv export --no-cache --frozen --no-dev --no-emit-project --no-header \
+      --format requirements-txt --project /tmp/lock \
+      > /tmp/requirements.txt && \
+    uv pip install --system --no-cache --require-hashes -r /tmp/requirements.txt && \
     uv pip install --system --no-cache --no-deps "/tmp/${WHEEL}" && \
     uv pip check --system && \
-    rm /tmp/constraints.txt /tmp/${WHEEL}
+    rm -rf /tmp/lock /tmp/requirements.txt /tmp/${WHEEL}
 
 RUN mkdir -p /data && chown -R hsuser:hsuser /data
 

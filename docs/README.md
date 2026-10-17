@@ -17,8 +17,7 @@ Reference material for running and understanding Social Home.
 - **[testing.md](./testing.md)** — Test strategy: layout, markers,
   the 90 % branch-coverage gate, the §27.9 release-blocker
   protocol tests under `tests/protocol/`, and the Python dependency
-  lock (`uv.lock` + `requirements/constraints*.txt`) CI and the images
-  install from.
+  lock (`uv.lock`) CI and the images install from.
 - **[api.md](./api.md)** — REST API reference for the Household Federation
   Server (HFS) and Global Federation Server (GFS), plus WebSocket channels
   and the inbound federation inbox.

@@ -272,14 +272,14 @@ fan in to `test (3.14)`). The test jobs and `typecheck` install with
 2. **`lint`** — `ruff check .` + `ruff format --check .`
 3. **`typecheck`** — `mypy socialhome/`
 4. **`lock`** — `scripts/lock.sh --check`: fails when `uv.lock` no
-   longer matches `pyproject.toml` (`uv lock --check`) or when
-   `requirements/constraints*.txt` differ from a fresh export of the lock
+   longer matches `pyproject.toml` (`uv lock --check`)
 5. **`images (amd64)` / `images (aarch64)`** — installs the locked set the
    way every shipped image does, natively on both arches: builds
    `Dockerfile.sh` and `Dockerfile.gfs` from a freshly built wheel and
    imports the native deps, then runs the Home Assistant App's builder
-   step (`pip3 wheel --require-hashes -r requirements/constraints.txt`
-   on the App's Alpine/musl base image). A lock bump that loses a wheel
+   step (`uv export --frozen` of `uv.lock`, then `pip3 wheel
+   --require-hashes -r` of the result, on the App's Alpine/musl base
+   image). A lock bump that loses a wheel
    or hash for one of those platforms fails here, before a release
 6. **`frontend`** — `pnpm build`, `pnpm fonts:check`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:circular`, `pnpm i18n:check`, `pnpm test`
 7. **`haos-ingress-ui`** — builds the SPA, installs the locked runtime
@@ -307,25 +307,34 @@ resolution (any OS / arch, Python ≥ 3.14) made by
 images and the Home Assistant App all install that one tested set, so a
 rebuild of a tag months later gets the same packages.
 
-| File | Contents | Installed by |
-|---|---|---|
-| `uv.lock` | everything, incl. `[dev]` + `[global-server]` | CI + dev container (`uv sync --locked --extra dev`) |
-| `requirements/constraints.txt` | core runtime: version + sha256 of every file | `Dockerfile.sh`; the Home Assistant App, fetched by tag from `raw.githubusercontent.com/social-home-io/socialhome/<tag>/requirements/constraints.txt` |
-| `requirements/constraints-gfs.txt` | core + `[global-server]` | `Dockerfile.gfs` |
+`uv.lock` is the only committed lock file. Nothing is generated from it
+into the repo, so a plain `uv lock` — including Dependabot's — keeps
+everything consistent.
 
-The two `requirements/` files are generated from `uv.lock` by
-`scripts/lock.sh` — never edit them by hand. The images install them
-with `uv pip install --require-hashes -r …` (every file hash-checked),
-then add the Social Home wheel with `--no-deps` and run `uv pip check`,
-so a lock that disagrees with the wheel's own requirements fails the
-image build. The App's builder runs the same two steps with `pip wheel`
-on Alpine (musl); everything there has a musllinux wheel except
-`aiolibdatachannel`, which it compiles from the locked, hashed sdist.
-The App fetches `requirements/constraints.txt` from the git tag equal to
-its `SOCIALHOME_VERSION` (the tag *is* the PyPI version, so the file at
-the tag is exactly the set that release was tested and imaged with);
-releases that predate the lock fall back to an unlocked
-build there, and any newer release without the file fails the App build.
+| Installed by | Set | How |
+|---|---|---|
+| CI + dev container | everything, incl. `[dev]` | `uv sync --locked --extra dev` |
+| `Dockerfile.sh` | core runtime | build-time `uv export --frozen` → `uv pip install --require-hashes` |
+| `Dockerfile.gfs` | core + `[global-server]` | same, with `--extra global-server` |
+| Home Assistant App | core runtime | fetches `uv.lock` + `pyproject.toml` for its `SOCIALHOME_VERSION` tag from `raw.githubusercontent.com/social-home-io/socialhome/<tag>/…`, then the same export → `pip3 wheel --require-hashes` |
+
+The export (`uv export --frozen --no-dev --no-emit-project --no-header
+--format requirements-txt`) pins every package, transitive ones
+included, to its locked version with the sha256 of every published file;
+`--frozen` reads the lock as-is, without resolving or touching the
+network. `scripts/lock.sh --export [core|gfs]` prints exactly what an
+image installs. The images install it with `uv pip install
+--require-hashes -r …` (every file hash-checked), then add the Social
+Home wheel with `--no-deps` and run `uv pip check`, so a lock that
+disagrees with the wheel's own requirements fails the image build. The
+App's builder runs the same two steps with `pip wheel` on Alpine (musl);
+everything there has a musllinux wheel except `aiolibdatachannel`, which
+it compiles from the locked, hashed sdist. The tag *is* the PyPI version,
+so the lock at the tag is exactly the set that release was tested and
+imaged with. Older tags: `2026.10.17` also committed the export as
+`requirements/constraints.txt`, which the App still reads when a tag has
+no `uv.lock`; releases that predate the lock fall back to an unlocked
+build there, and any newer release without a lock fails the App build.
 CI's `images` job runs that same musl step on every PR, so the lock can't
 reach a release with a platform the App can't install.
 
@@ -340,11 +349,14 @@ How to change the set (run with [uv](https://docs.astral.sh/uv/) on
   `scripts/lock.sh --upgrade`.
 - **Check without changing anything:** `scripts/lock.sh --check` (what
   CI's `lock` job and the release workflow run).
+- **See what an image installs:** `scripts/lock.sh --export` (core /
+  the App) or `scripts/lock.sh --export gfs`.
 
-Commit `uv.lock` and `requirements/` together with the `pyproject.toml`
-change, and run the full suite on the new set (`uv sync --locked
---extra dev && pytest`). The `uv` version is pinned (`0.12.10`) in CI,
-`publish.yml` and both Dockerfiles — bump every occurrence together.
+Commit `uv.lock` together with the `pyproject.toml` change, and run the
+full suite on the new set (`uv sync --locked --extra dev && pytest`). The `uv` version is pinned (`0.12.10`) in CI,
+`publish.yml` and both Dockerfiles — bump every occurrence together, and
+bump the Home Assistant App's pinned uv (its Dockerfiles) to at least the
+same version, since an older uv may not read a newer lock format.
 Build-time tooling (`hatchling`/`hatch-vcs` for the wheel, the build
 backend `pip` fetches to compile `aiolibdatachannel` in the App) is not
 part of the lock.
