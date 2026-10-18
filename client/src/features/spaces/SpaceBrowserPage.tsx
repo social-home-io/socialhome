@@ -1,9 +1,11 @@
 /**
  * SpaceBrowserPage — browse + join spaces across three scopes.
  *
- *   1. Your household     — local spaces (HOUSEHOLD + PUBLIC + GLOBAL
- *                           types; a space this household hosts shows up
- *                           here whatever tier it is published at).
+ *   1. Your household     — spaces this household hosts that you may
+ *                           find (`GET /api/household/spaces`): household
+ *                           spaces (everyone at home is a member; one you
+ *                           left can be joined again), and public / global
+ *                           ones you're in or can join. Never private.
  *   2. From friends       — type=public spaces published by paired
  *                           peers (§D1a SPACE_DIRECTORY_SYNC).
  *   3. Global directory   — type=global spaces on the GFS.
@@ -26,7 +28,7 @@ import { openPairing, PairingFlow } from '@/components/PairingFlow'
 import { openSpaceCreate } from '@/components/SpaceCreateDialog'
 import { currentUser } from '@/store/auth'
 import { cacheDirectoryEntries } from '@/store/spaceDirectory'
-import type { DirectoryEntry, Space } from '@/types'
+import type { DirectoryEntry, HouseholdSpaceRow, Space } from '@/types'
 import { hostLabel, SpaceCard } from './SpaceCard'
 import { JoinRequestModal } from './JoinRequestModal'
 
@@ -41,97 +43,45 @@ const searchTerm = signal('')
 
 interface MySubscription { space_id: string; subscribed_at: string }
 
-/**
- * Local space types that belong in the "Your household" tab.
- *
- * `private` spaces are invite-only by construction and already live in the
- * sidebar, so browsing them adds nothing. Everything else a household HOSTS
- * belongs here — including its `global` spaces: publishing one is the most
- * deliberate act in the app, and the owner's first instinct afterwards is to
- * go look at it in Browse.
- */
-const BROWSABLE_LOCAL_TYPES: ReadonlySet<string> = new Set([
-  'household', 'public', 'global',
-])
-
 /** Membership sets `loadAll` has already derived, passed down verbatim. */
 interface MembershipSets {
-  /** Real members (subscribers excluded — they get the Subscribe toggle). */
-  memberIds: Set<string>
   subIds: Set<string>
   pendingIds: Set<string>
 }
 
 /**
- * Map `GET /api/spaces` rows onto the "Your household" directory entries.
+ * Map `GET /api/household/spaces` rows onto the "Your household" entries.
  *
- * Exported for tests — the interesting behaviour is which rows survive the
- * filter (see {@link BROWSABLE_LOCAL_TYPES}) and that the readability flag
- * rides along from the list row.
+ * The server decides what is listed: every space this household hosts that
+ * the caller may find — the ones they're in, a household space they're not
+ * in (everyone at home may come back to it), and a public / global space
+ * they can join or request. Private spaces never are. Each row carries the
+ * real member count and the caller's `role` (`null` = no seat; a
+ * `subscriber` follows the space and gets the Subscribe toggle, not "Open").
+ *
+ * Exported for tests.
  */
 export function buildHouseholdEntries(
-  spaces: Space[],
-  { memberIds, subIds, pendingIds }: MembershipSets,
+  rows: HouseholdSpaceRow[],
+  { subIds, pendingIds }: MembershipSets,
 ): DirectoryEntry[] {
-  return spaces
-    .filter((s) => BROWSABLE_LOCAL_TYPES.has(s.space_type))
-    .map((s) => ({
-      space_id:           s.id,
-      host_instance_id:   'local',
-      host_display_name:  t('spaces.browse.your_household'),
-      host_is_paired:     true,
-      name:               s.name,
-      description:        s.description,
-      emoji:              s.emoji,
-      member_count:       0,
-      scope:              s.space_type as 'household' | 'public' | 'global',
-      join_mode:          s.join_mode,
-      // Readability lives on the space's features, not on its join mode.
-      // The list endpoint ships the same `features` block as the detail, so
-      // this is normally already the truth. It stays `undefined` against an
-      // older backend that withholds the block, and
-      // {@link hydrateLocalReadability} fills it in from the detail endpoint
-      // then. Leaving it `undefined` rather than coercing to `false` is what
-      // keeps the 🔒 chip honest in that window: "we don't know" is not "the
-      // content is private".
-      allow_subscribers:  s.features?.allow_subscribers,
-      min_age:            0,
-      category:           s.category,
-      already_member:     memberIds.has(s.id),
-      already_subscribed: subIds.has(s.id),
-      request_pending:    pendingIds.has(s.id),
-    }))
-}
-
-/**
- * Fallback: fill in `allow_subscribers` for locally-hosted discoverable
- * spaces whose list row didn't carry it.
- *
- * `GET /api/spaces` now ships the `features` block, so the common path is a
- * no-op — every entry already knows. Older backends shipped the block only on
- * `GET /api/spaces/{id}`, and against one of those the household tab knew
- * nothing about the owner's readability opt-in: every local public space wore
- * the 🔒 "Content is private" chip (a lie for the ones with followers ON) and
- * the 🔔 Subscribe button, which needs an explicit `true`, never appeared.
- *
- * Only public/global entries with an UNKNOWN flag are fetched — a household
- * space is private by definition, so the flag carries no information there,
- * and a flag we already have (`true` or `false`) is not worth a round-trip.
- * Each fetch fails soft: an entry we couldn't read keeps `undefined`, i.e.
- * "unknown", which claims nothing and offers no Subscribe.
- */
-export async function hydrateLocalReadability(
-  entries: DirectoryEntry[],
-): Promise<DirectoryEntry[]> {
-  return Promise.all(entries.map(async (e) => {
-    if (e.scope === 'household') return e
-    if (e.allow_subscribers !== undefined) return e
-    try {
-      const full = await api.get(`/api/spaces/${e.space_id}`) as Space
-      return { ...e, allow_subscribers: !!full.features?.allow_subscribers }
-    } catch {
-      return e
-    }
+  return rows.map((r) => ({
+    space_id:           r.space_id,
+    host_instance_id:   'local',
+    host_display_name:  t('spaces.browse.your_household'),
+    host_is_paired:     true,
+    name:               r.name,
+    description:        r.description,
+    emoji:              r.emoji,
+    member_count:       r.member_count,
+    scope:              r.space_type,
+    join_mode:          r.join_mode,
+    allow_subscribers:  r.allow_subscribers,
+    min_age:            r.min_age,
+    category:           r.category,
+    already_member:     r.role !== null && r.role !== 'subscriber',
+    already_subscribed: r.role === 'subscriber' || subIds.has(r.space_id),
+    request_pending:    pendingIds.has(r.space_id),
   }))
 }
 
@@ -140,7 +90,7 @@ async function loadAll() {
   try {
     const [rawLocal, rawFriends, rawGlobal, rawMine, rawSubs, rawPending] =
       await Promise.all([
-        api.get('/api/spaces').catch(() => [] as Space[]),
+        api.get('/api/household/spaces').catch(() => [] as HouseholdSpaceRow[]),
         api.get('/api/peer_spaces').catch(() => [] as DirectoryEntry[]),
         api.get('/api/public_spaces').catch(() => [] as DirectoryEntry[]),
         api.get('/api/spaces').catch(() => [] as Space[]),
@@ -172,17 +122,8 @@ async function loadAll() {
     const realMemberIds = new Set(
       [...myIds].filter((id) => !subIds.has(id)),
     )
-    household.value = buildHouseholdEntries(rawLocal as Space[], {
-      memberIds: realMemberIds, subIds, pendingIds,
-    })
-    // …then fill in any readability flag an older backend's list withheld.
-    // A current backend ships `features` on every row, so this resolves
-    // without a single request. Deliberately not awaited: the cards paint
-    // from the list immediately, and on an older backend the readability
-    // chip/button settles a beat later.
-    void hydrateLocalReadability(household.value).then((hydrated) => {
-      household.value = hydrated
-      cacheDirectoryEntries(hydrated)
+    household.value = buildHouseholdEntries(rawLocal as HouseholdSpaceRow[], {
+      subIds, pendingIds,
     })
     friends.value = (rawFriends as DirectoryEntry[]).map((e) => ({
       ...e,

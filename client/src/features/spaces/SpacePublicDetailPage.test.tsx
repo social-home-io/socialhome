@@ -274,6 +274,8 @@ describe('SpacePublicDetailPage cold link (no directory entry)', () => {
     expect(container.textContent).toContain('Your household')
     expect(container.textContent).toContain('1 member')
     expect(container.textContent).toContain('We sing on Tuesdays.')
+    // Everyone at home is a member of a household space: no join-mode chip.
+    expect(container.textContent).not.toContain('Open to join')
     fireEvent.click(getByText('Join space'))
     await waitFor(() => {
       expect(api.post).toHaveBeenCalledWith('/api/spaces/sp-1/join-requests', {})

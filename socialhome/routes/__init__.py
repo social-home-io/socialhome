@@ -197,7 +197,11 @@ from .highlights import (
     HighlightsCollectionView,
     HighlightShareView,
 )
-from .household import HouseholdChatView, HouseholdPreferencesView
+from .household import (
+    HouseholdChatView,
+    HouseholdPreferencesView,
+    HouseholdSpacesView,
+)
 from .household_zones import (
     HouseholdZoneDetailView,
     HouseholdZonesCollectionView,
@@ -1272,6 +1276,7 @@ def setup_routes(app: web.Application) -> None:
     # ── Household preferences ────────────────────────────────────────────
     app.router.add_view("/api/household/preferences", HouseholdPreferencesView)
     app.router.add_view("/api/household/chat", HouseholdChatView)
+    app.router.add_view("/api/household/spaces", HouseholdSpacesView)
     app.router.add_view("/api/household/zones", HouseholdZonesCollectionView)
     # Before ``{zone_id}`` — aiohttp matches in registration order.
     app.router.add_view("/api/household/zones/sync", HouseholdZoneSyncView)

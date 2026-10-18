@@ -3666,6 +3666,10 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         # §CP.F1 age gate on add_member + §CP.R public-tier gate.
         real_space_service.attach_child_protection(child_protection_service)
+        # A new local user becomes a member of every household space we host.
+        # Only this service knows our real instance id — the placeholder
+        # built at wiring time is never subscribed.
+        real_space_service.wire_household_seating()
         real_space_service.attach_profile_picture_repo(profile_picture_repo)
         real_space_service.attach_cover_repo(space_cover_repo)
         real_space_service.attach_icon_repo(space_icon_repo)

@@ -144,9 +144,16 @@ async def _seed_space(
     own = owner_instance_id or client.app[instance_id_key]
     await client._db.enqueue(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
-        "identity_public_key, space_type) "
-        "VALUES(?, 'Space One', ?, 'admin', ?, ?)",
-        (space_id, own, "aa" * 32, space_type),
+        "identity_public_key, space_type, join_mode) "
+        "VALUES(?, 'Space One', ?, 'admin', ?, ?, ?)",
+        # A household space this household hosts is always open (0101).
+        (
+            space_id,
+            own,
+            "aa" * 32,
+            space_type,
+            "open" if space_type == "household" else "invite_only",
+        ),
     )
     await client._db.enqueue(
         "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,'owner')",

@@ -216,7 +216,9 @@ export function SpaceCard({
   entry, onAction, subscribeBusy = false, onCardTap,
 }: SpaceCardProps) {
   const scope = scopeChip(entry.scope)
-  const jmode = joinModeChip(entry.join_mode)
+  // A household space has no join mode to speak of — everyone at home is
+  // a member — so its card shows the 🏠 Household chip alone.
+  const jmode = entry.scope === 'household' ? null : joinModeChip(entry.join_mode)
   const primary = decidePrimary(entry)
   const primaryDisabled = primary.kind === 'pending' || primary.kind === 'invite-only'
   const canSubscribe = subscribableScope(entry)
@@ -277,9 +279,11 @@ export function SpaceCard({
         <span class={scope.cls} title={scope.label}>
           <span aria-hidden="true">{scope.icon}</span> {scope.label}
         </span>
-        <span class={jmode.cls} title={jmode.label}>
-          <span aria-hidden="true">{jmode.icon}</span> {jmode.label}
-        </span>
+        {jmode && (
+          <span class={jmode.cls} title={jmode.label}>
+            <span aria-hidden="true">{jmode.icon}</span> {jmode.label}
+          </span>
+        )}
         {contentIsGated(entry) && (
           <span
             class={GATED_CHIP.cls}

@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { setLocale } from '@/i18n/i18n'
-import { visibilityOptions, joinModeOptions, SPACE_CATEGORIES, categoryLabel } from './spaceModeOptions'
+import {
+  visibilityOptions, joinModeOptions, SPACE_CATEGORIES, categoryLabel, hasJoinModeChoice,
+} from './spaceModeOptions'
 
 describe('spaceModeOptions', () => {
   it('lists four tiers in ladder order', () => {
@@ -43,5 +45,14 @@ describe('spaceModeOptions', () => {
       expect(categoryLabel('food_drink')).toBe('Essen & Trinken')
       expect(categoryLabel('nonsense')).toBe('Allgemein')
     })
+  })
+})
+
+describe('hasJoinModeChoice', () => {
+  it('a household space has no join mode to pick — everyone at home is in', () => {
+    expect(hasJoinModeChoice('household')).toBe(false)
+    for (const tier of ['private', 'public', 'global']) {
+      expect(hasJoinModeChoice(tier)).toBe(true)
+    }
   })
 })

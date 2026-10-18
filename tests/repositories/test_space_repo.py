@@ -2148,3 +2148,38 @@ async def test_has_gfs_servers_sees_an_unreadable_list(env):
     got = await env.repo.get("sp-g")
     assert got is not None and got.gfs_servers is None
     assert await env.repo.has_gfs_servers("sp-g") is True
+
+
+# ── Household directory listings ──────────────────────────────────────────
+
+
+async def test_list_hosted_listings_counts_seats_and_reads_the_callers_seat(env):
+    """One row per non-dissolved space of the asked tiers hosted by the given
+    instance, with its seat count and the caller's role / ban."""
+    await env.repo.save(_space("home", "Home", SpaceType.HOUSEHOLD))
+    await env.repo.save(_space("pub", "Pub", SpaceType.PUBLIC))
+    await env.repo.save(_space("priv", "Priv", SpaceType.PRIVATE))
+    await env.repo.save(
+        replace(_space("theirs", "Theirs", SpaceType.HOUSEHOLD), owner_instance_id="x")
+    )
+    await env.repo.save(
+        replace(_space("gone", "Gone", SpaceType.HOUSEHOLD), dissolved=True)
+    )
+    await env.repo.save_member(_member("home", "uid-alice", "owner"))
+    await env.repo.save_member(_member("home", "uid-bob"))
+    await env.repo.save_member(_member("pub", "uid-alice", "owner"))
+    await env.repo.ban_member("pub", "uid-bob", "uid-alice")
+
+    rows = await env.repo.list_hosted_listings(
+        "inst-x",
+        "uid-bob",
+        tiers=frozenset({SpaceType.HOUSEHOLD, SpaceType.PUBLIC}),
+    )
+    got = {r.space.id: (r.member_count, r.caller_role, r.caller_banned) for r in rows}
+    assert got == {"home": (2, "member", False), "pub": (1, None, True)}
+    assert [r.space.id for r in rows] == ["home", "pub"]  # sorted by name
+
+
+async def test_list_hosted_listings_with_no_tiers_is_empty(env):
+    await env.repo.save(_space("home", "Home", SpaceType.HOUSEHOLD))
+    assert await env.repo.list_hosted_listings("inst-x", "u", tiers=frozenset()) == []

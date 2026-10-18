@@ -2019,6 +2019,11 @@ class SpaceMemberJoined(DomainEvent):
     user_id: str
     role: str = "member"
     occurred_at: datetime = field(default_factory=_now)
+    #: Seated automatically as a member of the household (a household-tier
+    #: space seats every local user) rather than by joining. Subscribers
+    #: that announce a join ("X joined") skip it — creating a household
+    #: space for N people must not send N² notifications.
+    automatic: bool = False
 
 
 @dataclass(slots=True, frozen=True)

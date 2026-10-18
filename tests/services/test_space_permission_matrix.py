@@ -106,6 +106,14 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # The §4.3 access gate itself — a decision sibling services (the
         # Bazaar's listing edits) ask; it guards, it mutates nothing.
         "require_content_access",
+        # Browse › Your household: the caller's own view of the spaces this
+        # household hosts — filtered for THEM (tier, seat, ban, age gate)
+        # inside; there is no space to gate on. Read-only.
+        "household_directory",
+        # Called by the service itself on create / tier change and by the
+        # UserProvisioned subscriber — never from a route; it only seats
+        # this household's own active users in its own household spaces.
+        "seat_household_members",
         # Read-only: whether a config edit here would be forwarded to the
         # host (the PATCH route's ``forwarded`` hint). Mutates nothing.
         "config_edits_forward",

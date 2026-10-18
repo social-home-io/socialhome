@@ -23,8 +23,8 @@ async def _seed_space(client, *, member: bool = True) -> None:
     own = client.app[federation_service_key]._own_instance_id
     await db.enqueue(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
-        "identity_public_key, space_type) "
-        "VALUES('sp-1', 'test', ?, 'admin', ?, 'household')",
+        "identity_public_key, space_type, join_mode) "
+        "VALUES('sp-1', 'test', ?, 'admin', ?, 'household', 'open')",
         (own, "aa" * 32),
     )
     if member:

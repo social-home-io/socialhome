@@ -100,3 +100,14 @@ export function joinOptionsForVisibility(spaceType: string): RadioCardOption[] {
     o.value === 'invite_only' ? o : { ...o, disabled: true },
   )
 }
+
+/**
+ * Whether a space of this visibility has a join mode to choose. A
+ * **household** space has none: everyone in the home is a member
+ * automatically (the server stores `open` whatever is sent), so the
+ * create dialog and settings hide the picker instead of offering a choice
+ * that does nothing.
+ */
+export function hasJoinModeChoice(spaceType: string): boolean {
+  return spaceType !== 'household'
+}

@@ -24,7 +24,7 @@ import {
   sameGfsSet,
   type PrivateChannelChoices,
 } from './PrivateChannelPicker'
-import { joinOptionsForVisibility } from './spaceModeOptions'
+import { hasJoinModeChoice, joinOptionsForVisibility } from './spaceModeOptions'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
@@ -652,13 +652,22 @@ export function SpaceSettings({
         <label>{t('space.settings.name')} <input value={name.value} onInput={(e) => name.value = (e.target as HTMLInputElement).value} /></label>
         <label>{t('space.settings.description')} <textarea value={description.value} onInput={(e) => description.value = (e.target as HTMLTextAreaElement).value} rows={2} /></label>
         <EmojiField value={emoji} openKey="space-settings-icon" />
-        <RadioCardGroup
-          legend={t('space.join.legend')}
-          name="space-settings-join-mode"
-          value={joinMode.value}
-          options={joinOptionsForVisibility(space.space_type)}
-          onChange={(v) => joinMode.value = v as typeof joinMode.value}
-        />
+        {hasJoinModeChoice(space.space_type) ? (
+          <RadioCardGroup
+            legend={t('space.join.legend')}
+            name="space-settings-join-mode"
+            value={joinMode.value}
+            options={joinOptionsForVisibility(space.space_type)}
+            onChange={(v) => joinMode.value = v as typeof joinMode.value}
+          />
+        ) : (
+          <fieldset class="sh-radio-card-group">
+            <legend class="sh-radio-card-group__legend">{t('space.join.legend')}</legend>
+            <p class="sh-muted sh-space-settings-household-note">
+              🏠 {t('space.visibility.household_sub')}
+            </p>
+          </fieldset>
+        )}
         <fieldset class="sh-form-fieldset">
           <legend>🗓 {t('space.retention.legend')}</legend>
           <label>

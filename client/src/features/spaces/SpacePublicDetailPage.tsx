@@ -231,8 +231,10 @@ export default function SpacePublicDetailPage() {
   // Two independent statements, two chips — same as the browser card, so
   // both surfaces tell the same story. The join-mode chip says how you get
   // in; the 🔒 chip says whether there is anything to read before you do.
-  const jmode = joinModeChip(entry.join_mode)
-  const joinModeLabel = `${jmode.icon} ${jmode.label}`
+  // A household space has no join mode to speak of (everyone at home is a
+  // member), so it shows no join-mode chip — like its browser card.
+  const jmode = entry.scope === 'household' ? null : joinModeChip(entry.join_mode)
+  const joinModeLabel = jmode ? `${jmode.icon} ${jmode.label}` : null
   // How to get in, and that only members can read it, is for people
   // outside the space — a member is already in.
   const gated = !entry.already_member && contentIsGated(entry)
@@ -285,7 +287,7 @@ export default function SpacePublicDetailPage() {
         {entry.already_member && (
           <span class="sh-member-pill">✓ {t('space.public.you_are_member')}</span>
         )}
-        <span class="sh-join-mode-chip">{joinModeLabel}</span>
+        {joinModeLabel && <span class="sh-join-mode-chip">{joinModeLabel}</span>}
         {gated && (
           <span class={GATED_CHIP.cls}>
             {GATED_CHIP.icon} {GATED_CHIP.label}

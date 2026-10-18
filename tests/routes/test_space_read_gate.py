@@ -253,13 +253,35 @@ async def _create_space(client, hdr: dict, space_type: str, join_mode: str) -> s
     return sid
 
 
-@pytest.mark.parametrize("join_mode", ["open", "request", "invite_only"])
-async def test_non_member_sees_the_landing_of_a_household_space(seeded, join_mode):
-    """Household scope is discoverable to every local user: a neighbour with
-    no seat gets the landing fields (the about page), never the feed or
-    the roster."""
+async def _leave(client, hdr: dict, sid: str) -> None:
+    """The guest leaves ``sid`` — everyone in the home is seated in a
+    household space, so leaving is how a local user ends up without a
+    seat in one."""
+    r = await client.delete(
+        f"/api/spaces/{sid}/members/{_GUEST[1]}", headers=hdr["guest"]
+    )
+    assert r.status == 200, await r.text()
+
+
+async def test_everyone_at_home_is_seated_in_a_new_household_space(seeded):
+    """A household space seats every local user: the guest reads it at
+    once, without asking."""
     client, hdr = seeded
-    sid = await _create_space(client, hdr, "household", join_mode)
+    sid = await _create_space(client, hdr, "household", "request")
+    r = await client.get(f"/api/spaces/{sid}/feed", headers=hdr["guest"])
+    assert r.status == 200, await r.text()
+    r = await client.get(f"/api/spaces/{sid}", headers=hdr["guest"])
+    # join_mode means nothing for a household space: it stays open.
+    assert (await r.json())["join_mode"] == "open"
+
+
+async def test_non_member_sees_the_landing_of_a_household_space(seeded):
+    """Household scope is discoverable to every local user: one who left
+    gets the landing fields (the about page), never the feed or the
+    roster."""
+    client, hdr = seeded
+    sid = await _create_space(client, hdr, "household", "open")
+    await _leave(client, hdr, sid)
     r = await client.get(f"/api/spaces/{sid}", headers=hdr["guest"])
     assert r.status == 200, await r.text()
     assert await r.json() == {
@@ -268,10 +290,12 @@ async def test_non_member_sees_the_landing_of_a_household_space(seeded, join_mod
         "description": "We sing on Tuesdays.",
         "emoji": None,
         "space_type": "household",
-        "join_mode": join_mode,
+        "join_mode": "open",
         "category": "general",
         "features": {"allow_subscribers": False},
-        "member_count": 1,
+        # The test admin, Olive and Fern — everyone at home but the guest
+        # who left.
+        "member_count": 3,
     }
     for path in ("/feed", "/members"):
         await _forbidden(
@@ -279,34 +303,23 @@ async def test_non_member_sees_the_landing_of_a_household_space(seeded, join_mod
         )
 
 
-async def test_a_neighbour_joins_an_open_household_space_from_its_landing(seeded):
-    """The about page's Join button end to end: landing → join → the feed."""
+async def test_a_neighbour_joins_a_household_space_again_from_its_landing(seeded):
+    """The about page's Join button end to end: landing → join → the feed.
+    A household space is always open, so joining again needs nobody's
+    approval."""
     client, hdr = seeded
-    sid = await _create_space(client, hdr, "household", "open")
+    sid = await _create_space(client, hdr, "household", "request")
+    await _leave(client, hdr, sid)
     await _forbidden(await client.get(f"/api/spaces/{sid}/feed", headers=hdr["guest"]))
     r = await client.post(
         f"/api/spaces/{sid}/join-requests", json={}, headers=hdr["guest"]
     )
     assert r.status == 201, await r.text()
+    assert (await r.json())["joined"] is True
     r = await client.get(f"/api/spaces/{sid}/feed", headers=hdr["guest"])
     assert r.status == 200, await r.text()
     r = await client.get(f"/api/spaces/{sid}", headers=hdr["guest"])
     assert "retention_days" in await r.json()  # the full config now
-
-
-async def test_a_neighbour_asks_to_join_a_request_household_space(seeded):
-    client, hdr = seeded
-    sid = await _create_space(client, hdr, "household", "request")
-    r = await client.post(
-        f"/api/spaces/{sid}/join-requests",
-        json={"message": "I sing tenor"},
-        headers=hdr["guest"],
-    )
-    assert r.status == 201, await r.text()
-    r = await client.get(f"/api/spaces/{sid}/join-requests", headers=hdr["owner"])
-    assert [q["user_id"] for q in await r.json()] == [_GUEST[1]]
-    # Asking is not a seat: still no feed until the owner approves.
-    await _forbidden(await client.get(f"/api/spaces/{sid}/feed", headers=hdr["guest"]))
 
 
 async def test_a_private_space_of_this_household_stays_403(seeded):

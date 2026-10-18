@@ -191,6 +191,34 @@ describe('SpaceCreateDialog — min-age + category', () => {
     expect(categorySelect(container)).toBeNull()
   })
 
+  it('hides the join-mode picker for household and sends open', async () => {
+    post.mockResolvedValue({ id: 's9' })
+    const { container } = await open()
+    const joinPicker = () =>
+      container.querySelector('input[name="space-create-join-mode"]')
+    expect(joinPicker()).not.toBeNull()
+    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Home' } }) })
+    await act(async () => { fireEvent.click(pickVisibility(container, 'household')) })
+    await waitFor(() => expect(joinPicker()).toBeNull())
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    expect(post.mock.calls[0][1]).toMatchObject({
+      space_type: 'household', join_mode: 'open',
+    })
+  })
+
+  it('leaving household for public starts again from invite-only', async () => {
+    const { container } = await open()
+    await act(async () => { fireEvent.click(pickVisibility(container, 'household')) })
+    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
+    await waitFor(() => {
+      const checked = container.querySelector(
+        'input[name="space-create-join-mode"]:checked',
+      ) as HTMLInputElement | null
+      expect(checked?.value).toBe('invite_only')
+    })
+  })
+
   it('sends category + min_age for public', async () => {
     post.mockResolvedValue({ id: 's3' })
     const { container } = await open()
