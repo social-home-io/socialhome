@@ -1565,7 +1565,7 @@ async def test_owner_approval_gate_end_to_end_real_services(stack):
     service + space service, no execute-path mocks."""
     # 1. Host-owned space (delegation OFF by default) + a remote ADMIN on
     #    household B, plus a local target member to ban.
-    await _user(stack, "alicehost")
+    alice = await _user(stack, "alicehost")
     space = await stack.svc.create_space(owner_username="alicehost", name="S")
     assert space.features.delegated_admin_authority is False
     await stack.svc._remote_members.add(
@@ -1613,7 +1613,7 @@ async def test_owner_approval_gate_end_to_end_real_services(stack):
     await handler._on_remote_admin_action(event)
 
     # 4. A pending OWNER-ONLY proposal now exists; the ban has NOT run.
-    listed = await approvals.list_for_space(space.id)
+    listed = await approvals.list_for_space(space.id, viewer_user_id=alice.user_id)
     assert len(listed) == 1
     proposal = listed[0]
     assert proposal["action"] == ProposalAction.REMOTE_ADMIN_ACTION.value

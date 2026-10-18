@@ -200,8 +200,9 @@ async def test_create_and_dissolve(stack):
     members = await stack.space_repo.list_members(space.id)
     assert any(m.role == "owner" for m in members)
     await stack.space_svc.dissolve_space(space.id, actor_username="anna")
-    with pytest.raises(KeyError):
-        await stack.space_svc.list_feed(space.id)
+    # The space and its seats are gone: even its owner has nothing to read.
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.list_feed(space.id, viewer_user_id=_a.user_id)
 
 
 async def test_member_management(stack):
@@ -1927,9 +1928,13 @@ async def test_space_reactions(stack):
     p = await stack.space_svc.create_post(
         s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
     )
-    r = await stack.space_svc.add_reaction(p.id, user_id=anna.user_id, emoji=" 👍 ")
+    r = await stack.space_svc.add_reaction(
+        p.id, space_id=s.id, user_id=anna.user_id, emoji=" 👍 "
+    )
     assert "👍" in r.reactions
-    r2 = await stack.space_svc.remove_reaction(p.id, user_id=anna.user_id, emoji="👍")
+    r2 = await stack.space_svc.remove_reaction(
+        p.id, space_id=s.id, user_id=anna.user_id, emoji="👍"
+    )
     assert "👍" not in r2.reactions
 
 
@@ -1941,7 +1946,9 @@ async def test_space_reaction_empty_rejected(stack):
         s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
     )
     with pytest.raises(ValueError, match="empty"):
-        await stack.space_svc.add_reaction(p.id, user_id=anna.user_id, emoji="")
+        await stack.space_svc.add_reaction(
+            p.id, space_id=s.id, user_id=anna.user_id, emoji=""
+        )
 
 
 async def test_space_comment_and_delete(stack):
@@ -2063,7 +2070,7 @@ async def test_space_list_feed(stack):
     await stack.space_svc.create_post(
         s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="b"
     )
-    feed = await stack.space_svc.list_feed(s.id, limit=10)
+    feed = await stack.space_svc.list_feed(s.id, viewer_user_id=anna.user_id, limit=10)
     assert len(feed) == 2
 
 
@@ -2496,7 +2503,9 @@ async def test_subscriber_cannot_react(stack):
     )
     await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
     with pytest.raises(SpacePermissionError, match="subscribers can only read"):
-        await stack.space_svc.add_reaction(post.id, user_id=fan.user_id, emoji="👍")
+        await stack.space_svc.add_reaction(
+            post.id, space_id=space.id, user_id=fan.user_id, emoji="👍"
+        )
 
 
 async def test_subscribe_no_ops_for_an_existing_member_after_followers_off(stack):
@@ -3050,8 +3059,8 @@ async def test_dissolve_hard_deletes_content_and_unlinks_media(tmp_dir):
     assert bcall.args[2] == {"space_id": space.id}
 
     # Space + all content rows gone (cascade).
-    with pytest.raises(KeyError):
-        await svc.list_feed(space.id)
+    with pytest.raises(SpacePermissionError):
+        await svc.list_feed(space.id, viewer_user_id=anna.user_id)
     assert await post_repo.list_space_media_urls(space.id) == []
     assert await gallery.list_space_item_filenames(space.id) == []
     assert await bazaar.list_space_media_urls(space.id) == []
@@ -3078,7 +3087,7 @@ async def test_archive_makes_space_read_only_and_reversible(stack):
     refreshed = await stack.space_repo.get(space.id)
     assert refreshed.archived is True
     # Still readable (rows retained, not hard-deleted).
-    await stack.space_svc.list_feed(space.id)
+    await stack.space_svc.list_feed(space.id, viewer_user_id=a.user_id)
     # Writes rejected.
     with pytest.raises(SpacePermissionError, match="archived"):
         await stack.space_svc.create_post(
@@ -3087,7 +3096,9 @@ async def test_archive_makes_space_read_only_and_reversible(stack):
     with pytest.raises(SpacePermissionError, match="archived"):
         await stack.space_svc.add_comment(p.id, author_user_id=a.user_id, content="no")
     with pytest.raises(SpacePermissionError, match="archived"):
-        await stack.space_svc.add_reaction(p.id, user_id=a.user_id, emoji="👍")
+        await stack.space_svc.add_reaction(
+            p.id, space_id=space.id, user_id=a.user_id, emoji="👍"
+        )
 
     # Reversible: unarchive restores read-write.
     await stack.space_svc.unarchive_space(space.id, actor_username="anna")
@@ -9219,7 +9230,9 @@ async def test_admin_only_still_allows_comments_and_reactions(stack):
         post.id, author_user_id=u["bob"].user_id, content="nice"
     )
     assert comment.content == "nice"
-    await stack.space_svc.add_reaction(post.id, user_id=u["bob"].user_id, emoji="👍")
+    await stack.space_svc.add_reaction(
+        post.id, space_id=space.id, user_id=u["bob"].user_id, emoji="👍"
+    )
 
 
 async def test_require_content_access_exposes_the_gate(stack):
@@ -10412,8 +10425,12 @@ async def test_space_reactions_publish_who_reacted_with_what(stack):
     )
     seen: list = []
     stack.space_svc._bus.subscribe(PostReactionChanged, seen.append)
-    await stack.space_svc.add_reaction(p.id, user_id=anna.user_id, emoji=" 👍 ")
-    await stack.space_svc.remove_reaction(p.id, user_id=anna.user_id, emoji="👍")
+    await stack.space_svc.add_reaction(
+        p.id, space_id=s.id, user_id=anna.user_id, emoji=" 👍 "
+    )
+    await stack.space_svc.remove_reaction(
+        p.id, space_id=s.id, user_id=anna.user_id, emoji="👍"
+    )
     assert [(e.space_id, e.reactor_user_id, e.emoji, e.added) for e in seen] == [
         (s.id, anna.user_id, "👍", True),
         (s.id, anna.user_id, "👍", False),
@@ -10735,3 +10752,74 @@ async def test_space_comment_with_non_local_media_is_refused(stack):
         media_url="api/media/ok.webp",
     )
     assert c.media_url == "api/media/ok.webp"
+
+
+# ── Read gate (require_reader / read_space) ─────────────────────────────
+
+
+async def test_require_reader_admits_a_follower_and_refuses_an_outsider(stack):
+    """Any seat reads — a read-only follower included; no seat is the
+    403 ``SpacePermissionError``, the same for an unknown space id."""
+    anna = await stack.provision_user("anna")
+    fern = await stack.provision_user("fern")
+    guest = await stack.provision_user("guest")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=s.id,
+            user_id=fern.user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-10-18T00:00:00+00:00",
+        )
+    )
+    assert (await stack.space_svc.require_reader(s.id, anna.user_id)).role == "owner"
+    assert (await stack.space_svc.require_reader(s.id, fern.user_id)).role == (
+        SpaceRole.SUBSCRIBER
+    )
+    for sid in (s.id, "sp-nope"):
+        with pytest.raises(SpacePermissionError, match="Not a space member"):
+            await stack.space_svc.require_reader(sid, guest.user_id)
+        with pytest.raises(SpacePermissionError):
+            await stack.space_svc.list_feed(sid, viewer_user_id=guest.user_id)
+
+
+@pytest.mark.parametrize(
+    ("tier", "landing"),
+    [
+        (SpaceType.PRIVATE, False),
+        (SpaceType.HOUSEHOLD, False),
+        (SpaceType.PUBLIC, True),
+        (SpaceType.GLOBAL, True),
+    ],
+)
+async def test_read_space_gives_an_outsider_only_a_discoverable_space(
+    stack, tier, landing
+):
+    await stack.provision_user("anna")
+    guest = await stack.provision_user("guest")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_repo.save(dataclasses.replace(s, space_type=tier))
+    if landing:
+        space, seat = await stack.space_svc.read_space(s.id, guest.user_id)
+        assert (space.id, seat) == (s.id, None)
+    else:
+        with pytest.raises(SpacePermissionError, match="Not a space member"):
+            await stack.space_svc.read_space(s.id, guest.user_id)
+
+
+async def test_read_space_returns_a_members_seat(stack):
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    space, seat = await stack.space_svc.read_space(s.id, anna.user_id)
+    assert space.id == s.id
+    assert seat is not None and seat.role == "owner"
+
+
+async def test_read_space_refuses_an_outsider_a_dissolved_public_space(stack):
+    await stack.provision_user("anna")
+    guest = await stack.provision_user("guest")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_repo.save(dataclasses.replace(s, space_type=SpaceType.PUBLIC))
+    await stack.space_repo.mark_dissolved(s.id)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.read_space(s.id, guest.user_id)

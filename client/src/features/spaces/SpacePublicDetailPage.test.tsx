@@ -233,3 +233,23 @@ describe('SpacePublicDetailPage — unpaired host guidance follows the role', ()
     expect(container.textContent).not.toContain('Connections page')
   })
 })
+
+describe('SpacePublicDetailPage cold link (no directory entry)', () => {
+  it("a caller with no seat reads the member count off the space's landing fields", async () => {
+    // ``/members`` is for seats only — the landing fields carry the count.
+    api.get.mockImplementation(async (url: string) => {
+      if (url === '/api/spaces/sp-1') {
+        return {
+          id: 'sp-1', name: 'Chess club', description: '', emoji: '',
+          space_type: 'public', join_mode: 'request', category: 'general',
+          features: { allow_subscribers: true }, member_count: 7,
+        }
+      }
+      throw Object.assign(new Error('Not a space member.'), { status: 403 })
+    })
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Chess club'))
+    expect(container.textContent).toContain('7 members')
+    expect(api.get).not.toHaveBeenCalledWith('/api/spaces/sp-1/members')
+  })
+})

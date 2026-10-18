@@ -322,7 +322,15 @@ export default function SpaceFeedPage() {
     void loadHouseholdUsers()
     void loadSpaceMembers(spaceId)
     loadSpaceFeed(spaceId)
-      .catch(() => { posts.value = [] })
+      .catch((err: unknown) => {
+        posts.value = []
+        // 403: the viewer has no seat here (the feed is members-only). The
+        // landing page shows a public space's join options, or says the
+        // space isn't public — never an empty feed with a composer.
+        if ((err as { status?: unknown })?.status === 403) {
+          loc?.route(`/spaces/${spaceId}/about`, true)
+        }
+      })
       .finally(() => { loading.value = false })
     void loadSpaceHeader(spaceId)
 
@@ -376,7 +384,10 @@ export default function SpaceFeedPage() {
       offCalUpdated()
       offCalDeleted()
     }
-  }, [spaceId])
+    // ``loc`` (the no-seat redirect) changes with every URL change — the
+    // ``?tab=`` / ``?view=`` switches included — so as a dependency it would
+    // refetch the whole space on each of them.
+  }, [spaceId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // A deep link picks the tab once the page reset to the feed above…
   useEffect(() => {

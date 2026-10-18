@@ -53,6 +53,7 @@ from ..domain.space import (
     INVITE_VIA_INTERNAL,
     INVITE_VIAS,
     PUBLIC_SPACE_TIERS,
+    Space,
     SpaceFeatures,
     SpacePermissionError,
     SpaceRole,
@@ -220,13 +221,42 @@ class SpaceCollectionView(BaseView):
         )
 
 
+def _public_space_view(space: Space, member_count: int) -> dict:
+    """What ``GET /api/spaces/{id}`` shows a caller with no seat in a
+    discoverable (public / global) space: the directory-entry fields its
+    landing page renders — never the members' config (retention, bots,
+    archive state, GFS listing…)."""
+    return sanitise_for_api(
+        {
+            "id": space.id,
+            "name": space.name,
+            "description": space.description,
+            "emoji": space.emoji,
+            "space_type": space.space_type.value,
+            "join_mode": space.join_mode.value,
+            "category": normalize_category(space.category),
+            # Readability (may I follow it?) is the one feature flag the
+            # landing page reads — the directory ships it too.
+            "features": {"allow_subscribers": space.features.allow_subscribers},
+            # The seat count the peer directory publishes for it too.
+            "member_count": member_count,
+        }
+    )
+
+
 class SpaceDetailView(BaseView):
     """GET/PATCH/DELETE /api/spaces/{id} — get, update, dissolve a space."""
 
     async def get(self) -> web.Response:
         svc = self.svc(space_service_key)
         space_id = self.match("id")
-        space = await svc._require_space(space_id)
+        space, member = await svc.read_space(space_id, self.user.user_id)
+        if member is None:
+            # No seat: the caller opened a discoverable space's landing
+            # page — the fields a directory entry already publishes, none
+            # of the members' config.
+            seats = await self.svc(space_repo_key).list_members(space.id)
+            return web.json_response(_public_space_view(space, len(seats)))
         gfs_servers, gfs_unlisted = await self._gfs_listing(space)
         cover_url = (
             f"/api/spaces/{space.id}/cover?v={space.cover_hash}"
@@ -411,7 +441,9 @@ class SpaceProposalsView(BaseView):
 
     async def get(self) -> web.Response:
         approvals = self.svc(space_approval_service_key)
-        proposals = await approvals.list_for_space(self.match("id"))
+        proposals = await approvals.list_for_space(
+            self.match("id"), viewer_user_id=self.user.user_id
+        )
         return web.json_response({"proposals": proposals})
 
     async def post(self) -> web.Response:
@@ -716,6 +748,7 @@ class SpaceMembersView(BaseView):
 
     async def get(self) -> web.Response:
         space_id = self.match("id")
+        await self.svc(space_service_key).require_reader(space_id, self.user.user_id)
         members = await self.svc(space_repo_key).list_members(space_id)
         # §D1b — federated peers who accepted a cross-household invite
         # are seated in ``space_remote_members``, NOT ``space_members``.
@@ -2025,7 +2058,9 @@ class SpaceFeedView(BaseView):
         space_id = self.match("id")
         before = self.request.query.get("before")
         limit = min(max(int(self.request.query.get("limit", 20)), 1), 50)
-        posts = await svc.list_feed(space_id, before=before, limit=limit)
+        posts = await svc.list_feed(
+            space_id, viewer_user_id=self.user.user_id, before=before, limit=limit
+        )
 
         # Resolve bot personas for any system-author posts in one round-trip
         # per unique bot_id. The feed is capped at 50 so this is bounded.
@@ -2654,6 +2689,7 @@ class SpacePostReactionView(BaseView):
             )
         await svc.add_reaction(
             self.match("post_id"),
+            space_id=self.match("id"),
             user_id=ctx.user_id,
             emoji=emoji,
         )
@@ -2667,6 +2703,7 @@ class SpacePostReactionView(BaseView):
         svc = self.svc(space_service_key)
         await svc.remove_reaction(
             self.match("post_id"),
+            space_id=self.match("id"),
             user_id=ctx.user_id,
             emoji=self.match("emoji"),
         )
@@ -2763,11 +2800,13 @@ class SpacePostCommentView(BaseView):
         return web.json_response(_serialise_comment(comment), status=201)
 
     async def get(self) -> web.Response:
-        self.require_user()
         svc = self.svc(space_service_key)
-        post_id = self.match("post_id")
         try:
-            comments = await svc.list_comments(post_id)
+            comments = await svc.list_comments(
+                self.match("id"),
+                self.match("post_id"),
+                viewer_user_id=self.user.user_id,
+            )
         except KeyError:
             return error_response(404, "NOT_FOUND", "Post not found.")
         return web.json_response(

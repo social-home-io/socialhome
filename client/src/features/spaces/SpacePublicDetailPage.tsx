@@ -59,18 +59,24 @@ const loading = signal<boolean>(true)
 const error = signal<string | null>(null)
 
 /** ``/api/spaces/{id}`` returns the canonical Space wire shape — flatten
- *  it into the DirectoryEntry shape this page renders. Member count is
- *  fetched on the side because Space doesn't include it. */
+ *  it into the DirectoryEntry shape this page renders. A caller with no
+ *  seat gets a public / global space's landing fields only, member count
+ *  included; the roster (``/members``) is for seats only, so it's the
+ *  fallback for a member opening the page. */
 async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
   try {
-    const space = await api.get(`/api/spaces/${spaceId}`) as Space
-    let memberCount = 0
-    try {
-      const members = await api.get(
-        `/api/spaces/${spaceId}/members`,
-      ) as Array<{ user_id: string }>
-      memberCount = members.length
-    } catch { /* visibility-gated; leave at 0 */ }
+    const space = await api.get(`/api/spaces/${spaceId}`) as Space & {
+      member_count?: number
+    }
+    let memberCount = space.member_count ?? 0
+    if (space.member_count === undefined) {
+      try {
+        const members = await api.get(
+          `/api/spaces/${spaceId}/members`,
+        ) as Array<{ user_id: string }>
+        memberCount = members.length
+      } catch { /* seats only; leave at 0 */ }
+    }
     return {
       space_id:           space.id,
       host_instance_id:   'local',

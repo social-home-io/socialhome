@@ -312,11 +312,16 @@ async def test_delegation_off_holds_it_for_the_owner_under_the_actors_matrix(hos
     await _forward(
         host, sender=STUB, actor="u-admin", target=(OTHER, "t-member"), role="admin"
     )
-    assert await host.approvals.list_for_space(space.id) == []
+    assert (
+        await host.approvals.list_for_space(space.id, viewer_user_id=host.anna.user_id)
+        == []
+    )
     # An allowed one: queued, not yet applied.
     target = (OTHER, "t-member")
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
-    [proposal] = await host.approvals.list_for_space(space.id)
+    [proposal] = await host.approvals.list_for_space(
+        space.id, viewer_user_id=host.anna.user_id
+    )
     assert proposal["fwd_action"] == "set_member_role"
     assert proposal["owner_only"] is True
     assert await _role(host, *target) == SpaceRole.MEMBER
@@ -337,7 +342,9 @@ async def test_approval_rechecks_the_actor_seat(host):
     )
     target = (OTHER, "t-member")
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
-    [proposal] = await host.approvals.list_for_space(space.id)
+    [proposal] = await host.approvals.list_for_space(
+        space.id, viewer_user_id=host.anna.user_id
+    )
     await host.remote.set_role(space.id, STUB, "u-admin", "member")
     await host.approvals.vote(
         space.id, proposal["id"], actor_username="anna", approve=True
@@ -419,7 +426,9 @@ async def test_a_proposer_cannot_hand_build_an_owner_approval(host):
             },
         )
     )
-    assert await host.approvals.list_for_space(sid) == []
+    assert (
+        await host.approvals.list_for_space(sid, viewer_user_id=host.anna.user_id) == []
+    )
     await host.remote.set_role(sid, STUB, "u-admin", "member")
     assert await _role(host, OTHER, "t-member") == SpaceRole.MEMBER
 
@@ -431,7 +440,9 @@ async def test_approval_runs_as_the_signer_bound_proposer(host):
     sid = host.space.id
     target = (OTHER, "t-member")
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
-    [proposal] = await host.approvals.list_for_space(sid)
+    [proposal] = await host.approvals.list_for_space(
+        sid, viewer_user_id=host.anna.user_id
+    )
     assert proposal["proposed_by_instance"] == STUB
     assert proposal["proposed_by_user"] == "u-admin"
     # Tamper with the params' actor claim: point it at a live admin.
@@ -451,7 +462,9 @@ async def test_the_owner_sees_who_and_which_role(host):
     await _delegation_off(host)
     target = (OTHER, "t-member")
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
-    [proposal] = await host.approvals.list_for_space(host.space.id)
+    [proposal] = await host.approvals.list_for_space(
+        host.space.id, viewer_user_id=host.anna.user_id
+    )
     assert proposal["fwd_target_label"] == "t-member"  # the seat's display name
     assert proposal["fwd_params"]["role"] == "moderator"
 
@@ -461,13 +474,13 @@ async def test_a_newer_request_for_the_same_seat_supersedes_the_older(host):
     sid = host.space.id
     target = (OTHER, "t-member")
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
-    [first] = await host.approvals.list_for_space(sid)
+    [first] = await host.approvals.list_for_space(sid, viewer_user_id=host.anna.user_id)
     # A different seat stays queued alongside.
     await _forward(
         host, sender=STUB, actor="u-admin", target=(OTHER, "t-mod"), role="member"
     )
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
-    open_ = await host.approvals.list_for_space(sid)
+    open_ = await host.approvals.list_for_space(sid, viewer_user_id=host.anna.user_id)
     assert len(open_) == 2
     assert first["id"] not in {p["id"] for p in open_}
     old = await host.approvals._proposals.get(first["id"])
@@ -486,7 +499,7 @@ async def test_owner_approvals_are_capped_per_household(host):
             fwd_action="ban",
             fwd_params={"user_id": f"victim-{i}"},
         )
-    mine = await host.approvals.list_for_space(sid)
+    mine = await host.approvals.list_for_space(sid, viewer_user_id=host.anna.user_id)
     assert len(mine) == MAX_PENDING_OWNER_APPROVALS_PER_HOUSEHOLD
     await host.approvals.enqueue_owner_approval(
         sid,
@@ -495,9 +508,9 @@ async def test_owner_approvals_are_capped_per_household(host):
         fwd_action="ban",
         fwd_params={"user_id": "someone"},
     )
-    assert len(await host.approvals.list_for_space(sid)) == (
-        MAX_PENDING_OWNER_APPROVALS_PER_HOUSEHOLD + 1
-    )
+    assert len(
+        await host.approvals.list_for_space(sid, viewer_user_id=host.anna.user_id)
+    ) == (MAX_PENDING_OWNER_APPROVALS_PER_HOUSEHOLD + 1)
 
 
 # ── review hardening: a stale request never undoes a newer decision ──
@@ -539,7 +552,9 @@ async def test_approval_rechecks_from_role(host):
     sid = host.space.id
     target = (OTHER, "t-member")
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
-    [proposal] = await host.approvals.list_for_space(sid)
+    [proposal] = await host.approvals.list_for_space(
+        sid, viewer_user_id=host.anna.user_id
+    )
     await host.svc.set_remote_member_role(
         sid, actor_username="anna", instance_id=OTHER, user_id="t-member", role="admin"
     )
@@ -555,7 +570,7 @@ async def test_one_household_cannot_evict_anothers_request(host):
     target = (OTHER, "t-member")
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
     await _forward(host, sender=OTHER, actor="c-admin", target=target, role="moderator")
-    open_ = await host.approvals.list_for_space(sid)
+    open_ = await host.approvals.list_for_space(sid, viewer_user_id=host.anna.user_id)
     assert sorted(p["proposed_by_instance"] for p in open_) == sorted([STUB, OTHER])
 
 
@@ -566,7 +581,7 @@ async def test_the_cap_is_checked_before_a_supersede(host):
     sid = host.space.id
     target = (OTHER, "t-member")
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
-    [first] = await host.approvals.list_for_space(sid)
+    [first] = await host.approvals.list_for_space(sid, viewer_user_id=host.anna.user_id)
     for i in range(MAX_PENDING_OWNER_APPROVALS_PER_HOUSEHOLD - 1):
         await host.approvals.enqueue_owner_approval(
             sid,
@@ -576,6 +591,11 @@ async def test_the_cap_is_checked_before_a_supersede(host):
             fwd_params={"user_id": f"victim-{i}"},
         )
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
-    ids = {p["id"] for p in await host.approvals.list_for_space(sid)}
+    ids = {
+        p["id"]
+        for p in await host.approvals.list_for_space(
+            sid, viewer_user_id=host.anna.user_id
+        )
+    }
     assert first["id"] in ids
     assert len(ids) == MAX_PENDING_OWNER_APPROVALS_PER_HOUSEHOLD

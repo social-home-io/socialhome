@@ -22,6 +22,10 @@ with other mixins (e.g. ``BusPublisherMixin`` on ``SpaceZoneService``).
 See :mod:`socialhome.services.bus_publisher` for why composable mixins
 carry no slots.
 
+:func:`require_seat` is the read gate (any seat, followers included,
+403 :data:`NOT_A_SPACE_MEMBER` otherwise) as a free function, for services
+that hold the space repo under another slot name (themes, approvals).
+
 Compare roles against the :class:`SpaceRole` enum (never bare strings) —
 the caller passes the allowed set; this mixin only does the membership
 read and the ``in`` check.
@@ -90,3 +94,25 @@ class SpaceMemberGuardMixin:
         if actor is None:
             raise KeyError(f"{label} {username!r} not found")
         return actor
+
+
+#: The 403 detail every space read gate answers — the same text the
+#: route-level gates (calendar, tasks, pages…) return.
+NOT_A_SPACE_MEMBER = "Not a space member."
+
+
+async def require_seat(
+    space_repo: AbstractSpaceRepo, space_id: str, user_id: str
+) -> SpaceMember:
+    """The read gate for a space's content: the caller's seat — any role,
+    a read-only follower (``subscriber``) included — or
+    :class:`SpacePermissionError` (403 ``Not a space member.``).
+
+    A free function, not a mixin method, so services that hold the space
+    repo under another slot name (themes, approvals) share it too. It
+    never looks at the ``spaces`` row, so an unknown id answers the same
+    403 as a space the caller isn't in — no existence oracle."""
+    member = await space_repo.get_member(space_id, user_id)
+    if member is None:
+        raise SpacePermissionError(NOT_A_SPACE_MEMBER)
+    return member

@@ -25,9 +25,19 @@ class _SpacePollBase(BaseView):
     """Shared member-check for every space-scoped poll view."""
 
     async def _require_member(self, space_id: str, user_id: str) -> bool:
+        """``False`` (→ 403) without a seat in the path space. With one,
+        the path ``{pid}`` must be a post OF that space (``KeyError`` →
+        404): polls are keyed by post id alone, so without this a seat in
+        one space read and voted on another space's polls."""
         space_repo = self.svc(space_repo_key)
-        member = await space_repo.get_member(space_id, user_id)
-        return member is not None
+        if await space_repo.get_member(space_id, user_id) is None:
+            return False
+        post = await self.svc(space_service_key).get_space_post(
+            space_id, self.match("pid")
+        )
+        if post is None:
+            raise KeyError("post not found in this space")
+        return True
 
     async def _require_post_access(self, space_id: str, user_id: str) -> None:
         """Attaching a (schedule) poll is the second half of making a poll

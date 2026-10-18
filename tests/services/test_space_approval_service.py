@@ -98,6 +98,20 @@ async def _user(stack, name):
     return await stack.user_svc.provision(username=name, display_name=name)
 
 
+async def _open(stack, space_id: str) -> list[dict]:
+    """The open proposals as a seated reader sees them. Reading needs a
+    seat (any role): a follower seat keeps the admin quorum untouched."""
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space_id,
+            user_id="uid-reader",
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-10-18T00:00:00+00:00",
+        )
+    )
+    return await stack.approvals.list_for_space(space_id, viewer_user_id="uid-reader")
+
+
 async def _space(stack, owner="alice"):
     await _user(stack, owner)
     return await stack.setup.create_space(owner_username=owner, name="S")
@@ -222,7 +236,7 @@ async def test_nobody_proposes_a_remote_admin_action_directly(stack):
             action=ProposalAction.REMOTE_ADMIN_ACTION,
             params={"fwd_action": "ban", "fwd_params": {"user_id": "x"}},
         )
-    assert await stack.approvals.list_for_space(space.id) == []
+    assert await _open(stack, space.id) == []
 
 
 async def test_vote_by_non_admin_dropped(stack):
@@ -261,7 +275,7 @@ async def test_proposing_twice_reuses_open_proposal(stack):
         space.id, actor_username="alice", action=ProposalAction.DISSOLVE
     )
     assert v1["id"] == v2["id"]
-    assert len(await stack.approvals.list_for_space(space.id)) == 1
+    assert len(await _open(stack, space.id)) == 1
 
 
 async def test_expire_due_marks_expired(stack):
@@ -358,7 +372,7 @@ async def test_apply_remote_propose_then_vote_executes(stack):
         action="dissolve",
         params={},
     )
-    open_props = await stack.approvals.list_for_space(space.id)
+    open_props = await _open(stack, space.id)
     assert len(open_props) == 1
     pid = open_props[0]["id"]
     stack.exec.dissolve_space.assert_not_awaited()
@@ -382,7 +396,7 @@ async def test_apply_remote_propose_by_non_admin_dropped(stack):
         action="dissolve",
         params={},
     )
-    assert await stack.approvals.list_for_space(space.id) == []
+    assert await _open(stack, space.id) == []
 
 
 # ── member-household mirror shows the host's exact tally (fast-follow) ──
@@ -428,7 +442,7 @@ async def test_mirror_update_shows_host_tally_not_local_recompute(stack):
         "expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
     }
     await stack.approvals.apply_mirror_update(stub.id, host_view)
-    listed = await stack.approvals.list_for_space(stub.id)
+    listed = await _open(stack, stub.id)
     assert len(listed) == 1
     assert listed[0]["approvals"] == 2
     assert listed[0]["total_admins"] == 3
@@ -471,9 +485,9 @@ async def test_mirror_update_drops_resolved_proposal(stack):
         "expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
     }
     await stack.approvals.apply_mirror_update(stub.id, {**base, "status": "pending"})
-    assert len(await stack.approvals.list_for_space(stub.id)) == 1
+    assert len(await _open(stack, stub.id)) == 1
     await stack.approvals.apply_mirror_update(stub.id, {**base, "status": "rejected"})
-    assert await stack.approvals.list_for_space(stub.id) == []
+    assert await _open(stack, stub.id) == []
 
 
 # ── owner-only approval of a forwarded remote-admin action (Phase 6a) ──
@@ -496,7 +510,7 @@ async def test_enqueue_owner_approval_creates_pending_no_vote(stack):
         fwd_action="ban",
         fwd_params={"user_id": "u-victim"},
     )
-    listed = await stack.approvals.list_for_space(space.id)
+    listed = await _open(stack, space.id)
     assert len(listed) == 1
     v = listed[0]
     assert v["action"] == ProposalAction.REMOTE_ADMIN_ACTION.value
@@ -529,7 +543,7 @@ async def test_enqueue_owner_approval_no_dedup(stack):
         fwd_action="ban",
         fwd_params={"user_id": "b"},
     )
-    listed = await stack.approvals.list_for_space(space.id)
+    listed = await _open(stack, space.id)
     assert len(listed) == 2
     assert {p["id"] for p in listed} == {p["id"] for p in listed}
     assert len({p["id"] for p in listed}) == 2
@@ -544,7 +558,7 @@ async def test_enqueue_owner_approval_noop_when_not_host(stack):
         fwd_action="ban",
         fwd_params={},
     )
-    assert await stack.approvals.list_for_space(stub.id) == []
+    assert await _open(stack, stub.id) == []
 
 
 async def test_owner_approve_executes_forwarded_action(stack):
@@ -556,7 +570,7 @@ async def test_owner_approve_executes_forwarded_action(stack):
         fwd_action="ban",
         fwd_params={"user_id": "u-victim"},
     )
-    pid = (await stack.approvals.list_for_space(space.id))[0]["id"]
+    pid = (await _open(stack, space.id))[0]["id"]
     out = await stack.approvals.vote(
         space.id, pid, actor_username="alice", approve=True
     )
@@ -576,7 +590,7 @@ async def test_owner_reject_does_not_execute(stack):
         fwd_action="ban",
         fwd_params={},
     )
-    pid = (await stack.approvals.list_for_space(space.id))[0]["id"]
+    pid = (await _open(stack, space.id))[0]["id"]
     out = await stack.approvals.vote(
         space.id, pid, actor_username="alice", approve=False
     )
@@ -596,7 +610,7 @@ async def test_non_owner_admin_cannot_vote_owner_only(stack):
         fwd_action="ban",
         fwd_params={},
     )
-    pid = (await stack.approvals.list_for_space(space.id))[0]["id"]
+    pid = (await _open(stack, space.id))[0]["id"]
     out = await stack.approvals.vote(space.id, pid, actor_username="bob", approve=True)
     assert out["status"] == ProposalStatus.PENDING.value
     stack.exec.apply_approved_admin_action.assert_not_awaited()
@@ -613,7 +627,7 @@ async def test_owner_only_view_exposes_owner_only_fields(stack):
         fwd_action="ban",
         fwd_params={"user_id": "u-victim"},
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert v["owner_only"] is True
     assert v["fwd_action"] == "ban"
     assert v["fwd_params"] == {"user_id": "u-victim"}
@@ -649,7 +663,7 @@ async def test_owner_only_view_labels_ban_target_remote_member(stack):
         fwd_action="ban",
         fwd_params={"user_id": "u-victim"},
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert v["fwd_target_label"] == "Alice"
 
 
@@ -664,7 +678,7 @@ async def test_owner_only_view_labels_ban_target_local_user(stack):
         fwd_action="ban",
         fwd_params={"user_id": victim.user_id},
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert v["fwd_target_label"] == "victimlocal"
 
 
@@ -678,7 +692,7 @@ async def test_owner_only_view_label_none_for_unknown_ban_target(stack):
         fwd_action="ban",
         fwd_params={"user_id": "u-nobody"},
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert v["fwd_target_label"] is None
 
 
@@ -695,7 +709,7 @@ async def test_owner_only_view_label_none_for_invite_without_remote_record(stack
             "invitee_user_id": "u-newbie",
         },
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert v["fwd_target_label"] is None
 
 
@@ -732,7 +746,7 @@ async def test_owner_only_view_labels_invite_target_from_remote_user(stack):
             "invitee_user_id": "u-newbie",
         },
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert v["fwd_target_label"] == "Newbie Bob"
 
 
@@ -746,7 +760,7 @@ async def test_owner_only_view_label_none_for_targetless_action(stack):
         fwd_action="archive",
         fwd_params={},
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert v["fwd_target_label"] is None
 
 
@@ -771,7 +785,7 @@ async def test_owner_only_view_labels_proposer_from_remote_member(stack):
         fwd_action="archive",
         fwd_params={},
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert v["proposed_by_label"] == "Ben"
 
 
@@ -786,7 +800,7 @@ async def test_owner_only_view_proposer_label_none_when_unknown(stack):
         fwd_action="archive",
         fwd_params={},
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert v["proposed_by_label"] is None
 
 
@@ -802,7 +816,7 @@ async def test_owner_only_view_omits_untrusted_actor_params(stack):
         fwd_action="ban",
         fwd_params={"user_id": "u-victim"},
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert "actor_instance" not in v["params"]
     assert "actor_user" not in v["params"]
     assert v["params"]["fwd_action"] == "ban"
@@ -818,7 +832,7 @@ async def test_owner_only_view_omits_untrusted_actor_params(stack):
             },
         )
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert "actor_instance" not in v["params"]
     assert "actor_user" not in v["params"]
 
@@ -849,7 +863,7 @@ async def test_mirror_view_omits_untrusted_actor_params(stack):
             "expires_at": "2999-01-01T00:00:00+00:00",
         },
     )
-    v = (await stack.approvals.list_for_space(space.id))[0]
+    v = (await _open(stack, space.id))[0]
     assert v["params"] == {"fwd_action": "archive", "fwd_params": {}}
 
 
@@ -1017,7 +1031,7 @@ async def test_a_bad_gfs_choice_opens_no_proposal(stack):
             action=ProposalAction.SET_PUBLIC_TIER,
             params={"space_type": "global", "gfs_ids": ["bad"]},
         )
-    assert await stack.approvals.list_for_space(space.id) == []
+    assert await _open(stack, space.id) == []
     stack.exec.update_config.assert_not_awaited()
 
 
@@ -1079,7 +1093,7 @@ async def test_a_remote_admins_global_proposal_is_global_not_listed(stack):
         action="set_public_tier",
         params={"space_type": "global", "gfs_ids": ["g-attacker"]},
     )
-    (open_prop,) = await stack.approvals.list_for_space(space.id)
+    (open_prop,) = await _open(stack, space.id)
     assert "gfs_ids" not in open_prop["params"]
     await stack.approvals.vote(
         space.id, open_prop["id"], actor_username="alice", approve=True
@@ -1149,7 +1163,7 @@ async def test_a_co_admins_own_global_proposal_names_no_servers(stack):
         params={"space_type": "global", "gfs_ids": ["g1"]},
     )
     stack.exec.check_gfs_selection.assert_not_awaited()
-    (open_prop,) = await stack.approvals.list_for_space(space.id)
+    (open_prop,) = await _open(stack, space.id)
     assert "gfs_ids" not in open_prop["params"]
 
 
@@ -1182,7 +1196,7 @@ async def test_gfs_ids_follow_a_local_ownership_transfer(stack):
         action=ProposalAction.SET_PUBLIC_TIER,
         params={"space_type": "global", "gfs_ids": ["g-old-owner"]},
     )
-    (open_prop,) = await stack.approvals.list_for_space(space.id)
+    (open_prop,) = await _open(stack, space.id)
     assert "gfs_ids" not in open_prop["params"]
     view = await stack.approvals.propose(
         space.id,
@@ -1192,3 +1206,14 @@ async def test_gfs_ids_follow_a_local_ownership_transfer(stack):
     )
     assert view["status"] == ProposalStatus.EXECUTED.value
     assert stack.exec.update_config.call_args.kwargs["gfs_ids"] == ("g1",)
+
+
+async def test_list_for_space_refuses_a_caller_without_a_seat(stack):
+    """Open proposals are the members' business: no seat → 403, and the
+    refusal comes before the lazy expiry, so an outsider triggers no
+    write either."""
+    await _user(stack, "alice")
+    space = await stack.setup.create_space(owner_username="alice", name="S")
+    for sid in (space.id, "sp-nope"):
+        with pytest.raises(SpacePermissionError, match="Not a space member"):
+            await stack.approvals.list_for_space(sid, viewer_user_id="uid-outsider")

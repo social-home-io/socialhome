@@ -58,6 +58,7 @@ from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRep
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .protection_gate import ProtectionGateMixin
+from .space_member_guard import require_seat
 
 log = logging.getLogger(__name__)
 
@@ -255,10 +256,13 @@ class SpaceApprovalService(ProtectionGateMixin):
             approve=approve,
         )
 
-    async def list_for_space(self, space_id: str) -> list[dict]:
+    async def list_for_space(self, space_id: str, *, viewer_user_id: str) -> list[dict]:
         """Open proposals for a space (SPA views), lazily expiring stale
         ones. Reads the local table — authoritative on the host, mirror on
-        a member household."""
+        a member household. The caller needs a seat in the space (any
+        role) — checked before the lazy expiry, so an outsider can't
+        trigger its writes either."""
+        await require_seat(self._spaces, space_id, viewer_user_id)
         out: list[dict] = []
         for p in await self._proposals.list_open(space_id):
             if p.expires_at <= _now():
