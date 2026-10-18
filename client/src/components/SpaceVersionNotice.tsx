@@ -1,5 +1,5 @@
 /**
- * SpaceVersionBanner — advisory notice for space owners/admins when one or
+ * Space version notice — advisory for space owners/admins when one or
  * more member households run an older Social Home protocol version (issue
  * #319 ¶5).
  *
@@ -11,8 +11,8 @@
  * appears not to reach part of the group.
  *
  * Seeded from ``GET /api/spaces/{id}/compat`` (owner/admin only — best-effort,
- * so a 403 or any error just leaves the banner empty). Informational tone, no
- * actions: a future PR adds an upgrade nudge.
+ * so a 403 or any error just shows nothing). It is a row of the space's
+ * "Needs you" card that opens these details; informational, no actions.
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
@@ -37,14 +37,13 @@ export interface SpaceCompat {
   behind_members: BehindMember[]
 }
 
-interface Props {
-  spaceId: string
-}
-
-export function SpaceVersionBanner({ spaceId }: Props) {
+/** The space's compat for an owner / admin (``enabled``), or ``null``:
+ *  not allowed, still loading, failed (best-effort), or nothing lags. */
+export function useSpaceCompat(spaceId: string, enabled: boolean): SpaceCompat | null {
   const [compat, setCompat] = useState<SpaceCompat | null>(null)
-
   useEffect(() => {
+    setCompat(null)
+    if (!enabled) return
     let cancelled = false
     api
       .get<SpaceCompat>(`/api/spaces/${spaceId}/compat`)
@@ -57,45 +56,36 @@ export function SpaceVersionBanner({ spaceId }: Props) {
     return () => {
       cancelled = true
     }
-  }, [spaceId])
+  }, [spaceId, enabled])
+  return Array.isArray(compat?.lagging_features) && compat.lagging_features.length > 0
+    ? { ...compat, behind_members: compat.behind_members ?? [] }
+    : null
+}
 
-  if (!compat || compat.lagging_features.length === 0) return null
-
+/** What lags and whom the space waits on — the body of the Needs-you
+ *  row's dialog. */
+export function SpaceVersionDetails({ compat }: { compat: SpaceCompat }) {
   return (
-    <div
-      class="sh-space-proposals"
-      role="region"
-      aria-label={t('space.version_banner.region')}
-    >
-      <div class="sh-proposal-banner sh-version-banner" role="status">
-        <div class="sh-proposal-banner__body">
-          <span class="sh-proposal-banner__icon" aria-hidden="true">
-            🔌
+    <div class="sh-proposal-banner__text">
+      <p>
+        {t('space.version_banner.body')}{' '}
+        {featureLabels(compat.lagging_features, compat.lagging_feature_keys).map((f, i) => (
+          <span key={f}>
+            {i > 0 ? ', ' : ''}
+            <strong>{f}</strong>
           </span>
-          <div class="sh-proposal-banner__text">
-            <strong>{t('space.version_banner.title')}</strong>
-            <p class="sh-muted">
-              {t('space.version_banner.body')}{' '}
-              {featureLabels(compat.lagging_features, compat.lagging_feature_keys).map((f, i) => (
-                <span key={f}>
-                  {i > 0 ? ', ' : ''}
-                  <strong>{f}</strong>
-                </span>
-              ))}
-              .
-            </p>
-            {compat.behind_members.length > 0 && (
-              <p class="sh-muted">
-                {t('space.version_banner.waiting_on')}{' '}
-                {compat.behind_members
-                  .map((m) => `${m.display_name} (v${m.proto_version})`)
-                  .join(', ')}
-                .
-              </p>
-            )}
-          </div>
-        </div>
-      </div>
+        ))}
+        .
+      </p>
+      {compat.behind_members.length > 0 && (
+        <p class="sh-muted">
+          {t('space.version_banner.waiting_on')}{' '}
+          {compat.behind_members
+            .map((m) => `${m.display_name} (v${m.proto_version})`)
+            .join(', ')}
+          .
+        </p>
+      )}
     </div>
   )
 }

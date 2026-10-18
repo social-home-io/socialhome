@@ -16,9 +16,12 @@
  *   click outside closes it, focus returns to the button). Phone: the
  *   shared Modal's bottom sheet (``role=dialog``, ``aria-modal``,
  *   heading, ✕, focus trap, Esc). Rows: Members first, then the sections
- *   that didn't fit, Moderation (with the needs-you count) and "Your
- *   notifications" — the space's notification level, which replaced the
- *   per-space bell (the app keeps one bell).
+ *   that didn't fit — each with what it holds ("5 open · 2 yours", read
+ *   from ``/summary`` when More opens) — Moderation (with the needs-you
+ *   count) and "Your notifications" — the space's notification level,
+ *   which replaced the per-space bell (the app keeps one bell). The
+ *   footer: "Edit sections" for admins, "Leave space" for a member who
+ *   isn't the owner (the owner reads why they can't leave yet).
  * - **Two badge kinds.** A quiet grey count is "unread" (Chat); a filled
  *   primary count is "needs you" (Moderation, rolled up onto More).
  *   Screen readers hear "Chat, 4 unread" / "More, 3 need you".
@@ -36,6 +39,7 @@ import {
   sectionLabel, spaceSectionPath,
   type SpaceSection, type SpaceTabFeatures,
 } from '@/features/spaces/spaceTabs'
+import { sectionMeta, useSpaceSummary } from '@/features/spaces/spaceSummary'
 import {
   SpaceNotifLevelPicker, notifLevelLabel, type NotifLevel,
 } from '@/features/spaces/SpaceNotifLevels'
@@ -80,6 +84,12 @@ interface Props {
   settingsHref: string | null
   /** Settings authority: the "Edit sections" footer in More. */
   canEditSections: boolean
+  /** "Leave space" in More's footer: ``'member'`` may leave (asks to
+   *  confirm, then ``onLeave``); ``'owner'`` reads why not yet; ``null``
+   *  (a follower — they unfollow from the feed — or unknown) shows
+   *  nothing. */
+  leave?: 'member' | 'owner' | null
+  onLeave?: () => void
 }
 
 const SECTION_ICON: Partial<Record<SpaceSection, SideNavIconName>> = {
@@ -171,7 +181,7 @@ function membersMeta(m: SpaceMemberSummary): string {
 export function SpaceSectionNav({
   spaceId, spaceName, sections, active, features, chatUnread,
   members, needsYou, notifLevel, onNotifLevel,
-  settingsHref, canEditSections,
+  settingsHref, canEditSections, leave = null, onLeave,
 }: Props) {
   const rowRef = useRef<HTMLUListElement>(null)
   const measureRef = useRef<HTMLDivElement>(null)
@@ -183,6 +193,8 @@ export function SpaceSectionNav({
   const [sheet, setSheet] = useState(false)
   // The panel's view: the rows, or the notification level choice.
   const [view, setView] = useState<'rows' | 'notif'>('rows')
+  // What the hidden sections hold — read each time More opens.
+  const summary = useSpaceSummary(spaceId, open)
 
   const label = (s: SpaceSection) => sectionLabel(s, features)
   const badgeOf = (s: SpaceSection) => (s === 'chat' && active !== 'chat' ? chatUnread : 0)
@@ -298,7 +310,7 @@ export function SpaceSectionNav({
         {row('members', <SectionIcon section="members" />, label('members'),
           members ? membersMeta(members) : null, 0,
           spaceSectionPath(spaceId, 'members'), active === 'members')}
-        {overflow.map((s) => row(s, <SectionIcon section={s} />, label(s), null, 0,
+        {overflow.map((s) => row(s, <SectionIcon section={s} />, label(s), sectionMeta(s, summary), 0,
           spaceSectionPath(spaceId, s), active === s))}
         {needsYou && row('moderation', <SectionIcon section="moderation" />, label('moderation'),
           needsYouMeta(needsYou), needs, spaceSectionPath(spaceId, 'moderation'),
@@ -312,6 +324,17 @@ export function SpaceSectionNav({
           <span>{t('space.more.edit_hint')}</span>{' '}
           <a href={settingsHref}>{t('space.more.edit_sections')}</a>
         </p>
+      )}
+      {leave === 'member' && onLeave && (
+        <div class="sh-space-more__leave-row">
+          <button type="button" class="sh-space-more__leave" data-row="leave"
+                  onClick={() => { close(true); onLeave() }}>
+            {t('space.leave.button')}
+          </button>
+        </div>
+      )}
+      {leave === 'owner' && (
+        <p class="sh-space-more__footer sh-space-more__owner-note">{t('space.leave.owner_note')}</p>
       )}
     </>
   )

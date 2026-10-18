@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
-from socialhome.domain.space import SpaceMember, SpaceRole
+from socialhome.domain.space import SpaceMember, SpacePermissionError, SpaceRole
 from socialhome.services.space_attention import space_attention
 
 _SID = "sp-1"
@@ -96,3 +98,26 @@ async def test_no_moderation_service_counts_nothing_held():
     out = await _read(SpaceRole.ADMIN, moderation=None)
     assert out["pending_review"] == 0
     assert out["reports"] == 1
+
+
+async def test_a_refused_read_counts_nothing_and_is_logged(caplog):
+    """The counts are a hint: a read its service refuses must not fail
+    the whole space detail."""
+
+    class _Refusing:
+        async def review_space(self, space_id, *, actor_user_id):
+            raise SpacePermissionError("seat changed")
+
+    caplog.set_level(logging.WARNING, logger="socialhome.services.space_attention")
+    out = await space_attention(
+        _SID,
+        seat=_seat(SpaceRole.ADMIN),
+        username="me",
+        space_service=_Spaces(),
+        approvals=_Approvals(),
+        reports=_Refusing(),
+        moderation=_Moderation(),
+    )
+    assert out["reports"] == 0
+    assert out["pending_review"] == 2
+    assert "reports refused" in caplog.text
