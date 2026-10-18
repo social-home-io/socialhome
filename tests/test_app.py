@@ -830,7 +830,7 @@ async def test_signed_media_gets_have_their_own_per_client_limit(path, tmp_path)
     own looser rule, per client address."""
     assert SIGNED_MEDIA_GET_LIMIT == (600, 60)
     assert len(SIGNED_MEDIA_GET_RULES) == 5
-    _, _, rate_mw = _build_middleware(
+    _, _, rate_mw, _ = _build_middleware(
         Config(data_dir=str(tmp_path), db_path=str(tmp_path / "x.db")), RateLimiter()
     )
     for _ in range(600):
@@ -843,7 +843,7 @@ async def test_signed_media_gets_have_their_own_per_client_limit(path, tmp_path)
 async def test_gfs_picture_proxy_limit_stays_household_wide(tmp_path):
     """Every GFS-proxied avatar is an upstream fetch, so its signed-URL
     bucket is shared across clients — a leaked URL can't multiply it."""
-    _, _, rate_mw = _build_middleware(
+    _, _, rate_mw, _ = _build_middleware(
         Config(data_dir=str(tmp_path), db_path=str(tmp_path / "x.db")), RateLimiter()
     )
     path = "/api/gfs/g1/moments/users/u1/picture"

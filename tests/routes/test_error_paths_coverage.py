@@ -1335,15 +1335,17 @@ async def test_gfs_connection_delete_missing_404(client):
 
 
 async def test_gfs_space_publish_unknown_space_404(client):
-    """Listing is the space owner's choice: an unknown space is a 404 for
-    anyone, before any GFS is looked at."""
+    """Listing is the space owner's choice: an unknown space is refused
+    before any GFS is looked at — the space seat gate's 403 for a user
+    with no seat (no existence oracle), a 404 for the household admin,
+    whom the gate lets through."""
     await _add_second_user(client)
-    for token in ("bob-tok", client._tok):
+    for token, status in (("bob-tok", 403), (client._tok, 404)):
         r = await client.post(
             "/api/spaces/x/publish/y",
             headers={"Authorization": f"Bearer {token}"},
         )
-        assert r.status == 404
+        assert r.status == status
 
 
 async def test_gfs_space_unpublish_unknown_space_404(client):

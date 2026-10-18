@@ -2293,14 +2293,20 @@ async def test_subscribe_public_space_adds_subscriber_member(stack):
 
 async def test_subscribe_private_space_rejected(stack):
     """Private / household spaces cannot be followed — joining requires
-    an invite."""
-    await stack.provision_user("owner2")
+    an invite. To a caller with no seat a private space answers like an
+    unknown id (``KeyError`` → 404, no existence oracle); a member is
+    told why."""
+    owner = await stack.provision_user("owner2")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
         owner_username="owner2", name="Priv", space_type=SpaceType.PRIVATE
     )
-    with pytest.raises(SpacePermissionError, match="public / global"):
+    with pytest.raises(KeyError):
         await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    with pytest.raises(KeyError):
+        await stack.space_svc.subscribe_to_space(fan.user_id, "0" * 32)
+    with pytest.raises(SpacePermissionError, match="public / global"):
+        await stack.space_svc.subscribe_to_space(owner.user_id, space.id)
 
 
 async def test_subscribe_is_idempotent(stack):
