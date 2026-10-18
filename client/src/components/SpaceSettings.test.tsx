@@ -72,6 +72,22 @@ describe('SpaceSettings', () => {
     expect(typeof mod.SpaceSettings).toBe('function')
   })
 
+  it('a household space shows no join-mode picker, only who is in', () => {
+    const { container } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'household' })} onUpdate={() => {}} />,
+    )
+    expect(container.querySelector('input[name="space-settings-join-mode"]')).toBeNull()
+    expect(container.querySelector('.sh-space-settings-household-note')).not.toBeNull()
+  })
+
+  it('a private space keeps its join-mode picker', () => {
+    const { container } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
+    )
+    expect(container.querySelector('input[name="space-settings-join-mode"]')).not.toBeNull()
+    expect(container.querySelector('.sh-space-settings-household-note')).toBeNull()
+  })
+
   it('takes every section title from the catalog, not hard-coded English', () => {
     const { container } = render(
       <SpaceSettings space={makeSpace({ features: { location: true } })} onUpdate={() => {}} />,

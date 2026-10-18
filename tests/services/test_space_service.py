@@ -10805,7 +10805,14 @@ async def test_read_space_gives_an_outsider_only_a_discoverable_space(
     await stack.provision_user("anna")
     guest = await stack.provision_user("guest")
     s = await stack.space_svc.create_space(owner_username="anna", name="S")
-    await stack.space_repo.save(dataclasses.replace(s, space_type=tier))
+    # A household space we host is always open (migration 0101's guard).
+    await stack.space_repo.save(
+        dataclasses.replace(
+            s,
+            space_type=tier,
+            join_mode=JoinMode.OPEN if tier is SpaceType.HOUSEHOLD else s.join_mode,
+        )
+    )
     if remote:
         await _hosted_elsewhere(stack, s.id)
     if landing:

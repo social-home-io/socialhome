@@ -18,6 +18,7 @@ import {
 import {
   visibilityOptions as tierOptions,
   SPACE_CATEGORIES,
+  hasJoinModeChoice,
   joinOptionsForVisibility,
 } from './spaceModeOptions'
 import { showToast } from './Toast'
@@ -201,10 +202,18 @@ export function SpaceCreateDialog() {
           value={spaceType.value}
           options={offeredOptions}
           onChange={(v) => {
+            const was = spaceType.value
             spaceType.value = v
-            // A private space is invite-only by definition — there's no
+            // A private space is invite-only by definition, and everyone in
+            // the home is a member of a household space — neither has a
             // join-mode choice to make, so keep it consistent.
             if (v === 'private') joinMode.value = 'invite_only'
+            else if (v === 'household') joinMode.value = 'open'
+            else if (was === 'household') {
+              // Leaving household for public / global: its implicit "open"
+              // was never the person's choice — start from the safe default.
+              joinMode.value = 'invite_only'
+            }
           }}
         />
         {tierLocked && <ProtectedNotice capability="public_spaces" />}
@@ -234,13 +243,15 @@ export function SpaceCreateDialog() {
             error={gfsError.value}
           />
         )}
-        <RadioCardGroup
-          legend={t('space.join.legend')}
-          name="space-create-join-mode"
-          value={joinMode.value}
-          options={joinOptionsForVisibility(spaceType.value)}
-          onChange={(v) => joinMode.value = v}
-        />
+        {hasJoinModeChoice(spaceType.value) && (
+          <RadioCardGroup
+            legend={t('space.join.legend')}
+            name="space-create-join-mode"
+            value={joinMode.value}
+            options={joinOptionsForVisibility(spaceType.value)}
+            onChange={(v) => joinMode.value = v}
+          />
+        )}
         {isDiscoverable() && (
           <fieldset class="sh-form-fieldset sh-space-create-discovery">
             <legend>🧭 {t('space.create.discovery')}</legend>

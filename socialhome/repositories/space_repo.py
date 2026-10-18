@@ -39,6 +39,7 @@ from ..domain.gfs_server import (
 from ..domain.space import (
     INVITE_VIA_GFS,
     INVITE_VIAS,
+    HostedSpaceListing,
     JoinMode,
     ModerationStatus,
     Space,
@@ -149,6 +150,13 @@ class AbstractSpaceRepo(Protocol):
     ) -> None: ...
     async def has_gfs_servers(self, space_id: str) -> bool: ...
     async def list_by_type(self, space_type: SpaceType) -> list[Space]: ...
+    async def list_hosted_listings(
+        self,
+        own_instance_id: str,
+        user_id: str,
+        *,
+        tiers: frozenset[SpaceType],
+    ) -> list[HostedSpaceListing]: ...
     async def list_for_user(self, user_id: str) -> list[Space]: ...
     async def list_location_shared_spaces_for_user(
         self, user_id: str
@@ -1249,6 +1257,53 @@ class SqliteSpaceRepo:
             (space_type.value,),
         )
         return [s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s]
+
+    async def list_hosted_listings(
+        self,
+        own_instance_id: str,
+        user_id: str,
+        *,
+        tiers: frozenset[SpaceType],
+    ) -> list[HostedSpaceListing]:
+        """Every non-dissolved space of the given *tiers* hosted by
+        *own_instance_id*, with its seat count and *user_id*'s role / ban
+        on it, sorted by name. One query — no per-space round-trip."""
+        if not tiers:
+            return []
+        placeholders = ",".join("?" for _ in tiers)
+        rows = await self._db.fetchall(
+            f"""
+            SELECT s.*,
+                   (SELECT COUNT(*) FROM space_members m
+                     WHERE m.space_id = s.id) AS listing_member_count,
+                   (SELECT m.role FROM space_members m
+                     WHERE m.space_id = s.id AND m.user_id = ?)
+                       AS listing_caller_role,
+                   EXISTS (SELECT 1 FROM space_bans b
+                            WHERE b.space_id = s.id AND b.user_id = ?)
+                       AS listing_caller_banned
+              FROM spaces s
+             WHERE s.owner_instance_id = ?
+               AND s.dissolved = 0
+               AND s.space_type IN ({placeholders})
+             ORDER BY s.name
+            """,
+            (user_id, user_id, own_instance_id, *sorted(t.value for t in tiers)),
+        )
+        out: list[HostedSpaceListing] = []
+        for d in rows_to_dicts(rows):
+            space = _row_to_space(d)
+            if space is None:
+                continue
+            out.append(
+                HostedSpaceListing(
+                    space=space,
+                    member_count=int(d["listing_member_count"] or 0),
+                    caller_role=d["listing_caller_role"],
+                    caller_banned=bool(d["listing_caller_banned"]),
+                )
+            )
+        return out
 
     async def list_for_user(self, user_id: str) -> list[Space]:
         """Return every active space *user_id* is a member of (§23.48).

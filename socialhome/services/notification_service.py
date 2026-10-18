@@ -1652,7 +1652,12 @@ class NotificationService(ProtectionGateMixin):
         )
 
     async def on_space_member_joined(self, event: SpaceMemberJoined) -> None:
-        """Tell existing members that a new person joined (§23.52)."""
+        """Tell existing members that a new person joined (§23.52).
+
+        Not for an automatic household seat: everyone in the home is a
+        member of a household space, so "X joined" would be noise."""
+        if event.automatic:
+            return
         space = await self._spaces.get(event.space_id)
         if space is None:
             return

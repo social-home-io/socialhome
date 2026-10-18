@@ -115,6 +115,7 @@ from ..domain.events import (
     SpacePostCreated,
     SpacePostModerated,
     SpaceRemoteSeatLive,
+    UserProvisioned,
 )
 from ..domain.federation import (
     DELIVERY_ERROR_MESH_DEFERRED,
@@ -169,6 +170,7 @@ from ..domain.space import (
     AlreadyMemberError,
     BannedFromSpaceError,
     ContentAction,
+    HostedSpaceListing,
     HostNotPairedError,
     HostTooOldError,
     HostUnreachableError,
@@ -960,6 +962,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
 
         stype = _coerce_space_type(space_type)
         jmode = _coerce_join_mode(join_mode)
+        if stype is SpaceType.HOUSEHOLD:
+            # Everyone in the home is a member — there is no join gate.
+            jmode = JoinMode.OPEN
 
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")
@@ -1038,6 +1043,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             is_global=stype is SpaceType.GLOBAL,
             gfs_ids=chosen_gfs,
         )
+        await self.seat_household_members(space, actor_user_id=owner.user_id)
         return space
 
     async def ensure_space_seed(self, space_id: str) -> bytes | None:
@@ -2447,13 +2453,31 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
             new_fields["features"] = features
             payload["features"] = features.to_wire_dict()
+        # A household space seats everyone in the home, so its join mode is
+        # always ``open`` (whatever was asked); leaving the household tier
+        # falls back to ``invite_only`` unless this edit names a mode.
+        target_type = (
+            _coerce_space_type(space_type)
+            if space_type is not None
+            else space.space_type
+        )
+        entering_household = (
+            target_type is SpaceType.HOUSEHOLD
+            and space.space_type is not SpaceType.HOUSEHOLD
+        )
+        if target_type is SpaceType.HOUSEHOLD:
+            if join_mode is not None or entering_household:
+                join_mode = JoinMode.OPEN
+        elif space.space_type is SpaceType.HOUSEHOLD and join_mode is None:
+            join_mode = JoinMode.INVITE_ONLY
         if join_mode is not None:
             jmode = _coerce_join_mode(join_mode)
-            directory_state_changed = directory_state_changed or (
-                jmode is not space.join_mode
-            )
-            new_fields["join_mode"] = jmode
-            payload["join_mode"] = jmode.value
+            if not (target_type is SpaceType.HOUSEHOLD and jmode is space.join_mode):
+                directory_state_changed = directory_state_changed or (
+                    jmode is not space.join_mode
+                )
+                new_fields["join_mode"] = jmode
+                payload["join_mode"] = jmode.value
         if space_type is not None:
             stype = _coerce_space_type(space_type)
             if (
@@ -2660,6 +2684,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             and space.owner_instance_id == self._own_instance_id
         ):
             await self._bus.publish(SpaceAdminAuthorityRevoked(space_id=space_id))
+        if entering_household:
+            actor = await self._users.get(actor_username)
+            await self.seat_household_members(
+                updated, actor_user_id=actor.user_id if actor else actor_username
+            )
         return updated
 
     async def _after_writer_key_scope_change(self, space: Space) -> None:
@@ -2947,8 +2976,29 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # §CP.F1 — block underage minors when CP is wired in.
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
+        actor = await self._users.get(actor_username)
+        return await self._seat_local_member(
+            space,
+            user_id,
+            role=role,
+            actor_user_id=actor.user_id if actor is not None else actor_username,
+        )
+
+    async def _seat_local_member(
+        self,
+        space: Space,
+        user_id: str,
+        *,
+        role: str = SpaceRole.MEMBER,
+        actor_user_id: str,
+        automatic: bool = False,
+    ) -> SpaceMember:
+        """Seat a LOCAL user once the caller's gates (ban, §CP.F1 age,
+        authority) have passed: the row, :class:`SpaceMemberJoined`, the
+        v_23 roster gossip to member households and the §CP audit.
+        ``automatic`` marks a household-tier seat nobody asked for."""
         member = SpaceMember(
-            space_id=space_id,
+            space_id=space.id,
             user_id=user_id,
             role=role,
             joined_at=datetime.now(UTC).isoformat(),
@@ -2956,9 +3006,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         await self._spaces.save_member(member)
         await self._bus.publish(
             SpaceMemberJoined(
-                space_id=space_id,
+                space_id=space.id,
                 user_id=user_id,
                 role=role,
+                automatic=automatic,
             )
         )
         # v_23 — peer-replicate the seat to every member household so their
@@ -2978,15 +3029,85 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # §CP audit — record joined action for minors. No-op when the
         # user isn't CP-covered or when CP isn't wired.
         if self._child_protection is not None:
-            actor = await self._users.get(actor_username)
-            actor_uid = actor.user_id if actor is not None else actor_username
             await self._child_protection.record_membership_change(
                 user_id=user_id,
-                space_id=space_id,
+                space_id=space.id,
                 action="joined",
-                actor_id=actor_uid,
+                actor_id=actor_user_id,
             )
         return member
+
+    async def seat_household_members(
+        self,
+        space: Space,
+        *,
+        actor_user_id: str,
+        user_ids: set[str] | None = None,
+    ) -> list[str]:
+        """Seat everyone in the home in a household space we host.
+
+        A ``household`` space means "everyone in your home is a member":
+        every ACTIVE local user (``list_active`` — the household chat's
+        rule too) without a seat gets a ``member`` seat, limited to
+        ``user_ids`` when given. Never for another tier, a household-tier
+        stub another household hosts, or a dissolved space; never a user
+        banned from the space or a protected account below its §CP.F1 age
+        gate; an existing seat (any role) is left as it is. Called on the
+        events that make someone a household member of the space — create,
+        a move into the tier, a new local user — never by a reconcile, so
+        a member who left stays out. Returns the seated user ids.
+        """
+        if (
+            space.space_type is not SpaceType.HOUSEHOLD
+            or space.owner_instance_id != self._own_instance_id
+            or space.dissolved
+        ):
+            return []
+        seated: list[str] = []
+        for user in await self._users.list_active():
+            uid = user.user_id
+            if user_ids is not None and uid not in user_ids:
+                continue
+            if await self._spaces.get_member(space.id, uid) is not None:
+                continue
+            if await self._spaces.is_banned(space.id, uid):
+                continue
+            if self._child_protection is not None:
+                try:
+                    await self._child_protection.check_space_age_gate(space.id, uid)
+                except AgeRestrictedError:
+                    continue
+            await self._seat_local_member(
+                space, uid, actor_user_id=actor_user_id, automatic=True
+            )
+            seated.append(uid)
+        if seated:
+            log.info(
+                "household space %s: seated %d member(s) of the household",
+                space.id,
+                len(seated),
+            )
+        return seated
+
+    def wire_household_seating(self) -> None:
+        """Seat each newly provisioned local user in every household space
+        we host. Wired once, on the startup service that knows our real
+        instance id."""
+        self._bus.subscribe(UserProvisioned, self._seat_provisioned_user)
+
+    async def _seat_provisioned_user(self, event: UserProvisioned) -> None:
+        for space in await self._spaces.list_by_type(SpaceType.HOUSEHOLD):
+            try:
+                await self.seat_household_members(
+                    space, actor_user_id=event.user_id, user_ids={event.user_id}
+                )
+            except Exception:
+                # One space must not keep the new user out of the others.
+                log.exception(
+                    "household space %s: could not seat new user %s",
+                    space.id,
+                    event.user_id,
+                )
 
     async def invite_local_user(
         self,
@@ -6548,21 +6669,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         (the ban and existing-seat checks ran in :meth:`request_join`)."""
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space.id, user_id)
-        await self._spaces.save_member(
-            SpaceMember(
-                space_id=space.id,
-                user_id=user_id,
-                role=SpaceRole.MEMBER,
-                joined_at=datetime.now(UTC).isoformat(),
-            )
-        )
-        await self._bus.publish(
-            SpaceMemberJoined(
-                space_id=space.id,
-                user_id=user_id,
-                role=SpaceRole.MEMBER,
-            )
-        )
+        await self._seat_local_member(space, user_id, actor_user_id=user_id)
 
     async def list_pending_join_requests(
         self,
@@ -7552,6 +7659,47 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             except AgeRestrictedError:
                 raise SpacePermissionError(NOT_A_SPACE_MEMBER) from None
         return space, None
+
+    async def household_directory(self, user_id: str) -> list[HostedSpaceListing]:
+        """Browse › Your household: the spaces THIS household hosts that
+        ``user_id`` may find — the tiers with a landing page for a local
+        user (:meth:`_has_landing`: household, public, global; never
+        private). Every space they hold a seat in; a household space they
+        are not in (they left, or were removed — everyone in the home may
+        come back); a public / global space they are not in only when it
+        can be joined (``open`` / ``request``, never ``invite_only``) and
+        isn't archived. Never one they are banned from, and never one a
+        protected minor is below the §CP.F1 age gate of — the same hiding
+        :meth:`read_space` applies."""
+        tiers = frozenset({SpaceType.HOUSEHOLD, *PUBLIC_SPACE_TIERS})
+        out: list[HostedSpaceListing] = []
+        for row in await self._spaces.list_hosted_listings(
+            self._own_instance_id, user_id, tiers=tiers
+        ):
+            if row.caller_role is None and not await self._listed_to_non_member(
+                row, user_id
+            ):
+                continue
+            out.append(row)
+        return out
+
+    async def _listed_to_non_member(
+        self, row: HostedSpaceListing, user_id: str
+    ) -> bool:
+        space = row.space
+        if row.caller_banned or space.archived:
+            return False
+        if (
+            space.space_type is not SpaceType.HOUSEHOLD
+            and space.join_mode is JoinMode.INVITE_ONLY
+        ):
+            return False
+        if self._child_protection is not None:
+            try:
+                await self._child_protection.check_space_age_gate(space.id, user_id)
+            except AgeRestrictedError:
+                return False
+        return True
 
     def _has_landing(self, space: Space) -> bool:
         """May a local user with no seat see ``space``'s landing page?"""

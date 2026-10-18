@@ -382,10 +382,10 @@ async def test_list_instances_in_space_filters_membership_status_and_bans(env):
     # Add a space and seed membership.
     space_id = "sp-1"
     await env.db.enqueue(
-        "INSERT INTO spaces(id, name, space_type, owner_instance_id, "
+        "INSERT INTO spaces(id, name, space_type, join_mode, owner_instance_id, "
         "owner_username, identity_public_key) "
-        "VALUES(?,?,?,?,?,?)",
-        (space_id, "Space", "household", env.iid, "owner", "00" * 32),
+        "VALUES(?,?,?,?,?,?,?)",
+        (space_id, "Space", "household", "open", env.iid, "owner", "00" * 32),
     )
     for iid in (member.id, pending.id, banned.id):
         await env.db.enqueue(

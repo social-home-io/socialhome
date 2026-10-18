@@ -806,6 +806,24 @@ export interface TaskListEntry {
   open_count?: number
 }
 
+/** One row of `GET /api/household/spaces` (Browse › Your household): a
+ *  space this household hosts that the caller may find. Never private. */
+export interface HouseholdSpaceRow {
+  space_id: string
+  name: string
+  description: string | null
+  emoji: string | null
+  space_type: 'household' | 'public' | 'global'
+  join_mode: 'invite_only' | 'open' | 'request'
+  category: string
+  allow_subscribers: boolean
+  min_age: number
+  /** Seats in the space (followers included). */
+  member_count: number
+  /** The caller's role, `null` when they hold no seat. */
+  role: string | null
+}
+
 export interface DirectoryEntry {
   /** Unique id of the listed space (host's side). */
   space_id: string

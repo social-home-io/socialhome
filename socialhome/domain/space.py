@@ -1524,6 +1524,19 @@ class Space:
 
 
 @dataclass(slots=True, frozen=True)
+class HostedSpaceListing:
+    """A space THIS household hosts, as one local user sees it in the
+    household directory (``GET /api/household/spaces``): the space, its
+    seat count (``len(list_members)`` — what its landing page shows), the
+    caller's role (``None`` = no seat) and whether the caller is banned."""
+
+    space: Space
+    member_count: int
+    caller_role: str | None = None
+    caller_banned: bool = False
+
+
+@dataclass(slots=True, frozen=True)
 class JoinOwner:
     """Who a §D1b join stub is seated under (migration 0093).
 

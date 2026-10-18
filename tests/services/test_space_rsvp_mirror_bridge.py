@@ -54,9 +54,9 @@ async def env(tmp_dir):
     )
     # Space the events live in.
     await db.enqueue(
-        "INSERT INTO spaces(id, name, space_type, owner_instance_id,"
-        " owner_username, identity_public_key) VALUES(?,?,?,?,?,?)",
-        ("space-1", "Family", "household", iid, "anna", "ab" * 32),
+        "INSERT INTO spaces(id, name, space_type, join_mode, owner_instance_id,"
+        " owner_username, identity_public_key) VALUES(?,?,?,?,?,?,?)",
+        ("space-1", "Family", "household", "open", iid, "anna", "ab" * 32),
     )
 
     bus = EventBus()

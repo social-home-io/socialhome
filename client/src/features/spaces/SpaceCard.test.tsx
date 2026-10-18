@@ -418,3 +418,23 @@ describe('SpaceCard', () => {
     expect(btn.disabled).toBe(true)
   })
 })
+
+describe('SpaceCard — household spaces', () => {
+  it('shows no join-mode chip: everyone at home is a member', () => {
+    const { container } = render(
+      <SpaceCard
+        entry={{
+          space_id: 'h1', host_instance_id: 'local',
+          host_display_name: 'Your household', host_is_paired: true,
+          name: 'Choir', description: null, emoji: null,
+          member_count: 8, scope: 'household', join_mode: 'open',
+          min_age: 0, already_member: false,
+        }}
+        onAction={() => {}}
+      />,
+    )
+    expect(container.querySelector('.sh-join-mode-chip--open')).toBeNull()
+    expect(container.textContent).toContain('8 members')
+    expect(container.textContent).toContain('Join')
+  })
+})

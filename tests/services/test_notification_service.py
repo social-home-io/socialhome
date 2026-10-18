@@ -24,6 +24,7 @@ from socialhome.domain.events import (
     DmMessageUpdated,
     PostEdited,
     SpaceAdminSeedsRetiredAfterRestore,
+    SpaceMemberJoined,
     SpacePostCreated,
     SpaceRemoteSeatLive,
     TaskAssigned,
@@ -2866,3 +2867,49 @@ async def test_a_deleted_message_clears_the_bell_once_nothing_is_unread(stack):
     )
     assert await stack.notif_repo.count_unread(bob.user_id) == 0
     assert await stack.notif_repo.count_unread(carl.user_id) == 1
+
+
+async def _member_joined_bells(stack, user):
+    notes = await stack.notif_repo.list(user.user_id, limit=50)
+    return [n for n in notes if n.type == "space_member_joined"]
+
+
+async def test_space_member_joined_notifies_other_members(stack):
+    """A real join ("Bob joined Garden") reaches the existing members."""
+    anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space_svc = SpaceService(
+        stack.space_repo,
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Garden")
+    await stack.bus.publish(
+        SpaceMemberJoined(space_id=space.id, user_id=bob.user_id, role="member")
+    )
+    bells = await _member_joined_bells(stack, anna)
+    assert [n.title for n in bells] == ["bob joined Garden"]
+
+
+async def test_automatic_household_seat_sends_no_joined_bell(stack):
+    """Everyone in the home is a member of a household space: an automatic
+    seat must not ring "X joined" for everyone else (an N² storm when a
+    household space is created for N people)."""
+    anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space_svc = SpaceService(
+        stack.space_repo,
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Home")
+    await stack.bus.publish(
+        SpaceMemberJoined(
+            space_id=space.id, user_id=bob.user_id, role="member", automatic=True
+        )
+    )
+    assert await _member_joined_bells(stack, anna) == []

@@ -317,3 +317,176 @@ async def test_inactive_account_cannot_read_the_household_chat(client):
     await client._db.enqueue("UPDATE users SET state='inactive' WHERE username='bob'")
     r = await client.get(f"/api/conversations/{cid}/messages", headers=_auth(bob))
     assert r.status in (401, 403)
+
+
+# ─── Household spaces: everyone in the home is a member ──────────────────
+#
+# A ``household`` space seats every active local user of the household that
+# hosts it, and Browse › Your household (``GET /api/household/spaces``)
+# lists the spaces this household hosts that the caller may find, with real
+# member counts.
+
+
+async def _local_user(client, username: str, *, active: bool = True) -> dict:
+    """A local user + bearer token; returns ``{user_id, headers}``."""
+    user_id = f"uid-{username}"
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, state, deleted_at)"
+        " VALUES(?, ?, ?, ?, ?)",
+        (
+            username,
+            user_id,
+            username.title(),
+            "active" if active else "inactive",
+            None if active else "2026-10-01T00:00:00+00:00",
+        ),
+    )
+    token = f"{username}-tok"
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash)"
+        " VALUES(?, ?, 't', ?)",
+        (f"t-{username}", user_id, sha256_token_hash(token)),
+    )
+    return {"user_id": user_id, "headers": _auth(token)}
+
+
+async def _create_space(client, headers, **body) -> dict:
+    r = await client.post("/api/spaces", json={"name": "S", **body}, headers=headers)
+    assert r.status == 201, await r.text()
+    return await r.json()
+
+
+async def _member_ids(client, sid: str) -> set[str]:
+    rows = await client._db.fetchall(
+        "SELECT user_id FROM space_members WHERE space_id=?", (sid,)
+    )
+    return {r["user_id"] for r in rows}
+
+
+async def _directory(client, headers) -> dict[str, dict]:
+    r = await client.get("/api/household/spaces", headers=headers)
+    assert r.status == 200, await r.text()
+    return {row["space_id"]: row for row in await r.json()}
+
+
+async def _new_user(client, username: str) -> str:
+    """Provision a user through the admin API (publishes UserProvisioned)."""
+    r = await client.post(
+        "/api/admin/users",
+        json={"username": username, "password": "correct-horse"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201, await r.text()
+    return (await r.json())["user_id"]
+
+
+async def test_household_directory_requires_auth(client):
+    r = await client.get("/api/household/spaces")
+    assert r.status == 401
+
+
+async def test_creating_a_household_space_seats_everyone_at_home(client):
+    ben = await _local_user(client, "ben")
+    cleo = await _local_user(client, "cleo")
+    gone = await _local_user(client, "gone", active=False)
+    space = await _create_space(
+        client,
+        _auth(client._tok),
+        name="Home",
+        space_type="household",
+        join_mode="request",
+    )
+    r = await client.get(f"/api/spaces/{space['id']}", headers=_auth(client._tok))
+    assert (await r.json())["join_mode"] == "open"
+    members = await _member_ids(client, space["id"])
+    assert members == {client._uid, ben["user_id"], cleo["user_id"]}
+    assert gone["user_id"] not in members
+    # The seats are real: ben reads the member list.
+    r = await client.get(f"/api/spaces/{space['id']}/members", headers=ben["headers"])
+    assert r.status == 200
+    assert len(await r.json()) == 3
+
+
+async def test_a_new_user_is_seated_in_household_spaces_only(client):
+    home = await _create_space(client, _auth(client._tok), space_type="household")
+    secret = await _create_space(client, _auth(client._tok), space_type="private")
+    dora = await _new_user(client, "dora")
+    assert dora in await _member_ids(client, home["id"])
+    assert dora not in await _member_ids(client, secret["id"])
+
+
+async def test_a_member_who_left_a_household_space_stays_out(client):
+    ben = await _local_user(client, "ben")
+    home = await _create_space(client, _auth(client._tok), space_type="household")
+    r = await client.delete(
+        f"/api/spaces/{home['id']}/members/{ben['user_id']}", headers=ben["headers"]
+    )
+    assert r.status == 200, await r.text()
+    await _new_user(client, "dora")
+    assert ben["user_id"] not in await _member_ids(client, home["id"])
+    # …and finds it again under Browse › Your household, joinable at once.
+    row = (await _directory(client, ben["headers"]))[home["id"]]
+    assert row["role"] is None
+    assert row["member_count"] == 2
+    r = await client.post(
+        f"/api/spaces/{home['id']}/join-requests", json={}, headers=ben["headers"]
+    )
+    assert r.status == 201
+    assert (await r.json())["joined"] is True
+    assert ben["user_id"] in await _member_ids(client, home["id"])
+
+
+async def test_household_directory_lists_findable_spaces_with_counts(client):
+    ben = await _local_user(client, "ben")
+    admin = _auth(client._tok)
+    home = await _create_space(client, admin, name="Home", space_type="household")
+    priv_open = await _create_space(
+        client, admin, name="Private", space_type="private", join_mode="open"
+    )
+    pub_open = await _create_space(
+        client, admin, name="Pub open", space_type="public", join_mode="open"
+    )
+    pub_req = await _create_space(
+        client, admin, name="Pub req", space_type="public", join_mode="request"
+    )
+    pub_invite = await _create_space(
+        client, admin, name="Pub invite", space_type="public", join_mode="invite_only"
+    )
+    rows = await _directory(client, ben["headers"])
+    # Home: ben is seated automatically; two members (admin + ben).
+    assert rows[home["id"]]["role"] == "member"
+    assert rows[home["id"]]["member_count"] == 2
+    assert rows[home["id"]]["space_type"] == "household"
+    # Joinable public spaces ben isn't in, with their real seat counts.
+    assert rows[pub_open["id"]]["role"] is None
+    assert rows[pub_open["id"]]["member_count"] == 1
+    assert rows[pub_req["id"]]["join_mode"] == "request"
+    # Never a private space, never an invite-only one ben isn't in.
+    assert priv_open["id"] not in rows
+    assert pub_invite["id"] not in rows
+    # The admin (a member of all of them) sees every non-private one.
+    mine = await _directory(client, admin)
+    assert {home["id"], pub_open["id"], pub_req["id"], pub_invite["id"]} <= set(mine)
+    assert priv_open["id"] not in mine
+
+
+async def test_household_directory_hides_bans_and_foreign_household_spaces(client):
+    ben = await _local_user(client, "ben")
+    admin = _auth(client._tok)
+    home = await _create_space(client, admin, space_type="household")
+    r = await client.post(
+        f"/api/spaces/{home['id']}/ban",
+        json={"user_id": ben["user_id"]},
+        headers=admin,
+    )
+    assert r.status in (200, 201, 204), await r.text()
+    # A household-tier stub another household hosts.
+    await client._db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key, space_type, join_mode)"
+        " VALUES('theirs', 'Theirs', 'other-inst', 'x', ?, 'household', 'open')",
+        ("ab" * 32,),
+    )
+    rows = await _directory(client, ben["headers"])
+    assert home["id"] not in rows
+    assert "theirs" not in rows
