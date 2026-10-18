@@ -140,6 +140,7 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "decline_remote_invite",  # cross-instance — own user
         "accept_local_invite",  # same-household — own user (the invitee)
         "decline_local_invite",  # same-household — own user (the invitee)
+        "list_pending_local_invites",  # own user — the invitee's inbox
         "request_join",  # any user may request; gate is on approval
         "request_join_remote",  # cross-instance request
         "subscribe_to_space",  # public-space follow-only

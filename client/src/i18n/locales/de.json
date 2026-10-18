@@ -1804,6 +1804,7 @@
   "remote_invite.banner_remote": "Offene Einladungen aus anderen Haushalten",
   "remote_invite.from": "von {name}",
   "remote_invite.an_admin": "einem Admin",
+  "remote_invite.a_space": "einen Raum",
   "remote_invite.accept": "Annehmen",
   "remote_invite.decline": "Ablehnen",
   "remote_invite.confirm_decline": "Wirklich ablehnen",

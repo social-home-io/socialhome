@@ -1598,20 +1598,15 @@ class LocalInviteCollectionView(BaseView):
         ctx = self.user
         if ctx is None or ctx.user_id is None:
             return error_response(401, "UNAUTHENTICATED", "Login required.")
-        repo = self.svc(space_repo_key)
-        rows = await repo.list_pending_local_invites_for(ctx.user_id)
-        return web.json_response(
-            [
-                {
-                    "invitation_id": r["id"],
-                    "space_id": r["space_id"],
-                    "invited_by": r.get("invited_by"),
-                    "expires_at": r.get("expires_at"),
-                    "created_at": r.get("created_at"),
-                }
-                for r in rows
-            ]
+        invites = await self.svc(space_service_key).list_pending_local_invites(
+            ctx.user_id
         )
+        # The invitee is not a member yet: the icon is only reachable
+        # through a signed URL, like every other space icon.
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(invites, signer, extra_fields=("space_icon_url",))
+        return web.json_response(invites)
 
 
 class LocalInviteDecisionView(BaseView):

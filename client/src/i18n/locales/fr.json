@@ -1799,6 +1799,7 @@
   "remote_invite.banner_remote": "Invitations en attente d'autres foyers",
   "remote_invite.from": "de {name}",
   "remote_invite.an_admin": "un admin",
+  "remote_invite.a_space": "un espace",
   "remote_invite.accept": "Accepter",
   "remote_invite.decline": "Refuser",
   "remote_invite.confirm_decline": "Confirmer le refus",

@@ -18419,6 +18419,22 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
 .sh-remote-invite-banner__actions {
   display: flex; gap: var(--sh-space-xs);
 }
+.sh-remote-invite-banner__who {
+  display: flex; align-items: center; gap: var(--sh-space-sm);
+  min-width: 0;
+}
+.sh-remote-invite-banner__icon {
+  flex: none;
+  width: 36px; height: 36px;
+  border-radius: var(--sh-radius-md, 8px);
+  object-fit: cover;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 22px; line-height: 1;
+  background: color-mix(in srgb, var(--sh-primary) 8%, var(--sh-bg));
+}
+.sh-remote-invite-banner__meta {
+  font-size: var(--sh-font-size-sm);
+}
 
 /* Modal form conventions shared by JoinRequestModal + RemoteInviteDialog */
 .sh-form-field {

@@ -1799,6 +1799,7 @@
   "remote_invite.banner_remote": "Openstaande uitnodigingen van andere huishoudens",
   "remote_invite.from": "van {name}",
   "remote_invite.an_admin": "een beheerder",
+  "remote_invite.a_space": "een ruimte",
   "remote_invite.accept": "Accepteren",
   "remote_invite.decline": "Weigeren",
   "remote_invite.confirm_decline": "Weigeren bevestigen",

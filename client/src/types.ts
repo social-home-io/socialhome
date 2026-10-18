@@ -865,8 +865,17 @@ export interface LocalInvite {
   space_id: string
   /** Inviter's local ``user_id`` (a same-household admin). */
   invited_by: string | null
+  /** The inviter's display name; ``null`` when the user is gone. */
+  invited_by_display_name?: string | null
   expires_at: string | null
   created_at: string
+  /** Landing fields of the space invited to — ``null`` when the space
+   *  row is gone. ``space_icon_url`` is signed, ``null`` without an icon. */
+  space_name?: string | null
+  space_emoji?: string | null
+  space_description?: string | null
+  space_icon_url?: string | null
+  member_count?: number | null
 }
 
 export interface GfsConnection {

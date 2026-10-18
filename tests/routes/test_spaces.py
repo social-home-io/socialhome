@@ -3950,3 +3950,85 @@ async def test_get_space_hides_the_gfs_list_from_non_members(client):
     assert body["id"] == sid
     assert "gfs_servers" not in body
     assert "gfs_unlisted" not in body
+
+
+async def test_local_invites_carry_the_space_landing_fields(client):
+    """The pending-invite banner showed the raw space id ("502481f7…
+    from Tobi") because ``GET /api/local_invites`` carried no name. The
+    invitee now gets the landing fields of the space they are invited to
+    — name, emoji, description, signed icon URL, member count — plus the
+    inviter's display name."""
+    r = await client.post(
+        "/api/spaces",
+        json={
+            "name": "Board game night",
+            "emoji": "🎲",
+            "description": "Fridays at Tobi's",
+        },
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    form = aiohttp.FormData()
+    form.add_field("file", _TINY_PNG, filename="x.png", content_type="image/png")
+    up = await client.post(
+        f"/api/spaces/{sid}/icon", data=form, headers=_auth(client._admin_token)
+    )
+    assert up.status == 200
+    r2 = await client.post(
+        f"/api/spaces/{sid}/members",
+        json={"user_id": client._bob_uid},
+        headers=_auth(client._admin_token),
+    )
+    invitation_id = (await r2.json())["invitation_id"]
+
+    r3 = await client.get("/api/local_invites", headers=_auth(client._bob_token))
+    assert r3.status == 200
+    (inv,) = [i for i in await r3.json() if i["invitation_id"] == invitation_id]
+    assert inv["space_id"] == sid
+    assert inv["space_name"] == "Board game night"
+    assert inv["space_emoji"] == "🎲"
+    assert inv["space_description"] == "Fridays at Tobi's"
+    assert inv["member_count"] == 1
+    assert inv["invited_by_display_name"] == "Pascal"
+    assert inv["space_icon_url"].startswith(f"/api/spaces/{sid}/icon?v=")
+    assert "sig=" in inv["space_icon_url"]
+    # The signed icon URL is fetchable by the invitee (not yet a member).
+    icon = await client.get(inv["space_icon_url"])
+    assert icon.status == 200
+    # Nothing beyond the landing fields: no roster, no config.
+    assert set(inv) == {
+        "invitation_id",
+        "space_id",
+        "invited_by",
+        "invited_by_display_name",
+        "expires_at",
+        "created_at",
+        "space_name",
+        "space_emoji",
+        "space_description",
+        "space_icon_url",
+        "member_count",
+    }
+
+    # Only the invitee sees it — the inviting admin's own inbox is empty.
+    r4 = await client.get("/api/local_invites", headers=_auth(client._admin_token))
+    assert all(i["invitation_id"] != invitation_id for i in await r4.json())
+
+
+async def test_local_invites_without_icon_has_null_icon_url(client):
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Plain"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    await client.post(
+        f"/api/spaces/{sid}/members",
+        json={"user_id": client._bob_uid},
+        headers=_auth(client._admin_token),
+    )
+    r2 = await client.get("/api/local_invites", headers=_auth(client._bob_token))
+    (inv,) = [i for i in await r2.json() if i["space_id"] == sid]
+    assert inv["space_name"] == "Plain"
+    assert inv["space_icon_url"] is None
+    assert inv["space_emoji"] is None

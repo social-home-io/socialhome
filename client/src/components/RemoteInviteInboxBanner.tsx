@@ -33,7 +33,7 @@ import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from './Button'
 import { showToast } from './Toast'
-import { t } from '@/i18n/i18n'
+import { isOne, t } from '@/i18n/i18n'
 import {
   householdDisplayName,
   loadHouseholdUsers,
@@ -55,6 +55,18 @@ type InFlightState = Record<string, 'accept' | 'decline' | null>
 type ConfirmState = Record<string, boolean>
 
 const CONFIRM_RESET_MS = 4000
+
+/** The invited space's icon: the uploaded icon, else its emoji, else
+ *  nothing (the name alone still reads). */
+function SpaceMark({ inv }: { inv: LocalInvite }) {
+  if (inv.space_icon_url) {
+    return <img class="sh-remote-invite-banner__icon" src={inv.space_icon_url} alt="" />
+  }
+  if (inv.space_emoji) {
+    return <span class="sh-remote-invite-banner__icon" aria-hidden="true">{inv.space_emoji}</span>
+  }
+  return null
+}
 
 /** "from {name}" with the name in bold — split on the placeholder so
  *  each language keeps its own word order. */
@@ -212,17 +224,30 @@ export function RemoteInviteInboxBanner() {
           {localInvites.map((inv) => {
             const busy = inFlight[inv.invitation_id] != null
             const declineConfirming = confirming[inv.invitation_id] === true
-            const inviter = inv.invited_by
-              ? householdDisplayName(inv.invited_by)
-              : t('remote_invite.an_admin')
+            const inviter = inv.invited_by_display_name
+              || (inv.invited_by
+                ? householdDisplayName(inv.invited_by)
+                : t('remote_invite.an_admin'))
             return (
               <div
                 key={inv.invitation_id}
                 class="sh-remote-invite-banner__row"
               >
-                <div>
-                  <strong>{inv.space_id}</strong>
-                  <FromLine name={inviter} />
+                <div class="sh-remote-invite-banner__who">
+                  <SpaceMark inv={inv} />
+                  <div>
+                    {/* Never the raw space id — it reads as noise. */}
+                    <strong>{inv.space_name || t('remote_invite.a_space')}</strong>
+                    <FromLine name={inviter} />
+                    {inv.member_count != null && (
+                      <div class="sh-muted sh-remote-invite-banner__meta">
+                        {t(
+                          isOne(inv.member_count) ? 'space.members.count_one' : 'space.members.count',
+                          { n: String(inv.member_count) },
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div class="sh-remote-invite-banner__actions">
                   <Button
@@ -258,7 +283,7 @@ export function RemoteInviteInboxBanner() {
         return (
           <div key={inv.invite_token} class="sh-remote-invite-banner__row">
             <div>
-              <strong>{inv.space_display_hint || inv.space_id}</strong>
+              <strong>{inv.space_display_hint || t('remote_invite.a_space')}</strong>
               <FromLine name={householdLabel(inv.inviter_instance_id)} />
             </div>
             <div class="sh-remote-invite-banner__actions">

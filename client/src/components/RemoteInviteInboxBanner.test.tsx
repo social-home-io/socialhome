@@ -208,7 +208,81 @@ describe('RemoteInviteInboxBanner', () => {
         container.querySelector('[data-testid="local-invite-accept"]'),
       ).not.toBeNull()
     })
-    expect(container.textContent).toContain('space-fam')
+    // An older server sends no space name: a neutral "a space", never
+    // the raw id ("502481f7… from Tobi" read as noise).
+    expect(container.textContent).toContain('a space')
+    expect(container.textContent).not.toContain('space-fam')
+  })
+
+  it('a local invite shows the space name, icon, inviter and member count', async () => {
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/remote_invites') return Promise.resolve([])
+      if (url === '/api/local_invites') {
+        return Promise.resolve([
+          {
+            invitation_id: 'inv-3',
+            space_id: '502481f7ca774a83a0465a894f103311',
+            invited_by: 'uid-tobi',
+            invited_by_display_name: 'Tobi',
+            expires_at: null,
+            created_at: '2026-10-18T12:00:00Z',
+            space_name: 'Board game night',
+            space_emoji: '🎲',
+            space_description: 'Fridays',
+            space_icon_url: '/api/spaces/502481f7/icon?v=abc&sig=x',
+            member_count: 3,
+          },
+        ])
+      }
+      if (url === '/api/friends') return Promise.resolve({ households: [] })
+      if (url === '/api/users') return Promise.resolve([])
+      return Promise.reject(new Error(`unknown url: ${url}`))
+    })
+    const { container } = render(<RemoteInviteInboxBanner />)
+    await waitFor(() => {
+      expect(container.textContent).toContain('Board game night')
+    })
+    expect(container.textContent).toContain('Tobi')
+    expect(container.textContent).toContain('3 members')
+    expect(container.textContent).not.toContain('502481f7')
+    const img = container.querySelector('.sh-remote-invite-banner__icon') as HTMLImageElement
+    expect(img.tagName).toBe('IMG')
+    expect(img.getAttribute('src')).toBe('/api/spaces/502481f7/icon?v=abc&sig=x')
+    expect(img.getAttribute('alt')).toBe('')
+  })
+
+  it('a local invite without an icon shows the emoji; one member reads singular', async () => {
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/remote_invites') return Promise.resolve([])
+      if (url === '/api/local_invites') {
+        return Promise.resolve([
+          {
+            invitation_id: 'inv-4',
+            space_id: 'sp-4',
+            invited_by: 'uid-tobi',
+            invited_by_display_name: 'Tobi',
+            expires_at: null,
+            created_at: '2026-10-18T12:00:00Z',
+            space_name: 'Choir',
+            space_emoji: '🎵',
+            space_icon_url: null,
+            member_count: 1,
+          },
+        ])
+      }
+      if (url === '/api/friends') return Promise.resolve({ households: [] })
+      if (url === '/api/users') return Promise.resolve([])
+      return Promise.reject(new Error(`unknown url: ${url}`))
+    })
+    const { container } = render(<RemoteInviteInboxBanner />)
+    await waitFor(() => {
+      expect(container.textContent).toContain('Choir')
+    })
+    const mark = container.querySelector('.sh-remote-invite-banner__icon') as HTMLElement
+    expect(mark.tagName).toBe('SPAN')
+    expect(mark.textContent).toBe('🎵')
+    expect(container.textContent).toContain('1 member')
+    expect(container.textContent).not.toContain('1 members')
   })
 
   it('local-invite accept POSTs to /api/local_invites/{id}/accept', async () => {

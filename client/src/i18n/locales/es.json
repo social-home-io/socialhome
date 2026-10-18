@@ -1826,6 +1826,7 @@
   "remote_invite.banner_remote": "Invitaciones pendientes de otros hogares",
   "remote_invite.from": "de {name}",
   "remote_invite.an_admin": "un admin",
+  "remote_invite.a_space": "un espacio",
   "remote_invite.accept": "Aceptar",
   "remote_invite.decline": "Rechazar",
   "remote_invite.confirm_decline": "Confirmar rechazo",

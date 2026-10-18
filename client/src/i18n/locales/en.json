@@ -2114,6 +2114,7 @@
   "remote_invite.banner_remote": "Pending invites from other households",
   "remote_invite.from": "from {name}",
   "remote_invite.an_admin": "an admin",
+  "remote_invite.a_space": "a space",
   "remote_invite.accept": "Accept",
   "remote_invite.decline": "Decline",
   "remote_invite.confirm_decline": "Confirm decline",
