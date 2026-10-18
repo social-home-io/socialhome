@@ -185,6 +185,18 @@ describe('More on a desktop: a non-modal popover', () => {
     expect(document.activeElement).toBe(more)
   })
 
+  it('tabbing out of it closes it; tabbing through its rows does not', async () => {
+    layout(2000)
+    const { getByRole, container } = renderNav()
+    fireEvent.click(getByRole('button', { name: /^More/ }))
+    const members = within(container.querySelector('.sh-space-more__popover') as HTMLElement)
+      .getByRole('link', { name: /^Members/ })
+    members.focus()
+    expect(container.querySelector('.sh-space-more__popover')).toBeTruthy()
+    getByRole('link', { name: 'Space settings' }).focus()
+    await waitFor(() => expect(container.querySelector('.sh-space-more__popover')).toBeNull())
+  })
+
   it('a click outside closes it', () => {
     layout(2000)
     const { getByRole, container } = renderNav()

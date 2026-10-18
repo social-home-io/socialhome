@@ -215,7 +215,10 @@ describe('SpaceFeedPage /spaces/:id/:section', () => {
         if (fail) throw Object.assign(new Error('boom'), { status: 500 })
         return [{
           id: 'e1', calendar_id: 's1', summary: 'Game night',
-          start: new Date().toISOString(), end: new Date(Date.now() + 3600e3).toISOString(),
+          // 10:00–11:00 today, local: "now + 1 h" crossed midnight late
+          // in the evening and filed the event on two day cards.
+          start: new Date(new Date().setHours(10, 0, 0, 0)).toISOString(),
+          end: new Date(new Date().setHours(11, 0, 0, 0)).toISOString(),
           all_day: false, attendees: [], created_by: 'u1',
         }]
       }

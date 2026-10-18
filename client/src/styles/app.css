@@ -25003,7 +25003,13 @@ button.sh-page-editor-status {
   color: var(--sh-text-muted);
   font-size: var(--sh-font-size-sm);
 }
-.sh-space-more__footer a { color: var(--sh-primary-text); font-weight: 600; }
+.sh-space-more__footer a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  color: var(--sh-primary-text);
+  font-weight: 600;
+}
 .sh-space-more__notif { display: flex; flex-direction: column; gap: var(--sh-space-sm); padding: 4px; }
 .sh-space-more__heading { margin: 0; padding: 0 8px; font-size: var(--sh-font-size-base); }
 .sh-space-more__back {

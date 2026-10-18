@@ -213,11 +213,18 @@ export function SpaceSectionNav({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.preventDefault(); close(true) }
     }
+    // Tabbing past the last row leaves the popover: close it rather than
+    // leave it covering the page the focus moved on to.
+    const onFocus = (e: FocusEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) close(false)
+    }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
+    document.addEventListener('focusin', onFocus)
     return () => {
       document.removeEventListener('mousedown', onDown)
       document.removeEventListener('keydown', onKey)
+      document.removeEventListener('focusin', onFocus)
     }
   }, [open, sheet])
 
@@ -326,65 +333,70 @@ export function SpaceSectionNav({
   const panelBody = view === 'notif' ? notifView : rows
 
   return (
-    <div class="sh-space-subheader sh-space-subheader--sections">
-      <nav class="sh-space-sections" aria-label={t('space.header.sections')}>
-        <ul class="sh-space-sections__row" ref={rowRef}>
-          {inline.map((s) => (
-            <li key={s}>
-              {sectionLink(s, 'sh-space-section', (
-                <>
-                  <span class="sh-space-section__label">{label(s)}</span>
-                  <UnreadBadge count={badgeOf(s)} />
-                </>
-              ))}
-            </li>
-          ))}
-          <li class="sh-space-more" ref={wrapRef}>
-            <button
-              ref={moreBtnRef}
-              type="button"
-              class={activeInMore ? 'sh-space-section sh-space-section--active sh-space-more__btn' : 'sh-space-section sh-space-more__btn'}
-              aria-expanded={open}
-              aria-controls={panelId}
-              onClick={toggle}
-            >
-              <span class="sh-space-section__label">{t('space.more.button')}</span>
-              {activeInMore && (
-                <span class="sr-only">{', '}{t('space.more.current', { section: label(active) })}</span>
+    <>
+      <div class="sh-space-subheader sh-space-subheader--sections">
+        <nav class="sh-space-sections" aria-label={t('space.header.sections')}>
+          <ul class="sh-space-sections__row" ref={rowRef}>
+            {inline.map((s) => (
+              <li key={s}>
+                {sectionLink(s, 'sh-space-section', (
+                  <>
+                    <span class="sh-space-section__label">{label(s)}</span>
+                    <UnreadBadge count={badgeOf(s)} />
+                  </>
+                ))}
+              </li>
+            ))}
+            <li class="sh-space-more" ref={wrapRef}>
+              <button
+                ref={moreBtnRef}
+                type="button"
+                class={activeInMore ? 'sh-space-section sh-space-section--active sh-space-more__btn' : 'sh-space-section sh-space-more__btn'}
+                aria-expanded={open}
+                aria-controls={panelId}
+                onClick={toggle}
+              >
+                <span class="sh-space-section__label">{t('space.more.button')}</span>
+                {activeInMore && (
+                  <span class="sr-only">{', '}{t('space.more.current', { section: label(active) })}</span>
+                )}
+                <NeedsYouBadge count={needs} />
+                <span class="sh-space-more__down" aria-hidden="true">{EXTRA_ICONS.down}</span>
+              </button>
+              {open && !sheet && (
+                <div id={panelId} ref={panelRef} class="sh-space-more__popover" role="region"
+                     aria-label={t('space.more.title', { name: spaceName })}>
+                  {panelBody}
+                </div>
               )}
-              <NeedsYouBadge count={needs} />
-              <span class="sh-space-more__down" aria-hidden="true">{EXTRA_ICONS.down}</span>
-            </button>
-            {open && !sheet && (
-              <div id={panelId} ref={panelRef} class="sh-space-more__popover" role="region"
-                   aria-label={t('space.more.title', { name: spaceName })}>
-                {panelBody}
-              </div>
-            )}
-          </li>
-        </ul>
-        {/* An unconstrained, invisible copy of every section and of More:
-         *  their widths decide how many fit (``usePriorityPlus``). */}
-        <div class="sh-space-sections__measure" ref={measureRef} aria-hidden="true">
-          {sections.map((s) => (
-            <span key={s} class="sh-space-section">
-              <span class="sh-space-section__label">{label(s)}</span>
-              {badgeOf(s) > 0 && <span class="sh-space-badge sh-space-badge--unread">{badgeOf(s)}</span>}
+            </li>
+          </ul>
+          {/* An unconstrained, invisible copy of every section and of More:
+           *  their widths decide how many fit (``usePriorityPlus``). */}
+          <div class="sh-space-sections__measure" ref={measureRef} aria-hidden="true">
+            {sections.map((s) => (
+              <span key={s} class="sh-space-section">
+                <span class="sh-space-section__label">{label(s)}</span>
+                {badgeOf(s) > 0 && <span class="sh-space-badge sh-space-badge--unread">{badgeOf(s)}</span>}
+              </span>
+            ))}
+            <span class="sh-space-section sh-space-more__btn">
+              <span class="sh-space-section__label">{t('space.more.button')}</span>
+              {needs > 0 && <span class="sh-space-badge sh-space-badge--needs">{needs}</span>}
+              <span class="sh-space-more__down">{EXTRA_ICONS.down}</span>
             </span>
-          ))}
-          <span class="sh-space-section sh-space-more__btn">
-            <span class="sh-space-section__label">{t('space.more.button')}</span>
-            {needs > 0 && <span class="sh-space-badge sh-space-badge--needs">{needs}</span>}
-            <span class="sh-space-more__down">{EXTRA_ICONS.down}</span>
-          </span>
-        </div>
-      </nav>
-      {settingsHref && (
-        <a href={settingsHref} class="sh-space-gear" aria-label={t('space.header.settings_aria')}
-           title={t('nav.settings')}>
-          {EXTRA_ICONS.gear}
-        </a>
-      )}
+          </div>
+        </nav>
+        {settingsHref && (
+          <a href={settingsHref} class="sh-space-gear" aria-label={t('space.header.settings_aria')}
+             title={t('nav.settings')}>
+            {EXTRA_ICONS.gear}
+          </a>
+        )}
+      </div>
+      {/* The sheet sits outside the sticky row: the row is a stacking
+       *  context (z-index 50) that would keep the sheet under the phone's
+       *  bottom nav. */}
       {open && sheet && (
         <Modal
           open
@@ -395,6 +407,6 @@ export function SpaceSectionNav({
           <div id={panelId} ref={panelRef}>{panelBody}</div>
         </Modal>
       )}
-    </div>
+    </>
   )
 }
