@@ -106,6 +106,7 @@
   "dms.location.send_failed": "Standort konnte nicht gesendet werden: {error}",
   "calendar.title": "Kalender",
   "calendar.no_events": "Keine Termine in diesem Zeitraum.",
+  "calendar.load_failed": "Der Kalender konnte nicht geladen werden.",
   "calendar.new_event": "Neuer Termin",
   "calendar.today": "Heute",
   "calendar.month": "Monat",

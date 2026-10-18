@@ -18,7 +18,7 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.calendar_service import (
     CalendarService,
     SpaceCalendarService,
-    _parse_iso,
+    _parse_window_bound,
 )
 
 
@@ -54,16 +54,24 @@ async def env(tmp_dir):
     await db.shutdown()
 
 
-# ── _parse_iso ──────────────────────────────────────────────────────
+# ── _parse_window_bound ─────────────────────────────────────────────
 
 
-def test_parse_iso_with_z():
-    assert _parse_iso("2026-01-01T00:00:00Z").isoformat().startswith("2026-01-01")
+def test_parse_window_bound_with_z():
+    assert _parse_window_bound("2026-01-01T00:00:00Z").isoformat() == (
+        "2026-01-01T00:00:00+00:00"
+    )
 
 
-def test_parse_iso_invalid_raises():
+def test_parse_window_bound_date_only_is_utc_midnight():
+    assert _parse_window_bound("2026-01-01").isoformat() == (
+        "2026-01-01T00:00:00+00:00"
+    )
+
+
+def test_parse_window_bound_invalid_raises():
     with pytest.raises(ValueError):
-        _parse_iso("not-a-date")
+        _parse_window_bound("not-a-date")
 
 
 # ── CalendarService ─────────────────────────────────────────────────
