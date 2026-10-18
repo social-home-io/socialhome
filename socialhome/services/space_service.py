@@ -111,6 +111,7 @@ from ..domain.events import (
     SpaceLocationModeChanged,
     SpaceMemberJoined,
     SpaceMemberLeft,
+    SpaceMemberLocationOptedIn,
     SpaceMemberProfileUpdated,
     SpacePostCreated,
     SpacePostModerated,
@@ -165,6 +166,7 @@ from ..domain.space import (
     PUBLIC_SPACE_TIERS,
     SETTINGS_AUTHORITY_ROLES,
     SPACE_CATEGORIES,
+    WRITER_ROLES,
     AccessDecision,
     AgeRestrictedError,
     AlreadyMemberError,
@@ -7625,6 +7627,29 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 author_user_id=comment.author,
             ),
         )
+
+    async def set_my_location_sharing(
+        self, space_id: str, user_id: str, enabled: bool
+    ) -> bool:
+        """§23.8.8 member self-service: flip the caller's own
+        ``location_share_enabled`` in ``space_id``; returns the new value.
+
+        Needs a seat (403 ``Not a space member.`` otherwise). Turning it
+        **on** needs a member's seat: a follower is an outsider to the
+        space's people (owner decision 13) — they see no pins, and theirs
+        are not the members' to see — so they get 403
+        ``SUBSCRIBER_READ_ONLY``. Turning it off is always allowed. On
+        opt-in :class:`SpaceMemberLocationOptedIn` refires the member's
+        current position for this one space."""
+        seat = await require_seat(self._spaces, space_id, user_id)
+        if enabled and seat.role not in WRITER_ROLES:
+            raise SubscriberReadOnlyError("share location")
+        await self._spaces.set_member_location_sharing(space_id, user_id, enabled)
+        if enabled:
+            await self._bus.publish(
+                SpaceMemberLocationOptedIn(space_id=space_id, user_id=user_id)
+            )
+        return enabled
 
     async def require_reader(self, space_id: str, user_id: str) -> SpaceMember:
         """The read gate for a space's content and roster: the caller must

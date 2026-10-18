@@ -63,10 +63,25 @@ describe('SpaceNotifPrefsMenu', () => {
     expect(result.queryByTestId('space-location-toggle')).toBeNull()
   })
 
+  it('offers a follower no location toggle — they may not share (location_share_allowed=false)', async () => {
+    mockGet.mockResolvedValue({
+      level: 'all',
+      feature_location: true,
+      location_share_enabled: false,
+      location_share_allowed: false,
+    })
+    const result = render(<SpaceNotifPrefsMenu spaceId="s1" />)
+    await waitFor(() => expect(result.container.querySelector('button')).toBeTruthy())
+    fireEvent.click(result.container.querySelector('button') as HTMLButtonElement)
+    await waitFor(() => expect(result.getByRole('menu')).toBeTruthy())
+    expect(result.queryByTestId('space-location-toggle')).toBeNull()
+  })
+
   it('shows the location toggle reflecting location_share_enabled=true', async () => {
     mockGet.mockResolvedValue({
       level: 'mentions',
       feature_location: true,
+      location_share_allowed: true,
       location_share_enabled: true,
     })
     const result = render(<SpaceNotifPrefsMenu spaceId="s1" />)
@@ -83,6 +98,7 @@ describe('SpaceNotifPrefsMenu', () => {
     mockGet.mockResolvedValue({
       level: 'all',
       feature_location: true,
+      location_share_allowed: true,
       location_share_enabled: false,
     })
     const result = render(<SpaceNotifPrefsMenu spaceId="s1" />)
@@ -98,6 +114,7 @@ describe('SpaceNotifPrefsMenu', () => {
     mockGet.mockResolvedValue({
       level: 'all',
       feature_location: true,
+      location_share_allowed: true,
       location_share_enabled: false,
     })
     const result = render(<SpaceNotifPrefsMenu spaceId="s1" />)
@@ -121,6 +138,7 @@ describe('SpaceNotifPrefsMenu', () => {
     mockGet.mockResolvedValue({
       level: 'all',
       feature_location: true,
+      location_share_allowed: true,
       location_share_enabled: true,
     })
     mockPatch.mockRejectedValueOnce(new Error('boom'))

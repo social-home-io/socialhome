@@ -102,6 +102,7 @@ from ....services.space_service import (
     apply_inviter_reproof,
     apply_owner_statement_from_metadata,
 )
+from ....services.space_writer_households import holds_member_seat
 from ....utils.timezones import coerce_tz
 from ...host_equivalence import touches_owner_household
 from ...owner_bound_id import (
@@ -1547,6 +1548,21 @@ class SpaceSyncReceiver:
                         exc,
                         exc_info=True,
                     )
+        elif resource in (
+            "space_zones",
+            "space_zones_deleted",
+        ) and not await holds_member_seat(self._space_repo, space_id):
+            # We only follow this space: its members' places are not ours
+            # to keep (owner decision 13), whichever household streams them
+            # — the live SPACE_ZONE_* events are dropped the same way.
+            log.info(
+                "sync: %d %s records from %s for %s dropped: this household "
+                "holds no member seat there",
+                len(records),
+                resource,
+                provider,
+                space_id,
+            )
         elif resource == "space_zones_deleted":
             await self._persist_zone_tombstones(records, space_id, provider=provider)
         elif resource == "space_zones":
