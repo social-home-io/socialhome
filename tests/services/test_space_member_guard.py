@@ -28,6 +28,9 @@ class _FakeSpaces:
     async def get_member(self, space_id, user_id):
         return self._members.get((space_id, user_id))
 
+    async def is_banned(self, space_id, user_id):
+        return (space_id, user_id) in getattr(self, "banned", set())
+
 
 class _FakeUsers:
     def __init__(self, users):
@@ -121,3 +124,13 @@ async def test_require_seat_refuses_no_seat_with_the_route_gates_text():
     with pytest.raises(SpacePermissionError) as exc:
         await require_seat(_FakeSpaces({}), "s1", "nobody")
     assert str(exc.value) == NOT_A_SPACE_MEMBER == "Not a space member."
+
+
+async def test_require_seat_refuses_a_banned_user_with_a_leftover_seat():
+    """Defence in depth: a ban must end the read access even if a seat row
+    survived it (a half-applied ban, a federation race) — with the same
+    403, so it reveals nothing more."""
+    spaces = _FakeSpaces({("s1", "u1"): _Member(SpaceRole.MEMBER)})
+    spaces.banned = {("s1", "u1")}
+    with pytest.raises(SpacePermissionError, match=NOT_A_SPACE_MEMBER):
+        await require_seat(spaces, "s1", "u1")

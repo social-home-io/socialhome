@@ -39,8 +39,9 @@ from aiohttp import web
 
 from ..app_keys import space_repo_key
 from ..auth import USER_KEY
+from ..domain.space import SpacePermissionError
 from ..security import error_response
-from ..services.space_member_guard import NOT_A_SPACE_MEMBER
+from ..services.space_member_guard import NOT_A_SPACE_MEMBER, require_seat
 
 log = logging.getLogger(__name__)
 
@@ -100,8 +101,11 @@ def build_space_seat_gate_middleware():
             or (request.method, canonical) in SEATLESS_ROUTES
         ):
             return await handler(request)
-        seat = await request.app[space_repo_key].get_member(space_id, ctx.user_id)
-        if seat is None:
+        try:
+            # The read gate's own check — a banned user's leftover seat
+            # counts as none.
+            await require_seat(request.app[space_repo_key], space_id, ctx.user_id)
+        except SpacePermissionError:
             return error_response(403, "FORBIDDEN", NOT_A_SPACE_MEMBER)
         return await handler(request)
 
