@@ -402,6 +402,7 @@ from .services.space_rsvp_mirror_bridge import SpaceRsvpMirrorBridge
 from .services.space_service import own_inviter_proof
 from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
 from .services.space_subscriber_key_outbound import SpaceSubscriberKeyOutbound
+from .services.space_summary_service import SpaceSummaryService
 from .services.space_writer_cert_service import SpaceWriterCertService
 from .services.space_writer_households import SpaceWriterHouseholds
 from .services.space_zone_outbound import SpaceZoneOutbound
@@ -2118,6 +2119,20 @@ def _build_space_timetables(
     return SpaceTimetableService(repos.space_timetable, repos.space, bus)
 
 
+def _build_space_summary(repos: SimpleNamespace) -> SpaceSummaryService:
+    """Per-section counts of a space (More's section rows) — read-time
+    only, from the sections' own repos."""
+    return SpaceSummaryService(
+        space_repo=repos.space,
+        task_repo=repos.space_task,
+        page_repo=repos.page,
+        gallery_repo=repos.gallery,
+        sticky_repo=repos.sticky,
+        bazaar_repo=repos.bazaar,
+        calendar_repo=repos.space_cal,
+    )
+
+
 def _build_space_chat_federation(
     *,
     app: web.Application,
@@ -3415,6 +3430,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.space_task_service_key] = space_task_service
     app[K.timetable_service_key] = timetable_service
     app[K.space_timetable_service_key] = space_timetable_service
+    app[K.space_summary_service_key] = _build_space_summary(repos)
     app[K.calendar_service_key] = calendar_service
     app[K.space_cal_service_key] = space_cal_service
     app[K.shopping_service_key] = shopping_service
