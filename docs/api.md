@@ -292,9 +292,14 @@ pins) and `…/zones` need a **member's** seat (owner, admin, moderator,
 member — `space_member_guard.require_member_seat`): a follower gets the
 outsider's `403 "Not a space member."`, and an unknown id the same. The
 live `space.proposal.updated`, `space_zone_changed` and
-`space_location_updated` frames skip followers likewise. `GET
-/api/spaces/{id}` carries `my_role` so a follower's SPA still knows who it
-is.
+`space_location_updated` frames skip followers likewise, and so do the
+roster frames about a follower — `space.member.joined`,
+`space.member.left` and `space.member.profile_updated` whose subject holds
+a follower's seat (here or on another household; an unknown subject counts
+as one) reach the members only — and the "X joined" bell for a new
+follower rings the members only. A frame about a member still reaches
+everyone. `GET /api/spaces/{id}` carries `my_role` so a follower's SPA
+still knows who it is.
 
 **Space CRUD**
 
