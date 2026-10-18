@@ -3,7 +3,11 @@
 import pytest
 
 from socialhome.domain.space import SpacePermissionError, SpaceRole
-from socialhome.services.space_member_guard import SpaceMemberGuardMixin
+from socialhome.services.space_member_guard import (
+    NOT_A_SPACE_MEMBER,
+    SpaceMemberGuardMixin,
+    require_seat,
+)
 
 
 class _Member:
@@ -105,3 +109,15 @@ async def test_actor_or_raise_keyerror_honours_label():
 
 def test_mixin_owns_no_slots():
     assert SpaceMemberGuardMixin.__slots__ == ()
+
+
+@pytest.mark.parametrize("role", list(SpaceRole))
+async def test_require_seat_admits_every_role_followers_included(role):
+    spaces = _FakeSpaces({("s1", "u1"): _Member(role)})
+    assert (await require_seat(spaces, "s1", "u1")).role == role
+
+
+async def test_require_seat_refuses_no_seat_with_the_route_gates_text():
+    with pytest.raises(SpacePermissionError) as exc:
+        await require_seat(_FakeSpaces({}), "s1", "nobody")
+    assert str(exc.value) == NOT_A_SPACE_MEMBER == "Not a space member."

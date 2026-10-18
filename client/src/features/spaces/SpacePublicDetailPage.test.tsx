@@ -233,3 +233,51 @@ describe('SpacePublicDetailPage — unpaired host guidance follows the role', ()
     expect(container.textContent).not.toContain('Connections page')
   })
 })
+
+describe('SpacePublicDetailPage cold link (no directory entry)', () => {
+  it("a caller with no seat reads the member count off the space's landing fields", async () => {
+    // ``/members`` is for seats only — the landing fields carry the count.
+    api.get.mockImplementation(async (url: string) => {
+      if (url === '/api/spaces/sp-1') {
+        return {
+          id: 'sp-1', name: 'Chess club', description: '', emoji: '',
+          space_type: 'public', join_mode: 'request', category: 'general',
+          features: { allow_subscribers: true }, member_count: 7,
+        }
+      }
+      throw Object.assign(new Error('Not a space member.'), { status: 403 })
+    })
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Chess club'))
+    expect(container.textContent).toContain('7 members')
+    expect(api.get).not.toHaveBeenCalledWith('/api/spaces/sp-1/members')
+  })
+
+  it('a household space you are not in: landing, then Join seats you', async () => {
+    // Household scope is discoverable to every local user: the server
+    // answers a neighbour with the landing fields, and Join on an open
+    // space seats them at once.
+    api.get.mockImplementation(async (url: string) => {
+      if (url === '/api/spaces/sp-1') {
+        return {
+          id: 'sp-1', name: 'Hottingen Community Choir',
+          description: 'We sing on Tuesdays.', emoji: '🎶',
+          space_type: 'household', join_mode: 'open', category: 'general',
+          features: { allow_subscribers: false }, member_count: 1,
+        }
+      }
+      throw Object.assign(new Error('Not a space member.'), { status: 403 })
+    })
+    api.post.mockResolvedValue({ request_id: null, joined: true })
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Hottingen Community Choir'))
+    expect(container.textContent).toContain('Your household')
+    expect(container.textContent).toContain('1 member')
+    expect(container.textContent).toContain('We sing on Tuesdays.')
+    fireEvent.click(getByText('Join space'))
+    await waitFor(() => {
+      expect(api.post).toHaveBeenCalledWith('/api/spaces/sp-1/join-requests', {})
+    })
+    expect(routeMock).toHaveBeenCalledWith('/spaces/sp-1')
+  })
+})

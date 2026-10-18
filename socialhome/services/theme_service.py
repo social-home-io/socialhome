@@ -14,6 +14,7 @@ from ..repositories.theme_repo import (
     HouseholdTheme,
     SpaceTheme,
 )
+from .space_member_guard import require_seat
 
 #: Household fields callers are permitted to patch.
 _HOUSEHOLD_ALLOWED = frozenset(
@@ -73,7 +74,11 @@ class ThemeService:
 
     # ─── Space ────────────────────────────────────────────────────────────
 
-    async def get_space_theme(self, space_id: str) -> SpaceTheme | None:
+    async def get_space_theme(
+        self, space_id: str, *, viewer_user_id: str
+    ) -> SpaceTheme | None:
+        """The space's theme, for a caller with a seat in it (any role)."""
+        await require_seat(self._space_repo, space_id, viewer_user_id)
         return await self._repo.get_space(space_id)
 
     async def update_space_theme(

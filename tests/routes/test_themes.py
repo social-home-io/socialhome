@@ -115,6 +115,10 @@ async def test_get_space_theme_falls_back_to_household(client):
         " identity_public_key) VALUES('sp-1', 'X', 'inst-x', 'pascal', ?)",
         ("aa" * 32,),
     )
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('sp-1', ?, 'member')",
+        (client._uid,),
+    )
     r = await client.get("/api/spaces/sp-1/theme", headers=_auth(client._tok))
     assert r.status == 200
     body = await r.json()
@@ -142,6 +146,21 @@ async def test_update_space_theme_owner_succeeds(client):
     body = await r.json()
     assert body["primary_color"] == "#abcdef"
     assert body["is_default"] is False
+
+
+async def test_get_space_theme_non_member_403(client):
+    """A space's theme is for its seats only — no seat (or no such space)
+    is 403, like every other space read."""
+    db = client._db
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-4', 'Z', 'inst-x', 'somebody-else', ?)",
+        ("aa" * 32,),
+    )
+    for sid in ("sp-4", "sp-nope"):
+        r = await client.get(f"/api/spaces/{sid}/theme", headers=_auth(client._tok))
+        assert r.status == 403
+        assert (await r.json())["error"]["detail"] == "Not a space member."
 
 
 async def test_update_space_theme_non_member_403(client):

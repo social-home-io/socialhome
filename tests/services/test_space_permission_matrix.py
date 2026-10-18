@@ -90,6 +90,12 @@ GATED_METHODS: frozenset[str] = frozenset(
         "upsert_link",
         "delete_link",
         "space_version_compat",  # admin/owner read — _require_admin_or_owner
+        # The read gate: a seat (any role, followers included) or 403.
+        "require_reader",
+        "list_feed",
+        "list_comments",
+        # A non-member reads only a public/global space's landing fields.
+        "read_space",
     }
 )
 
@@ -114,9 +120,7 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # that is not a live link of ours, so it is not an existence
         # oracle either. See ``routes.spaces.InviteLinkCodeView``.
         "invite_code_for_token",
-        "list_feed",
         "get_space",  # plain row read; callers (routes / sibling services) gate
-        "list_comments",  # route layer applies the membership gate
         "mention_tokens",  # read-only; members route applies the gate
         "list_links",
         "get_space_post",  # plain row read scoped to the path space
@@ -406,6 +410,36 @@ async def stack(tmp_dir):
             ),
         ),
         (
+            "require_reader",
+            lambda s: s.space_svc.require_reader(s.space.id, s.bob.user_id),
+        ),
+        (
+            "list_feed",
+            lambda s: s.space_svc.list_feed(s.space.id, viewer_user_id=s.bob.user_id),
+        ),
+        (
+            "list_comments",
+            lambda s: s.space_svc.list_comments(
+                s.space.id, "post-x", viewer_user_id=s.bob.user_id
+            ),
+        ),
+        (
+            "add_reaction (non-member)",
+            lambda s: s.space_svc.add_reaction(
+                "post-x", space_id=s.space.id, user_id=s.bob.user_id, emoji="👍"
+            ),
+        ),
+        (
+            "remove_reaction (non-member)",
+            lambda s: s.space_svc.remove_reaction(
+                "post-x", space_id=s.space.id, user_id=s.bob.user_id, emoji="👍"
+            ),
+        ),
+        (
+            "read_space (private)",
+            lambda s: s.space_svc.read_space(s.space.id, s.bob.user_id),
+        ),
+        (
             "create_invite_token",
             lambda s: s.space_svc.create_invite_token(s.space.id, actor_username="bob"),
         ),
@@ -486,9 +520,9 @@ async def test_subscriber_cannot_comment(stack):
 
 
 async def test_list_comments_returns_chronological_order(stack):
-    """``list_comments`` is a bare repo delegation — verify the
-    round-trip after add_comment so the GET-route path that calls it
-    has confidence at the service layer too."""
+    """``list_comments`` round-trips after add_comment for a seated
+    reader, so the GET-route path that calls it has confidence at the
+    service layer too."""
     post = await stack.space_svc.create_post(
         stack.public_space.id,
         author_user_id=stack.anna.user_id,
@@ -497,7 +531,12 @@ async def test_list_comments_returns_chronological_order(stack):
     )
     assert post is not None
     # No comments yet.
-    assert await stack.space_svc.list_comments(post.id) == []
+    assert (
+        await stack.space_svc.list_comments(
+            stack.public_space.id, post.id, viewer_user_id=stack.anna.user_id
+        )
+        == []
+    )
     # Add two and confirm both surface.
     await stack.space_svc.add_comment(
         post.id,
@@ -509,7 +548,9 @@ async def test_list_comments_returns_chronological_order(stack):
         author_user_id=stack.anna.user_id,
         content="second",
     )
-    comments = await stack.space_svc.list_comments(post.id)
+    comments = await stack.space_svc.list_comments(
+        stack.public_space.id, post.id, viewer_user_id=stack.anna.user_id
+    )
     assert [c.content for c in comments] == ["first", "second"]
 
 
@@ -525,5 +566,8 @@ async def test_subscriber_cannot_react(stack):
     await stack.space_svc.subscribe_to_space(stack.bob.user_id, stack.public_space.id)
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.add_reaction(
-            post.id, user_id=stack.bob.user_id, emoji="👍"
+            post.id,
+            space_id=stack.public_space.id,
+            user_id=stack.bob.user_id,
+            emoji="👍",
         )

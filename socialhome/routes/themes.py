@@ -44,10 +44,9 @@ class SpaceThemeView(BaseView):
     """``GET /api/spaces/{space_id}/theme`` + ``PUT /api/spaces/{space_id}/theme``."""
 
     async def get(self) -> web.Response:
-        self.require_user()
         space_id = self.match("space_id")
         svc = self.svc(K.theme_service_key)
-        theme = await svc.get_space_theme(space_id)
+        theme = await svc.get_space_theme(space_id, viewer_user_id=self.user.user_id)
         if theme is None:
             household = await svc.get_household_theme()
             out = asdict(household)

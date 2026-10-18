@@ -193,10 +193,11 @@ async def test_space_errors(client):
     h = _auth(client._tok)
     r = await client.post("/api/spaces", json={"name": ""}, headers=h)
     assert r.status == 422
+    # No seat in a missing space: the same 403 as any space you're not in.
     r = await client.get("/api/spaces/nonexistent", headers=h)
-    assert r.status == 404
+    assert r.status == 403
     r = await client.get("/api/spaces/nonexistent/feed", headers=h)
-    assert r.status == 404
+    assert r.status == 403
     r = await client.post(
         "/api/spaces/nonexistent/posts",
         json={"type": "text", "content": "x"},

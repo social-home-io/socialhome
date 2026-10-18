@@ -180,9 +180,10 @@ async def test_space_errors_create_space_empty_name(client):
 
 
 async def test_space_errors_get_nonexistent_space(client):
-    """GET /api/spaces/{id} for missing space returns 404."""
+    """GET /api/spaces/{id} for a missing space is the no-seat 403 — no
+    existence oracle."""
     r = await client.get("/api/spaces/nonexistent", headers=_auth(client._admin_tok))
-    assert r.status == 404
+    assert r.status == 403
 
 
 async def test_space_errors_dissolve_non_owner(client):
@@ -241,11 +242,11 @@ async def test_space_errors_space_post_non_member(client):
 
 
 async def test_space_errors_space_feed_nonexistent(client):
-    """GET /api/spaces/{id}/feed for missing space returns 404."""
+    """GET /api/spaces/{id}/feed for a missing space is the no-seat 403."""
     r = await client.get(
         "/api/spaces/nonexistent/feed", headers=_auth(client._admin_tok)
     )
-    assert r.status == 404
+    assert r.status == 403
 
 
 async def test_conversation_errors_create_dm_self(client):

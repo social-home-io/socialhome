@@ -782,8 +782,19 @@ async def test_space_schedule_poll_non_member_403(client):
     assert r.status == 403
 
 
+async def _seed_post(client, sid: str, post_id: str) -> None:
+    """A schedule post of ``sid`` — the poll routes bind ``{pid}`` to the
+    path space (404 for another space's post, or none)."""
+    await client._db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type)"
+        " VALUES(?, ?, ?, 'schedule')",
+        (post_id, sid, client._uid),
+    )
+
+
 async def test_space_schedule_poll_finalize_missing_slot_422(client):
     sid = await _seed_space(client)
+    await _seed_post(client, sid, "pid")
     r = await client.post(
         f"/api/spaces/{sid}/schedule-polls/pid/finalize",
         json={},
@@ -794,6 +805,7 @@ async def test_space_schedule_poll_finalize_missing_slot_422(client):
 
 async def test_space_schedule_poll_respond_missing_422(client):
     sid = await _seed_space(client)
+    await _seed_post(client, sid, "pid")
     r = await client.post(
         f"/api/spaces/{sid}/schedule-polls/pid/respond",
         json={},

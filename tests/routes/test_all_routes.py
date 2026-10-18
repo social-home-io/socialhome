@@ -142,8 +142,9 @@ async def test_space_routes(client):
     # Errors
     r = await client.post("/api/spaces", json={"name": "  "}, headers=h)
     assert r.status == 422
+    # No seat in a missing space: the same 403 as any space you're not in.
     r = await client.get("/api/spaces/nonexistent", headers=h)
-    assert r.status == 404
+    assert r.status == 403
 
 
 # ── Conversation routes ───────────────────────────────────────────────────
@@ -559,10 +560,10 @@ async def test_spaces_join_invalid_token(client):
 
 
 async def test_spaces_feed_nonexistent(client):
-    """GET /api/spaces/{id}/feed for missing space."""
+    """GET /api/spaces/{id}/feed for a missing space is the no-seat 403."""
     h = _auth(client._tok)
     r = await client.get("/api/spaces/nonexistent/feed", headers=h)
-    assert r.status == 404
+    assert r.status == 403
 
 
 async def test_spaces_post_to_nonexistent(client):

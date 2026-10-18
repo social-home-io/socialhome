@@ -242,7 +242,11 @@ from .space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
 )
-from .space_member_guard import SpaceMemberGuardMixin
+from .space_member_guard import (
+    NOT_A_SPACE_MEMBER,
+    SpaceMemberGuardMixin,
+    require_seat,
+)
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
 from .space_purge import purge_space_and_media
@@ -6452,7 +6456,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         *,
         user_id: str,
         message: str | None = None,
-    ) -> str:
+    ) -> str | None:
+        """A local user asks to join ``space_id``. Returns the pending
+        request's id — or ``None`` when they were seated at once: an
+        ``open`` space this household hosts needs nobody's approval (the
+        about page's Join button)."""
         space = await self._require_space(space_id)
         if space.join_mode is JoinMode.INVITE_ONLY:
             raise InviteOnlyError()
@@ -6461,6 +6469,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         existing = await self._spaces.get_member(space_id, user_id)
         if existing is not None:
             raise AlreadyMemberError()
+        if (
+            space.join_mode is JoinMode.OPEN
+            and space.owner_instance_id == self._own_instance_id
+        ):
+            await self._join_open_space(space, user_id)
+            return None
         request_id = await self._spaces.save_join_request(
             space_id,
             user_id,
@@ -6475,6 +6489,28 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
         )
         return request_id
+
+    async def _join_open_space(self, space: Space, user_id: str) -> None:
+        """Seat a local user in an ``open`` space we host — the same seat
+        :meth:`accept_local_invite` makes, behind the same §CP.F1 age gate
+        (the ban and existing-seat checks ran in :meth:`request_join`)."""
+        if self._child_protection is not None:
+            await self._child_protection.check_space_age_gate(space.id, user_id)
+        await self._spaces.save_member(
+            SpaceMember(
+                space_id=space.id,
+                user_id=user_id,
+                role=SpaceRole.MEMBER,
+                joined_at=datetime.now(UTC).isoformat(),
+            )
+        )
+        await self._bus.publish(
+            SpaceMemberJoined(
+                space_id=space.id,
+                user_id=user_id,
+                role=SpaceRole.MEMBER,
+            )
+        )
 
     async def list_pending_join_requests(
         self,
@@ -7198,16 +7234,18 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self,
         post_id: str,
         *,
+        space_id: str,
         user_id: str,
         emoji: str,
     ) -> Post:
+        """React to a post of ``space_id``: the reactor needs a seat there
+        (403 otherwise; a follower only where the space opts them in) and
+        the post must live in that space (``KeyError`` → 404)."""
         emoji = unicodedata.normalize("NFC", emoji.strip())
         if not emoji:
             raise ValueError("emoji must not be empty")
-        got = await self._posts.get(post_id)
-        if got is None:
-            raise KeyError(f"space post {post_id!r} not found")
-        space_id, _post = got
+        await self.require_reader(space_id, user_id)
+        await self._post_in_space(post_id, space_id)
         await self._require_writable_space(space_id)
         await self._reject_subscriber(space_id, user_id, action="react")
         post = await self._posts.add_reaction(
@@ -7230,14 +7268,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self,
         post_id: str,
         *,
+        space_id: str,
         user_id: str,
         emoji: str,
     ) -> Post:
+        """Withdraw a reaction — same seat + same-space rules as
+        :meth:`add_reaction`."""
         emoji = unicodedata.normalize("NFC", emoji.strip())
-        got = await self._posts.get(post_id)
-        if got is None:
-            raise KeyError(f"space post {post_id!r} not found")
-        space_id, _post = got
+        await self.require_reader(space_id, user_id)
+        await self._post_in_space(post_id, space_id)
         await self._reject_subscriber(space_id, user_id, action="react")
         post = await self._posts.remove_reaction(
             post_id, emoji, user_id, space_id=space_id
@@ -7321,15 +7360,20 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         )
         return comment
 
-    async def list_comments(self, post_id: str) -> list[Comment]:
+    async def list_comments(
+        self, space_id: str, post_id: str, *, viewer_user_id: str
+    ) -> list[Comment]:
         """Return every comment on a space post in chronological order.
 
-        Used by ``GET /api/spaces/{id}/posts/{post_id}/comments``.
-        Bare delegation to the repo — the route layer is responsible
-        for the (cheap) membership check before calling. Soft-deleted
-        comments are excluded by the repo's filter so the response
-        matches what the SPA expects to render.
+        Used by ``GET /api/spaces/{id}/posts/{post_id}/comments``. The
+        caller needs a seat in ``space_id`` (:meth:`require_reader`, 403)
+        and the post must live in that space (``KeyError`` → 404) — a
+        seat in one space never reads another space's thread by post id.
+        Soft-deleted comments are excluded by the repo's filter so the
+        response matches what the SPA expects to render.
         """
+        await self.require_reader(space_id, viewer_user_id)
+        await self._post_in_space(post_id, space_id)
         return await self._posts.list_comments(post_id)
 
     async def edit_comment(
@@ -7412,14 +7456,69 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             ),
         )
 
+    async def require_reader(self, space_id: str, user_id: str) -> SpaceMember:
+        """The read gate for a space's content and roster: the caller must
+        hold a seat — any role, a read-only follower (``subscriber``)
+        included. Anyone else gets :class:`SpacePermissionError` (403).
+
+        Membership is checked BEFORE existence, so an unknown id and a
+        space the caller isn't in answer the same 403 — the gate is no
+        oracle for which space ids exist. A member of a dissolved space
+        still gets the ``KeyError`` (404) :meth:`_require_space` raises.
+        """
+        member = await require_seat(self._spaces, space_id, user_id)
+        await self._require_space(space_id)
+        return member
+
+    async def read_space(
+        self, space_id: str, user_id: str
+    ) -> tuple[Space, SpaceMember | None]:
+        """``GET /api/spaces/{id}``: ``(space, the caller's seat)``.
+
+        A seated caller (any role) reads any space. A local caller with no
+        seat reads only the landing page of a space that is discoverable to
+        them — a ``public`` / ``global`` space (its directory entry links
+        here), or a ``household`` space THIS household hosts (household
+        scope is by definition open to every local user to find and join)
+        — and gets ``None`` for the seat, so the route answers with the
+        landing fields only. A private space they aren't in, another
+        household's household-tier space, and an unknown id are the same
+        403 (see :meth:`require_reader`).
+        """
+        member = await self._spaces.get_member(space_id, user_id)
+        if member is not None:
+            return await self._require_space(space_id), member
+        space = await self._spaces.get(space_id)
+        if space is None or space.dissolved or not self._has_landing(space):
+            raise SpacePermissionError(NOT_A_SPACE_MEMBER)
+        if self._child_protection is not None:
+            # §CP.F1: the directories hide an age-gated space from a
+            # protected minor below its gate, so its landing page does too
+            # — with the same 403, not the gate's own message.
+            try:
+                await self._child_protection.check_space_age_gate(space_id, user_id)
+            except AgeRestrictedError:
+                raise SpacePermissionError(NOT_A_SPACE_MEMBER) from None
+        return space, None
+
+    def _has_landing(self, space: Space) -> bool:
+        """May a local user with no seat see ``space``'s landing page?"""
+        if space.space_type in PUBLIC_SPACE_TIERS:
+            return True
+        return (
+            space.space_type is SpaceType.HOUSEHOLD
+            and space.owner_instance_id == self._own_instance_id
+        )
+
     async def list_feed(
         self,
         space_id: str,
         *,
+        viewer_user_id: str,
         before: str | None = None,
         limit: int = 20,
     ) -> list[Post]:
-        await self._require_space(space_id)
+        await self.require_reader(space_id, viewer_user_id)
         limit = max(1, min(int(limit), 50))
         return await self._posts.list_feed(space_id, before=before, limit=limit)
 

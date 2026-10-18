@@ -1813,13 +1813,14 @@ async def test_create_space_empty_name_422(client):
     assert resp.status == 422
 
 
-async def test_get_nonexistent_space_404(client):
-    """GET /api/spaces/{id} for unknown id returns 404."""
+async def test_get_nonexistent_space_403(client):
+    """GET /api/spaces/{id} for an unknown id is the same 403 a space the
+    caller has no seat in answers — no existence oracle."""
     resp = await client.get(
         "/api/spaces/no-such-space-id",
         headers=_auth(client._admin_token),
     )
-    assert resp.status == 404
+    assert resp.status == 403
 
 
 async def test_non_owner_cannot_dissolve_403(client):
@@ -3934,7 +3935,8 @@ async def test_tier_proposal_with_an_unknown_gfs_is_refused(client):
 @pytest.mark.security
 async def test_get_space_hides_the_gfs_list_from_non_members(client):
     """Which GFSs list a space is the members' business: a local user who
-    is not a member (the detail route itself is open) sees no list."""
+    is not a member sees only the global space's landing fields — no
+    GFS list."""
     await _connect_gfs(client, "g1")
     r = await client.post(
         "/api/spaces",
@@ -3945,5 +3947,6 @@ async def test_get_space_hides_the_gfs_list_from_non_members(client):
     body = await (
         await client.get(f"/api/spaces/{sid}", headers=_auth(client._bob_token))
     ).json()
-    assert body["gfs_servers"] is None
-    assert body["gfs_unlisted"] is False
+    assert body["id"] == sid
+    assert "gfs_servers" not in body
+    assert "gfs_unlisted" not in body
