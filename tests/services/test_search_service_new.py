@@ -56,7 +56,15 @@ async def test_index_space_and_find_by_name(env):
         name="Garden Club",
         description="weekly tips on composting",
     )
-    result = await svc.search_with_counts("composting", type_="spaces")
+    # A space row is tied to its space: found by those with a seat only.
+    svc.attach_access_repos(space_repo=_FakeSpaceRepo({"uid-me": ["sp-garden"]}))
+    other = await svc.search_with_counts(
+        "composting", type_="spaces", caller_user_id="uid-other"
+    )
+    assert other["hits"] == []
+    result = await svc.search_with_counts(
+        "composting", type_="spaces", caller_user_id="uid-me"
+    )
     assert len(result["hits"]) == 1
     assert result["hits"][0].scope == SCOPE_SPACE
     assert result["hits"][0].ref_id == "sp-garden"
@@ -111,7 +119,8 @@ async def test_search_with_counts_returns_per_scope_counts(env):
         name="lola-world",
         description="",
     )
-    result = await svc.search_with_counts("lola")
+    svc.attach_access_repos(space_repo=_FakeSpaceRepo({"uid-me": ["sp1"]}))
+    result = await svc.search_with_counts("lola", caller_user_id="uid-me")
     assert result["counts"] == {"user": 1, "space": 1}
 
 
@@ -165,89 +174,98 @@ async def test_type_posts_expands_to_post_and_space_post(env):
     assert scopes == {"post", "space_post"}
 
 
-# ─── Access-control filter ──────────────────────────────────────────
+# ─── Access control (§23.2.6) — fail closed ─────────────────────────
+
+
+class _Space:
+    def __init__(self, space_id: str) -> None:
+        self.id = space_id
 
 
 class _FakeSpaceRepo:
-    def __init__(self, member_map: dict[str, list[str]]):
-        self._m = member_map
+    """``list_for_user`` from a ``{user_id: [space_id, ...]}`` seat map."""
 
-    async def list_local_member_user_ids(self, space_id: str) -> list[str]:
-        return self._m.get(space_id, [])
+    def __init__(self, seats: dict[str, list[str]]):
+        self._seats = seats
+
+    async def list_for_user(self, user_id: str) -> list[_Space]:
+        return [_Space(sid) for sid in self._seats.get(user_id, [])]
 
 
-async def test_access_filter_drops_non_member_space_post(env):
-    svc, _ = env
-    svc.attach_access_repos(
-        space_repo=_FakeSpaceRepo({"sp-private": ["uid-owner"]}),
-    )
+class _BrokenSpaceRepo:
+    async def list_for_user(self, user_id: str):
+        raise RuntimeError("db gone")
+
+
+async def _secret(svc, space_id: str | None = "sp-private", scope: str = "space_post"):
     await svc._repo.upsert(
-        scope="space_post",
-        ref_id="p1",
-        space_id="sp-private",
+        scope=scope,
+        ref_id=f"{scope}-1",
+        space_id=space_id,
         title="",
         body="secret recipe",
     )
-    # Caller is NOT a member of sp-private → hidden.
-    result = await svc.search_with_counts(
-        "secret",
-        caller_user_id="uid-outsider",
-        caller_username="outsider",
-    )
-    assert result["hits"] == []
-    # But raw counts still reveal the hit exists — spec trade-off.
-    assert result["counts"] == {"space_post": 1}
+
+
+async def test_access_filter_drops_non_member_space_post(env):
+    """No seat → neither the hit nor its count."""
+    svc, _ = env
+    svc.attach_access_repos(space_repo=_FakeSpaceRepo({"uid-owner": ["sp-private"]}))
+    await _secret(svc)
+    result = await svc.search_with_counts("secret", caller_user_id="uid-outsider")
+    assert result == {"hits": [], "counts": {}}
 
 
 async def test_access_filter_lets_member_see_space_post(env):
     svc, _ = env
-    svc.attach_access_repos(
-        space_repo=_FakeSpaceRepo({"sp-private": ["uid-alice"]}),
-    )
-    await svc._repo.upsert(
-        scope="space_post",
-        ref_id="p1",
-        space_id="sp-private",
-        title="",
-        body="secret recipe",
-    )
-    result = await svc.search_with_counts(
-        "secret",
-        caller_user_id="uid-alice",
-        caller_username="alice",
-    )
+    svc.attach_access_repos(space_repo=_FakeSpaceRepo({"uid-alice": ["sp-private"]}))
+    await _secret(svc)
+    result = await svc.search_with_counts("secret", caller_user_id="uid-alice")
     assert len(result["hits"]) == 1
+    assert result["counts"] == {"space_post": 1}
 
 
-async def test_access_filter_drops_dm_hits_when_wired(env):
-    """Privacy-preserving default: when access repos are wired, DM hits
-    drop (we can't verify conversation membership today)."""
+async def test_a_space_id_without_a_seat_answers_like_no_match(env):
+    svc, _ = env
+    svc.attach_access_repos(space_repo=_FakeSpaceRepo({"uid-owner": ["sp-private"]}))
+    await _secret(svc)
+    result = await svc.search_with_counts(
+        "secret", space_id="sp-private", caller_user_id="uid-outsider"
+    )
+    assert result == {"hits": [], "counts": {}}
+
+
+async def test_access_filter_drops_dm_hits_and_counts(env):
+    """A DM row carries no conversation id — never shown, never counted."""
     svc, _ = env
     svc.attach_access_repos(space_repo=_FakeSpaceRepo({}))
-    await svc._repo.upsert(
-        scope="message",
-        ref_id="m1",
-        space_id=None,
-        title="alice",
-        body="secret dm body",
-    )
-    result = await svc.search_with_counts(
-        "secret",
-        caller_user_id="uid-x",
-        caller_username="x",
-    )
-    assert result["hits"] == []
+    await _secret(svc, space_id=None, scope="message")
+    result = await svc.search_with_counts("secret", caller_user_id="uid-x")
+    assert result == {"hits": [], "counts": {}}
 
 
-async def test_access_filter_no_op_when_unwired(env):
-    """Standalone mode (no access repos) keeps existing permissive behaviour."""
+async def test_access_filter_fails_closed_when_unwired(env):
+    """No space repo → no seats → nothing space-bound (was: everything)."""
     svc, _ = env
-    await svc._repo.upsert(
-        scope="space_post",
-        ref_id="p1",
-        space_id="sp-x",
-        title="",
-        body="content",
-    )
-    result = await svc.search_with_counts("content")
-    assert len(result["hits"]) == 1
+    await _secret(svc, space_id="sp-x")
+    await _secret(svc, space_id=None, scope="post")
+    result = await svc.search_with_counts("secret", caller_user_id="uid-x")
+    assert [h.scope for h in result["hits"]] == ["post"]
+    assert result["counts"] == {"post": 1}
+
+
+async def test_access_filter_fails_closed_without_a_caller(env):
+    svc, _ = env
+    svc.attach_access_repos(space_repo=_FakeSpaceRepo({"uid-x": ["sp-x"]}))
+    await _secret(svc, space_id="sp-x")
+    assert await svc.search_with_counts("secret") == {"hits": [], "counts": {}}
+
+
+async def test_a_roster_error_fails_the_search_never_widens_it(env):
+    """The old filter let every hit of a space through when reading its
+    roster raised — now the error propagates."""
+    svc, _ = env
+    svc.attach_access_repos(space_repo=_BrokenSpaceRepo())
+    await _secret(svc)
+    with pytest.raises(RuntimeError):
+        await svc.search_with_counts("secret", caller_user_id="uid-x")

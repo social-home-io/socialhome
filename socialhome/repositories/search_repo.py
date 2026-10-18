@@ -12,6 +12,7 @@ index also keeps schema migrations small and the index size bounded.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -84,6 +85,8 @@ class AbstractSearchRepo(Protocol):
         space_id: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        visible_space_ids: Collection[str] | None = None,
+        exclude_scopes: Collection[str] = (),
     ) -> list[SearchHit]: ...
 
     async def count_by_scope(
@@ -91,7 +94,33 @@ class AbstractSearchRepo(Protocol):
         query: str,
         *,
         space_id: str | None = None,
+        visible_space_ids: Collection[str] | None = None,
+        exclude_scopes: Collection[str] = (),
     ) -> dict[str, int]: ...
+
+
+def _visibility_clauses(
+    visible_space_ids: Collection[str] | None,
+    exclude_scopes: Collection[str],
+) -> tuple[list[str], list]:
+    """SQL for the caller's visibility: a row tied to a space only when
+    that space is in ``visible_space_ids`` (``None`` = no restriction),
+    and none of ``exclude_scopes``."""
+    clauses: list[str] = []
+    params: list = []
+    if visible_space_ids is not None:
+        ids = sorted(set(visible_space_ids))
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"(space_id IS NULL OR space_id IN ({placeholders}))")
+            params.extend(ids)
+        else:
+            clauses.append("space_id IS NULL")
+    if exclude_scopes:
+        excluded = sorted(set(exclude_scopes))
+        clauses.append(f"scope NOT IN ({','.join('?' for _ in excluded)})")
+        params.extend(excluded)
+    return clauses, params
 
 
 class SqliteSearchRepo:
@@ -141,7 +170,13 @@ class SqliteSearchRepo:
         space_id: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        visible_space_ids: Collection[str] | None = None,
+        exclude_scopes: Collection[str] = (),
     ) -> list[SearchHit]:
+        """FTS hits for ``query``. ``visible_space_ids`` (when given)
+        keeps a row tied to a space only if that space is in it;
+        ``exclude_scopes`` drops whole scopes — both in SQL, so the
+        ``limit`` / ``offset`` page is over what the caller may see."""
         query = (query or "").strip()
         if not query:
             return []
@@ -160,6 +195,9 @@ class SqliteSearchRepo:
         if space_id:
             clauses.append("space_id = ?")
             params.append(space_id)
+        extra, extra_params = _visibility_clauses(visible_space_ids, exclude_scopes)
+        clauses.extend(extra)
+        params.extend(extra_params)
 
         sql = (
             "SELECT scope, ref_id, space_id, title,"
@@ -187,8 +225,11 @@ class SqliteSearchRepo:
         query: str,
         *,
         space_id: str | None = None,
+        visible_space_ids: Collection[str] | None = None,
+        exclude_scopes: Collection[str] = (),
     ) -> dict[str, int]:
-        """Return ``{scope: count}`` for a query.
+        """Return ``{scope: count}`` for a query, under the same
+        visibility filters as :meth:`search`.
 
         Used so the response can drive per-type empty-state messages
         without running N separate searches. Counts respect the
@@ -205,6 +246,9 @@ class SqliteSearchRepo:
         if space_id:
             clauses.append("space_id = ?")
             params.append(space_id)
+        extra, extra_params = _visibility_clauses(visible_space_ids, exclude_scopes)
+        clauses.extend(extra)
+        params.extend(extra_params)
         sql = (
             "SELECT scope, COUNT(*) AS n FROM search_index"
             f" WHERE {' AND '.join(clauses)} GROUP BY scope"

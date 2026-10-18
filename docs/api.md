@@ -942,7 +942,7 @@ bell for it reads "{sender} in Household chat" and opens `/?tab=chat`.
 | GET | `/api/notifications/unread-count` | Count. |
 | POST | `/api/notifications/{id}/read` | Mark read. |
 | POST | `/api/notifications/read-all` | Mark all read. |
-| GET | `/api/search` | Full-text search (posts, comments, spaces, users). |
+| GET | `/api/search` | Full-text search (posts, comments, spaces, users). Query `q` (≥ 2 chars), `type?` (`posts` / `people` / `spaces` / `pages` / `messages`), `scope?`, `space_id?`, `limit?`, `offset?`. Answers `{hits: [{scope, ref_id, space_id, title, snippet}], counts: {scope: n}}`. **Access, hits and counts alike:** a row tied to a space (space posts, pages, spaces) is returned and counted only for a caller with a **seat** there (any role, a follower included); DM `message` rows are never returned or counted (the index carries no conversation id to check against). A `space_id` the caller has no seat in — or an unknown one — answers `{hits: [], counts: {}}`, exactly like a query with no matches. Fails closed: without the space directory or a caller, nothing space-bound is returned; an error reading the caller's seats fails the request. |
 
 ## HFS — Pairing
 

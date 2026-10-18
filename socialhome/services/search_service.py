@@ -46,6 +46,10 @@ from ..repositories.search_repo import (
 
 log = logging.getLogger(__name__)
 
+#: Scopes no search ever returns or counts: a DM message row carries no
+#: conversation id, so membership can't be checked — never shown.
+_NEVER_SEARCHABLE: frozenset[str] = frozenset({SCOPE_MESSAGE})
+
 #: Minimum query length (§23.2.5). Anything shorter returns an empty
 #: result set so the UI shows "Keep typing…".
 MIN_QUERY_CHARS: int = 2
@@ -270,11 +274,19 @@ class SearchService:
             {"hits": [SearchHit, ...], "counts": {"post": N, ...}}
 
         The ``type_`` filter groups underlying scopes per spec §23.2:
-        ``posts`` → {post, space_post}, ``people`` → {user}, etc. Pass
-        the caller's identity so hits the caller can't see are filtered
-        out (§23.2.6). ``offset`` enables pagination — the client fires a
-        second request with ``offset=limit`` for "Load more".
+        ``posts`` → {post, space_post}, ``people`` → {user}, etc.
+        ``offset`` enables pagination — the client fires a second request
+        with ``offset=limit`` for "Load more".
+
+        Access (§23.2.6), applied to the hits AND the counts, failing
+        closed: a row tied to a space only for a caller with a seat there
+        (any role, a follower included); no DM message (the index has no
+        conversation id to check membership against). ``space_id`` the
+        caller has no seat in answers exactly like a query with no
+        matches. Without the space repo or a caller there are no seats —
+        nothing space-bound is returned or counted.
         """
+        del caller_username  # identity is the user id
         q = (query or "").strip()
         if len(q) < MIN_QUERY_CHARS:
             return {"hits": [], "counts": {}}
@@ -286,22 +298,41 @@ class SearchService:
         else:
             scopes = None
 
-        # Fetch more than ``limit`` so access filtering doesn't leave
-        # the response short — 2× is a fair heuristic.
+        seats = await self._seat_space_ids(caller_user_id)
+        if space_id is not None and space_id not in seats:
+            return {"hits": [], "counts": {}}
         raw = await self._repo.search(
             q,
             scopes=scopes,
             space_id=space_id,
-            limit=limit * 2,
+            limit=limit,
             offset=offset,
+            visible_space_ids=seats,
+            exclude_scopes=_NEVER_SEARCHABLE,
         )
-        filtered = await self._apply_access_filter(
-            raw,
-            caller_user_id=caller_user_id,
-            caller_username=caller_username,
+        # Defence in depth: the repo filtered in SQL; never trust one gate.
+        hits = [
+            h
+            for h in raw
+            if h.scope not in _NEVER_SEARCHABLE
+            and (h.space_id is None or h.space_id in seats)
+        ]
+        counts = await self._repo.count_by_scope(
+            q,
+            space_id=space_id,
+            visible_space_ids=seats,
+            exclude_scopes=_NEVER_SEARCHABLE,
         )
-        counts = await self._repo.count_by_scope(q, space_id=space_id)
-        return {"hits": filtered[:limit], "counts": counts}
+        return {"hits": hits[:limit], "counts": counts}
+
+    async def _seat_space_ids(self, caller_user_id: str | None) -> frozenset[str]:
+        """The spaces the caller holds a seat in (any role). Fail closed:
+        no space repo or no caller → none. A repo error propagates (the
+        request fails) rather than widening what the caller sees."""
+        if self._space_repo is None or not caller_user_id:
+            return frozenset()
+        spaces = await self._space_repo.list_for_user(caller_user_id)
+        return frozenset(s.id for s in spaces)
 
     # ─── Internals ────────────────────────────────────────────────────────
 
@@ -338,72 +369,3 @@ class SearchService:
             title=title or "",
             body=body,
         )
-
-    # ─── Access filtering (§23.2.6) ───────────────────────────────────────
-
-    async def _apply_access_filter(
-        self,
-        hits: list[SearchHit],
-        *,
-        caller_user_id: str | None,
-        caller_username: str | None,
-    ) -> list[SearchHit]:
-        """Drop hits the caller isn't allowed to see.
-
-        * ``SCOPE_SPACE_POST`` + ``SCOPE_PAGE`` (in a space): require
-          membership in ``space_id`` when known.
-        * ``SCOPE_MESSAGE``: require membership in the DM conversation.
-          Today the index doesn't carry the conversation id, so we
-          only surface DM hits to the caller who authored them — a
-          conservative default that never leaks other households'
-          DMs; refining this is follow-up work.
-        * ``SCOPE_POST`` / ``SCOPE_USER`` / ``SCOPE_SPACE``: visible to
-          every authenticated household member.
-
-        If the access repos haven't been attached, filtering is a no-op
-        (tests that don't care about visibility keep working).
-        """
-        if not hits:
-            return hits
-        # Early exit when we have no machinery to filter with.
-        if self._space_repo is None and self._conv_repo is None:
-            return hits
-
-        space_member_cache: dict[str, bool] = {}
-
-        async def _in_space(space_id: str) -> bool:
-            if self._space_repo is None or not caller_username:
-                return True
-            if space_id in space_member_cache:
-                return space_member_cache[space_id]
-            try:
-                uids = await self._space_repo.list_local_member_user_ids(space_id)
-            except Exception:
-                log.debug(
-                    "SearchService._apply_access_filter._in_space: fail-soft error ignored",
-                    exc_info=True,
-                )
-                space_member_cache[space_id] = True
-                return True
-            allowed = caller_user_id is not None and caller_user_id in uids
-            space_member_cache[space_id] = allowed
-            return allowed
-
-        kept: list[SearchHit] = []
-        for hit in hits:
-            if (
-                hit.scope in (SCOPE_SPACE_POST, SCOPE_PAGE)
-                and hit.space_id
-                and not await _in_space(hit.space_id)
-            ):
-                continue
-            if hit.scope == SCOPE_MESSAGE:
-                # Without a conversation id in the index row, restrict
-                # DM hits to the caller's own messages (conservative).
-                # ``title`` is the sender display name on write, so we
-                # don't have ownership info here; skip all DM hits for
-                # callers who haven't opted into DM search specifically.
-                # Safer to err on the side of privacy (§26 + §12.5).
-                continue
-            kept.append(hit)
-        return kept
