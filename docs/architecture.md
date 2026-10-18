@@ -1137,8 +1137,8 @@ by the existing `/api/conversations/{id}/...` routes.
   account; the blocked person's messages are withheld from it (recipients,
   `list_messages`, unread, notifications) instead.
 - **Notifications** link the household chat to `/?tab=chat` and read
-  "{sender} in Household chat"; a space chat links to
-  `/spaces/{id}?view=chat` and reads "{sender} in {space}" (title only,
+  "{sender} in Household chat"; a space chat links to its Chat section
+  `/spaces/{id}/chat` and reads "{sender} in {space}" (title only,
   §25.3). New space-chat seats start at notification level `mentions`.
 - **Space chats federate, as their own events.** A space chat never
   rides the DM path. `SpaceChatService` keeps its seats in step with the

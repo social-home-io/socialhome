@@ -21,8 +21,7 @@ import {
   spaceChatOf,
   spaceChatUnread,
   spaceChatUnreadOf,
-  spaceFeedViewFromQuery,
-  spaceFeedViews,
+  spaceChatOpenTo,
 } from './spaceChat'
 
 const SUMMARY = {
@@ -102,26 +101,19 @@ describe('isSpaceChatFrame', () => {
   })
 })
 
-describe('spaceFeedViews', () => {
-  it('chat for a writer while the feature is on and the server agrees', () => {
+describe('spaceChatOpenTo', () => {
+  it('open to a writer while the feature is on and the server agrees', () => {
     for (const role of ['owner', 'admin', 'moderator', 'member'] as const) {
-      expect(spaceFeedViews({}, role, null)).toEqual(['posts', 'chat'])
-      expect(spaceFeedViews({ chat: true }, role, { enabled: true })).toEqual(['posts', 'chat'])
+      expect(spaceChatOpenTo({}, role, null)).toBe(true)
+      expect(spaceChatOpenTo({ chat: true }, role, { enabled: true })).toBe(true)
     }
   })
 
-  it('posts only for a follower, a non-member, chat off or a server "off"', () => {
-    expect(spaceFeedViews({}, 'subscriber', null)).toEqual(['posts'])
-    expect(spaceFeedViews({}, undefined, null)).toEqual(['posts'])
-    expect(spaceFeedViews({ chat: false }, 'owner', { enabled: true })).toEqual(['posts'])
-    expect(spaceFeedViews(undefined, 'member', { enabled: false })).toEqual(['posts'])
-  })
-
-  it('?view= parsing', () => {
-    expect(spaceFeedViewFromQuery('chat')).toBe('chat')
-    expect(spaceFeedViewFromQuery('posts')).toBe('posts')
-    expect(spaceFeedViewFromQuery(undefined)).toBe('posts')
-    expect(spaceFeedViewFromQuery(['chat'])).toBe('posts')
+  it('closed to a follower, a non-member, with chat off or a server "off"', () => {
+    expect(spaceChatOpenTo({}, 'subscriber', null)).toBe(false)
+    expect(spaceChatOpenTo({}, undefined, null)).toBe(false)
+    expect(spaceChatOpenTo({ chat: false }, 'owner', { enabled: true })).toBe(false)
+    expect(spaceChatOpenTo(undefined, 'member', { enabled: false })).toBe(false)
   })
 })
 

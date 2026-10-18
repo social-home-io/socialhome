@@ -1,36 +1,67 @@
 /**
- * Space tab gating: which tabs a space's feature toggles show, and what
- * the Calendar tab holds (Events, Timetable, or both behind a switch).
+ * Space sections: which ones a space's feature toggles show, in which
+ * order, what the Calendar section holds, and where each one lives in
+ * the URL (old ``?tab=`` / ``?view=`` / ``#`` links included).
  */
 import { describe, it, expect } from 'vitest'
-import { calendarModes, calendarTabLabel, visibleSpaceTabs } from './spaceTabs'
+import {
+  SECTION_ORDER, calendarModes, calendarTabLabel, legacySpaceSection, parseSpaceSection,
+  sectionAllowed, spaceSectionPath, visibleSpaceSections,
+} from './spaceTabs'
 
-describe('visibleSpaceTabs', () => {
-  it('defaults: every tab but the opt-ins (map, timetable-only)', () => {
-    expect(visibleSpaceTabs(undefined, false)).toEqual(
-      ['feed', 'members', 'pages', 'calendar', 'tasks', 'stickies', 'gallery', 'bazaar'])
+const member = { chat: true, follower: false }
+const follower = { chat: false, follower: true }
+
+describe('visibleSpaceSections', () => {
+  it('defaults: every section but the opt-ins (map, timetable-only), in the one fixed order', () => {
+    expect(visibleSpaceSections(undefined, member)).toEqual(
+      ['feed', 'chat', 'calendar', 'tasks', 'pages', 'gallery', 'stickies', 'bazaar'])
   })
 
-  it('the Calendar tab shows when calendar or timetable is on', () => {
-    const tabs = (f: Record<string, boolean>) => visibleSpaceTabs(f, false).includes('calendar')
-    expect(tabs({ calendar: true, timetable: false })).toBe(true)
-    expect(tabs({ calendar: true, timetable: true })).toBe(true)
-    expect(tabs({ calendar: false, timetable: true })).toBe(true)
-    expect(tabs({ calendar: false, timetable: false })).toBe(false)
-    expect(tabs({ calendar: false })).toBe(false)
+  it('never puts Members or Moderation in the bar (they are rows of More)', () => {
+    const all = visibleSpaceSections({ location: true }, member)
+    expect(all).not.toContain('members')
+    expect(all).not.toContain('moderation')
+    expect(all).toEqual([...SECTION_ORDER])
   })
 
-  it('content authority (owner / admin / moderator) gets moderation, location adds the map', () => {
-    const tabs = visibleSpaceTabs({ location: true }, true)
-    expect(tabs).toContain('map')
-    expect(tabs[tabs.length - 1]).toBe('moderation')
+  it('keeps SECTION_ORDER whatever the toggles', () => {
+    const s = visibleSpaceSections({ pages: false, todo: false, location: true }, member)
+    expect(s).toEqual(['feed', 'chat', 'calendar', 'gallery', 'stickies', 'bazaar', 'map'])
+  })
+
+  it('the Calendar section shows when calendar or timetable is on', () => {
+    const has = (f: Record<string, boolean>) => visibleSpaceSections(f, member).includes('calendar')
+    expect(has({ calendar: true, timetable: false })).toBe(true)
+    expect(has({ calendar: true, timetable: true })).toBe(true)
+    expect(has({ calendar: false, timetable: true })).toBe(true)
+    expect(has({ calendar: false, timetable: false })).toBe(false)
+    expect(has({ calendar: false })).toBe(false)
+  })
+
+  it('Chat only when the space chat is open to the viewer', () => {
+    expect(visibleSpaceSections(undefined, { chat: false, follower: false })).not.toContain('chat')
   })
 })
 
-describe('visibleSpaceTabs — a follower', () => {
-  it("gets no Map: the pins and zones are the members' whereabouts", () => {
-    expect(visibleSpaceTabs({ location: true }, false, true)).not.toContain('map')
-    expect(visibleSpaceTabs({ location: true }, false, false)).toContain('map')
+describe('visibleSpaceSections — a follower', () => {
+  it("gets no Map (the pins and zones are the members' whereabouts) and no Chat", () => {
+    expect(visibleSpaceSections({ location: true }, follower)).not.toContain('map')
+    expect(visibleSpaceSections({ location: true }, follower)).not.toContain('chat')
+    expect(visibleSpaceSections({ location: true }, member)).toContain('map')
+  })
+})
+
+describe('sectionAllowed', () => {
+  it('Members for everyone, Moderation for content authority only', () => {
+    expect(sectionAllowed('members', undefined, { ...follower, canModerate: false })).toBe(true)
+    expect(sectionAllowed('moderation', undefined, { ...member, canModerate: false })).toBe(false)
+    expect(sectionAllowed('moderation', undefined, { ...member, canModerate: true })).toBe(true)
+  })
+
+  it('a section whose feature is off is not allowed', () => {
+    expect(sectionAllowed('gallery', { gallery: false }, { ...member, canModerate: true })).toBe(false)
+    expect(sectionAllowed('map', { location: true }, { ...follower, canModerate: false })).toBe(false)
   })
 })
 
@@ -52,14 +83,35 @@ describe('calendarModes / calendarTabLabel', () => {
   })
 })
 
-describe('parseSpaceTab', () => {
-  it('accepts a linkable tab name and nothing else', async () => {
-    const { parseSpaceTab } = await import('./spaceTabs')
-    expect(parseSpaceTab('tasks')).toBe('tasks')
-    expect(parseSpaceTab('stickies')).toBe('stickies')
-    expect(parseSpaceTab('moderation')).toBeNull()
-    expect(parseSpaceTab('nope')).toBeNull()
-    expect(parseSpaceTab(undefined)).toBeNull()
-    expect(parseSpaceTab(['tasks'])).toBeNull()
+describe('section paths', () => {
+  it('the feed is the space root, every other section its own path', () => {
+    expect(spaceSectionPath('sp-1', 'feed')).toBe('/spaces/sp-1')
+    expect(spaceSectionPath('sp-1', 'chat')).toBe('/spaces/sp-1/chat')
+    expect(spaceSectionPath('sp-1', 'members')).toBe('/spaces/sp-1/members')
+  })
+
+  it('parses a path segment: none → feed, unknown → null', () => {
+    expect(parseSpaceSection(undefined)).toBe('feed')
+    expect(parseSpaceSection('')).toBe('feed')
+    expect(parseSpaceSection('calendar')).toBe('calendar')
+    expect(parseSpaceSection('moderation')).toBe('moderation')
+    expect(parseSpaceSection('nope')).toBeNull()
+    expect(parseSpaceSection(['tasks'])).toBeNull()
+  })
+})
+
+describe('legacySpaceSection — links from before sections had paths', () => {
+  it('maps ?tab=, ?view=chat and #join-requests', () => {
+    expect(legacySpaceSection({ tab: 'tasks' }, '')).toBe('tasks')
+    expect(legacySpaceSection({ tab: 'moderation' }, '')).toBe('moderation')
+    expect(legacySpaceSection({ view: 'chat' }, '')).toBe('chat')
+    expect(legacySpaceSection({}, '#join-requests')).toBe('moderation')
+  })
+
+  it('ignores anything else', () => {
+    expect(legacySpaceSection({}, '')).toBeNull()
+    expect(legacySpaceSection(undefined, undefined)).toBeNull()
+    expect(legacySpaceSection({ tab: 'feed' }, '')).toBeNull()
+    expect(legacySpaceSection({ tab: 'nope' }, '#other')).toBeNull()
   })
 })

@@ -5,10 +5,14 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/feed':           lazy(() => import('@/features/feed/FeedPage')),
   '/spaces':         lazy(() => import('@/features/spaces/SpaceListPage')),
   '/spaces/browse':  lazy(() => import('@/features/spaces/SpaceBrowserPage')),
-  '/spaces/:id':     lazy(() => import('@/features/spaces/SpaceFeedPage')),
   '/spaces/:id/about': lazy(() => import('@/features/spaces/SpacePublicDetailPage')),
   '/spaces/:id/settings': lazy(() => import('@/features/spaces/SpaceSettingsPage')),
   '/spaces/:id/zones': lazy(() => import('@/features/spaces/SpaceZonesPage')),
+  // A space and its sections: ``/spaces/:id`` is the feed, ``/spaces/:id/
+  // chat``, ``…/calendar`` etc. the rest. ONE route (optional segment) so a
+  // section switch re-renders the page instead of remounting it. The
+  // first match wins, so it sits after the fixed sub-pages above.
+  '/spaces/:id/:section?': lazy(() => import('@/features/spaces/SpaceFeedPage')),
   '/join':           lazy(() => import('@/features/spaces/SpaceJoinLanding')),
   '/dms':            lazy(() => import('@/features/dms/DmInboxPage')),
   '/dms/:id':        lazy(() => import('@/features/dms/DmThreadPage')),

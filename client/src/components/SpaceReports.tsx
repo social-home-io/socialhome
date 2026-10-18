@@ -24,7 +24,7 @@ import { showToast } from './Toast'
 import { confirmDialog } from './confirm'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import { t } from '@/i18n/i18n'
-import type { SpaceTab } from './SpaceSubHeader'
+import type { SpaceSection } from '@/features/spaces/spaceTabs'
 
 /** One row of ``GET /api/spaces/{id}/reports``. */
 export interface SpaceReportRow {
@@ -49,7 +49,7 @@ export interface SpaceReportRow {
 }
 
 /** The space tab that holds each kind of reported item. */
-export const REPORT_TARGET_TAB: Record<string, SpaceTab> = {
+export const REPORT_TARGET_TAB: Record<string, SpaceSection> = {
   post: 'feed',
   comment: 'feed',
   page: 'pages',
@@ -101,7 +101,7 @@ export function SpaceReports({
   onOpenTab,
 }: {
   spaceId: string
-  onOpenTab?: (tab: SpaceTab) => void
+  onOpenTab?: (tab: SpaceSection) => void
 }) {
   useEffect(() => {
     rows.value = []

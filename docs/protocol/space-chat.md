@@ -76,8 +76,8 @@ a banned or a removed seat). The same roster feeds
 `GET /api/conversations/{id}/members`, so the composer offers members of
 every household and their messages carry their names.
 
-**In the SPA** the chat is the Feed tab's **Feed | Chat** switch
-(`SpaceFeedPage`, `?view=chat` — where chat notifications link), shown
+**In the SPA** the chat is the space's **Chat** section
+(`SpaceFeedPage` at `/spaces/{id}/chat` — where chat notifications link), shown
 to a member (never a follower) while `features.chat` is on. Owners,
 admins and moderators get Delete on anyone's message; everybody on their
 own.

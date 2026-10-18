@@ -137,12 +137,12 @@ def _conversation_link(
     space_id: str | None = None,
 ) -> str:
     """The SPA path a conversation's bell / push opens: the feed's Chat
-    tab for the household chat, the space's Feed | Chat switch for a space
-    chat, the DM thread otherwise."""
+    tab for the household chat, the space's Chat section for a space chat,
+    the DM thread otherwise."""
     if scope is SystemChatScope.HOUSEHOLD:
         return HOUSEHOLD_CHAT_LINK
     if scope is SystemChatScope.SPACE and space_id:
-        return f"/spaces/{space_id}?view=chat"
+        return f"/spaces/{space_id}/chat"
     return f"/dms/{conversation_id}"
 
 
@@ -1218,7 +1218,7 @@ class NotificationService(ProtectionGateMixin):
                             fallback="New content pending review in {space_name}",
                             space_name=space.name,
                         ),
-                        link_url=f"/spaces/{event.item.space_id}?tab=moderation",
+                        link_url=f"/spaces/{event.item.space_id}/moderation",
                     )
                 )
 
@@ -1269,7 +1269,7 @@ class NotificationService(ProtectionGateMixin):
                         fallback="New report in {space_name}",
                         space_name=space.name,
                     ),
-                    link_url=f"/spaces/{event.space_id}?tab=moderation",
+                    link_url=f"/spaces/{event.space_id}/moderation",
                 )
             )
 
@@ -1614,7 +1614,7 @@ class NotificationService(ProtectionGateMixin):
             link_url = f"/tasks/{task.list_id}"
             members: set[str] | None = None
         else:
-            link_url = f"/spaces/{event.space_id}?tab=tasks"
+            link_url = f"/spaces/{event.space_id}/tasks"
             members = set(await self._spaces.list_local_member_user_ids(event.space_id))
         for uid in getattr(task, "assignees", ()):
             if uid == completed_by:
@@ -1783,7 +1783,7 @@ class NotificationService(ProtectionGateMixin):
                         name=name,
                         space_name=space.name,
                     ),
-                    link_url=f"/spaces/{event.space_id}#join-requests",
+                    link_url=f"/spaces/{event.space_id}/moderation",
                 )
             )
 

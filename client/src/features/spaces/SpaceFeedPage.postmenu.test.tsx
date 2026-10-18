@@ -80,19 +80,22 @@ describe('SpaceFeedPage post menu', () => {
     expect(r.getByTestId('post-theirs').textContent).toBe('locked')
   }, 20000)
 
-  it('a moderator on a member stub gets the Moderation tab (v_43)', async () => {
+  it('a moderator on a member stub gets the Moderation row in More (v_43)', async () => {
     // Items reach every household holding a moderator seat, so the queue
     // is worked from the stub too.
     wire('moderator', 'iid-elsewhere')
     const { tl, r } = await renderPage()
     await tl.waitFor(() => expect(r.getByTestId('post-theirs').textContent).toBe('deletable'))
-    expect(r.getByRole('tab', { name: 'Moderation' })).toBeTruthy()
+    tl.fireEvent.click(r.getByRole('button', { name: /^More/ }))
+    expect(r.getByRole('link', { name: /^Moderation/ }).getAttribute('href')).toBe('/spaces/s1/moderation')
   }, 20000)
 
-  it('a plain member on a stub has no Moderation tab', async () => {
+  it('a plain member on a stub has no Moderation row', async () => {
     wire('member', 'iid-elsewhere')
     const { tl, r } = await renderPage()
     await tl.waitFor(() => expect(r.getByTestId('post-mine').textContent).toBe('deletable'))
-    expect(r.queryByRole('tab', { name: 'Moderation' })).toBeNull()
+    tl.fireEvent.click(r.getByRole('button', { name: /^More/ }))
+    expect(r.getByRole('link', { name: /^Members/ })).toBeTruthy()
+    expect(r.queryByRole('link', { name: /^Moderation/ })).toBeNull()
   }, 20000)
 })

@@ -38,9 +38,13 @@ vi.mock('@/store/auth', () => ({
   logout: vi.fn(),
 }))
 
-const route = vi.hoisted(() => ({ id: 's1', query: {} as Record<string, string> }))
+const route = vi.hoisted(() => ({
+  id: 's1', section: undefined as string | undefined, query: {} as Record<string, string>,
+}))
 vi.mock('preact-iso', () => ({
-  useRoute: () => ({ params: { id: route.id }, query: route.query, path: `/spaces/${route.id}` }),
+  useRoute: () => ({
+    params: { id: route.id, section: route.section }, query: route.query, path: `/spaces/${route.id}`,
+  }),
   useLocation: () => ({ route: vi.fn(), url: '/spaces/s1', path: '/spaces/s1', query: route.query }),
 }))
 
@@ -102,6 +106,7 @@ beforeEach(() => {
   toast.show.mockClear()
   edits.results = []
   route.query = {}
+  route.section = undefined
   route.id = 's1'
 })
 
@@ -187,7 +192,7 @@ describe('space post edit', () => {
 
 describe('space event delete', () => {
   it('offers Delete only on can_edit rows, and deletes with Undo', async () => {
-    route.query = { tab: 'calendar' }
+    route.section = 'calendar'
     wire('member')
     apiDelete.mockResolvedValue({ ok: true })
     const { tl, r } = await renderPage()
@@ -214,7 +219,7 @@ describe('space event delete', () => {
 
 describe('space event delete after leaving the space', () => {
   it('a commit landing on another space does not reload this calendar', async () => {
-    route.query = { tab: 'calendar' }
+    route.section = 'calendar'
     wire('member')
     apiDelete.mockResolvedValue({ ok: true })
     const { tl, r } = await renderPage()
@@ -224,10 +229,13 @@ describe('space event delete after leaving the space', () => {
     // Navigate to another space before the Undo window closes.
     route.id = 's2'
     route.query = {}
+    route.section = undefined
     tl.cleanup()
     const { default: Page } = await import('./SpaceFeedPage')
     const r2 = tl.render(<Page />)
-    await tl.waitFor(() => expect(r2.container.textContent).toContain('OT'))
+    // The other space's section bar is up (its Feed links to /spaces/s2).
+    await tl.waitFor(() =>
+      expect(r2.getByRole('link', { name: 'Feed' }).getAttribute('href')).toBe('/spaces/s2'))
     apiGet.mockClear()
     ;(call[2] as { onExpire: () => void }).onExpire()
     await tl.waitFor(() =>

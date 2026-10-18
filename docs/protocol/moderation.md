@@ -368,7 +368,7 @@ is not in (the same 404 body) and nothing is stored — no existence oracle.
 - **Notification.** Each reviewing household tells its local content
   authority (except the reporter and the subject, per the rule above) with
   a title-only bell entry and push, `New report in {space_name}`, linking
-  to the space's Moderation tab (`/spaces/{id}?tab=moderation`) — never the
+  to the space's Moderation section (`/spaces/{id}/moderation`) — never the
   category, notes or reporter (§25.3).
 - **Purge.** When this household stops reviewing a space (its last
   content-authority member demoted or gone) it deletes the reports other

@@ -24,6 +24,7 @@ from socialhome.domain.events import (
     DmMessageUpdated,
     PostEdited,
     SpaceAdminSeedsRetiredAfterRestore,
+    SpaceJoinRequested,
     SpaceMemberJoined,
     SpacePostCreated,
     SpaceRemoteSeatLive,
@@ -1623,7 +1624,7 @@ async def test_space_task_completed_links_to_the_space_tasks_tab(stack):
         )
     )
     notifs = await stack.notif_repo.list(bob.user_id, limit=10)
-    assert [n.link_url for n in notifs] == ["/spaces/sp-tc?tab=tasks"]
+    assert [n.link_url for n in notifs] == ["/spaces/sp-tc/tasks"]
     assert await stack.notif_repo.list(outsider.user_id, limit=10) == []
 
 
@@ -2648,8 +2649,33 @@ async def test_space_report_notifies_content_authority_title_only(stack):
         assert not any(n.type == "space_report" for n in notes)
     mo_n = await stack.notif_repo.list(mo.user_id, limit=50)
     assert [n.link_url for n in mo_n if n.type == "space_report"] == [
-        f"/spaces/{space.id}?tab=moderation"
+        f"/spaces/{space.id}/moderation"
     ]
+
+
+async def test_a_join_request_links_the_admins_to_the_moderation_section(stack):
+    """Join requests are decided in the space's Moderation section
+    (``/spaces/{id}/moderation``) — the bell links there, not to the old
+    ``#join-requests`` anchor on the space page."""
+    anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space_svc = SpaceService(
+        _space_repo(stack.db),
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Club")
+    await stack.bus.publish(
+        SpaceJoinRequested(space_id=space.id, user_id=bob.user_id, request_id="jr1")
+    )
+    notes = [
+        n
+        for n in await stack.notif_repo.list(anna.user_id, limit=10)
+        if n.type == "space_join_requested"
+    ]
+    assert [n.link_url for n in notes] == [f"/spaces/{space.id}/moderation"]
 
 
 async def test_space_report_about_a_moderator_does_not_notify_them(stack):
@@ -2813,7 +2839,7 @@ async def test_space_chat_bell_names_the_space_and_opens_its_chat(stack):
     push = _CapturingPush()
     stack.notif_svc.attach_push_service(push)
     await stack.bus.publish(_dm_event(chat_id, anna, [bob, carl], mentions=[_m(bob)]))
-    link = "/spaces/sp-chat?view=chat"
+    link = "/spaces/sp-chat/chat"
     assert [
         (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(carl.user_id)
     ] == [("dm_message", "anna-s in Choir", link)]

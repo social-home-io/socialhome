@@ -26,6 +26,20 @@ describe('router', () => {
     expect(Object.keys(routes).length).toBe(43)
   })
 
+  it('a space and its sections are ONE route, after the fixed space sub-pages', () => {
+    // /spaces/:id is the feed, /spaces/:id/chat etc. the sections — one
+    // route so a section switch re-renders instead of remounting. The
+    // router takes the first match, so about / settings / zones go first.
+    const keys = Object.keys(routes)
+    const space = keys.indexOf('/spaces/:id/:section?')
+    expect(space).toBeGreaterThan(-1)
+    expect(routes['/spaces/:id']).toBeUndefined()
+    for (const fixed of ['/spaces/browse', '/spaces/:id/about', '/spaces/:id/settings', '/spaces/:id/zones']) {
+      expect(keys.indexOf(fixed)).toBeGreaterThan(-1)
+      expect(keys.indexOf(fixed)).toBeLessThan(space)
+    }
+  })
+
   it('has feed route at /', () => {
     expect(routes['/']).toBeTruthy()
   })

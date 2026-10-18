@@ -24,9 +24,11 @@ vi.mock('@/store/auth', () => ({
   logout: vi.fn(),
 }))
 
-const route = vi.hoisted(() => ({ query: {} as Record<string, string>, go: vi.fn() }))
+const route = vi.hoisted(() => ({
+  section: undefined as string | undefined, query: {} as Record<string, string>, go: vi.fn(),
+}))
 vi.mock('preact-iso', () => ({
-  useRoute: () => ({ params: { id: 's1' }, query: route.query, path: '/spaces/s1' }),
+  useRoute: () => ({ params: { id: 's1', section: route.section }, query: route.query, path: '/spaces/s1' }),
   useLocation: () => ({ route: route.go, url: '/spaces/s1', path: '/spaces/s1', query: route.query }),
 }))
 
@@ -92,7 +94,7 @@ async function open(
   features?: Record<string, unknown>,
   extra?: Record<string, unknown>,
 ) {
-  route.query = tab === 'feed' ? {} : { tab }
+  route.section = tab === 'feed' ? undefined : tab
   wire(role, features, extra)
   const tl = await import('@testing-library/preact')
   tl.cleanup() // a test may open several tabs, one page at a time
@@ -144,12 +146,9 @@ describe('the leftovers of an admin-only posts feed', () => {
     await tl.waitFor(() => expect(r.getByTestId('bazaar-tab').textContent).toBe('false'))
   }, 20000)
 
-  async function moderationTab(role: string) {
-    const { tl, r } = await open('feed', role)
-    const tab = await tl.waitFor(() => r.getByRole('tab', { name: /Moderation/ }))
-    tl.fireEvent.click(tab)
-    return { tl, r }
-  }
+  // ``/spaces/s1/moderation`` — the section a Moderation row in More
+  // links to.
+  const moderationTab = (role: string) => open('moderation', role)
 
   it('a moderator may reject but not approve in the moderation queue', async () => {
     const { tl, r } = await moderationTab('moderator')
