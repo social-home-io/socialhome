@@ -7808,6 +7808,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 gfs_id = mirrored[1]
         space = await self._require_space(space_id)
         if space.space_type not in PUBLIC_SPACE_TIERS:
+            if not self._has_landing(space) and (
+                await self._spaces.get_member(space_id, user_id) is None
+            ):
+                # A space hidden from the caller (private, another
+                # household's household space) answers exactly like an
+                # unknown id — no existence oracle.
+                raise KeyError(f"space {space_id!r} not found")
             raise SubscribeNotAllowedError(
                 "only public / global spaces can be subscribed to",
             )

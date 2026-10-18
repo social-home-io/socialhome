@@ -262,6 +262,7 @@ from .repositories.timetable_repo import (
     SqliteTimetableRepo,
 )
 from .routes import setup_routes
+from .routes.space_seat_gate import build_space_seat_gate_middleware
 from .services import (
     DmService,
     FeedService,
@@ -2480,6 +2481,7 @@ def _build_middleware(config: Config, limiter: RateLimiter):
         body_size_middleware,
         cors_middleware,
         rate_middleware,
+        build_space_seat_gate_middleware(),
     )
 
 
@@ -3276,6 +3278,7 @@ def create_app(config: Config | None = None) -> web.Application:
         body_size_middleware,
         cors_middleware,
         rate_middleware,
+        space_seat_gate_middleware,
     ) = _build_middleware(config, limiter)
 
     # ── Application ───────────────────────────────────────────────────────
@@ -3295,6 +3298,9 @@ def create_app(config: Config | None = None) -> web.Application:
             cors_middleware,
             auth_middleware,
             rate_middleware,
+            # After auth + rate limiting: no seat in the path space → the
+            # read gate's 403, so no space route is an existence oracle.
+            space_seat_gate_middleware,
         ],
     )
     # Security headers go on at prepare time, so streamed responses

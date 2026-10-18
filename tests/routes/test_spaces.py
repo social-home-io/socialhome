@@ -2384,7 +2384,8 @@ async def test_subscriptions_scoped_per_user(client):
 
 
 async def test_subscribe_private_space_rejected(client):
-    """Private spaces cannot be subscribed to — 403."""
+    """Private spaces cannot be subscribed to — to a caller with no seat
+    one answers like an unknown id: 404, no existence oracle."""
     r = await client.post(
         "/api/spaces",
         json={"name": "Priv", "space_type": "private"},
@@ -2395,7 +2396,7 @@ async def test_subscribe_private_space_rejected(client):
         f"/api/spaces/{sid}/subscribe",
         headers=_auth(client._bob_token),
     )
-    assert r.status == 403
+    assert r.status == 404
 
 
 async def test_subscriber_cannot_post_in_space(client):
@@ -3429,10 +3430,14 @@ async def test_space_members_talk_in_the_space_chat(client):
     assert r.status == 200
 
 
-async def test_space_chat_is_404_for_non_members_and_unknown_spaces(client):
+async def test_space_chat_is_refused_to_non_members_and_unknown_spaces(client):
+    """No seat → the space seat gate's 403 (an unknown id the same); the
+    household admin passes the gate and an unknown id is the chat's 404."""
     sid = await _chat_space(client)
     status, _ = await _space_chat(client, sid, client._bob_token)
-    assert status == 404
+    assert status == 403
+    status, _ = await _space_chat(client, "sp-nope", client._bob_token)
+    assert status == 403
     status, _ = await _space_chat(client, "sp-nope", client._admin_token)
     assert status == 404
     cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]

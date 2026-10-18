@@ -246,7 +246,7 @@ reads (enforced by `SpaceService.require_reader` /
 403, so those reads are no oracle for which ids exist. Calendar, tasks, pages,
 stickies, polls, bazaar, gallery, links, zones, bots, timetables, presence and
 notification prefs check the seat with their own gates (same 403); chat
-answers 404 to a non-member. Reactions (`POST` / `DELETE …/posts/{pid}/reactions`)
+answers 404 to a follower. Reactions (`POST` / `DELETE …/posts/{pid}/reactions`)
 need a seat too. Every route that takes a post id — comments, reactions, polls,
 schedule polls — binds it to the **path** space: another space's post is
 **404**, so a seat in one space never reaches another space's post. The one
@@ -259,6 +259,25 @@ only (see the row below), unless they are a protected minor below the space's
 `private` space, and a household-tier space another household hosts, stay 403. The
 signed-URL media routes (`cover`, `icon`, `members/{uid}/picture`) are
 capability URLs and stay outside this gate.
+
+**No existence oracle.** In front of every route under
+`/api/spaces/{id}/…` (and `/api/spaces/{space_id}/…`) sits the **space seat
+gate** (`routes/space_seat_gate.py`, a middleware after auth): a caller with
+no seat in the path space gets that same `403 {"error": {"code":
+"FORBIDDEN", "detail": "Not a space member."}}` before the route runs —
+reads, writes and admin routes alike (bans, compat, invite tokens, the
+join-request queue, GFS servers, archive, sync, moderation, reports…). An
+unknown id has no seats, so it answers **exactly** the same: no space route
+tells a local user whether an id exists, and the space's own wording ("admin
+or owner required", …) is only ever shown to someone with a seat (a
+follower's seat counts). It lets through without a seat: a **household
+admin** (who lists every space anyway — `GET /api/admin/spaces` — and may
+take a global space off a GFS), a **signed media URL** (the signature is the
+grant), and the routes meant for reaching a space you aren't in yet, each
+with its own uniform gate: the landing page (`GET /api/spaces/{id}`),
+`POST …/join-requests` and `POST` / `DELETE …/subscribe`. This also means
+the [space chat](./protocol/space-chat.md) answers a caller with no seat
+`403` (a follower, who has a seat, still gets its `404`).
 
 **Followers see less.** A follower reads the posts but is an outsider to
 the space's *people* (the chat refuses them too): `GET …/members` lists them
@@ -289,7 +308,7 @@ is.
 | GET | `/api/admin/spaces` | Admin-only: list all spaces on this HFS. |
 | GET | `/api/spaces/{id}/feed` | Space feed summary. Needs a seat (any role, followers included) — `403 FORBIDDEN "Not a space member."` otherwise. |
 | POST | `/api/spaces/{id}/sync` | Trigger a re-sync with the space hosts. |
-| POST / DELETE | `/api/spaces/{id}/subscribe` | Subscribe / unsubscribe to a public or global space. Idempotent. Subscribe adds the caller as `role='subscriber'` in `space_members` (read-only member — receives content, cannot post / comment / react). For an id with **no local row**, subscribe first mirrors the listing from the first paired GFS that serves it (`GET {gfs}/gfs/spaces/{id}`) and seats a `space_type=global` stub with the GFS-served authority key (TOFU-pinned) before registering on the GFS relay — no GFS knows it, or the listing fails validation → unchanged 404; a paired GFS that errors → **502 `GFS_UNAVAILABLE`**. Private / household spaces return 403. Unsubscribe is a no-op for users who aren't subscribers (won't demote real members); when it removes the **last** local member of a provable GFS mirror it also unsubscribes from every paired GFS and purges the stub with its content. Returns `{subscribed}`. |
+| POST / DELETE | `/api/spaces/{id}/subscribe` | Subscribe / unsubscribe to a public or global space. Idempotent. Subscribe adds the caller as `role='subscriber'` in `space_members` (read-only member — receives content, cannot post / comment / react). For an id with **no local row**, subscribe first mirrors the listing from the first paired GFS that serves it (`GET {gfs}/gfs/spaces/{id}`) and seats a `space_type=global` stub with the GFS-served authority key (TOFU-pinned) before registering on the GFS relay — no GFS knows it, or the listing fails validation → unchanged 404; a paired GFS that errors → **502 `GFS_UNAVAILABLE`**. A private space (or another household's household space) the caller holds no seat in answers the **same 404** as an unknown id — no existence oracle; a member of one, and a local user of a household space this household hosts, get 403. Unsubscribe is a no-op for users who aren't subscribers (won't demote real members); when it removes the **last** local member of a provable GFS mirror it also unsubscribes from every paired GFS and purges the stub with its content. Returns `{subscribed}`. |
 
 ### Household spaces
 

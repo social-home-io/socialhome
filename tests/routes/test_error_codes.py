@@ -122,8 +122,12 @@ async def test_join_request_to_invite_only_space_is_403_invite_only(client):
 
 
 async def test_following_a_private_space_is_403_subscribe_not_allowed(client):
+    """A member is told why; to anyone else the space is an unknown id."""
     sid = await _space(client, space_type=SpaceType.PRIVATE)
-    _, bob_tok = await _add_user(client, "bob")
+    bob_uid, bob_tok = await _add_user(client, "bob")
+    await client.app[space_service_key].add_member(
+        sid, actor_username="admin", user_id=bob_uid
+    )
     r = await client.post(f"/api/spaces/{sid}/subscribe", headers=_auth(bob_tok))
     assert r.status == 403
     assert (await _error(r))["code"] == "SUBSCRIBE_NOT_ALLOWED"

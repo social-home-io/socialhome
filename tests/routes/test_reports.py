@@ -323,10 +323,12 @@ async def test_cross_space_report_id_is_404(space_client):
     assert await resp.json() == []
 
 
-async def test_unknown_space_reports_404(space_client):
+async def test_unknown_space_reports_403(space_client):
+    """The space seat gate: an unknown id answers like a space the caller
+    has no seat in — no existence oracle."""
     c = space_client
     resp = await c.get("/api/spaces/nope/reports", headers=_auth(c._tok["mona"]))
-    assert resp.status == 404
+    assert resp.status == 403
 
 
 async def test_member_report_names_the_space(space_client):
