@@ -49,7 +49,9 @@ from ..domain.post import Post, PostType
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
+    WRITER_ROLES,
     SpaceRole,
+    SubscriberReadOnlyError,
 )
 from ..federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
@@ -64,6 +66,7 @@ from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .media_transcode_service import MediaTranscodeService
+from .space_member_guard import NOT_A_SPACE_MEMBER, seat_of
 
 try:
     from PIL import ExifTags, Image
@@ -199,11 +202,7 @@ class GalleryService:
         *,
         actor_user_id: str,
     ) -> GalleryAlbum:
-        album = await self._repo.get_album(album_id)
-        if album is None:
-            raise GalleryNotFoundError(f"album {album_id!r} not found")
-        if album.space_id is not None:
-            await self._require_member(album.space_id, actor_user_id)
+        album = await self._visible_album(album_id, actor_user_id)
         cover_url = await self._resolve_cover(album)
         return _with_cover(album, cover_url)
 
@@ -224,7 +223,7 @@ class GalleryService:
                 f"Description must be {DESCRIPTION_MAX} characters or fewer"
             )
         if space_id is not None:
-            await self._require_member(space_id, owner_user_id)
+            await self._require_writer(space_id, owner_user_id)
             existing = await self._repo.list_albums(
                 space_id, limit=ALBUMS_PER_SPACE + 1
             )
@@ -276,9 +275,7 @@ class GalleryService:
         description: str | None = None,
         cover_item_id: str | None = None,
     ) -> None:
-        album = await self._repo.get_album(album_id)
-        if album is None:
-            raise GalleryNotFoundError(f"album {album_id!r} not found")
+        album = await self._visible_album(album_id, actor_user_id)
         if album.is_system:
             raise GalleryPermissionError(
                 "system album cannot be renamed or edited",
@@ -310,7 +307,9 @@ class GalleryService:
 
     async def delete_album(self, album_id: str, *, actor_user_id: str) -> None:
         album = await self._repo.get_album(album_id)
-        if album is None:
+        if album is None or not await self._can_see(album, actor_user_id):
+            # Idempotent, and an album of a space the caller holds no seat
+            # in answers exactly like an unknown id.
             return
         if album.is_system:
             raise GalleryPermissionError(
@@ -341,9 +340,7 @@ class GalleryService:
         actor_user_id: str,
     ) -> None:
         """Mark an album as exempt from space retention purge (§23.132)."""
-        album = await self._repo.get_album(album_id)
-        if album is None:
-            raise GalleryNotFoundError(f"album {album_id!r} not found")
+        album = await self._visible_album(album_id, actor_user_id)
         if album.is_system:
             raise GalleryPermissionError(
                 "system album retention is managed automatically",
@@ -365,11 +362,7 @@ class GalleryService:
         limit: int = 50,
         before: str | None = None,
     ) -> list[GalleryItem]:
-        album = await self._repo.get_album(album_id)
-        if album is None:
-            raise GalleryNotFoundError(f"album {album_id!r} not found")
-        if album.space_id is not None:
-            await self._require_member(album.space_id, actor_user_id)
+        await self._visible_album(album_id, actor_user_id)
         return await self._repo.list_items(album_id, limit=limit, before=before)
 
     async def upload_item(
@@ -389,16 +382,14 @@ class GalleryService:
         Video path runs the VideoProcessor → WebM and uses the
         extracted thumbnail.
         """
-        album = await self._repo.get_album(album_id)
-        if album is None:
-            raise GalleryNotFoundError(f"album {album_id!r} not found")
+        album = await self._visible_album(album_id, uploader_user_id)
         if album.is_system:
             raise GalleryPermissionError(
                 "system album cannot be uploaded to directly — "
                 "share a photo or video via a feed post instead",
             )
         if album.space_id is not None:
-            await self._require_member(album.space_id, uploader_user_id)
+            await self._require_writer(album.space_id, uploader_user_id)
         if caption and len(caption) > CAPTION_MAX:
             raise ValueError(f"Caption must be {CAPTION_MAX} characters or fewer")
         if not data:
@@ -451,6 +442,8 @@ class GalleryService:
         if item is None:
             return
         album = await self._repo.get_album(item.album_id)
+        if album is not None and not await self._can_see(album, actor_user_id):
+            return  # an item of a space the caller isn't in: like an unknown id
         if album is not None and album.is_system:
             raise GalleryPermissionError(
                 "system album items are managed automatically — "
@@ -630,11 +623,36 @@ class GalleryService:
         return await self._repo.get_first_item_thumbnail(album.id)
 
     async def _require_member(self, space_id: str, user_id: str) -> None:
-        member = await self._space_repo.get_member(space_id, user_id)
-        if member is None:
-            raise GalleryPermissionError(
-                f"user {user_id!r} is not a member of space {space_id!r}"
-            )
+        """A seat in ``space_id`` (any role, a follower included — a
+        banned user's leftover seat counts as none), else 403 ``Not a space
+        member.`` — the space gate's own answer, naming nobody."""
+        if await seat_of(self._space_repo, space_id, user_id) is None:
+            raise GalleryPermissionError(NOT_A_SPACE_MEMBER)
+
+    async def _require_writer(self, space_id: str, user_id: str) -> None:
+        """A member's seat: adding to a space gallery is a write, so a
+        read-only follower gets 403 ``SUBSCRIBER_READ_ONLY``."""
+        seat = await seat_of(self._space_repo, space_id, user_id)
+        if seat is None:
+            raise GalleryPermissionError(NOT_A_SPACE_MEMBER)
+        if seat.role not in WRITER_ROLES:
+            raise SubscriberReadOnlyError("upload")
+
+    async def _can_see(self, album: GalleryAlbum, user_id: str) -> bool:
+        """A household album: every local user. A space album: a seat in
+        its space (:func:`seat_of` — not a banned user's leftover)."""
+        if album.space_id is None:
+            return True
+        return await seat_of(self._space_repo, album.space_id, user_id) is not None
+
+    async def _visible_album(self, album_id: str, user_id: str) -> GalleryAlbum:
+        """The album, for someone who may see it — else the unknown id's
+        404, so the by-id routes (outside the ``/api/spaces/{id}`` seat
+        gate) never tell an outsider that an album, or its space, exists."""
+        album = await self._repo.get_album(album_id)
+        if album is None or not await self._can_see(album, user_id):
+            raise GalleryNotFoundError(f"album {album_id!r} not found")
+        return album
 
     async def _has_role(
         self, space_id: str, user_id: str, roles: frozenset[SpaceRole]

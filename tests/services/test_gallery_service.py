@@ -13,7 +13,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import GalleryAlbumDeleted, GalleryAlbumUpdated
-from socialhome.domain.space import SpaceMember
+from socialhome.domain.space import SpaceMember, SubscriberReadOnlyError
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
@@ -249,13 +249,13 @@ async def test_update_album_space_admin_succeeds(env):
     )
 
 
-async def test_update_album_other_user_403(env):
+async def test_update_album_by_an_outsider_is_the_unknown_ids_404(env):
     a = await env.create_album(
         space_id="sp-1",
         owner_user_id="b-id",
         name="Bobs",
     )
-    with pytest.raises(GalleryPermissionError):
+    with pytest.raises(GalleryNotFoundError):
         await env.update_album(
             a.id,
             actor_user_id="e-id",
@@ -709,3 +709,33 @@ async def test_a_member_cannot_delete_others_items(env):
     _album, item = await _bobs_item(env)
     with pytest.raises(GalleryPermissionError):
         await env.delete_item(item.id, actor_user_id="e-id")
+
+
+async def test_a_member_who_is_not_the_owner_still_gets_403_on_rename(env):
+    """The by-id 404 is for outsiders only: a seated member who doesn't
+    own the album keeps the owner/admin 403."""
+    await env._space_repo.save_member(
+        SpaceMember(space_id="sp-1", user_id="e-id", role="member", joined_at="")
+    )
+    a = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="Bobs")
+    with pytest.raises(GalleryPermissionError):
+        await env.update_album(a.id, actor_user_id="e-id", name="Hijack")
+
+
+async def test_a_follower_creates_no_album_and_uploads_nothing(env):
+    await env._space_repo.save_member(
+        SpaceMember(space_id="sp-1", user_id="e-id", role="subscriber", joined_at="")
+    )
+    with pytest.raises(SubscriberReadOnlyError):
+        await env.create_album(space_id="sp-1", owner_user_id="e-id", name="Mine")
+    a = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="Bobs")
+    with pytest.raises(SubscriberReadOnlyError):
+        await env.upload_item(
+            a.id,
+            data=b"x",
+            content_type="image/png",
+            caption=None,
+            uploader_user_id="e-id",
+        )
+    # A follower still reads the space gallery.
+    assert (await env.get_album(a.id, actor_user_id="e-id")).id == a.id

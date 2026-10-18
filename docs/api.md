@@ -805,6 +805,19 @@ system album — items appear and disappear strictly with their source
 feed post. Each item also carries `source_post_id: string | null`;
 non-null means the item was mirrored from a feed post.
 
+**Who sees and adds to a space album.** A space album belongs to its
+space: any seat reads it (a follower included), only a member's seat adds
+to it — `POST /api/spaces/{id}/gallery/albums` and `POST
+/api/gallery/albums/{id}/items` answer a read-only follower **`403
+SUBSCRIBER_READ_ONLY`** (`params.action: "upload"`). The by-id routes
+(`/api/gallery/albums/{id}`, `…/items`, `…/retention`, `DELETE
+/api/gallery/items/{iid}`) sit outside the `/api/spaces/{id}` seat gate,
+so they answer a caller with no seat in the album's space — or a banned
+user's leftover seat — exactly like an unknown id: **`404 "album '<id>'
+not found"`** for reads, rename and upload, a no-op `204` for the
+deletes. A seated member who doesn't own the album keeps the owner /
+admin `403`.
+
 ### Space Bazaar tab (§23.15)
 
 Bazaar is a first-class space tab alongside Calendar / Gallery. Listings

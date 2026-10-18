@@ -93,3 +93,28 @@ describe('GalleryPage live album frames', () => {
     expect(showToast).not.toHaveBeenCalled()
   })
 })
+
+describe('GalleryPage for a read-only follower', () => {
+  it('offers no New album / Upload — a follower only looks', async () => {
+    const { default: GalleryPage } = await import('./GalleryPage')
+    const view = render(<GalleryPage spaceId="sp-1" readOnly />)
+    await view.findByRole('button', { name: /Open album Holiday/ })
+    expect(view.queryByRole('button', { name: /New album/ })).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: /Open album Holiday/ }))
+    await view.findByRole('heading', { name: /Holiday/ })
+    expect(view.queryByRole('button', { name: /Upload/ })).toBeNull()
+  })
+
+  it('an empty space gallery invites no album for a follower', async () => {
+    albumRows = []
+    const { default: GalleryPage } = await import('./GalleryPage')
+    const view = render(<GalleryPage spaceId="sp-1" readOnly />)
+    await view.findByRole('heading', { name: /No albums yet/ })
+    expect(view.queryByRole('button', { name: /album/i })).toBeNull()
+  })
+
+  it('a member still gets both', async () => {
+    const view = await renderOpenAlbum()
+    expect(view.getByRole('button', { name: /Upload/ })).toBeTruthy()
+  })
+})
