@@ -10,6 +10,7 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
+from socialhome.domain.space import SpaceMember
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
 from socialhome.services.bazaar_service import (
@@ -23,6 +24,24 @@ from socialhome.services.bazaar_service import (
     _coerce_mode,
     _validate_price_fields,
 )
+from socialhome.services.space_service import SpaceService
+
+
+class _SeatedSpaces:
+    """Stands in for SpaceService: everyone holds a member seat in every
+    space (the Bazaar's visibility gate passes) and the posts level lets
+    every edit through. Gate behaviour itself is covered end to end in
+    ``tests/routes/test_bazaar_membership_gate.py``."""
+
+    async def require_reader(self, space_id, user_id):
+        return SpaceMember(
+            space_id=space_id, user_id=user_id, role="member", joined_at=""
+        )
+
+    assert_writable_member = staticmethod(SpaceService.assert_writable_member)
+
+    async def require_content_access(self, *_a, **_kw):
+        return None
 
 
 @pytest.fixture
@@ -45,6 +64,7 @@ async def env(tmp_dir):
     e.repo = SqliteBazaarRepo(db)
     e.bus = EventBus()
     e.svc = BazaarService(e.repo, e.bus)
+    e.svc.attach_spaces(_SeatedSpaces())
     yield e
     await db.shutdown()
 
@@ -130,7 +150,7 @@ def test_validate_price_fixed_ok():
 # ── update_listing ───────────────────────────────────────────────────────
 
 
-class _OpenSpaces:
+class _OpenSpaces(_SeatedSpaces):
     """Stands in for SpaceService: the posts level lets every edit through."""
 
     async def require_content_access(self, *_a, **_kw):
@@ -346,7 +366,7 @@ async def test_withdraw_bid_happy(env):
 
 async def test_list_bids_empty(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
-    rows = await env.svc.list_bids(pid)
+    rows = await env.svc.list_bids(pid, viewer_user_id="u-stranger")
     assert rows == []
 
 
@@ -391,6 +411,7 @@ async def test_update_listing_is_a_posts_edit_under_admin_only(env):
 async def test_update_listing_fails_closed_without_the_space_service(env):
     """No space service → no access gate → no edit (never fail open)."""
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
+    env.svc.attach_spaces(None)  # type: ignore[arg-type]
     with pytest.raises(RuntimeError):
         await env.svc.update_listing(post_id=pid, actor_user_id="u-seller", title="X")
     assert (await env.repo.get_listing(pid)).title == "Item"

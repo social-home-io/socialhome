@@ -3763,6 +3763,7 @@
   "bazaar.card.loading": "Aanbieding laden…",
   "bazaar.card.missing": "Bij dit bericht zijn nog geen details van de aanbieding.",
   "bazaar.card.load_error": "Kon deze aanbieding niet laden. Probeer het later opnieuw.",
+  "bazaar.card.follower_read_only": "Je volgt deze ruimte: je kunt aanbiedingen bekijken en bewaren, maar kopen, bieden en voorstellen doen is alleen voor leden.",
   "bazaar.card.bid_placed": "Bod geplaatst",
   "bazaar.card.confirm_withdraw_bid": "Dit bod intrekken?",
   "bazaar.card.bid_withdrawn": "Bod ingetrokken",

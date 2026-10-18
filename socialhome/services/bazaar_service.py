@@ -41,7 +41,12 @@ from ..domain.post import (
     BazaarStatus,
     Post,
 )
-from ..domain.space import ContentAction, SpacePermissionError
+from ..domain.space import (
+    WRITER_ROLES,
+    ContentAction,
+    SpaceMember,
+    SpacePermissionError,
+)
 from ..infrastructure.event_bus import EventBus
 from ..repositories.bazaar_repo import (
     AbstractBazaarRepo,
@@ -149,6 +154,86 @@ class BazaarService(ProtectionGateMixin):
         if listing is None:
             raise ListingNotFoundError(post_id)
         return listing
+
+    # ─── Visibility (who may see / trade on a listing) ──────────────────
+
+    async def _seat(self, listing: BazaarListing, user_id: str) -> SpaceMember | None:
+        """``user_id``'s seat in the listing's space (any role, a follower
+        included), or ``None`` — no seat, a dissolved space. Fails closed
+        without the space service."""
+        if self._spaces is None:
+            raise RuntimeError("space service not attached")
+        try:
+            return await self._spaces.require_reader(listing.space_id, user_id)
+        except SpacePermissionError, KeyError:
+            return None
+
+    async def get_visible_listing(
+        self, post_id: str, viewer_user_id: str
+    ) -> BazaarListing:
+        """The listing, for someone who may see it: a seat in its space
+        (any role — a follower reads the Bazaar tab too) or its seller
+        (``GET /api/bazaar?seller=me`` lists it wherever they are now).
+        Anyone else gets :class:`ListingNotFoundError` — the same 404 an
+        unknown id gets, so a listing id is no oracle."""
+        listing = await self._repo.get_listing(post_id)
+        if listing is None:
+            raise ListingNotFoundError(post_id)
+        if listing.seller_user_id == viewer_user_id:
+            return listing
+        if await self._seat(listing, viewer_user_id) is None:
+            raise ListingNotFoundError(post_id)
+        return listing
+
+    async def viewer_can_trade(self, listing: BazaarListing, user_id: str) -> bool:
+        """May ``user_id`` bid / make an offer here — a writer seat in the
+        listing's space (a follower looks, saves, but doesn't trade). The
+        SPA hides the buy controls on ``False``; the write paths enforce
+        it regardless (:meth:`_tradeable_listing`). Never the seller, who
+        can't buy their own listing."""
+        if listing.seller_user_id == user_id:
+            return False
+        seat = await self._seat(listing, user_id)
+        return seat is not None and seat.role in WRITER_ROLES
+
+    async def _tradeable_listing(
+        self, post_id: str, buyer_user_id: str
+    ) -> BazaarListing:
+        """The listing a buyer bids / makes an offer on: visible to them
+        (404 otherwise) and — trading being a write — not from a
+        read-only follower seat (403 ``SUBSCRIBER_READ_ONLY``). The
+        seller falls through so the own-listing rule answers them."""
+        listing = await self._repo.get_listing(post_id)
+        if listing is None:
+            raise ListingNotFoundError(post_id)
+        if listing.seller_user_id == buyer_user_id:
+            return listing
+        seat = await self._seat(listing, buyer_user_id)
+        if seat is None:
+            raise ListingNotFoundError(post_id)
+        assert self._spaces is not None  # _seat fails closed without it
+        self._spaces.assert_writable_member(seat, action="trade")
+        return listing
+
+    async def _listing_of_bid_or_offer(
+        self,
+        listing_post_id: str,
+        actor_user_id: str,
+        *,
+        owner_user_id: str,
+        not_found: Exception,
+    ) -> BazaarListing:
+        """The listing behind a bid / offer the actor acts on. Its owner
+        (the bidder / offerer) always reaches it — withdrawing after
+        leaving the space must still work; anyone else needs to see the
+        listing, or gets ``not_found`` — never the seller-only 403 that
+        would confirm the bid exists."""
+        if actor_user_id == owner_user_id:
+            return await self.get_listing(listing_post_id)
+        try:
+            return await self.get_visible_listing(listing_post_id, actor_user_id)
+        except ListingNotFoundError:
+            raise not_found from None
 
     async def list_active(self) -> list[BazaarListing]:
         return await self._repo.list_active()
@@ -341,8 +426,9 @@ class BazaarService(ProtectionGateMixin):
         description: str | None | _Unset = _UNSET,
         title: str | None | _Unset = _UNSET,
     ) -> BazaarListing:
-        """Patch mutable fields on an active listing (seller only)."""
-        listing = await self.get_listing(post_id)
+        """Patch mutable fields on an active listing (seller only). Someone
+        who can't see the listing gets the unknown id's 404."""
+        listing = await self.get_visible_listing(post_id, actor_user_id)
         if listing.seller_user_id != actor_user_id:
             raise PermissionError("only the seller may edit this listing")
         if listing.status is not BazaarStatus.ACTIVE:
@@ -406,8 +492,9 @@ class BazaarService(ProtectionGateMixin):
         post_id: str,
         actor_user_id: str,
     ) -> None:
-        """Seller pulls a listing. Only allowed while ACTIVE."""
-        listing = await self.get_listing(post_id)
+        """Seller pulls a listing. Only allowed while ACTIVE. Someone who
+        can't see the listing gets the unknown id's 404."""
+        listing = await self.get_visible_listing(post_id, actor_user_id)
         if listing.seller_user_id != actor_user_id:
             raise PermissionError(
                 "only the seller may cancel this listing",
@@ -440,9 +527,11 @@ class BazaarService(ProtectionGateMixin):
           * AUCTION / BID_FROM must beat the current high bid + step
           * listing must be ACTIVE
           * the bidder isn't a protected account (§CP.R)
+          * the bidder holds a writer seat in the listing's space (404
+            without a seat, 403 for a read-only follower)
         """
         await self._require_unrestricted(bidder_user_id, ProtectedCapability.BAZAAR)
-        listing = await self.get_listing(listing_post_id)
+        listing = await self._tradeable_listing(listing_post_id, bidder_user_id)
         if listing.status is not BazaarStatus.ACTIVE:
             raise ListingNotActiveError(status=422)
         if listing.seller_user_id == bidder_user_id:
@@ -486,7 +575,12 @@ class BazaarService(ProtectionGateMixin):
         bid = await self._repo.get_bid(bid_id)
         if bid is None:
             raise BidNotFoundError(bid_id)
-        listing = await self.get_listing(bid.listing_post_id)
+        listing = await self._listing_of_bid_or_offer(
+            bid.listing_post_id,
+            actor_user_id,
+            owner_user_id=bid.bidder_user_id,
+            not_found=BidNotFoundError(bid_id),
+        )
         if listing.seller_user_id != actor_user_id:
             raise PermissionError("Only the seller may accept this offer")
         # §CP.R: nor sell — even from a listing made before protection —
@@ -524,7 +618,12 @@ class BazaarService(ProtectionGateMixin):
         bid = await self._repo.get_bid(bid_id)
         if bid is None:
             raise BidNotFoundError(bid_id)
-        listing = await self.get_listing(bid.listing_post_id)
+        listing = await self._listing_of_bid_or_offer(
+            bid.listing_post_id,
+            actor_user_id,
+            owner_user_id=bid.bidder_user_id,
+            not_found=BidNotFoundError(bid_id),
+        )
         if listing.seller_user_id != actor_user_id:
             raise PermissionError("Only the seller may reject this offer")
         try:
@@ -551,9 +650,14 @@ class BazaarService(ProtectionGateMixin):
         bid = await self._repo.get_bid(bid_id)
         if bid is None:
             raise BidNotFoundError(bid_id)
+        listing = await self._listing_of_bid_or_offer(
+            bid.listing_post_id,
+            actor_user_id,
+            owner_user_id=bid.bidder_user_id,
+            not_found=BidNotFoundError(bid_id),
+        )
         if bid.bidder_user_id != actor_user_id:
             raise PermissionError("only the bidder may withdraw this bid")
-        listing = await self.get_listing(bid.listing_post_id)
         try:
             await self._repo.withdraw_bid(bid_id)
         except BidStateError as exc:
@@ -567,7 +671,9 @@ class BazaarService(ProtectionGateMixin):
             )
         )
 
-    async def list_bids(self, post_id: str) -> list[BazaarBid]:
+    async def list_bids(self, post_id: str, *, viewer_user_id: str) -> list[BazaarBid]:
+        """The bids on a listing the viewer may see (404 otherwise)."""
+        await self.get_visible_listing(post_id, viewer_user_id)
         return await self._repo.list_bids(post_id)
 
     # ─── Fixed-price offers (§23.23) ────────────────────────────────────
@@ -588,7 +694,7 @@ class BazaarService(ProtectionGateMixin):
         protected account can't make offers (§CP.R).
         """
         await self._require_unrestricted(offerer_user_id, ProtectedCapability.BAZAAR)
-        listing = await self.get_listing(listing_post_id)
+        listing = await self._tradeable_listing(listing_post_id, offerer_user_id)
         if listing.status != BazaarStatus.ACTIVE:
             raise ListingNotActiveError(status=409)
         if listing.mode == BazaarMode.AUCTION:
@@ -636,7 +742,12 @@ class BazaarService(ProtectionGateMixin):
         offer = await self._repo.get_offer(offer_id)
         if offer is None:
             raise OfferNotFoundError(offer_id)
-        listing = await self.get_listing(offer.listing_post_id)
+        listing = await self._listing_of_bid_or_offer(
+            offer.listing_post_id,
+            actor_user_id,
+            owner_user_id=offer.offerer_user_id,
+            not_found=OfferNotFoundError(offer_id),
+        )
         if actor_user_id != listing.seller_user_id:
             raise PermissionError("only the seller may accept offers")
         await self._require_unrestricted(actor_user_id, ProtectedCapability.BAZAAR)
@@ -679,7 +790,12 @@ class BazaarService(ProtectionGateMixin):
         offer = await self._repo.get_offer(offer_id)
         if offer is None:
             raise OfferNotFoundError(offer_id)
-        listing = await self.get_listing(offer.listing_post_id)
+        listing = await self._listing_of_bid_or_offer(
+            offer.listing_post_id,
+            actor_user_id,
+            owner_user_id=offer.offerer_user_id,
+            not_found=OfferNotFoundError(offer_id),
+        )
         if actor_user_id != listing.seller_user_id:
             raise PermissionError("only the seller may reject offers")
         updated = await self._repo.update_offer_status(offer_id, "rejected")
@@ -708,6 +824,12 @@ class BazaarService(ProtectionGateMixin):
         offer = await self._repo.get_offer(offer_id)
         if offer is None:
             raise OfferNotFoundError(offer_id)
+        await self._listing_of_bid_or_offer(
+            offer.listing_post_id,
+            actor_user_id,
+            owner_user_id=offer.offerer_user_id,
+            not_found=OfferNotFoundError(offer_id),
+        )
         if actor_user_id != offer.offerer_user_id:
             raise PermissionError("only the offerer may withdraw")
         return await self._repo.update_offer_status(offer_id, "withdrawn")
@@ -723,9 +845,10 @@ class BazaarService(ProtectionGateMixin):
         The seller sees every offer; other callers see only their own.
         Sellers routing-need the full list to pick which to accept;
         other participants get their row back so they can poll the
-        status of their own offer.
+        status of their own offer. Someone who can't see the listing gets
+        the unknown id's 404.
         """
-        listing = await self.get_listing(listing_post_id)
+        listing = await self.get_visible_listing(listing_post_id, actor_user_id)
         if actor_user_id == listing.seller_user_id:
             return await self._repo.list_offers_for_listing(listing_post_id)
         # Filter by offerer — the caller's own offer (or none).
@@ -740,8 +863,8 @@ class BazaarService(ProtectionGateMixin):
         user_id: str,
         post_id: str,
     ) -> None:
-        """Bookmark a listing for the caller. Idempotent."""
-        await self.get_listing(post_id)  # existence check
+        """Bookmark a listing the caller can see. Idempotent."""
+        await self.get_visible_listing(post_id, user_id)
         await self._repo.save_listing_bookmark(user_id=user_id, post_id=post_id)
 
     async def unsave_listing(
@@ -770,7 +893,16 @@ class BazaarService(ProtectionGateMixin):
         self,
         user_id: str,
     ) -> list[dict]:
-        return await self._repo.list_saved_listings(user_id)
+        """The caller's bookmarks of listings they can still see — one of
+        a space they left is dropped (it would only hydrate into a 404)."""
+        out: list[dict] = []
+        for row in await self._repo.list_saved_listings(user_id):
+            try:
+                await self.get_visible_listing(str(row["post_id"]), user_id)
+            except ListingNotFoundError:
+                continue
+            out.append(row)
+        return out
 
     # ─── Expiry ──────────────────────────────────────────────────────────
 

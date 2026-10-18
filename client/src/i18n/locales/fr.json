@@ -3763,6 +3763,7 @@
   "bazaar.card.loading": "Chargement de l'annonce…",
   "bazaar.card.missing": "Les détails de l'annonce n'ont pas encore été ajoutés à cette publication.",
   "bazaar.card.load_error": "Impossible de charger cette annonce. Réessayez plus tard.",
+  "bazaar.card.follower_read_only": "Vous suivez cet espace : vous pouvez consulter et enregistrer les annonces, mais acheter, enchérir et faire une offre est réservé aux membres.",
   "bazaar.card.bid_placed": "Enchère placée",
   "bazaar.card.confirm_withdraw_bid": "Retirer cette enchère ?",
   "bazaar.card.bid_withdrawn": "Enchère retirée",

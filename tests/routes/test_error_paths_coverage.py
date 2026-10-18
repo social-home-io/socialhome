@@ -1279,7 +1279,8 @@ async def test_bazaar_bids_list(client):
         "/api/bazaar/whatever/bids",
         headers=_auth(client._tok),
     )
-    assert r.status == 200  # empty list for unknown listing
+    # An unknown listing is a 404, the same as one the caller can't see.
+    assert r.status == 404
 
 
 # ─── gfs.py ────────────────────────────────────────────────────────────────

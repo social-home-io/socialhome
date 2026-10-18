@@ -17,6 +17,7 @@ from socialhome.domain.events import (
     BazaarOfferAccepted,
 )
 from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
+from socialhome.domain.space import SpaceMember
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo, new_bid
 from socialhome.services.bazaar_service import (
@@ -26,6 +27,24 @@ from socialhome.services.bazaar_service import (
     BidNotFoundError,
     ListingNotFoundError,
 )
+from socialhome.services.space_service import SpaceService
+
+
+class _SeatedSpaces:
+    """Stands in for SpaceService: everyone holds a member seat in every
+    space (the Bazaar's visibility gate passes) and the posts level lets
+    every edit through. Gate behaviour itself is covered end to end in
+    ``tests/routes/test_bazaar_membership_gate.py``."""
+
+    async def require_reader(self, space_id, user_id):
+        return SpaceMember(
+            space_id=space_id, user_id=user_id, role="member", joined_at=""
+        )
+
+    assert_writable_member = staticmethod(SpaceService.assert_writable_member)
+
+    async def require_content_access(self, *_a, **_kw):
+        return None
 
 
 @pytest.fixture
@@ -48,6 +67,7 @@ async def env(tmp_dir):
     e.repo = SqliteBazaarRepo(db)
     e.bus = EventBus()
     e.svc = BazaarService(e.repo, e.bus)
+    e.svc.attach_spaces(_SeatedSpaces())
     e.events: list = []
 
     async def _capture(evt):

@@ -3790,6 +3790,7 @@
   "bazaar.card.loading": "Cargando anuncio…",
   "bazaar.card.missing": "Este mensaje aún no tiene los detalles del anuncio.",
   "bazaar.card.load_error": "No se pudo cargar el anuncio. Inténtalo más tarde.",
+  "bazaar.card.follower_read_only": "Sigues este espacio: puedes ver y guardar anuncios, pero comprar, pujar y hacer ofertas es solo para miembros.",
   "bazaar.card.bid_placed": "Oferta realizada",
   "bazaar.card.confirm_withdraw_bid": "¿Retirar esta oferta?",
   "bazaar.card.bid_withdrawn": "Oferta retirada",

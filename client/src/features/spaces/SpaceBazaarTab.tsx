@@ -40,12 +40,16 @@ export async function loadSpaceBazaar(spaceId: string) {
   }
 }
 
-export function SpaceBazaarTab({ spaceId, canSell = true }: {
+export function SpaceBazaarTab({ spaceId, canSell = true, follower = false }: {
   spaceId: string
   /** False while the space keeps posts to its admins for the viewer
    *  (``posts_access`` ADMIN_ONLY, §4.3): a listing is a post. */
   canSell?: boolean
+  /** A read-only follower: looks and saves, never sells — no "New
+   *  listing", and no admin-only note (that isn't why). */
+  follower?: boolean
 }) {
+  const sells = canSell && !follower
   useEffect(() => {
     selected.value = null
     void loadSpaceBazaar(spaceId)
@@ -86,11 +90,11 @@ export function SpaceBazaarTab({ spaceId, canSell = true }: {
         <p class="sh-muted" style={{ margin: 0 }}>
           {t('space.bazaar.intro')}
         </p>
-        {canSell && !isRestricted('bazaar') && (
+        {sells && !isRestricted('bazaar') && (
           <Button onClick={() => openBazaarCreate(spaceId)}>+ {t('space.bazaar.new_listing')}</Button>
         )}
       </div>
-      {!canSell && <AccessNote feature="posts" />}
+      {!canSell && !follower && <AccessNote feature="posts" />}
       {isRestricted('bazaar') && <ProtectedNotice capability="bazaar" />}
       {loading.value ? (
         <BazaarSkeleton />
@@ -98,12 +102,12 @@ export function SpaceBazaarTab({ spaceId, canSell = true }: {
         <div class="sh-empty-state">
           <div aria-hidden="true">🛍</div>
           <h3>{t('space.bazaar.empty_title')}</h3>
-          {canSell && (
+          {sells && (
             <p class="sh-muted">
               {t('space.bazaar.empty_body')}
             </p>
           )}
-          {canSell && !isRestricted('bazaar') && (
+          {sells && !isRestricted('bazaar') && (
             <Button onClick={() => openBazaarCreate(spaceId)}>+ {t('space.bazaar.new_listing')}</Button>
           )}
         </div>
