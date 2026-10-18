@@ -1960,7 +1960,7 @@ async def test_ownership_transfer_requires_to_user_id(client):
 async def test_join_request_lifecycle(client):
     r = await client.post(
         "/api/spaces",
-        json={"name": "OpenJoin", "join_mode": "request"},
+        json={"name": "OpenJoin", "join_mode": "request", "space_type": "public"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -1992,7 +1992,7 @@ async def test_join_request_lifecycle(client):
 async def test_join_request_deny_closes_flow(client):
     r = await client.post(
         "/api/spaces",
-        json={"name": "DenyMe", "join_mode": "request"},
+        json={"name": "DenyMe", "join_mode": "request", "space_type": "public"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -2013,7 +2013,7 @@ async def test_join_request_deny_closes_flow(client):
 async def test_join_request_unknown_action_422(client):
     r = await client.post(
         "/api/spaces",
-        json={"name": "Bad", "join_mode": "request"},
+        json={"name": "Bad", "join_mode": "request", "space_type": "public"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]

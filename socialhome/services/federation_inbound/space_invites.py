@@ -24,10 +24,12 @@ from ...domain.events import (
     RemoteSpaceJoinRequestReceived,
 )
 from ...domain.federation import FederationEventType
+from ...domain.space import PUBLIC_SPACE_TIERS, JoinMode
 from ...infrastructure.event_bus import EventBus
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
+    from ...domain.space import Space
     from ...federation.federation_service import FederationService
     from ...repositories.space_repo import AbstractSpaceRepo
 
@@ -37,7 +39,7 @@ log = logging.getLogger(__name__)
 class SpaceInviteInboundHandlers:
     """Register invitation + join-request inbound handlers."""
 
-    __slots__ = ("_bus", "_space_repo")
+    __slots__ = ("_bus", "_own_instance_id", "_space_repo")
 
     def __init__(
         self,
@@ -47,8 +49,12 @@ class SpaceInviteInboundHandlers:
     ) -> None:
         self._bus = bus
         self._space_repo = space_repo
+        #: Set by :meth:`attach_to`; until then no space is "ours", so a
+        #: join request is refused (fail closed).
+        self._own_instance_id = ""
 
     def attach_to(self, federation_service: FederationService) -> None:
+        self._own_instance_id = federation_service.own_instance_id
         registry = federation_service._event_registry
         registry.register(FederationEventType.SPACE_INVITE, self._on_invite)
         registry.register(FederationEventType.SPACE_INVITE_VIA, self._on_invite_via)
@@ -116,6 +122,28 @@ class SpaceInviteInboundHandlers:
         if not space_id or not user_id:
             log.debug("SPACE_JOIN_REQUEST missing required field")
             return
+        space = await self._space_repo.get(space_id)
+        if not self._takes_remote_join_requests(space):
+            # A private space is joined by invite only, a household space
+            # is for this household's people, and only the host files a
+            # request — anything else would put a stranger's request (and
+            # its notification) in front of the admins of a space the
+            # stranger must not be able to reach.
+            log.warning(
+                "SPACE_JOIN_REQUEST from %s for space %s refused: not a "
+                "public / global space this household hosts that takes "
+                "requests",
+                event.from_instance,
+                space_id,
+            )
+            return
+        if await self._space_repo.is_banned(space_id, user_id):
+            log.info(
+                "SPACE_JOIN_REQUEST from %s refused: applicant banned from %s",
+                event.from_instance,
+                space_id,
+            )
+            return
         message = event.payload.get("message")
         applicant_pk = event.payload.get("applicant_pk")
         request_id = event.payload.get("request_id")
@@ -132,6 +160,19 @@ class SpaceInviteInboundHandlers:
                 space_id=space_id,
                 requester_user_id=user_id,
             )
+        )
+
+    def _takes_remote_join_requests(self, space: Space | None) -> bool:
+        """May another household's user ask to join ``space``? Only a live
+        ``public`` / ``global`` space THIS household hosts, in a join mode
+        that takes requests."""
+        return (
+            space is not None
+            and not space.dissolved
+            and bool(self._own_instance_id)
+            and space.owner_instance_id == self._own_instance_id
+            and space.space_type in PUBLIC_SPACE_TIERS
+            and space.join_mode is not JoinMode.INVITE_ONLY
         )
 
     async def _on_join_request_via(self, event: FederationEvent) -> None:

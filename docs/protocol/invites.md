@@ -1458,6 +1458,16 @@ Used when a user wants to join a public space hosted on an HFS they
 aren't paired with. The GFS forwards the opaque `_VIA` envelope
 without ever decrypting it.
 
+The host files a `SPACE_JOIN_REQUEST` (direct or relayed) only for a
+live `public` / `global` space **it hosts** whose join mode takes
+requests (not `invite_only`), from an applicant not banned there. A
+request for a `private` space (joined by invite only), a `household`
+space (this household's people only), a space another household hosts,
+or an unknown / dissolved id is dropped with a WARNING — nothing is
+filed and no admin is notified. The local route
+`POST /api/spaces/{id}/join-requests` applies the same tier rule to the
+host's own users (see [api.md](../api.md)).
+
 ```mermaid
 sequenceDiagram
     autonumber

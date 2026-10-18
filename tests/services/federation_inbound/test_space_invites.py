@@ -11,6 +11,7 @@ from socialhome.domain.events import (
     RemoteSpaceJoinRequestReceived,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceInviteInboundHandlers
 
@@ -26,6 +27,27 @@ class _FakeRegistry:
 class _FakeFederationService:
     def __init__(self) -> None:
         self._event_registry = _FakeRegistry()
+        self.own_instance_id = "self"
+
+
+def _space(
+    space_id: str = "sp-1",
+    *,
+    space_type: SpaceType = SpaceType.PUBLIC,
+    join_mode: JoinMode = JoinMode.REQUEST,
+    owner: str = "self",
+) -> Space:
+    return Space(
+        id=space_id,
+        name="S",
+        owner_instance_id=owner,
+        owner_username="o",
+        identity_public_key="ab" * 32,
+        config_sequence=1,
+        features=SpaceFeatures(),
+        space_type=space_type,
+        join_mode=join_mode,
+    )
 
 
 class _FakeSpaceRepo:
@@ -33,6 +55,14 @@ class _FakeSpaceRepo:
         self.invitations = []
         self.join_requests = []
         self.join_status = []
+        self.spaces = {"sp-1": _space()}
+        self.banned: set[tuple[str, str]] = set()
+
+    async def get(self, space_id):
+        return self.spaces.get(space_id)
+
+    async def is_banned(self, space_id, user_id):
+        return (space_id, user_id) in self.banned
 
     async def save_invitation(
         self, *, space_id, invited_user_id, invited_by, ttl_days=7
@@ -174,6 +204,90 @@ async def test_join_request_missing_user_id_drops(repo, handlers):
             FederationEventType.SPACE_JOIN_REQUEST,
             {},
             space_id="sp-1",
+        )
+    )
+    assert repo.join_requests == []
+
+
+_PRIVATE = _space("sp-x", space_type=SpaceType.PRIVATE)
+_HOUSEHOLD = _space("sp-x", space_type=SpaceType.HOUSEHOLD, join_mode=JoinMode.OPEN)
+_INVITE_ONLY = _space("sp-x", join_mode=JoinMode.INVITE_ONLY)
+_ELSEWHERE = _space("sp-x", owner="peer-b")
+_DISSOLVED = Space(
+    id="sp-x",
+    name="S",
+    owner_instance_id="self",
+    owner_username="o",
+    identity_public_key="ab" * 32,
+    config_sequence=1,
+    features=SpaceFeatures(),
+    space_type=SpaceType.PUBLIC,
+    join_mode=JoinMode.REQUEST,
+    dissolved=True,
+)
+
+
+@pytest.mark.parametrize(
+    "space",
+    [None, _PRIVATE, _HOUSEHOLD, _INVITE_ONLY, _ELSEWHERE, _DISSOLVED],
+    ids=[
+        "unknown",
+        "private",
+        "household",
+        "invite_only",
+        "hosted_elsewhere",
+        "dissolved",
+    ],
+)
+async def test_join_request_only_for_a_public_space_we_host(bus, repo, handlers, space):
+    """A paired peer may ask to join a public / global space THIS household
+    hosts that takes requests — never a private one (invite only), a
+    household one (local people only), another host's space, a dissolved
+    or an unknown one. Anything else is dropped: nothing filed, no
+    notification for the admins."""
+    if space is not None:
+        repo.spaces["sp-x"] = space
+    captured: list[RemoteSpaceJoinRequestReceived] = []
+
+    async def _append(e):
+        captured.append(e)
+
+    bus.subscribe(RemoteSpaceJoinRequestReceived, _append)
+    await handlers._on_join_request(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST, {"user_id": "u-1"}, space_id="sp-x"
+        )
+    )
+    assert repo.join_requests == []
+    assert captured == []
+
+
+async def test_join_request_for_a_global_space_is_filed(repo, handlers):
+    repo.spaces["sp-g"] = _space("sp-g", space_type=SpaceType.GLOBAL)
+    await handlers._on_join_request(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST, {"user_id": "u-1"}, space_id="sp-g"
+        )
+    )
+    assert [r[0] for r in repo.join_requests] == ["sp-g"]
+
+
+async def test_join_request_from_a_banned_user_is_dropped(repo, handlers):
+    repo.banned.add(("sp-1", "u-1"))
+    await handlers._on_join_request(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST, {"user_id": "u-1"}, space_id="sp-1"
+        )
+    )
+    assert repo.join_requests == []
+
+
+async def test_join_request_before_attach_fails_closed(bus, repo):
+    """No federation attached → no own instance id → nothing is "ours"."""
+    h = SpaceInviteInboundHandlers(bus=bus, space_repo=repo)
+    await h._on_join_request(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST, {"user_id": "u-1"}, space_id="sp-1"
         )
     )
     assert repo.join_requests == []

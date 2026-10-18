@@ -79,7 +79,7 @@ async def test_inviting_an_existing_member_is_403_user_already_member(client):
 
 
 async def test_banned_self_join_request_is_403_banned(client):
-    sid = await _space(client, join_mode=JoinMode.REQUEST)
+    sid = await _space(client, join_mode=JoinMode.REQUEST, space_type=SpaceType.PUBLIC)
     bob_uid, bob_tok = await _add_user(client, "bob")
     await client.app[space_service_key].ban(
         sid, actor_username="admin", user_id=bob_uid
@@ -110,7 +110,9 @@ async def test_adding_a_banned_user_is_403_user_banned_without_their_id(client):
 
 
 async def test_join_request_to_invite_only_space_is_403_invite_only(client):
-    sid = await _space(client, join_mode=JoinMode.INVITE_ONLY)
+    sid = await _space(
+        client, join_mode=JoinMode.INVITE_ONLY, space_type=SpaceType.PUBLIC
+    )
     _, bob_tok = await _add_user(client, "bob")
     r = await client.post(
         f"/api/spaces/{sid}/join-requests", json={}, headers=_auth(bob_tok)

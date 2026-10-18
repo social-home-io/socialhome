@@ -50,7 +50,6 @@ from socialhome.domain.media_constraints import (
 )
 from socialhome.domain.post import PostType
 from socialhome.domain.space import (
-    AgeRestrictedError,
     AlreadyMemberError,
     ContentAction,
     ContentQueuedForReview,
@@ -975,6 +974,7 @@ async def test_join_request_approve(stack):
         owner_username="anna",
         name="Open",
         join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
     )
     req_id = await stack.space_svc.request_join(space.id, user_id=bob.user_id)
     member = await stack.space_svc.approve_join_request(req_id, actor_username="anna")
@@ -990,6 +990,7 @@ async def test_join_request_deny(stack):
         owner_username="anna",
         name="Open",
         join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
     )
     req_id = await stack.space_svc.request_join(space.id, user_id=bob.user_id)
     await stack.space_svc.deny_join_request(req_id, actor_username="anna")
@@ -3676,18 +3677,21 @@ async def test_age_gate_blocks_minor_on_approve_join_request(stack):
         owner_username="anna",
         name="Adults",
         join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
     )
     await cp.enable_protection(
         minor_username="kid",
         declared_age=8,
         actor_user_id=anna.user_id,
     )
+    # Filed while the space had no age gate (a gated one is hidden from
+    # the kid, so they could not file it now) — the approve re-checks.
+    req_id = await stack.space_svc.request_join(space.id, user_id=kid.user_id)
     await cp.update_space_age_gate(
         space.id,
         min_age=18,
         actor_user_id=anna.user_id,
     )
-    req_id = await stack.space_svc.request_join(space.id, user_id=kid.user_id)
     with pytest.raises(SpacePermissionError, match="18"):
         await stack.space_svc.approve_join_request(req_id, actor_username="anna")
     assert await stack.space_repo.get_member(space.id, kid.user_id) is None
@@ -3757,6 +3761,7 @@ async def test_age_gate_allows_older_minor_through_seating_paths(stack):
         owner_username="anna",
         name="Teens",
         join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
     )
     await cp.enable_protection(
         minor_username="teen",
@@ -10855,7 +10860,10 @@ async def test_request_join_seats_at_once_in_an_open_space_we_host(stack):
     await stack.provision_user("anna")
     guest = await stack.provision_user("guest")
     s = await stack.space_svc.create_space(
-        owner_username="anna", name="S", join_mode=JoinMode.OPEN
+        owner_username="anna",
+        name="S",
+        join_mode=JoinMode.OPEN,
+        space_type=SpaceType.PUBLIC,
     )
     seen: list = []
     stack.bus.subscribe(SpaceMemberJoined, seen.append)
@@ -10873,7 +10881,10 @@ async def test_request_join_files_a_request_for_an_open_space_hosted_elsewhere(s
     await stack.provision_user("anna")
     guest = await stack.provision_user("guest")
     s = await stack.space_svc.create_space(
-        owner_username="anna", name="S", join_mode=JoinMode.OPEN
+        owner_username="anna",
+        name="S",
+        join_mode=JoinMode.OPEN,
+        space_type=SpaceType.PUBLIC,
     )
     await _hosted_elsewhere(stack, s.id)
     assert await stack.space_svc.request_join(s.id, user_id=guest.user_id)
@@ -10881,17 +10892,22 @@ async def test_request_join_files_a_request_for_an_open_space_hosted_elsewhere(s
 
 
 async def test_open_join_keeps_the_age_gate(stack):
+    """An age-gated space is hidden from a protected minor below its gate
+    (§CP.F1), so their Join is the outsider's 403 — nothing seated."""
     anna = await stack.provision_user("anna", is_admin=True)
     kid = await stack.provision_user("kid")
     cp = await _attach_cp(stack)
     s = await stack.space_svc.create_space(
-        owner_username="anna", name="S", join_mode=JoinMode.OPEN
+        owner_username="anna",
+        name="S",
+        join_mode=JoinMode.OPEN,
+        space_type=SpaceType.PUBLIC,
     )
     await cp.enable_protection(
         minor_username="kid", declared_age=10, actor_user_id=anna.user_id
     )
     await cp.update_space_age_gate(s.id, min_age=13, actor_user_id=anna.user_id)
-    with pytest.raises(AgeRestrictedError):
+    with pytest.raises(SpacePermissionError, match="Not a space member"):
         await stack.space_svc.request_join(s.id, user_id=kid.user_id)
     assert await stack.space_repo.get_member(s.id, kid.user_id) is None
 

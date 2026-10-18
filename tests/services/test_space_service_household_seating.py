@@ -365,7 +365,7 @@ async def test_open_join_records_cp_audit_and_gossip(env, monkeypatch):
     space = await env.spaces.create_space(
         owner_username="anna",
         name="Open",
-        space_type=SpaceType.PRIVATE,
+        space_type=SpaceType.PUBLIC,
         join_mode=JoinMode.OPEN,
     )
     gossip: list[str] = []
