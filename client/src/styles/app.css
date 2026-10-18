@@ -18350,6 +18350,25 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   background: color-mix(in srgb, #ef4444 14%, transparent);
   color: #991b1b;
 }
+/* A private space's scope (only its own members ever see its landing page).
+   Neutral, like the invite-only chip: it states the audience, nothing more. */
+.sh-scope-chip--private {
+  background: color-mix(in srgb, var(--sh-text-muted) 16%, transparent);
+  color: var(--sh-text);
+}
+/* "You're a member" on a space's landing page. ``--sh-success`` is the moss
+   token, redefined per theme, so the ink stays readable on light and dark. */
+.sh-member-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--sh-radius-full);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--sh-success) 16%, transparent);
+  color: var(--sh-success);
+}
 
 /* The chip row carries two independent facts — how you join, and whether the
    content is readable — so both have to be legible in both themes. The hues

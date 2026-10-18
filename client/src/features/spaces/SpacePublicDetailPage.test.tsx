@@ -281,3 +281,76 @@ describe('SpacePublicDetailPage cold link (no directory entry)', () => {
     expect(routeMock).toHaveBeenCalledWith('/spaces/sp-1')
   })
 })
+
+describe('SpacePublicDetailPage — a member opening their own space (cold link)', () => {
+  // ``GET /api/spaces/{id}`` answers a seated caller with the full space
+  // (no ``member_count``) and a caller without a seat with the landing
+  // fields only. The roster says which seat is the viewer's.
+  function seated(spaceType: string, myRole: string, joinMode = 'invite_only') {
+    api.get.mockImplementation(async (url: string) => {
+      if (url === '/api/spaces/sp-1') {
+        return {
+          id: 'sp-1', name: 'Vizeli Family', description: 'Our family space', emoji: '🏡',
+          space_type: spaceType, join_mode: joinMode, category: 'general',
+          features: { allow_subscribers: false },
+        }
+      }
+      if (url === '/api/spaces/sp-1/members') {
+        return [
+          { user_id: 'u1', role: myRole },
+          { user_id: 'u2', role: 'member' },
+        ]
+      }
+      throw new Error(`unexpected ${url}`)
+    })
+  }
+
+  beforeEach(() => {
+    currentUser.value = {
+      user_id: 'u1', username: 'u', display_name: 'U', is_admin: false,
+      picture_url: null, bio: null, is_new_member: false,
+    } as unknown as typeof currentUser.value
+  })
+  afterEach(() => { currentUser.value = null })
+
+  it('a member of a private space sees "You\'re a member" and an Open space action, not "Invite required"', async () => {
+    seated('private', 'owner')
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Vizeli Family'))
+    expect(container.textContent).toContain("You're a member")
+    expect(container.textContent).not.toContain('Invite required')
+    // Nothing about how to get in, or that only members can read it.
+    expect(container.textContent).not.toContain('Only members can read')
+    expect(container.textContent).not.toContain('has to invite you')
+    const open = getByText('Open space').closest('button')!
+    expect(open.disabled).toBe(false)
+    fireEvent.click(open)
+    expect(routeMock).toHaveBeenCalledWith('/spaces/sp-1')
+    expect(container.textContent).toContain('2 members')
+  })
+
+  it.each([
+    ['private', 'Private'],
+    ['household', 'Your household'],
+    ['public', 'Public'],
+    ['global', 'Global'],
+  ])('a %s space is labelled "%s"', async (spaceType, label) => {
+    seated(spaceType, 'member')
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Vizeli Family'))
+    const chip = container.querySelector('.sh-scope-chip')!
+    expect(chip.textContent).toContain(label)
+    for (const other of ['Private', 'Your household', 'Public', 'Global']) {
+      if (other !== label) expect(chip.textContent).not.toContain(other)
+    }
+  })
+
+  it('a follower (subscriber seat) is not called a member', async () => {
+    seated('global', 'subscriber', 'request')
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Vizeli Family'))
+    expect(container.textContent).not.toContain("You're a member")
+    expect(container.querySelector('.sh-subscribed-pill')).not.toBeNull()
+    expect(getByText('Request to join')).toBeTruthy()
+  })
+})

@@ -9,8 +9,9 @@
  * Data sources (in priority order):
  *   1. ``directoryCache`` — populated by :class:`SpaceBrowserPage` on
  *      load; covers every visible scope.
- *   2. ``GET /api/spaces/{id}`` — works for any authed user, returns
- *      public-shaped fields for local + already-known spaces.
+ *   2. ``GET /api/spaces/{id}`` — the landing fields for a caller with no
+ *      seat in a discoverable space; the full space for a seated caller
+ *      (a member opening their own space, private ones included).
  *
  * The CTA flips to match the viewer's relationship:
  * already-member → "Open space"; pending request → disabled "Pending";
@@ -59,24 +60,34 @@ const loading = signal<boolean>(true)
 const error = signal<string | null>(null)
 
 /** ``/api/spaces/{id}`` returns the canonical Space wire shape — flatten
- *  it into the DirectoryEntry shape this page renders. A caller with no
- *  seat gets a public / global space's landing fields only, member count
- *  included; the roster (``/members``) is for seats only, so it's the
- *  fallback for a member opening the page. */
+ *  it into the DirectoryEntry shape this page renders.
+ *
+ *  The answer says whether the caller holds a seat: a caller with no seat
+ *  gets a discoverable space's landing fields only, ``member_count``
+ *  included; a seated caller gets the full space and no count. A seated
+ *  caller reads the roster (``/members``, seats only) for the count and for
+ *  their own role — a ``subscriber`` seat is a follower, every other role
+ *  a member. */
 async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
   try {
     const space = await api.get(`/api/spaces/${spaceId}`) as Space & {
       member_count?: number
     }
+    const seated = space.member_count === undefined
     let memberCount = space.member_count ?? 0
-    if (space.member_count === undefined) {
+    // Seated but the roster didn't load: still a seat, so assume a member —
+    // "Open space" is the right way in for a follower too.
+    let myRole: string | undefined
+    if (seated) {
       try {
         const members = await api.get(
           `/api/spaces/${spaceId}/members`,
-        ) as Array<{ user_id: string }>
+        ) as Array<{ user_id: string, role?: string }>
         memberCount = members.length
-      } catch { /* seats only; leave at 0 */ }
+        myRole = members.find(m => m.user_id === currentUser.value?.user_id)?.role
+      } catch { /* leave the count at 0 */ }
     }
+    const following = seated && myRole === 'subscriber'
     return {
       space_id:           space.id,
       host_instance_id:   'local',
@@ -86,16 +97,30 @@ async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
       description:        space.description,
       emoji:              space.emoji,
       member_count:       memberCount,
-      scope:              space.space_type as 'household' | 'public',
+      scope:              space.space_type,
       join_mode:          space.join_mode,
       allow_subscribers:  !!space.features?.allow_subscribers,
       min_age:            0,
       category:           space.category,
-      already_member:     false,
-      already_subscribed: false,
+      already_member:     seated && !following,
+      already_subscribed: following,
     }
   } catch {
     return null
+  }
+}
+
+/** The scope chip in the hero: which audience the space is for. */
+function scopeLabel(scope: DirectoryEntry['scope']): string {
+  switch (scope) {
+    case 'private':
+      return `🔐 ${t('space.visibility.private')}`
+    case 'household':
+      return `🏠 ${t('spaces.browse.your_household')}`
+    case 'public':
+      return `🤝 ${t('space.public.scope_public')}`
+    case 'global':
+      return `🌐 ${t('space.public.scope_global')}`
   }
 }
 
@@ -203,16 +228,14 @@ export default function SpacePublicDetailPage() {
 
   const entry = detail.value
   const isLocal = entry.host_instance_id === 'local'
-  const scopeLabel =
-    entry.scope === 'household' ? `🏠 ${t('spaces.browse.your_household')}`
-      : entry.scope === 'public' ? `🤝 ${t('space.public.scope_public')}`
-      : `🌐 ${t('space.public.scope_global')}`
   // Two independent statements, two chips — same as the browser card, so
   // both surfaces tell the same story. The join-mode chip says how you get
   // in; the 🔒 chip says whether there is anything to read before you do.
   const jmode = joinModeChip(entry.join_mode)
   const joinModeLabel = `${jmode.icon} ${jmode.label}`
-  const gated = contentIsGated(entry)
+  // How to get in, and that only members can read it, is for people
+  // outside the space — a member is already in.
+  const gated = !entry.already_member && contentIsGated(entry)
 
   const primaryLabel =
     entry.already_member ? t('space.public.open')
@@ -224,10 +247,11 @@ export default function SpacePublicDetailPage() {
       : entry.join_mode === 'open' ? t('space.public.join')
       : t('space.public.request_join')
 
-  const primaryDisabled =
+  const primaryDisabled = !entry.already_member && (
     entry.request_pending
     || entry.join_mode === 'invite_only'
     || (entry.scope !== 'household' && !entry.host_is_paired)
+  )
 
   return (
     <div class="sh-space-public">
@@ -257,7 +281,10 @@ export default function SpacePublicDetailPage() {
       <div class={`sh-space-public__accent sh-space-public__accent--${entry.scope}`} />
 
       <div class="sh-space-public__chips">
-        <span class="sh-scope-chip">{scopeLabel}</span>
+        <span class="sh-scope-chip">{scopeLabel(entry.scope)}</span>
+        {entry.already_member && (
+          <span class="sh-member-pill">✓ {t('space.public.you_are_member')}</span>
+        )}
         <span class="sh-join-mode-chip">{joinModeLabel}</span>
         {gated && (
           <span class={GATED_CHIP.cls}>
@@ -293,7 +320,7 @@ export default function SpacePublicDetailPage() {
         </section>
       )}
 
-      {entry.scope !== 'household' && !entry.host_is_paired && (
+      {!entry.already_member && entry.scope !== 'household' && !entry.host_is_paired && (
         <section class="sh-space-public__section sh-muted">
           {/* Pairing is a household-admin action — a member is pointed at
            *  an admin rather than at settings they cannot use. */}
