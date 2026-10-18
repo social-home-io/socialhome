@@ -96,6 +96,8 @@ GATED_METHODS: frozenset[str] = frozenset(
         "list_comments",
         # A non-member reads only a public/global space's landing fields.
         "read_space",
+        # A seat to flip it; a member's seat to turn it on.
+        "set_my_location_sharing",
     }
 )
 
@@ -421,6 +423,12 @@ async def stack(tmp_dir):
         (
             "require_reader",
             lambda s: s.space_svc.require_reader(s.space.id, s.bob.user_id),
+        ),
+        (
+            "set_my_location_sharing",
+            lambda s: s.space_svc.set_my_location_sharing(
+                s.space.id, s.bob.user_id, True
+            ),
         ),
         (
             "list_feed",

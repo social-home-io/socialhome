@@ -460,7 +460,9 @@ async def test_patch_zone_full_field_set(client):
     assert body["color"] == "#10b981"
 
 
-async def test_member_location_sharing_non_member_404(client):
+async def test_member_location_sharing_non_member_403(client):
+    """No seat (here a household admin, whom the seat gate lets through):
+    the read gate's own 403, like every other space route."""
     space_id = await _create_space(client)
     # Drop ourselves from the members table.
     await client._db.enqueue(
@@ -472,4 +474,5 @@ async def test_member_location_sharing_non_member_404(client):
         json={"enabled": True},
         headers=_auth(client._tok),
     )
-    assert r.status == 404
+    assert r.status == 403
+    assert (await r.json())["error"]["detail"] == "Not a space member."

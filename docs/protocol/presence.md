@@ -167,8 +167,15 @@ households only — those holding a writer seat; a follower-only household
 gets no zones, live or by §25.6 catch-up (the `space_zones` /
 `space_zones_deleted` sync resources sit behind the same member gate as
 the chat), and a follower-only household drops a `SPACE_ZONE_UPSERTED` an
-older sender still pushes it — via two sealed federation events under the
-space content key:
+older sender still pushes it, and the `space_zones` / `space_zones_deleted`
+records any provider still streams it (receiver-side `holds_member_seat`)
+— via two sealed federation events under the space content key. Rows a
+follower-only household stored before that (zones, the members' pins, the
+admin proposal mirror) were removed by migration 0102. A follower can't
+share their own location in a space either (`PATCH
+…/members/me/location-sharing {"enabled": true}` → 403
+`SUBSCRIBER_READ_ONLY`; the database holds a follower's
+`location_share_enabled` at 0):
 
 - `SPACE_ZONE_UPSERTED` — encrypted payload
   `{zone_id, space_id, name, latitude, longitude, radius_m, color,

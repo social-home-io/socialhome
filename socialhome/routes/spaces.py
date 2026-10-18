@@ -15,7 +15,6 @@ from aiohttp.multipart import BodyPartReader
 from ..app_keys import (
     alias_resolver_key,
     child_protection_service_key,
-    event_bus_key,
     federation_repo_key,
     gfs_server_selection_service_key,
     instance_id_key,
@@ -43,7 +42,6 @@ from ..app_keys import (
 from ..csp import MEDIA_CSP
 from ..domain.child_protection import name_only
 from ..domain.errors import ImageTooLargeError
-from ..domain.events import SpaceMemberLocationOptedIn
 from ..domain.federation import PairingStatus
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.link_preview import link_preview_to_dict
@@ -1047,12 +1045,6 @@ class SpaceMemberLocationSharingView(BaseView):
 
     async def patch(self) -> web.Response:
         ctx = self.user
-        if ctx is None or ctx.user_id is None:
-            return error_response(
-                401,
-                "UNAUTHENTICATED",
-                "Authentication required.",
-            )
         space_id = self.match("id")
         body = await self.body()
         if "enabled" not in body or not isinstance(body["enabled"], bool):
@@ -1061,33 +1053,13 @@ class SpaceMemberLocationSharingView(BaseView):
                 "UNPROCESSABLE",
                 "`enabled` must be a boolean.",
             )
-        repo = self.svc(space_repo_key)
-        ok = await repo.set_member_location_sharing(
-            space_id,
-            ctx.user_id,
-            body["enabled"],
+        # A follower may not opt in (403 SUBSCRIBER_READ_ONLY); on opt-in
+        # the service refires the member's current presence for this one
+        # space so the pin appears at once.
+        enabled = await self.svc(space_service_key).set_my_location_sharing(
+            space_id, ctx.user_id, body["enabled"]
         )
-        if not ok:
-            return error_response(
-                404,
-                "NOT_FOUND",
-                "You are not a member of this space.",
-            )
-        # On opt-in, fire a bus event so SpaceLocationOutbound can
-        # refire the member's current presence for this one space —
-        # the user sees their pin appear immediately instead of
-        # waiting for the next HA push (could be minutes).
-        if body["enabled"]:
-            bus = self.svc(event_bus_key)
-            await bus.publish(
-                SpaceMemberLocationOptedIn(
-                    space_id=space_id,
-                    user_id=ctx.user_id,
-                ),
-            )
-        return web.json_response(
-            {"location_share_enabled": body["enabled"]},
-        )
+        return web.json_response({"location_share_enabled": enabled})
 
 
 class SpaceMemberMePictureView(BaseView):
@@ -3109,6 +3081,9 @@ class SpaceNotifPrefsView(BaseView):
                 "level": level,
                 "feature_location": feature_location,
                 "location_share_enabled": bool(member.location_share_enabled),
+                # A follower is offered no sharing toggle (owner decision 13).
+                "location_share_allowed": feature_location
+                and member.role in WRITER_ROLES,
             }
         )
 

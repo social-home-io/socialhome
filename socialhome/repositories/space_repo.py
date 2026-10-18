@@ -1325,7 +1325,8 @@ class SqliteSpaceRepo:
     async def list_location_shared_spaces_for_user(self, user_id: str) -> list[Space]:
         """Return every space where this user has opted in to location
         sharing (``location_share_enabled = 1``) AND the space has the
-        feature on (``feature_location = 1``).
+        feature on (``feature_location = 1``). Never a follower's seat
+        (migration 0102 holds their flag at 0; this is belt and braces).
 
         Used by :class:`SpaceLocationOutbound` to fan a household
         ``PresenceUpdated`` out to the spaces that should receive a
@@ -1338,6 +1339,7 @@ class SqliteSpaceRepo:
               JOIN space_members m ON m.space_id = s.id
              WHERE m.user_id = ?
                AND m.location_share_enabled = 1
+               AND m.role <> 'subscriber'
                AND s.feature_location = 1
                AND s.dissolved = 0
              ORDER BY s.id
@@ -1349,7 +1351,8 @@ class SqliteSpaceRepo:
     async def list_user_memberships_with_location_feature(
         self, user_id: str
     ) -> list[dict]:
-        """Return every space where *user_id* is a member AND
+        """Return every space where *user_id* holds a member's seat (not a
+        follower's — a follower can't share, owner decision 13) AND
         ``feature_location = 1``, sorted by space name.
 
         Each row carries the fields needed by
@@ -1366,6 +1369,7 @@ class SqliteSpaceRepo:
               FROM spaces s
               JOIN space_members m ON m.space_id = s.id
              WHERE m.user_id = ?
+               AND m.role <> 'subscriber'
                AND s.feature_location = 1
                AND s.dissolved = 0
              ORDER BY s.name

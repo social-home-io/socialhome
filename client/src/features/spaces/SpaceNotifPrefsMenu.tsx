@@ -33,6 +33,9 @@ interface PrefsResponse {
   level: NotifLevel
   feature_location: boolean
   location_share_enabled: boolean
+  /** ``false`` for a read-only follower: they may not share their
+   *  location in the space (owner decision 13), so no toggle. */
+  location_share_allowed: boolean
 }
 
 const LEVEL_ICONS: Record<NotifLevel, string> = {
@@ -69,7 +72,11 @@ export function SpaceNotifPrefsMenu({ spaceId }: Props) {
         ) as PrefsResponse
         if (stopped) return
         setLevel(body.level)
-        setFeatureLocation(Boolean(body.feature_location))
+        // The toggle is offered only where the space has location on AND
+        // the caller may share there (not a follower).
+        setFeatureLocation(
+          Boolean(body.feature_location) && body.location_share_allowed === true,
+        )
         setShareLocation(Boolean(body.location_share_enabled))
       } catch {
         // Non-member or network issue — leave defaults + hide menu later.

@@ -105,12 +105,24 @@ def _config(tmp_path, name: str) -> Config:
 
 async def _seed(db, *, local: str | None = None) -> None:
     """The space hosted by ``HOST``, every household seated; ``local`` is
-    the one user who lives on this household."""
+    the one user who lives on this household. With no ``local`` the
+    household still holds a member seat of its own (``u-dora``) — a member
+    household always does, and a follower-only one keeps no zones (#1006)."""
     await db.enqueue(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
         " identity_public_key) VALUES(?,?,?,?,?)",
         (SPACE, SPACE, HOST, "anna", "00" * 32),
     )
+    if local is None:
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name)"
+            " VALUES('dora', 'u-dora', 'Dora')"
+        )
+        await db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role)"
+            " VALUES(?, 'u-dora', 'member')",
+            (SPACE,),
+        )
     for instance, user, role in SEATS:
         if user == local:
             await db.enqueue(

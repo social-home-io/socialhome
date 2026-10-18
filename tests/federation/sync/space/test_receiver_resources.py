@@ -299,6 +299,15 @@ class _SpaceRepoStub:
     async def get_member(self, space_id, user_id):
         return SimpleNamespace(user_id=user_id) if user_id == "u-seated" else None
 
+    # ``holds_member_seat``: this household's one local user ``u-local``
+    # holds a member's seat, or only a follower's (``follower_only``).
+    async def list_local_member_user_ids(self, space_id):
+        return ["u-local"]
+
+    async def list_members(self, space_id):
+        role = "subscriber" if getattr(self._c, "follower_only", False) else "member"
+        return [SimpleNamespace(user_id="u-local", role=role)]
+
 
 @pytest.fixture
 def bus():
@@ -1126,6 +1135,19 @@ async def test_space_zones(setup):
     assert z.latitude == 47.3769
     assert z.radius_m == 150
     assert z.color == "#3b82f6"
+
+
+async def test_space_zones_never_land_on_a_follower_only_household(setup):
+    """The members' places are not a follower's (owner decision 13): an
+    older sender — or any provider — streaming ``space_zones`` /
+    ``space_zones_deleted`` to a household whose local users only follow
+    the space stores nothing, like the live ``SPACE_ZONE_UPSERTED`` (#1006)."""
+    r, c, kp = setup
+    c.follower_only = True
+    await _send(r, kp, "space_zones", [dict(_GOOD_ZONE_RECORD)])
+    assert c.zones == []
+    await _send(r, kp, "space_zones_deleted", [{"id": "z_ok"}], sync_id="sync-2")
+    assert c.zones == []
 
 
 async def test_space_zones_malformed_record_dropped(setup):
