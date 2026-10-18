@@ -106,6 +106,7 @@
   "dms.location.send_failed": "Impossible d'envoyer la position : {error}",
   "calendar.title": "Calendrier",
   "calendar.no_events": "Aucun événement sur cette période.",
+  "calendar.load_failed": "Impossible de charger le calendrier.",
   "calendar.new_event": "Nouvel événement",
   "calendar.today": "Aujourd'hui",
   "calendar.month": "Mois",

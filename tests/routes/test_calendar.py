@@ -1451,3 +1451,159 @@ async def test_space_event_cover_must_be_local_and_legacy_is_served_null(client)
     body = await r.json()
     assert body["summary"] == "Retro"
     assert body["cover_url"] is None
+
+
+async def test_space_date_only_all_day_event_lists_alongside_timed(client):
+    """Regression: one all-day event created with date-only bounds made
+    ``GET …/calendar/events`` 500 for the whole space (naive vs aware
+    compare). The bounds are normalised on write to UTC instants of the
+    day in the event's tz; the list answers 200 with both events."""
+    await _seed_space(client)
+    timed = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Timed",
+            "start": "2026-10-19T09:00:00Z",
+            "end": "2026-10-19T10:00:00Z",
+        },
+        headers=_auth(client._tok),
+    )
+    assert timed.status == 201
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Day off",
+            "start": "2026-10-20",
+            "end": "2026-10-20",
+            "all_day": True,
+            "tz": "Europe/Zurich",
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    created = await r.json()
+    assert created["start"] == "2026-10-19T22:00:00+00:00"
+    assert created["end"] == "2026-10-20T22:00:00+00:00"
+    assert created["tz"] == "Europe/Zurich"
+
+    r2 = await client.get(
+        "/api/spaces/sp-cal/calendar/events"
+        "?start=2026-10-01T00:00:00Z&end=2026-11-01T00:00:00Z",
+        headers=_auth(client._tok),
+    )
+    assert r2.status == 200
+    events = await r2.json()
+    assert [e["summary"] for e in events] == ["Timed", "Day off"]
+    day_off = events[1]
+    assert day_off["all_day"] is True
+    assert day_off["start"] == "2026-10-19T22:00:00+00:00"
+
+
+async def test_space_patch_date_only_start_on_timed_event(client):
+    """A PATCH that sends a date-only bound against an event whose other
+    bound is stored tz-aware compared naive vs aware (500) — it now
+    normalises like the create."""
+    await _seed_space(client)
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Trip",
+            "start": "2026-10-20T09:00:00Z",
+            "end": "2026-10-22T09:00:00Z",
+            "tz": "UTC",
+        },
+        headers=_auth(client._tok),
+    )
+    eid = (await r.json())["id"]
+    r2 = await client.patch(
+        f"/api/spaces/sp-cal/calendar/events/{eid}",
+        json={"start": "2026-10-20", "all_day": True},
+        headers=_auth(client._tok),
+    )
+    assert r2.status == 200
+    body = await r2.json()
+    assert body["start"] == "2026-10-20T00:00:00+00:00"
+
+
+async def test_personal_date_only_all_day_event_lists(client):
+    """The household calendar has the same create / list path."""
+    r = await client.post(
+        "/api/calendars", json={"name": "C"}, headers=_auth(client._tok)
+    )
+    cid = (await r.json())["id"]
+    for body in (
+        {
+            "summary": "Timed",
+            "start": "2026-10-19T09:00:00Z",
+            "end": "2026-10-19T10:00:00Z",
+        },
+        {
+            "summary": "Day off",
+            "start": "2026-10-20",
+            "end": "2026-10-20",
+            "all_day": True,
+            "tz": "UTC",
+        },
+    ):
+        r = await client.post(
+            f"/api/calendars/{cid}/events", json=body, headers=_auth(client._tok)
+        )
+        assert r.status == 201
+    r2 = await client.get(
+        f"/api/calendars/{cid}/events"
+        "?start=2026-10-01T00:00:00Z&end=2026-11-01T00:00:00Z",
+        headers=_auth(client._tok),
+    )
+    assert r2.status == 200
+    events = await r2.json()
+    assert [e["summary"] for e in events] == ["Timed", "Day off"]
+    assert events[1]["start"] == "2026-10-20T00:00:00+00:00"
+    assert events[1]["end"] == "2026-10-21T00:00:00+00:00"
+
+
+async def test_personal_patch_date_only_end(client):
+    """The household PATCH normalises a date-only end too."""
+    r = await client.post(
+        "/api/calendars", json={"name": "C"}, headers=_auth(client._tok)
+    )
+    cid = (await r.json())["id"]
+    r = await client.post(
+        f"/api/calendars/{cid}/events",
+        json={
+            "summary": "Trip",
+            "start": "2026-10-20T09:00:00Z",
+            "end": "2026-10-20T10:00:00Z",
+            "tz": "UTC",
+        },
+        headers=_auth(client._tok),
+    )
+    eid = (await r.json())["id"]
+    r2 = await client.patch(
+        f"/api/calendars/events/{eid}",
+        json={"end": "2026-10-21"},
+        headers=_auth(client._tok),
+    )
+    assert r2.status == 200
+    assert (await r2.json())["end"] == "2026-10-22T00:00:00+00:00"
+
+
+async def test_space_list_accepts_date_only_window(client):
+    """A date-only ``?start=`` / ``?end=`` window is UTC midnight — not a
+    naive bound that breaks recurrence expansion."""
+    await _seed_space(client)
+    await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Weekly",
+            "start": "2026-10-05T09:00:00Z",
+            "end": "2026-10-05T10:00:00Z",
+            "rrule": "FREQ=WEEKLY;COUNT=3",
+        },
+        headers=_auth(client._tok),
+    )
+    r = await client.get(
+        "/api/spaces/sp-cal/calendar/events?start=2026-10-01&end=2026-11-01",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert len(await r.json()) == 3

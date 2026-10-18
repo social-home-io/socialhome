@@ -15,6 +15,7 @@ import {
   type CalendarViewMode,
 } from '@/utils/calendar'
 import type { FeedPost, CalendarEvent } from '@/types'
+import { LoadErrorState } from '@/components/LoadErrorState'
 import { EventRowMeta } from '@/components/EventRowMeta'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
@@ -152,6 +153,9 @@ const activeTab = signal<SpaceTab>('feed')
 /** Calendar tab → "Subscribe" dialog (private iCal link). */
 const subscribeFeedOpen = signal(false)
 const spaceCalEvents = signal<CalendarEvent[]>([])
+/** The last events fetch failed — the tab shows an error with Retry, not
+ *  the "no events" empty state (they call for different actions). */
+const spaceCalLoadFailed = signal(false)
 const spaceCalCursor = signal(new Date())
 const spaceCalView = signal<CalendarViewMode>('month')
 /** Which agenda row is expanded, as ``"<dayKey>:<eventId>"``. Keyed
@@ -211,8 +215,10 @@ async function loadSpaceCalendar(spaceId: string) {
       `/api/spaces/${spaceId}/calendar/events`,
       { start, end },
     ) as CalendarEvent[]
+    spaceCalLoadFailed.value = false
   } catch {
     spaceCalEvents.value = []
+    spaceCalLoadFailed.value = true
   }
 }
 
@@ -316,6 +322,7 @@ export default function SpaceFeedPage() {
     spaceDetail.value = null
     memberCount.value = null
     spaceCalEvents.value = []
+    spaceCalLoadFailed.value = false
     spaceCalCursor.value = new Date()
     spaceCalView.value = 'month'
     selectedSpaceEventId.value = null
@@ -868,7 +875,15 @@ export default function SpaceFeedPage() {
               </div>
             </div>
 
-            {shown.length === 0 && (
+            {spaceCalLoadFailed.value && (
+              <LoadErrorState
+                headingLevel={2}
+                message={t('calendar.load_failed')}
+                onRetry={() => { void loadSpaceCalendar(spaceId) }}
+              />
+            )}
+
+            {shown.length === 0 && !spaceCalLoadFailed.value && (
               <div class="sh-empty-state">
                 <div aria-hidden="true">📅</div>
                 {/* Keys: calendar.empty_{month,week,day} */}

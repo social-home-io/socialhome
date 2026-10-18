@@ -143,4 +143,35 @@ describe('SpaceFeedPage ?tab=', () => {
       r.unmount()
     }
   }, 20000)
+
+  it('a failed calendar load shows an error with Retry, not "no events"', async () => {
+    // A 500 from the events list used to fall back to the empty state —
+    // "nothing this month" when the truth was "couldn't fetch".
+    route.query = { tab: 'calendar' }
+    let fail = true
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features: { calendar: true } }
+      if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role: 'member' }]
+      if (url === '/api/spaces/s1/links') return { links: [] }
+      if (url === '/api/spaces/s1/calendar/events') {
+        if (fail) throw Object.assign(new Error('boom'), { status: 500 })
+        return [{
+          id: 'e1', calendar_id: 's1', summary: 'Game night',
+          start: new Date().toISOString(), end: new Date(Date.now() + 3600e3).toISOString(),
+          all_day: false, attendees: [], created_by: 'u1',
+        }]
+      }
+      return []
+    })
+    const tl = await import('@testing-library/preact')
+    const { default: Page } = await import('./SpaceFeedPage')
+    const r = tl.render(<Page />)
+    const alert = await tl.waitFor(() => r.getByRole('alert'))
+    expect(alert.querySelector('h2')?.textContent).toBe("Couldn't load the calendar.")
+    expect(r.container.textContent).not.toContain('No events')
+    fail = false
+    tl.fireEvent.click(tl.within(alert).getByRole('button', { name: 'Retry' }))
+    await tl.waitFor(() => expect(r.getByText('Game night')).toBeTruthy())
+    expect(r.queryByRole('alert')).toBeNull()
+  }, 20000)
 })

@@ -106,3 +106,32 @@ def local_day_bounds(d: date, tz: str) -> tuple[datetime, datetime]:
         local_instant(d, time(0, 0), tz),
         local_instant(d + timedelta(days=1), time(0, 0), tz),
     )
+
+
+def parse_event_bound(value: str, *, tz: str, is_end: bool) -> datetime:
+    """Parse a calendar event's ``start`` / ``end`` from an API body into
+    the tz-aware UTC instant the ``start_dt`` / ``end_dt`` columns store.
+
+    * A date-only value (``"2026-10-20"``) names a day in the event's
+      ``tz``: as a start it is that day's local midnight, as an end the
+      next local midnight — the day is included, so ``start == end ==
+      "2026-10-20"`` is the one all-day "20 Oct". This is the same
+      exclusive-midnight bound the SPA reads back in ``tz``.
+    * A datetime without an offset is UTC (the codebase-wide rule).
+    * A datetime with an offset is converted to UTC.
+
+    Raises :class:`ValueError` (→ 422) on anything else.
+    """
+    try:
+        day = date.fromisoformat(value)
+    except ValueError:
+        day = None
+    if day is not None:
+        return local_day_bounds(day, tz)[1 if is_end else 0]
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid datetime: {value!r}") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

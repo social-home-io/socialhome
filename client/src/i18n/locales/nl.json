@@ -106,6 +106,7 @@
   "dms.location.send_failed": "Locatie kon niet worden verstuurd: {error}",
   "calendar.title": "Agenda",
   "calendar.no_events": "Geen afspraken in deze periode.",
+  "calendar.load_failed": "De agenda kon niet worden geladen.",
   "calendar.new_event": "Nieuwe afspraak",
   "calendar.today": "Vandaag",
   "calendar.month": "Maand",

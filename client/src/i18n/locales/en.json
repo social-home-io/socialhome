@@ -170,6 +170,7 @@
 
   "calendar.title": "Calendar",
   "calendar.no_events": "No events in this period.",
+  "calendar.load_failed": "Couldn't load the calendar.",
   "calendar.new_event": "New event",
   "calendar.today": "Today",
   "calendar.month": "Month",

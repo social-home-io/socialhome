@@ -1461,3 +1461,101 @@ async def test_space_calendar_sync_page_is_every_stored_event_unexpanded(
     assert first[1].rrule == "FREQ=WEEKLY" and first[1].start == ancient
     rest, end = await repo.list_events_sync_page("cs-a", cursor=nxt, limit=2)
     assert [e.id for e in rest] == ["cev-far"] and end is None
+
+
+async def test_space_cal_list_tolerates_legacy_date_only_rows(env):
+    """A row stored with a date-only / offset-less bound (an API client's
+    ``"2026-10-20"`` before the service normalised it) must not 500 the
+    whole space calendar: comparing it with a tz-aware row raised
+    ``TypeError`` in ``_expand_window``'s sort. Offset-less values read
+    back as UTC."""
+    sid = await _seed_space(env, "sp-legacy")
+    for eid, start, end in (
+        ("ev-aware", datetime(2026, 10, 19, 9, tzinfo=UTC), None),
+        ("ev-date", datetime(2026, 10, 20, tzinfo=UTC), None),
+        ("ev-naive", datetime(2026, 10, 21, 8, tzinfo=UTC), None),
+    ):
+        await env.space_cal_repo.save_event(
+            CalendarEvent(
+                id=eid,
+                calendar_id=sid,
+                summary=eid,
+                start=start,
+                end=end or start,
+                created_by="uid-alice",
+                all_day=eid == "ev-date",
+            ),
+            space_id=sid,
+        )
+    # Rewrite two rows into the legacy shapes the API used to store.
+    await env.db.enqueue(
+        "UPDATE space_calendar_events SET start_dt='2026-10-20',"
+        " end_dt='2026-10-21' WHERE id='ev-date'"
+    )
+    await env.db.enqueue(
+        "UPDATE space_calendar_events SET start_dt='2026-10-21T08:00:00',"
+        " end_dt='2026-10-21T09:00:00' WHERE id='ev-naive'"
+    )
+    results = await env.space_cal_repo.list_events_in_range(
+        sid,
+        start=datetime(2026, 10, 1, tzinfo=UTC),
+        end=datetime(2026, 11, 1, tzinfo=UTC),
+    )
+    assert [e.id for e in results] == ["ev-aware", "ev-date", "ev-naive"]
+    by_id = {e.id: e for e in results}
+    assert by_id["ev-date"].start == datetime(2026, 10, 20, tzinfo=UTC)
+    assert by_id["ev-date"].start.tzinfo is not None
+    assert by_id["ev-naive"].end == datetime(2026, 10, 21, 9, tzinfo=UTC)
+
+
+async def test_personal_list_tolerates_legacy_offsetless_rows(env):
+    """Same guarantee for the household calendar's range query."""
+    await env.cal_repo.save_calendar(
+        Calendar(id="cal-legacy", name="C", color="#000", owner_username="alice")
+    )
+    for eid, hour in (("p-aware", 9), ("p-naive", 10)):
+        start = datetime(2026, 10, 20, hour, tzinfo=UTC)
+        await env.cal_repo.save_event(
+            CalendarEvent(
+                id=eid,
+                calendar_id="cal-legacy",
+                summary=eid,
+                start=start,
+                end=start,
+                created_by="uid-alice",
+            )
+        )
+    await env.db.enqueue(
+        "UPDATE calendar_events SET start_dt='2026-10-20T10:00:00',"
+        " end_dt='2026-10-20T11:00:00' WHERE id='p-naive'"
+    )
+    results = await env.cal_repo.list_events_in_range(
+        "cal-legacy",
+        start=datetime(2026, 10, 1, tzinfo=UTC),
+        end=datetime(2026, 11, 1, tzinfo=UTC),
+    )
+    assert [e.id for e in results] == ["p-aware", "p-naive"]
+    assert all(e.start.tzinfo is not None for e in results)
+
+
+async def test_save_event_stores_offsetless_datetime_as_utc(env):
+    """A naive datetime reaching the repo (a federation payload that
+    omitted the offset) lands in the column's UTC ``+00:00`` shape, so
+    the column never holds mixed shapes going forward."""
+    sid = await _seed_space(env, "sp-naive-write")
+    await env.space_cal_repo.save_event(
+        CalendarEvent(
+            id="ev-w",
+            calendar_id=sid,
+            summary="w",
+            start=datetime(2026, 10, 20, 8),
+            end=datetime(2026, 10, 20, 9),
+            created_by="uid-alice",
+        ),
+        space_id=sid,
+    )
+    row = await env.db.fetchone(
+        "SELECT start_dt, end_dt FROM space_calendar_events WHERE id='ev-w'"
+    )
+    assert row["start_dt"] == "2026-10-20T08:00:00+00:00"
+    assert row["end_dt"] == "2026-10-20T09:00:00+00:00"

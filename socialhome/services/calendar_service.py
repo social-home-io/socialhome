@@ -64,8 +64,9 @@ from ..infrastructure.event_bus import EventBus
 from ..media_signer import strip_signature_query
 from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCalendarRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from ..utils.datetime import as_utc
 from ..utils.rrule import expand_rrule
-from ..utils.timezones import is_valid_tz
+from ..utils.timezones import is_valid_tz, parse_event_bound
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .inbound_media_store import require_local_media_ref
@@ -626,22 +627,16 @@ class CalendarService(BusPublisherMixin):
         if cal is None:
             raise KeyError(f"calendar {calendar_id!r} not found")
 
-        def _parse_dt(value: str) -> datetime:
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError as exc:
-                raise ValueError(f"invalid datetime: {value!r}") from exc
-
-        start_dt = _parse_dt(start)
-        end_dt = _parse_dt(end)
+        # The tz first: a date-only bound names a day in the event's zone.
+        event_tz = await self._resolve_personal_tz(
+            tz, owner_username=cal.owner_username
+        )
+        start_dt = parse_event_bound(start, tz=event_tz, is_end=False)
+        end_dt = parse_event_bound(end, tz=event_tz, is_end=True)
         if end_dt < start_dt:
             raise ValueError("event end must not be before start")
 
         attendee_tuple, instance_for_user = await self._validate_attendees(attendees)
-
-        event_tz = await self._resolve_personal_tz(
-            tz, owner_username=cal.owner_username
-        )
 
         group_uuid = _clean_client_event_uuid(client_event_uuid)
 
@@ -811,16 +806,10 @@ class CalendarService(BusPublisherMixin):
         start: str,
         end: str,
     ) -> list[CalendarEvent]:
-        def _parse_dt(value: str) -> datetime:
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError as exc:
-                raise ValueError(f"invalid datetime: {value!r}") from exc
-
         return await self._repo.list_events_in_range(
             calendar_id,
-            start=_parse_dt(start),
-            end=_parse_dt(end),
+            start=_parse_window_bound(start),
+            end=_parse_window_bound(end),
         )
 
     async def delete_event(self, event_id: str) -> None:
@@ -888,16 +877,23 @@ class CalendarService(BusPublisherMixin):
         new_summary = (summary or existing.summary).strip()
         if not new_summary:
             raise ValueError("event summary must not be empty")
-        new_start = _parse_iso(start) if start else existing.start
-        new_end = _parse_iso(end) if end else existing.end
-        if new_end < new_start:
-            raise ValueError("event end must not be before start")
+        # The tz first: a date-only bound names a day in the event's zone.
         if tz is not None:
             if not is_valid_tz(tz):
                 raise ValueError(f"unknown IANA timezone {tz!r}")
             new_tz = tz
         else:
             new_tz = existing.tz
+        new_start = (
+            parse_event_bound(start, tz=new_tz, is_end=False)
+            if start
+            else existing.start
+        )
+        new_end = (
+            parse_event_bound(end, tz=new_tz, is_end=True) if end else existing.end
+        )
+        if new_end < new_start:
+            raise ValueError("event end must not be before start")
         if cover_url is _UNSET:
             new_cover = existing.cover_url
         else:
@@ -1366,16 +1362,10 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         start: str,
         end: str,
     ) -> list[CalendarEvent]:
-        def _parse_dt(value: str) -> datetime:
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError as exc:
-                raise ValueError(f"invalid datetime: {value!r}") from exc
-
         return await self._repo.list_events_in_range(
             space_id,
-            start=_parse_dt(start),
-            end=_parse_dt(end),
+            start=_parse_window_bound(start),
+            end=_parse_window_bound(end),
         )
 
     async def create_event(
@@ -1413,11 +1403,10 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         if not summary:
             raise ValueError("summary must not be empty")
         capacity = validate_capacity(capacity)
-        try:
-            start_dt = datetime.fromisoformat(start)
-            end_dt = datetime.fromisoformat(end)
-        except ValueError as exc:
-            raise ValueError(f"invalid datetime: {exc}") from exc
+        # The tz first: a date-only bound names a day in the event's zone.
+        event_tz = await self._resolve_space_event_tz(tz, space_id=space_id)
+        start_dt = parse_event_bound(start, tz=event_tz, is_end=False)
+        end_dt = parse_event_bound(end, tz=event_tz, is_end=True)
         if end_dt < start_dt:
             raise ValueError("end must be at or after start")
         decision = await self._gate(
@@ -1476,7 +1465,6 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
                 # to the event instead (below); the route tells the creator.
                 announce_in_feed = False
                 queue_announce = refusal == "moderated"
-        event_tz = await self._resolve_space_event_tz(tz, space_id=space_id)
         event = CalendarEvent(
             # Owner-bound (v_36): no other household can announce this id
             # first as its own user's event.
@@ -1819,8 +1807,21 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         new_summary = (summary if summary is not None else existing.summary).strip()
         if not new_summary:
             raise ValueError("event summary must not be empty")
-        new_start = _parse_iso(start) if start else existing.start
-        new_end = _parse_iso(end) if end else existing.end
+        # The tz first: a date-only bound names a day in the event's zone.
+        if tz is not None:
+            if not is_valid_tz(tz):
+                raise ValueError(f"unknown IANA timezone {tz!r}")
+            new_tz = tz
+        else:
+            new_tz = existing.tz
+        new_start = (
+            parse_event_bound(start, tz=new_tz, is_end=False)
+            if start
+            else existing.start
+        )
+        new_end = (
+            parse_event_bound(end, tz=new_tz, is_end=True) if end else existing.end
+        )
         if new_end < new_start:
             raise ValueError("event end must not be before start")
 
@@ -1843,12 +1844,6 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         else:
             assert location is None or isinstance(location, str)
             new_location = _clean_location(location)
-        if tz is not None:
-            if not is_valid_tz(tz):
-                raise ValueError(f"unknown IANA timezone {tz!r}")
-            new_tz = tz
-        else:
-            new_tz = existing.tz
         updated = replace(
             existing,
             summary=new_summary,
@@ -2582,10 +2577,12 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         )
 
 
-def _parse_iso(value: str) -> datetime:
-    """Parse an ISO 8601 string, tolerating the trailing ``Z`` form."""
+def _parse_window_bound(value: str) -> datetime:
+    """A list query's ``start`` / ``end`` as a tz-aware instant; a
+    date-only or offset-less value is UTC (a naive window bound broke
+    recurrence expansion against the stored tz-aware rows)."""
     try:
-        return datetime.fromisoformat(value)
+        return as_utc(datetime.fromisoformat(value))
     except ValueError as exc:
         raise ValueError(f"invalid datetime: {value!r}") from exc
 

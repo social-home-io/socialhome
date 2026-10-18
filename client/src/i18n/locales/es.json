@@ -111,6 +111,7 @@
 
   "calendar.title": "Calendario",
   "calendar.no_events": "Sin eventos en este periodo.",
+  "calendar.load_failed": "No se pudo cargar el calendario.",
   "calendar.new_event": "Nuevo evento",
   "calendar.today": "Hoy",
   "calendar.month": "Mes",
