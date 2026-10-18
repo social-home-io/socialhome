@@ -104,6 +104,19 @@ class SpaceMemberGuardMixin:
 NOT_A_SPACE_MEMBER = "Not a space member."
 
 
+async def seat_of(
+    space_repo: AbstractSpaceRepo, space_id: str, user_id: str
+) -> SpaceMember | None:
+    """The caller's seat in ``space_id`` — any role — or ``None``: no
+    seat, or a seat row of a **banned** user (banning drops the seat in
+    the same transaction, but a seat that survived a ban — an older
+    half-applied ban, a federation race — never counts)."""
+    member = await space_repo.get_member(space_id, user_id)
+    if member is None or await space_repo.is_banned(space_id, user_id):
+        return None
+    return member
+
+
 async def require_seat(
     space_repo: AbstractSpaceRepo, space_id: str, user_id: str
 ) -> SpaceMember:
@@ -114,8 +127,11 @@ async def require_seat(
     A free function, not a mixin method, so services that hold the space
     repo under another slot name (themes, approvals) share it too. It
     never looks at the ``spaces`` row, so an unknown id answers the same
-    403 as a space the caller isn't in — no existence oracle."""
-    member = await space_repo.get_member(space_id, user_id)
+    403 as a space the caller isn't in — no existence oracle.
+
+    A **banned** user is refused too, even with a seat row
+    (:func:`seat_of`) — the same 403, so it reveals nothing more."""
+    member = await seat_of(space_repo, space_id, user_id)
     if member is None:
         raise SpacePermissionError(NOT_A_SPACE_MEMBER)
     return member

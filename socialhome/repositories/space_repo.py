@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..db.unit_of_work import UnitOfWork
 from ..domain.gfs_server import (
     SignedGfsServerList,
     signed_gfs_server_list_from_column,
@@ -1813,19 +1814,29 @@ class SqliteSpaceRepo:
         identity_pk: str | None = None,
         reason: str | None = None,
     ) -> None:
-        # Atomic: insert the ban and drop the membership in the same batch.
-        await self._db.enqueue(
-            """
-            INSERT INTO space_bans(space_id, user_id, identity_pk, banned_by, reason)
-            VALUES(?, ?, ?, ?, ?)
-            ON CONFLICT(space_id, user_id) DO UPDATE SET
-                identity_pk=excluded.identity_pk,
-                banned_by=excluded.banned_by,
-                reason=excluded.reason
-            """,
-            (space_id, user_id, identity_pk, banned_by, reason),
-        )
-        await self.delete_member(space_id, user_id)
+        # One transaction: the ban row and the seat delete land together
+        # or not at all. Two ``enqueue`` calls were two transactions (each
+        # awaited its own commit, and the writer isolates statements in
+        # savepoints) — a failure between them left a ban beside a live
+        # seat, i.e. a banned user who could still read the space.
+        async with UnitOfWork(self._db) as uow:
+            await uow.exec(
+                """
+                INSERT INTO space_bans(
+                    space_id, user_id, identity_pk, banned_by, reason
+                )
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(space_id, user_id) DO UPDATE SET
+                    identity_pk=excluded.identity_pk,
+                    banned_by=excluded.banned_by,
+                    reason=excluded.reason
+                """,
+                (space_id, user_id, identity_pk, banned_by, reason),
+            )
+            await uow.exec(
+                "DELETE FROM space_members WHERE space_id=? AND user_id=?",
+                (space_id, user_id),
+            )
 
     async def unban_member(self, space_id: str, user_id: str) -> None:
         await self._db.enqueue(

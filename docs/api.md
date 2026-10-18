@@ -238,7 +238,11 @@ events these routes fire.
 **Read access.** Every read of a space's content or roster under
 `/api/spaces/{id}/…` needs a **seat** in that space — any `space_members`
 role: owner, admin, moderator, member, or a read-only follower
-(`subscriber`). Being a user of the same household is not enough. A caller
+(`subscriber`). Being a user of the same household is not enough. A
+**banned** user holds no seat: banning drops the seat and records the ban in
+one transaction, and every seat check (`space_member_guard.seat_of` /
+`require_seat`, the space seat gate, the landing page) treats a seat row that
+survived a ban as no seat. A caller
 with no seat gets `403 {"error": {"code": "FORBIDDEN", "detail": "Not a space
 member."}}`. On the detail, feed, members, proposals, theme and post-comment
 reads (enforced by `SpaceService.require_reader` /
@@ -352,7 +356,7 @@ migration `0101`). Automatic seats publish the usual roster event but **no**
 | GET | `/api/local_invites` | Same-household space invitations pending for the caller (an admin's "add member" makes one; the invitee accepts or declines). Only the caller's own invitations are listed. Each row: `{invitation_id, space_id, invited_by, invited_by_display_name, expires_at, created_at, space_name, space_emoji, space_description, space_icon_url, member_count}` — the space fields are the landing fields of the space invited to (what a non-member sees on a discoverable space's landing page, never its roster or config); `space_icon_url` is a signed `/api/spaces/{id}/icon` URL, `null` without an uploaded icon; the space fields and `member_count` are `null` when the space row is gone. |
 | POST | `/api/local_invites/{id}/{accept\|decline}` | Respond to a same-household invitation: accept seats the caller (`200 {user_id, role}`), decline answers `204`. `404` for an unknown invitation; `403` for another user's invitation or one no longer pending. |
 | POST | `/api/remote_invites/{token}/{accept\|decline}` | Respond. The accept seats the space from that invitation's own stored snapshot (nothing is seated before it, migration 0093) and expires pending invitations for the same space from other households. `404 INVITE_EXPIRED` for an unknown token, another user's invitation, or one no longer pending; `403` when this household already joined that space under another owner, when the invitation's owner proof no longer resolves as on receipt, when its sealed content key does not open here, when the ACCEPT definitively cannot reach the host (the seat is rolled back; an ACCEPT queued for redelivery keeps it), or for the §CP.F1 age gate (read from the invitation's snapshot). Decline checks the user and the pending status like accept. |
-| POST | `/api/spaces/{id}/ban` | Ban a user from a space. |
+| POST | `/api/spaces/{id}/ban` | Ban a user from a space (owner / admin). The ban row and the removal of their seat are written in **one transaction** — never a ban beside a live seat; from then on every read of the space answers them `403 "Not a space member."`. |
 | GET / DELETE | `/api/spaces/{id}/bans[/{user_id}]` | Ban list management. |
 | GET | `/api/spaces/{id}/moderation?status=pending\|all` | The moderation queue of every feature (default `pending`). Owner / admin / **moderator** (content authority); 403 otherwise. Works on the host **and on a member household's stub** (v_43): every household holding a content-authority seat holds the items submitted in the space — the SPA shows the Moderation tab there for content authority. Each item: `{id, space_id, feature, action, entity, op, target_id, submitted_by, submitted_by_display, submitted_at, expires_at, status, reviewed_by, reviewed_at, rejection_reason, publishing, preview, snapshot, current, payload}` (`publishing`: approved on this member household, waiting for the host to publish it) — `preview` the proposed state (a create's full item, an edit's changed fields, a delete's row), `snapshot` an edit's OLD values of those fields (a delete's full row), `current` their LIVE values (`null` when the target is gone). Media URLs are signed. |
 | GET | `/api/spaces/{id}/moderation/mine` | The caller's own submissions, any status, newest first (any member) — same item shape, never anybody else's. Drives the author's "Pending review" strip. |

@@ -2183,3 +2183,43 @@ async def test_list_hosted_listings_counts_seats_and_reads_the_callers_seat(env)
 async def test_list_hosted_listings_with_no_tiers_is_empty(env):
     await env.repo.save(_space("home", "Home", SpaceType.HOUSEHOLD))
     assert await env.repo.list_hosted_listings("inst-x", "u", tiers=frozenset()) == []
+
+
+async def test_ban_member_is_all_or_nothing(env):
+    """Regression: the ban row and the seat delete were two separate
+    writes (two transactions) — a failure between them left a ban record
+    beside a live seat. Now one transaction: when the seat delete fails,
+    no ban is recorded either."""
+    sp = await _seed_space_for_ban(env)
+    await env.repo.save_member(
+        SpaceMember(space_id=sp, user_id="uid-bob", role="member", joined_at="t")
+    )
+    await env.db.enqueue(
+        "CREATE TRIGGER boom BEFORE DELETE ON space_members"
+        " BEGIN SELECT RAISE(ABORT, 'seat delete failed'); END"
+    )
+    with pytest.raises(Exception, match="seat delete failed"):
+        await env.repo.ban_member(sp, "uid-bob", banned_by="uid-alice")
+    assert not await env.repo.is_banned(sp, "uid-bob")
+    assert await env.repo.get_member(sp, "uid-bob") is not None
+    await env.db.enqueue("DROP TRIGGER boom")
+    await env.repo.ban_member(sp, "uid-bob", banned_by="uid-alice")
+    assert await env.repo.is_banned(sp, "uid-bob")
+    assert await env.repo.get_member(sp, "uid-bob") is None
+
+
+async def _seed_space_for_ban(env) -> str:
+    await env.repo.save(
+        Space(
+            id="sp-ban",
+            name="Ban",
+            owner_instance_id=env.iid,
+            owner_username="alice",
+            identity_public_key=env.kp.public_key.hex(),
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        )
+    )
+    return "sp-ban"

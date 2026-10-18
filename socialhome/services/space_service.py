@@ -248,6 +248,7 @@ from .space_member_guard import (
     NOT_A_SPACE_MEMBER,
     SpaceMemberGuardMixin,
     require_seat,
+    seat_of,
 )
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
@@ -7653,7 +7654,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         household's household-tier space, and an unknown id are the same
         403 (see :meth:`require_reader`).
         """
-        member = await self._spaces.get_member(space_id, user_id)
+        member = await seat_of(self._spaces, space_id, user_id)
         if member is not None:
             return await self._require_space(space_id), member
         space = await self._spaces.get(space_id)
