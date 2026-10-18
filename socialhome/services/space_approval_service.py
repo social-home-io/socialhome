@@ -59,6 +59,7 @@ from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .protection_gate import ProtectionGateMixin
 from .space_member_guard import require_member_seat
+from .space_writer_households import SpaceWriterHouseholds
 
 log = logging.getLogger(__name__)
 
@@ -899,10 +900,16 @@ class SpaceApprovalService(ProtectionGateMixin):
         # remote admin's SPA shows the same proposal + tally and can vote.
         if self._federation is not None and await self._host_owns(proposal.space_id):
             try:
+                # Governance is the members' business: never mirrored
+                # onto a household that only follows (owner decision 13).
+                members = SpaceWriterHouseholds(
+                    self._remote_members, own_instance_id=self._own_instance_id
+                )
                 await self._federation.broadcast_to_space_members(
                     proposal.space_id,
                     FederationEventType.SPACE_ADMIN_PROPOSAL_UPDATED,
                     {"space_id": proposal.space_id, "view": view},
+                    only_instances=await members.writer_households(proposal.space_id),
                 )
             except Exception:
                 log.exception(

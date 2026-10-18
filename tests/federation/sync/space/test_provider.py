@@ -1134,7 +1134,7 @@ async def test_chat_streams_only_to_a_v55_writer_household(
         asked.append((space_id, instance_id))
         return writer
 
-    svc.attach_chat_gate(_gate)
+    svc.attach_member_gate(_gate)
     session = _FakeSession()
     await svc.stream_initial(session)
     assert (_resources(session) == ["chat_messages"]) is streamed
@@ -1154,10 +1154,43 @@ async def test_chat_never_streams_without_a_gate_or_federation(encoder):
     async def _yes(_space_id: str, _instance_id: str) -> bool:
         return True
 
-    svc.attach_chat_gate(_yes)
+    svc.attach_member_gate(_yes)
     session2 = _FakeSession()
     await svc.stream_initial(session2)
     assert _resources(session2) == []
+
+
+def _zones_provider(encoder) -> SpaceSyncService:
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    exporters = {
+        "space_zones": _FakeExporter("space_zones", [{"id": "z-1", "name": "School"}]),
+        "space_zones_deleted": _FakeExporter("space_zones_deleted", [{"id": "z-0"}]),
+    }
+    return SpaceSyncService(builder=builder, exporters=exporters, sig_suite="ed25519")
+
+
+@pytest.mark.parametrize("member", [True, False])
+async def test_zones_stream_only_to_a_member_household(encoder, member):
+    """The members' places are member-only data (owner decision 13): a
+    follower-only household gets no zones by catch-up, as it gets none
+    live."""
+    svc = _zones_provider(encoder)
+
+    async def _gate(_space_id: str, _instance_id: str) -> bool:
+        return member
+
+    svc.attach_member_gate(_gate)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    streamed = sorted(set(_resources(session)))
+    assert streamed == (["space_zones", "space_zones_deleted"] if member else [])
+
+
+async def test_zones_never_stream_without_a_gate(encoder):
+    svc = _zones_provider(encoder)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    assert _resources(session) == []
 
 
 # ─── §25.6 incremental sessions: change stamps + per-household watermark ──
@@ -1416,7 +1449,7 @@ async def test_the_requesters_version_is_read_once_per_session(encoder):
     async def _gate(space_id: str, instance_id: str) -> bool:
         return True
 
-    svc.attach_chat_gate(_gate)
+    svc.attach_member_gate(_gate)
     session = _FakeSession()
     await svc.stream_initial(session)
     assert federation.space_member_version.await_count == 1
@@ -1451,7 +1484,7 @@ async def test_a_request_more_slice_mid_stream_takes_fresh_indices(encoder):
     async def _gate(space_id: str, instance_id: str) -> bool:
         return True
 
-    svc.attach_chat_gate(_gate)
+    svc.attach_member_gate(_gate)
     session = _FakeSession()
 
     class _Rtc(_FakeRtc):

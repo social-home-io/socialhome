@@ -1234,3 +1234,25 @@ async def test_list_for_space_refuses_a_follower(stack):
     )
     with pytest.raises(SpacePermissionError, match="Not a space member"):
         await stack.approvals.list_for_space(space.id, viewer_user_id="uid-fol")
+
+
+async def test_the_proposal_mirror_skips_follower_only_households(stack):
+    """Governance is the members' business (owner decision 13): the host
+    mirrors a proposal onto member households only, never onto one whose
+    people only follow the space."""
+    space = await _space(stack)
+    await _add_admin(stack, space.id, "bob")
+    for house, role in (("house-member", "member"), ("house-follower", "subscriber")):
+        await stack.remote.add(
+            space_id=space.id,
+            instance_id=house,
+            user_id=f"u-{house}",
+            user_pk=None,
+            display_name=house,
+            role=role,
+        )
+    await stack.approvals.propose(
+        space.id, actor_username="alice", action=ProposalAction.DISSOLVE
+    )
+    call = stack.fed.broadcast_to_space_members.await_args
+    assert call.kwargs["only_instances"] == frozenset({"house-member"})

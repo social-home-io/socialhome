@@ -209,7 +209,8 @@ used to tear down a seat that is still carrying another shared space. See
 
 `SPACE_MEMBER_ROLE_CHANGED` (v_8+), `SPACE_REMOTE_ADMIN_KICK` (v_9+),
 `SPACE_REMOTE_ADMIN_ACTION` (v_15+), `SPACE_ADMIN_PROPOSAL_UPDATED`
-(v_16+), the `moderator` role (v_41). Role propagation + remote admins
+(v_16+; mirrored onto **member** households only — never a follower-only
+one), the `moderator` role (v_41). Role propagation + remote admins
 running mutations on a space
 hosted elsewhere + multi-admin approval of critical actions. See
 "Cross-household admin promotion / kick / actions" and "Multi-admin

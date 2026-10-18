@@ -74,8 +74,12 @@ Two distinct fan-outs follow every household ``PresenceUpdated``:
      this instance, payload `{space_id, user_id, lat, lon, accuracy_m,
      updated_at}`;
    - a sealed federation event `SPACE_LOCATION_UPDATED` to every
-     remote member instance, encrypted payload `{user_id, lat, lon,
-     accuracy_m, updated_at}`.
+     remote **member** household — one holding a writer seat (owner /
+     admin / moderator / member), never a household whose people only
+     follow the space (owner decision 13; `SpaceWriterHouseholds`, the
+     same audience as the space chat) — encrypted payload `{user_id,
+     lat, lon, accuracy_m, updated_at}`. The local frame skips this
+     household's followers too.
 
    On the receiving household the inbound handler stores the pin
    (coordinates truncated to 4 decimals, none at all for `zone_only`)
@@ -156,8 +160,11 @@ catalogues below.
 ## Per-space zones (§23.8.7)
 
 Each space owns a catalogue of named display circles (lat, lon,
-radius_m). Live admin CRUD is replicated to remote member instances
-via two sealed federation events under the space content key:
+radius_m). Live admin CRUD is replicated to remote **member**
+households only — those holding a writer seat; a follower-only household
+gets no zones, live or by §25.6 catch-up (the `space_zones` /
+`space_zones_deleted` sync resources sit behind the same member gate as
+the chat) — via two sealed federation events under the space content key:
 
 - `SPACE_ZONE_UPSERTED` — encrypted payload
   `{zone_id, space_id, name, latitude, longitude, radius_m, color,

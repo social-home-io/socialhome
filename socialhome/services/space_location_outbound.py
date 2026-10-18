@@ -52,6 +52,7 @@ from ..repositories.user_repo import AbstractUserRepo
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
+    from .space_writer_households import SpaceWriterHouseholds
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class SpaceLocationOutbound:
     __slots__ = (
         "_bus",
         "_federation",
+        "_members",
         "_presence",
         "_spaces",
         "_users",
@@ -82,8 +84,12 @@ class SpaceLocationOutbound:
         space_zone_repo: AbstractSpaceZoneRepo,
         user_repo: AbstractUserRepo,
         presence_repo: AbstractPresenceRepo,
+        member_households: SpaceWriterHouseholds,
     ) -> None:
         self._bus = bus
+        #: A member's pin goes to member households only — never to one
+        #: that only follows the space (owner decision 13).
+        self._members = member_households
         self._ws = ws
         self._federation = federation_service
         self._spaces = space_repo
@@ -367,6 +373,7 @@ class SpaceLocationOutbound:
                 space_id,
                 FederationEventType.SPACE_LOCATION_UPDATED,
                 payload,
+                only_instances=await self._members.writer_households(space_id),
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(

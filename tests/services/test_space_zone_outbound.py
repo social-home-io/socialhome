@@ -38,15 +38,29 @@ class _FakeFederation:
                 "space_id": space_id,
                 "event_type": event_type,
                 "payload": payload,
+                "only_instances": kwargs.get("only_instances"),
             },
         )
+
+
+class _MemberHouseholds:
+    """Stands in for :class:`SpaceWriterHouseholds`: the member
+    households of every space."""
+
+    def __init__(self, households: frozenset[str] = frozenset({"house-m"})) -> None:
+        self.households = households
+
+    async def writer_households(self, space_id: str) -> frozenset[str]:
+        return self.households
 
 
 @pytest.fixture
 async def env():
     bus = EventBus()
     fed = _FakeFederation()
-    outbound = SpaceZoneOutbound(bus=bus, federation_service=fed)
+    outbound = SpaceZoneOutbound(
+        bus=bus, federation_service=fed, member_households=_MemberHouseholds()
+    )
     outbound.wire()
 
     class E:
@@ -124,7 +138,9 @@ async def test_broadcast_failure_is_swallowed():
     """A broadcast failure must not bubble up through the bus."""
     bus = EventBus()
     fed = _FakeFederation(raise_on_broadcast=True)
-    SpaceZoneOutbound(bus=bus, federation_service=fed).wire()
+    SpaceZoneOutbound(
+        bus=bus, federation_service=fed, member_households=_MemberHouseholds()
+    ).wire()
     # Must not raise.
     await bus.publish(_upsert_event())
     assert fed.broadcasts == []
@@ -150,3 +166,28 @@ async def test_delete_applied_from_a_peer_is_never_echoed(env):
         )
     )
     assert env.fed.broadcasts == []
+
+
+async def test_zones_go_to_member_households_only(env):
+    """The members' places never reach a follower-only household (owner
+    decision 13): the fan-out is narrowed to the writer households."""
+    await env.bus.publish(
+        SpaceZoneUpserted(
+            space_id="sp-1",
+            zone_id="z1",
+            name="School",
+            latitude=47.37,
+            longitude=8.54,
+            radius_m=150,
+            color=None,
+            created_by="u1",
+            updated_at="2026-10-18T00:00:00+00:00",
+        )
+    )
+    await env.bus.publish(
+        SpaceZoneDeleted(space_id="sp-1", zone_id="z1", deleted_by="u1")
+    )
+    assert [b["only_instances"] for b in env.fed.broadcasts] == [
+        frozenset({"house-m"}),
+        frozenset({"house-m"}),
+    ]

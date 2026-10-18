@@ -23,6 +23,7 @@ from ..infrastructure.event_bus import EventBus
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
+    from .space_writer_households import SpaceWriterHouseholds
 
 log = logging.getLogger(__name__)
 
@@ -30,16 +31,20 @@ log = logging.getLogger(__name__)
 class SpaceZoneOutbound:
     """Publish per-space zone mutations to remote member instances."""
 
-    __slots__ = ("_bus", "_federation")
+    __slots__ = ("_bus", "_federation", "_members")
 
     def __init__(
         self,
         *,
         bus: EventBus,
         federation_service: FederationService,
+        member_households: SpaceWriterHouseholds,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
+        #: Zones are the members' places — never sent to a household that
+        #: only follows the space (owner decision 13).
+        self._members = member_households
 
     def wire(self) -> None:
         self._bus.subscribe(SpaceZoneUpserted, self._on_upserted)
@@ -89,6 +94,7 @@ class SpaceZoneOutbound:
                 space_id,
                 event_type,
                 payload,
+                only_instances=await self._members.writer_households(space_id),
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(

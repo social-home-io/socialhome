@@ -39,11 +39,9 @@ from socialhome.services.dm_service import DmService
 from socialhome.services.federation_inbound.space_chat import (
     SpaceChatInboundHandlers,
 )
-from socialhome.services.space_chat_outbound import (
-    SpaceChatAudience,
-    SpaceChatOutbound,
-)
+from socialhome.services.space_chat_outbound import SpaceChatOutbound
 from socialhome.services.space_chat_service import SpaceChatService
+from socialhome.services.space_writer_households import SpaceWriterHouseholds
 from socialhome.services.system_chat_policy import SpaceChatAccess, SystemChatPolicy
 
 SP = "sp-chat"
@@ -145,7 +143,7 @@ class Stack:
     chat: SpaceChatService
     dm: DmService
     federation: FakeFederation
-    audience: SpaceChatAudience
+    audience: SpaceWriterHouseholds
     inbound: SpaceChatInboundHandlers
     uid: dict[str, str]
 
@@ -219,7 +217,7 @@ async def build_stack(tmp_dir) -> Stack:
     s.dm = DmService(s.convos, s.users, s.bus, own_instance_id=s.iid)
     s.dm.attach_federation(s.federation, None, s.iid)  # type: ignore[arg-type]
     s.dm.attach_system_chats(s.policy)
-    s.audience = SpaceChatAudience(s.seats, own_instance_id=s.iid)
+    s.audience = SpaceWriterHouseholds(s.seats, own_instance_id=s.iid)
     SpaceChatOutbound(
         bus=s.bus,
         federation_service=s.federation,  # type: ignore[arg-type]

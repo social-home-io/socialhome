@@ -106,8 +106,20 @@ class _FakeFederation:
                 "payload": payload,
                 "encrypted_payload": encrypted,
                 "space_id": space_id,
+                "only_instances": kwargs.get("only_instances"),
             },
         )
+
+
+class _MemberHouseholds:
+    """Stands in for :class:`SpaceWriterHouseholds`: the member
+    households of every space."""
+
+    def __init__(self, households: frozenset[str] = frozenset({"house-m"})) -> None:
+        self.households = households
+
+    async def writer_households(self, space_id: str) -> frozenset[str]:
+        return self.households
 
 
 @pytest.fixture
@@ -173,6 +185,7 @@ async def env(tmp_dir):
         space_zone_repo=zone_repo,
         user_repo=user_repo,
         presence_repo=presence_repo,
+        member_households=_MemberHouseholds(),
     )
     outbound.wire()
 
@@ -474,6 +487,7 @@ async def test_no_zone_name_in_decrypted_federation_envelope(env, tmp_dir):
         space_zone_repo=env.zone_repo,
         user_repo=SqliteUserRepo(env.db),
         presence_repo=SqlitePresenceRepo(env.db),
+        member_households=_MemberHouseholds(frozenset({"remote_decrypt"})),
     )
     outbound.wire()
 
@@ -731,6 +745,7 @@ async def test_zone_only_decrypted_envelope_has_no_gps(env, tmp_dir):
         space_zone_repo=env.zone_repo,
         user_repo=SqliteUserRepo(env.db),
         presence_repo=SqlitePresenceRepo(env.db),
+        member_households=_MemberHouseholds(frozenset({"remote_decrypt"})),
     )
     outbound.wire()
 
@@ -1058,3 +1073,31 @@ async def test_remote_pin_skipped_when_map_feature_off_or_space_unknown(env):
     await env.bus.publish(_remote_pin(sp.id))
     await env.bus.publish(_remote_pin("sp_unknown"))
     assert env.ws.calls == []
+
+
+async def test_pins_go_to_member_households_only(env):
+    """A member's pin never reaches a follower-only household (owner
+    decision 13): the fan-out is narrowed to the writer households."""
+    sp = await env.make_space("sp_members_only")
+    await env.space_repo.save_member(
+        SpaceMember(
+            space_id=sp.id,
+            user_id=env.alice_uid,
+            role="member",
+            joined_at="2026-04-27T00:00:00+00:00",
+            location_share_enabled=True,
+        ),
+    )
+    await env.bus.publish(
+        PresenceUpdated(
+            username="alice",
+            state="away",
+            latitude=47.3769,
+            longitude=8.5417,
+            gps_accuracy_m=12.0,
+            updated_at="2026-04-27T12:00:00+00:00",
+        ),
+    )
+    assert [c["only_instances"] for c in env.federation.calls] == [
+        frozenset({"house-m"})
+    ]
