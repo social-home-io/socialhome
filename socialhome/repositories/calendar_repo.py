@@ -94,38 +94,30 @@ def _expand_window(
 def _iso(value) -> str | None:
     """A bound in the ``start_dt`` / ``end_dt`` column shape.
 
-    A naive datetime is UTC (the codebase-wide rule) and is stamped
-    ``+00:00`` before it is written, so the column never mixes offset-less
-    and offset-carrying values — mixing them made the range read raise
-    ``TypeError`` and 500 the whole calendar.
+    The producer side of the column's invariant (migration 0101's triggers
+    refuse anything else): a naive datetime is UTC (the codebase-wide rule)
+    and is stamped ``+00:00`` before it is written; an explicit offset is
+    kept as given.
     """
     if value is None:
         return None
     if isinstance(value, datetime):
-        return _aware(value).isoformat()
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.isoformat()
     if isinstance(value, date):
         return value.isoformat()
     return str(value)
 
 
-def _aware(value: datetime) -> datetime:
-    """``value`` with a naive datetime read as UTC; an explicit offset is
-    kept as stored (it already orders correctly against any other aware
-    value, and occurrence ids are minted from it)."""
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-
-
 def _parse(value: str | None) -> datetime | None:
-    """Read a stored bound as a tz-aware datetime.
-
-    Rows written before the API normalised its input can hold a date-only
-    (``"2026-10-20"``) or offset-less value; both read back as UTC so one
-    such row can't break the sort over every other event of the calendar.
-    """
+    """Read a stored bound. The column holds only tz-aware values
+    (migration 0101 repaired the rest and its triggers refuse new ones);
+    ``''`` is a tombstone stub's blank bound."""
     if not value:
         return None
     try:
-        return _aware(datetime.fromisoformat(value))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 

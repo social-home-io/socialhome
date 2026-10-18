@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -1463,79 +1464,29 @@ async def test_space_calendar_sync_page_is_every_stored_event_unexpanded(
     assert [e.id for e in rest] == ["cev-far"] and end is None
 
 
-async def test_space_cal_list_tolerates_legacy_date_only_rows(env):
-    """A row stored with a date-only / offset-less bound (an API client's
-    ``"2026-10-20"`` before the service normalised it) must not 500 the
-    whole space calendar: comparing it with a tz-aware row raised
-    ``TypeError`` in ``_expand_window``'s sort. Offset-less values read
-    back as UTC."""
-    sid = await _seed_space(env, "sp-legacy")
-    for eid, start, end in (
-        ("ev-aware", datetime(2026, 10, 19, 9, tzinfo=UTC), None),
-        ("ev-date", datetime(2026, 10, 20, tzinfo=UTC), None),
-        ("ev-naive", datetime(2026, 10, 21, 8, tzinfo=UTC), None),
-    ):
-        await env.space_cal_repo.save_event(
-            CalendarEvent(
-                id=eid,
-                calendar_id=sid,
-                summary=eid,
-                start=start,
-                end=end or start,
-                created_by="uid-alice",
-                all_day=eid == "ev-date",
-            ),
-            space_id=sid,
+async def test_db_refuses_an_offsetless_bound(env):
+    """Migration 0101's triggers: a date-only / offset-less bound written
+    past the repo (raw SQL, a regression) aborts instead of landing next
+    to tz-aware rows — one such row used to 500 the whole calendar."""
+    sid = await _seed_space(env, "sp-guard")
+    start = datetime(2026, 10, 20, 9, tzinfo=UTC)
+    await env.space_cal_repo.save_event(
+        CalendarEvent(
+            id="ev-guard",
+            calendar_id=sid,
+            summary="g",
+            start=start,
+            end=start,
+            created_by="uid-alice",
+        ),
+        space_id=sid,
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="tz-aware"):
+        await env.db.enqueue(
+            "UPDATE space_calendar_events SET start_dt='2026-10-20' WHERE id='ev-guard'"
         )
-    # Rewrite two rows into the legacy shapes the API used to store.
-    await env.db.enqueue(
-        "UPDATE space_calendar_events SET start_dt='2026-10-20',"
-        " end_dt='2026-10-21' WHERE id='ev-date'"
-    )
-    await env.db.enqueue(
-        "UPDATE space_calendar_events SET start_dt='2026-10-21T08:00:00',"
-        " end_dt='2026-10-21T09:00:00' WHERE id='ev-naive'"
-    )
-    results = await env.space_cal_repo.list_events_in_range(
-        sid,
-        start=datetime(2026, 10, 1, tzinfo=UTC),
-        end=datetime(2026, 11, 1, tzinfo=UTC),
-    )
-    assert [e.id for e in results] == ["ev-aware", "ev-date", "ev-naive"]
-    by_id = {e.id: e for e in results}
-    assert by_id["ev-date"].start == datetime(2026, 10, 20, tzinfo=UTC)
-    assert by_id["ev-date"].start.tzinfo is not None
-    assert by_id["ev-naive"].end == datetime(2026, 10, 21, 9, tzinfo=UTC)
-
-
-async def test_personal_list_tolerates_legacy_offsetless_rows(env):
-    """Same guarantee for the household calendar's range query."""
-    await env.cal_repo.save_calendar(
-        Calendar(id="cal-legacy", name="C", color="#000", owner_username="alice")
-    )
-    for eid, hour in (("p-aware", 9), ("p-naive", 10)):
-        start = datetime(2026, 10, 20, hour, tzinfo=UTC)
-        await env.cal_repo.save_event(
-            CalendarEvent(
-                id=eid,
-                calendar_id="cal-legacy",
-                summary=eid,
-                start=start,
-                end=start,
-                created_by="uid-alice",
-            )
-        )
-    await env.db.enqueue(
-        "UPDATE calendar_events SET start_dt='2026-10-20T10:00:00',"
-        " end_dt='2026-10-20T11:00:00' WHERE id='p-naive'"
-    )
-    results = await env.cal_repo.list_events_in_range(
-        "cal-legacy",
-        start=datetime(2026, 10, 1, tzinfo=UTC),
-        end=datetime(2026, 11, 1, tzinfo=UTC),
-    )
-    assert [e.id for e in results] == ["p-aware", "p-naive"]
-    assert all(e.start.tzinfo is not None for e in results)
+    got = await env.space_cal_repo.get_event("ev-guard")
+    assert got is not None and got[1].start == start
 
 
 async def test_save_event_stores_offsetless_datetime_as_utc(env):

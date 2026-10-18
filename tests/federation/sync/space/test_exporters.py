@@ -852,8 +852,8 @@ async def test_covered_exporters_stream_only_rows_changed_since_a_stamp(db):
     sticky = await stickies.add(author="u", content="note", space_id="sp")
     await db.enqueue(
         "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
-        " end_dt, created_by) VALUES('ev','sp','Party','2026-07-01T10:00:00',"
-        " '2026-07-01T11:00:00','u')"
+        " end_dt, created_by) VALUES('ev','sp','Party','2026-07-01T10:00:00+00:00',"
+        " '2026-07-01T11:00:00+00:00','u')"
     )
     mark = await _seq(db)
 

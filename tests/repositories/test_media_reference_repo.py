@@ -108,13 +108,13 @@ async def test_collects_the_remaining_media_sources(db):
         ),
         (
             "INSERT INTO calendar_events(id, calendar_id, summary, start_dt, end_dt, "
-            "created_by, cover_url) VALUES('e1', 'cal1', 'S', '2026-01-01', "
-            "'2026-01-02', 'u1', '/api/media/calcover.webp')"
+            "created_by, cover_url) VALUES('e1', 'cal1', 'S', '2026-01-01T00:00:00+00:00', "
+            "'2026-01-02T00:00:00+00:00', 'u1', '/api/media/calcover.webp')"
         ),
         (
             "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, "
-            "end_dt, created_by, cover_url) VALUES('e2', 'sp1', 'S', '2026-01-01', "
-            "'2026-01-02', 'u1', '/api/media/spcalcover.webp')"
+            "end_dt, created_by, cover_url) VALUES('e2', 'sp1', 'S', '2026-01-01T00:00:00+00:00', "
+            "'2026-01-02T00:00:00+00:00', 'u1', '/api/media/spcalcover.webp')"
         ),
         (
             "INSERT INTO pages(id, title, created_by, cover_image_url) "

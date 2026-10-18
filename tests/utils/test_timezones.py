@@ -9,6 +9,7 @@ import pytest
 
 from socialhome.utils.timezones import (
     DEFAULT_TZ,
+    canonical_event_bound,
     coerce_tz,
     is_valid_tz,
     local_date,
@@ -155,3 +156,26 @@ class TestParseEventBound:
     def test_malformed_raises_value_error(self, bad):
         with pytest.raises(ValueError, match="invalid datetime"):
             parse_event_bound(bad, tz="UTC", is_end=False)
+
+
+class TestCanonicalEventBound:
+    """A stored-shape bound (a backup row) brought to migration 0101's
+    invariant — only offset-less values change."""
+
+    def test_date_only_uses_the_row_tz(self):
+        assert (
+            canonical_event_bound("2026-10-20", tz="Europe/Zurich", is_end=True)
+            == "2026-10-20T22:00:00+00:00"
+        )
+
+    def test_naive_is_utc_and_missing_tz_is_utc(self):
+        assert (
+            canonical_event_bound("2026-10-20T08:00:00", tz=None, is_end=False)
+            == "2026-10-20T08:00:00+00:00"
+        )
+
+    @pytest.mark.parametrize(
+        "kept", ["2026-10-20T08:00:00+02:00", "2026-10-20T08:00:00Z", "", "junk", None]
+    )
+    def test_everything_else_is_unchanged(self, kept):
+        assert canonical_event_bound(kept, tz="UTC", is_end=False) == kept
