@@ -1,14 +1,14 @@
 /**
- * Shared overflow-menu pieces used by both :class:`SpaceSubHeader` and
- * :class:`TabHeader`. Lets either surface re-use the exact same
+ * Shared overflow-menu pieces used by :class:`TabHeader` and the
+ * settings page's tab strip. Lets each surface re-use the exact same
  * affordance — ResizeObserver-driven overflow detection, ⋯ More button
  * next to the actions slot, vertical popover with ARIA keyboard model,
  * active-tab scrollIntoView — without duplicating ~80 lines of JSX +
- * hooks.
+ * hooks. (A space's sections use priority+ links instead:
+ * :class:`SpaceSectionNav`.)
  *
- * The two host components own their own tab-strip <nav> + actions so
- * they can keep their own DOM ordering (the space subheader has an
- * identity badge before the strip; the generic TabHeader doesn't).
+ * The host components own their own tab-strip <nav> + actions so they
+ * can keep their own DOM ordering.
  * They pass the strip ref into ``useTabStripOverflow`` to drive the
  * ⋯ button, and render :component:`TabOverflowMenu` next to the
  * actions when overflow is detected.

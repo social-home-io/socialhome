@@ -2,7 +2,7 @@
  * TabHeader — generic tab strip used by single-page surfaces that
  * need an in-page tab nav (DM panel, Organize, Highlights, Momentum).
  *
- * Mirrors the visual + interaction treatment of :class:`SpaceSubHeader`
+ * Shares the sticky ``.sh-space-subheader`` row with :class:`SpaceSectionNav`
  * (terracotta accent on the active tab, pill-shaped buttons, sticky
  * under the TopBar) — including the mobile overflow-menu pattern via
  * the shared :file:`TabStripOverflow` helpers: a ⋯ More button
@@ -54,7 +54,9 @@ export function TabHeader<T extends string>({
 }: TabHeaderProps<T>) {
   const stripRef = useRef<HTMLElement | null>(null)
   const overflowing = useTabStripOverflow(stripRef, [visibleTabs])
-  // Stable string key — see SpaceSubHeader for why not the objects.
+  // A stable string key, not the arrays/objects themselves: hosts often
+  // pass fresh literals each render, and re-running the reveal on every
+  // render would yank back a strip the user just scrolled by hand.
   useScrollActiveTabIntoView(
     stripRef, activeTab, [visibleTabs.map((t) => labels[t]).join('\u0000')],
   )

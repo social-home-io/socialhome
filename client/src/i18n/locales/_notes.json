@@ -372,7 +372,6 @@
   "moment.composer.share_public": "Checkbox label. {n} = number of GFS servers this household is registered with (2 or more). Keep 'GFS' untranslated.",
   "apps.uninstall_body": "{name} = app name (e.g. 'Chess'). French/Spanish: 'app' is feminine.",
   "connections.map.you_pin": "Text inside the small round map pin that marks your own household. Very short (≤ 4 chars).",
-  "space.notif.trigger": "Tooltip / screen-reader name of the bell button on a space. {level} = one of space.notif.level_*.",
   "space.public.hosted_by": "Follows the member count on the space's public page: '5 members · hosted by Miller family'. Lowercase.",
   "space.public.scope_global": "Chip for a space listed in the worldwide directory (via a GFS). Short.",
   "space.public.you_are_member": "Pill on a space's public page when the viewer already belongs to it (any role except follower). Short.",
@@ -513,5 +512,9 @@
   "me.menu_aria": "Accessible name of the top-bar 'You' menu button (the signed-in person's avatar). {name} is their display name.",
   "me.menu_aria_status": "Same as me.menu_aria while a status is set. {status} is the emoji + text status, e.g. '🌴 On leave'.",
   "me.set_status": "Menu item in the top-bar 'You' menu; opens the status dialog. The ellipsis signals a dialog follows.",
-  "me.profile_settings": "Menu item in the top-bar 'You' menu; opens personal settings."
+  "me.profile_settings": "Menu item in the top-bar 'You' menu; opens personal settings.",
+  "space.sections.unread": "Screen-reader text after a section link's grey count, read as 'Chat, 4 unread'. Lower case; the comma is added by the app.",
+  "space.sections.needs_you": "Screen-reader text after the More button's filled count of items waiting for the viewer (posts to review, join requests, reports), read as 'More, 3 need you'.",
+  "space.more.current": "Screen-reader text on the More button when the open section is one of its rows, read as 'More, showing Gallery'.",
+  "space.more.button": "The button at the end of a space's section bar that opens the sections that didn't fit. Keep it one short word."
 }

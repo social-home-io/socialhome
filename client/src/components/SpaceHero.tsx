@@ -25,6 +25,8 @@ interface Props {
   iconUrl?: string | null
   about: string | null
   memberCount?: number | null
+  /** Where the member count leads (the space's Members section). */
+  membersHref?: string
   slim?: boolean
 }
 
@@ -35,6 +37,7 @@ export function SpaceHero({
   iconUrl,
   about,
   memberCount,
+  membersHref,
   slim,
 }: Props) {
   const fallback = emoji || name.trim().charAt(0).toUpperCase() || '🏠'
@@ -59,12 +62,13 @@ export function SpaceHero({
         </span>
         <div class="sh-space-hero-meta">
           <h2 class="sh-space-hero-name">{name}</h2>
-          {!slim && memberCount != null && (
-            <span class="sh-space-hero-members">
-              {t(isOne(memberCount) ? 'space.header.members_one' : 'space.header.members',
-                 { count: String(memberCount) })}
-            </span>
-          )}
+          {!slim && memberCount != null && (() => {
+            const label = t(isOne(memberCount) ? 'space.header.members_one' : 'space.header.members',
+                            { count: String(memberCount) })
+            return membersHref
+              ? <a class="sh-space-hero-members sh-space-hero-members--link" href={membersHref}>{label}</a>
+              : <span class="sh-space-hero-members">{label}</span>
+          })()}
         </div>
       </div>
       {!slim && about && (

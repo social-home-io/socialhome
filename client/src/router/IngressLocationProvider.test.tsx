@@ -390,3 +390,88 @@ describe('IngressLocationProvider (prefixed — simulated ingress)', () => {
     release()
   })
 })
+
+describe('space sections under the ingress prefix (/spaces/:id/:section?)', () => {
+  const PREFIX = '/api/hassio_ingress/tok/'
+  beforeEach(() => {
+    vi.resetModules()
+    vi.doMock('@/baseUrl', () => ({
+      basePath: PREFIX,
+      addBase: (p: string) => PREFIX.replace(/\/+$/, '') + (p.startsWith('/') ? p : '/' + p),
+      stripBase: (p: string) => {
+        const prefix = PREFIX.replace(/\/+$/, '')
+        if (p === prefix) return '/'
+        if (p.startsWith(prefix + '/')) return p.slice(prefix.length) || '/'
+        return p
+      },
+    }))
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.resetModules()
+    vi.doUnmock('@/baseUrl')
+  })
+
+  /** The app's route order for a space: fixed sub-pages first, then the
+   *  one optional-section route the page itself reads. */
+  async function mountSpace(at: string) {
+    resetLocation(at)
+    const mod = await import('./IngressLocationProvider')
+    const iso = await import('preact-iso')
+    const base = await import('@/baseUrl')
+    const mounts = { space: 0 }
+    function Space(_: { path: string }) {
+      const { params } = iso.useRoute()
+      useEffect(() => { mounts.space += 1 }, [])
+      return (
+        <div>
+          <p data-testid="section">{`${params.id}:${params.section ?? 'feed'}`}</p>
+          <a href={base.addBase(`/spaces/${params.id}/chat`)} data-testid="to-chat">Chat</a>
+        </div>
+      )
+    }
+    const About = (_: { path: string }) => <p data-testid="section">about</p>
+    const r = render(
+      <mod.IngressLocationProvider>
+        <iso.Router>
+          <About path="/spaces/:id/about" />
+          <Space path="/spaces/:id/:section?" />
+        </iso.Router>
+      </mod.IngressLocationProvider>,
+    )
+    return { r, mounts }
+  }
+
+  it('a cold load of an ingress-prefixed section path opens that section', async () => {
+    const { r } = await mountSpace('/api/hassio_ingress/tok/spaces/abc/calendar')
+    await vi.waitFor(() => expect(r.getByTestId('section').textContent).toBe('abc:calendar'))
+  })
+
+  it('the bare space path under the prefix is the feed; a fixed sub-page still wins', async () => {
+    let { r } = await mountSpace('/api/hassio_ingress/tok/spaces/abc')
+    await vi.waitFor(() => expect(r.getByTestId('section').textContent).toBe('abc:feed'))
+    cleanup()
+    vi.resetModules()
+    ;({ r } = await mountSpace('/api/hassio_ingress/tok/spaces/abc/about'))
+    await vi.waitFor(() => expect(r.getByTestId('section').textContent).toBe('about'))
+  })
+
+  it('a section link keeps the ingress prefix in the address bar and re-renders the same page', async () => {
+    const { r, mounts } = await mountSpace('/api/hassio_ingress/tok/spaces/abc')
+    await vi.waitFor(() => expect(r.getByTestId('section').textContent).toBe('abc:feed'))
+    const link = r.getByTestId('to-chat')
+    expect(link.getAttribute('href')).toBe('/api/hassio_ingress/tok/spaces/abc/chat')
+    const evt = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })
+    link.dispatchEvent(evt)
+    expect(evt.defaultPrevented).toBe(true)
+    await vi.waitFor(() => expect(r.getByTestId('section').textContent).toBe('abc:chat'))
+    expect(location.pathname).toBe('/api/hassio_ingress/tok/spaces/abc/chat')
+    // Back keeps the section too.
+    history.replaceState(null, '', '/api/hassio_ingress/tok/spaces/abc')
+    fireEvent(window, new PopStateEvent('popstate'))
+    await vi.waitFor(() => expect(r.getByTestId('section').textContent).toBe('abc:feed'))
+    // One mount: switching sections never remounts (and refetches) the page.
+    expect(mounts.space).toBe(1)
+  })
+})

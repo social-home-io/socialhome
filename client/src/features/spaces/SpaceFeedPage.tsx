@@ -37,11 +37,14 @@ import { PendingReviewStrip } from '@/components/PendingReviewStrip'
 import { useModerationMine } from '@/store/moderationMine'
 import { itemPreview } from './moderationItems'
 import { openCommentOverlay } from '@/components/CommentOverlay'
-import { SpaceSubHeader, type SpaceTab } from '@/components/SpaceSubHeader'
+import { SpaceSectionNav, type SpaceMemberSummary } from '@/components/SpaceSectionNav'
 import { SpaceTasksTab } from './SpaceTasksTab'
 import { SpacePagesTab } from './SpacePagesTab'
 import { SpaceCalendarHost } from './SpaceCalendarHost'
-import { calendarTabLabel, parseSpaceTab, visibleSpaceTabs } from './spaceTabs'
+import {
+  legacySpaceSection, parseSpaceSection, sectionAllowed, spaceSectionPath,
+  visibleSpaceSections,
+} from './spaceTabs'
 import {
   canContribute,
   canModerate as roleCanModerate,
@@ -62,16 +65,11 @@ import { SpaceLinksStrip } from './SpaceLinksStrip'
 import { SpaceProposalsBanner } from '@/components/SpaceProposalsBanner'
 import { SpaceVersionBanner } from '@/components/SpaceVersionBanner'
 import { SpaceHero } from '@/components/SpaceHero'
-import { SpaceNotifPrefsMenu } from './SpaceNotifPrefsMenu'
+import { useSpaceNotifLevel } from './SpaceNotifLevels'
+import { useSpaceAttention, spaceAttention, loadSpaceAttention } from '@/store/spaceAttention'
 import { confirmDialog } from '@/components/confirm'
-import { SegmentedSwitch } from '@/components/SegmentedSwitch'
 import { SpaceChatView, useSpaceChatSummary } from './SpaceChatView'
-import {
-  spaceChatOf,
-  spaceFeedViewFromQuery,
-  spaceFeedViews,
-  type SpaceFeedView,
-} from '@/store/spaceChat'
+import { spaceChatOf, spaceChatOpenTo } from '@/store/spaceChat'
 import { isMuteActive } from '@/utils/mute'
 
 interface SpaceDetail {
@@ -154,8 +152,7 @@ export function archivedCopy(
 
 const posts = signal<FeedPost[]>([])
 const loading = signal(true)
-const activeTab = signal<SpaceTab>('feed')
-/** Calendar tab → "Subscribe" dialog (private iCal link). */
+/** Calendar section → "Subscribe" dialog (private iCal link). */
 const subscribeFeedOpen = signal(false)
 const spaceCalEvents = signal<CalendarEvent[]>([])
 /** The last events fetch failed — the tab shows an error with Retry, not
@@ -174,6 +171,8 @@ const spaceDetail = signal<SpaceDetail | null>(null)
  *  unknown, not "no role". */
 const roleKnown = signal(false)
 const memberCount = signal<number | null>(null)
+/** Members and admins (owner + admin) — the Members row of More. */
+const memberSummary = signal<SpaceMemberSummary | null>(null)
 
 /** The space header + the viewer's role: ``GET /api/spaces/{id}`` (name,
  *  emoji, cover, features → tabs, archive state, ``my_role`` → admin-only
@@ -192,7 +191,13 @@ async function loadSpaceHeader(spaceId: string) {
       roleKnown.value = true
     }).catch(() => { roleKnown.value = true /* keep the last role */ }),
     api.get(`/api/spaces/${spaceId}/members`)
-      .then((members: unknown[]) => { memberCount.value = members.length })
+      .then((members: { role?: string }[]) => {
+        memberCount.value = members.length
+        memberSummary.value = {
+          count: members.length,
+          admins: members.filter((m) => m.role === 'owner' || m.role === 'admin').length,
+        }
+      })
       .catch(() => { /* keep the last count */ }),
   ])
 }
@@ -284,15 +289,11 @@ function setSpaceCalendarView(mode: CalendarViewMode, spaceId: string) {
 export default function SpaceFeedPage() {
   const { params, query } = useRoute()
   const spaceId = params.id
-  // ``?tab=tasks`` (e.g. from a task notification) opens that tab.
-  const linkedTab = parseSpaceTab(query?.tab)
-  // ``?tab=moderation`` (the review / report notifications) waits for the
-  // viewer's role: only content authority has the tab.
-  const wantsModeration = query?.tab === 'moderation'
-  // ``?view=chat`` (the chat notifications, a reload) opens the Feed tab's
-  // Chat view; the switch keeps the URL in step.
+  // Every section has its own path: ``/spaces/:id`` is the feed,
+  // ``/spaces/:id/:section`` the rest — Refresh and Back keep it.
+  const parsedSection = parseSpaceSection(params.section)
+  const section = parsedSection ?? 'feed'
   const loc = useLocation() as ReturnType<typeof useLocation> | undefined
-  const wantedView = spaceFeedViewFromQuery(query?.view)
 
   // Apply the space's custom theme (§23 customization). The hook
   // fetches /api/spaces/{id}/theme, sets CSS vars, and cleans up on
@@ -315,12 +316,12 @@ export default function SpaceFeedPage() {
   )
 
   useEffect(() => {
-    activeTab.value = 'feed'
     loading.value = true
     viewerRole.value = undefined
     roleKnown.value = false
     spaceDetail.value = null
     memberCount.value = null
+    memberSummary.value = null
     spaceCalEvents.value = []
     spaceCalLoadFailed.value = false
     spaceCalCursor.value = new Date()
@@ -391,52 +392,68 @@ export default function SpaceFeedPage() {
       offCalUpdated()
       offCalDeleted()
     }
-    // ``loc`` (the no-seat redirect) changes with every URL change — the
-    // ``?tab=`` / ``?view=`` switches included — so as a dependency it would
-    // refetch the whole space on each of them.
+    // ``loc`` (the no-seat redirect) changes with every URL change — every
+    // section switch included — so as a dependency it would refetch the
+    // whole space on each of them.
   }, [spaceId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // A deep link picks the tab once the page reset to the feed above…
+  // Links from before sections had paths (a stored bell entry, a
+  // bookmark): ``?tab=tasks``, ``?view=chat``, ``#join-requests`` → the
+  // section's own path, replacing the entry so Back skips the old form.
+  // A section this page doesn't know → the feed.
   useEffect(() => {
-    if (linkedTab && linkedTab !== activeTab.value) loadTabData(linkedTab)
-  }, [spaceId, linkedTab]) // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (wantsModeration && roleKnown.value && roleCanModerate(viewerRole.value)) {
-      activeTab.value = 'moderation'
-    }
-  }, [spaceId, wantsModeration, roleKnown.value, viewerRole.value])
-  // …and falls back to the feed if the space turns out not to have it
-  // (feature off), or turns it off while it's open.
+    if (!loc) return
+    if (parsedSection === null) { loc.route(spaceSectionPath(spaceId, 'feed'), true); return }
+    if (params.section) return
+    const legacy = legacySpaceSection(query, typeof location === 'undefined' ? '' : location.hash)
+    if (legacy) loc.route(spaceSectionPath(spaceId, legacy), true)
+  }, [spaceId, params.section, query?.tab, query?.view]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const features = spaceDetail.value?.features
-  useEffect(() => {
-    if (!spaceDetail.value || activeTab.value === 'moderation') return
-    if (!visibleSpaceTabs(features, true, isFollower(viewerRole.value)).includes(activeTab.value)) {
-      activeTab.value = 'feed'
-    }
-  }, [features, viewerRole.value])
-
-  // The Feed tab's Feed | Chat switch: Chat for a member (never a
-  // follower) while the space keeps chat on and the server agrees. A
-  // ``?view=chat`` the viewer can't have shows the posts.
+  // The space chat is a section for a member (never a follower) while
+  // the space keeps chat on and the server agrees.
   const chatEligible = features?.chat !== false && isWriterRole(viewerRole.value)
-  const feedViews = spaceFeedViews(features, viewerRole.value, spaceChatOf(spaceId))
-  const feedView: SpaceFeedView = feedViews.includes(wantedView) ? wantedView : 'posts'
-  const chatOpen = activeTab.value === 'feed' && feedView === 'chat'
-  useSpaceChatSummary(spaceId, chatEligible, chatOpen)
-  const pickFeedView = (next: SpaceFeedView) => {
-    const path = `/spaces/${spaceId}`
-    const url = next === 'chat' ? `${path}?view=chat` : path
-    if (loc && loc.url !== url) loc.route(url, true)
-  }
-
-  const loadTabData = (tab: SpaceTab) => {
-    activeTab.value = tab
-    // The events endpoint refuses while the calendar feature is off
-    // (the tab then holds only the timetable).
-    if (tab === 'calendar' && (spaceDetail.value?.features?.calendar ?? true)) {
-      void loadSpaceCalendar(spaceId)
+  const chatOn = spaceChatOpenTo(features, viewerRole.value, spaceChatOf(spaceId))
+  const follower = isFollower(viewerRole.value)
+  const canModerateHere = roleCanModerate(viewerRole.value)
+  // A section the viewer can't have here (feature off, a follower on the
+  // Map, Moderation without content authority) falls back to the feed —
+  // once the space and the viewer's role are known, and again if an
+  // admin turns the section off while it's open.
+  useEffect(() => {
+    if (!loc || !spaceDetail.value || !roleKnown.value) return
+    const viewer = { chat: chatOn, follower, canModerate: canModerateHere }
+    if (!sectionAllowed(section, features, viewer)) {
+      loc.route(spaceSectionPath(spaceId, 'feed'), true)
     }
-  }
+  }, [spaceId, section, features, roleKnown.value, chatOn, follower, canModerateHere]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const chatOpen = section === 'chat'
+  useSpaceChatSummary(spaceId, chatEligible, chatOpen)
+
+  // The calendar loads when its section opens. The events endpoint
+  // refuses while the calendar feature is off (the section then holds
+  // only the timetable).
+  const calendarOn = features?.calendar ?? true
+  useEffect(() => {
+    if (section === 'calendar' && calendarOn) void loadSpaceCalendar(spaceId)
+  }, [spaceId, section, calendarOn])
+
+  // "Needs you": held items + reports (content authority), join requests
+  // (settings authority) — the filled badge on More.
+  const settingsAuthority = hasSettingsAuthority(viewerRole.value)
+  useSpaceAttention(spaceId, canModerateHere, settingsAuthority)
+  // Leaving Moderation re-reads the counts (a report dismissed there
+  // sends no frame).
+  useEffect(() => {
+    if (section !== 'moderation' && canModerateHere) {
+      void loadSpaceAttention(spaceId, canModerateHere, settingsAuthority)
+    }
+  }, [section]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [notifLevel, setNotifLevel] = useSpaceNotifLevel(
+    spaceId, roleKnown.value && viewerRole.value !== undefined,
+  )
 
   const handleSubmit = async (
     type: string,
@@ -523,9 +540,14 @@ export default function SpaceFeedPage() {
   const canModerateQueue = canModerate
   const s = spaceDetail.value
 
-  // Per-space feature toggles hide their tab when off (``spaceTabs``).
+  // Per-space feature toggles hide their section when off (``spaceTabs``).
   const f = s?.features
-  const visibleTabs: readonly SpaceTab[] = visibleSpaceTabs(f, canModerateQueue, isFollower(viewerRole.value))
+  const sections = visibleSpaceSections(f, { chat: chatOn, follower })
+  const attention = spaceAttention.value
+  const chatSummary = spaceChatOf(spaceId)
+  // A muted chat keeps its count on the server but raises no badge — the
+  // household Chat tab's rule.
+  const chatUnread = chatOpen || isMuteActive(chatSummary?.muted_until) ? 0 : (chatSummary?.unread ?? 0)
   // Space timetables: owners / admins edit, everyone else reads. The
   // server's role check is the authority (a remote-hosted space's
   // admin edits too — the host verifies it); an archive is read-only.
@@ -559,34 +581,26 @@ export default function SpaceFeedPage() {
 
   return (
     <div class={chatOpen ? 'sh-space-feed sh-space-scope sh-space-feed--chat' : 'sh-space-feed sh-space-scope'}>
-      <SpaceSubHeader
-        name={s?.name ?? t('spaces.space_title')}
-        emoji={s?.emoji ?? null}
-        iconUrl={s?.icon_url ?? null}
-        memberCount={memberCount.value}
-        activeTab={activeTab}
-        visibleTabs={visibleTabs}
-        tabLabels={{ calendar: calendarTabLabel(f) }}
-        onSelectTab={loadTabData}
-        actions={
-          <>
-            {s && viewerRole.value !== undefined && (
-              <SpaceNotifPrefsMenu spaceId={spaceId} />
-            )}
-            {/* Every full member can open space settings — the page itself
-             *  gates what's shown: a non-admin (member or moderator) sees
-             *  only their own surface (Bots), a remote admin sees the
-             *  forwarding-capable tabs, a local admin sees the full hub.
-             *  Subscribers (read-only) don't. */}
-            {isWriterRole(viewerRole.value) && (
-              <a href={addBase(`/spaces/${spaceId}/settings`)}
-                 class="sh-space-settings-btn"
-                 aria-label={t('space.header.settings_aria')}>
-                ⚙ {t('nav.settings')}
-              </a>
-            )}
-          </>
-        }
+      <SpaceSectionNav
+        spaceId={spaceId}
+        spaceName={s?.name ?? t('spaces.space_title')}
+        sections={sections}
+        active={section}
+        features={f}
+        chatUnread={chatUnread}
+        members={memberSummary.value}
+        needsYou={canModerateQueue && attention?.spaceId === spaceId
+          ? { review: attention.review, reports: attention.reports, joinRequests: attention.joinRequests }
+          : null}
+        notifLevel={notifLevel}
+        onNotifLevel={setNotifLevel}
+        // Every full member can open space settings — the page itself
+        // gates what's shown: a non-admin (member or moderator) sees only
+        // their own surface (Bots), a remote admin sees the
+        // forwarding-capable tabs, a local admin sees the full hub.
+        // Followers (read-only) don't.
+        settingsHref={isWriterRole(viewerRole.value) ? addBase(`/spaces/${spaceId}/settings`) : null}
+        canEditSections={hasSettingsAuthority(viewerRole.value)}
       />
       {/* Proposals are the members' business — a follower never sees them
        *  (``GET …/proposals`` refuses them). */}
@@ -611,7 +625,7 @@ export default function SpaceFeedPage() {
       {s && (() => {
         // The open chat is a tool view: the slim header, so the thread
         // keeps the height.
-        const isFeed = activeTab.value === 'feed' && !chatOpen
+        const isFeed = section === 'feed'
         const branded = !!(s.cover_url || s.icon_url)
         const show = isFeed ? branded || !!s.about_markdown : branded
         if (!show) return null
@@ -623,34 +637,18 @@ export default function SpaceFeedPage() {
             iconUrl={s.icon_url ?? null}
             about={s.about_markdown ?? null}
             memberCount={memberCount.value}
+            membersHref={addBase(spaceSectionPath(spaceId, 'members'))}
             slim={!isFeed}
           />
         )
       })()}
 
-      {activeTab.value === 'feed' && feedViews.length > 1 && (
-        <SegmentedSwitch<SpaceFeedView>
-          class="sh-space-feed-switch"
-          options={feedViews}
-          value={feedView}
-          labels={{ posts: t('space.chat.view_posts'), chat: t('space.chat.view_chat') }}
-          ariaLabel={t('space.chat.view_aria')}
-          // A muted chat keeps its count on the server but raises no
-          // badge — the household Chat tab's rule.
-          badges={{
-            chat: chatOpen || isMuteActive(spaceChatOf(spaceId)?.muted_until)
-              ? 0
-              : (spaceChatOf(spaceId)?.unread ?? 0),
-          }}
-          onChange={pickFeedView}
-        />
-      )}
       {chatOpen && (
         <SpaceChatView spaceId={spaceId} spaceName={s?.name ?? t('spaces.space_title')}
                        canModerate={canModerate} archived={s?.archived === true} />
       )}
 
-      {activeTab.value === 'feed' && !chatOpen && (
+      {section === 'feed' && (
         <div class="sh-feed sh-space-feed-content">
           {viewerRole.value === 'subscriber' ? (
             <div class="sh-subscriber-banner" role="status">
@@ -772,16 +770,11 @@ export default function SpaceFeedPage() {
         </div>
       )}
 
-      {activeTab.value === 'members' && (
-        <>
-          {hasSettingsAuthority(viewerRole.value) && (
-            <JoinRequestList spaceId={spaceId} />
-          )}
-          <SpaceMemberList spaceId={spaceId} viewerRole={viewerRole.value} />
-        </>
+      {section === 'members' && (
+        <SpaceMemberList spaceId={spaceId} viewerRole={viewerRole.value} />
       )}
 
-      {activeTab.value === 'pages' && (
+      {section === 'pages' && (
         <SpacePagesTab
           spaceId={spaceId}
           role={viewerRole.value}
@@ -795,7 +788,7 @@ export default function SpaceFeedPage() {
         />
       )}
 
-      {activeTab.value === 'calendar' && visibleTabs.includes('calendar') && (
+      {section === 'calendar' && sections.includes('calendar') && (
         <SpaceCalendarHost spaceId={spaceId} features={f} canEdit={canEditTimetable}
                            events={() => {
         // The visible range clamps the day expansion — the server's
@@ -984,16 +977,16 @@ export default function SpaceFeedPage() {
               )
             })}
 
-            <CalendarEventDialog onCreated={() => loadTabData('calendar')} />
+            <CalendarEventDialog onCreated={() => { void loadSpaceCalendar(spaceId) }} />
           </div>
         )
       }} />
       )}
 
-      {activeTab.value === 'tasks' && (
+      {section === 'tasks' && (
         <PendingReviewStrip spaceId={spaceId} feature="tasks" />
       )}
-      {activeTab.value === 'tasks' && (
+      {section === 'tasks' && (
         <SpaceTasksTab
           spaceId={spaceId}
           // Unknown until the member list answers: the tab waits rather
@@ -1004,33 +997,33 @@ export default function SpaceFeedPage() {
         />
       )}
 
-      {activeTab.value === 'stickies' && (
+      {section === 'stickies' && (
         <PendingReviewStrip spaceId={spaceId} feature="stickies" />
       )}
-      {activeTab.value === 'stickies' && (
+      {section === 'stickies' && (
         <StickyBoardPage
           spaceId={spaceId}
           readOnly={stickiesReadOnly()}
         />
       )}
 
-      {activeTab.value === 'gallery' && (
+      {section === 'gallery' && (
         <GalleryPage
           spaceId={spaceId}
           readOnly={roleKnown.value && !isWriterRole(viewerRole.value)}
         />
       )}
 
-      {activeTab.value === 'bazaar' && (
+      {section === 'bazaar' && (
         <PendingReviewStrip spaceId={spaceId} feature="posts"
                             filter={i => !!itemPreview(i).bazaar} />
       )}
-      {activeTab.value === 'bazaar' && (
+      {section === 'bazaar' && (
         <SpaceBazaarTab spaceId={spaceId} canSell={!adminOnly('posts')}
                         follower={isFollower(viewerRole.value)} />
       )}
 
-      {activeTab.value === 'map' && visibleTabs.includes('map') && (
+      {section === 'map' && sections.includes('map') && (
         // Passing ``currentUserId`` lights up the "Share my location"
         // chip + button at the top of the map. Without it the share
         // surface stays hidden (the card otherwise renders the map
@@ -1041,7 +1034,10 @@ export default function SpaceFeedPage() {
         />
       )}
 
-      {activeTab.value === 'moderation' && canModerateQueue && (
+      {section === 'moderation' && canModerateQueue && hasSettingsAuthority(viewerRole.value) && (
+        <JoinRequestList spaceId={spaceId} />
+      )}
+      {section === 'moderation' && canModerateQueue && (
         // Approving creates the item as the approver: a moderator can't
         // where the feature is kept to admins (§4.3) — rejecting stays open.
         <ModerationQueue
@@ -1049,8 +1045,9 @@ export default function SpaceFeedPage() {
           canApprove={(feature) => !adminOnly(feature as AccessFeature)}
         />
       )}
-      {activeTab.value === 'moderation' && canModerateQueue && (
-        <SpaceReports spaceId={spaceId} onOpenTab={loadTabData} />
+      {section === 'moderation' && canModerateQueue && (
+        <SpaceReports spaceId={spaceId}
+                      onOpenTab={(tab) => loc?.route(spaceSectionPath(spaceId, tab))} />
       )}
     </div>
   )

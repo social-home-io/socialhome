@@ -1,5 +1,5 @@
 /**
- * SpaceFeedPage — the Feed tab's Feed | Chat switch (space chat).
+ * SpaceFeedPage — the space chat, its own section (``/spaces/s1/chat``).
  *
  * The thread itself is ConversationView's job (its own tests cover
  * delete and ``meta``); here it is a stub that records its props.
@@ -50,33 +50,36 @@ vi.mock('@/store/auth', () => ({
 }))
 
 const route = vi.hoisted(() => ({
+  section: undefined as string | undefined,
   query: {} as Record<string, string>,
-  sig: null as null | { value: Record<string, string> },
+  sig: null as null | { value: string | undefined },
+  go: [] as string[],
 }))
-// The query lives in a signal so a switch click re-renders the page the
+// The section lives in a signal so a navigation re-renders the page the
 // way the router's URL change does.
 vi.mock('preact-iso', async () => {
   const { signal } = await import('@preact/signals')
-  const sig = signal(route.query)
+  const sig = signal<string | undefined>(route.section)
   route.sig = sig
   return {
-    useRoute: () => ({ params: { id: 's1' }, query: sig.value, path: '/spaces/s1' }),
+    useRoute: () => ({ params: { id: 's1', section: sig.value }, query: route.query, path: '/spaces/s1' }),
     useLocation: () => ({
       route: (url: string) => {
-        const q = url.split('?')[1] ?? ''
-        route.query = Object.fromEntries(new URLSearchParams(q))
-        sig.value = route.query
+        route.go.push(url)
+        const m = /^\/spaces\/s1(?:\/([a-z]+))?$/.exec(url.split('?')[0])
+        route.query = {}
+        sig.value = m?.[1]
       },
-      url: sig.value.view ? `/spaces/s1?view=${sig.value.view}` : '/spaces/s1',
+      url: sig.value ? `/spaces/s1/${sig.value}` : '/spaces/s1',
       path: '/spaces/s1',
-      query: sig.value,
+      query: route.query,
     }),
   }
 })
 
-function setQuery(q: Record<string, string>): void {
-  route.query = q
-  if (route.sig) route.sig.value = q
+function goTo(section: string | undefined): void {
+  route.section = section
+  if (route.sig) route.sig.value = section
 }
 
 const viewProps: Array<Record<string, unknown>> = []
@@ -126,7 +129,9 @@ async function renderPage() {
 beforeEach(() => {
   vi.resetModules()
   apiGet.mockReset()
-  setQuery({})
+  route.query = {}
+  route.go = []
+  goTo(undefined)
   viewProps.length = 0
   for (const k of Object.keys(wsHandlers)) delete wsHandlers[k]
   ;(window as unknown as Record<string, unknown>).ResizeObserver ??= class {
@@ -142,18 +147,24 @@ afterEach(async () => {
   cleanup()
 })
 
-describe('SpaceFeedPage — Feed | Chat switch', () => {
-  it('a member gets the switch, posts first; Chat opens the thread', async () => {
+const chatLink = (r: { queryByRole: (role: string, o: { name: RegExp }) => HTMLElement | null }) =>
+  r.queryByRole('link', { name: /^Chat/ })
+
+describe('SpaceFeedPage — the Chat section', () => {
+  it('a member gets Chat right after Feed; /spaces/s1/chat opens the thread', async () => {
     wire()
     const r = await renderPage()
-    const chat = await r.findByRole('button', { name: 'Chat' })
-    const feed = r.getByRole('button', { name: 'Feed' })
-    expect(r.getByRole('group', { name: 'Feed or chat' })).toBeTruthy()
-    expect(feed.getAttribute('aria-pressed')).toBe('true')
+    const chat = await r.findByRole('link', { name: 'Chat' })
+    expect(chat.getAttribute('href')).toBe('/spaces/s1/chat')
+    const links = Array.from(r.getByRole('navigation', { name: 'Space sections' })
+      .querySelectorAll('a')).map((a) => a.textContent)
+    expect(links.slice(0, 2)).toEqual(['Feed', 'Chat'])
+    expect(r.getByRole('link', { name: 'Feed' }).getAttribute('aria-current')).toBe('page')
     expect(r.queryByTestId('conversation-view')).toBeNull()
-    r.fireEvent.click(chat)
+    goTo('chat')
     await r.waitFor(() => expect(r.getByTestId('conversation-view').textContent).toBe('sc-1'))
-    expect(route.query).toEqual({ view: 'chat' })
+    expect(r.getByRole('link', { name: 'Chat' }).getAttribute('aria-current')).toBe('page')
+    expect(r.getByRole('link', { name: 'Feed' }).getAttribute('aria-current')).toBeNull()
     const props = viewProps.at(-1)!
     expect(props).toMatchObject({
       embedded: true, showHeader: false, showGroupInfo: false, allowCalls: false,
@@ -161,68 +172,64 @@ describe('SpaceFeedPage — Feed | Chat switch', () => {
     })
     expect(props.meta).toMatchObject({ type: 'group_dm', notif_level: 'all', last_read_at: '2026-10-08 12:00:00' })
     expect(r.getByText('Members of Choir can read this chat.')).toBeTruthy()
-    // Back to the posts drops the query.
-    r.fireEvent.click(r.getByRole('button', { name: 'Feed' }))
+    goTo(undefined)
     await r.waitFor(() => expect(r.queryByTestId('conversation-view')).toBeNull())
-    expect(route.query).toEqual({})
   })
 
-  it('?view=chat deep-links straight into the chat', async () => {
-    setQuery({ view: 'chat' })
+  it('the old ?view=chat link moves to /spaces/s1/chat', async () => {
+    route.query = { view: 'chat' }
     wire()
     const r = await renderPage()
     await r.waitFor(() => expect(r.getByTestId('conversation-view').textContent).toBe('sc-1'))
-    expect(r.getByRole('button', { name: 'Chat' }).getAttribute('aria-pressed')).toBe('true')
+    expect(route.go).toContain('/spaces/s1/chat')
   })
 
   it('an owner / admin / moderator may moderate the chat', async () => {
-    setQuery({ view: 'chat' })
+    goTo('chat')
     wire({ role: 'moderator' })
     const r = await renderPage()
     await r.waitFor(() => expect(r.getByTestId('conversation-view')).toBeTruthy())
     expect(viewProps.at(-1)!.canModerate).toBe(true)
   })
 
-  it('no switch while the space turned chat off; ?view=chat shows the posts', async () => {
-    setQuery({ view: 'chat' })
+  it('no Chat while the space turned chat off; /chat falls back to the feed', async () => {
+    goTo('chat')
     wire({ features: { chat: false } })
     const r = await renderPage()
     await r.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1/feed'))
-    await r.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1/members'))
-    await new Promise(res => setTimeout(res, 50))
-    expect(r.queryByRole('group', { name: 'Feed or chat' })).toBeNull()
+    await r.waitFor(() => expect(route.go).toContain('/spaces/s1'))
+    expect(chatLink(r)).toBeNull()
     expect(r.queryByTestId('conversation-view')).toBeNull()
     expect(summaryCalls()).toBe(0)
   })
 
-  it('a follower gets no switch and never asks for the chat', async () => {
+  it('a follower gets no Chat and never asks for the chat', async () => {
     wire({ role: 'subscriber' })
     const r = await renderPage()
     await r.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1/members'))
     await new Promise(res => setTimeout(res, 50))
-    expect(r.queryByRole('group', { name: 'Feed or chat' })).toBeNull()
+    expect(chatLink(r)).toBeNull()
     expect(summaryCalls()).toBe(0)
   })
 
-  it('a non-member (public space visitor) gets no switch', async () => {
+  it('a non-member (public space visitor) gets no Chat', async () => {
     wire({ role: null })
     const r = await renderPage()
     await r.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1/members'))
     await new Promise(res => setTimeout(res, 50))
-    expect(r.queryByRole('group', { name: 'Feed or chat' })).toBeNull()
+    expect(chatLink(r)).toBeNull()
     expect(summaryCalls()).toBe(0)
   })
 
-  it('the server saying "off" hides the switch', async () => {
+  it('the server saying "off" hides Chat', async () => {
     wire({ summary: { ...SUMMARY, enabled: false, conversation_id: null } })
     const r = await renderPage()
     await r.waitFor(() => expect(summaryCalls()).toBe(1))
-    await new Promise(res => setTimeout(res, 50))
-    expect(r.queryByRole('group', { name: 'Feed or chat' })).toBeNull()
+    await r.waitFor(() => expect(chatLink(r)).toBeNull())
   })
 
-  it('a failed summary offers Retry in the chat view', async () => {
-    setQuery({ view: 'chat' })
+  it('a failed summary offers Retry in the chat section', async () => {
+    goTo('chat')
     wire({ summary: 'fail' })
     const r = await renderPage()
     const retry = await r.findByRole('button', { name: 'Retry' })
@@ -231,47 +238,48 @@ describe('SpaceFeedPage — Feed | Chat switch', () => {
     await r.waitFor(() => expect(r.getByTestId('conversation-view').textContent).toBe('sc-1'))
   })
 
-  it('unread: the server count on Chat; live frames for this space count', async () => {
+  it('unread: a quiet count on Chat, read as "Chat, 2 unread"; live frames for this space count', async () => {
     wire({ summary: { ...SUMMARY, unread: 2 } })
     const r = await renderPage()
-    await r.findByRole('button', { name: /Chat.*2 unread/ })
+    const chat = await r.findByRole('link', { name: 'Chat, 2 unread' })
+    expect(chat.querySelector('.sh-space-badge--unread')?.textContent).toBe('2')
     // Another space's chat, the household chat and the viewer's own
     // message don't count.
     emit('dm.message', { system_scope: 'space', space_id: 's2', message: { sender_user_id: 'u2' } })
     emit('dm.message', { system_scope: 'household', space_id: null, message: { sender_user_id: 'u2' } })
     emit('dm.message', { system_scope: 'space', space_id: 's1', message: { sender_user_id: 'u1' } })
     emit('dm.message', { system_scope: 'space', space_id: 's1', message: { sender_user_id: 'u2' } })
-    await r.findByRole('button', { name: /Chat.*3 unread/ })
+    await r.findByRole('link', { name: 'Chat, 3 unread' })
     // Opening the chat clears the badge.
-    r.fireEvent.click(r.getByRole('button', { name: /Chat/ }))
-    await r.waitFor(() => expect(r.getByRole('button', { name: 'Chat' })).toBeTruthy())
+    goTo('chat')
+    await r.waitFor(() => expect(r.getByRole('link', { name: 'Chat' })).toBeTruthy())
   })
 
   it('unread: none while muted; at "Only @mentions" only frames that mention me', async () => {
     wire({ summary: { ...SUMMARY, unread: 4, muted_until: FOREVER } })
     const r = await renderPage()
     await r.waitFor(() => expect(summaryCalls()).toBe(1))
-    const chat = await r.findByRole('button', { name: 'Chat' })
+    const chat = await r.findByRole('link', { name: 'Chat' })
     expect(chat.textContent).toBe('Chat')
     r.cleanup()
     wsHandlersReset()
     wire({ summary: { ...SUMMARY, unread: 1, notif_level: 'mentions' } })
     const r2 = await renderPage()
-    await r2.findByRole('button', { name: /Chat.*1 unread/ })
+    await r2.findByRole('link', { name: 'Chat, 1 unread' })
     emit('dm.message', { system_scope: 'space', space_id: 's1', message: { sender_user_id: 'u2' } })
     emit('dm.message', {
       system_scope: 'space', space_id: 's1', mentions_you: false, message: { sender_user_id: 'u2' },
     })
     await new Promise(res => setTimeout(res, 20))
-    expect(r2.getByRole('button', { name: /Chat.*1 unread/ })).toBeTruthy()
+    expect(r2.getByRole('link', { name: 'Chat, 1 unread' })).toBeTruthy()
     emit('dm.message', {
       system_scope: 'space', space_id: 's1', mentions_you: true, message: { sender_user_id: 'u2' },
     })
-    await r2.findByRole('button', { name: /Chat.*2 unread/ })
+    await r2.findByRole('link', { name: 'Chat, 2 unread' })
   })
 
   it('re-reads the summary on a WS reconnect and on leaving the chat', async () => {
-    setQuery({ view: 'chat' })
+    goTo('chat')
     wire()
     const r = await renderPage()
     await r.waitFor(() => expect(r.getByTestId('conversation-view')).toBeTruthy())
@@ -279,12 +287,12 @@ describe('SpaceFeedPage — Feed | Chat switch', () => {
     conn.state!.value = 'reconnecting'
     conn.state!.value = 'open'
     await r.waitFor(() => expect(summaryCalls()).toBe(2))
-    r.fireEvent.click(r.getByRole('button', { name: 'Feed' }))
+    goTo(undefined)
     await r.waitFor(() => expect(summaryCalls()).toBe(3))
   })
 
   it('an archived space shows its chat read-only', async () => {
-    setQuery({ view: 'chat' })
+    goTo('chat')
     wire({ archived: true })
     const r = await renderPage()
     await r.waitFor(() => expect(r.getByTestId('conversation-view')).toBeTruthy())
@@ -298,7 +306,7 @@ describe('SpaceFeedPage — Feed | Chat switch', () => {
   })
 
   it('a live space keeps the composer', async () => {
-    setQuery({ view: 'chat' })
+    goTo('chat')
     wire()
     const r = await renderPage()
     await r.waitFor(() => expect(r.getByTestId('conversation-view')).toBeTruthy())

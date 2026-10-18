@@ -239,27 +239,18 @@ export function isSpaceChatFrame(data: unknown, spaceId: string): boolean {
   return d?.system_scope === 'space' && d.space_id === spaceId
 }
 
-/** The two views of a space's Feed tab. */
-export type SpaceFeedView = 'posts' | 'chat'
-
-/** The views to offer, in switch order. Chat needs the space's ``chat``
- *  feature on (absent = on, the backend default), a viewer the member
- *  list named as a writer (owner / admin / moderator / member — never a
- *  follower or a non-member), and a summary that doesn't say "off".
- *  A summary still loading counts as on, so the switch doesn't jump in
- *  once the answer lands. */
-export function spaceFeedViews(
+/** Is the space chat open to this viewer — its own section (``/spaces/
+ *  :id/chat``)? It needs the space's ``chat`` feature on (absent = on, the
+ *  backend default), a viewer the member list named as a writer (owner /
+ *  admin / moderator / member — never a follower or a non-member), and a
+ *  summary that doesn't say "off". A summary still loading counts as on,
+ *  so the section doesn't jump in once the answer lands. */
+export function spaceChatOpenTo(
   features: { chat?: boolean } | undefined,
   role: SpaceRole | undefined,
   chat: Pick<SystemChatSummary, 'enabled'> | null,
-): SpaceFeedView[] {
-  if (features?.chat === false) return ['posts']
-  if (!isWriterRole(role)) return ['posts']
-  if (chat !== null && !chat.enabled) return ['posts']
-  return ['posts', 'chat']
-}
-
-/** The view a ``?view=`` query value asks for. */
-export function spaceFeedViewFromQuery(v: unknown): SpaceFeedView {
-  return v === 'chat' ? 'chat' : 'posts'
+): boolean {
+  if (features?.chat === false) return false
+  if (!isWriterRole(role)) return false
+  return chat === null || chat.enabled
 }
