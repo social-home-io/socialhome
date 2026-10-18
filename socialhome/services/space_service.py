@@ -3044,6 +3044,58 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         )
         return invitation_id
 
+    async def list_pending_local_invites(self, user_id: str) -> list[dict]:
+        """Same-household invites pending for ``user_id``, each with the
+        landing fields of the space it invites to — what a directory entry
+        or a discoverable space's landing page already shows a non-member
+        (name, emoji, description, icon, member count), never the roster
+        or the config — plus the inviter's display name.
+
+        Only the caller's own invitations are listed (the repo filters on
+        ``invited_user_id``), so the space fields reach exactly the person
+        the space's admin chose to invite.
+
+        ``space_icon_url`` is the canonical (unsigned) ``/api/spaces/{id}/
+        icon?v=`` path, ``None`` without an uploaded icon; the route signs it.
+        """
+        rows = await self._spaces.list_pending_local_invites_for(user_id)
+        out: list[dict] = []
+        for r in rows:
+            space = await self._spaces.get(r["space_id"])
+            inviter_id = r.get("invited_by")
+            inviter = (
+                await self._users.get_by_user_id(inviter_id) if inviter_id else None
+            )
+            member_count = (
+                len(await self._spaces.list_members(space.id))
+                if space is not None
+                else None
+            )
+            out.append(
+                {
+                    "invitation_id": r["id"],
+                    "space_id": r["space_id"],
+                    "invited_by": inviter_id,
+                    "invited_by_display_name": (
+                        inviter.display_name if inviter is not None else None
+                    ),
+                    "expires_at": r.get("expires_at"),
+                    "created_at": r.get("created_at"),
+                    "space_name": space.name if space is not None else None,
+                    "space_emoji": space.emoji if space is not None else None,
+                    "space_description": (
+                        space.description if space is not None else None
+                    ),
+                    "space_icon_url": (
+                        f"/api/spaces/{space.id}/icon?v={space.icon_hash}"
+                        if space is not None and space.icon_hash
+                        else None
+                    ),
+                    "member_count": member_count,
+                }
+            )
+        return out
+
     async def accept_local_invite(
         self,
         invitation_id: str,

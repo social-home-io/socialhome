@@ -10887,3 +10887,46 @@ async def test_open_join_keeps_the_age_gate(stack):
     with pytest.raises(AgeRestrictedError):
         await stack.space_svc.request_join(s.id, user_id=kid.user_id)
     assert await stack.space_repo.get_member(s.id, kid.user_id) is None
+
+
+async def test_list_pending_local_invites_carries_space_landing_fields(stack):
+    """The invitee's pending invite names the space (not just its id),
+    the inviter and the member count — the landing fields a non-member
+    may see."""
+    await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Board games", emoji="🎲"
+    )
+    invitation_id = await stack.space_svc.invite_local_user(
+        space.id, actor_username="anna", user_id=b.user_id
+    )
+    (inv,) = await stack.space_svc.list_pending_local_invites(b.user_id)
+    assert inv["invitation_id"] == invitation_id
+    assert inv["space_name"] == "Board games"
+    assert inv["space_emoji"] == "🎲"
+    assert inv["space_icon_url"] is None
+    assert inv["member_count"] == 1
+    assert inv["invited_by_display_name"] is not None
+    # Another user has nothing pending.
+    assert await stack.space_svc.list_pending_local_invites("uid-nobody") == []
+
+
+async def test_list_pending_local_invites_space_gone(stack):
+    """``space_invitations`` has no FK to ``spaces``: an invite whose
+    space row is gone still lists (so it can be declined), with the
+    space fields ``None`` — the banner falls back to "a space"."""
+    await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Gone")
+    await stack.space_svc.invite_local_user(
+        space.id, actor_username="anna", user_id=b.user_id
+    )
+    await stack.db.enqueue("PRAGMA foreign_keys=OFF")
+    await stack.db.enqueue("DELETE FROM spaces WHERE id=?", (space.id,))
+    await stack.db.enqueue("PRAGMA foreign_keys=ON")
+    (inv,) = await stack.space_svc.list_pending_local_invites(b.user_id)
+    assert inv["space_id"] == space.id
+    assert inv["space_name"] is None
+    assert inv["member_count"] is None
+    assert inv["space_icon_url"] is None
