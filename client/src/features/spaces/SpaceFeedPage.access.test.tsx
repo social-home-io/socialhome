@@ -24,10 +24,10 @@ vi.mock('@/store/auth', () => ({
   logout: vi.fn(),
 }))
 
-const route = vi.hoisted(() => ({ query: {} as Record<string, string> }))
+const route = vi.hoisted(() => ({ query: {} as Record<string, string>, go: vi.fn() }))
 vi.mock('preact-iso', () => ({
   useRoute: () => ({ params: { id: 's1' }, query: route.query, path: '/spaces/s1' }),
-  useLocation: () => ({ route: vi.fn(), url: '/spaces/s1', path: '/spaces/s1', query: route.query }),
+  useLocation: () => ({ route: route.go, url: '/spaces/s1', path: '/spaces/s1', query: route.query }),
 }))
 
 vi.mock('./SpaceTasksTab', () => ({
@@ -205,5 +205,26 @@ describe('a sticky board the viewer can only read', () => {
     await tl.waitFor(() =>
       expect(r.getByTestId('sticky-board').textContent)
         .toBe('This space is archived — its sticky notes are read-only.'))
+  }, 20000)
+})
+
+describe('a follower unfollowing from the banner', () => {
+  it('routes to the spaces list in-app — no full page reload', async () => {
+    route.go.mockClear()
+    const { tl, r } = await open('feed', 'subscriber', {})
+    const btn = await tl.waitFor(() => r.getByRole('button', { name: 'Unfollow this space' }))
+    // ``window.location.href = …`` would reload the whole SPA.
+    const spy = vi.spyOn(window, 'location', 'get')
+    const loc = { href: '' } as Location
+    spy.mockReturnValue(loc)
+    try {
+      tl.fireEvent.click(btn)
+      const { api } = await import('@/api')
+      await tl.waitFor(() => expect(route.go).toHaveBeenCalledWith('/spaces', true))
+      expect(api.delete).toHaveBeenCalledWith('/api/spaces/s1/subscribe')
+      expect(loc.href).toBe('')
+    } finally {
+      spy.mockRestore()
+    }
   }, 20000)
 })

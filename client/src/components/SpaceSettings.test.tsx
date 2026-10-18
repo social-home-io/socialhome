@@ -11,6 +11,12 @@ vi.mock('@/api', () => {
   return { api: m }
 })
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
+// The router: leaving the page after a dissolve is an in-app ``route()``.
+const nav = vi.hoisted(() => ({ route: vi.fn() }))
+vi.mock('preact-iso', async (orig) => ({
+  ...(await orig<object>()),
+  useLocation: () => ({ route: nav.route }),
+}))
 
 import { SpaceSettings } from './SpaceSettings'
 import { api } from '@/api'
@@ -578,7 +584,8 @@ describe('SpaceSettings', () => {
       return { markedDuringRequest, isLocalDissolve }
     }
 
-    it('claims an executed dissolve and hard-navigates inside the ingress base', async () => {
+    it('claims an executed dissolve and routes to the spaces list in-app (no full reload)', async () => {
+      nav.route.mockClear()
       const spy = vi.spyOn(window, 'location', 'get')
       const loc = { href: '' } as Location
       spy.mockReturnValue(loc)
@@ -590,10 +597,18 @@ describe('SpaceSettings', () => {
         expect(apiMock.post).toHaveBeenCalledWith(
           '/api/spaces/s-1/proposals', { action: 'dissolve' },
         )
-        expect(loc.href.endsWith('/spaces')).toBe(true)
+        // Replace: Back must not return to the dissolved space.
+        expect(nav.route).toHaveBeenCalledWith('/spaces', true)
+        expect(loc.href).toBe('')
       } finally {
         spy.mockRestore()
       }
+    })
+
+    it('an only-proposed dissolve stays on the page', async () => {
+      nav.route.mockClear()
+      await proposeDissolve(Promise.resolve({ proposal: { status: 'pending', needed: 2 } }))
+      expect(nav.route).not.toHaveBeenCalled()
     })
 
     it('releases the claim when the dissolve is only proposed', async () => {

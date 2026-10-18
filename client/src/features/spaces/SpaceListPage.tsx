@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'preact/hooks'
+import { useLocation } from 'preact-iso'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
@@ -146,6 +147,9 @@ function SpaceRow({
 
 export default function SpaceListPage() {
   useTitle(t('nav.spaces'))
+  // In-app navigation: the router swaps the page without reloading the
+  // SPA, and keeps the ingress prefix on the address bar.
+  const { route } = useLocation()
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set<string>())
 
   useEffect(() => {
@@ -201,7 +205,7 @@ export default function SpaceListPage() {
         <div class="sh-page-header__actions">
           <Button
             variant="secondary"
-            onClick={() => { window.location.href = addBase('/spaces/browse') }}
+            onClick={() => route('/spaces/browse')}
           >
             🔭 {t('spaces.list.browse')}
           </Button>
@@ -223,7 +227,7 @@ export default function SpaceListPage() {
             </Button>
             <Button
               variant="secondary"
-              onClick={() => { window.location.href = addBase('/spaces/browse') }}
+              onClick={() => route('/spaces/browse')}
             >
               🔭 {t('spaces.list.browse_public')}
             </Button>

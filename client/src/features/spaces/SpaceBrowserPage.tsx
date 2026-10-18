@@ -19,7 +19,6 @@ import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
-import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
 import { SpaceListSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
@@ -270,7 +269,7 @@ export default function SpaceBrowserPage() {
 
   const onAction = async (entry: DirectoryEntry, action: { kind: string }) => {
     if (action.kind === 'open') {
-      window.location.href = addBase(`/spaces/${entry.space_id}`)
+      loc.route(`/spaces/${entry.space_id}`)
       return
     }
     if (action.kind === 'pair-first') {

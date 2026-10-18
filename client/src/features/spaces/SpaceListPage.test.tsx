@@ -155,3 +155,40 @@ describe('SpaceListPage — chat unread stays current', () => {
     expect(unreadCalls()).toBe(2)
   })
 })
+
+describe('SpaceListPage — Browse routes in-app, no full page reload', () => {
+  // ``window.location.href = …`` reloads the whole SPA (every store, the
+  // socket, the ingress iframe). The router's ``route()`` pushes history
+  // and swaps the page in place — JSDOM never moves ``location`` on a hard
+  // navigate, so a changed pathname proves the router did it.
+  const before = location.pathname
+  afterEach(() => { history.replaceState(null, '', before) })
+
+  async function renderRouted() {
+    const tl = await import('@testing-library/preact')
+    const { IngressLocationProvider } = await import('@/router/IngressLocationProvider')
+    const { default: Page } = await import('./SpaceListPage')
+    history.replaceState(null, '', '/spaces')
+    return { ...tl, ...tl.render(<IngressLocationProvider><Page /></IngressLocationProvider>) }
+  }
+
+  it('the header Browse button routes to /spaces/browse', async () => {
+    wire({})
+    const r = await renderRouted()
+    await r.findByText('Choir')
+    r.fireEvent.click(r.getByRole('button', { name: /Browse spaces/ }))
+    expect(location.pathname).toBe('/spaces/browse')
+  })
+
+  it('the empty state Browse button routes to /spaces/browse', async () => {
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/api/me/subscriptions') return { subscriptions: [] }
+      if (url === '/api/spaces/chat-unread') return { spaces: {} }
+      return []
+    })
+    const r = await renderRouted()
+    const btn = await r.findByRole('button', { name: /Browse public spaces/ })
+    r.fireEvent.click(btn)
+    expect(location.pathname).toBe('/spaces/browse')
+  })
+})
