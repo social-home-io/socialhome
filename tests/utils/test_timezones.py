@@ -159,7 +159,7 @@ class TestParseEventBound:
 
 
 class TestCanonicalEventBound:
-    """A stored-shape bound (a backup row) brought to migration 0101's
+    """A stored-shape bound (a backup row) brought to migration 0100's
     invariant — only offset-less values change."""
 
     def test_date_only_uses_the_row_tz(self):

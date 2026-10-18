@@ -1,9 +1,6 @@
-"""0101 — calendar event bounds are tz-aware ISO 8601, enforced by the DB.
+"""0100 — calendar event bounds are tz-aware ISO 8601, enforced by the DB.
 
-Follows 0099 (member picture hash repair); 0100 is reserved for the household
-auto-membership change, which must land on main BEFORE this one (the runner
-applies only versions above the highest recorded, so a later 0100 would be
-skipped on every database that already ran 0101).
+Follows 0099 (member picture hash repair).
 
 Before #994 the calendar API stored ``start`` / ``end`` exactly as
 ``datetime.fromisoformat`` parsed them, so an API client's date-only
@@ -113,7 +110,7 @@ def _canonical(value: object, tz: str | None, *, is_end: bool) -> object:
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError:
-        log.warning("0101: unparseable calendar bound %r left as stored", value)
+        log.warning("0100: unparseable calendar bound %r left as stored", value)
         return value
     if parsed.tzinfo is not None:
         return value
@@ -162,7 +159,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         fixed = _repair(conn, table)
         if fixed:
             log.info(
-                "0101: repaired %d %s row(s) with offset-less bounds", fixed, table
+                "0100: repaired %d %s row(s) with offset-less bounds", fixed, table
             )
     for table in _TABLES:
         _install_guard(conn, table)

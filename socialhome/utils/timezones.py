@@ -144,7 +144,7 @@ def canonical_event_bound(value: object, *, tz: str | None, is_end: bool) -> obj
     :func:`parse_event_bound`'s rules in ``tz`` and returned as its
     ``+00:00`` ISO string; everything else — a value with an offset, the
     ``''`` of a tombstone stub, a non-string, an unparseable string — is
-    returned unchanged (migration 0101's triggers judge the latter).
+    returned unchanged (migration 0100's triggers judge the latter).
     """
     if not isinstance(value, str) or value == "":
         return value

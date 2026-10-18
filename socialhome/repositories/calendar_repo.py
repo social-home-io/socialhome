@@ -94,7 +94,7 @@ def _expand_window(
 def _iso(value) -> str | None:
     """A bound in the ``start_dt`` / ``end_dt`` column shape.
 
-    The producer side of the column's invariant (migration 0101's triggers
+    The producer side of the column's invariant (migration 0100's triggers
     refuse anything else): a naive datetime is UTC (the codebase-wide rule)
     and is stamped ``+00:00`` before it is written; an explicit offset is
     kept as given.
@@ -112,7 +112,7 @@ def _iso(value) -> str | None:
 
 def _parse(value: str | None) -> datetime | None:
     """Read a stored bound. The column holds only tz-aware values
-    (migration 0101 repaired the rest and its triggers refuse new ones);
+    (migration 0100 repaired the rest and its triggers refuse new ones);
     ``''`` is a tombstone stub's blank bound."""
     if not value:
         return None

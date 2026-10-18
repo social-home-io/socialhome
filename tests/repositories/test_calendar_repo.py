@@ -1465,7 +1465,7 @@ async def test_space_calendar_sync_page_is_every_stored_event_unexpanded(
 
 
 async def test_db_refuses_an_offsetless_bound(env):
-    """Migration 0101's triggers: a date-only / offset-less bound written
+    """Migration 0100's triggers: a date-only / offset-less bound written
     past the repo (raw SQL, a regression) aborts instead of landing next
     to tz-aware rows — one such row used to 500 the whole calendar."""
     sid = await _seed_space(env, "sp-guard")

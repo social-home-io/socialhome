@@ -309,7 +309,7 @@ async def test_restore_keeps_a_user_whose_old_backup_has_a_bad_picture_hash(tmp_
 async def test_restore_brings_an_old_backups_offsetless_calendar_bounds_in_shape(
     tmp_dir,
 ):
-    """A backup taken before migration 0101 can hold a date-only or
+    """A backup taken before migration 0100 can hold a date-only or
     offset-less event bound the DB's trigger now refuses. Restore rewrites
     it with the migration's rules (date-only = the day in the row's tz,
     offset-less = UTC) instead of dropping the event."""
@@ -322,7 +322,7 @@ async def test_restore_brings_an_old_backups_offsetless_calendar_bounds_in_shape
         " identity_public_key, routing_secret) VALUES(?,?,?,?)",
         (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
     )
-    # The pre-0101 world: no trigger guards the columns yet.
+    # The pre-0100 world: no trigger guards the columns yet.
     await src.enqueue("DROP TRIGGER calendar_events_bounds_tz_insert_check")
     await src.enqueue(
         "INSERT INTO users(username, user_id, display_name) VALUES('alice', 'a', 'A')"

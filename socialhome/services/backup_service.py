@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 
 #: Tables whose ``picture_hash`` the DB guards (migration 0098) — restore
 #: cleans the column so an old backup's bad hash can't drop the whole row.
-#: Tables whose ``start_dt`` / ``end_dt`` migration 0101 keeps tz-aware.
+#: Tables whose ``start_dt`` / ``end_dt`` migration 0100 keeps tz-aware.
 _CALENDAR_BOUND_TABLES: frozenset[str] = frozenset(
     {"calendar_events", "space_calendar_events"}
 )
@@ -399,7 +399,7 @@ class BackupService:
         clean_bounds = table in _CALENDAR_BOUND_TABLES and "start_dt" in cols
         for row in rows:
             if clean_bounds:
-                # A backup from before migration 0101 can carry a date-only
+                # A backup from before migration 0100 can carry a date-only
                 # / offset-less bound the DB's trigger now refuses; bring it
                 # to the column's shape with the migration's rules.
                 tz = row.get("tz")

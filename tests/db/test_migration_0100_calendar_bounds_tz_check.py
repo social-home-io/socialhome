@@ -1,4 +1,4 @@
-"""Migration 0101 — calendar event bounds are tz-aware, enforced by the DB.
+"""Migration 0100 — calendar event bounds are tz-aware, enforced by the DB.
 
 A date-only / offset-less ``start_dt`` / ``end_dt`` (an API client's
 ``"2026-10-20"`` before #994) made the range read compare naive and aware
@@ -17,7 +17,7 @@ import pytest
 
 from tests.migration_chain import apply_through
 
-_VERSION = 101
+_VERSION = 100
 _AWARE = "2026-10-21T17:00:00+02:00"
 
 
