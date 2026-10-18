@@ -2619,7 +2619,10 @@ class SpaceJoinRequestCollectionView(BaseView):
             user_id=ctx.user_id,
             message=body.get("message"),
         )
-        return web.json_response({"request_id": request_id}, status=201)
+        # ``open`` space hosted here: seated at once, no request to review.
+        return web.json_response(
+            {"request_id": request_id, "joined": request_id is None}, status=201
+        )
 
 
 class SpaceJoinRequestDetailView(BaseView):

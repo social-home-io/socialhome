@@ -6456,7 +6456,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         *,
         user_id: str,
         message: str | None = None,
-    ) -> str:
+    ) -> str | None:
+        """A local user asks to join ``space_id``. Returns the pending
+        request's id — or ``None`` when they were seated at once: an
+        ``open`` space this household hosts needs nobody's approval (the
+        about page's Join button)."""
         space = await self._require_space(space_id)
         if space.join_mode is JoinMode.INVITE_ONLY:
             raise InviteOnlyError()
@@ -6465,6 +6469,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         existing = await self._spaces.get_member(space_id, user_id)
         if existing is not None:
             raise AlreadyMemberError()
+        if (
+            space.join_mode is JoinMode.OPEN
+            and space.owner_instance_id == self._own_instance_id
+        ):
+            await self._join_open_space(space, user_id)
+            return None
         request_id = await self._spaces.save_join_request(
             space_id,
             user_id,
@@ -6479,6 +6489,28 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
         )
         return request_id
+
+    async def _join_open_space(self, space: Space, user_id: str) -> None:
+        """Seat a local user in an ``open`` space we host — the same seat
+        :meth:`accept_local_invite` makes, behind the same §CP.F1 age gate
+        (the ban and existing-seat checks ran in :meth:`request_join`)."""
+        if self._child_protection is not None:
+            await self._child_protection.check_space_age_gate(space.id, user_id)
+        await self._spaces.save_member(
+            SpaceMember(
+                space_id=space.id,
+                user_id=user_id,
+                role=SpaceRole.MEMBER,
+                joined_at=datetime.now(UTC).isoformat(),
+            )
+        )
+        await self._bus.publish(
+            SpaceMemberJoined(
+                space_id=space.id,
+                user_id=user_id,
+                role=SpaceRole.MEMBER,
+            )
+        )
 
     async def list_pending_join_requests(
         self,
@@ -7443,22 +7475,21 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     ) -> tuple[Space, SpaceMember | None]:
         """``GET /api/spaces/{id}``: ``(space, the caller's seat)``.
 
-        A seated caller (any role) reads any space. A caller with no seat
-        reads only a discoverable (``public`` / ``global``) space — the
-        landing page a directory entry links to — and gets ``None`` for
-        the seat, so the route answers with the public fields only. A
-        private or household space they aren't in is the same 403 as an
-        unknown id (see :meth:`require_reader`).
+        A seated caller (any role) reads any space. A local caller with no
+        seat reads only the landing page of a space that is discoverable to
+        them — a ``public`` / ``global`` space (its directory entry links
+        here), or a ``household`` space THIS household hosts (household
+        scope is by definition open to every local user to find and join)
+        — and gets ``None`` for the seat, so the route answers with the
+        landing fields only. A private space they aren't in, another
+        household's household-tier space, and an unknown id are the same
+        403 (see :meth:`require_reader`).
         """
         member = await self._spaces.get_member(space_id, user_id)
         if member is not None:
             return await self._require_space(space_id), member
         space = await self._spaces.get(space_id)
-        if (
-            space is None
-            or space.dissolved
-            or space.space_type not in PUBLIC_SPACE_TIERS
-        ):
+        if space is None or space.dissolved or not self._has_landing(space):
             raise SpacePermissionError(NOT_A_SPACE_MEMBER)
         if self._child_protection is not None:
             # §CP.F1: the directories hide an age-gated space from a
@@ -7469,6 +7500,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             except AgeRestrictedError:
                 raise SpacePermissionError(NOT_A_SPACE_MEMBER) from None
         return space, None
+
+    def _has_landing(self, space: Space) -> bool:
+        """May a local user with no seat see ``space``'s landing page?"""
+        if space.space_type in PUBLIC_SPACE_TIERS:
+            return True
+        return (
+            space.space_type is SpaceType.HOUSEHOLD
+            and space.owner_instance_id == self._own_instance_id
+        )
 
     async def list_feed(
         self,

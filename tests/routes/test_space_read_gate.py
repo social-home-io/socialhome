@@ -10,8 +10,10 @@ The rule (:meth:`SpaceService.require_reader`): any seat reads — owner,
 admin, moderator, member and a read-only follower (``subscriber``).
 Nobody else does, and an unknown space id answers the same 403 as a space
 the caller isn't in. The one exception is ``GET /api/spaces/{id}`` on a
-discoverable (``public`` / ``global``) space: its landing page shows a
-caller with no seat the directory-entry fields only.
+space discoverable to the caller — ``public`` / ``global``, or a
+``household`` space this household hosts: its landing page shows a caller
+with no seat the directory-entry fields only, and the Join / request flow
+starts from there.
 """
 
 import pytest
@@ -188,6 +190,8 @@ async def test_member_and_follower_read_the_full_detail(seeded):
 
 @pytest.mark.parametrize("tier", ["private", "household"])
 async def test_non_member_cannot_read_a_non_discoverable_space(seeded, tier):
+    """A private space, and a household-tier space ANOTHER household hosts
+    (``owner_instance_id='inst'`` is not us — a stub we only mirror)."""
     client, hdr = seeded
     await _seed_space(client, f"sp-{tier}-2", tier)
     await _forbidden(await client.get(f"/api/spaces/sp-{tier}-2", headers=hdr["guest"]))
@@ -226,6 +230,89 @@ async def test_landing_is_hidden_from_a_protected_minor_below_its_age_gate(seede
         (_GUEST[1],),
     )
     await _forbidden(await client.get("/api/spaces/sp-adult", headers=hdr["guest"]))
+
+
+# ── Household spaces: discoverable to every local user ──────────────────
+
+
+async def _create_space(client, hdr: dict, space_type: str, join_mode: str) -> str:
+    """Olive creates a space through the API — hosted by THIS household."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Hottingen Community Choir", "space_type": space_type},
+        headers=hdr["owner"],
+    )
+    assert r.status == 201, await r.text()
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"description": "We sing on Tuesdays.", "join_mode": join_mode},
+        headers=hdr["owner"],
+    )
+    assert r.status == 200, await r.text()
+    return sid
+
+
+@pytest.mark.parametrize("join_mode", ["open", "request", "invite_only"])
+async def test_non_member_sees_the_landing_of_a_household_space(seeded, join_mode):
+    """Household scope is discoverable to every local user: a neighbour with
+    no seat gets the landing fields (the about page), never the feed or
+    the roster."""
+    client, hdr = seeded
+    sid = await _create_space(client, hdr, "household", join_mode)
+    r = await client.get(f"/api/spaces/{sid}", headers=hdr["guest"])
+    assert r.status == 200, await r.text()
+    assert await r.json() == {
+        "id": sid,
+        "name": "Hottingen Community Choir",
+        "description": "We sing on Tuesdays.",
+        "emoji": None,
+        "space_type": "household",
+        "join_mode": join_mode,
+        "category": "general",
+        "features": {"allow_subscribers": False},
+        "member_count": 1,
+    }
+    for path in ("/feed", "/members"):
+        await _forbidden(
+            await client.get(f"/api/spaces/{sid}{path}", headers=hdr["guest"])
+        )
+
+
+async def test_a_neighbour_joins_an_open_household_space_from_its_landing(seeded):
+    """The about page's Join button end to end: landing → join → the feed."""
+    client, hdr = seeded
+    sid = await _create_space(client, hdr, "household", "open")
+    await _forbidden(await client.get(f"/api/spaces/{sid}/feed", headers=hdr["guest"]))
+    r = await client.post(
+        f"/api/spaces/{sid}/join-requests", json={}, headers=hdr["guest"]
+    )
+    assert r.status == 201, await r.text()
+    r = await client.get(f"/api/spaces/{sid}/feed", headers=hdr["guest"])
+    assert r.status == 200, await r.text()
+    r = await client.get(f"/api/spaces/{sid}", headers=hdr["guest"])
+    assert "retention_days" in await r.json()  # the full config now
+
+
+async def test_a_neighbour_asks_to_join_a_request_household_space(seeded):
+    client, hdr = seeded
+    sid = await _create_space(client, hdr, "household", "request")
+    r = await client.post(
+        f"/api/spaces/{sid}/join-requests",
+        json={"message": "I sing tenor"},
+        headers=hdr["guest"],
+    )
+    assert r.status == 201, await r.text()
+    r = await client.get(f"/api/spaces/{sid}/join-requests", headers=hdr["owner"])
+    assert [q["user_id"] for q in await r.json()] == [_GUEST[1]]
+    # Asking is not a seat: still no feed until the owner approves.
+    await _forbidden(await client.get(f"/api/spaces/{sid}/feed", headers=hdr["guest"]))
+
+
+async def test_a_private_space_of_this_household_stays_403(seeded):
+    client, hdr = seeded
+    sid = await _create_space(client, hdr, "private", "open")
+    await _forbidden(await client.get(f"/api/spaces/{sid}", headers=hdr["guest"]))
 
 
 # ── Neighbouring holes: reactions and polls by post id ──────────────────
