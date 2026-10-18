@@ -2289,6 +2289,16 @@ class SpaceContentInboundHandlers:
         if not zone_id or not p.get("name"):
             log.debug("SPACE_ZONE_UPSERTED missing required field")
             return
+        if not await self._authorship.holds_member_seat(space_id):
+            # We only follow this space: its members' places are not ours
+            # to keep (owner decision 13), whoever sent them.
+            log.info(
+                "SPACE_ZONE_UPSERTED from %s for %s dropped: this household "
+                "holds no member seat there",
+                event.from_instance,
+                space_id,
+            )
+            return
         # Same display-data rules as the local API (§23.8.7): the name,
         # colour and icon reach every member's map. Never log the name itself.
         # Coordinates and radius pass the same rules too: finite, in

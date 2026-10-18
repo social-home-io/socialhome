@@ -62,11 +62,9 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.dm_service import DmService
 from socialhome.services.federation_inbound import SpaceChatInboundHandlers
-from socialhome.services.space_chat_outbound import (
-    SpaceChatAudience,
-    SpaceChatOutbound,
-)
+from socialhome.services.space_chat_outbound import SpaceChatOutbound
 from socialhome.services.space_chat_service import SpaceChatService
+from socialhome.services.space_writer_households import SpaceWriterHouseholds
 from socialhome.services.system_chat_policy import SpaceChatAccess, SystemChatPolicy
 
 pytestmark = pytest.mark.security
@@ -169,7 +167,7 @@ async def _household(tmp_path, name: str, world: dict) -> SimpleNamespace:
         bus=bus,
         federation_service=federation,
         conversation_repo=convos,
-        audience=SpaceChatAudience(seats, own_instance_id=iid),
+        audience=SpaceWriterHouseholds(seats, own_instance_id=iid),
     ).wire()
     inbound = SpaceChatInboundHandlers(
         bus=bus,

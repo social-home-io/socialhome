@@ -146,8 +146,9 @@ async def require_member_seat(
     For the reads about the space's people rather than its posts —
     governance (proposals) and whereabouts (map pins, zones). A follower
     reads the posts but is an outsider to the people (owner decision 13:
-    the chat refuses them, the roster never syncs to a follower-only
-    household), so they get the outsider's answer, not a distinct one."""
+    the chat refuses them, and a follower-only household receives neither
+    the chat nor the members' whereabouts nor the proposals), so they get
+    the outsider's answer, not a distinct one."""
     member = await require_seat(space_repo, space_id, user_id)
     if member.role not in WRITER_ROLES:
         raise SpacePermissionError(NOT_A_SPACE_MEMBER)

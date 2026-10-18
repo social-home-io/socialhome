@@ -106,18 +106,25 @@ def _wait_budget(error: str) -> tuple[int, float] | None:
     return None
 
 
+#: Resources only a member household (a writer seat) receives by
+#: catch-up — the members' places; the chat has its own version gate too.
+_MEMBER_ONLY_RESOURCES: frozenset[str] = frozenset(
+    {"space_zones", "space_zones_deleted"}
+)
+
+
 class SpaceSyncService:
     """Streams encrypted space content over a negotiated DataChannel."""
 
     __slots__ = (
         "_bazaar_repo",
         "_builder",
-        "_chat_gate",
         "_exporters",
         "_federation",
         "_gallery_repo",
         "_inviter_proof_for",
         "_media_sync",
+        "_member_gate",
         "_owner_statement_for",
         "_sig_suite",
         "_space_post_repo",
@@ -190,15 +197,17 @@ class SpaceSyncService:
         #: for HTTPS-mode chunk delivery (``session.transport_mode ==
         #: "https"``); ``_send`` falls back to RTC when ``None``.
         self._federation = None
-        #: v_55 — who may receive the ``chat_messages`` resource:
-        #: ``(space_id, requester_instance_id) -> bool`` (a household holding
-        #: a writer seat — :meth:`SpaceChatAudience.may_receive`). ``None``
-        #: never streams the chat (fail closed).
-        self._chat_gate: Callable[[str, str], Awaitable[bool]] | None = None
+        #: Who may receive the member-only resources (the chat, v_55, and
+        #: the zones): ``(space_id, requester_instance_id) -> bool`` — a
+        #: household holding a writer seat
+        #: (:meth:`SpaceWriterHouseholds.may_receive`). ``None`` streams
+        #: none of them (fail closed).
+        self._member_gate: Callable[[str, str], Awaitable[bool]] | None = None
 
-    def attach_chat_gate(self, gate: Callable[[str, str], Awaitable[bool]]) -> None:
-        """Wire who may receive a space's chat by catch-up (v_55)."""
-        self._chat_gate = gate
+    def attach_member_gate(self, gate: Callable[[str, str], Awaitable[bool]]) -> None:
+        """Wire who may receive a space's member-only resources by
+        catch-up — never a follower-only household (owner decision 13)."""
+        self._member_gate = gate
 
     async def _exporter_for(
         self, resource: str, session: SyncSessionRecord
@@ -213,6 +222,11 @@ class SpaceSyncService:
         ``MIN_FOR_SPACE_CHAT`` or later that holds a writer seat in the
         space (the chat gate) — a follower-only household, an older one, or
         one we cannot ask gets no exporter at all.
+
+        Zones (``space_zones`` / ``space_zones_deleted``) are the members' places: only
+        a requester holding a writer seat gets them (the same gate) — a
+        follower-only household gets no exporter, as it gets no live
+        ``SPACE_ZONE_*`` either.
         """
         exporter = self._exporters.get(resource)
         version = await self._session_version(session)
@@ -225,12 +239,17 @@ class SpaceSyncService:
             "chat_messages_deleted",
         ):
             allowed = (
-                self._chat_gate is not None
+                self._member_gate is not None
                 and self._federation is not None
                 and version >= FederationCapability.MIN_FOR_SPACE_CHAT
-                and await self._chat_gate(
+                and await self._member_gate(
                     session.space_id, session.requester_instance_id
                 )
+            )
+            return exporter if allowed else None
+        if exporter is not None and resource in _MEMBER_ONLY_RESOURCES:
+            allowed = self._member_gate is not None and await self._member_gate(
+                session.space_id, session.requester_instance_id
             )
             return exporter if allowed else None
         if exporter is None or resource != "members":

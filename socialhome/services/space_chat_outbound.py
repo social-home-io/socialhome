@@ -14,7 +14,7 @@ to the space's other member households:
 * **Writers only.** :meth:`FederationService.broadcast_to_space_members`
   is narrowed with ``only_instances`` to the households holding at least
   one live WRITER seat (owner / admin / moderator / member) by this
-  household's roster mirror (:meth:`SpaceChatAudience.writer_households`),
+  household's roster mirror (:meth:`SpaceWriterHouseholds.writer_households`),
   so a household whose people only follow the space receives nothing. A
   household with no live roster row yet (gossip still on its way) is left
   out too — fail closed; the §25.6 catch-up fills it in later.
@@ -48,47 +48,14 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.space import WRITER_ROLES
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
-from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
+from .space_writer_households import SpaceWriterHouseholds
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
 
 log = logging.getLogger(__name__)
-
-_WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
-
-
-class SpaceChatAudience:
-    """Which member households may receive a space's chat: those holding at
-    least one live WRITER seat, by this household's roster mirror.
-
-    One rule for the live fan-out (:class:`SpaceChatOutbound`) and the
-    §25.6 catch-up (the ``chat_messages`` sync resource): a follower-only
-    household never gets a chat message, live or streamed.
-    """
-
-    __slots__ = ("_own_instance_id", "_seats")
-
-    def __init__(
-        self,
-        remote_member_repo: AbstractSpaceRemoteMemberRepo,
-        *,
-        own_instance_id: str,
-    ) -> None:
-        self._seats = remote_member_repo
-        self._own_instance_id = own_instance_id
-
-    async def writer_households(self, space_id: str) -> frozenset[str]:
-        """Every other household holding a live writer seat in ``space_id``."""
-        ids = await self._seats.list_instances_with_roles(space_id, _WRITER_ROLE_VALUES)
-        return frozenset(i for i in ids if i and i != self._own_instance_id)
-
-    async def may_receive(self, space_id: str, instance_id: str) -> bool:
-        """Whether household ``instance_id`` may receive ``space_id``'s chat."""
-        return instance_id in await self.writer_households(space_id)
 
 
 class SpaceChatOutbound:
@@ -102,7 +69,7 @@ class SpaceChatOutbound:
         bus: EventBus,
         federation_service: FederationService,
         conversation_repo: AbstractConversationRepo,
-        audience: SpaceChatAudience,
+        audience: SpaceWriterHouseholds,
     ) -> None:
         self._bus = bus
         self._federation = federation_service

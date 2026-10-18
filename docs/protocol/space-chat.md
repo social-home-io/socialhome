@@ -108,7 +108,7 @@ delete or reaction must belong to *this space's* chat here.
 chat. It calls `broadcast_to_space_members` with:
 
 - `only_instances`: the households holding at least one live writer seat
-  in this household's roster mirror (`SpaceChatAudience`). A household
+  in this household's roster mirror (`SpaceWriterHouseholds`). A household
   with no live roster row yet (its seat gossip is still on the way) is
   left out, which fails closed; the catch-up fills it in later.
 - a version gate per household: `FederationService.space_member_supports(…,
@@ -160,7 +160,7 @@ page in storage order (oldest stored first), encrypted under the space
 content key like every resource (`ChatMessagesExporter`). No fixed count
 cuts it. The
 provider gates it per requester. A requester must be at v_55 and hold a
-writer seat (`SpaceChatAudience.may_receive`). Otherwise it gets no
+writer seat (`SpaceWriterHouseholds.may_receive`). Otherwise it gets no
 exporter: a follower-only household gets the chat by catch-up no more than
 live.
 
@@ -230,8 +230,10 @@ window every space write has; the roster gossip closes it.
   decides read and write live.
 - `socialhome/services/space_chat_service.py`: the chat's lifecycle, the
   seat reconciler and `GET /api/spaces/{id}/chat`.
-- `socialhome/services/space_chat_outbound.py`: `SpaceChatOutbound` and
-  `SpaceChatAudience`.
+- `socialhome/services/space_chat_outbound.py`: `SpaceChatOutbound`.
+- `socialhome/services/space_writer_households.py`: `SpaceWriterHouseholds`
+  — the member-household audience the chat shares with the members'
+  whereabouts (location pins, zones) and the proposal mirror.
 - `socialhome/services/federation_inbound/space_chat.py`: the four inbound
   handlers and `apply_sync_records`.
 - `socialhome/federation/space_authorship.py`: `may_author_writer`.

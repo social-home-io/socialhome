@@ -377,7 +377,7 @@ from .services.space_bot_service import SpaceBotService
 from .services.space_calendar_reminder_scheduler import (
     SpaceCalendarReminderScheduler,
 )
-from .services.space_chat_outbound import SpaceChatAudience, SpaceChatOutbound
+from .services.space_chat_outbound import SpaceChatOutbound
 from .services.space_chat_service import SpaceChatService
 from .services.space_config_outbound import SpaceConfigOutbound
 from .services.space_crypto_service import (
@@ -403,6 +403,7 @@ from .services.space_service import own_inviter_proof
 from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
 from .services.space_subscriber_key_outbound import SpaceSubscriberKeyOutbound
 from .services.space_writer_cert_service import SpaceWriterCertService
+from .services.space_writer_households import SpaceWriterHouseholds
 from .services.space_zone_outbound import SpaceZoneOutbound
 from .services.space_zone_service import SpaceZoneService
 from .services.sticky_federation_outbound import StickyFederationOutbound
@@ -1776,6 +1777,11 @@ def _wire_federation_stack(
     page_proposal_forwarder.wire()
     app[K.page_proposal_forwarder_key] = page_proposal_forwarder
 
+    # Member-only data (whereabouts, zones) goes to member households only
+    # — never to one whose people only follow the space (owner decision 13).
+    member_households = SpaceWriterHouseholds(
+        space_remote_member_repo, own_instance_id=identity.instance_id
+    )
     # §23.8.6 — fan a household PresenceUpdated out to opted-in spaces
     # as a GPS-only WS frame + sealed federation event. ``zone_name`` is
     # never on a space-bound payload (HA zones are household-only data).
@@ -1787,6 +1793,7 @@ def _wire_federation_stack(
         space_zone_repo=space_zone_repo,
         user_repo=user_repo,
         presence_repo=presence_repo,
+        member_households=member_households,
     )
     space_location_outbound.wire()
 
@@ -1794,6 +1801,7 @@ def _wire_federation_stack(
     space_zone_outbound = SpaceZoneOutbound(
         bus=bus,
         federation_service=federation_service,
+        member_households=member_households,
     )
     space_zone_outbound.wire()
 
@@ -2132,7 +2140,9 @@ def _build_space_chat_federation(
     ``chat_messages`` exporter (gated per requester to the same writer
     households) and the receiver's chat sink (the live create rule).
     """
-    audience = SpaceChatAudience(remote_member_repo, own_instance_id=own_instance_id)
+    audience = SpaceWriterHouseholds(
+        remote_member_repo, own_instance_id=own_instance_id
+    )
     SpaceChatOutbound(
         bus=bus,
         federation_service=federation_service,
@@ -2152,7 +2162,7 @@ def _build_space_chat_federation(
     # §CP.F2: a guardian-blocked sender is withheld from the protected reader.
     handlers.attach_child_protection(child_protection)
     handlers.attach_to(federation_service)
-    app[K.space_sync_service_key].attach_chat_gate(audience.may_receive)
+    app[K.space_sync_service_key].attach_member_gate(audience.may_receive)
     app[K.space_sync_receiver_key].attach_chat_sink(handlers)
 
 

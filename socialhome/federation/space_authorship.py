@@ -100,6 +100,7 @@ from ..domain.space import (
     SpaceRole,
 )
 from ..domain.user import SYSTEM_AUTHOR
+from ..services.space_writer_households import holds_member_seat
 from .host_equivalence import acts_as_host
 from .moderation_approval import (
     FEATURE_OF_EVENT,
@@ -308,6 +309,12 @@ class SpaceAuthorship:
             return False
         space = await self._spaces.get(space_id)
         return await self.acts_as_host(space, sender)
+
+    async def holds_member_seat(self, space_id: str) -> bool:
+        """THIS household holds a member's seat in ``space_id`` (a local
+        writer) — a follower-only household keeps no member-only data
+        (owner decision 13)."""
+        return await holds_member_seat(self._spaces, space_id)
 
     @property
     def seat_repo(self) -> AbstractSpaceRemoteMemberRepo:
