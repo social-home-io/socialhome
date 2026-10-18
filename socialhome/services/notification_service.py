@@ -87,6 +87,7 @@ from ..domain.mention import Mention, MentionType
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
+    WRITER_ROLES,
     SpaceFeatureAccess,
     SpaceRole,
 )
@@ -1664,8 +1665,14 @@ class NotificationService(ProtectionGateMixin):
         joiner = await self._users.get_by_user_id(event.user_id)
         name = joiner.display_name if joiner else event.user_id
         members = await self._spaces.list_members(event.space_id)
+        # A follower's reduced roster lists the members, never another
+        # follower (owner decision 13): a follower joining is news to the
+        # members only.
+        followers_too = event.role in WRITER_ROLES
         for member in members:
             if member.user_id == event.user_id:
+                continue
+            if not followers_too and member.role not in WRITER_ROLES:
                 continue
             recipient = await self._users.get_by_user_id(member.user_id)
             await self._save_notif(

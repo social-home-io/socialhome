@@ -3371,6 +3371,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             SpaceMemberLeft(
                 space_id=space_id,
                 user_id=user_id,
+                role=target.role,
             )
         )
         # v_23 — peer-replicate the removal so every member household
@@ -7883,6 +7884,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             SpaceMemberLeft(
                 space_id=space_id,
                 user_id=user_id,
+                role=existing.role,
             )
         )
         if self._child_protection is not None:

@@ -130,6 +130,12 @@ class _FakeSpaceRepo:
             for uid in self._members.get(space_id, [])
         ]
 
+    async def get_member(self, space_id, user_id):
+        return next(
+            (m for m in await self.list_members(space_id) if m.user_id == user_id),
+            None,
+        )
+
     async def get(self, space_id):
         # A calendar_id is "a space" iff we know members for it; household /
         # personal calendars (not in the members map) return None so the

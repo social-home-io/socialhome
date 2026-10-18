@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,7 @@ from socialhome.domain.events import (
     UserWentIdle,
     UserWentOffline,
 )
+from socialhome.domain.space import SpaceRole
 from socialhome.domain.user import User, UserStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.ws_manager import WebSocketManager
@@ -62,6 +64,10 @@ class _FakeUserRepo:
 class _FakeSpaceRepo:
     async def list_local_member_user_ids(self, space_id):
         return [u.user_id for u in _USERS]
+
+    async def get_member(self, space_id, user_id):
+        # Everyone holds a member's seat here.
+        return SimpleNamespace(user_id=user_id, role=SpaceRole.MEMBER)
 
 
 class _FakeCpRepo:

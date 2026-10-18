@@ -560,6 +560,7 @@ class ChildProtectionService:
             SpaceMemberLeft(
                 space_id=space_id,
                 user_id=minor_user_id,
+                role=member.role,
             )
         )
         return True

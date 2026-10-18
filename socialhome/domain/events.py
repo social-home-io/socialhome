@@ -2033,6 +2033,10 @@ class SpaceMemberLeft(DomainEvent):
     space_id: str
     user_id: str
     occurred_at: datetime = field(default_factory=_now)
+    #: The seat's role before it went — a follower's leaving is news to the
+    #: members only (owner decision 13). ``None`` (unknown) is treated as a
+    #: follower's: fail closed.
+    role: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

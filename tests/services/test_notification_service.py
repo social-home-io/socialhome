@@ -36,6 +36,7 @@ from socialhome.domain.space import (
     ContentQueuedForReview,
     SpaceFeatureAccess,
     SpaceFeatures,
+    SpaceMember,
 )
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.domain.user import RemoteUser
@@ -2913,3 +2914,58 @@ async def test_automatic_household_seat_sends_no_joined_bell(stack):
         )
     )
     assert await _member_joined_bells(stack, anna) == []
+
+
+async def test_a_follower_joining_rings_no_follower(stack):
+    """Followers see the members, never each other (owner decision 13): a
+    new follower's "X joined" reaches the space's members only."""
+    anna = await stack.provision_user("anna")
+    fern = await stack.provision_user("fern")
+    gus = await stack.provision_user("gus")
+    space_svc = SpaceService(
+        stack.space_repo,
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Garden")
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id, user_id=fern.user_id, role="subscriber", joined_at=""
+        )
+    )
+    await stack.bus.publish(
+        SpaceMemberJoined(space_id=space.id, user_id=gus.user_id, role="subscriber")
+    )
+    assert [n.title for n in await _member_joined_bells(stack, anna)] == [
+        "gus joined Garden"
+    ]
+    assert await _member_joined_bells(stack, fern) == []
+
+
+async def test_a_member_joining_still_rings_the_followers(stack):
+    """A follower's reduced roster shows the members, so a new member is
+    news to them too."""
+    await stack.provision_user("anna")
+    fern = await stack.provision_user("fern")
+    bob = await stack.provision_user("bob")
+    space_svc = SpaceService(
+        stack.space_repo,
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Garden")
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id, user_id=fern.user_id, role="subscriber", joined_at=""
+        )
+    )
+    await stack.bus.publish(
+        SpaceMemberJoined(space_id=space.id, user_id=bob.user_id, role="member")
+    )
+    assert [n.title for n in await _member_joined_bells(stack, fern)] == [
+        "bob joined Garden"
+    ]
