@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from ..domain.space import WRITER_ROLES
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
+from ..repositories.space_repo import AbstractSpaceRepo
 
 _WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
 
@@ -47,3 +48,15 @@ class SpaceWriterHouseholds:
         """Whether household ``instance_id`` holds a member's seat in
         ``space_id`` (may receive its member-only data)."""
         return instance_id in await self.writer_households(space_id)
+
+
+async def holds_member_seat(space_repo: AbstractSpaceRepo, space_id: str) -> bool:
+    """Does THIS household hold a member's seat in ``space_id`` — a local
+    user with a writer role? The receiving half of the rule above: a
+    follower-only household drops member-only data an older sender still
+    pushes it (pins, zones, proposal mirrors) instead of storing it."""
+    local = set(await space_repo.list_local_member_user_ids(space_id))
+    return any(
+        m.user_id in local and m.role in WRITER_ROLES
+        for m in await space_repo.list_members(space_id)
+    )

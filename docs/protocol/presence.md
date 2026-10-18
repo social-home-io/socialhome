@@ -79,7 +79,9 @@ Two distinct fan-outs follow every household ``PresenceUpdated``:
      follow the space (owner decision 13; `SpaceWriterHouseholds`, the
      same audience as the space chat) — encrypted payload `{user_id,
      lat, lon, accuracy_m, updated_at}`. The local frame skips this
-     household's followers too.
+     household's followers too. Receiving half: a household holding no
+     member seat in the space (only followers) drops the pin, whoever
+     sent it — so an older sender can't make it keep one.
 
    On the receiving household the inbound handler stores the pin
    (coordinates truncated to 4 decimals, none at all for `zone_only`)
@@ -164,7 +166,9 @@ radius_m). Live admin CRUD is replicated to remote **member**
 households only — those holding a writer seat; a follower-only household
 gets no zones, live or by §25.6 catch-up (the `space_zones` /
 `space_zones_deleted` sync resources sit behind the same member gate as
-the chat) — via two sealed federation events under the space content key:
+the chat), and a follower-only household drops a `SPACE_ZONE_UPSERTED` an
+older sender still pushes it — via two sealed federation events under the
+space content key:
 
 - `SPACE_ZONE_UPSERTED` — encrypted payload
   `{zone_id, space_id, name, latitude, longitude, radius_m, color,

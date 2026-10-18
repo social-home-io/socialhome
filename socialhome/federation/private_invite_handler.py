@@ -62,6 +62,7 @@ from ..services.space_service import (
     apply_space_content_key_from_metadata,
     seal_join_snapshot,
 )
+from ..services.space_writer_households import holds_member_seat
 from .host_equivalence import acts_as_host
 from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
 
@@ -866,6 +867,16 @@ class PrivateSpaceInviteHandler:
                 space_id,
             )
             return
+        if not await holds_member_seat(self._space_repo, space_id):
+            # We only follow this space: the members' whereabouts are not
+            # ours to keep (owner decision 13), whoever sent them.
+            log.info(
+                "SPACE_LOCATION_UPDATED from %s for %s dropped: this "
+                "household holds no member seat there",
+                event.from_instance,
+                space_id,
+            )
+            return
         # GPS rule (§25): 4 decimals before storage, whatever precision
         # the peer sent. A zone_only pin carries no coordinates at all,
         # even if the sender put some in.
@@ -1085,6 +1096,8 @@ class PrivateSpaceInviteHandler:
             self._space_repo, self._remote_members, space, event.from_instance
         ):
             return  # only the host (or our trusted inviter) mirrors proposals
+        if not await holds_member_seat(self._space_repo, space_id):
+            return  # governance is the members' — a follower household keeps none
         await self._approval_service.apply_mirror_update(space_id, view)
 
     async def _on_key_exchange_rekey(self, event: FederationEvent) -> None:

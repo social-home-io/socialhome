@@ -102,6 +102,13 @@ class _AllowAuthorship:
         self.calls.append(("writes_here", space_id, ""))
         return self.answer
 
+    #: Whether THIS household holds a member seat (False: a follower-only
+    #: household, which keeps no member-only data).
+    member_household = True
+
+    async def holds_member_seat(self, space_id):
+        return self.member_household
+
     async def is_admin_household(self, event, space_id):
         self.calls.append(("is_admin_household", space_id, ""))
         return self.answer
@@ -5396,3 +5403,14 @@ async def test_a_tombstoned_gallery_item_is_not_recreated_or_announced(gallery_e
         )
     )
     assert gallery.created == [] and seen == []
+
+
+async def test_zone_upserted_dropped_by_a_follower_only_household(zone_handlers, repos):
+    """Owner decision 13, receiving half: a household that only follows the
+    space stores no zone, even from an older sender that still sends one."""
+    handlers, zones = zone_handlers
+    repos["auth"].member_household = False
+    await handlers._on_zone_upserted(
+        _event(FederationEventType.SPACE_ZONE_UPSERTED, dict(_ZONE), space_id="sp-1")
+    )
+    assert zones.upserted == []

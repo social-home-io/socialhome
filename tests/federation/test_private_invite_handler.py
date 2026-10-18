@@ -1260,7 +1260,7 @@ async def test_space_location_updated_upserts_when_sender_is_a_member():
     )
     h = PrivateSpaceInviteHandler(
         bus=_RecordingBus(),  # type: ignore[arg-type]
-        space_repo=AsyncMock(),
+        space_repo=_member_household_repo(),
         remote_member_repo=remote_members,
         remote_location_repo=locations,
     )
@@ -1812,7 +1812,29 @@ async def test_member_removed_does_not_delete_a_local_member_of_a_space_we_host(
     )
 
 
-async def _location_handler(role=SpaceRole.MEMBER.value, *, seat=True):
+def _member_household_repo(*, member: bool = True) -> AsyncMock:
+    """A space repo for a household holding a member seat in every space
+    (``member=False``: only a follower seat — owner decision 13)."""
+    from socialhome.domain.space import SpaceMember
+
+    repo = AsyncMock()
+    repo.list_local_member_user_ids = AsyncMock(return_value=["u-local"])
+    repo.list_members = AsyncMock(
+        return_value=[
+            SpaceMember(
+                space_id="sp",
+                user_id="u-local",
+                role="member" if member else "subscriber",
+                joined_at="",
+            )
+        ]
+    )
+    return repo
+
+
+async def _location_handler(
+    role=SpaceRole.MEMBER.value, *, seat=True, member_household=True
+):
     from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
 
     locations = AsyncMock()
@@ -1832,7 +1854,7 @@ async def _location_handler(role=SpaceRole.MEMBER.value, *, seat=True):
     )
     h = PrivateSpaceInviteHandler(
         bus=_RecordingBus(),  # type: ignore[arg-type]
-        space_repo=AsyncMock(),
+        space_repo=_member_household_repo(member=member_household),
         remote_member_repo=remote_members,
         remote_location_repo=locations,
     )
@@ -2279,3 +2301,40 @@ async def test_invite_with_an_unknown_key_suite_is_refused(handler):
         _keyed_invite({"epoch": 2, "key_base64": "AA==", "key_suite": "rot13"})
     )
     handler.space_repo.save_remote_invitation.assert_not_awaited()
+
+
+async def test_space_location_updated_dropped_by_a_follower_only_household():
+    """Owner decision 13, receiving half: a household that only follows the
+    space keeps no member's pin, even from an older sender that still
+    sends one."""
+    h, locations, _ = await _location_handler(member_household=False)
+    ev = _event(
+        "SPACE_LOCATION_UPDATED",
+        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": 1.0, "lon": 2.0},
+    )
+    await h._on_space_location_updated(ev)
+    locations.upsert.assert_not_awaited()
+
+
+@pytest.mark.parametrize("member", [True, False])
+async def test_proposal_mirror_is_kept_by_member_households_only(member):
+    """Governance is the members' business (owner decision 13): a
+    household that only follows the space ignores the host's proposal
+    mirror; a member household applies it."""
+    repo = _member_household_repo(member=member)
+    repo.get = AsyncMock(return_value=SimpleNamespace(owner_instance_id="host-1"))
+    approvals = AsyncMock()
+    h = PrivateSpaceInviteHandler(
+        bus=_RecordingBus(),  # type: ignore[arg-type]
+        space_repo=repo,
+        remote_member_repo=AsyncMock(),
+    )
+    h.attach_approval_service(approvals)
+    await h._on_proposal_mirror(
+        _event(
+            "SPACE_ADMIN_PROPOSAL_UPDATED",
+            {"space_id": "sp-a", "view": {"id": "pr-1"}},
+            from_instance="host-1",
+        )
+    )
+    assert approvals.apply_mirror_update.await_count == (1 if member else 0)
