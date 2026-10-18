@@ -13,6 +13,7 @@ from socialhome.domain.space import (
     SpaceMember,
     SpacePermissionError,
     SpaceType,
+    SubscriberReadOnlyError,
 )
 from socialhome.domain.space_bot import (
     BotScope,
@@ -110,6 +111,9 @@ async def stack(tmp_dir):
     s.svc = svc
     s.events = seen
     s.bot_repo = bot_repo
+    s.space_repo = space_repo
+    s.user_repo = user_repo
+    s.db = db
     yield s
     await db.shutdown()
 
@@ -246,3 +250,52 @@ async def test_bot_in_other_space_not_found(stack):
     # Alice isn't a member of sp-nonexistent, so she's refused there.
     with pytest.raises(SpacePermissionError):
         await stack.svc.get_bot("sp-nonexistent", "anything", actor_username="alice")
+
+
+# ─── A bot speaks for its maker: followers and banned users make none ────
+
+
+async def _seat_carol(stack, role: str, *, banned: bool = False) -> None:
+    await stack.user_repo.save(
+        User(username="carol", user_id="uid-carol", display_name="Carol")
+    )
+    await stack.space_repo.save_member(
+        SpaceMember(space_id="sp-1", user_id="uid-carol", role=role, joined_at="")
+    )
+    if banned:
+        await stack.db.enqueue(
+            "INSERT INTO space_bans(space_id, user_id, banned_by)"
+            " VALUES('sp-1', 'uid-carol', 'uid-alice')"
+        )
+
+
+async def test_a_follower_cannot_make_a_personal_bot(stack):
+    """A bot posts into the space: a read-only follower would post
+    through it (403 SUBSCRIBER_READ_ONLY, nothing created)."""
+    await _seat_carol(stack, "subscriber")
+    with pytest.raises(SubscriberReadOnlyError):
+        await stack.svc.create_bot(
+            "sp-1",
+            actor_username="carol",
+            scope=BotScope.MEMBER,
+            slug="sneaky",
+            name="Sneaky",
+            icon="🤖",
+        )
+    assert await stack.bot_repo.list_for_space("sp-1") == []
+
+
+async def test_a_banned_users_leftover_seat_makes_and_lists_no_bot(stack):
+    await _seat_carol(stack, "member", banned=True)
+    with pytest.raises(SpacePermissionError):
+        await stack.svc.create_bot(
+            "sp-1",
+            actor_username="carol",
+            scope=BotScope.MEMBER,
+            slug="sneaky",
+            name="Sneaky",
+            icon="🤖",
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.svc.list_bots("sp-1", actor_username="carol")
+    assert await stack.bot_repo.list_for_space("sp-1") == []

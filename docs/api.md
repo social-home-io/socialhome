@@ -392,7 +392,7 @@ how those tokens are used to post.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/spaces/{id}/bots` | List bots visible to the caller (all members see all bots). |
-| POST | `/api/spaces/{id}/bots` | Create a bot. Body: `{scope, slug, name, icon}`. Admin required for `scope="space"`. Returns `{...bot, token}` — token is shown once. |
+| POST | `/api/spaces/{id}/bots` | Create a bot. Body: `{scope, slug, name, icon}`. Admin required for `scope="space"`; a read-only follower gets `403 SUBSCRIBER_READ_ONLY` (a bot posts). Returns `{...bot, token}` — token is shown once. |
 | PATCH | `/api/spaces/{id}/bots/{bot_id}` | Update `name`/`icon`. Owner/admin for any bot; members for their own `scope="member"` bots. |
 | DELETE | `/api/spaces/{id}/bots/{bot_id}` | Delete. Same permissions as PATCH. Existing posts remain (author falls back to "Home Assistant"). |
 | POST | `/api/spaces/{id}/bots/{bot_id}/token` | Rotate the Bearer token. Returns the new plaintext token — show once. |
@@ -1168,7 +1168,7 @@ CRUD surface for the bot personas themselves is under
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/api/bot-bridge/spaces/{space_id}` | **Per-bot** Bearer token (from `POST /api/spaces/{id}/bots`). User API tokens are rejected. | Post as the SpaceBot the token was issued to. Body: `{title?, message}`. Fails 403 when `space.bot_enabled=false`. |
+| POST | `/api/bot-bridge/spaces/{space_id}` | **Per-bot** Bearer token (from `POST /api/spaces/{id}/bots`). User API tokens are rejected. | Post as the SpaceBot the token was issued to. Body: `{title?, message}`. Fails 403 when `space.bot_enabled=false`. The token outlives its maker's seat, so every post re-checks the maker: a bot whose maker is **banned** from the space posts nothing, and a personal (`scope="member"`) bot posts only while its maker holds a member seat (not after they left, not while they only follow) — otherwise `403 FORBIDDEN "This bot may not post in this space."`. A space-scope bot whose maker left keeps posting (the admins rotate or delete it). |
 | POST | `/api/bot-bridge/conversations/{conversation_id}` | User Bearer token. | Post a system message into a DM. Fails 403 when `conversation.bot_enabled=false`. |
 
 Both endpoints reject requests carrying `X-Ingress-User` (403) so a
