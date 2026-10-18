@@ -490,6 +490,7 @@ async def test_on_remote_join_request_approved_local_fallback_seats(stack):
         owner_username="alicehost",
         name="S",
         join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
     )
     # Local request row → remote_applicant_instance_id is NULL.
     rid = await stack.svc.request_join(
@@ -555,6 +556,7 @@ async def test_deny_local_join_request(stack):
         owner_username="alicehost",
         name="S",
         join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
     )
     rid = await stack.svc.request_join(
         space.id,
@@ -572,6 +574,7 @@ async def test_approve_local_join_request(stack):
         owner_username="alicehost",
         name="S",
         join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
     )
     rid = await stack.svc.request_join(
         space.id,

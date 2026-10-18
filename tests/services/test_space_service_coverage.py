@@ -14,6 +14,7 @@ from socialhome.domain.space import (
     JoinMode,
     SpaceFeatures,
     SpacePermissionError,
+    SpaceType,
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
@@ -455,6 +456,7 @@ async def test_request_join_invite_only_rejected(stack):
         owner_username="anna",
         name="F",
         join_mode=JoinMode.INVITE_ONLY,
+        space_type=SpaceType.PUBLIC,
     )
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.request_join(
@@ -490,6 +492,7 @@ async def test_request_join_banned_rejected(stack):
         owner_username="anna",
         name="F",
         join_mode=JoinMode.OPEN,
+        space_type=SpaceType.PUBLIC,
     )
     await stack.space_repo.ban_member(
         space.id,
@@ -510,6 +513,7 @@ async def test_request_join_happy(stack):
         owner_username="anna",
         name="F",
         join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
     )
     rid = await stack.space_svc.request_join(
         space.id,

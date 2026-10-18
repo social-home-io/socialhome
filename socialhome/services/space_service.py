@@ -6633,15 +6633,24 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """A local user asks to join ``space_id``. Returns the pending
         request's id — or ``None`` when they were seated at once: an
         ``open`` space this household hosts needs nobody's approval (the
-        about page's Join button)."""
-        space = await self._require_space(space_id)
+        about page's Join button).
+
+        Only a space discoverable to the caller takes a request — the set
+        whose landing page they may open (:meth:`read_space`): a
+        ``public`` / ``global`` space, or a ``household`` space this
+        household hosts. A private space is joined by invite only, never
+        by a cold request; it, another household's household space, an
+        unknown id and an age-gated space hidden from a protected minor
+        all answer the read gate's 403 — before the join mode is looked
+        at, so the answer says nothing about a space the caller can't
+        see."""
+        space, seat = await self.read_space(space_id, user_id)
+        if seat is not None:
+            raise AlreadyMemberError()
         if space.join_mode is JoinMode.INVITE_ONLY:
             raise InviteOnlyError()
         if await self._spaces.is_banned(space_id, user_id):
             raise BannedFromSpaceError()
-        existing = await self._spaces.get_member(space_id, user_id)
-        if existing is not None:
-            raise AlreadyMemberError()
         if (
             space.join_mode is JoinMode.OPEN
             and space.owner_instance_id == self._own_instance_id
