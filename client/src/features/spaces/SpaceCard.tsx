@@ -55,6 +55,8 @@ export interface SpaceCardProps {
 
 function scopeChip(scope: DirectoryEntry['scope']) {
   switch (scope) {
+    case 'private':
+      return { cls: 'sh-scope-chip sh-scope-chip--private', icon: '🔐', label: t('space.visibility.private') }
     case 'household':
       return { cls: 'sh-scope-chip sh-scope-chip--household', icon: '🏠', label: t('space.visibility.household') }
     case 'public':
@@ -84,7 +86,7 @@ function scopeChip(scope: DirectoryEntry['scope']) {
  * costs nothing — a peer-hosted space is never subscribable from here
  * anyway (see {@link subscribableScope}, which requires an explicit `true`).
  *
- * Public/global scope only. A `household` space is private by definition —
+ * Public/global scope only. A `household` (or `private`) space is private by definition —
  * never published, never relayed, never subscribable — so the flag carries no
  * information there, and the "Your household" tab maps it off every local
  * space's features. Without this check every private space on that tab wore a
@@ -92,7 +94,9 @@ function scopeChip(scope: DirectoryEntry['scope']) {
  * teaching the reader to ignore the one place it matters.
  */
 export function contentIsGated(entry: DirectoryEntry): boolean {
-  return entry.scope !== 'household' && entry.allow_subscribers === false
+  return entry.scope !== 'household'
+    && entry.scope !== 'private'
+    && entry.allow_subscribers === false
 }
 
 /** The 🔒 chip that says so, rendered only when {@link contentIsGated}.

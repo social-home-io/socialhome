@@ -375,6 +375,7 @@
   "space.notif.trigger": "Tooltip / screen-reader name of the bell button on a space. {level} = one of space.notif.level_*.",
   "space.public.hosted_by": "Follows the member count on the space's public page: '5 members · hosted by Miller family'. Lowercase.",
   "space.public.scope_global": "Chip for a space listed in the worldwide directory (via a GFS). Short.",
+  "space.public.you_are_member": "Pill on a space's public page when the viewer already belongs to it (any role except follower). Short.",
   "spaces.browse.from_friends": "Tab on Browse spaces: public spaces shared by households you're connected with. Short.",
   "spaces.browse.your_household": "Tab on Browse spaces and the name shown for spaces your own household hosts.",
   "space.join_landing.wrong_body": "“Join with code” must match the button on the Spaces page (spaces.list.join_code).",

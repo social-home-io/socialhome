@@ -3310,6 +3310,7 @@
   "space.public.scope_public": "Public",
   "space.public.scope_global": "Global",
   "space.public.open": "Open space",
+  "space.public.you_are_member": "You're a member",
   "space.public.request_pending": "Request pending",
   "space.public.invite_required": "Invite required",
   "space.public.join": "Join space",

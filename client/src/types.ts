@@ -819,8 +819,10 @@ export interface DirectoryEntry {
   emoji: string | null
   member_count: number
   /** Local/household spaces use the same shape — scope tells us which
-   *  browser tab / chip to surface the card in. */
-  scope: 'household' | 'public' | 'global'
+   *  browser tab / chip to surface the card in. ``'private'`` never comes
+   *  from a directory (private spaces are not listed); only the landing
+   *  page builds it, for a member opening their own private space. */
+  scope: 'private' | 'household' | 'public' | 'global'
   /** How a person becomes a posting MEMBER. Says nothing about whether
    *  the content is readable — see `allow_subscribers`. */
   join_mode: 'invite_only' | 'open' | 'request'
