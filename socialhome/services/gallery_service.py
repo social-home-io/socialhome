@@ -46,6 +46,7 @@ from ..domain.media_constraints import (
     VIDEO_MAX_DIMENSION,
 )
 from ..domain.post import Post, PostType
+from ..domain.preferences import FeatureDisabledError
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
@@ -311,6 +312,7 @@ class GalleryService:
             # Idempotent, and an album of a space the caller holds no seat
             # in answers exactly like an unknown id.
             return
+        await self._require_gallery_on(album)
         if album.is_system:
             raise GalleryPermissionError(
                 "system album cannot be deleted",
@@ -444,6 +446,8 @@ class GalleryService:
         album = await self._repo.get_album(item.album_id)
         if album is not None and not await self._can_see(album, actor_user_id):
             return  # an item of a space the caller isn't in: like an unknown id
+        if album is not None:
+            await self._require_gallery_on(album)
         if album is not None and album.is_system:
             raise GalleryPermissionError(
                 "system album items are managed automatically — "
@@ -652,7 +656,19 @@ class GalleryService:
         album = await self._repo.get_album(album_id)
         if album is None or not await self._can_see(album, user_id):
             raise GalleryNotFoundError(f"album {album_id!r} not found")
+        await self._require_gallery_on(album)
         return album
+
+    async def _require_gallery_on(self, album: GalleryAlbum) -> None:
+        """403 ``FEATURE_DISABLED`` (``space:gallery``) for an album of a
+        space whose admin switched the gallery off — the by-id routes
+        answer like the space-scoped ones. Asked only after the seat
+        check, so an outsider still gets the unknown id's 404."""
+        if album.space_id is None:
+            return
+        space = await self._space_repo.get(album.space_id)
+        if space is not None and not space.features.gallery:
+            raise FeatureDisabledError("space:gallery")
 
     async def _has_role(
         self, space_id: str, user_id: str, roles: frozenset[SpaceRole]

@@ -13,6 +13,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import GalleryAlbumDeleted, GalleryAlbumUpdated
+from socialhome.domain.preferences import FeatureDisabledError
 from socialhome.domain.space import SpaceMember, SubscriberReadOnlyError
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
@@ -60,7 +61,7 @@ async def env(tmp_dir):
         )
     await db.enqueue(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
-        " identity_public_key) VALUES('sp-1', 'X', ?, 'alice', ?)",
+        " identity_public_key, feature_gallery) VALUES('sp-1', 'X', ?, 'alice', ?, 1)",
         (iid, "ab" * 32),
     )
     # alice = owner, bob = member (no special role).
@@ -199,6 +200,28 @@ async def test_list_albums_non_member_403(env):
 async def test_get_album_unknown_404(env):
     with pytest.raises(GalleryNotFoundError):
         await env.get_album("nope", actor_user_id="a-id")
+
+
+async def test_a_space_with_its_gallery_off_answers_by_id_like_its_space_routes(env):
+    """By-id album reads and writes honour the space's ``gallery`` toggle;
+    a household album has no space toggle and is untouched."""
+    album = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="A")
+    home = await env.create_album(space_id=None, owner_user_id="b-id", name="H")
+    await env._space_repo._db.enqueue(
+        "UPDATE spaces SET feature_gallery = 0 WHERE id='sp-1'"
+    )
+    with pytest.raises(FeatureDisabledError):
+        await env.get_album(album.id, actor_user_id="b-id")
+    with pytest.raises(FeatureDisabledError):
+        await env.list_items(album.id, actor_user_id="b-id")
+    with pytest.raises(FeatureDisabledError):
+        await env.update_album(album.id, actor_user_id="b-id", name="B")
+    with pytest.raises(FeatureDisabledError):
+        await env.delete_album(album.id, actor_user_id="b-id")
+    # An outsider still learns nothing: the unknown id's 404 comes first.
+    with pytest.raises(GalleryNotFoundError):
+        await env.get_album(album.id, actor_user_id="e-id")
+    assert (await env.get_album(home.id, actor_user_id="b-id")).id == home.id
 
 
 # ─── Update + delete permissions ─────────────────────────────────────────
