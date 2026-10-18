@@ -140,3 +140,45 @@ async def test_search_diacritic_folding(repo):
     )
     hits = await repo.search("cafe")
     assert len(hits) == 1
+
+
+async def _rows(repo) -> None:
+    for scope, ref, space in (
+        ("post", "a", None),
+        ("space_post", "b", "sp-1"),
+        ("space_post", "c", "sp-2"),
+        ("message", "d", None),
+    ):
+        await repo.upsert(
+            scope=scope, ref_id=ref, space_id=space, title="", body="kiwi"
+        )
+
+
+async def test_visible_space_ids_and_excluded_scopes_filter_in_sql(repo):
+    """Rows tied to a space outside ``visible_space_ids`` and excluded
+    scopes are neither returned nor counted — the page is over what the
+    caller may see."""
+    await _rows(repo)
+    hits = await repo.search(
+        "kiwi", visible_space_ids={"sp-1"}, exclude_scopes={"message"}
+    )
+    assert {h.ref_id for h in hits} == {"a", "b"}
+    counts = await repo.count_by_scope(
+        "kiwi", visible_space_ids={"sp-1"}, exclude_scopes={"message"}
+    )
+    assert counts == {"post": 1, "space_post": 1}
+
+
+async def test_no_visible_spaces_keeps_only_unscoped_rows(repo):
+    await _rows(repo)
+    hits = await repo.search("kiwi", visible_space_ids=())
+    assert {h.ref_id for h in hits} == {"a", "d"}
+    assert await repo.count_by_scope("kiwi", visible_space_ids=()) == {
+        "post": 1,
+        "message": 1,
+    }
+
+
+async def test_no_visibility_filter_is_unrestricted(repo):
+    await _rows(repo)
+    assert len(await repo.search("kiwi")) == 4
