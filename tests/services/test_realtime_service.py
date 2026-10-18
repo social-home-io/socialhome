@@ -58,6 +58,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.mention import Mention, MentionType
 from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.space import SpaceMember
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.domain.timetable import Timetable, to_wire_dict
 from socialhome.domain.user import User, UserStatus
@@ -122,6 +123,12 @@ class _FakeSpaceRepo:
 
     async def list_local_member_user_ids(self, space_id):
         return self._members.get(space_id, [])
+
+    async def list_members(self, space_id):
+        return [
+            SpaceMember(space_id=space_id, user_id=uid, role="member", joined_at="")
+            for uid in self._members.get(space_id, [])
+        ]
 
     async def get(self, space_id):
         # A calendar_id is "a space" iff we know members for it; household /

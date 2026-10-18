@@ -27,6 +27,13 @@ describe('visibleSpaceTabs', () => {
   })
 })
 
+describe('visibleSpaceTabs — a follower', () => {
+  it("gets no Map: the pins and zones are the members' whereabouts", () => {
+    expect(visibleSpaceTabs({ location: true }, false, true)).not.toContain('map')
+    expect(visibleSpaceTabs({ location: true }, false, false)).toContain('map')
+  })
+})
+
 describe('calendarModes / calendarTabLabel', () => {
   it('calendar only (timetable off by default) → events, labelled Calendar', () => {
     expect(calendarModes(undefined)).toEqual(['events'])

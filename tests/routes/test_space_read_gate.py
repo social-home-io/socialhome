@@ -77,7 +77,6 @@ async def _post(client, sid: str) -> None:
 _SEAT_READS = (
     "/feed",
     "/members",
-    "/proposals",
     "/theme",
     "/posts/p-{sid}/comments",
 )
@@ -114,7 +113,8 @@ async def test_non_member_cannot_read_a_private_space(seeded):
     """The reported repro: guest, in zero spaces, read a private
     invite-only space's detail, feed and roster."""
     client, hdr = seeded
-    for path in ("", *_SEAT_READS):
+    # ``/proposals`` is for members only — test_space_follower_view.py.
+    for path in ("", *_SEAT_READS, "/proposals"):
         r = await client.get(
             "/api/spaces/sp-priv" + path.format(sid="sp-priv"), headers=hdr["guest"]
         )

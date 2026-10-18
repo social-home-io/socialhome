@@ -20,7 +20,7 @@ import { showToast } from './Toast'
 import { PersonButton } from './PersonButton'
 import { rosterPersonHint, type PersonHint } from '@/utils/personHint'
 import { openMemberActions, MemberActionSheet, roleLabel } from './MemberActionSheet'
-import { hasSettingsAuthority, type SpaceRole } from '@/features/spaces/spaceRoles'
+import { hasSettingsAuthority, isFollower, type SpaceRole } from '@/features/spaces/spaceRoles'
 import {
   SpaceProfileDialog,
   openSpaceProfileDialog,
@@ -58,7 +58,8 @@ interface Member {
   user_id: string
   display_name?: string | null
   role: string
-  joined_at: string
+  /** Absent on a follower's roster (it lists who, not when). */
+  joined_at?: string
   space_display_name?: string | null
   /** §4.1.6 — viewer's private rename (only the requesting user sees it). */
   personal_alias?: string | null
@@ -110,6 +111,7 @@ interface Props {
 }
 
 export function SpaceMemberList({ spaceId, viewerRole }: Props) {
+  const follower = isFollower(viewerRole)
   const reload = () => {
     loading.value = true
     loadFailed.value = false
@@ -323,7 +325,10 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                 // kicks in. The space-override still wins when set.
                 src={resolveAvatar(spaceId, m.user_id, null)}
                 size={32}
-                online={m.is_online ? (m.is_idle ? 'idle' : 'online') : null}
+                // A follower sees who, never when (owner decision 13): the
+                // server sends them no presence, and the household-wide
+                // ``user.*`` frames must not paint a dot on their roster.
+                online={!follower && m.is_online ? (m.is_idle ? 'idle' : 'online') : null}
               />
               <span class="sh-member-info">
                 <span class="sh-member-name">{r.name}</span>
@@ -357,13 +362,15 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                     for both "Pascal Vizeli ✏ Your nickname" and the
                     date on a 360 px phone). On its own line the date
                     reads as quiet metadata. */}
-                <time
-                  class="sh-muted sh-member-joined"
-                  dateTime={m.joined_at}
-                  title={new Date(m.joined_at).toLocaleString()}
-                >
-                  {formatRelativeJoined(m.joined_at)}
-                </time>
+                {m.joined_at && (
+                  <time
+                    class="sh-muted sh-member-joined"
+                    dateTime={m.joined_at}
+                    title={new Date(m.joined_at).toLocaleString()}
+                  >
+                    {formatRelativeJoined(m.joined_at)}
+                  </time>
+                )}
               </span>
               </PersonButton>
               {/* Nickname moved into the person sheet (tap the row). The

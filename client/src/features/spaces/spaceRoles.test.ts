@@ -7,6 +7,7 @@ import {
   canContribute,
   canModerate,
   hasSettingsAuthority,
+  isFollower,
   isWriterRole,
   parseSpaceRole,
   roleChangeOptions,
@@ -24,6 +25,15 @@ describe('authority sets', () => {
     expect(hasSettingsAuthority(role)).toBe(settings)
     expect(canModerate(role)).toBe(content)
     expect(isWriterRole(role)).toBe(writer)
+  })
+})
+
+describe('isFollower', () => {
+  it('only a subscriber seat is a follower', () => {
+    expect(isFollower('subscriber')).toBe(true)
+    for (const r of ['owner', 'admin', 'moderator', 'member', undefined] as const) {
+      expect(isFollower(r)).toBe(false)
+    }
   })
 })
 

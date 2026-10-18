@@ -28,9 +28,11 @@ export interface SpaceTabFeatures {
 export type CalendarMode = 'events' | 'timetable'
 
 /** ``canModerate`` — the viewer holds content authority (owner / admin /
- *  moderator) and so works the Moderation tab. */
+ *  moderator) and so works the Moderation tab. ``follower`` — a read-only
+ *  follower, who gets no Map: the pins and zones are the members'
+ *  whereabouts (the server refuses them too). */
 export function visibleSpaceTabs(
-  f: SpaceTabFeatures | undefined, canModerate: boolean,
+  f: SpaceTabFeatures | undefined, canModerate: boolean, follower = false,
 ): SpaceTab[] {
   return [
     'feed', 'members',
@@ -40,7 +42,7 @@ export function visibleSpaceTabs(
     ...((f?.stickies ?? true) ? (['stickies'] as const) : []),
     ...((f?.gallery ?? true) ? (['gallery'] as const) : []),
     ...((f?.bazaar ?? true) ? (['bazaar'] as const) : []),
-    ...(f?.location ? (['map'] as const) : []),
+    ...(f?.location && !follower ? (['map'] as const) : []),
     ...(canModerate ? (['moderation'] as const) : []),
   ]
 }

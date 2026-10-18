@@ -38,7 +38,7 @@ vi.mock('./SpaceTasksTab', () => ({
 
 function wire(features: Record<string, boolean>, role: string) {
   apiGet.mockImplementation(async (url: string) => {
-    if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features }
+    if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features, my_role: role }
     if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role }]
     if (url === '/api/spaces/s1/links') return { links: [] }
     return []
@@ -60,12 +60,12 @@ describe('SpaceFeedPage ?tab=', () => {
     await tl.waitFor(() => expect(r.getByTestId('tasks-tab').textContent).toBe('s1:false:false'))
   }, 20000)
 
-  it('until the member list answers, the role is unknown (not read-only)', async () => {
+  it('until the space detail answers, the role is unknown (not read-only)', async () => {
     route.query = { tab: 'tasks' }
     let answer!: (v: unknown) => void
     apiGet.mockImplementation((url: string) => {
-      if (url === '/api/spaces/s1') return Promise.resolve({ id: 's1', name: 'Trip', features: { todo: true } })
-      if (url === '/api/spaces/s1/members') return new Promise((res) => { answer = res })
+      if (url === '/api/spaces/s1') return new Promise((res) => { answer = res })
+      if (url === '/api/spaces/s1/members') return Promise.resolve([{ user_id: 'u1', role: 'member' }])
       if (url === '/api/spaces/s1/links') return Promise.resolve({ links: [] })
       return Promise.resolve([])
     })
@@ -73,7 +73,7 @@ describe('SpaceFeedPage ?tab=', () => {
     const { default: Page } = await import('./SpaceFeedPage')
     const r = tl.render(<Page />)
     await tl.waitFor(() => expect(r.getByTestId('tasks-tab').textContent).toBe('s1:undefined:false'))
-    answer([{ user_id: 'u1', role: 'member' }])
+    answer({ id: 's1', name: 'Trip', features: { todo: true }, my_role: 'member' })
     await tl.waitFor(() => expect(r.getByTestId('tasks-tab').textContent).toBe('s1:true:false'))
   }, 20000)
 
@@ -94,6 +94,27 @@ describe('SpaceFeedPage ?tab=', () => {
     const r = tl.render(<Page />)
     await tl.waitFor(() => expect(r.getByTestId('tasks-tab').textContent).toBe('s1:true:false'))
     await tl.waitFor(() => expect(r.getByRole('tab', { name: 'Moderation' })).toBeTruthy())
+  }, 20000)
+
+  it('a follower — not in the roster — learns its role from the detail: no Map, no proposals', async () => {
+    route.query = { tab: 'map' }
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/api/spaces/s1') {
+        return { id: 's1', name: 'Trip', features: { location: true, todo: true }, my_role: 'subscriber' }
+      }
+      // A follower's roster lists the members only — never the viewer.
+      if (url === '/api/spaces/s1/members') return [{ user_id: 'u9', role: 'owner' }]
+      if (url === '/api/spaces/s1/links') return { links: [] }
+      return []
+    })
+    const tl = await import('@testing-library/preact')
+    const { default: Page } = await import('./SpaceFeedPage')
+    const r = tl.render(<Page />)
+    await tl.waitFor(() => expect(r.container.querySelector('.sh-subscriber-banner')).toBeTruthy())
+    expect(r.queryByRole('tab', { name: 'Map' })).toBeNull()
+    expect(r.queryByRole('tab', { name: 'Tasks' })).toBeTruthy()
+    expect(apiGet).not.toHaveBeenCalledWith('/api/spaces/s1/proposals')
+    expect(apiGet).not.toHaveBeenCalledWith('/api/spaces/s1/presence')
   }, 20000)
 
   it('a plain member gets no Moderation tab', async () => {
@@ -150,7 +171,7 @@ describe('SpaceFeedPage ?tab=', () => {
     route.query = { tab: 'calendar' }
     let fail = true
     apiGet.mockImplementation(async (url: string) => {
-      if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features: { calendar: true } }
+      if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features: { calendar: true }, my_role: 'member' }
       if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role: 'member' }]
       if (url === '/api/spaces/s1/links') return { links: [] }
       if (url === '/api/spaces/s1/calendar/events') {
