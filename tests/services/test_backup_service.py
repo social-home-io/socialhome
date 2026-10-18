@@ -304,3 +304,58 @@ async def test_restore_keeps_a_user_whose_old_backup_has_a_bad_picture_hash(tmp_
     }
     assert rows == {"alice": None, "bob": "0123456789abcdef"}
     await tgt.shutdown()
+
+
+async def test_restore_brings_an_old_backups_offsetless_calendar_bounds_in_shape(
+    tmp_dir,
+):
+    """A backup taken before migration 0100 can hold a date-only or
+    offset-less event bound the DB's trigger now refuses. Restore rewrites
+    it with the migration's rules (date-only = the day in the row's tz,
+    offset-less = UTC) instead of dropping the event."""
+    src = AsyncDatabase(tmp_dir / "src4.db", batch_timeout_ms=10)
+    await src.startup()
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    await src.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES(?,?,?,?)",
+        (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
+    )
+    # The pre-0100 world: no trigger guards the columns yet.
+    await src.enqueue("DROP TRIGGER calendar_events_bounds_tz_insert_check")
+    await src.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('alice', 'a', 'A')"
+    )
+    await src.enqueue(
+        "INSERT INTO calendars(id, name, color, owner_username)"
+        " VALUES('cal', 'C', '#000', 'alice')"
+    )
+    for eid, start, end, tz in (
+        ("day", "2026-10-20", "2026-10-20", "Europe/Zurich"),
+        ("naive", "2026-10-21T08:00:00", "2026-10-21T09:00:00", "UTC"),
+        ("aware", "2026-10-22T08:00:00+02:00", "2026-10-22T09:00:00+02:00", "UTC"),
+    ):
+        await src.enqueue(
+            "INSERT INTO calendar_events(id, calendar_id, summary, start_dt,"
+            " end_dt, created_by, tz) VALUES(?,?,?,?,?,?,?)",
+            (eid, "cal", eid, start, end, "a", tz),
+        )
+    media_src = tmp_dir / "media-src4"
+    media_src.mkdir()
+    blob = await BackupService(src, media_src).export_to_bytes()
+    await src.shutdown()
+
+    tgt = AsyncDatabase(tmp_dir / "tgt4.db", batch_timeout_ms=10)
+    await tgt.startup()
+    await BackupService(tgt, tmp_dir / "media-tgt4").restore_from_bytes(blob)
+    rows = {
+        r["id"]: (r["start_dt"], r["end_dt"])
+        for r in await tgt.fetchall("SELECT id, start_dt, end_dt FROM calendar_events")
+    }
+    assert rows == {
+        "day": ("2026-10-19T22:00:00+00:00", "2026-10-20T22:00:00+00:00"),
+        "naive": ("2026-10-21T08:00:00+00:00", "2026-10-21T09:00:00+00:00"),
+        "aware": ("2026-10-22T08:00:00+02:00", "2026-10-22T09:00:00+02:00"),
+    }
+    await tgt.shutdown()

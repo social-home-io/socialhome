@@ -135,3 +135,23 @@ def parse_event_bound(value: str, *, tz: str, is_end: bool) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def canonical_event_bound(value: object, *, tz: str | None, is_end: bool) -> object:
+    """Bring a STORED-shape bound (a backup row) to the column's invariant.
+
+    An offset-less value (date-only or a naive datetime) is rewritten with
+    :func:`parse_event_bound`'s rules in ``tz`` and returned as its
+    ``+00:00`` ISO string; everything else — a value with an offset, the
+    ``''`` of a tombstone stub, a non-string, an unparseable string — is
+    returned unchanged (migration 0100's triggers judge the latter).
+    """
+    if not isinstance(value, str) or value == "":
+        return value
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if parsed.tzinfo is not None:
+        return value
+    return parse_event_bound(value, tz=tz or DEFAULT_TZ, is_end=is_end).isoformat()

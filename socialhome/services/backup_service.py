@@ -29,11 +29,17 @@ import orjson
 
 from ..db import AsyncDatabase
 from ..domain.picture_hash import clean_picture_hash
+from ..utils.timezones import canonical_event_bound
 
 log = logging.getLogger(__name__)
 
 #: Tables whose ``picture_hash`` the DB guards (migration 0098) — restore
 #: cleans the column so an old backup's bad hash can't drop the whole row.
+#: Tables whose ``start_dt`` / ``end_dt`` migration 0100 keeps tz-aware.
+_CALENDAR_BOUND_TABLES: frozenset[str] = frozenset(
+    {"calendar_events", "space_calendar_events"}
+)
+
 _PICTURE_HASH_TABLES: frozenset[str] = frozenset(
     {"users", "remote_users", "space_members"}
 )
@@ -390,7 +396,22 @@ class BackupService:
         col_list = ", ".join(cols)
         sql = f"INSERT OR IGNORE INTO {table}({col_list}) VALUES({placeholders})"
         clean_hash = table in _PICTURE_HASH_TABLES and "picture_hash" in cols
+        clean_bounds = table in _CALENDAR_BOUND_TABLES and "start_dt" in cols
         for row in rows:
+            if clean_bounds:
+                # A backup from before migration 0100 can carry a date-only
+                # / offset-less bound the DB's trigger now refuses; bring it
+                # to the column's shape with the migration's rules.
+                tz = row.get("tz")
+                row = {
+                    **row,
+                    "start_dt": canonical_event_bound(
+                        row.get("start_dt"), tz=tz, is_end=False
+                    ),
+                    "end_dt": canonical_event_bound(
+                        row.get("end_dt"), tz=tz, is_end=True
+                    ),
+                }
             if clean_hash:
                 # A backup from before migration 0098 can carry a hash the
                 # DB's trigger now refuses; drop the hash, never the row.
