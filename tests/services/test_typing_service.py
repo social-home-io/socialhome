@@ -840,3 +840,24 @@ async def test_typing_in_a_system_chat_without_a_policy_goes_nowhere():
         == 0
     )
     assert ws.sent == []
+
+
+async def test_comment_typing_from_outside_the_space_reaches_nobody():
+    """A local user with no seat in ``space_id`` (the WS frame names any
+    space id it likes) must not light a typing indicator inside it."""
+    space = _FakeSpaceRepo([_FakeMember("alice"), _FakeMember("bob")])
+    ws = _FakeWS()
+    svc = TypingService(
+        conversation_repo=_FakeConvoRepo(),
+        user_repo=_FakeUserRepoWithList([_FakeUser("mallory")]),
+        ws_manager=ws,
+        space_repo=space,
+    )
+    delivered = await svc.user_typing_on_comment(
+        post_id="p1",
+        space_id="space-x",
+        sender_user_id="mallory",
+        sender_username="mallory",
+    )
+    assert delivered == 0
+    assert all(targets == [] for targets, _ in ws.calls)

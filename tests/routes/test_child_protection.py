@@ -6,6 +6,8 @@ from socialhome import app_keys as K
 from socialhome.auth import sha256_token_hash
 
 from .conftest import _auth
+from .test_space_read_gate import _add_user, _seat
+from .test_space_read_gate import _seed_space as _seed_rg_space
 
 
 async def _seed_minor(client, *, username: str = "lila", uid: str = "lila-id"):
@@ -553,3 +555,26 @@ async def test_protection_status_non_admin_403(client):
 async def test_protection_status_requires_auth(client):
     r = await client.get("/api/cp/protection")
     assert r.status == 401
+
+
+# ─── The age gate is no oracle for a space you're not in ────────────────
+
+
+async def test_get_age_gate_answers_an_outsider_like_an_unknown_space(client):
+    """A local user with no seat learned a private space's ``min_age`` (and
+    so that it exists — an unknown id answered ``0``). Now: a seat or a
+    household admin reads it; anyone else gets the space gate's 403, for a
+    real id and an unknown one alike."""
+    hdr = await _add_user(client, "guest", "uid-guest")
+    member = await _add_user(client, "mia", "uid-mia")
+    await _seed_rg_space(client, "sp-teen", "private")
+    await client._db.enqueue("UPDATE spaces SET min_age = 16 WHERE id='sp-teen'")
+    await _seat(client, "sp-teen", "uid-mia", "member")
+    for sid in ("sp-teen", "sp-nope"):
+        r = await client.get(f"/api/cp/spaces/{sid}/age-gate", headers=hdr)
+        assert r.status == 403, await r.text()
+        assert (await r.json())["error"]["detail"] == "Not a space member."
+    r = await client.get("/api/cp/spaces/sp-teen/age-gate", headers=member)
+    assert (await r.json()) == {"min_age": 16}
+    r = await client.get("/api/cp/spaces/sp-teen/age-gate", headers=_auth(client._tok))
+    assert (await r.json()) == {"min_age": 16}

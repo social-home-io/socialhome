@@ -273,6 +273,11 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
                     exc_info=True,
                 )
                 members = []
+            seated = {getattr(m, "user_id", None) for m in members}
+            if sender_user_id not in seated:
+                # The frame names any space id the client likes: someone
+                # with no seat there lights no indicator inside it.
+                return 0
             for m in members:
                 uid = getattr(m, "user_id", None)
                 if uid and uid != sender_user_id:
