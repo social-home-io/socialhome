@@ -244,3 +244,43 @@ describe('pairing affordances follow the household role', () => {
     expect(openPairing).toHaveBeenCalledWith('household')
   }, 20000)
 })
+
+describe('SpaceBrowserPage — Open space routes in-app', () => {
+  // ``window.location.href = …`` reloads the whole SPA; the router's
+  // ``route()`` pushes history and swaps the page in place. JSDOM never
+  // moves ``location`` on a hard navigate, so a changed pathname proves
+  // the router did it.
+  const before = location.pathname
+  afterEach(() => {
+    cleanup()
+    history.replaceState(null, '', before)
+  })
+
+  it("a member's Open space goes to the space without a full page reload", async () => {
+    const { api } = await import('@/api')
+    ;(api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url === '/api/spaces') {
+        return Promise.resolve([{
+          id: 'sp-9', name: 'Neighbourhood Garden', description: null, emoji: null,
+          space_type: 'household', join_mode: 'request', category: 'general',
+          features: { allow_subscribers: false },
+        }])
+      }
+      if (url === '/api/me/subscriptions') return Promise.resolve({ subscriptions: [] })
+      if (url === '/api/me/join-requests') return Promise.resolve({ pending_space_ids: [] })
+      return Promise.resolve([])
+    })
+    const { IngressLocationProvider } = await import('@/router/IngressLocationProvider')
+    const { default: SpaceBrowserPage } = await import('./SpaceBrowserPage')
+    history.replaceState(null, '', '/spaces/browse')
+    const r = render(
+      <IngressLocationProvider>
+        <SpaceBrowserPage />
+      </IngressLocationProvider>,
+    )
+    fireEvent.click(await r.findByRole('tab', { name: /Your household/ }))
+    const open = await r.findByRole('button', { name: /Open space/ })
+    fireEvent.click(open)
+    expect(location.pathname).toBe('/spaces/sp-9')
+  }, 20000)
+})

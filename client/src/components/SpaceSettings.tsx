@@ -5,6 +5,7 @@
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { signal, useSignal } from '@preact/signals'
+import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { clearLocalDissolve, markLocalDissolve } from '@/store/spaces'
@@ -143,6 +144,7 @@ export function SpaceSettings({
    *  else with 403. */
   isOwner?: boolean
 }) {
+  const { route } = useLocation()
   const channelChecklistRef = useRef<HTMLFieldSetElement | null>(null)
   const tierChecklistRef = useRef<HTMLFieldSetElement | null>(null)
   // ``useSignal`` (not ``signal()``) so the underlying signal instance
@@ -581,8 +583,9 @@ export function SpaceSettings({
       }>(`/api/spaces/${space.id}/proposals`, { action: 'dissolve' })
       if (res?.proposal?.status === 'executed') {
         showToast(t('space.dissolve.done'), 'info')
-        // ``addBase`` keeps the hard navigate inside the ingress prefix.
-        window.location.href = addBase('/spaces')
+        // The space is gone: leave for the spaces list in-app (no SPA
+        // reload), replacing the entry so Back doesn't return to it.
+        route('/spaces', true)
       } else {
         // Only proposed: when the other admins approve later, the
         // dissolve frame must still move this tab off the space.

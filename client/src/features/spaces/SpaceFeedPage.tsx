@@ -687,11 +687,10 @@ export default function SpaceFeedPage() {
                   try {
                     await api.delete(`/api/spaces/${spaceId}/subscribe`)
                     showToast(t('space.subscriber.unsubscribed'), 'info')
-                    // ``addBase`` prepends the HA Supervisor ingress
-                    // prefix (no-op for standalone) so the
-                    // hard-navigate stays inside the SPA shell instead
-                    // of bouncing the iframe to HA Core's frontend.
-                    window.location.href = addBase('/spaces')
+                    // A follower no longer reads this feed: leave it for
+                    // the spaces list in-app (no SPA reload), replacing
+                    // the entry so Back doesn't return to it.
+                    loc?.route('/spaces', true)
                   } catch (exc) {
                     showToast((exc as Error).message, 'error')
                   }
