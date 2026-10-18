@@ -405,3 +405,50 @@ describe('PagesView — household scope', () => {
     await waitFor(() => expect(apiDelete).toHaveBeenCalledWith('/api/pages/p1/lock', { keepalive: true }))
   })
 })
+
+describe('PagesView — table of contents under the HA ingress prefix (/api/hassio_ingress/<token>/)', () => {
+  // ``<base href>`` is always present, so a bare ``href="#slug"`` resolves
+  // to ``<base>#slug`` — the app root. Following it left the page for Home.
+  let baseEl: HTMLBaseElement
+  const before = location.pathname
+  beforeEach(() => {
+    baseEl = document.createElement('base')
+    baseEl.href = '/api/hassio_ingress/tok/'
+    document.head.prepend(baseEl)
+    history.replaceState(null, '', '/api/hassio_ingress/tok/spaces/s1/pages')
+  })
+  afterEach(() => {
+    baseEl.remove()
+    history.replaceState(null, '', before)
+  })
+
+  it('a contents entry jumps to its heading in place instead of navigating to the ingress root', async () => {
+    wire([page({ content: '## Intro\n\nfirst\n\n## Next **step**\n\nsecond' })])
+    const r = render(<PagesView scope={space()} />)
+    await openPage(r)
+    const toc = r.getByRole('navigation', { name: 'On this page' })
+    const entry = Array.from(toc.querySelectorAll('a')).find(a => a.textContent?.includes('Next'))!
+    const followed = entry.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+    )
+    expect(followed).toBe(false)
+    const heading = r.getByRole('heading', { name: 'Next step' })
+    expect(document.activeElement).toBe(heading)
+    expect(location.pathname).toBe('/api/hassio_ingress/tok/spaces/s1/pages')
+  })
+
+  it('a repeated or non-Latin heading jumps to its own occurrence, not the first one', async () => {
+    wire([page({ content: '## Notes\n\na\n\n## 厨房\n\nb\n\n## Notes\n\nc\n\n## 花园\n\nd' })])
+    const r = render(<PagesView scope={space()} />)
+    await openPage(r)
+    const entries = Array.from(
+      r.getByRole('navigation', { name: 'On this page' }).querySelectorAll('a'),
+    )
+    const rendered = Array.from(document.querySelectorAll('.sh-markdown h2'))
+    expect(entries).toHaveLength(4)
+    entries.forEach((entry, i) => {
+      fireEvent.click(entry)
+      expect(document.activeElement).toBe(rendered[i])
+    })
+  })
+})
