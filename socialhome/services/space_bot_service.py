@@ -7,8 +7,10 @@ Thin service around :class:`SqliteSpaceBotRepo` that centralises
   household voices; a member creating one would effectively grant
   themselves an un-attributed channel.
 * **Member-scope bots** — any space member can create one for
-  themselves. Posts always carry ``via {member}`` attribution so they
-  cannot masquerade as a household alert.
+  themselves (not a read-only follower: a bot posts). Posts always carry
+  ``via {member}`` attribution so they cannot masquerade as a household
+  alert, and post only while their maker still may
+  (:meth:`BotBridgeService.notify_space`).
 * **Delete / rotate** — owner + admin always; the creating member for
   their own member-scope bot.
 
@@ -26,7 +28,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from ..domain.events import DomainEvent
-from ..domain.space import SETTINGS_AUTHORITY_ROLES, SpacePermissionError
+from ..domain.space import (
+    SETTINGS_AUTHORITY_ROLES,
+    WRITER_ROLES,
+    SpacePermissionError,
+    SubscriberReadOnlyError,
+)
 from ..domain.space_bot import (
     MAX_BOT_ICON_LEN,
     MAX_BOT_NAME_LEN,
@@ -43,7 +50,7 @@ from ..infrastructure.event_bus import EventBus
 from ..repositories.space_bot_repo import AbstractSpaceBotRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
-from .space_member_guard import SpaceMemberGuardMixin
+from .space_member_guard import SpaceMemberGuardMixin, require_seat
 
 log = logging.getLogger(__name__)
 
@@ -151,7 +158,12 @@ class SpaceBotService(SpaceMemberGuardMixin):
         The caller MUST surface the plaintext token to the user once and
         then drop it — it is never retrievable again.
         """
-        actor = await self._require_member(space_id, actor_username)
+        actor = await self._actor_or_raise(actor_username, label="user")
+        seat = await require_seat(self._spaces, space_id, actor.user_id)
+        if seat.role not in WRITER_ROLES:
+            # A bot posts into the space — a read-only follower would post
+            # through it.
+            raise SubscriberReadOnlyError("post")
         if scope is BotScope.SPACE:
             await self._require_admin_or_owner(space_id, actor_username)
         self._validate_fields(slug=slug, name=name, icon=icon)
@@ -278,8 +290,10 @@ class SpaceBotService(SpaceMemberGuardMixin):
         return bot
 
     async def _require_member(self, space_id: str, username: str):
+        """The actor, when they hold a seat here — a banned user's leftover
+        seat counts as none (:func:`require_seat`)."""
         actor = await self._actor_or_raise(username, label="user")
-        await self._member_or_raise(space_id, actor.user_id)
+        await require_seat(self._spaces, space_id, actor.user_id)
         return actor
 
     async def _require_admin_or_owner(self, space_id: str, username: str) -> None:
@@ -294,7 +308,7 @@ class SpaceBotService(SpaceMemberGuardMixin):
     async def _require_can_manage(self, bot: SpaceBot, actor_username: str) -> None:
         """Admin/owner always; creating member for their own scope=member bot."""
         actor = await self._actor_or_raise(actor_username, label="user")
-        member = await self._member_or_raise(bot.space_id, actor.user_id)
+        member = await require_seat(self._spaces, bot.space_id, actor.user_id)
         if member.role in SETTINGS_AUTHORITY_ROLES:
             return
         # Non-admins can only manage their own member-scope bots.

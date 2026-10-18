@@ -15,7 +15,9 @@ from socialhome.domain.space import (
     Space,
     SpaceFeatures,
     SpaceMember,
+    SpacePermissionError,
     SpaceType,
+    SubscriberReadOnlyError,
 )
 from socialhome.domain.space_bot import (
     BotPostsReviewedError,
@@ -296,3 +298,71 @@ async def test_moderated_posts_leave_space_scope_bots_alone(stack):
     bot = await _moderated_with_bot(stack, creator_role="member", scope=BotScope.SPACE)
     post = await stack.svc.notify_space(bot, title=None, message="space bot")
     assert post.content == "space bot"
+
+
+# ─── A bot speaks for its maker: no seat, a follower's or a ban → no post ──
+
+
+async def _member_bot(stack, *, maker_role: str | None, banned: bool = False):
+    """A personal bot made by ``uid-maker`` (seated as ``maker_role``, or
+    not at all), optionally banned since."""
+    if maker_role is not None:
+        await stack.db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES('sp-1', ?, ?)",
+            ("uid-maker", maker_role),
+        )
+    if banned:
+        await stack.db.enqueue(
+            "INSERT INTO space_bans(space_id, user_id, banned_by)"
+            " VALUES('sp-1', 'uid-maker', 'uid-alice')"
+        )
+    bot, _raw = await SqliteSpaceBotRepo(stack.db).create(
+        bot_id="b-maker",
+        space_id="sp-1",
+        scope=BotScope.MEMBER,
+        slug="maker",
+        name="Maker",
+        icon="🤖",
+        created_by="uid-maker",
+    )
+    return bot
+
+
+async def test_a_members_personal_bot_posts(stack):
+    bot = await _member_bot(stack, maker_role="member")
+    post = await stack.svc.notify_space(bot, title=None, message="laundry done")
+    assert post.bot_id == "b-maker"
+
+
+@pytest.mark.parametrize(
+    ("maker_role", "banned", "error"),
+    [
+        ("subscriber", False, SubscriberReadOnlyError),
+        (None, False, SpacePermissionError),
+        (None, True, SpacePermissionError),
+        ("member", True, SpacePermissionError),
+    ],
+    ids=["follower", "left", "banned", "banned-with-leftover-seat"],
+)
+async def test_a_personal_bot_posts_only_while_its_maker_may_post(
+    stack, maker_role, banned, error
+):
+    """A personal bot is its member's voice: once the maker only follows,
+    left, or was banned, the bot's token posts nothing (it outlives the
+    seat — the maker set the automation up in their own Home Assistant)."""
+    bot = await _member_bot(stack, maker_role=maker_role, banned=banned)
+    with pytest.raises(error):
+        await stack.svc.notify_space(bot, title=None, message="still here")
+    assert await stack.space_post_repo.list_feed("sp-1") == []
+
+
+async def test_a_space_bot_of_a_banned_maker_posts_nothing(stack):
+    """A space-scope bot outlives its maker leaving (the space's voice),
+    but not a ban: the banned admin still holds its token."""
+    await stack.db.enqueue(
+        "INSERT INTO space_bans(space_id, user_id, banned_by)"
+        " VALUES('sp-1', 'uid-alice', 'uid-owner')"
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.svc.notify_space(stack.bot, title=None, message="ding")
+    assert await stack.space_post_repo.list_feed("sp-1") == []

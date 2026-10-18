@@ -33,7 +33,14 @@ from datetime import UTC, datetime
 from ..domain.conversation import ConversationMessage
 from ..domain.events import DmMessageCreated, SpacePostCreated
 from ..domain.post import Post, PostType
-from ..domain.space import AccessDecision, ContentAction, SpaceFeatureAccess
+from ..domain.space import (
+    WRITER_ROLES,
+    AccessDecision,
+    ContentAction,
+    SpaceFeatureAccess,
+    SpacePermissionError,
+    SubscriberReadOnlyError,
+)
 from ..domain.space_bot import (
     BotPostsReviewedError,
     BotScope,
@@ -46,6 +53,7 @@ from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .content_access import ContentAccessMixin
+from .space_member_guard import NOT_A_SPACE_MEMBER, seat_of
 from .space_mentions import SpaceMentionResolver
 
 log = logging.getLogger(__name__)
@@ -103,6 +111,30 @@ class BotBridgeService(ContentAccessMixin):
 
     # ── Public API ───────────────────────────────────────────────────────
 
+    async def _require_maker_may_post(self, bot: SpaceBot) -> None:
+        """The bot's token outlives its maker's seat (the maker set the
+        automation up in their own Home Assistant), so every post re-checks
+        the maker:
+
+        * a **banned** maker's bot posts nothing, whatever its scope — the
+          banned person still holds the token (403 ``Not a space member.``);
+        * a **personal** (member-scope) bot is its member's voice: it posts
+          only while the maker holds a writer seat — not after they left
+          (403 ``Not a space member.``), not as a read-only follower (403
+          ``SUBSCRIBER_READ_ONLY``).
+
+        A space-scope bot whose maker merely left keeps posting: it is the
+        space's voice, and its admins rotate or delete it."""
+        if await self._spaces.is_banned(bot.space_id, bot.created_by):
+            raise SpacePermissionError(NOT_A_SPACE_MEMBER)
+        if bot.scope is not BotScope.MEMBER:
+            return
+        seat = await seat_of(self._spaces, bot.space_id, bot.created_by)
+        if seat is None:
+            raise SpacePermissionError(NOT_A_SPACE_MEMBER)
+        if seat.role not in WRITER_ROLES:
+            raise SubscriberReadOnlyError("post")
+
     async def notify_space(
         self,
         bot: SpaceBot,
@@ -126,6 +158,7 @@ class BotBridgeService(ContentAccessMixin):
             raise KeyError(f"space {bot.space_id!r} not found")
         if not space.bot_enabled:
             raise SpaceBotDisabledError("bot posting is disabled for this space")
+        await self._require_maker_may_post(bot)
         # A bot speaks for the member who made it (a personal bot) or the
         # admin who set it up: under an ADMIN_ONLY ``posts`` level (§4.3) its
         # post is theirs — no posting around it through a webhook.
