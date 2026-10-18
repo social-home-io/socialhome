@@ -21,7 +21,6 @@ from socialhome.services.gallery_service import (
     ALBUMS_PER_SPACE,
     CAPTION_MAX,
     GalleryNotFoundError,
-    GalleryPermissionError,
     GalleryService,
     _with_cover,
 )
@@ -163,14 +162,16 @@ async def test_list_items_unknown_album_raises(env):
         await svc.list_items("missing", actor_user_id="a-id")
 
 
-async def test_list_items_non_member_403(env):
+async def test_list_items_non_member_gets_the_unknown_ids_404(env):
+    """No seat in the album's space: the album does not exist for them
+    (no oracle naming the space)."""
     svc, _ = env
     a = await svc.create_album(
         space_id="sp-1",
         owner_user_id="a-id",
         name="X",
     )
-    with pytest.raises(GalleryPermissionError):
+    with pytest.raises(GalleryNotFoundError):
         await svc.list_items(a.id, actor_user_id="hostile-id")
 
 
@@ -277,8 +278,9 @@ async def test_delete_item_non_uploader_non_admin_403(env):
         caption=None,
         uploader_user_id="b-id",
     )
-    with pytest.raises(GalleryPermissionError):
-        await svc.delete_item(item.id, actor_user_id="other-id")
+    # No seat: answered like an unknown item (a no-op), nothing deleted.
+    await svc.delete_item(item.id, actor_user_id="other-id")
+    assert [i.id for i in await svc.list_items(a.id, actor_user_id="b-id")] == [item.id]
 
 
 async def test_delete_item_space_admin_succeeds(env):
@@ -325,8 +327,9 @@ async def test_delete_album_random_user_403(env):
         owner_user_id="b-id",
         name="Bobs",
     )
-    with pytest.raises(GalleryPermissionError):
-        await svc.delete_album(a.id, actor_user_id="hostile-id")
+    # No seat: answered like an unknown album (a no-op), nothing deleted.
+    await svc.delete_album(a.id, actor_user_id="hostile-id")
+    assert (await svc.get_album(a.id, actor_user_id="b-id")).id == a.id
 
 
 # ─── Cover URL resolution ────────────────────────────────────────────────

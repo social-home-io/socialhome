@@ -64,9 +64,13 @@ const showCreate  = signal(false)
 
 export interface GalleryPageProps {
   spaceId?: string
+  /** A read-only follower of the space: they look at the albums but
+   *  neither create one nor upload (the server answers 403
+   *  ``SUBSCRIBER_READ_ONLY``), so neither control is offered. */
+  readOnly?: boolean
 }
 
-export default function GalleryPage({ spaceId }: GalleryPageProps) {
+export default function GalleryPage({ spaceId, readOnly = false }: GalleryPageProps) {
   useTitle(t('nav.gallery'))
   useEffect(() => { void loadAlbums(spaceId) }, [spaceId])
 
@@ -112,6 +116,7 @@ export default function GalleryPage({ spaceId }: GalleryPageProps) {
     return (
       <AlbumDetail
         album={activeAlbum.value}
+        readOnly={readOnly}
         onBack={() => {
           activeAlbum.value = null
           items.value = []
@@ -147,12 +152,14 @@ export default function GalleryPage({ spaceId }: GalleryPageProps) {
           <strong>{itemCount}</strong>{' '}
           {t(isOne(itemCount) ? 'gallery.media_word_one' : 'gallery.media_word')}
         </div>
-        <div class="sh-gallery-hero-actions">
-          <Button onClick={() => (showCreate.value = true)}>{t('gallery.new_album_btn')}</Button>
-        </div>
+        {!readOnly && (
+          <div class="sh-gallery-hero-actions">
+            <Button onClick={() => (showCreate.value = true)}>{t('gallery.new_album_btn')}</Button>
+          </div>
+        )}
       </header>
 
-      {showCreate.value && (
+      {showCreate.value && !readOnly && (
         <CreateAlbumForm
           spaceId={spaceId}
           onClose={() => (showCreate.value = false)}
@@ -165,9 +172,11 @@ export default function GalleryPage({ spaceId }: GalleryPageProps) {
           <div aria-hidden="true">📸</div>
           <h3>{t('gallery.empty_title')}</h3>
           <p>{spaceId ? t('gallery.empty_body_space') : t('gallery.empty_body_household')}</p>
-          <Button onClick={() => (showCreate.value = true)}>
-            {t('gallery.create_first')}
-          </Button>
+          {!readOnly && (
+            <Button onClick={() => (showCreate.value = true)}>
+              {t('gallery.create_first')}
+            </Button>
+          )}
         </div>
       ) : (
         <div class="sh-album-grid">
@@ -236,7 +245,11 @@ function AlbumCover({ album }: { album: Album }) {
   )
 }
 
-function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
+function AlbumDetail({ album, onBack, readOnly = false }: {
+  album: Album
+  onBack: () => void
+  readOnly?: boolean
+}) {
   const [uploadPct, setUploadPct] = useState<number | null>(null)
   // Once the bytes are sent the request blocks on server-side transcoding
   // (video → VP9/WebM). Flip to a "Processing…" label so the bar doesn't
@@ -322,7 +335,8 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
   // Drag-drop is a noop on the system album — the album rejects
   // direct uploads server-side too, but handling the UI ourselves
   // avoids a needless 403 round-trip.
-  const dragHandlers = album.is_system ? {} : {
+  const canUpload = !album.is_system && !readOnly
+  const dragHandlers = !canUpload ? {} : {
     onDragOver: (e: DragEvent) => { e.preventDefault(); setDragOver(true) },
     onDragLeave: () => setDragOver(false),
     onDrop: (e: DragEvent) => {
@@ -348,7 +362,7 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
             </span>
           )}
         </h1>
-        {!album.is_system && (
+        {canUpload && (
           <div class="sh-row">
             <Button onClick={() => inputRef.current?.click()}>{t('gallery.upload_btn')}</Button>
             <input
@@ -385,7 +399,7 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
         </div>
       )}
 
-      {dragOver && !album.is_system && (
+      {dragOver && canUpload && (
         <div class="sh-drop-overlay" aria-hidden="true">
           {t('gallery.drop_to_upload')}
         </div>
@@ -402,7 +416,9 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
           ) : (
             <>
               <h3>{t('gallery.album_empty_title')}</h3>
-              <p>{t('gallery.album_empty_body_before')}<strong>{t('gallery.upload_btn')}</strong>{t('gallery.album_empty_body_after')}</p>
+              {canUpload && (
+                <p>{t('gallery.album_empty_body_before')}<strong>{t('gallery.upload_btn')}</strong>{t('gallery.album_empty_body_after')}</p>
+              )}
             </>
           )}
         </div>

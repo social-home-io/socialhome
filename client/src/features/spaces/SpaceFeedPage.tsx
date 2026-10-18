@@ -1015,7 +1015,10 @@ export default function SpaceFeedPage() {
       )}
 
       {activeTab.value === 'gallery' && (
-        <GalleryPage spaceId={spaceId} />
+        <GalleryPage
+          spaceId={spaceId}
+          readOnly={roleKnown.value && !isWriterRole(viewerRole.value)}
+        />
       )}
 
       {activeTab.value === 'bazaar' && (
