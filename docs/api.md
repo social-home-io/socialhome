@@ -816,6 +816,23 @@ wrapper post only surfaces in the space feed when `announce_in_feed` is
 true (otherwise it carries `space_posts.hidden_from_feed = 1`). Creating a
 listing in a space whose `bazaar` feature is off returns 403.
 
+**Who sees a listing.** Every listing lives in a space. `GET
+/api/bazaar/{id}`, its `…/bids` and `…/offers`, `POST …/save`, and every
+action on a listing, bid or offer (`PATCH` / `DELETE` the listing, bid,
+offer, accept / reject / withdraw) need the caller to see the listing: a
+**seat** in its space (any role, a follower included) or being its
+**seller** (who keeps their listing after leaving the space). Anyone else
+gets `404 NOT_FOUND "Listing not found."` (`"Bid not found."` / `"Offer not
+found."` on a bid / offer route) — exactly what an unknown id gets, so a
+listing, bid or offer id is no oracle. The bidder / offerer always reaches
+their own bid / offer (withdrawing after leaving still works). **Trading
+is for members:** `POST …/bids` and `POST …/offers` from a follower answer
+`403 SUBSCRIBER_READ_ONLY` (`params.action: "trade"`); a follower may look
+and save. `GET /api/bazaar/{id}` carries **`viewer_can_trade`** (boolean,
+per caller: a writer seat and not the seller) so the SPA hides Buy / bid /
+offer for a follower. `GET /api/me/bazaar/saved` leaves out bookmarks of
+listings the caller can no longer see.
+
 ### Bazaar offers & saved listings (§23.23)
 
 Offers write to a dedicated `bazaar_offers` table — distinct from

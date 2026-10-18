@@ -207,13 +207,18 @@ class BazaarDetailView(BaseView):
     """``GET/PATCH/DELETE /api/bazaar/{id}``."""
 
     async def get(self) -> web.Response:
-        self.require_user()
-        listing_id = self.match("id")
-        repo = self.svc(bazaar_repo_key)
-        listing = await repo.get_listing(listing_id)
-        if listing is None:
+        svc = self.svc(bazaar_service_key)
+        try:
+            listing = await svc.get_visible_listing(self.match("id"), self.user.user_id)
+        except ListingNotFoundError:
             return error_response(404, "NOT_FOUND", "Listing not found.")
-        return web.json_response(_listing_dict_signed(self.request, listing))
+        payload = _listing_dict_signed(self.request, listing)
+        # Per viewer: may they bid / make an offer (a writer seat)? A
+        # follower sees the listing but not the buy controls.
+        payload["viewer_can_trade"] = await svc.viewer_can_trade(
+            listing, self.user.user_id
+        )
+        return web.json_response(payload)
 
     async def patch(self) -> web.Response:
         ctx = self.user
@@ -259,9 +264,13 @@ class BazaarBidCollectionView(BaseView):
     """``GET/POST /api/bazaar/{id}/bids``."""
 
     async def get(self) -> web.Response:
-        self.require_user()
         svc = self.svc(bazaar_service_key)
-        bids = await svc.list_bids(self.match("id"))
+        try:
+            bids = await svc.list_bids(
+                self.match("id"), viewer_user_id=self.user.user_id
+            )
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
         return web.json_response([_bid_dict(b) for b in bids])
 
     async def post(self) -> web.Response:

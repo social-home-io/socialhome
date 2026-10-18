@@ -1023,6 +1023,10 @@ export interface BazaarListing {
   winning_price: number | null
   sold_at: string | null
   created_at: string
+  /** ``GET /api/bazaar/{id}`` only: may the viewer bid / make an offer
+   *  (a writer seat in the listing's space)? ``false`` for a follower,
+   *  who looks and saves but doesn't trade. Absent → assume yes. */
+  viewer_can_trade?: boolean
 }
 
 export interface BazaarBid {

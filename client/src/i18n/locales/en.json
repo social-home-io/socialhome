@@ -3799,6 +3799,7 @@
   "bazaar.card.loading": "Loading listing…",
   "bazaar.card.missing": "Listing details haven't been attached to this post yet.",
   "bazaar.card.load_error": "Couldn't load this listing. Try again later.",
+  "bazaar.card.follower_read_only": "You follow this space: you can look at and save listings, but buying, bidding and offers are for members.",
   "bazaar.card.bid_placed": "Bid placed",
   "bazaar.card.confirm_withdraw_bid": "Withdraw this bid?",
   "bazaar.card.bid_withdrawn": "Bid withdrawn",

@@ -3763,6 +3763,7 @@
   "bazaar.card.loading": "Anzeige wird geladen…",
   "bazaar.card.missing": "Zu diesem Beitrag gibt es noch keine Anzeigendetails.",
   "bazaar.card.load_error": "Die Anzeige konnte nicht geladen werden. Versuch es später noch mal.",
+  "bazaar.card.follower_read_only": "Du folgst diesem Raum: Du kannst Anzeigen ansehen und merken – kaufen, bieten und Angebote machen können nur Mitglieder.",
   "bazaar.card.bid_placed": "Gebot abgegeben",
   "bazaar.card.confirm_withdraw_bid": "Dieses Gebot zurückziehen?",
   "bazaar.card.bid_withdrawn": "Gebot zurückgezogen",

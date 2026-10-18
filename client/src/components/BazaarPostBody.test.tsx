@@ -109,3 +109,23 @@ describe('BazaarPostBody — protected buyer', () => {
     }
   })
 })
+
+describe('BazaarPostBody — a follower', () => {
+  beforeEach(() => apiGet.mockReset())
+
+  it('sees the listing and a note, never Buy / bid / offer controls', async () => {
+    const saved = currentUser.value
+    ;(currentUser as { value: unknown }).value = { user_id: 'fan1', restrictions: [] }
+    try {
+      mockApi(listing({ mode: 'fixed', price: 1000, viewer_can_trade: false }), [], [])
+      const { container, findByRole } = render(<BazaarPostBody postId="p1" />)
+      const note = await findByRole('status')
+      expect(note.textContent).toContain('buying, bidding and offers are for members')
+      expect(container.textContent).toContain('Vinyl')
+      expect(container.textContent).not.toContain('Buy for')
+      expect(container.querySelector('form.sh-bazaar-bid-form')).toBeNull()
+    } finally {
+      ;(currentUser as { value: unknown }).value = saved
+    }
+  })
+})

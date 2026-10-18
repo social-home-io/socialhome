@@ -1023,7 +1023,8 @@ export default function SpaceFeedPage() {
                             filter={i => !!itemPreview(i).bazaar} />
       )}
       {activeTab.value === 'bazaar' && (
-        <SpaceBazaarTab spaceId={spaceId} canSell={!adminOnly('posts')} />
+        <SpaceBazaarTab spaceId={spaceId} canSell={!adminOnly('posts')}
+                        follower={isFollower(viewerRole.value)} />
       )}
 
       {activeTab.value === 'map' && visibleTabs.includes('map') && (

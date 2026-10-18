@@ -75,3 +75,16 @@ describe('SpaceBazaarTab — ADMIN_ONLY posts (§4.3)', () => {
     expect(getByText('Only admins can post here.')).toBeTruthy()
   })
 })
+
+describe('SpaceBazaarTab — a follower', () => {
+  it('gets no New listing and no admin-only note — they look, they do not sell', async () => {
+    apiGet.mockResolvedValue([])
+    const { SpaceBazaarTab } = await import('./SpaceBazaarTab')
+    const { queryAllByText, queryByText } = render(
+      <SpaceBazaarTab spaceId="sp-1" follower />,
+    )
+    await tick()
+    expect(queryAllByText('+ New listing')).toHaveLength(0)
+    expect(queryByText('Only admins can post here.')).toBeNull()
+  })
+})

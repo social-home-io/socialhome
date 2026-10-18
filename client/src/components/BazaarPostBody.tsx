@@ -151,6 +151,9 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
   }
 
   const isSeller = me === listing.seller_user_id
+  // A follower looks and saves; buying, bidding and offers are for
+  // members (the server refuses them with SUBSCRIBER_READ_ONLY too).
+  const canTrade = listing.viewer_can_trade !== false
   const activeBids = bids.filter(b => !b.withdrawn && !b.rejected && !b.accepted)
   const pendingOffers = offers.filter(o => o.status === 'pending')
   const highestBid = activeBids.reduce<BazaarBid | null>(
@@ -373,7 +376,12 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
       {!closed && me && !isSeller && isRestricted('bazaar') && (
         <ProtectedNotice capability="bazaar" />
       )}
-      {!closed && me && !isSeller && !isRestricted('bazaar') && (
+      {!closed && me && !isSeller && !isRestricted('bazaar') && !canTrade && (
+        <p class="sh-muted sh-bazaar-follower-note" role="status">
+          {t('bazaar.card.follower_read_only')}
+        </p>
+      )}
+      {!closed && me && !isSeller && !isRestricted('bazaar') && canTrade && (
         listing.mode === 'fixed' ? (
           <Button loading={busy}
                   onClick={() => void placeBid(listing.price ?? 0)}>
