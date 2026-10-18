@@ -25,6 +25,9 @@ carry no slots.
 :func:`require_seat` is the read gate (any seat, followers included,
 403 :data:`NOT_A_SPACE_MEMBER` otherwise) as a free function, for services
 that hold the space repo under another slot name (themes, approvals).
+:func:`require_member_seat` is its narrower sibling for the reads that are
+about the space's *people* (proposals, map pins, zones): a follower is an
+outsider there and gets the same 403.
 
 Compare roles against the :class:`SpaceRole` enum (never bare strings) —
 the caller passes the allowed set; this mixin only does the membership
@@ -35,7 +38,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..domain.space import SpacePermissionError
+from ..domain.space import WRITER_ROLES, SpacePermissionError
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -114,5 +117,22 @@ async def require_seat(
     403 as a space the caller isn't in — no existence oracle."""
     member = await space_repo.get_member(space_id, user_id)
     if member is None:
+        raise SpacePermissionError(NOT_A_SPACE_MEMBER)
+    return member
+
+
+async def require_member_seat(
+    space_repo: AbstractSpaceRepo, space_id: str, user_id: str
+) -> SpaceMember:
+    """:func:`require_seat` minus followers: the caller's seat when it is
+    a member's (owner / admin / moderator / member), else the same 403.
+
+    For the reads about the space's people rather than its posts —
+    governance (proposals) and whereabouts (map pins, zones). A follower
+    reads the posts but is an outsider to the people (owner decision 13:
+    the chat refuses them, the roster never syncs to a follower-only
+    household), so they get the outsider's answer, not a distinct one."""
+    member = await require_seat(space_repo, space_id, user_id)
+    if member.role not in WRITER_ROLES:
         raise SpacePermissionError(NOT_A_SPACE_MEMBER)
     return member

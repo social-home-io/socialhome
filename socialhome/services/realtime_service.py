@@ -140,6 +140,7 @@ from ..domain.events import (
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
+    WRITER_ROLES,
     SpaceModerationItem,
 )
 from ..domain.timetable import to_wire_dict as timetable_to_wire_dict
@@ -916,6 +917,7 @@ class RealtimeService:
                 "proposal_id": event.proposal_id,
                 "proposal": event.view,
             },
+            members_only=True,
         )
 
     async def _on_remote_space_dissolved(self, event: RemoteSpaceDissolved) -> None:
@@ -962,6 +964,7 @@ class RealtimeService:
                     },
                 },
             },
+            members_only=True,
         )
 
     async def _on_space_zone_deleted(self, event: SpaceZoneDeleted) -> None:
@@ -976,6 +979,7 @@ class RealtimeService:
                     "zone": None,
                 },
             },
+            members_only=True,
         )
 
     # ─── Space membership (§23.52) ───────────────────────────────────────
@@ -1860,10 +1864,22 @@ class RealtimeService:
         payload: dict,
         *,
         withheld: frozenset[str] = frozenset(),
+        members_only: bool = False,
     ) -> int:
+        """Fan ``payload`` out to the space's local seats. ``members_only``
+        leaves its followers out — for frames about the space's people
+        (governance, whereabouts) that a follower may not read either
+        (owner decision 13)."""
         if self._media_signer is not None:
             sign_media_urls_in(payload, self._media_signer, extra_fields=("url",))
-        ids = await self._space_repo.list_local_member_user_ids(space_id)
+        if members_only:
+            ids = [
+                m.user_id
+                for m in await self._space_repo.list_members(space_id)
+                if m.role in WRITER_ROLES
+            ]
+        else:
+            ids = await self._space_repo.list_local_member_user_ids(space_id)
         return await self._ws.broadcast_to_users(
             [uid for uid in ids if uid not in withheld], payload
         )

@@ -243,6 +243,37 @@ async def test_publishes_gps_only_local_frame(env):
     assert "state" not in data
 
 
+async def test_local_frame_skips_followers(env):
+    """A follower may not read the map (owner decision 13), so its live
+    pins never reach them either."""
+    sp = await env.make_space("sp_follow")
+    for uid, role, share in (
+        (env.alice_uid, "member", True),
+        (env.bob_uid, "subscriber", False),
+    ):
+        await env.space_repo.save_member(
+            SpaceMember(
+                space_id=sp.id,
+                user_id=uid,
+                role=role,
+                joined_at="2026-04-27T00:00:00+00:00",
+                location_share_enabled=share,
+            ),
+        )
+    await env.bus.publish(
+        PresenceUpdated(
+            username="alice",
+            state="away",
+            latitude=47.3769,
+            longitude=8.5417,
+            gps_accuracy_m=12.0,
+            updated_at="2026-04-27T12:00:00+00:00",
+        ),
+    )
+    [(user_ids, _frame)] = env.ws.calls
+    assert list(user_ids) == [env.alice_uid]
+
+
 async def test_no_zone_name_in_federation_payload(env):
     sp = await env.make_space("sp_office")
     await env.space_repo.save_member(

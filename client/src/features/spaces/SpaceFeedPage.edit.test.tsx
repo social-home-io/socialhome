@@ -67,12 +67,12 @@ const SOON = (() => {
 
 function wire(role: string, opts: { archived?: boolean; features?: Record<string, unknown> } = {}) {
   apiGet.mockImplementation(async (url: string) => {
-    if (url === '/api/spaces/s2') return { id: 's2', name: 'Other', features: { calendar: true } }
+    if (url === '/api/spaces/s2') return { id: 's2', name: 'Other', features: { calendar: true }, my_role: role }
     if (url === '/api/spaces/s2/members') return [{ user_id: 'u1', role }]
     if (url === '/api/spaces/s1') {
       return {
         id: 's1', name: 'Trip', archived: !!opts.archived,
-        features: { calendar: true, ...opts.features },
+        features: { calendar: true, ...opts.features }, my_role: role,
       }
     }
     if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role }]
@@ -140,11 +140,11 @@ describe('space post edit', () => {
     expect(r.getByTestId('post-mine').textContent).toBe('locked')
   }, 20000)
 
-  it('no Edit until the member list says who the viewer is', async () => {
+  it('no Edit until the space detail says who the viewer is', async () => {
     wire('member')
     const base = apiGet.getMockImplementation()!
     apiGet.mockImplementation((url: string) =>
-      url === '/api/spaces/s1/members' ? new Promise(() => {}) : base(url))
+      url === '/api/spaces/s1' ? new Promise(() => {}) : base(url))
     const { tl, r } = await renderPage()
     await tl.waitFor(() => r.getByTestId('post-mine'))
     await new Promise(res => setTimeout(res, 20))

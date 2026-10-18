@@ -105,7 +105,7 @@ function wire(opts: {
 } = {}) {
   const { role = 'member', features = {}, summary = SUMMARY, archived = false } = opts
   apiGet.mockImplementation(async (url: string) => {
-    if (url === '/api/spaces/s1') return { id: 's1', name: 'Choir', features, archived }
+    if (url === '/api/spaces/s1') return { id: 's1', name: 'Choir', features, archived, my_role: role ?? undefined }
     if (url === '/api/spaces/s1/members') return role ? [{ user_id: 'u1', role }] : []
     if (url === '/api/spaces/s1/chat') {
       if (summary === 'fail') throw new Error('offline')

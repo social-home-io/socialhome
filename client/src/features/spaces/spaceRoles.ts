@@ -22,6 +22,12 @@ export function parseSpaceRole(raw: unknown): SpaceRole | undefined {
     : undefined
 }
 
+/** A read-only follower (``subscriber``): reads the posts, but is an
+ *  outsider to the people — no presence, map, zones or proposals. */
+export function isFollower(role: SpaceRole | undefined): boolean {
+  return role === 'subscriber'
+}
+
 /** Settings authority: owner / admin. */
 export function hasSettingsAuthority(role: SpaceRole | undefined): boolean {
   return role === 'owner' || role === 'admin'

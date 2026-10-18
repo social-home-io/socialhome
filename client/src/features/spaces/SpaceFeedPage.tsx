@@ -46,6 +46,7 @@ import {
   canContribute,
   canModerate as roleCanModerate,
   hasSettingsAuthority,
+  isFollower,
   isWriterRole,
   parseSpaceRole,
   type SpaceRole,
@@ -115,6 +116,10 @@ interface SpaceDetail {
   archived_reason?: 'dissolved' | 'removed' | null
   /** Another household has a member here. */
   has_remote_households?: boolean
+  /** The viewer's own role here. A follower is not in ``/members`` (it
+   *  lists the members only), so this — not the roster — says who the
+   *  viewer is. */
+  my_role?: string
 }
 
 /** Reason-aware copy for the read-only archive banner + empty-state.
@@ -165,35 +170,30 @@ const spaceCalView = signal<CalendarViewMode>('month')
 const selectedSpaceEventId = signal<string | null>(null)
 const viewerRole = signal<SpaceRole | undefined>(undefined)
 const spaceDetail = signal<SpaceDetail | null>(null)
-/** The member list answered (or failed) — until then ``viewerRole`` is
+/** The space detail answered (or failed) — until then ``viewerRole`` is
  *  unknown, not "no role". */
 const roleKnown = signal(false)
 const memberCount = signal<number | null>(null)
 
 /** The space header + the viewer's role: ``GET /api/spaces/{id}`` (name,
- *  emoji, cover, features → tabs, archive state) and the member list
- *  (role → admin-only UI, member count). Runs on open and again on every
+ *  emoji, cover, features → tabs, archive state, ``my_role`` → admin-only
+ *  and follower UI) and the member list (member count — a follower's
+ *  lists the members only). Runs on open and again on every
  *  ``space.config.changed`` frame — a rename, feature toggle or admin
  *  grant elsewhere shows up without a reload. A failed refetch keeps
  *  what's on screen. */
 async function loadSpaceHeader(spaceId: string) {
-  const me = currentUser.value?.user_id
   await Promise.all([
     api.get(`/api/spaces/${spaceId}`).then((d) => {
-      spaceDetail.value = d as SpaceDetail
-      setSpaceHereAllowed(spaceId, (d as SpaceDetail).allow_here_mention === true)
-    }).catch(() => { /* non-fatal */ }),
-    // Derive viewer's role from the member list so admin-only UI renders.
-    me
-      ? api.get(`/api/spaces/${spaceId}/members`)
-        .then((members: { user_id: string; role: string }[]) => {
-          memberCount.value = members.length
-          const mine = members.find(m => m.user_id === me)
-          viewerRole.value = mine ? parseSpaceRole(mine.role) : undefined
-          roleKnown.value = true
-        })
-        .catch(() => { roleKnown.value = true /* keep the last role */ })
-      : Promise.resolve().then(() => { roleKnown.value = true }),
+      const detail = d as SpaceDetail
+      spaceDetail.value = detail
+      setSpaceHereAllowed(spaceId, detail.allow_here_mention === true)
+      viewerRole.value = parseSpaceRole(detail.my_role)
+      roleKnown.value = true
+    }).catch(() => { roleKnown.value = true /* keep the last role */ }),
+    api.get(`/api/spaces/${spaceId}/members`)
+      .then((members: unknown[]) => { memberCount.value = members.length })
+      .catch(() => { /* keep the last count */ }),
   ])
 }
 
@@ -410,8 +410,10 @@ export default function SpaceFeedPage() {
   const features = spaceDetail.value?.features
   useEffect(() => {
     if (!spaceDetail.value || activeTab.value === 'moderation') return
-    if (!visibleSpaceTabs(features, true).includes(activeTab.value)) activeTab.value = 'feed'
-  }, [features])
+    if (!visibleSpaceTabs(features, true, isFollower(viewerRole.value)).includes(activeTab.value)) {
+      activeTab.value = 'feed'
+    }
+  }, [features, viewerRole.value])
 
   // The Feed tab's Feed | Chat switch: Chat for a member (never a
   // follower) while the space keeps chat on and the server agrees. A
@@ -523,7 +525,7 @@ export default function SpaceFeedPage() {
 
   // Per-space feature toggles hide their tab when off (``spaceTabs``).
   const f = s?.features
-  const visibleTabs: readonly SpaceTab[] = visibleSpaceTabs(f, canModerateQueue)
+  const visibleTabs: readonly SpaceTab[] = visibleSpaceTabs(f, canModerateQueue, isFollower(viewerRole.value))
   // Space timetables: owners / admins edit, everyone else reads. The
   // server's role check is the authority (a remote-hosted space's
   // admin edits too — the host verifies it); an archive is read-only.
@@ -586,7 +588,9 @@ export default function SpaceFeedPage() {
           </>
         }
       />
-      {s && (
+      {/* Proposals are the members' business — a follower never sees them
+       *  (``GET …/proposals`` refuses them). */}
+      {s && isWriterRole(viewerRole.value) && (
         <SpaceProposalsBanner
           spaceId={spaceId}
           canVote={hasSettingsAuthority(viewerRole.value)}
@@ -1022,7 +1026,7 @@ export default function SpaceFeedPage() {
         <SpaceBazaarTab spaceId={spaceId} canSell={!adminOnly('posts')} />
       )}
 
-      {activeTab.value === 'map' && s?.features?.location && (
+      {activeTab.value === 'map' && visibleTabs.includes('map') && (
         // Passing ``currentUserId`` lights up the "Share my location"
         // chip + button at the top of the map. Without it the share
         // surface stays hidden (the card otherwise renders the map

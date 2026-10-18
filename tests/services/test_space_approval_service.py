@@ -100,12 +100,12 @@ async def _user(stack, name):
 
 async def _open(stack, space_id: str) -> list[dict]:
     """The open proposals as a seated reader sees them. Reading needs a
-    seat (any role): a follower seat keeps the admin quorum untouched."""
+    member's seat: a plain member seat keeps the admin quorum untouched."""
     await stack.space_repo.save_member(
         SpaceMember(
             space_id=space_id,
             user_id="uid-reader",
-            role=SpaceRole.SUBSCRIBER,
+            role=SpaceRole.MEMBER,
             joined_at="2026-10-18T00:00:00+00:00",
         )
     )
@@ -1217,3 +1217,20 @@ async def test_list_for_space_refuses_a_caller_without_a_seat(stack):
     for sid in (space.id, "sp-nope"):
         with pytest.raises(SpacePermissionError, match="Not a space member"):
             await stack.approvals.list_for_space(sid, viewer_user_id="uid-outsider")
+
+
+async def test_list_for_space_refuses_a_follower(stack):
+    """A follower is an outsider to the space's governance (owner
+    decision 13): the same 403 as no seat at all."""
+    await _user(stack, "alice")
+    space = await stack.setup.create_space(owner_username="alice", name="S")
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id,
+            user_id="uid-fol",
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-10-18T00:00:00+00:00",
+        )
+    )
+    with pytest.raises(SpacePermissionError, match="Not a space member"):
+        await stack.approvals.list_for_space(space.id, viewer_user_id="uid-fol")

@@ -56,7 +56,7 @@ vi.mock('@/components/Composer', () => ({
 
 function wire(mine: unknown[] = []) {
   apiGet.mockImplementation(async (url: string) => {
-    if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features: { posts_access: 'moderated' } }
+    if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features: { posts_access: 'moderated' }, my_role: 'member' }
     if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role: 'member' }]
     if (url === '/api/spaces/s1/links') return { links: [] }
     if (url === '/api/spaces/s1/moderation/mine') return mine

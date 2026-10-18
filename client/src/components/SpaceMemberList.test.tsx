@@ -67,6 +67,21 @@ describe('SpaceMemberList', () => {
     expect(r.container.textContent).not.toContain('Invite by code')
   })
 
+  it('a follower sees who, never when: no presence dot, no join date', async () => {
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    apiGet.mockImplementationOnce(async () => [
+      // A follower's roster carries no presence / joined_at at all.
+      { user_id: 'u-o', display_name: 'Olivia', role: 'owner' },
+    ])
+    const r = render(<SpaceMemberList spaceId="sp-follow" viewerRole="subscriber" />)
+    await waitFor(() => expect(r.container.textContent).toContain('Olivia'))
+    // The household-wide ``user.online`` frame must not paint a dot.
+    emit('user.online', { user_id: 'u-o' })
+    await new Promise(res => setTimeout(res, 10))
+    expect(r.container.querySelector('.sh-avatar-status-dot')).toBeNull()
+    expect(r.container.querySelector('.sh-member-joined')).toBeNull()
+  })
+
   it("refetches when the host's role update arrives, not for other config", async () => {
     // v_47: a stub's forwarded role change lands as the host's role
     // broadcast, which the backend re-emits as space.config.changed.

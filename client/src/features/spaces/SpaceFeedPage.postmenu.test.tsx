@@ -41,7 +41,7 @@ vi.mock('@/components/PostCard', () => ({
 
 function wire(role: string, host = 'iid-us') {
   apiGet.mockImplementation(async (url: string) => {
-    if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features: {}, owner_instance_id: host }
+    if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features: {}, owner_instance_id: host, my_role: role }
     if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role }]
     if (url === '/api/spaces/s1/feed') {
       return [

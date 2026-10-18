@@ -41,7 +41,7 @@ from ..domain.events import (
     SpaceMemberLocationOptedIn,
 )
 from ..domain.federation import FederationEventType
-from ..domain.space import Space, SpaceZone
+from ..domain.space import WRITER_ROLES, Space, SpaceZone
 from ..domain.zone_geo import match_zone
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
@@ -335,8 +335,16 @@ class SpaceLocationOutbound:
     # ── Fan-out helpers ────────────────────────────────────────────────
 
     async def _broadcast_local(self, space_id: str, payload: dict) -> None:
+        """The pin to this household's members of the space — never its
+        followers, who may not read the map (owner decision 13)."""
         try:
-            user_ids = await self._spaces.list_local_member_user_ids(space_id)
+            local = await self._spaces.list_local_member_user_ids(space_id)
+            members = {
+                m.user_id
+                for m in await self._spaces.list_members(space_id)
+                if m.role in WRITER_ROLES
+            }
+            user_ids = [uid for uid in local if uid in members]
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(
                 "space-location-outbound: list local members failed: %s",

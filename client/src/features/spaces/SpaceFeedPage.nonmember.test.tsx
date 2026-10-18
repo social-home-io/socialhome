@@ -41,7 +41,7 @@ async function open(feedError: Error | null) {
       if (feedError) throw feedError
       return []
     }
-    if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features: {} }
+    if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features: {}, my_role: 'member' }
     if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role: 'member' }]
     if (url === '/api/spaces/s1/links') return { links: [] }
     return []
