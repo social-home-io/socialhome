@@ -230,6 +230,17 @@ export function renderMarkdown(src: string): string {
   return out.innerHTML
 }
 
+/** Slug for a heading: lower-case ASCII letters / digits, words joined
+ *  by ``-``. Markdown emphasis (``*``, ``_``…) drops out, so the slug of
+ *  the source line matches the slug of the rendered heading's text. */
+export function headingSlug(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+}
+
 /** Auto-generate a flat table of contents from ``##`` / ``###`` headings.
  * Returns `[{depth, text, slug}]` for the viewer's TOC rail. */
 export function extractHeadings(
@@ -242,12 +253,7 @@ export function extractHeadings(
     if (!m) continue
     const depth = m[1].length
     const text = m[2].trim()
-    const slug = text
-      .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, '')
-      .trim()
-      .replace(/\s+/g, '-')
-    out.push({ depth, text, slug })
+    out.push({ depth, text, slug: headingSlug(text) })
   }
   return out
 }

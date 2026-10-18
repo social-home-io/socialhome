@@ -19,6 +19,7 @@ import { LoginPage } from '@/features/auth/LoginPage'
 import { routes } from './router'
 import { Button } from '@/components/Button'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { SkipLink } from '@/components/SkipLink'
 import { NotificationBell, startNotificationPolling, stopNotificationPolling } from '@/components/NotificationBell'
 import { MeButton } from '@/components/MeButton'
 import { StatusEditorHost } from '@/components/StatusEditor'
@@ -261,7 +262,7 @@ export function App() {
   return (
     <ErrorBoundary>
       <LocationProvider>
-        <a href="#main" class="sh-skip-link">{t('a11y.skip_to_main')}</a>
+        <SkipLink />
         <OfflineIndicator />
         <InstallPrompt />
         <div class="sh-layout">

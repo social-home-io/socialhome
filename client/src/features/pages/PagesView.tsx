@@ -63,7 +63,7 @@ import { showToast } from '@/components/Toast'
 import { confirmDialog } from '@/components/confirm'
 import { pendingMine } from '@/store/moderationMine'
 import { contentWrite } from '@/utils/contentWrite'
-import { extractHeadings } from '@/utils/markdown'
+import { extractHeadings, headingSlug } from '@/utils/markdown'
 import { normaliseTimestamp, relativeDocsTime } from '@/utils/relativeTime'
 import type { EditLock, Page } from '@/types'
 import type { PageScope } from './scope'
@@ -114,6 +114,23 @@ function isStale(err: unknown): boolean {
   const e = err as { status?: unknown; message?: unknown } | null
   return e?.status === 409
     || String(e?.message ?? '').toLowerCase().includes('stale')
+}
+
+/** A contents entry jumps to its heading in place. A bare ``#slug`` href
+ *  resolves against ``<base href>`` (``/``, or the HA ingress prefix), so
+ *  following it would leave the page for the app root — and the rendered
+ *  headings carry no ids anyway. Find the ``nth`` rendered heading whose
+ *  text has the same slug (repeated or non-Latin headings share a slug)
+ *  and move focus to it (``focus()`` scrolls it into view). */
+function jumpToHeading(ev: MouseEvent, slug: string, nth: number): void {
+  ev.preventDefault()
+  const layout = (ev.currentTarget as HTMLElement).closest('.sh-page-viewer-layout')
+  const heading = Array.from(
+    layout?.querySelectorAll<HTMLElement>('.sh-markdown h2, .sh-markdown h3') ?? [],
+  ).filter(el => headingSlug(el.textContent ?? '') === slug)[nth]
+  if (!heading) return
+  heading.tabIndex = -1
+  heading.focus()
 }
 
 export function PagesView({ scope, header }: {
@@ -947,11 +964,16 @@ export function PagesView({ scope, header }: {
               <nav class="sh-page-toc" aria-label={t('pages.toc')}>
                 <h4>{t('pages.toc')}</h4>
                 <ul>
-                  {headings.map(h => (
-                    <li key={h.slug} class={`sh-toc-depth-${h.depth}`}>
-                      <a href={`#${h.slug}`}>{h.text}</a>
-                    </li>
-                  ))}
+                  {headings.map((h, i) => {
+                    const nth = headings.slice(0, i).filter(o => o.slug === h.slug).length
+                    return (
+                      <li key={`${h.slug}-${nth}`} class={`sh-toc-depth-${h.depth}`}>
+                        <a href={`#${h.slug}`} onClick={ev => jumpToHeading(ev, h.slug, nth)}>
+                          {h.text}
+                        </a>
+                      </li>
+                    )
+                  })}
                 </ul>
               </nav>
             )}
