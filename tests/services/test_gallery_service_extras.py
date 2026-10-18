@@ -48,7 +48,7 @@ async def env(tmp_dir):
         )
     await db.enqueue(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
-        " identity_public_key) VALUES('sp-1', 'X', ?, 'alice', ?)",
+        " identity_public_key, feature_gallery) VALUES('sp-1', 'X', ?, 'alice', ?, 1)",
         (iid, "ab" * 32),
     )
     await db.enqueue(
