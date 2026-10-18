@@ -30,6 +30,7 @@ from ..serialization.ics import (
     serialize_event,
     serialize_feed,
 )
+from ..services.space_member_guard import seat_of
 from .base import BaseView
 from .calendar import event_access
 
@@ -99,8 +100,10 @@ class SpaceCalendarFeedView(BaseView):
             return error_response(401, "UNAUTHORIZED", "token / space mismatch")
         # Verify the user is still a member — leaving the space should
         # invalidate the feed regardless of token.
+        # ``seat_of``: a banned user's leftover seat counts as none. This
+        # public (token-authorized) route sits outside the space seat gate.
         space_repo = self.svc(K.space_repo_key)
-        if await space_repo.get_member(space_id, token_user) is None:
+        if await seat_of(space_repo, space_id, token_user) is None:
             return error_response(401, "UNAUTHORIZED", "no longer a member")
         # The space's calendar tab switched off → no feed either.
         await self.require_space_feature(space_id, "calendar")

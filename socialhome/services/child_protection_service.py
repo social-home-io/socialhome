@@ -52,6 +52,7 @@ from ..infrastructure.event_bus import EventBus
 from ..repositories.cp_repo import AbstractCpRepo
 from ..repositories.user_repo import AbstractUserRepo
 from ..utils.timezones import DEFAULT_TZ, local_date
+from .space_member_guard import NOT_A_SPACE_MEMBER, require_seat
 
 if TYPE_CHECKING:
     from .preferences_service import PreferencesService
@@ -751,6 +752,19 @@ class ChildProtectionService:
         )
 
     async def get_space_age_gate(self, space_id: str) -> dict:
+        return await self._repo.get_space_age_gate(space_id)
+
+    async def read_space_age_gate(self, space_id: str, *, actor_user_id: str) -> dict:
+        """``GET /api/cp/spaces/{id}/age-gate``: a household admin (who
+        sets it and lists every space anyway) or someone with a seat in the
+        space reads its ``min_age``. Anyone else gets the space gate's 403
+        ``Not a space member.`` — for a real id and an unknown one alike, so
+        the route is no oracle for which spaces exist or how they are
+        gated."""
+        if not await self._repo.is_admin(actor_user_id):
+            if self._space_repo is None:
+                raise SpacePermissionError(NOT_A_SPACE_MEMBER)
+            await require_seat(self._space_repo, space_id, actor_user_id)
         return await self._repo.get_space_age_gate(space_id)
 
     async def list_protection_status(self, *, actor_user_id: str) -> list[dict]:

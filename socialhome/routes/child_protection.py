@@ -248,9 +248,10 @@ class CPAgeGateView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.require_user()
-        gate = await self.svc(K.child_protection_service_key).get_space_age_gate(
+        ctx = self.user
+        gate = await self.svc(K.child_protection_service_key).read_space_age_gate(
             self.match("space_id"),
+            actor_user_id=ctx.user_id,
         )
         return self._json(gate)
 

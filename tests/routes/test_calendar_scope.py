@@ -543,3 +543,20 @@ async def test_event_read_carries_can_rsvp_hint(client):
     await client._db.enqueue("UPDATE spaces SET archived=1 WHERE id='sp-b'")
     r = await client.get(f"/api/calendars/events/{eid}", headers=admin)
     assert (await r.json())["can_rsvp"] is False
+
+
+async def test_ics_feed_of_a_banned_users_leftover_seat_is_refused(client):
+    """The token-authorized feed sits outside the space seat gate: a seat
+    row that survived a ban (a half-applied ban, a federation race) must
+    not keep serving the calendar."""
+    admin = _auth(client._tok)
+    await _seed_space(client, "sp-b", client._uid, "owner")
+    r = await client.post("/api/spaces/sp-b/calendar/feed-token", headers=admin)
+    token = (await r.json())["token"]
+    feed = f"/api/spaces/sp-b/calendar/export.ics?token={token}"
+    assert (await client.get(feed)).status == 200
+    await client._db.enqueue(
+        "INSERT INTO space_bans(space_id, user_id, banned_by) VALUES('sp-b', ?, 'x')",
+        (client._uid,),
+    )
+    assert (await client.get(feed)).status == 401
