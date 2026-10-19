@@ -42,6 +42,7 @@ from ..crypto import (
     verify_ed25519,
 )
 from ..domain.space import normalize_category, normalize_join_mode
+from ..domain.space_place import parse_place_pin_wire
 from ..gfs_proof import sign_possession_proof
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
 from .envelope_relay import ENVELOPE_INSTANCE_ID_RE
@@ -2396,6 +2397,13 @@ def _space_to_wire(s: GlobalSpace) -> dict:
         # peer sync would silently un-withdraw a space the owner delisted
         # (the same reason ``status='banned'`` has its ban-wins rule).
         "withdrawn": s.withdrawn,
+        # The owner's place pin travels too, or a peer sync would drop it
+        # until the owner's next publish.
+        "place": (
+            {"lat": s.place_lat, "lon": s.place_lon}
+            if s.place_lat is not None and s.place_lon is not None
+            else None
+        ),
     }
 
 
@@ -2424,7 +2432,16 @@ def _wire_to_space(d: dict) -> GlobalSpace:
         ),
         authority_rotation_seq=_wire_rotation_seq(d.get("authority_rotation_seq")),
         withdrawn=bool(d.get("withdrawn") or False),
+        # Re-validated like any wire point; malformed ⇒ no pin.
+        place_lat=_wire_place(d)[0],
+        place_lon=_wire_place(d)[1],
     )
+
+
+def _wire_place(d: dict) -> tuple[float | None, float | None]:
+    """A gossiped place pin, re-validated; malformed or absent ⇒ none."""
+    pin = parse_place_pin_wire(d.get("place"))
+    return (pin.lat, pin.lon) if pin is not None else (None, None)
 
 
 def _wire_rotation_seq(raw: object) -> int:

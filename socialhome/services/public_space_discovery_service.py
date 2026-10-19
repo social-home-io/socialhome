@@ -23,6 +23,7 @@ from ..domain.space import (
     normalize_join_mode,
     normalize_min_age,
 )
+from ..domain.space_place import parse_place_pin_wire
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.public_space_repo import (
     AbstractPublicSpaceRepo,
@@ -271,6 +272,10 @@ class PublicSpaceDiscoveryService:
         for item in items:
             if not isinstance(item, dict):
                 continue
+            # A global space's optional place pin (the owner's choice, for
+            # sorting by distance in the viewer's browser), re-validated to
+            # 4 dp; a malformed one lists the space unpinned.
+            pin = parse_place_pin_wire(item.get("place"))
             try:
                 out.append(
                     PublicSpaceListing(
@@ -280,13 +285,12 @@ class PublicSpaceDiscoveryService:
                         ),
                         name=str(item.get("name", "")),
                         description=item.get("description"),
-                        # The GFS directory (``GlobalSpace``) is geo-less and
-                        # carries no emoji — geo filtering applies only to
-                        # peer-directory listings, so leave these unset
-                        # rather than invent values.
+                        # The GFS directory carries no emoji and no area; a
+                        # radius belongs to a public local community, which
+                        # is never on a GFS.
                         emoji=None,
-                        lat=None,
-                        lon=None,
+                        lat=pin.lat if pin is not None else None,
+                        lon=pin.lon if pin is not None else None,
                         radius_km=None,
                         member_count=int(
                             item.get("subscriber_count")

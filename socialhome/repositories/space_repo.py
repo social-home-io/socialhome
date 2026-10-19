@@ -53,6 +53,7 @@ from ..domain.space import (
     SpaceType,
     normalize_retention_exempt_types,
 )
+from ..domain.space_place import PlacePin
 from ..infrastructure.hlc import HLC
 from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
 
@@ -161,6 +162,7 @@ class AbstractSpaceRepo(Protocol):
     ) -> None: ...
     async def set_tz(self, space_id: str, tz: str) -> None: ...
     async def set_local_area(self, space_id: str, area: LocalArea | None) -> None: ...
+    async def set_place_pin(self, space_id: str, pin: PlacePin | None) -> None: ...
     async def set_gfs_servers(
         self, space_id: str, servers: SignedGfsServerList | None
     ) -> None: ...
@@ -780,6 +782,19 @@ class SqliteSpaceRepo:
                 area.lat if area is not None else None,
                 area.lon if area is not None else None,
                 area.radius_km if area is not None else None,
+                space_id,
+            ),
+        )
+
+    async def set_place_pin(self, space_id: str, pin: PlacePin | None) -> None:
+        """Set (or, with ``None``, clear) a GLOBAL space's place pin —
+        ``spaces.lat`` / ``lon``, with ``radius_km`` NULL (a radius is a
+        local community's area). The caller has validated it (4 dp)."""
+        await self._db.enqueue(
+            "UPDATE spaces SET lat=?, lon=?, radius_km=NULL WHERE id=?",
+            (
+                pin.lat if pin is not None else None,
+                pin.lon if pin is not None else None,
                 space_id,
             ),
         )

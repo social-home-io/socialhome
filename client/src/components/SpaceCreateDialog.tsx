@@ -20,6 +20,7 @@ import { currentUser } from '@/store/auth'
 import { ensureHouseholdHome, householdHome } from '@/store/householdHome'
 import type { LocalArea } from '@/types'
 import { areaLabel } from '@/utils/localArea'
+import { coordLabel } from '@/utils/coordLabel'
 import { loadSpaces } from '@/store/spaces'
 import { Modal } from './Modal'
 import { Button } from './Button'
@@ -37,7 +38,7 @@ import {
 } from './spaceModeOptions'
 import { showToast } from './Toast'
 import { LocalAreaMap } from './LocalAreaMap'
-import { LocalAreaPicker } from './LocalAreaPicker'
+import { LocalAreaPicker, PIN_DOT_KM } from './LocalAreaPicker'
 import { t } from '@/i18n/i18n'
 import { markSetupPending } from '@/features/spaces/spaceSetup'
 
@@ -51,6 +52,9 @@ const joinMode = signal('invite_only')
 // their home lies inside this area (centre 4 dp + radius).
 const localOn = signal(false)
 const localArea = signal<LocalArea | null>(null)
+// A global space's optional place pin (sorting only) — never the home.
+const placePin = signal<{ lat: number; lon: number } | null>(null)
+const pickingPin = signal(false)
 const pickingArea = signal(false)
 const submitting = signal(false)
 // Discovery metadata, sent only for public/global spaces (§23.50).
@@ -83,6 +87,8 @@ export function openSpaceCreate() {
   localOn.value = false
   localArea.value = null
   pickingArea.value = false
+  placePin.value = null
+  pickingPin.value = false
   void ensureHouseholdHome()
   // The Global tier is only offered when an active GFS connection exists.
   void api.get<(GfsChoice & { status: string })[]>('/api/gfs/connections')
@@ -133,6 +139,7 @@ export function SpaceCreateDialog() {
         ...(discoverable ? { category: category.value } : {}),
         ...(discoverable && minAge.value ? { min_age: minAge.value } : {}),
         ...(isGlobal() ? { gfs_ids: gfsSelected.value } : {}),
+        ...(isGlobal() && placePin.value ? { place: placePin.value } : {}),
         ...(isPublic() && localOn.value && localArea.value
           ? {
             lat: localArea.value.lat,
@@ -292,6 +299,36 @@ export function SpaceCreateDialog() {
             )}
           </fieldset>
         )}
+        {isGlobal() && !tierLocked && (
+          <fieldset class="sh-form-fieldset sh-space-create-local sh-space-create-place">
+            <legend>📍 {t('place_pin.create.legend')}</legend>
+            {placePin.value ? (
+              <div class="sh-space-create-local__area">
+                <LocalAreaMap area={{ ...placePin.value, radius_km: PIN_DOT_KM }} height={140}
+                              zoneName={t('place_pin.map_zone')} ariaLabel={t('place_pin.map_label')} />
+                <p class="sh-muted" role="status">
+                  {t('place_pin.settings.where', { place: coordLabel(placePin.value.lat, placePin.value.lon) })}
+                </p>
+                <div class="sh-row" style={{ gap: 'var(--sh-space-sm)' }}>
+                  <Button variant="secondary" onClick={() => { pickingPin.value = true }}>
+                    {t('place_pin.settings.change')}
+                  </Button>
+                  <Button variant="ghost" onClick={() => { placePin.value = null }}>
+                    {t('place_pin.settings.remove')}
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div class="sh-space-create-local__area">
+                <p class="sh-muted">{t('place_pin.create.hint')}</p>
+                <Button variant="secondary" onClick={() => { pickingPin.value = true }}>
+                  {t('place_pin.settings.make')}
+                </Button>
+              </div>
+            )}
+            <p class="sh-ss-hint">{t('place_pin.privacy')}</p>
+          </fieldset>
+        )}
         {isDiscoverable() && (
           <fieldset class="sh-form-fieldset sh-space-create-discovery">
             <legend>🧭 {t('space.create.discovery')}</legend>
@@ -347,6 +384,17 @@ export function SpaceCreateDialog() {
         onSubmit={(area) => {
           localArea.value = area
           pickingArea.value = false
+        }}
+      />
+      <LocalAreaPicker
+        mode="pin"
+        open={pickingPin.value}
+        initial={placePin.value ? { ...placePin.value, radius_km: PIN_DOT_KM } : null}
+        home={null}
+        onClose={() => { pickingPin.value = false }}
+        onSubmit={(p) => {
+          placePin.value = { lat: p.lat, lon: p.lon }
+          pickingPin.value = false
         }}
       />
     </Modal>

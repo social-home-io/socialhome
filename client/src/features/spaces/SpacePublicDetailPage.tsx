@@ -40,6 +40,7 @@ import {
 } from './discover'
 import { addBase } from '@/baseUrl'
 import { areaLabel, areaShortLabel, peerAreaLabel, type AreaVerdict } from '@/utils/localArea'
+import { distanceLabel, pinDistanceKm } from '@/utils/placePin'
 
 type AboutAction = 'open' | Exclude<DiscoverAction, null>
 
@@ -276,6 +277,10 @@ export default function SpacePublicDetailPage() {
   // household's centre never leaves it.
   const radius = entryRadiusKm(entry)
   const ownArea = isLocal ? entry.local_area ?? null : null
+  // A global space's place pin: "about 3 km away" from our home, worked
+  // out here. Sorting / a hint only — joining never checks it.
+  const pinKm = entry.scope === 'global' ? pinDistanceKm(entry, householdHome.value) : null
+  const joining = action === 'join' || action === 'request'
 
   return (
     <div class="sh-space-public">
@@ -297,6 +302,9 @@ export default function SpacePublicDetailPage() {
               { count: String(entry.member_count) })}
             {!isLocal && (
               <> · {t('space.public.hosted_by', { host: hostLabel(entry) })}</>
+            )}
+            {pinKm !== null && (
+              <span data-testid="place-distance"> · 📍 {distanceLabel(pinKm)}</span>
             )}
           </p>
         </div>
@@ -332,6 +340,9 @@ export default function SpacePublicDetailPage() {
             {primaryLabel}
           </Button>
         </div>
+      )}
+      {joining && entry.scope === 'global' && (
+        <p class="sh-muted sh-space-public__rules-note">{t('space.public.follow_rules')}</p>
       )}
       {!action && !entry.already_subscribed && !areaBlocks && (
         <p class="sh-muted sh-space-public__invite-note">{t('spaces.discover.invite_link')}</p>

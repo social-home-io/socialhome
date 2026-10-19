@@ -2,6 +2,10 @@
  * LocalAreaPicker — choose a local community's area: a centre and a
  * radius. Households join the space only while their home lies inside.
  *
+ * ``mode="pin"`` picks a GLOBAL space's place pin instead: a point only
+ * (no radius), and NO "Use our home" shortcut — a pin is shown to everyone
+ * who can find the space, so it is never the household's home by default.
+ *
  * The centre is tapped on the map, typed as latitude / longitude (the
  * keyboard way in — there is no place search, which would be a third-party
  * fetch), or "Use our home" takes the HOUSEHOLD's home location (never this device's position — the space is
@@ -33,17 +37,26 @@ export function parseCoord(raw: string, limit: number): number | null {
 
 const fmt4 = (v: number): string => v.toFixed(4)
 
+/** How big the dot is that marks a place pin on the map (km). */
+export const PIN_DOT_KM = 0.15
+
 export function LocalAreaPicker({
-  open, initial, home, onClose, onSubmit,
+  open, initial, home, onClose, onSubmit, mode = 'area',
 }: {
   open: boolean
   /** The current area (editing), or ``null`` for a new one. */
   initial: LocalArea | null
-  /** This household's home: the "Use our home" shortcut and a 🏠 pin. */
+  /** This household's home: the "Use our home" shortcut and a 🏠 pin
+   *  (area mode only). */
   home: Home | null | undefined
   onClose: () => void
+  /** In pin mode the radius is meaningless — read ``lat`` / ``lon``. */
   onSubmit: (area: LocalArea) => void
+  mode?: 'area' | 'pin'
 }) {
+  const pin = mode === 'pin'
+  // A pin never starts from — or offers — the household's home.
+  const ownHome = pin ? null : home
   const [centre, setCentre] = useState<Home | null>(null)
   const [radius, setRadius] = useState<number>(DEFAULT_RADIUS_KM)
   // The typed fields mirror the centre; a map tap or "Use our home"
@@ -76,7 +89,9 @@ export function LocalAreaPicker({
       : initial?.radius_km ?? DEFAULT_RADIUS_KM)
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps -- read on open only
 
-  const area: LocalArea | null = centre ? { ...centre, radius_km: radius } : null
+  const area: LocalArea | null = centre
+    ? { ...centre, radius_km: pin ? PIN_DOT_KM : radius }
+    : null
   const radiusOptions = (RADIUS_PRESETS_KM.includes(radius)
     ? RADIUS_PRESETS_KM : [...RADIUS_PRESETS_KM, radius].sort((a, b) => a - b))
     .map((km) => ({ value: String(km), label: radiusLabel(km) }))
@@ -87,29 +102,32 @@ export function LocalAreaPicker({
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={t('local_area.picker.title')}>
+    <Modal open={open} onClose={onClose}
+           title={pin ? t('place_pin.picker.title') : t('local_area.picker.title')}>
       <form class="sh-form sh-local-area-picker" onSubmit={submit}>
-        <p class="sh-muted">{t('local_area.picker.intro')}</p>
+        <p class="sh-muted">{pin ? t('place_pin.picker.intro') : t('local_area.picker.intro')}</p>
         <LocalAreaMap
           area={area}
-          home={home}
+          home={ownHome}
           height={240}
           onPick={(lat, lon) => place({ lat: round4(lat), lon: round4(lon) })}
-          ariaLabel={t('local_area.picker.map_label')}
+          ariaLabel={pin ? t('place_pin.picker.map_label') : t('local_area.picker.map_label')}
+          zoneName={pin ? t('place_pin.map_zone') : undefined}
         />
         <p class="sh-muted sh-local-area-picker__where" role="status">
           {centre
-            ? t('local_area.picker.centre', { place: coordLabel(centre.lat, centre.lon) })
-            : t('local_area.picker.tap_hint')}
+            ? t(pin ? 'place_pin.picker.at' : 'local_area.picker.centre',
+              { place: coordLabel(centre.lat, centre.lon) })
+            : t(pin ? 'place_pin.picker.tap_hint' : 'local_area.picker.tap_hint')}
         </p>
-        {home && (
+        {ownHome && (
           <button type="button" class="sh-link sh-local-area-picker__home"
-                  onClick={() => place({ lat: round4(home.lat), lon: round4(home.lon) })}>
+                  onClick={() => place({ lat: round4(ownHome.lat), lon: round4(ownHome.lon) })}>
             🏠 {t('local_area.picker.use_home')}
           </button>
         )}
         <fieldset class="sh-local-area-picker__coords">
-          <legend>{t('local_area.picker.coords_legend')}</legend>
+          <legend>{pin ? t('place_pin.picker.coords_legend') : t('local_area.picker.coords_legend')}</legend>
           <label>
             {t('local_area.picker.lat')}
             <input type="text" inputMode="decimal" autoComplete="off" spellcheck={false}
@@ -129,7 +147,7 @@ export function LocalAreaPicker({
             {lonBad && <span id="local-area-lon-err" class="sh-form-error">{t('local_area.picker.lon_invalid')}</span>}
           </label>
         </fieldset>
-        <div class="sh-local-area-picker__radius">
+        {!pin && <div class="sh-local-area-picker__radius">
           <span id="local-area-radius-label" class="sh-local-area-picker__radius-label">
             {t('local_area.picker.radius')}
           </span>
@@ -139,14 +157,14 @@ export function LocalAreaPicker({
             onChange={(v) => setRadius(Number(v))}
             labelledBy="local-area-radius-label"
           />
-        </div>
-        <p class="sh-ss-hint">{t('local_area.picker.privacy')}</p>
+        </div>}
+        <p class="sh-ss-hint">{pin ? t('place_pin.privacy') : t('local_area.picker.privacy')}</p>
         <div class="sh-form-actions">
           <Button type="button" variant="secondary" onClick={onClose}>
             {t('common.cancel')}
           </Button>
           <Button type="submit" disabled={!area || latBad || lonBad}>
-            {t('local_area.picker.submit')}
+            {pin ? t('place_pin.picker.submit') : t('local_area.picker.submit')}
           </Button>
         </div>
       </form>

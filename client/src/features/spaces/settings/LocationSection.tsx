@@ -6,7 +6,8 @@
  * Sharing your OWN location is personal and stays on the Map section (and
  * a member's "You in this space"); this section is the space's rules.
  * Both switches save as they change. A public space hosted here also
- * gets its local-community area (``LocalCommunity``): who may join, by
+ * gets its local-community area (``LocalCommunity``), a global one its
+ * optional place pin (``PlacePinCard``, sorting only): who may join, by
  * where they live.
  */
 import { useEffect, useState } from 'preact/hooks'
@@ -16,6 +17,7 @@ import { RadioCardGroup } from '@/components/RadioCardGroup'
 import { t } from '@/i18n/i18n'
 import type { Space } from '@/types'
 import { LocalCommunity } from './LocalCommunity'
+import { PlacePinCard } from './PlacePinCard'
 import { patchSpace, useServerValue } from './spacePatch'
 import { SwitchRow } from './SettingsRows'
 
@@ -69,6 +71,12 @@ export function LocationSection({ space, isRemoteSpace = false, onUpdate }: {
       {!isRemoteSpace && space.space_type === 'public' && (
         <div class="sh-ss-card">
           <LocalCommunity space={space} onUpdate={onUpdate} />
+        </div>
+      )}
+      {/* A global space hosted here may be pinned to a place. */}
+      {!isRemoteSpace && space.space_type === 'global' && (
+        <div class="sh-ss-card">
+          <PlacePinCard space={space} onUpdate={onUpdate} />
         </div>
       )}
       <div class="sh-ss-card">

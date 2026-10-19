@@ -14,7 +14,9 @@
  * A paired household's local community carries only "within X km" and the
  * host's verdict for our home (never its centre): Paired lists the ones
  * your home is in first, the ones you're outside of last and dimmed, and
- * "Near you" narrows the list to the first kind.
+ * "Near you" narrows the list to the first kind. Global lists the spaces
+ * pinned nearest to our home first ("about 3 km away") — worked out in
+ * this browser; our home goes nowhere.
  *
  * Invite-only spaces are never listed, nor a space you're already in or
  * follow. Each row opens the space's About page; its one button joins,
@@ -35,7 +37,8 @@ import { cacheDirectoryEntries } from '@/store/spaceDirectory'
 import { askAdmins } from '@/features/connections/AdminContactNote'
 import { householdAdmins, loadHouseholdAdmins } from '@/features/connections/connectionsData'
 import { ConnIcon } from '@/features/connections/ConnIcon'
-import { areaShortLabel } from '@/utils/localArea'
+import { areaShortLabel, type Home } from '@/utils/localArea'
+import { distanceLabel, pinDistanceKm, sortByDistance } from '@/utils/placePin'
 import type { DirectoryEntry, GfsConnection, HouseholdSpaceRow } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
@@ -105,9 +108,12 @@ function actionLabel(a: Exclude<DiscoverAction, null>): string {
   }
 }
 
-/** "Sara's household · 6 members · ask to join". */
-function entryMeta(e: DirectoryEntry, source: DiscoverSource): string {
+/** "Sara's household · 6 members · ask to join" — and, for a pinned
+ *  global space, "about 3 km away" from our home. */
+function entryMeta(e: DirectoryEntry, source: DiscoverSource, home: Home | null | undefined): string {
   const parts: string[] = []
+  const km = source === 'global' ? pinDistanceKm(e, home) : null
+  if (km !== null) parts.push(distanceLabel(km))
   if (source !== 'household') parts.push(hostLabel(e))
   parts.push(membersLabel(e.member_count))
   if (e.join_mode === 'request') parts.push(t('spaces.discover.mode_request'))
@@ -222,7 +228,10 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
   const shown: Lists = {
     household: discoverable(lists.household, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
     paired: near ? paired.filter((e) => entryAreaVerdict(e, home) === 'inside') : paired,
-    global: discoverable(lists.global, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
+    global: sortByDistance(
+      discoverable(lists.global, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
+      home,
+    ),
   }
   const rows = shown[source]
   const searching = term.trim() !== ''
@@ -323,8 +332,8 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
             const a = areaBlocks && way !== 'pending' ? null : way
             // No way in from here: say how people do get in.
             const meta = a === null && !areaBlocks
-              ? `${entryMeta(e, source)} · ${t('spaces.discover.invite_link_short')}`
-              : entryMeta(e, source)
+              ? `${entryMeta(e, source, home)} · ${t('spaces.discover.invite_link_short')}`
+              : entryMeta(e, source, home)
             const areaText = radius !== null
               ? [areaShortLabel(radius), verdict ? localAreaVerdictText(verdict, hostLabel(e)) : null]
                 .filter(Boolean).join(' · ')

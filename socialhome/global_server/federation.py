@@ -43,6 +43,7 @@ from ..domain.space import (
     normalize_category,
     normalize_join_mode,
 )
+from ..domain.space_place import parse_place_pin_wire
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from .domain import (
     MIN_EPOCH_STEP_INTERVAL_S,
@@ -1212,6 +1213,7 @@ class GfsFederationService:
         signature: str = "",
         ts: str = "",
         authority_cert: dict | None = None,
+        place: object = None,
     ) -> GlobalSpace:
         """Register / refresh a space row from the owning instance.
 
@@ -1298,6 +1300,13 @@ class GfsFederationService:
             if not ts:
                 raise PermissionError("authority_cert requires a signed ts")
             signed["authority_cert"] = authority_cert
+        # The owner's optional place pin (``place: {lat, lon}``, advertised
+        # as the ``place_pin`` capability) rides inside the signed bytes when
+        # sent, so a relay can neither add, move nor strip one. Absent ⇒ the
+        # listing has no pin (an older household never sends one; an owner
+        # who removed it sends none either).
+        if place is not None:
+            signed["place"] = place
         # The signed ``ts`` is OPTIONAL, for backward compatibility: unlike
         # subscribe/unsubscribe, ``publish_space`` has shipped production
         # callers, so hard-requiring ``ts`` would 403 every older household
@@ -1404,6 +1413,12 @@ class GfsFederationService:
         normalized_join_mode = normalize_join_mode(join_mode)
         # Never trust the wire here either: absent ⇒ not publicly readable.
         readable = bool(allow_subscribers)
+        # Verified above over the value as sent; stored re-validated to 4 dp.
+        # A malformed point lists the space unpinned rather than failing the
+        # publish — the pin only ever sorts.
+        pin = parse_place_pin_wire(place)
+        if place is not None and pin is None:
+            log.warning("GFS: space %s published a malformed place; ignored", space_id)
         space = GlobalSpace(
             space_id=space_id,
             owning_instance=owning_instance,
@@ -1431,6 +1446,8 @@ class GfsFederationService:
             # instead. A moderator ``banned`` status is handled above and
             # stays sticky either way.
             withdrawn=(existing.withdrawn if existing and not has_ts else False),
+            place_lat=pin.lat if pin is not None else None,
+            place_lon=pin.lon if pin is not None else None,
         )
         if existing is not None and existing.withdrawn and not has_ts:
             log.info(

@@ -215,6 +215,7 @@ async def test_non_member_sees_only_the_landing_fields_of_a_public_space(seeded,
         "features": {"allow_subscribers": True},
         "member_count": 1,
         "local_area": None,
+        "place": None,
     }
 
 
@@ -298,6 +299,7 @@ async def test_non_member_sees_the_landing_of_a_household_space(seeded):
         # who left.
         "member_count": 3,
         "local_area": None,
+        "place": None,
     }
     for path in ("/feed", "/members"):
         await _forbidden(

@@ -5,8 +5,9 @@
  * remove the area; it saves at once, like every control outside Basics.
  *
  * Existing members stay when the area changes — the check runs when
- * someone joins. Paired households see the centre and radius before
- * joining (``PATCH /api/spaces/{id}`` ``{lat, lon, radius_km}``, 4 dp).
+ * someone joins. Only this household's people see the centre; paired
+ * households see the radius and whether their own home is inside
+ * (``PATCH /api/spaces/{id}`` ``{lat, lon, radius_km}``, 4 dp).
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { Button } from '@/components/Button'

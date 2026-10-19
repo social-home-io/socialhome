@@ -886,6 +886,26 @@ household:
   `space_meta` and `SPACE_CONFIG_CHANGED`); a public space is never on a
   GFS.
 
+### A global space may carry a place pin — for sorting only
+
+- The owner or an admin may pin a `global` space to a place (a town, a
+  club house): Settings › Location, or the create dialog. **Never defaulted
+  to the household's home** — the picker has no "use our home" shortcut,
+  and both say the place is shown to everyone who can find the space.
+- The pin is the space's own published listing metadata, exactly like its
+  name and description: it rides the owner's signed publish body to the
+  GFSs that list it (only to one advertising the signed `place_pin`
+  capability) and is served on their public directory. The GFS can read
+  it, as it reads the name — it is not a person's location.
+- **The viewer's location goes nowhere.** Discover › Global sorts by the
+  distance from the viewer's own household home, computed in the browser
+  ("about 3 km away", rounded).
+- **Joining never checks it.** A join request or a follow works as for any
+  global space; the About page says "You're expected to follow this
+  space's rules."
+- A `public` (non-local) space has no pin: its location is its local
+  community's area or nothing.
+
 ## One initial migration
 
 v1 ships exactly one schema file: `socialhome/migrations/0001_initial.sql`.

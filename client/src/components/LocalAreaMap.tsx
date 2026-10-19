@@ -15,7 +15,7 @@ import { LocationMap, type LocationMarker, type LocationZoneOverlay } from './Lo
 const AREA_ZONE_ID = 'local-area'
 
 export function LocalAreaMap({
-  area, home, height = 180, onPick, ariaLabel,
+  area, home, height = 180, onPick, ariaLabel, zoneName,
 }: {
   /** ``null`` in the picker before a centre is chosen. */
   area: LocalArea | null
@@ -24,16 +24,18 @@ export function LocalAreaMap({
   height?: number
   onPick?: (lat: number, lon: number) => void
   ariaLabel?: string
+  /** The overlay's name (a global space's place pin says "Place"). */
+  zoneName?: string
 }) {
   const zones: LocationZoneOverlay[] = area
     ? [{
       id: AREA_ZONE_ID,
-      name: t('local_area.map_zone'),
+      name: zoneName ?? t('local_area.map_zone'),
       latitude: area.lat,
       longitude: area.lon,
       radius_m: area.radius_km * 1000,
       color: null,
-      icon: '🏘️',
+      icon: zoneName ? '📍' : '🏘️',
     }]
     : []
   const markers: LocationMarker[] = home

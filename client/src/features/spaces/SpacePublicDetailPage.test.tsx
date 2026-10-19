@@ -346,6 +346,31 @@ describe('SpacePublicDetailPage — a member opening their own space (cold link)
   })
 })
 
+describe('SpacePublicDetailPage — a global space\'s place pin', () => {
+  beforeEach(() => { resetHouseholdHome() })
+
+  it('says roughly how far away it is, from our own home, and that its rules apply', async () => {
+    api.get.mockImplementation((url: string) => Promise.resolve(
+      url === '/api/friends' ? { instance: { home_lat: 47.37, home_lon: 8.563 } } : {},
+    ))
+    cacheDirectoryEntries([entry({
+      scope: 'global', host_instance_id: 'iid-far', host_is_paired: true, join_mode: 'request',
+      lat: 46.9481, lon: 7.4474,
+    })])
+    const { getByTestId, getByText } = await renderPage()
+    await waitFor(() => expect(getByTestId('place-distance').textContent).toContain('about 95 km away'))
+    expect(getByText('You’re expected to follow this space’s rules.')).toBeTruthy()
+  })
+
+  it('no pin (or no home): no distance', async () => {
+    api.get.mockImplementation(() => Promise.resolve({}))
+    cacheDirectoryEntries([entry({ scope: 'global', host_instance_id: 'iid-far' })])
+    const { queryByTestId, container } = await renderPage()
+    await waitFor(() => expect(container.querySelector('h1')).not.toBeNull())
+    expect(queryByTestId('place-distance')).toBeNull()
+  })
+})
+
 describe('SpacePublicDetailPage — local community', () => {
   const AREA = { lat: 47.3769, lon: 8.5417, radius_km: 5 }
   const home = (h: { lat: number; lon: number } | null) => {

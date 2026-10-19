@@ -48,6 +48,12 @@ def public_space_dict(space) -> dict:
     """
     body = asdict(space)
     body.pop("authority_cert", None)
+    # The owner's place pin, as the ``{lat, lon}`` it was published as (or
+    # null) — for sorting by distance on the reader's side only.
+    lat, lon = body.pop("place_lat", None), body.pop("place_lon", None)
+    body["place"] = (
+        {"lat": lat, "lon": lon} if lat is not None and lon is not None else None
+    )
     return body
 
 
@@ -147,6 +153,11 @@ class GfsInfoView(GfsBaseView):
             # key) on member publish, epoch notices and channel requests, and
             # refuses one that is not its own key.
             "addressee_key": True,
+            # Folds a global space's optional ``place: {lat, lon}`` into the
+            # signed publish bytes and lists it. Signed: a household sends
+            # the field only to a server that proved it verifies it (an
+            # older one would 403 the whole publish).
+            "place_pin": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         if cfg.instance_id_aliases:
@@ -641,6 +652,9 @@ class SpacePublishView(GfsBaseView):
                 signature=str(body.get("signature") or ""),
                 ts=str(body.get("ts") or ""),
                 authority_cert=authority_cert,
+                # Optional: the owner's pin, inside the signed bytes when
+                # present; a malformed one is stored as no pin.
+                place=body.get("place"),
             )
         except PermissionError as exc:
             return web.json_response(

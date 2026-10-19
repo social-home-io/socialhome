@@ -371,6 +371,9 @@ export interface Space {
   /** ``GET /api/spaces/{id}`` only: a local community's area (a public
    *  space hosted here bound to a centre + radius); ``null`` otherwise. */
   local_area?: LocalArea | null
+  /** ``GET /api/spaces/{id}`` only: a GLOBAL space's place pin (4 dp),
+   *  listed with it on its GFSs for sorting by distance; ``null`` otherwise. */
+  place?: { lat: number; lon: number } | null
   /** ``GET /api/spaces/{id}`` only: at least one OTHER household has a
    *  member here. */
   has_remote_households?: boolean
@@ -914,6 +917,10 @@ export interface DirectoryEntry {
   /** Paired rows only: does this household share its home location with
    *  the host? A local community's host reads only that. */
   home_shared_with_host?: boolean
+  /** Global rows only: the space's place pin, as its GFS lists it — the
+   *  distance to it is worked out in this browser, for sorting only. */
+  lat?: number | null
+  lon?: number | null
 }
 
 export interface RemoteInvite {

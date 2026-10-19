@@ -194,6 +194,7 @@ from ..domain.space import (
     OwnerTransferNotLocalError,
     OwnerTransferSelfError,
     PeersTooOldError,
+    PlacePinGlobalOnlyError,
     PrivateGfsLinkMembersError,
     PrivateGfsOffError,
     PublicSpaceLimitError,
@@ -221,6 +222,7 @@ from ..domain.space import (
     role_change_event_type,
     validate_space_link_url,
 )
+from ..domain.space_place import PlacePin, validate_place_pin
 from ..domain.user import User
 from ..domain.writer_cert import WriterEntitlement
 from ..federation.invite_link_forward import (
@@ -962,8 +964,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         lat: object = None,
         lon: object = None,
         radius_km: object = None,
+        place: object = None,
     ) -> Space:
         """Create a new space and seat the creator as owner.
+
+        ``place`` (``{lat, lon}``) pins a GLOBAL space to a place, for
+        sorting Discover by distance only (``domain/space_place``); any other
+        tier is a 422 ``PLACE_PIN_GLOBAL_ONLY``. Never defaulted to the
+        household's home — the owner chose it.
 
         ``lat`` / ``lon`` / ``radius_km`` make a PUBLIC space a local
         community (``domain/local_community``): a household joins only while
@@ -991,6 +999,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")
         area = _local_area_from_input(stype, lat, lon, radius_km)
+        pin = _place_pin_from_input(stype, place)
         if (
             area is not None
             and features is not None
@@ -1043,8 +1052,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             else None,
             retention_exempt_types=exempt_types,
             category=category,
-            lat=area.lat if area is not None else None,
-            lon=area.lon if area is not None else None,
+            lat=area.lat if area is not None else pin.lat if pin is not None else None,
+            lon=area.lon if area is not None else pin.lon if pin is not None else None,
             radius_km=area.radius_km if area is not None else None,
         )
         await self._spaces.save(space)
@@ -2217,6 +2226,35 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         await self._bus.publish(SpaceLocalAreaChanged(space_id=space_id))
         return area
 
+    async def set_place_pin(
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+        place: object,
+    ) -> PlacePin | None:
+        """Pin a GLOBAL space to a place (``{lat, lon}``, truncated to 4 dp)
+        or, with ``None``, unpin it. Owner or admin, on the household hosting
+        the space (409 ``LOCAL_AREA_UNAVAILABLE`` elsewhere); any other tier
+        is a 422 ``PLACE_PIN_GLOBAL_ONLY`` (clearing works on any tier).
+
+        The pin is the space's published listing metadata, for sorting only
+        — nobody's join is checked against it. Host-local like the area (no
+        ``config_sequence`` bump; member households never need it): every
+        GFS that already lists the space is re-published so its directory
+        shows the new pin. Returns the stored pin.
+        """
+        space = await self._require_space(space_id)
+        await self._require_admin_or_owner(space, actor_username)
+        if space.owner_instance_id != self._own_instance_id:
+            raise LocalAreaUnavailableError()
+        pin = _place_pin_from_input(space.space_type, place)
+        await self._spaces.set_place_pin(space_id, pin)
+        if self._gfs is not None and space.space_type is SpaceType.GLOBAL:
+            # Fail-soft: the service logs and never raises.
+            await self._gfs.republish_space(space_id)
+        return pin
+
     async def require_local_seat(self, space: Space, instance_id: str) -> None:
         """The local-community check for one seat-granting path of ours
         (:func:`~socialhome.services.local_community.require_local_eligibility`)
@@ -2585,13 +2623,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             new_fields["space_type"] = stype
             payload["space_type"] = stype.value
             will_be_global = stype is SpaceType.GLOBAL
-            if stype is not SpaceType.PUBLIC and (
+            if stype is not space.space_type and (
                 space.lat is not None
                 or space.lon is not None
                 or space.radius_km is not None
             ):
-                # Only a public space is a local community; leaving the tier
-                # drops its area (host-local state — never in ``payload``).
+                # A public space's area and a global space's pin belong to
+                # their tier; leaving it drops them (host-local state — never
+                # in ``payload``).
                 new_fields["lat"] = None
                 new_fields["lon"] = None
                 new_fields["radius_km"] = None
@@ -10027,6 +10066,18 @@ def _local_area_from_input(
     if space_type is not SpaceType.PUBLIC:
         raise LocalAreaPublicOnlyError()
     return validate_local_area(lat, lon, radius_km)
+
+
+def _place_pin_from_input(space_type: SpaceType, place: object) -> PlacePin | None:
+    """The pin a create / settings body names (``{lat, lon}``), or ``None``
+    when it names none. Only a GLOBAL space takes one
+    (:class:`PlacePinGlobalOnlyError`); a malformed one is a ``ValueError``
+    (422)."""
+    if place is None:
+        return None
+    if space_type is not SpaceType.GLOBAL:
+        raise PlacePinGlobalOnlyError()
+    return validate_place_pin(place)
 
 
 def _coerce_space_type(value: SpaceType | str) -> SpaceType:

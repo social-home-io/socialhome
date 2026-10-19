@@ -20,13 +20,17 @@ vi.mock('./EmojiField', () => ({ EmojiField: () => null }))
 vi.mock('./LocalAreaMap', () => ({ LocalAreaMap: () => <div data-testid="area-map" /> }))
 // The area picker: a dialog whose one button picks a fixed area.
 vi.mock('./LocalAreaPicker', () => ({
-  LocalAreaPicker: ({ open, onSubmit, onClose }: {
+  PIN_DOT_KM: 0.15,
+  LocalAreaPicker: ({ open, onSubmit, onClose, mode, home }: {
     open: boolean
     onSubmit: (a: { lat: number; lon: number; radius_km: number }) => void
     onClose: () => void
+    mode?: string
+    home?: unknown
   }) => (open
     ? (
-      <div role="dialog" data-testid="area-picker">
+      <div role="dialog" data-testid={mode === 'pin' ? 'pin-picker' : 'area-picker'}
+           data-home={home === null ? 'none' : 'some'}>
         <button type="button" onClick={() => onSubmit({ lat: 47.3769, lon: 8.5417, radius_km: 5 })}>pick-area</button>
         <button type="button" onClick={onClose}>close-picker</button>
       </div>
@@ -421,6 +425,31 @@ describe('SpaceCreateDialog — choosing the GFSs of a global space', () => {
     await act(async () => { fireEvent.click(createBtn(container)) })
     await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
     expect(post.mock.calls[0][1]).toMatchObject({ space_type: 'global', gfs_ids: ['g-a'] })
+  })
+
+  it('a global space may be pinned to a place — optional, never the home, sent as place', async () => {
+    gfsConns = [gfsA]
+    post.mockResolvedValue({ id: 's1' })
+    const { container, getByText, getByTestId, queryByTestId } = await openGlobal()
+    expect(getByText(/place_pin.create.legend/)).toBeTruthy()
+    expect(getByText('place_pin.privacy')).toBeTruthy()
+    await act(async () => { fireEvent.click(getByText('place_pin.settings.make')) })
+    expect(getByTestId('pin-picker').getAttribute('data-home')).toBe('none')
+    await act(async () => { fireEvent.click(getByText('pick-area')) })
+    expect(queryByTestId('pin-picker')).toBeNull()
+    expect(container.textContent).toContain('place_pin.settings.where')
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    expect(post.mock.calls[0][1]).toMatchObject({ space_type: 'global', place: { lat: 47.3769, lon: 8.5417 } })
+  })
+
+  it('without a pin, a global space sends no place', async () => {
+    gfsConns = [gfsA]
+    post.mockResolvedValue({ id: 's1' })
+    const { container } = await openGlobal()
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    expect('place' in (post.mock.calls[0][1] as object)).toBe(false)
   })
 
   it('ticks nothing with several GFSs and requires at least one', async () => {
