@@ -40,6 +40,8 @@ export function LocalAreaMap({
     ? [{ id: 'home', lat: home.lat, lon: home.lon, label: t('local_area.your_home'), glyph: '🏠' }]
     : []
   return (
+    // The wrapper dims the tiles in dark mode, like the Friends map.
+    <div class="sh-local-area-map">
     <LocationMap
       markers={markers}
       zones={zones}
@@ -53,5 +55,6 @@ export function LocalAreaMap({
       emptyLabel=""
       ariaLabel={ariaLabel ?? t('local_area.map_label')}
     />
+    </div>
   )
 }

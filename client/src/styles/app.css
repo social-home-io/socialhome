@@ -12775,6 +12775,16 @@ a.sh-space-hero-members:focus-visible,
 .sh-space-public__local { display: grid; gap: var(--sh-space-sm); }
 .sh-space-public__local p { margin: 0; }
 .sh-space-public__local-where { font-weight: 600; }
+/* Area maps: dark dims the tiles only, exactly like the Friends map. */
+.sh-theme-dark .sh-local-area-map .leaflet-tile-pane { filter: brightness(.75) contrast(1.1) saturate(.8); }   /* dark */
+/* The keyboard way to set the centre: two fields side by side, stacked on
+   a phone. */
+.sh-local-area-picker__coords {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--sh-space-sm); margin: 0; padding: 0; border: 0; min-width: 0;
+}
+.sh-local-area-picker__coords legend { font-weight: 600; font-size: var(--sh-font-size-sm); padding: 0; margin-bottom: var(--sh-space-xs); }
+.sh-local-area-picker__coords label { display: grid; gap: 4px; min-width: 0; }
 .sh-ss-zones__head {
   display: flex;
   flex-wrap: wrap;

@@ -24,6 +24,11 @@ describe('LocalAreaMap', () => {
     expect(p.markers).toEqual([])
   })
 
+  it('sits in the wrapper that dims its tiles in dark mode', () => {
+    const { container } = render(<LocalAreaMap area={{ lat: 1, lon: 2, radius_km: 1 }} />)
+    expect(container.querySelector('.sh-local-area-map [data-testid="map"]')).not.toBeNull()
+  })
+
   it('shows our home as a 🏠 pin, and picks when asked to', () => {
     const onPick = vi.fn()
     render(<LocalAreaMap area={null} home={{ lat: 1, lon: 2 }} onPick={onPick} />)
