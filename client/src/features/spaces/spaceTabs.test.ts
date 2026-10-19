@@ -1,25 +1,26 @@
 /**
  * Space sections: which ones a space's feature toggles show, in which
- * order, what the Calendar section holds, and where each one lives in
- * the URL (old ``?tab=`` / ``?view=`` / ``#`` links included).
+ * order, and where each one lives in the URL (old ``?tab=`` / ``?view=``
+ * / ``#`` links included, and Calendar links that meant the timetable
+ * before it was its own section).
  */
 import { describe, it, expect } from 'vitest'
 import {
-  SECTION_ORDER, calendarModes, calendarTabLabel, legacySpaceSection, parseSpaceSection,
-  sectionAllowed, spaceSectionPath, visibleSpaceSections,
+  SECTION_ORDER, legacySpaceSection, parseSpaceSection, redirectedSection,
+  sectionAllowed, sectionLabel, spaceSectionPath, visibleSpaceSections,
 } from './spaceTabs'
 
 const member = { chat: true, follower: false }
 const follower = { chat: false, follower: true }
 
 describe('visibleSpaceSections', () => {
-  it('defaults: every section but the opt-ins (map, timetable-only), in the one fixed order', () => {
+  it('defaults: every section but the opt-ins (map, timetable), in the one fixed order', () => {
     expect(visibleSpaceSections(undefined, member)).toEqual(
       ['feed', 'chat', 'calendar', 'tasks', 'pages', 'gallery', 'stickies', 'bazaar'])
   })
 
   it('never puts Members or Moderation in the bar (they are rows of More)', () => {
-    const all = visibleSpaceSections({ location: true }, member)
+    const all = visibleSpaceSections({ location: true, timetable: true }, member)
     expect(all).not.toContain('members')
     expect(all).not.toContain('moderation')
     expect(all).toEqual([...SECTION_ORDER])
@@ -30,13 +31,17 @@ describe('visibleSpaceSections', () => {
     expect(s).toEqual(['feed', 'chat', 'calendar', 'gallery', 'stickies', 'bazaar', 'map'])
   })
 
-  it('the Calendar section shows when calendar or timetable is on', () => {
+  it('Timetable is its own section, last in the order (so it usually sits in More)', () => {
+    expect(visibleSpaceSections({ timetable: true }, member).at(-1)).toBe('timetable')
+    expect(SECTION_ORDER.at(-1)).toBe('timetable')
+    expect(visibleSpaceSections({ timetable: false }, member)).not.toContain('timetable')
+  })
+
+  it('Calendar follows the calendar feature alone — a timetable no longer keeps it', () => {
     const has = (f: Record<string, boolean>) => visibleSpaceSections(f, member).includes('calendar')
     expect(has({ calendar: true, timetable: false })).toBe(true)
-    expect(has({ calendar: true, timetable: true })).toBe(true)
-    expect(has({ calendar: false, timetable: true })).toBe(true)
-    expect(has({ calendar: false, timetable: false })).toBe(false)
-    expect(has({ calendar: false })).toBe(false)
+    expect(has({ calendar: false, timetable: true })).toBe(false)
+    expect(has({})).toBe(true)
   })
 
   it('Chat only when the space chat is open to the viewer', () => {
@@ -65,21 +70,23 @@ describe('sectionAllowed', () => {
   })
 })
 
-describe('calendarModes / calendarTabLabel', () => {
-  it('calendar only (timetable off by default) → events, labelled Calendar', () => {
-    expect(calendarModes(undefined)).toEqual(['events'])
-    expect(calendarModes({ calendar: true })).toEqual(['events'])
-    expect(calendarTabLabel({ calendar: true })).toBe('Calendar')
+describe('redirectedSection — Calendar links from when the timetable lived there', () => {
+  it('a Calendar link in a space with only a timetable opens the Timetable', () => {
+    expect(redirectedSection('calendar', { calendar: false, timetable: true })).toBe('timetable')
   })
 
-  it('both → the Events | Timetable switch', () => {
-    expect(calendarModes({ calendar: true, timetable: true })).toEqual(['events', 'timetable'])
-    expect(calendarTabLabel({ calendar: true, timetable: true })).toBe('Calendar')
+  it('anything else stays', () => {
+    expect(redirectedSection('calendar', { calendar: true, timetable: true })).toBeNull()
+    expect(redirectedSection('calendar', { calendar: false, timetable: false })).toBeNull()
+    expect(redirectedSection('calendar', undefined)).toBeNull()
+    expect(redirectedSection('tasks', { calendar: false, timetable: true })).toBeNull()
   })
+})
 
-  it('timetable only → straight to the timetable, labelled Timetable', () => {
-    expect(calendarModes({ calendar: false, timetable: true })).toEqual(['timetable'])
-    expect(calendarTabLabel({ calendar: false, timetable: true })).toBe('Timetable')
+describe('sectionLabel', () => {
+  it('Calendar is always "Calendar"; Timetable its own label', () => {
+    expect(sectionLabel('calendar')).toBe('Calendar')
+    expect(sectionLabel('timetable')).toBe('Timetable')
   })
 })
 
@@ -88,6 +95,7 @@ describe('section paths', () => {
     expect(spaceSectionPath('sp-1', 'feed')).toBe('/spaces/sp-1')
     expect(spaceSectionPath('sp-1', 'chat')).toBe('/spaces/sp-1/chat')
     expect(spaceSectionPath('sp-1', 'members')).toBe('/spaces/sp-1/members')
+    expect(spaceSectionPath('sp-1', 'timetable')).toBe('/spaces/sp-1/timetable')
   })
 
   it('parses a path segment: none → feed, unknown → null', () => {
@@ -95,6 +103,7 @@ describe('section paths', () => {
     expect(parseSpaceSection('')).toBe('feed')
     expect(parseSpaceSection('calendar')).toBe('calendar')
     expect(parseSpaceSection('moderation')).toBe('moderation')
+    expect(parseSpaceSection('timetable')).toBe('timetable')
     expect(parseSpaceSection('nope')).toBeNull()
     expect(parseSpaceSection(['tasks'])).toBeNull()
   })
@@ -106,6 +115,7 @@ describe('legacySpaceSection — links from before sections had paths', () => {
     expect(legacySpaceSection({ tab: 'moderation' }, '')).toBe('moderation')
     expect(legacySpaceSection({ view: 'chat' }, '')).toBe('chat')
     expect(legacySpaceSection({}, '#join-requests')).toBe('moderation')
+    expect(legacySpaceSection({ tab: 'timetable' }, '')).toBe('timetable')
   })
 
   it('ignores anything else', () => {

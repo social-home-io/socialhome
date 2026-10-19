@@ -25,12 +25,12 @@ import { SwitchRow } from './SettingsRows'
 const FEATURES: [keyof NonNullable<Space['features']>, string, string, boolean][] = [
   ['chat', 'space.feature.chat', 'space.settings_page.sections.chat_hint', true],
   ['calendar', 'nav.calendar', 'space.settings_page.sections.calendar_hint', true],
-  ['timetable', 'space.feature.timetable', 'space.feature.timetable_sub', false],
   ['todo', 'nav.tasks', 'space.settings_page.sections.tasks_hint', true],
   ['pages', 'nav.pages', 'space.settings_page.sections.pages_hint', true],
   ['gallery', 'nav.gallery', 'space.settings_page.sections.gallery_hint', true],
   ['stickies', 'nav.stickies', 'space.settings_page.sections.stickies_hint', true],
   ['bazaar', 'nav.bazaar', 'space.settings_page.sections.bazaar_hint', true],
+  ['timetable', 'space.feature.timetable', 'space.feature.timetable_sub', false],
 ]
 
 // Post types an admin can switch on / off (§23.49) — the space composer's
@@ -99,7 +99,7 @@ export function FeaturesSection({ space, onUpdate }: { space: Space; onUpdate: (
       <div data-testid="space-features">
         {FEATURES.map(([key, label, hint]) => (
           <SwitchRow key={key} id={`feature-${key}-${space.id}`} label={t(label)}
-                     hint={t(hint)} checked={on[key]} sub={key === 'timetable'}
+                     hint={t(hint)} checked={on[key]}
                      onChange={(v) => void flip(key, v)} />
         ))}
       </div>

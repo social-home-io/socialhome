@@ -9,30 +9,19 @@ import { loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers, setSpaceHereAllowed } from '@/store/spaceMembers'
 import { useTitle } from '@/store/pageTitle'
 import { t } from '@/i18n/i18n'
-import {
-  advanceDate, dateRangeForMode, formatDayLabel, formatEventBounds, formatRangeHeading,
-  groupEventsByDay,
-  type CalendarViewMode,
-} from '@/utils/calendar'
-import type { FeedPost, CalendarEvent } from '@/types'
+import type { FeedPost } from '@/types'
 import { LoadErrorState } from '@/components/LoadErrorState'
-import { EventRowMeta } from '@/components/EventRowMeta'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { JoinRequestList } from '@/components/JoinRequestList'
 import { ModerationQueue } from '@/components/ModerationQueue'
 import { SpaceReports } from '@/components/SpaceReports'
-import { openReport } from '@/components/ReportDialog'
 import { SpaceLocationCard } from '@/components/SpaceLocationCard'
 import { SpaceMemberList } from '@/components/SpaceMemberList'
 import GalleryPage from '@/features/gallery/GalleryPage'
-import { Button } from '@/components/Button'
-import { Modal } from '@/components/Modal'
-import { SubscribeFeed } from '@/components/SubscribeFeed'
 import { PostCard } from '@/components/PostCard'
 import { Composer, type ComposerExtras } from '@/components/Composer'
-import { announceQueued, contentWrite, isQueuedWrite } from '@/utils/contentWrite'
-import { pendingDeletes, undoableDelete } from '@/utils/undoableDelete'
+import { contentWrite } from '@/utils/contentWrite'
 import { PendingReviewStrip } from '@/components/PendingReviewStrip'
 import { useModerationMine } from '@/store/moderationMine'
 import { itemPreview } from './moderationItems'
@@ -40,9 +29,10 @@ import { openCommentOverlay } from '@/components/CommentOverlay'
 import { SpaceSectionNav, type SpaceMemberSummary } from '@/components/SpaceSectionNav'
 import { SpaceTasksTab } from './SpaceTasksTab'
 import { SpacePagesTab } from './SpacePagesTab'
-import { SpaceCalendarHost } from './SpaceCalendarHost'
+import { SpaceCalendarSection } from './SpaceCalendarSection'
+import { SpaceTimetableTab } from './SpaceTimetableTab'
 import {
-  legacySpaceSection, parseSpaceSection, sectionAllowed, spaceSectionPath,
+  legacySpaceSection, parseSpaceSection, redirectedSection, sectionAllowed, spaceSectionPath,
   visibleSpaceSections,
 } from './spaceTabs'
 import {
@@ -60,7 +50,6 @@ import { SpaceBazaarTab } from './SpaceBazaarTab'
 import StickyBoardPage from '@/features/stickies/StickyBoardPage'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
 import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
-import { CalendarEventDialog, openSpaceEventDialog } from '@/components/CalendarEventDialog'
 import { useSpaceLinks } from './useSpaceLinks'
 import { useSpaceCompat } from '@/components/SpaceVersionNotice'
 import { SpaceHero, type HeroMember } from '@/components/SpaceHero'
@@ -171,19 +160,6 @@ export function archivedCopy(
 
 const posts = signal<FeedPost[]>([])
 const loading = signal(true)
-/** Calendar section → "Subscribe" dialog (private iCal link). */
-const subscribeFeedOpen = signal(false)
-const spaceCalEvents = signal<CalendarEvent[]>([])
-/** The last events fetch failed — the tab shows an error with Retry, not
- *  the "no events" empty state (they call for different actions). */
-const spaceCalLoadFailed = signal(false)
-const spaceCalCursor = signal(new Date())
-const spaceCalView = signal<CalendarViewMode>('month')
-/** Which agenda row is expanded, as ``"<dayKey>:<eventId>"``. Keyed
- *  by the DAY CARD, not the event: a multi-day event renders one row
- *  per covered day, so an event-id key would expand every one of them
- *  at once. */
-const selectedSpaceEventId = signal<string | null>(null)
 const viewerRole = signal<SpaceRole | undefined>(undefined)
 const spaceDetail = signal<SpaceDetail | null>(null)
 /** The space detail answered (or failed) — until then ``viewerRole`` is
@@ -247,85 +223,6 @@ async function loadSpaceFeed(spaceId: string) {
   posts.value = rows
 }
 
-async function loadSpaceCalendar(spaceId: string) {
-  // Use the per-space calendar endpoint directly — the route fans out
-  // to the space's own calendar without us having to look up its id
-  // first. Same shape as the household ``/api/calendars/{id}/events``
-  // response, just space-scoped.
-  try {
-    const { start, end } = dateRangeForMode(
-      spaceCalCursor.value, spaceCalView.value,
-    )
-    spaceCalEvents.value = await api.get(
-      `/api/spaces/${spaceId}/calendar/events`,
-      { start, end },
-    ) as CalendarEvent[]
-    spaceCalLoadFailed.value = false
-  } catch {
-    spaceCalEvents.value = []
-    spaceCalLoadFailed.value = true
-  }
-}
-
-/** A stored event id from an agenda row's id — the range query expands a
- *  recurring event into ``"{id}@{occurrence}"`` rows (see
- *  ``isOccurrenceId``); edits and deletes act on the stored series. */
-export function seriesEventId(id: string): string {
-  const at = id.indexOf('@')
-  return at === -1 ? id : id.slice(0, at)
-}
-
-/** Delete a space event with Undo (``undoableDelete``): every row of it
- *  disappears at once, the DELETE goes out when the toast closes. Held
- *  for review (somebody else's event in a "Reviewed" calendar, §4.3): the
- *  event comes back and the toast says it waits for a moderator. A
- *  recurring event goes as a whole series — the toast says so. */
-export function deleteSpaceEvent(spaceId: string, ev: CalendarEvent) {
-  const id = seriesEventId(ev.id)
-  selectedSpaceEventId.value = null
-  undoableDelete({
-    ids: [id],
-    message: ev.rrule
-      ? t('event.deleted_series', { title: ev.summary })
-      : t('event.deleted_named', { title: ev.summary }),
-    commit: async ({ keepalive }) => {
-      const path = `/api/spaces/${spaceId}/calendar/events/${id}`
-      try {
-        const res = await (keepalive
-          ? api.delete<unknown>(path, { keepalive: true })
-          : api.delete<unknown>(path))
-        if (isQueuedWrite(res)) announceQueued({ spaceId })
-      } catch (err) {
-        if ((err as { status?: unknown })?.status !== 404) throw err
-      }
-      // The Undo window may close after the viewer moved to another space:
-      // the calendar signal is that space's now — don't refill it with ours.
-      if (spaceDetail.value?.id === spaceId) void loadSpaceCalendar(spaceId)
-    },
-  })
-}
-
-function navigateSpaceCalendar(direction: number, spaceId: string) {
-  spaceCalCursor.value = advanceDate(
-    spaceCalCursor.value, direction, spaceCalView.value,
-  )
-  selectedSpaceEventId.value = null
-  void loadSpaceCalendar(spaceId)
-}
-
-function jumpToSpaceToday(spaceId: string) {
-  spaceCalCursor.value = new Date()
-  selectedSpaceEventId.value = null
-  void loadSpaceCalendar(spaceId)
-}
-
-function setSpaceCalendarView(mode: CalendarViewMode, spaceId: string) {
-  if (spaceCalView.value === mode) return
-  spaceCalView.value = mode
-  selectedSpaceEventId.value = null
-  void loadSpaceCalendar(spaceId)
-}
-
 export default function SpaceFeedPage() {
   const { params, query } = useRoute()
   const spaceId = params.id
@@ -366,11 +263,6 @@ export default function SpaceFeedPage() {
     detailFailed.value = false
     feedFailed.value = false
     spaceAttention.value = null
-    spaceCalEvents.value = []
-    spaceCalLoadFailed.value = false
-    spaceCalCursor.value = new Date()
-    spaceCalView.value = 'month'
-    selectedSpaceEventId.value = null
     void loadHouseholdUsers()
     void loadSpaceMembers(spaceId)
     loadSpaceFeed(spaceId)
@@ -416,29 +308,10 @@ export default function SpaceFeedPage() {
       const d = e.data as { space_id?: string | null }
       if (d.space_id === spaceId) void loadSpaceFeed(spaceId)
     })
-    // Live space calendar — the shared store/calendar.ts won't refresh
-    // this tab (its activeCalendarScope is null on the space view), so
-    // refetch the space calendar signal directly. created/updated carry
-    // event.calendar_id; deleted carries calendar_id.
-    const offCalCreated = ws.on('calendar.created', (e) => {
-      const d = e.data as { event?: { calendar_id?: string } }
-      if (d.event?.calendar_id === spaceId) void loadSpaceCalendar(spaceId)
-    })
-    const offCalUpdated = ws.on('calendar.updated', (e) => {
-      const d = e.data as { event?: { calendar_id?: string } }
-      if (d.event?.calendar_id === spaceId) void loadSpaceCalendar(spaceId)
-    })
-    const offCalDeleted = ws.on('calendar.deleted', (e) => {
-      const d = e.data as { calendar_id?: string | null }
-      if (d.calendar_id === spaceId) void loadSpaceCalendar(spaceId)
-    })
     return () => {
       off4()
       offComment()
       offModerated()
-      offCalCreated()
-      offCalUpdated()
-      offCalDeleted()
     }
     // ``loc`` (the no-seat redirect) changes with every URL change — every
     // section switch included — so as a dependency it would refetch the
@@ -474,25 +347,20 @@ export default function SpaceFeedPage() {
   // A section the viewer can't have here (feature off, a follower on the
   // Map, Moderation without content authority) falls back to the feed —
   // once the space and the viewer's role are known, and again if an
-  // admin turns the section off while it's open.
+  // admin turns the section off while it's open. An old Calendar link in
+  // a space that keeps only a timetable opens the Timetable section.
   useEffect(() => {
     if (!loc || !spaceDetail.value || !roleKnown.value) return
     const viewer = { chat: chatOn, follower, canModerate: canModerateHere }
     if (!sectionAllowed(section, features, viewer)) {
-      loc.route(spaceSectionPath(spaceId, 'feed'), true)
+      const moved = redirectedSection(section, features)
+      const target = moved && sectionAllowed(moved, features, viewer) ? moved : 'feed'
+      loc.route(spaceSectionPath(spaceId, target), true)
     }
   }, [spaceId, section, features, roleKnown.value, chatOn, follower, canModerateHere]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const chatOpen = section === 'chat'
   useSpaceChatSummary(spaceId, chatEligible, chatOpen)
-
-  // The calendar loads when its section opens. The events endpoint
-  // refuses while the calendar feature is off (the section then holds
-  // only the timetable).
-  const calendarOn = features?.calendar ?? true
-  useEffect(() => {
-    if (section === 'calendar' && calendarOn) void loadSpaceCalendar(spaceId)
-  }, [spaceId, section, calendarOn])
 
   // Viewing the Feed reads it: the Spaces list's "N new" starts again from
   // now — on opening the section, and again when posts arrive while it's
@@ -695,7 +563,6 @@ export default function SpaceFeedPage() {
         spaceName={s?.name ?? t('spaces.space_title')}
         sections={sections}
         active={section}
-        features={f}
         chatUnread={chatUnread}
         members={memberSummary.value && membersShown != null
           ? { ...memberSummary.value, count: membersShown }
@@ -908,198 +775,16 @@ export default function SpaceFeedPage() {
       )}
 
       {section === 'calendar' && sections.includes('calendar') && (
-        <SpaceCalendarHost spaceId={spaceId} features={f} canEdit={canEditTimetable}
-                           events={() => {
-        // The visible range clamps the day expansion — the server's
-        // range query is overlap-based, so an event that started before
-        // the period comes back and would otherwise file an
-        // out-of-range day card.
-        // Rows waiting out their Undo window stay hidden.
-        const hidden = pendingDeletes.value
-        const shown = spaceCalEvents.value.filter(e => !hidden.has(seriesEventId(e.id)))
-        const grouped = groupEventsByDay(
-          shown,
-          dateRangeForMode(spaceCalCursor.value, spaceCalView.value),
-        )
-        // Keys are ``YYYY-MM-DD`` (see ``groupEventsByDay``) so a plain
-        // lexicographic sort is chronological — no locale-fragile
-        // ``new Date(key)`` round-trip required.
-        const dayKeys = Object.keys(grouped).sort()
-        return (
-          <div class="sh-calendar">
-            <div class="sh-page-header sh-space-cal-header">
-              <Button variant="secondary"
-                      onClick={() => { subscribeFeedOpen.value = true }}>
-                {t('event.subscribe.button')}
-              </Button>
-              {canWrite('calendar') && (
-                <Button onClick={() => openSpaceEventDialog(spaceId)}>
-                  + {t('calendar.new_event')}
-                </Button>
-              )}
-            </div>
-            {adminOnly('calendar') && <AccessNote feature="calendar" />}
-            <PendingReviewStrip spaceId={spaceId} feature="calendar" />
-            <Modal
-              open={subscribeFeedOpen.value}
-              onClose={() => { subscribeFeedOpen.value = false }}
-              title={t('event.subscribe.heading')}
-            >
-              <SubscribeFeed spaceId={spaceId} />
-            </Modal>
+        <SpaceCalendarSection
+          spaceId={spaceId}
+          canWrite={canWrite('calendar')}
+          adminOnly={adminOnly('calendar')}
+          archived={!!s?.archived}
+        />
+      )}
 
-            <div class="sh-calendar-controls">
-              <div class="sh-calendar-nav">
-                <Button variant="secondary"
-                        // Keys: calendar.prev_{month,week,day}
-                        aria-label={t(`calendar.prev_${spaceCalView.value}`)}
-                        onClick={() => navigateSpaceCalendar(-1, spaceId)}>
-                  &#8249;
-                </Button>
-                <span class="sh-calendar-heading">
-                  {formatRangeHeading(spaceCalCursor.value, spaceCalView.value)}
-                </span>
-                <Button variant="secondary"
-                        // Keys: calendar.next_{month,week,day}
-                        aria-label={t(`calendar.next_${spaceCalView.value}`)}
-                        onClick={() => navigateSpaceCalendar(1, spaceId)}>
-                  &#8250;
-                </Button>
-                <Button variant="secondary"
-                        onClick={() => jumpToSpaceToday(spaceId)}>
-                  {t('calendar.today')}
-                </Button>
-              </div>
-              <div class="sh-calendar-views" role="tablist">
-                {(['month', 'week', 'day'] as CalendarViewMode[]).map(mode => (
-                  <button
-                    key={mode}
-                    type="button"
-                    role="tab"
-                    aria-selected={spaceCalView.value === mode}
-                    class={
-                      spaceCalView.value === mode
-                        ? 'sh-tab sh-tab--active'
-                        : 'sh-tab'
-                    }
-                    onClick={() => setSpaceCalendarView(mode, spaceId)}
-                  >
-                    {t(`calendar.${mode}`)}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {spaceCalLoadFailed.value && (
-              <LoadErrorState
-                headingLevel={2}
-                message={t('calendar.load_failed')}
-                onRetry={() => { void loadSpaceCalendar(spaceId) }}
-              />
-            )}
-
-            {shown.length === 0 && !spaceCalLoadFailed.value && (
-              <div class="sh-empty-state">
-                <div aria-hidden="true">📅</div>
-                {/* Keys: calendar.empty_{month,week,day} */}
-                <h2>{t(`calendar.empty_${spaceCalView.value}`)}</h2>
-                {canWrite('calendar') && (
-                  <p>{t('calendar.empty_space_hint')}</p>
-                )}
-              </div>
-            )}
-
-            {dayKeys.map(dayKey => {
-              const friendly = formatDayLabel(dayKey)
-              return (
-              <div key={dayKey} class="sh-calendar-day-group">
-                <h2
-                  class={
-                    friendly.isToday
-                      ? 'sh-calendar-day-heading sh-calendar-day-heading--today'
-                      : 'sh-calendar-day-heading'
-                  }
-                >
-                  {friendly.long}
-                  {friendly.relative && (
-                    <span class="sh-calendar-day-heading__rel">{friendly.relative}</span>
-                  )}
-                </h2>
-                {grouped[dayKey].map(entry => {
-                  // ``e`` stays bound to the underlying event row;
-                  // ``entry`` only carries this day card's place in the
-                  // event's span.
-                  const e = entry.event
-                  const rowKey = `${dayKey}:${e.id}`
-                  // Disclosure wiring — mirrors CalendarPage: the header
-                  // is a native <button>, the detail panel its sibling, and
-                  // the id stays a clean token (no ``:`` from ``rowKey``).
-                  const isOpen = selectedSpaceEventId.value === rowKey
-                  const detailId = `sh-event-detail-${dayKey}-${e.id}`
-                  // One call, two labels — the helper builds two Dates
-                  // and up to two Intl formatters per invocation.
-                  const bounds = formatEventBounds(e)
-                  return (
-                  <div
-                    key={rowKey}
-                    class={
-                      'sh-event'
-                      + (entry.isFirst ? '' : ' sh-event--continued')
-                      + (entry.isLast ? '' : ' sh-event--continues')
-                    }
-                  >
-                    <button
-                      type="button"
-                      class="sh-event-header"
-                      aria-expanded={isOpen}
-                      aria-controls={detailId}
-                      onClick={() => {
-                        selectedSpaceEventId.value = isOpen ? null : rowKey
-                      }}
-                    >
-                      <strong>{e.summary}</strong>
-                      <EventRowMeta entry={entry} />
-                    </button>
-                    {isOpen && (
-                      <div class="sh-event-detail" id={detailId}>
-                        {e.description && <p>{e.description}</p>}
-                        <div class="sh-event-times">
-                          <span>{t('event.starts')} {bounds.starts}</span>
-                          <span>{t('event.ends')} {bounds.ends}</span>
-                        </div>
-                        {/* ``can_edit``: the calendar's access level lets
-                         *  the viewer change this event (§4.3) — absent
-                         *  from an older host: no control offered. */}
-                        {((e.can_edit === true && !s?.archived)
-                          || e.created_by !== currentUser.value?.user_id) && (
-                          <div class="sh-event-admin sh-row">
-                            {e.can_edit === true && !s?.archived && (
-                              <Button variant="danger"
-                                      onClick={() => deleteSpaceEvent(spaceId, e)}>
-                                {t('event.delete')}
-                              </Button>
-                            )}
-                            {e.created_by !== currentUser.value?.user_id && (
-                              <Button variant="ghost"
-                                      onClick={() => openReport('calendar_event', e.id, spaceId)}>
-                                {t('report.action')}
-                              </Button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  )
-                })}
-              </div>
-              )
-            })}
-
-            <CalendarEventDialog onCreated={() => { void loadSpaceCalendar(spaceId) }} />
-          </div>
-        )
-      }} />
+      {section === 'timetable' && sections.includes('timetable') && (
+        <SpaceTimetableTab spaceId={spaceId} canEdit={canEditTimetable} />
       )}
 
       {section === 'tasks' && (
