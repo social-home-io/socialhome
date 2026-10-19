@@ -294,8 +294,8 @@ class SpaceDetailView(BaseView):
             # No seat: the caller opened a discoverable space's landing
             # page — the fields a directory entry already publishes, none
             # of the members' config.
-            seats = await self.svc(space_repo_key).list_members(space.id)
-            return web.json_response(_public_space_view(space, len(seats)))
+            count = await self.svc(space_repo_key).count_members(space.id)
+            return web.json_response(_public_space_view(space, count))
         gfs_servers, gfs_unlisted = await self._gfs_listing(space)
         cover_url = (
             f"/api/spaces/{space.id}/cover?v={space.cover_hash}"
@@ -319,6 +319,9 @@ class SpaceDetailView(BaseView):
                 # The caller's own role here — the SPA's admin / follower
                 # UI reads it (a follower is not listed in ``/members``).
                 "my_role": member.role,
+                # Members, never followers — the one count every surface
+                # shows (``space_repo.MEMBER_COUNT_SQL``).
+                "member_count": await self.svc(space_repo_key).count_members(space.id),
                 "features": space.features.to_wire_dict(),
                 "retention_days": space.retention_days,
                 "retention_exempt_types": list(space.retention_exempt_types),

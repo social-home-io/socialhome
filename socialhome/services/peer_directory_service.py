@@ -69,14 +69,14 @@ class PeerDirectoryService:
         spaces = await self._space_repo.list_by_type(SpaceType.PUBLIC)
         out: list[dict] = []
         for s in spaces:
-            members = await self._space_repo.list_members(s.id)
             out.append(
                 {
                     "space_id": s.id,
                     "name": s.name,
                     "description": s.description,
                     "emoji": s.emoji,
-                    "member_count": len(members),
+                    # Members, never followers (``MEMBER_COUNT_SQL``).
+                    "member_count": await self._space_repo.count_members(s.id),
                     "join_mode": s.join_mode.value,
                     "category": normalize_category(s.category),
                 }

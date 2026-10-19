@@ -3191,7 +3191,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 await self._users.get_by_user_id(inviter_id) if inviter_id else None
             )
             member_count = (
-                len(await self._spaces.list_members(space.id))
+                await self._spaces.count_members(space.id)
                 if space is not None
                 else None
             )

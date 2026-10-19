@@ -55,6 +55,18 @@ from ..domain.space import (
 from ..infrastructure.hlc import HLC
 from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
 
+#: The one definition of a space's member count (owner decision 13: a
+#: follower gets a reduced view and is no member): local seats and live
+#: remote seats, never a ``subscriber``, never a tombstoned remote seat —
+#: who the space's people list shows. ``s`` is the ``spaces`` row.
+MEMBER_COUNT_SQL = """(
+    (SELECT COUNT(*) FROM space_members mc
+      WHERE mc.space_id = s.id AND mc.role != 'subscriber')
+    + (SELECT COUNT(*) FROM space_remote_members rc
+        WHERE rc.space_id = s.id AND rc.tombstoned = 0
+          AND COALESCE(rc.role, 'member') != 'subscriber')
+)"""
+
 
 @runtime_checkable
 class AbstractSpaceRepo(Protocol):
@@ -161,6 +173,7 @@ class AbstractSpaceRepo(Protocol):
     ) -> list[HostedSpaceListing]: ...
     async def list_for_user(self, user_id: str) -> list[Space]: ...
     async def list_member_listings(self, user_id: str) -> list[MemberSpaceListing]: ...
+    async def count_members(self, space_id: str) -> int: ...
     async def list_location_shared_spaces_for_user(
         self, user_id: str
     ) -> list[Space]: ...
@@ -1277,8 +1290,7 @@ class SqliteSpaceRepo:
         rows = await self._db.fetchall(
             f"""
             SELECT s.*,
-                   (SELECT COUNT(*) FROM space_members m
-                     WHERE m.space_id = s.id) AS listing_member_count,
+                   {MEMBER_COUNT_SQL} AS listing_member_count,
                    (SELECT m.role FROM space_members m
                      WHERE m.space_id = s.id AND m.user_id = ?)
                        AS listing_caller_role,
@@ -1324,6 +1336,15 @@ class SqliteSpaceRepo:
         )
         return [s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s]
 
+    async def count_members(self, space_id: str) -> int:
+        """The space's member count (:data:`MEMBER_COUNT_SQL`); ``0`` for an
+        unknown id."""
+        row = await self._db.fetchone(
+            f"SELECT {MEMBER_COUNT_SQL} AS n FROM spaces s WHERE s.id = ?",
+            (space_id,),
+        )
+        return int(row["n"]) if row is not None else 0
+
     async def list_member_listings(self, user_id: str) -> list[MemberSpaceListing]:
         """Every active space *user_id* holds a seat in (as
         :meth:`list_for_user`), with the caller's role, the member count
@@ -1333,15 +1354,10 @@ class SqliteSpaceRepo:
         column holds both SQLite's naive and Python's tz-aware ISO shape,
         which don't compare as strings. One query — no per-space round-trip."""
         rows = await self._db.fetchall(
-            """
+            f"""
             SELECT s.*,
                    m.role AS listing_caller_role,
-                   (SELECT COUNT(*) FROM space_members mm
-                     WHERE mm.space_id = s.id AND mm.role != 'subscriber')
-                   + (SELECT COUNT(*) FROM space_remote_members rm
-                       WHERE rm.space_id = s.id AND rm.tombstoned = 0
-                         AND COALESCE(rm.role, 'member') != 'subscriber')
-                       AS listing_member_count,
+                   {MEMBER_COUNT_SQL} AS listing_member_count,
                    COALESCE(
                        (SELECT MAX(datetime(p.created_at)) FROM space_posts p
                          WHERE p.space_id = s.id AND p.deleted = 0
