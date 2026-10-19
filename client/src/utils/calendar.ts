@@ -1,11 +1,13 @@
 /**
- * Calendar formatting / grouping helpers shared by the household
- * calendar (`features/calendar/CalendarPage.tsx`) and the per-space
- * calendar tab (`features/spaces/SpaceFeedPage.tsx`). Keeping the
- * grouping rule in one place means the two surfaces always render the
- * same day buckets — no drift between the household and a space.
+ * Calendar date helpers shared by the household calendar
+ * (`features/calendar/CalendarPage.tsx`) and a space's Calendar
+ * (`features/spaces/SpaceCalendarSection.tsx`): the day rules every view
+ * places events by (:func:`eventDaySpan`), the expanded event's bounds,
+ * the shared-event merge and the grid headings. The views themselves are
+ * ``utils/calendarViews.ts`` — one calendar UI, no drift between the
+ * household and a space.
  */
-import { formatLocale, t } from '@/i18n/i18n'
+import { formatLocale } from '@/i18n/i18n'
 import type { CalendarEvent } from '@/types'
 import { utcIsoToLocalParts } from './timezone'
 import { currentWeekStart, startOfWeek, type WeekStart } from './week'
@@ -74,9 +76,8 @@ interface DayParts {
   time: string
 }
 
-/** Calendar view modes — mirrored on the household and per-space
- *  calendar surfaces so date math + range labels can come from one
- *  helper module. */
+/** Period units for ``advanceDate`` / ``formatRangeHeading`` (the
+ *  calendar grids use month / week; ``day`` heads a single day). */
 export type CalendarViewMode = 'month' | 'week' | 'day'
 
 /** Build a ``YYYY-MM-DD`` key from the local date components of ``d``.
@@ -172,41 +173,23 @@ function keyFromOrdinal(ordinal: number): string {
   return `${y}-${m}-${dd}`
 }
 
-/** Runaway guard for :func:`groupEventsByDay`. A bad ICS import (or a
- *  typo'd year in the composer) can produce a decade-long "event";
- *  without a cap the day-expansion would mint thousands of cards. The
- *  entry still reports the TRUE ``dayCount`` so the UI can say
- *  "day 1 of 4000" — we just stop emitting cards. */
-const MAX_SPAN_DAYS = 366
-
-/** One day-card's worth of an event. A multi-day event yields one
- *  entry per covered day, all pointing at the SAME row. */
-export interface DayEventEntry {
-  /** The original event row — never a clone with a rewritten
-   *  ``start`` / ``end``. Downstream code keys the RSVP
-   *  ``occurrence_at`` off ``event.start``, so a per-day clone with a
-   *  shifted start would silently RSVP the wrong occurrence. */
-  event: CalendarEvent
-  /** 1-based position of this day within the event's full span. */
-  dayIndex: number
-  /** Total days the event covers — 1 for an ordinary same-day event.
-   *  Always the TRUE span, even when the visible-range clamp or
-   *  :data:`MAX_SPAN_DAYS` suppressed some of the day cards. */
-  dayCount: number
-  /** ``dayIndex === 1`` — the day the event actually starts. */
-  isFirst: boolean
-  /** ``dayIndex === dayCount`` — the day the event ends. */
-  isLast: boolean
-}
-
 /** The calendar days an event covers: its first and last day key and
- *  how many days that is. ``null`` when ``start`` is unparseable.
+ *  how many days that is. ``null`` when ``start`` is unparseable. Every
+ *  calendar view (Upcoming, Month, Week — household and space) places an
+ *  event by these rules:
  *
- *  The day rules every calendar view shares (see
- *  :func:`groupEventsByDay` for the reasoning):
- *
- *  * **All-day → the event's own tz, timed → the viewer's.**
- *  * **A midnight end is exclusive** — ``22:00 → 00:00`` is one evening.
+ *  * **Day keys, not ``Date`` cursors.** ``YYYY-MM-DD`` keys sort
+ *    lexicographically == chronologically in every locale, and calendar
+ *    arithmetic over them (``keyOrdinal``) never skips or repeats a day
+ *    across a 23- / 25-hour DST day.
+ *  * **All-day → the event's own tz, timed → the viewer's.** All-day
+ *    rows are stored as ``00:00`` / ``23:59`` in ``event.tz`` (see
+ *    ``components/CalendarEventDialog.tsx``), so their days are read in
+ *    that zone — ``'UTC'`` when the row carries none (the server default
+ *    and the zone legacy rows were computed in). Timed rows are
+ *    wall-clock events for whoever is looking.
+ *  * **A midnight end is exclusive** — ``22:00 → 00:00`` is one evening,
+ *    not two days (also ICS-style exclusive ``00:00`` end bounds).
  *  * **Degenerate ends fail soft** — a missing, unparseable or backwards
  *    ``end`` makes it a single-day event on the start day. */
 export function eventDaySpan(
@@ -249,248 +232,6 @@ export function daysBetweenKeys(a: string, b: string): number {
 /** ``YYYY-MM-DD`` of ``d``'s local calendar day. */
 export function dayKeyOf(d: Date): string {
   return localDateKey(d)
-}
-
-/** Group events into ``{ "YYYY-MM-DD" → day entries }`` buckets. The
- *  key is built from date components rather than
- *  ``toLocaleDateString()`` because the previous shape (``5/14/2026`` /
- *  ``14.5.2026``) couldn't be round-tripped through ``new Date()`` in
- *  non-en-* locales, so the agenda sort silently fell back to insertion
- *  order. With ``YYYY-MM-DD`` the sort is locale-independent
- *  (lexicographic == chronological).
- *
- *  A **multi-day** event lands in every day it covers, not just its
- *  start day — the agenda is a list of per-day cards, so a Fri–Sun trip
- *  filed only under Friday is invisible when you look at Saturday. Each
- *  entry carries its ``dayIndex`` / ``dayCount`` so the card can render
- *  "Day 2 of 3" and drop the start time on continuation days.
- *
- *  The span is walked as **calendar arithmetic over the two
- *  ``YYYY-MM-DD`` keys** (`keyOrdinal` ± whole days), never by
- *  cursoring a ``Date``: a date string carries no clock, so a 23- or
- *  25-hour DST day can neither skip nor duplicate a key.
- *
- *  Conventions, each matching what already ships elsewhere:
- *
- *  * **All-day → the event's own tz, timed → the viewer's.** All-day
- *    rows are stored as ``00:00`` / ``23:59`` in ``event.tz`` (see
- *    ``components/CalendarEventDialog.tsx``), so their day keys are
- *    read back in that same zone — ``'UTC'`` when the row carries no
- *    ``tz``, which is the server default and the zone legacy rows were
- *    computed in. Timed rows are wall-clock events for whoever is
- *    looking, so they bucket in the viewer's zone.
- *  * **A midnight end is exclusive.** ``22:00 → 00:00`` is one evening,
- *    not two days: an end landing exactly on midnight (in the same zone
- *    its key was read in) belongs to the day before it. This also
- *    handles ICS-style exclusive ``00:00`` end bounds.
- *  * **Degenerate rows fail soft.** A missing / unparseable / backwards
- *    ``end`` degrades to a single-day event on the start day. An
- *    unparseable ``start`` is skipped entirely rather than minting a
- *    ``NaN-NaN-NaN`` bucket.
- *
- *  ``visibleRange`` (as produced by :func:`dateRangeForMode`) clamps the
- *  emitted keys to the visible period — the server's range query is
- *  overlap-based, so an event starting before the range comes back and
- *  would otherwise file a stray out-of-range day card (an April card in
- *  a May view). The clamp is measured in **viewer calendar days** for
- *  both conventions: the keyspace is calendar-day strings and
- *  :func:`formatDayLabel` renders each key as a viewer calendar day, so
- *  "which days are on screen" is a viewer-zone question even for a key
- *  the event's own zone produced. The walk *starts* inside the range
- *  rather than skipping its way in, so a span longer than :data:`MAX_SPAN_DAYS` whose
- *  visible days sit beyond day 366 still files cards inside the range.
- *  The clamp is **fail-soft**: if the clamped range is genuinely empty,
- *  the event still lands on its own start day. The visible range and the
- *  rows held in the caller's ``events`` signal can legitimately disagree
- *  — WS frames accrete rows for other periods into the same cache, and a
- *  fetch can land after the user has navigated — and a hard clamp would
- *  silently swallow those. Clamping never changes ``dayIndex`` /
- *  ``dayCount``, so a clipped span still reads "day 4 of 6".
- *
- *  Within a bucket, continuation entries come first — a running
- *  multi-day event is standing context for the day — then the events
- *  that actually start that day, sorted by start time so a
- *  multi-calendar overlay (the household page does one fetch per
- *  calendar then ``.flat()``s the results) doesn't surface in
- *  calendar-arrival order. */
-export function groupEventsByDay(
-  evts: CalendarEvent[],
-  visibleRange?: { start: string; end: string },
-): Record<string, DayEventEntry[]> {
-  const groups: Record<string, DayEventEntry[]> = {}
-  // The visible window is a span of VIEWER calendar days, for BOTH
-  // conventions — see the clamp below — so derive its bounds once.
-  const viewerLo = visibleRange ? viewerParts(visibleRange.start)?.key : undefined
-  const viewerHi = visibleRange ? viewerParts(visibleRange.end)?.key : undefined
-  for (const e of evts) {
-    const span = eventDaySpan(e)
-    if (!span) continue
-    const { startKey, endKey, dayCount } = span
-    const startOrdinal = keyOrdinal(startKey)
-    const endOrdinal = keyOrdinal(endKey)
-
-    // Clamp to the visible range in the VIEWER's calendar days —
-    // whichever convention produced the key. The bucket keyspace is
-    // calendar-day STRINGS and ``formatDayLabel`` renders each key as
-    // a viewer calendar day, so "is this day inside the visible
-    // period" is a question about viewer days. The event's own zone
-    // decides WHICH day an all-day event falls on; the viewer's period
-    // decides WHICH days are on screen. (Re-reading the range bounds
-    // in ``event.tz`` landed a day off for any viewer west of the
-    // event's zone — a Zurich all-day 30 May – 2 Jun leaked a 1 June
-    // card into a May view at plain UTC.) ``dateRangeForMode`` builds
-    // its bounds from LOCAL components before ``toISOString()``, so
-    // reading them back in the viewer's zone recovers exactly the
-    // first / last local day of the period.
-    //
-    // The walk also STARTS inside the range — beginning at the event's
-    // own start day would burn the MAX_SPAN_DAYS budget on invisible
-    // days and emit nothing for a genuinely-overlapping decade-long
-    // row.
-    const from = viewerLo
-      ? Math.max(startOrdinal, keyOrdinal(viewerLo)) : startOrdinal
-    const to = viewerHi
-      ? Math.min(endOrdinal, keyOrdinal(viewerHi)) : endOrdinal
-
-    let emittedAny = false
-    for (let o = from; o <= to && o - from < MAX_SPAN_DAYS; o++) {
-      const dayIndex = o - startOrdinal + 1
-      const entry: DayEventEntry = {
-        event: e,
-        dayIndex,
-        dayCount,
-        isFirst: dayIndex === 1,
-        isLast: dayIndex === dayCount,
-      }
-      const key = keyFromOrdinal(o)
-      if (!groups[key]) groups[key] = []
-      groups[key].push(entry)
-      emittedAny = true
-    }
-    // Fail-soft: a zero-overlap clamp must not make the event vanish.
-    if (!emittedAny) {
-      if (!groups[startKey]) groups[startKey] = []
-      groups[startKey].push({
-        event: e,
-        dayIndex: 1,
-        dayCount,
-        isFirst: true,
-        isLast: dayCount === 1,
-      })
-    }
-  }
-  for (const key of Object.keys(groups)) {
-    groups[key].sort((a, b) => {
-      // Continuations first, then starters by start time.
-      if (a.isFirst !== b.isFirst) return a.isFirst ? 1 : -1
-      return new Date(a.event.start).getTime()
-        - new Date(b.event.start).getTime()
-    })
-  }
-  return groups
-}
-
-/** Row labels for one day-card of an event — see
- *  :func:`formatDayPortion`. */
-export interface DayPortionLabels {
-  /** Row label. Multi-day: "1 – 3 May · from 16:00". Ordinary timed
-   *  event: "16:00". Single-day all-day event: "" (the existing
-   *  "All day" badge already says it). */
-  when: string
-  /** Span badge — "Starts" / "Day 2 of 3" / "Ends". ``null`` for a
-   *  single-day event, which needs no badge. */
-  badge: string | null
-  /** Screen-reader summary of the row's place in the span. ``null``
-   *  for a single-day event. */
-  aria: string | null
-}
-
-/** ``{ hour: '2-digit', minute: '2-digit' }`` clock for ``iso`` in the
- *  VIEWER's zone — no ``timeZone`` option at all.
- *
- *  Only timed rows ever get a clock: :func:`formatDayPortion` calls
- *  this exclusively on its ``!allDay`` paths, because an all-day row
- *  has no wall clock to quote (its ``00:00`` / ``23:59`` are storage
- *  artefacts, not something the host typed). And a timed row IS a
- *  wall-clock event for whoever is looking — the same convention
- *  :func:`groupEventsByDay` buckets timed rows with, so the printed
- *  clock and the day card it sits under can't disagree. */
-function clockIn(iso: string): string {
-  return new Date(iso).toLocaleTimeString(formatLocale(), {
-    hour: '2-digit', minute: '2-digit',
-  })
-}
-
-/** Per-day labels for one :interface:`DayEventEntry` — the row that
- *  renders under an agenda day heading (which already states the
- *  date), e.g. ``"1 – 3 May · from 16:00"`` + a ``"Starts"`` badge.
- *
- *  A **single-day** event gets no badge and no aria summary: an
- *  ordinary timed event keeps exactly the plain start time the row has
- *  always shown, and a single-day all-day event gets an EMPTY label
- *  (its "All day" badge already says everything a ``00:00`` clock
- *  would pretend to).
- *
- *  A **multi-day** event gets ``"<range> · <portion>"``: the compact
- *  localized range via ``Intl.DateTimeFormat.formatRange`` (which
- *  collapses the shared month/year per locale — ``"1 – 3 May"`` on
- *  en-GB, ``"May 1 – 3"`` on en-US, ``"28. Apr. – 3. Mai"`` on de-DE;
- *  hand-rolling it from two ``toLocaleDateString`` calls and a dash is
- *  what makes those read wrong), plus the day-specific clock hint —
- *  "from HH:MM" on the first day, "until HH:MM" on the last, "all day"
- *  for every day of an all-day span and for the middle days of a timed
- *  one (the event does cover those whole days). */
-export function formatDayPortion(entry: DayEventEntry): DayPortionLabels {
-  const { event, dayIndex, dayCount, isFirst, isLast } = entry
-  const allDay = event.all_day === true
-  // ``undefined`` means "the viewer's zone" to Intl — the convention
-  // for a timed row. An all-day row is anchored on its own tz.
-  const zone = allDay ? safeTimeZone(event.tz) : undefined
-  const startDate = new Date(event.start)
-
-  if (dayCount <= 1) {
-    return {
-      when: allDay ? '' : clockIn(event.start),
-      badge: null,
-      aria: null,
-    }
-  }
-
-  // The exclusive-end rule (:func:`lastInclusiveMoment`) — so a
-  // ``22:00 → next-day 00:00`` span can't print a range one day longer
-  // than the midnight-exclusive ``dayCount`` the badge claims.
-  const effectiveEnd = lastInclusiveMoment(event.end as string)
-  const range = new Intl.DateTimeFormat(formatLocale(), {
-    day: 'numeric', month: 'short', timeZone: zone,
-  }).formatRange(startDate, effectiveEnd)
-
-  // ``isFirst`` wins a degenerate ``isFirst && isLast`` entry (which
-  // can't occur for ``dayCount > 1``, but must not crash if it does).
-  const portion = allDay
-    ? t('event.span.all_day')
-    : isFirst
-      ? t('event.span.from', { time: clockIn(event.start) })
-      : isLast
-        ? t('event.span.until', {
-            time: clockIn(event.end as string),
-          })
-        : t('event.span.all_day')
-
-  const badge = isFirst
-    ? t('event.span.starts')
-    : isLast
-      ? t('event.span.ends')
-      : t('event.span.day_of', {
-          n: String(dayIndex), total: String(dayCount),
-        })
-
-  return {
-    when: `${range} · ${portion}`,
-    badge,
-    aria: t('event.span.aria', {
-      range, n: String(dayIndex), total: String(dayCount),
-    }),
-  }
 }
 
 /** The two bound labels of the expanded event detail — see
@@ -636,55 +377,6 @@ export function groupSharedEvents(
   return out
 }
 
-/** Friendly day-group label — "Today · Friday 8 May" / "Tomorrow ·
- *  Saturday 9 May" / "Mon 12 May" rather than the spreadsheet-y
- *  ``5/8/2026`` the toLocaleDateString default emits. ``dayKey`` is a
- *  ``YYYY-MM-DD`` bucket key (the shape :func:`groupEventsByDay`
- *  emits), parsed as a LOCAL date below. */
-export interface FriendlyDayLabel {
-  /** Long form for visual rendering: "Friday 8 May" */
-  long: string
-  /** Relative descriptor for the kicker: "Today" / "Tomorrow" / null */
-  relative: string | null
-  /** True when the bucket is the local current day. */
-  isToday: boolean
-}
-export function formatDayLabel(dayKey: string): FriendlyDayLabel {
-  // Parse ``YYYY-MM-DD`` (the shape :func:`groupEventsByDay` emits) as
-  // a LOCAL date — ``new Date('2026-05-14')`` would treat it as UTC
-  // midnight and bump the rendered day back by one for viewers west of
-  // UTC. Any other shape falls through to the generic ``new Date()``
-  // path so legacy callers / tests that still pass
-  // ``toLocaleDateString()`` output keep working.
-  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dayKey)
-  const date = iso
-    ? new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]))
-    : new Date(dayKey)
-  if (Number.isNaN(date.getTime())) {
-    return { long: dayKey, relative: null, isToday: false }
-  }
-  const today = new Date()
-  const sameDay = (a: Date, b: Date) =>
-    a.getFullYear() === b.getFullYear()
-    && a.getMonth() === b.getMonth()
-    && a.getDate() === b.getDate()
-  const tomorrow = new Date(today)
-  tomorrow.setDate(today.getDate() + 1)
-  const isToday = sameDay(date, today)
-  const isTomorrow = sameDay(date, tomorrow)
-  const long = date.toLocaleDateString(formatLocale(), {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-  })
-  const relative = isToday
-    ? 'Today'
-    : isTomorrow
-      ? 'Tomorrow'
-      : null
-  return { long, relative, isToday }
-}
-
 /** Heading for a month-view month strip — "April 2026", localised. */
 export function formatMonthHeading(date: Date): string {
   return date.toLocaleDateString(formatLocale(), {
@@ -697,31 +389,6 @@ export function formatMonthHeading(date: Date): string {
 export function monthRange(date: Date): { start: string; end: string } {
   const start = new Date(date.getFullYear(), date.getMonth(), 1)
   const end = new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59)
-  return { start: start.toISOString(), end: end.toISOString() }
-}
-
-/** ISO bounds covering the active period for ``mode`` anchored at
- *  ``date``. Month → calendar month; week → the 7 days opening on
- *  ``weekStart`` (default: the user's ``week_start`` preference,
- *  re-read on every call); day → 00:00 to 23:59:59. Used by both the
- *  household calendar and the per-space calendar's view-mode switcher. */
-export function dateRangeForMode(
-  date: Date,
-  mode: CalendarViewMode,
-  weekStart: WeekStart = currentWeekStart(),
-): { start: string; end: string } {
-  if (mode === 'month') return monthRange(date)
-  const d = new Date(date)
-  if (mode === 'week') {
-    const start = startOfWeek(d, weekStart)
-    const end = new Date(start)
-    end.setDate(start.getDate() + 6)
-    end.setHours(23, 59, 59, 0)
-    return { start: start.toISOString(), end: end.toISOString() }
-  }
-  // day
-  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-  const end = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59)
   return { start: start.toISOString(), end: end.toISOString() }
 }
 

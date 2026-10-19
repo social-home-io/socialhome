@@ -14,9 +14,12 @@ import {
 import { CalendarFilterStrip } from '@/components/CalendarFilterStrip'
 import { CalendarImport, openCalendarImport } from '@/components/CalendarImport'
 import { CapacityStrip } from '@/components/CapacityStrip'
+import { CalendarGrid } from '@/components/CalendarGrid'
+import { CalendarUpcoming } from '@/components/CalendarUpcoming'
+import type { RowDecor } from '@/components/CalendarEventRow'
 import { EventOverflowMenu } from '@/components/EventOverflowMenu'
-import { EventRowMeta } from '@/components/EventRowMeta'
 import { LocationLink } from '@/components/LocationLink'
+import { SegmentedSwitch } from '@/components/SegmentedSwitch'
 import { HostApprovalQueue } from '@/components/HostApprovalQueue'
 import { ReminderPicker } from '@/components/ReminderPicker'
 import { showToast } from '@/components/Toast'
@@ -24,10 +27,15 @@ import { currentUser } from '@/store/auth'
 import { householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
 import { events, rsvpCounts, myRsvpStatus, activeCalendarScope } from '@/store/calendar'
 import {
-  advanceDate, calendarHue, dateRangeForMode, formatDayLabel, formatEventBounds,
-  formatRangeHeading, groupEventsByDay, groupSharedEvents, resolveCalendarColor,
-  type CalendarViewMode,
+  advanceDate, calendarHue, formatEventBounds, formatRangeHeading, groupSharedEvents,
+  resolveCalendarColor,
 } from '@/utils/calendar'
+import {
+  CALENDAR_WIDE_QUERY, UPCOMING_WEEKS, gridRange, gridWeeks, upcomingRange, viewOnScreen,
+  type CalendarView,
+} from '@/utils/calendarViews'
+import { currentWeekStart } from '@/utils/week'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { t } from '@/i18n/i18n'
 import { confirmDialog } from '@/components/confirm'
 import { TabHeader } from '@/components/TabHeader'
@@ -70,7 +78,10 @@ function saveVisibilityPrefs(userId: string, ids: Set<string>): void {
 }
 
 const loading = signal(true)
-const viewMode = signal<CalendarViewMode>('month')
+/** Upcoming (default) · Month · Week (wide screens) — the same views as
+ *  a space's Calendar (owner decision 9; the household page follows, no
+ *  Day view). */
+const viewMode = signal<CalendarView>('upcoming')
 /** Calendar id used as the "write target" — the calendar the +New-
  *  event dialog writes to. Always the caller's own calendar; doesn't
  *  change when they overlay another member's calendar. */
@@ -80,12 +91,19 @@ const writeCalendarId = signal<string>('')
 const visibleCalendarIds = signal<Set<string>>(new Set())
 const calendars = signal<CalendarSummary[]>([])
 const currentDate = signal(new Date())
-/** Which agenda row is expanded, as ``"<dayKey>:<eventId>"``. Keyed
- *  by the DAY CARD, not the event: a multi-day event renders one row
- *  per covered day, so an event-id key would expand all of them at
- *  once when the user clicks Saturday. */
-const selectedRow = signal<string | null>(null)
 const rsvpPending = signal<string | null>(null)
+
+/** Is the screen wide enough for Week right now (outside a render)? */
+function wideNow(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia(CALENDAR_WIDE_QUERY).matches
+}
+
+/** The range a view reads: Upcoming is a rolling window from today;
+ *  Month / Week the whole weeks the grid shows. */
+function rangeFor(v: CalendarView): { start: string; end: string } {
+  if (v === 'upcoming') return upcomingRange(new Date())
+  return gridRange(gridWeeks(currentDate.value, v, currentWeekStart()))
+}
 
 async function loadEvents() {
   const ids = Array.from(visibleCalendarIds.value)
@@ -95,7 +113,7 @@ async function loadEvents() {
     return
   }
   loading.value = true
-  const { start, end } = dateRangeForMode(currentDate.value, viewMode.value)
+  const { start, end } = rangeFor(viewOnScreen(viewMode.value, wideNow()))
   try {
     const responses = await Promise.all(ids.map(id =>
       api.get(`/api/calendars/${id}/events`, { start, end })
@@ -111,8 +129,8 @@ async function loadEvents() {
   loading.value = false
 }
 
-function navigateDate(direction: number) {
-  currentDate.value = advanceDate(currentDate.value, direction, viewMode.value)
+function navigateDate(direction: number, mode: 'month' | 'week') {
+  currentDate.value = advanceDate(currentDate.value, direction, mode)
 }
 
 /** Lazily ensure a default household calendar exists for the caller.
@@ -222,6 +240,9 @@ export default function CalendarPage() {
 /** The calendar tab — household agenda, filters, event dialog. */
 function CalendarAgenda() {
   useTitle(t('nav.calendar'))
+  const wide = useMediaQuery(CALENDAR_WIDE_QUERY)
+  // Week on a phone (a rotated tablet, a narrowed window) shows Month.
+  const current = viewOnScreen(viewMode.value, wide)
   useEffect(() => {
     // Drop any rows the WS handler accreted while we were on a
     // different surface — we'll re-fetch the right ones below.
@@ -282,7 +303,7 @@ function CalendarAgenda() {
       activeCalendarScope.value = visibleCalendarIds.value
       loadEvents()
     }
-  }, [viewMode.value, currentDate.value])
+  }, [current, currentDate.value])
 
   const handleNewEvent = async () => {
     try {
@@ -333,7 +354,6 @@ function CalendarAgenda() {
     try {
       await api.delete(`/api/calendars/events/${eventId}`)
       showToast(t('calendar.page.deleted'), 'success')
-      selectedRow.value = null
       await loadEvents()
     } catch (err: unknown) {
       showToast(t('calendar.page.delete_failed', { error: String((err as Error).message ?? err) }), 'error')
@@ -346,7 +366,6 @@ function CalendarAgenda() {
     // editable, including attendees, the RSVP toggle, and the "For:"
     // target calendar (so an event can be moved between members'
     // calendars without delete-and-recreate).
-    selectedRow.value = null
     openEditEventDialog(
       {
         id: evt.id,
@@ -402,11 +421,15 @@ function CalendarAgenda() {
     void loadEvents()
   }
 
-  // "Show in calendar" after an import: move the view to the earliest
+  // "Show in calendar" after an import: Month view at the earliest
   // imported event — an .ics export usually covers other months.
   const showImported = (imported: { start: string }[]) => {
     const times = imported.map(e => Date.parse(e.start)).filter(t => !Number.isNaN(t))
-    if (times.length > 0) currentDate.value = new Date(Math.min(...times))
+    if (times.length > 0) {
+      // Upcoming only looks ahead from today; Month shows the import.
+      viewMode.value = 'month'
+      currentDate.value = new Date(Math.min(...times))
+    }
   }
 
   const setVisible = (next: Set<string>) => {
@@ -432,17 +455,152 @@ function CalendarAgenda() {
 
   if (loading.value) return <>{importHost}<CalendarSkeleton /></>
 
-  // Pass the visible range so the overlap-based server query (which
-  // legitimately returns an event that started before the period) can't
-  // file a stray out-of-range day card — an April card in a May view.
-  const grouped = groupEventsByDay(
-    events.value,
-    dateRangeForMode(currentDate.value, viewMode.value),
-  )
-  // Keys are ``YYYY-MM-DD`` (see ``groupEventsByDay``) so a plain
-  // lexicographic sort is chronological — no locale-fragile
-  // ``new Date(key)`` round-trip required.
-  const dayKeys = Object.keys(grouped).sort()
+  const weekStart = currentWeekStart()
+  const now = new Date()
+  const me = currentUser.value?.username
+  const myUid = currentUser.value?.user_id
+  const calendarOf = (id: string) => calendars.value.find(c => c.id === id)
+
+  /** Owner chips — one per DISTINCT owner of a copy, so a household
+   *  dinner reads "YOU · BOB" instead of two rows; each in its own
+   *  calendar's hue. The source is ``copies`` (the server's
+   *  visibility-independent copy set); ``_grouped_*`` is the fallback for
+   *  uuid-less legacy / ICS rows, where the server sends ``copies: []``. */
+  const ownerChips = (e: CalendarEvent): { name: string; color: string }[] => {
+    const groupedCalIds =
+      (e.copies?.length ? e.copies.map(c => c.calendar_id) : null)
+      ?? e._grouped_calendar_ids ?? [e.calendar_id]
+    const copyOwners = new Map((e.copies ?? []).map(c => [c.calendar_id, c.owner_username]))
+    const chips: { name: string; color: string }[] = []
+    const seen = new Set<string>()
+    for (const calId of groupedCalIds) {
+      const cal = calendarOf(calId)
+      const owner = cal?.owner_username ?? copyOwners.get(calId)
+      if (!owner || seen.has(owner)) continue
+      seen.add(owner)
+      // Neutral ink when the calendar row isn't on hand — a hashed hue
+      // would imply a colour the picker never shows.
+      const color = cal ? resolveCalendarColor(cal) : 'var(--sh-text-muted)'
+      if (owner === me) {
+        chips.push({ name: t('calendar.page.owner_you'), color })
+        continue
+      }
+      let name: string = owner
+      for (const u of householdUsers.value.values()) {
+        if (u.username === owner) { name = u.display_name || u.username; break }
+      }
+      chips.push({ name, color })
+    }
+    return chips
+  }
+
+  /** The row's rail takes its calendar's colour; the owner chips follow
+   *  the title when they add information — more than one owner holds a
+   *  copy (shared), or more than one calendar is overlaid (whose row this
+   *  is). A lone "You" on your only calendar would be noise. */
+  const decorate = (e: CalendarEvent): RowDecor => {
+    const cal = calendarOf(e.calendar_id)
+    const hue = cal ? resolveCalendarColor(cal) : calendarHue(e.calendar_id)
+    const chips = ownerChips(e)
+    const show = chips.length > 1 || visibleCalendarIds.value.size > 1
+    if (!show || chips.length === 0) return { hue }
+    return {
+      hue,
+      badges: (
+        <span
+          class="sh-event-owner-chips"
+          aria-label={
+            chips.length === 1
+              ? t('calendar.page.on_calendar', { name: chips[0].name })
+              : t('calendar.page.shared_with', { names: chips.map(c => c.name).join(', ') })
+          }
+        >
+          {chips.map(chip => (
+            <span key={chip.name} class="sh-event-owner"
+                  style={{ '--cal-hue': chip.color } as Record<string, string>}>
+              {chip.name}
+            </span>
+          ))}
+        </span>
+      ),
+    }
+  }
+
+  /** What an opened row shows: where, the note, the times, RSVP,
+   *  reminders, the host's approval queue, and Edit / Delete / ⋯. */
+  const detail = (e: CalendarEvent) => {
+    // RSVP only when explicitly enabled (``rsvp_enabled``) OR capped (the
+    // legacy signal that an event needs confirmation) — and never for the
+    // creator alone on their own one-attendee event.
+    const others = (e.attendees ?? []).filter(uid => uid !== myUid)
+    const isCapped = e.capacity != null
+    const showRsvp = (e.rsvp_enabled || isCapped)
+      && others.length > 0
+      && (e.attendees ?? []).includes(myUid ?? '__none__')
+    const bounds = formatEventBounds(e)
+    return (
+      <>
+        {e.cover_url && (
+          <img class="sh-event-cover-thumb" src={e.cover_url} alt="" loading="lazy" />
+        )}
+        {e.location && (
+          <p class="sh-event-location-row">
+            <LocationLink value={e.location} class="sh-event-location" />
+          </p>
+        )}
+        {e.description && <p class="sh-cal-row__desc">{e.description}</p>}
+        <div class="sh-event-times">
+          <span>{t('event.starts')} {bounds.starts}</span>
+          <span>{t('event.ends')} {bounds.ends}</span>
+        </div>
+        {showRsvp && (
+          <CapacityStrip
+            counts={rsvpCounts.value[e.id]}
+            capacity={e.capacity}
+            myStatus={
+              (myRsvpStatus.value[e.id] ?? null) as
+                | 'going' | 'maybe' | 'declined' | 'requested' | 'waitlist' | null
+            }
+          />
+        )}
+        {showRsvp && (
+          <div class="sh-event-rsvp" role="group" aria-label={t('event.rsvp.aria')}>
+            {(['going', 'maybe', 'declined'] as const).map((status) => {
+              const ended = isEventEnded(e)
+              const labelKey = isCapped && status === 'going'
+                ? 'event.rsvp.request_to_join'
+                : `event.rsvp.${status}`
+              return (
+                <Button
+                  key={status}
+                  variant={status === 'going' ? 'primary' : 'secondary'}
+                  loading={rsvpPending.value === `${e.id}:${status}`}
+                  disabled={ended}
+                  title={ended ? t('event.has_ended_tooltip') : undefined}
+                  onClick={() => handleRsvp(e, status)}
+                >
+                  {t(labelKey)}
+                </Button>
+              )
+            })}
+          </div>
+        )}
+        <ReminderPicker eventId={e.id} occurrenceAt={e.rrule ? e.start : null} />
+        {e.capacity != null && (
+          e.created_by === myUid || currentUser.value?.is_admin
+        ) && (
+          <HostApprovalQueue eventId={e.id} spaceId={null} occurrenceAt={e.rrule ? e.start : null} />
+        )}
+        <div class="sh-event-admin sh-row">
+          <Button variant="secondary" onClick={() => handleEdit(e)}>{t('event.edit')}</Button>
+          <Button variant="danger" onClick={() => handleDelete(e.id)}>{t('event.delete')}</Button>
+          <EventOverflowMenu eventId={e.id} />
+        </div>
+      </>
+    )
+  }
+
+  const views: CalendarView[] = wide ? ['upcoming', 'month', 'week'] : ['upcoming', 'month']
 
   return (
     <>{importHost}
@@ -463,312 +621,81 @@ function CalendarAgenda() {
         }
       />
 
-      <div class="sh-calendar-controls">
-        <div class="sh-calendar-nav">
-          <Button variant="secondary"
-                  // Keys: calendar.prev_{month,week,day}
-                  aria-label={t(`calendar.prev_${viewMode.value}`)}
-                  onClick={() => navigateDate(-1)}>&#8249;</Button>
-          <span class="sh-calendar-heading">{formatRangeHeading(currentDate.value, viewMode.value)}</span>
-          <Button variant="secondary"
-                  // Keys: calendar.next_{month,week,day}
-                  aria-label={t(`calendar.next_${viewMode.value}`)}
-                  onClick={() => navigateDate(1)}>&#8250;</Button>
-          <Button variant="secondary" onClick={() => { currentDate.value = new Date() }}>{t('calendar.today')}</Button>
-        </div>
-        <div class="sh-calendar-views" role="tablist">
-          {(['month', 'week', 'day'] as CalendarViewMode[]).map(mode => (
-            <button
-              key={mode}
-              type="button"
-              role="tab"
-              aria-selected={viewMode.value === mode}
-              class={viewMode.value === mode ? 'sh-tab sh-tab--active' : 'sh-tab'}
-              onClick={() => { viewMode.value = mode }}
-            >
-              {t(`calendar.${mode}`)}
-            </button>
-          ))}
-        </div>
+      <div class="sh-space-cal-bar">
+        <SegmentedSwitch<CalendarView>
+          class="sh-space-cal-bar__views"
+          options={views}
+          value={current}
+          labels={{
+            upcoming: t('calendar.upcoming'),
+            month: t('calendar.month'),
+            week: t('calendar.week'),
+          }}
+          ariaLabel={t('calendar.views_aria')}
+          onChange={(v) => { viewMode.value = v }}
+        />
       </div>
 
-      {events.value.length === 0 && (
-        <div class="sh-empty-state">
-          <div aria-hidden="true">📅</div>
-          {/* Keys: calendar.empty_{month,week,day} */}
-          <h2>{t(`calendar.empty_${viewMode.value}`)}</h2>
-          <p>{t('calendar.page.empty_body')}</p>
-          <div class="sh-empty-state__cta-row">
-            <Button onClick={handleNewEvent}>
-              + {t('calendar.page.first_event')}
-            </Button>
-            <Button variant="secondary" onClick={openCalendarImport}>
-              {t('calendar.page.import_file')}
-            </Button>
-          </div>
+      {current !== 'upcoming' && (
+        <div class="sh-space-cal-nav">
+          {/* ‹ › are bidi-mirrored characters: RTL turns them by itself. */}
+          <Button variant="secondary"
+                  // Keys: calendar.prev_{month,week}
+                  aria-label={t(`calendar.prev_${current}`)}
+                  onClick={() => navigateDate(-1, current)}>
+            <span aria-hidden="true">&#8249;</span>
+          </Button>
+          <h2 class="sh-space-cal-nav__heading">
+            {formatRangeHeading(currentDate.value, current, weekStart)}
+          </h2>
+          <Button variant="secondary"
+                  // Keys: calendar.next_{month,week}
+                  aria-label={t(`calendar.next_${current}`)}
+                  onClick={() => navigateDate(1, current)}>
+            <span aria-hidden="true">&#8250;</span>
+          </Button>
+          <Button variant="secondary" onClick={() => { currentDate.value = new Date() }}>
+            {t('calendar.today')}
+          </Button>
         </div>
       )}
 
-      {dayKeys.map(dayKey => {
-        const friendly = formatDayLabel(dayKey)
-        return (
-        <div key={dayKey} class="sh-calendar-day-group">
-          <h2
-            class={
-              friendly.isToday
-                ? 'sh-calendar-day-heading sh-calendar-day-heading--today'
-                : 'sh-calendar-day-heading'
-            }
-          >
-            {friendly.long}
-            {friendly.relative && (
-              <span class="sh-calendar-day-heading__rel">{friendly.relative}</span>
-            )}
-          </h2>
-          {grouped[dayKey].map(entry => {
-            // ``e`` stays bound to the underlying event row so
-            // everything below (owner chips, RSVP gating, edit /
-            // delete, reminders) reads unchanged; ``entry`` only
-            // carries this day card's place in the span.
-            const e = entry.event
-            const rowKey = `${dayKey}:${e.id}`
-            // Disclosure wiring: the header is a native <button> and the
-            // detail panel is its SIBLING (it holds Edit / Delete / RSVP /
-            // ReminderPicker — interactive elements nested inside a button
-            // would be invalid HTML and break keyboard traversal). The id
-            // is derived from the same parts as ``rowKey`` but kept a clean
-            // token (no ``:``) so it reads well in ``aria-controls``.
-            const isOpen = selectedRow.value === rowKey
-            const detailId = `sh-event-detail-${dayKey}-${e.id}`
-            // Owner byline / chips — one chip per DISTINCT owner of a
-            // copy, so a household dinner reads as one row "YOU · BOB"
-            // instead of two stacked rows. Each chip carries its OWN
-            // calendar's hue so the sharing reads as ``YOU
-            // (terracotta) · BOB (moss)`` rather than two
-            // same-coloured pills.
-            //
-            // The source is ``copies`` — the server's authoritative,
-            // visibility-INDEPENDENT copy set. It used to be the
-            // ``_grouped_*`` render artifact behind a "more than one
-            // calendar visible" gate, which meant a shared event was
-            // silently indistinguishable from a personal one whenever
-            // the viewer had only their own calendar on. That hidden
-            // sharing was half the "I tick the other members and
-            // nothing happens" bug. ``_grouped_*`` stays as the
-            // fallback for uuid-less legacy / ICS rows and space
-            // events, where the server sends ``copies: []``.
-            const groupedCalIds =
-              (e.copies?.length ? e.copies.map(c => c.calendar_id) : null)
-              ?? e._grouped_calendar_ids ?? [e.calendar_id]
-            // Owner carried on the copy itself — the defensive fallback
-            // for a calendar id missing from ``calendars`` (shouldn't
-            // happen: /api/calendars returns the whole household).
-            const copyOwners = new Map(
-              (e.copies ?? []).map(c => [c.calendar_id, c.owner_username]),
-            )
-            const ownerChips: { name: string; color: string }[] = []
-            const me = currentUser.value?.username
-            const seen = new Set<string>()
-            for (const calId of groupedCalIds) {
-              const cal = calendars.value.find(c => c.id === calId)
-              const owner = cal?.owner_username ?? copyOwners.get(calId)
-              if (!owner) continue
-              if (seen.has(owner)) continue
-              seen.add(owner)
-              // Neutral ink when the calendar row isn't on hand — a
-              // hashed hue would imply a colour the picker never shows.
-              const color = cal
-                ? resolveCalendarColor(cal)
-                : 'var(--sh-text-muted)'
-              if (owner === me) {
-                ownerChips.push({ name: t('calendar.page.owner_you'), color })
-                continue
-              }
-              let name: string = owner
-              for (const u of householdUsers.value.values()) {
-                if (u.username === owner) {
-                  name = u.display_name || u.username
-                  break
-                }
-              }
-              ownerChips.push({ name, color })
-            }
-            // Chips earn their place when they add information: more
-            // than one owner holds a copy (the event is shared), or
-            // more than one calendar is overlaid (the byline says whose
-            // row this is — hue alone is a thin accent, two household
-            // calendars can sit close together, and it's inaccessible
-            // to anyone who can't discriminate them). With a single
-            // owner AND a single calendar on screen the owner is
-            // implied, so a lone "You" would be noise.
-            const showOwnerChips =
-              ownerChips.length > 1 || visibleCalendarIds.value.size > 1
-            const shownChips = showOwnerChips ? ownerChips : []
-            return (
-            <div key={rowKey}
-                 class={
-                   'sh-event'
-                   + (entry.isFirst ? '' : ' sh-event--continued')
-                   + (entry.isLast ? '' : ' sh-event--continues')
-                 }
-                 style={{ '--cal-hue': (() => {
-                   const cal = calendars.value.find(c => c.id === e.calendar_id)
-                   return cal ? resolveCalendarColor(cal) : calendarHue(e.calendar_id)
-                 })() } as Record<string, string>}>
-              <button
-                type="button"
-                class="sh-event-header"
-                aria-expanded={isOpen}
-                aria-controls={detailId}
-                onClick={() => {
-                  selectedRow.value = isOpen ? null : rowKey
-                }}
-              >
-                {e.cover_url && (
-                  <img
-                    class="sh-event-cover-thumb"
-                    src={e.cover_url}
-                    alt=""
-                    loading="lazy"
-                  />
-                )}
-                <strong>{e.summary}</strong>
-                {shownChips.length > 0 && (
-                  <span
-                    class="sh-event-owner-chips"
-                    aria-label={
-                      shownChips.length === 1
-                        ? t('calendar.page.on_calendar', { name: shownChips[0].name })
-                        : t('calendar.page.shared_with', { names: shownChips.map(c => c.name).join(', ') })
-                    }
-                  >
-                    {shownChips.map(chip => (
-                      <span
-                        key={chip.name}
-                        class="sh-event-owner"
-                        style={{ '--cal-hue': chip.color } as Record<string, string>}
-                      >
-                        {chip.name}
-                      </span>
-                    ))}
-                  </span>
-                )}
-                <EventRowMeta entry={entry}>
-                  {e.location && (
-                    // Compact "where" hint on the collapsed row. The full
-                    // location + maps link only renders inside the expanded
-                    // detail to keep the row visually quiet.
-                    <span
-                      class="sh-event-row-locpin"
-                      aria-label={t('calendar.page.location_aria', { location: e.location })}
-                      title={e.location}
-                    >
-                      📍
-                    </span>
-                  )}
-                </EventRowMeta>
-              </button>
-              {isOpen && (() => {
-                // RSVP visibility: only when explicitly enabled
-                // (``rsvp_enabled``) OR when there's a capacity cap
-                // (the legacy Phase C signal that an event needs
-                // confirmation). And even then, hide the buttons for
-                // the creator viewing their own one-attendee event —
-                // there's nobody to ask.
-                const myUid = currentUser.value?.user_id
-                const others = (e.attendees ?? []).filter(uid => uid !== myUid)
-                const hasOthers = others.length > 0
-                const isCapped = e.capacity != null
-                const showRsvp = (e.rsvp_enabled || isCapped)
-                  && hasOthers
-                  && (e.attendees ?? []).includes(myUid ?? '__none__')
-                // One call, two labels — the helper builds two Dates
-                // and up to two Intl formatters per invocation.
-                const bounds = formatEventBounds(e)
-                return (
-                <div class="sh-event-detail" id={detailId}>
-                  {e.location && (
-                    <p class="sh-event-location-row">
-                      <LocationLink
-                        value={e.location}
-                        class="sh-event-location"
-                      />
-                    </p>
-                  )}
-                  {e.description && <p>{e.description}</p>}
-                  <div class="sh-event-times">
-                    <span>{t('event.starts')} {bounds.starts}</span>
-                    <span>{t('event.ends')} {bounds.ends}</span>
-                  </div>
-
-                  {showRsvp && (
-                    <CapacityStrip
-                      counts={rsvpCounts.value[e.id]}
-                      capacity={e.capacity}
-                      myStatus={
-                        (myRsvpStatus.value[e.id] ?? null) as
-                          | 'going' | 'maybe' | 'declined' | 'requested' | 'waitlist' | null
-                      }
-                    />
-                  )}
-
-                  {showRsvp && (
-                    <div class="sh-event-rsvp" role="group" aria-label={t('event.rsvp.aria')}>
-                      {(['going', 'maybe', 'declined'] as const).map((status) => {
-                        const ended = isEventEnded(e)
-                        const labelKey = isCapped && status === 'going'
-                          ? 'event.rsvp.request_to_join'
-                          : `event.rsvp.${status}`
-                        const ariaTip = ended ? t('event.has_ended_tooltip') : ''
-                        return (
-                          <Button
-                            key={status}
-                            variant={status === 'going' ? 'primary' : 'secondary'}
-                            loading={rsvpPending.value === `${e.id}:${status}`}
-                            disabled={ended}
-                            title={ariaTip || undefined}
-                            onClick={() => handleRsvp(e, status)}
-                          >
-                            {t(labelKey)}
-                          </Button>
-                        )
-                      })}
-                    </div>
-                  )}
-
-                  <ReminderPicker
-                    eventId={e.id}
-                    occurrenceAt={e.rrule ? e.start : null}
-                  />
-
-                  {e.capacity != null && (
-                    e.created_by === currentUser.value?.user_id
-                      || currentUser.value?.is_admin
-                  ) && (
-                    <HostApprovalQueue
-                      eventId={e.id}
-                      spaceId={null}
-                      occurrenceAt={e.rrule ? e.start : null}
-                    />
-                  )}
-
-                  <div class="sh-event-admin sh-row">
-                    <Button variant="secondary" onClick={() => handleEdit(e)}>
-                      {t('event.edit')}
-                    </Button>
-                    <Button variant="danger" onClick={() => handleDelete(e.id)}>
-                      {t('event.delete')}
-                    </Button>
-                    <EventOverflowMenu eventId={e.id} />
-                  </div>
-                </div>
-                )
-              })()}
+      {current === 'upcoming' ? (
+        <CalendarUpcoming
+          events={events.value}
+          now={now}
+          weekStart={weekStart}
+          renderDetail={detail}
+          decorate={decorate}
+          empty={(
+            <div class="sh-empty-state">
+              <div aria-hidden="true">📅</div>
+              <h2>{t('calendar.upcoming.empty', { weeks: String(UPCOMING_WEEKS) })}</h2>
+              <p>{t('calendar.page.empty_body')}</p>
+              <div class="sh-empty-state__cta-row">
+                <Button onClick={handleNewEvent}>+ {t('calendar.page.first_event')}</Button>
+                <Button variant="secondary" onClick={openCalendarImport}>
+                  {t('calendar.page.import_file')}
+                </Button>
+              </div>
             </div>
-          )})}
-        </div>
-        )
-      })}
+          )}
+          footer={events.value.length > 0
+            ? t('calendar.upcoming.end', { weeks: String(UPCOMING_WEEKS) })
+            : undefined}
+        />
+      ) : (
+        <CalendarGrid
+          view={current}
+          cursor={currentDate.value}
+          events={events.value}
+          weekStart={weekStart}
+          now={now}
+          renderDetail={detail}
+          decorate={decorate}
+          maxLanes={wide ? 3 : 2}
+        />
+      )}
 
       <CalendarEventDialog onCreated={(newCopyIds) => {
         // The dialog reports only the calendars that received a NEW

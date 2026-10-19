@@ -11,6 +11,10 @@
  * The row header is a disclosure button; the detail (``children``)
  * renders as its sibling while open, so a surface puts its own actions
  * (Delete, Report, RSVP) there without nesting controls in a button.
+ *
+ * A surface may decorate a row (``RowDecor``): the household calendar
+ * paints the rail in the event's calendar colour and names whose
+ * calendars hold it (owner chips) after the title.
  */
 import type { ComponentChildren } from 'preact'
 import { formatLocale, t } from '@/i18n/i18n'
@@ -53,6 +57,13 @@ export function rowMeta(entry: SpanEntry): string {
   return parts.join(' · ')
 }
 
+/** What a surface adds to a row: the rail colour (a calendar's hue) and
+ *  small labels after the title (whose calendar it is on). */
+export interface RowDecor {
+  hue?: string
+  badges?: ComponentChildren
+}
+
 /** Rail colour: timed, all-day, or several days. */
 function railKind(entry: SpanEntry): 'timed' | 'allday' | 'multi' {
   if (entry.dayCount > 1) return 'multi'
@@ -67,13 +78,16 @@ interface Props {
   detailId: string
   /** The expanded detail; rendered only while ``open``. */
   children?: ComponentChildren
+  decor?: RowDecor
 }
 
-export function CalendarEventRow({ entry, open, onToggle, detailId, children }: Props) {
+export function CalendarEventRow({ entry, open, onToggle, detailId, children, decor }: Props) {
   const when = rowWhen(entry)
   const meta = rowMeta(entry)
+  const hue = decor?.hue
   return (
-    <div class={`sh-cal-row sh-cal-row--${railKind(entry)}${open ? ' is-open' : ''}`}>
+    <div class={`sh-cal-row sh-cal-row--${railKind(entry)}${hue ? ' sh-cal-row--hued' : ''}${open ? ' is-open' : ''}`}
+         style={hue ? { '--sh-cal-hue': hue } : undefined}>
       <button type="button" class="sh-cal-row__head"
               aria-expanded={open} aria-controls={detailId} onClick={onToggle}>
         <span class="sh-cal-row__when">
@@ -84,6 +98,7 @@ export function CalendarEventRow({ entry, open, onToggle, detailId, children }: 
         <span class="sh-cal-row__rail" aria-hidden="true" />
         <span class="sh-cal-row__body">
           <strong class="sh-cal-row__title">{entry.event.summary}</strong>{' '}
+          {decor?.badges}
           {meta && <span class="sh-cal-row__meta">{meta}</span>}
         </span>
       </button>

@@ -37,7 +37,8 @@ import { CalendarGrid } from '@/components/CalendarGrid'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { advanceDate, formatEventBounds, formatRangeHeading } from '@/utils/calendar'
 import {
-  UPCOMING_WEEKS, gridRange, gridWeeks, upcomingRange, type CalendarView,
+  CALENDAR_WIDE_QUERY, UPCOMING_WEEKS, gridRange, gridWeeks, upcomingRange, viewOnScreen,
+  type CalendarView,
 } from '@/utils/calendarViews'
 import { currentWeekStart } from '@/utils/week'
 import { announceQueued, isQueuedWrite } from '@/utils/contentWrite'
@@ -45,7 +46,7 @@ import { pendingDeletes, undoableDelete } from '@/utils/undoableDelete'
 import { AccessNote } from './AccessNote'
 
 /** Week needs room for seven readable columns. */
-export const WIDE_QUERY = '(min-width: 769px)'
+export const WIDE_QUERY = CALENDAR_WIDE_QUERY
 
 const events = signal<CalendarEvent[]>([])
 /** The last read failed — an error with Retry, not the empty state. */
@@ -74,10 +75,7 @@ export function resetSpaceCalendar(): void {
   subscribeOpen.value = false
 }
 
-/** The view on screen: Week falls back to Month on a narrow screen. */
-function onScreen(v: CalendarView, wide: boolean): CalendarView {
-  return v === 'week' && !wide ? 'month' : v
-}
+const onScreen = viewOnScreen
 
 /** Is the screen wide enough for Week right now (outside a render)? */
 function wideNow(): boolean {

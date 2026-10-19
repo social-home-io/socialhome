@@ -9,7 +9,7 @@ import type { CalendarEvent } from '@/types'
 import {
   UPCOMING_WEEKS, entriesOnDay, gridRange, gridWeeks, groupUpcomingByWeek,
   layoutWeekBars, shortDay, spanDays, spanEntries, upcomingRange, upcomingWeekTitle,
-  weekRangeLabel,
+  viewOnScreen, weekRangeLabel,
 } from './calendarViews'
 
 /** A timed event on local wall-clock times. */
@@ -132,6 +132,37 @@ describe('gridWeeks / gridRange', () => {
     const { start, end } = gridRange(gridWeeks(NOW, 'month', 0))
     expect(new Date(start)).toEqual(new Date(2026, 8, 28))
     expect(new Date(end)).toEqual(new Date(2026, 10, 1, 23, 59, 59))
+  })
+
+  it('Week follows the week start: a Sunday is the last day (Monday) or the first (Sunday)', () => {
+    const sunday = new Date(2026, 9, 4, 15, 30)
+    expect(gridWeeks(sunday, 'week', 0)[0][0]).toBe('2026-09-28')
+    expect(gridWeeks(sunday, 'week', 6)[0][0]).toBe('2026-10-04')
+    // A Saturday closes the Sunday-start week.
+    expect(gridWeeks(new Date(2026, 9, 3, 9), 'week', 6)[0]).toContain('2026-09-27')
+  })
+
+  it('a week spanning a DST change still ends at local 23:59:59', () => {
+    // US DST ends Sun 1 Nov 2026, inside the Mon 26 Oct – Sun 1 Nov week.
+    const prevTz = process.env.TZ
+    process.env.TZ = 'America/New_York'
+    try {
+      expect(new Date(2026, 9, 26).getTimezoneOffset())
+        .not.toBe(new Date(2026, 10, 1, 12).getTimezoneOffset())
+      const r = gridRange(gridWeeks(new Date(2026, 9, 27, 12), 'week', 0))
+      expect(r.start).toBe(new Date(2026, 9, 26, 0, 0, 0).toISOString())
+      expect(r.end).toBe(new Date(2026, 10, 1, 23, 59, 59).toISOString())
+    } finally {
+      process.env.TZ = prevTz
+    }
+  })
+})
+
+describe('viewOnScreen', () => {
+  it('Week falls back to Month on a narrow screen; the rest stay', () => {
+    expect(viewOnScreen('week', false)).toBe('month')
+    expect(viewOnScreen('week', true)).toBe('week')
+    expect(viewOnScreen('upcoming', false)).toBe('upcoming')
   })
 })
 

@@ -76,3 +76,23 @@ describe('CalendarEventRow', () => {
     expect(r.getByText('detail').parentElement?.id).toBe('d1')
   })
 })
+
+describe('CalendarEventRow — decor', () => {
+  it('paints the rail in a calendar hue and shows labels after the title', () => {
+    const r = render(
+      <CalendarEventRow entry={entry({ summary: 'Dinner' })} open={false} onToggle={() => {}} detailId="d2"
+                        decor={{ hue: '#123456', badges: <span class="chip">You · Bob</span> }} />,
+    )
+    const row = r.container.querySelector<HTMLElement>('.sh-cal-row')!
+    expect(row.classList.contains('sh-cal-row--hued')).toBe(true)
+    expect(row.style.getPropertyValue('--sh-cal-hue')).toBe('#123456')
+    expect(r.getByRole('button', { name: /Dinner/ }).textContent).toContain('You · Bob')
+  })
+
+  it('no decor: the kind colours the rail', () => {
+    const r = render(
+      <CalendarEventRow entry={entry({})} open={false} onToggle={() => {}} detailId="d3" />,
+    )
+    expect(r.container.querySelector('.sh-cal-row--hued')).toBeNull()
+  })
+})
