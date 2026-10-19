@@ -56,6 +56,13 @@ describe('HighlightShareCard', () => {
     householdUsers.value = new Map()
   })
 
+  it('dates the card in words, not as the raw "2026-10-19" key', async () => {
+    apiMock.get.mockResolvedValue(detail('h-date', 'u-pascal'))
+    const { container, findByText } = render(<HighlightShareCard highlightId="h-date" />)
+    expect(await findByText(/October 19, 2026/)).toBeTruthy()
+    expect(container.textContent).not.toContain('2026-10-19')
+  })
+
   it('in a space, a remote author resolves through the space roster', async () => {
     spaceMembers.value = { s1: new Map([['u-oma', {
       user_id: 'u-oma', role: 'member', joined_at: '', space_display_name: null,
