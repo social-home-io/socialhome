@@ -9,7 +9,7 @@ describe('router', () => {
     //   /join            — space invite deep link (§23.62)
     //   /parent          — parent dashboard (§CP)
     //   /feed            — explicit household-feed route (§23 dashboard)
-    //   /spaces/:id/settings — admin space settings (§23 customization)
+    //   /spaces/:id/settings/:section? — space settings, one page, a URL per section
     //   /spaces/:id/about — public-style space landing (parallel to GFS)
     //   /spaces/browse   — redirects to the Spaces page's Discover
     //   /spaces/:id/zones — per-space zones admin (§23.8.7)
@@ -34,10 +34,15 @@ describe('router', () => {
     const space = keys.indexOf('/spaces/:id/:section?')
     expect(space).toBeGreaterThan(-1)
     expect(routes['/spaces/:id']).toBeUndefined()
-    for (const fixed of ['/spaces/browse', '/spaces/:id/about', '/spaces/:id/settings', '/spaces/:id/zones']) {
+    for (const fixed of ['/spaces/browse', '/spaces/:id/about', '/spaces/:id/settings/:section?', '/spaces/:id/zones']) {
       expect(keys.indexOf(fixed)).toBeGreaterThan(-1)
       expect(keys.indexOf(fixed)).toBeLessThan(space)
     }
+  })
+
+  it('the settings sections are one route, so a section jump keeps the page', () => {
+    expect(routes['/spaces/:id/settings/:section?']).toBeTruthy()
+    expect(routes['/spaces/:id/settings']).toBeUndefined()
   })
 
   it('has feed route at /', () => {

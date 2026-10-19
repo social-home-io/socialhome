@@ -23,6 +23,10 @@ export interface NavigationGuard {
    *  this path (e.g. ``/settings`` → ``/settings#privacy``) is in-page
    *  and never asks. */
   path: string
+  /** The page also owns every path below ``path`` (a one-page settings
+   *  screen whose sections have their own URLs): moving between them is
+   *  in-page too. */
+  subpaths?: boolean
 }
 
 let current: NavigationGuard | null = null
@@ -44,7 +48,10 @@ function pathOf(url: string): string {
 /** Whether moving to *target* (stripped URL) needs the user's OK. */
 export function shouldConfirmLeave(target: string): boolean {
   if (!current || !current.isDirty()) return false
-  return pathOf(target) !== pathOf(current.path)
+  const to = pathOf(target)
+  const own = pathOf(current.path)
+  if (to === own) return false
+  return !(current.subpaths && to.startsWith(`${own}/`))
 }
 
 /** Ask the live guard. ``true`` when there is nothing to ask. */

@@ -114,7 +114,7 @@ export function SpaceLinksTab({ spaceId }: Props) {
 
   return (
     <section class="sh-space-links-tab">
-      <h2>{t('space.links.title')}</h2>
+      <h3 class="sh-ss-subheading">{t('space.links.title')}</h3>
       <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)' }}>
         {t('space.links.intro')}
       </p>
@@ -173,7 +173,7 @@ export function SpaceLinksTab({ spaceId }: Props) {
       )}
 
       <form class="sh-space-links-editor__create" onSubmit={createLink}>
-        <h3>{t('space.links.add')}</h3>
+        <h4>{t('space.links.add')}</h4>
         <input type="text"
                value={draft.label}
                placeholder={t('space.links.label_placeholder')}

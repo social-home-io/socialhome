@@ -96,7 +96,6 @@ export function SpaceBotsTab({
           requests for this space return 403 even if bot tokens remain
           valid — so disabling is cheap, reversible, and non-destructive. */}
       <section class="sh-bots-tab__intro">
-        <h2>{t('space.settings_page.tab_bots')}</h2>
         <p class="sh-muted">
           {t('space.bots.intro')}
         </p>

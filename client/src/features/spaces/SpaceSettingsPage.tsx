@@ -1,125 +1,240 @@
 /**
- * SpaceSettingsPage — full space admin hub (§23.91 / §23.123 / §23.124).
+ * SpaceSettingsPage — a space's settings on ONE page (spaces redesign,
+ * PR 12; §23.91 / §23.123 / §23.124).
  *
- * Tabs:
- *   - General: reuses :mod:`SpaceSettings` (name / emoji / join-mode +
- *     GFS federation + danger zone).
- *   - About: markdown editor + cover-image uploader.
- *   - Theme: :mod:`SpaceThemeStudio` rewrite with live preview.
- *   - Age & safety: :mod:`SpaceAgeGating` — min-age gate + category
- *     that blocks under-age minors from joining (§CP.F1).
+ * Every section has its own address (``/spaces/:id/settings/:section``,
+ * ``spaceSettingsSections``) and sits on one scrolling page, indexed by a
+ * left rail on desktop and a row of jump chips on phones — real links
+ * with ``aria-current``, not a tab widget. Opening a section's URL scrolls
+ * to it; the URL survives Refresh and Back, and More's "Edit sections"
+ * deep-links to ``…/settings/sections``. Links go through ``addBase`` so
+ * they keep the HA ingress prefix.
  *
- * Only owners/admins may view; a non-member gets a 403 from the
- * detail endpoint and we render an access message.
+ * Save model (owner decision 8): only Basics is a form — its draft is held
+ * here and saved with a page-level save bar ("1 unsaved change · Discard ·
+ * Save") that appears only while something is unsaved; leaving the page
+ * with a draft asks first (``navigationGuard`` + ``beforeunload``), moving
+ * between sections doesn't. Every other switch, radio and select saves the
+ * moment it changes, with a toast, as each section's line says.
+ *
+ * Who sees what (``settingsSections``): owners / admins get every section
+ * (a remote admin — space hosted elsewhere — only what forwards to the
+ * host); members and moderators their notifications, "You in this space",
+ * their bots and Leave; followers their notifications and Unfollow.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { setSpaceHereAllowed } from '@/store/spaceMembers'
-import { signal } from '@preact/signals'
-import { useRoute, useLocation } from 'preact-iso'
+import { useLocation, useRoute } from 'preact-iso'
 import { api } from '@/api'
+import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
-import { MarkdownView } from '@/components/MarkdownView'
+import { confirmDialog } from '@/components/confirm'
 import { Spinner } from '@/components/Spinner'
-import { SpaceSettings } from '@/components/SpaceSettings'
-import {
-  SpaceGfsServersReadOnly, hasGfsServersToShow,
-} from '@/components/SpaceGfsListing'
-import { SpaceThemeStudio } from '@/components/SpaceThemeStudio'
+import type { SpaceMemberSummary } from '@/components/SpaceSectionNav'
 import { showToast } from '@/components/Toast'
+import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
+import { isOne, t } from '@/i18n/i18n'
+import { setNavigationGuard, useBeforeUnload } from '@/router/navigationGuard'
 import { currentUser } from '@/store/auth'
 import { instanceConfig } from '@/store/instance'
+import { setSpaceHereAllowed } from '@/store/spaceMembers'
 import type { Space } from '@/types'
 import { SpaceBotsTab } from './SpaceBotsTab'
-import { SpaceLinksTab } from './SpaceLinksTab'
-import { SpaceAgeGating } from '@/features/child-protection/SpaceAgeGating'
-import { confirmDialog } from '@/components/confirm'
-import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
-import { t } from '@/i18n/i18n'
-import { cssUrl } from '@/utils/cssUrl'
-import { spaceGlyph } from './spaceGlyph'
-
-type SettingsTab = 'general' | 'about' | 'theme' | 'links' | 'age' | 'bots'
-
-/**
- * Which settings tabs a viewer can see.
- *
- * - Non-admin members get only their own surface ("Bots").
- * - A local admin gets the full hub.
- * - A *remote* admin (the space is hosted on another household) gets only
- *   the tabs whose controls forward to the host — General (config / archive
- *   / dissolve + tier proposals all federate) and About. Theme, Quick links,
- *   and Age & safety are host-local config that would silently mutate our
- *   stub (the age gate is enforced by the host on join), so they're hidden
- *   on a remote stub.
- *
- * Exported pure so the gating is unit-tested without standing up a second
- * household.
- */
-export function visibleSettingsTabs(
-  canAdmin: boolean,
-  isRemoteSpace: boolean,
-): SettingsTab[] {
-  if (!canAdmin) return ['bots']
-  if (isRemoteSpace) return ['general', 'about', 'bots']
-  return ['general', 'about', 'theme', 'links', 'age', 'bots']
-}
+import {
+  SpaceNotificationChoices, useSpaceChatNotif, useSpaceNotifLevel,
+} from './SpaceNotifLevels'
+import { parseSpaceRole } from './spaceRoles'
+import {
+  resolveSettingsSection, settingsSectionLabel, settingsSectionPath, settingsSections,
+  type SettingsSection, type SettingsViewer,
+} from './spaceSettingsSections'
+import { BasicsSection } from './settings/BasicsSection'
+import { DangerSection } from './settings/DangerSection'
+import { FeaturesSection } from './settings/FeaturesSection'
+import { FindSection } from './settings/FindSection'
+import { LocationSection } from './settings/LocationSection'
+import { MembersSection } from './settings/MembersSection'
+import { ModerationSection } from './settings/ModerationSection'
+import { patchSpace } from './settings/spacePatch'
+import { basicsOf, useBasicsForm } from './settings/useBasicsForm'
+import {
+  LeaveSection, UnfollowSection, YouSection, type MySeat,
+} from './settings/YouSection'
 
 interface SpaceDetail extends Space {
   about_markdown: string | null
   cover_url: string | null
-  cover_hash: string | null
   icon_url: string | null
-  icon_hash: string | null
   bot_enabled?: boolean
 }
 
-const activeTab = signal<SettingsTab>('general')
+interface RosterRow extends MySeat {
+  user_id: string
+  role: string
+}
+
+/** The kind of viewer, from their seat and where the space is hosted. */
+export function settingsViewer(role: string | undefined, isRemoteSpace: boolean): SettingsViewer | null {
+  switch (parseSpaceRole(role)) {
+    case 'owner':
+    case 'admin': return isRemoteSpace ? 'remote-admin' : 'admin'
+    case 'moderator':
+    case 'member': return 'member'
+    case 'subscriber': return 'follower'
+    default: return null
+  }
+}
+
+/** The line under a section's heading (how it saves), or ``null``. */
+// For ``i18n:check``: t('space.settings_page.lead.basics') t('space.settings_page.lead.find')
+// t('space.settings_page.lead.members') t('space.settings_page.lead.sections')
+// t('space.settings_page.lead.notifications') t('space.settings_page.lead.location')
+// t('space.settings_page.lead.moderation') t('space.settings_page.lead.you')
+const LEADS: Partial<Record<SettingsSection, string>> = {
+  basics: 'space.settings_page.lead.basics',
+  find: 'space.settings_page.lead.find',
+  members: 'space.settings_page.lead.members',
+  sections: 'space.settings_page.lead.sections',
+  notifications: 'space.settings_page.lead.notifications',
+  location: 'space.settings_page.lead.location',
+  moderation: 'space.settings_page.lead.moderation',
+  you: 'space.settings_page.lead.you',
+}
+
+/** Rows that end the page as one collapsed row, titled by their summary. */
+const COLLAPSED: readonly SettingsSection[] = ['danger', 'leave', 'unfollow']
+
+const FALLBACK = { name: '', description: '', emoji: '', about_markdown: '' }
+
+function scrollToSection(section: SettingsSection, focus: boolean) {
+  const el = document.getElementById(`settings-${section}`)
+  if (!el) return
+  el.scrollIntoView?.({ block: 'start' })
+  if (focus) (el.querySelector('[data-section-heading]') as HTMLElement | null)?.focus({ preventScroll: true })
+}
 
 export default function SpaceSettingsPage() {
   const { params } = useRoute()
   const { route } = useLocation()
   const spaceId = params.id
+  const segment = params.section
   const [space, setSpace] = useState<SpaceDetail | null>(null)
+  const [roster, setRoster] = useState<RosterRow[]>([])
   const [loading, setLoading] = useState(true)
-  const [canAdmin, setCanAdmin] = useState(false)
-  // Owner-only settings (e.g. how members publish over a connection server)
-  // render only for the space owner — the server refuses anyone else.
-  const [isOwner, setIsOwner] = useState(false)
-  const [isMember, setIsMember] = useState(false)
+  const [sharing, setSharing] = useState<{ allowed: boolean; on: boolean }>({ allowed: false, on: false })
 
-  /** ``quiet`` is the live-refresh path: a failed refetch keeps the
-   *  page as it is instead of flipping to "Space not found". */
+  /** ``quiet`` is the live-refresh path: a failed refetch keeps the page
+   *  as it is instead of flipping to "Space not found". */
   const reload = async ({ quiet = false } = {}) => {
     try {
       const [detail, members] = await Promise.all([
         api.get(`/api/spaces/${spaceId}`) as Promise<SpaceDetail>,
-        api.get(`/api/spaces/${spaceId}/members`) as Promise<
-          Array<{ user_id: string; role: string }>
-        >,
+        api.get(`/api/spaces/${spaceId}/members`) as Promise<RosterRow[]>,
       ])
       setSpace(detail)
+      setRoster(Array.isArray(members) ? members : [])
       setSpaceHereAllowed(spaceId, detail.allow_here_mention === true)
-      const mine = members.find(
-        m => m.user_id === currentUser.value?.user_id,
-      )
-      setCanAdmin(mine?.role === 'owner' || mine?.role === 'admin')
-      setIsOwner(mine?.role === 'owner')
-      setIsMember(Boolean(mine))
     } catch {
       if (quiet) return
       setSpace(null)
-      setCanAdmin(false)
-      setIsOwner(false)
-      setIsMember(false)
+      setRoster([])
     } finally {
       setLoading(false)
     }
   }
-
-  useEffect(() => { void reload() }, [spaceId])
+  useEffect(() => { setLoading(true); void reload() }, [spaceId])
   // Another admin renamed / reconfigured the space, or changed roles →
-  // refresh the detail + tab gating; a dissolve leaves for the list.
+  // refresh; a dissolve leaves for the list.
   useSpaceConfigWs(spaceId, () => { void reload({ quiet: true }) })
+  const refresh = () => { void reload({ quiet: true }) }
+
+  const me = roster.find(m => m.user_id === currentUser.value?.user_id) ?? null
+  const isRemoteSpace = !!(
+    space?.owner_instance_id && instanceConfig.value?.instance_id
+    && space.owner_instance_id !== instanceConfig.value.instance_id
+  )
+  // The detail's ``my_role`` is the viewer's seat (a follower's roster
+  // doesn't list followers); the roster row backs it up.
+  const myRole = space?.my_role ?? me?.role
+  const viewer = space ? settingsViewer(myRole, isRemoteSpace) : null
+  const isOwner = myRole === 'owner'
+  const admin = viewer === 'admin' || viewer === 'remote-admin'
+  const sections = viewer ? settingsSections(viewer) : []
+  const active = viewer ? resolveSettingsSection(segment, viewer) : null
+
+  const form = useBasicsForm(basicsOf(space ?? FALLBACK))
+  const dirty = admin ? form.dirtyCount : 0
+  const dirtyRef = useRef(0)
+  dirtyRef.current = dirty
+  // The guard is registered once; it reads the latest form through this.
+  const formRef = useRef(form)
+  formRef.current = form
+  const [saving, setSaving] = useState(false)
+
+  const [notifLevel, setNotifLevel] = useSpaceNotifLevel(spaceId, viewer !== null)
+  const chatOn = viewer !== null && viewer !== 'follower' && (space?.features?.chat ?? true)
+  const chatNotif = useSpaceChatNotif(spaceId, chatOn)
+
+  // A member's own location sharing (the switch lives on the Map).
+  useEffect(() => {
+    if (viewer !== 'member') return
+    let stop = false
+    api.get(`/api/spaces/${spaceId}/notif-prefs`)
+      .then((b: { location_share_allowed?: boolean; location_share_enabled?: boolean }) => {
+        if (!stop) setSharing({ allowed: b?.location_share_allowed === true, on: b?.location_share_enabled === true })
+      })
+      .catch(() => { /* the row just stays hidden */ })
+    return () => { stop = true }
+  }, [spaceId, viewer])
+
+  // Leaving with an unsaved Basics draft asks first; moving between this
+  // page's sections (its subpaths) doesn't.
+  useEffect(() => setNavigationGuard({
+    path: `/spaces/${spaceId}/settings`,
+    subpaths: true,
+    isDirty: () => dirtyRef.current > 0,
+    confirm: async () => {
+      const ok = await confirmDialog(t('space.settings_page.leave_body'), {
+        title: t('settings.profile.leave_title'),
+        confirmLabel: t('settings.profile.leave_discard'),
+        cancelLabel: t('settings.profile.leave_stay'),
+        destructive: true,
+      })
+      if (ok) formRef.current.reset()
+      return ok
+    },
+  }), [spaceId])
+  useBeforeUnload(dirty > 0)
+
+  // Opening a section's URL (link, Back, a deep link) scrolls to it — and
+  // again while the sections above it finish loading (links, theme,
+  // notifications grow after the first paint), until the reader scrolls.
+  const ready = !loading && active !== null
+  useEffect(() => {
+    if (!ready || !segment || !active) return
+    let moved = false
+    const stop = () => { moved = true }
+    const opts = { passive: true } as const
+    window.addEventListener('wheel', stop, opts)
+    window.addEventListener('touchstart', stop, opts)
+    window.addEventListener('keydown', stop)
+    const go = () => { if (!moved) scrollToSection(active, false) }
+    go()
+    const timers = [setTimeout(go, 400), setTimeout(go, 1200)]
+    return () => {
+      timers.forEach(clearTimeout)
+      window.removeEventListener('wheel', stop)
+      window.removeEventListener('touchstart', stop)
+      window.removeEventListener('keydown', stop)
+    }
+  }, [ready, segment, active])
+
+  // Phones: keep the current jump chip in view in its sideways row.
+  useEffect(() => {
+    if (!ready || typeof window.matchMedia !== 'function'
+      || !window.matchMedia('(max-width: 899px)').matches) return
+    const chip = document.querySelector('.sh-ss-index a[aria-current="page"]') as HTMLElement | null
+    chip?.scrollIntoView?.({ block: 'nearest', inline: 'center' })
+  }, [ready, active])
 
   if (loading) return <Spinner />
 
@@ -131,312 +246,147 @@ export default function SpaceSettingsPage() {
       </div>
     )
   }
-
-  // Any space member can reach the "Bots" tab to manage their OWN
-  // personal bots. Admin-only guards for the shared space-scope bots
-  // live inside SpaceBotsTab. Non-members still get the 403 screen.
-  if (!isMember) {
+  if (!viewer || !active) {
     return (
       <div class="sh-empty-state">
         <div aria-hidden="true">🔒</div>
         <h3>{t('space.settings_page.members_only')}</h3>
         <p class="sh-muted">{t('space.settings_page.members_only_body')}</p>
-        <Button onClick={() => route(`/spaces/${spaceId}`)}>
-          {t('space.settings_page.back')}
-        </Button>
+        <Button onClick={() => route(`/spaces/${spaceId}`)}>{t('space.settings_page.back')}</Button>
       </div>
     )
   }
 
-  // A stub of a space hosted on another household: General config, archive,
-  // and the dissolve / tier proposals all forward to the host, but theme /
-  // links / GFS publication are host-local — see visibleSettingsTabs.
-  const isRemoteSpace = !!(
-    space.owner_instance_id &&
-    instanceConfig.value?.instance_id &&
-    space.owner_instance_id !== instanceConfig.value.instance_id
-  )
-  // Per-member notifications live on the 🔔 bell in the space header, not
-  // here — this page has no Notifications tab.
-  const visibleTabs = visibleSettingsTabs(canAdmin, isRemoteSpace)
-  if (!visibleTabs.includes(activeTab.value)) {
-    activeTab.value = visibleTabs[0]
+  const members: SpaceMemberSummary = {
+    count: roster.filter(m => m.role !== 'subscriber').length,
+    admins: roster.filter(m => m.role === 'owner' || m.role === 'admin').length,
   }
 
-  const tabLabel = (tab: SettingsTab): string => {
-    switch (tab) {
-      case 'general':       return t('space.settings_page.tab_general')
-      case 'about':         return t('space.settings_page.tab_about')
-      case 'theme':         return t('space.settings_page.tab_theme')
-      case 'links':         return t('space.settings_page.tab_links')
-      case 'age':           return t('space.settings_page.tab_age')
-      case 'bots':          return t('space.settings_page.tab_bots')
+  const save = async () => {
+    if (!form.fields.name.value.trim()) {
+      showToast(t('space.settings_page.basics.name_required'), 'error')
+      return
+    }
+    setSaving(true)
+    const outcome = await patchSpace(space.id, form.changes, {
+      okToast: t('space.settings.saved'), onUpdate: refresh,
+    })
+    // Forwarded: the host applies it; the draft would only linger.
+    if (outcome === 'forwarded') form.reset()
+    setSaving(false)
+  }
+
+  const body = (s: SettingsSection) => {
+    switch (s) {
+      case 'basics':
+        return <BasicsSection space={space} form={form} isRemoteSpace={isRemoteSpace} onUpdate={refresh} />
+      case 'find':
+        return <FindSection space={space} isOwner={isOwner} isRemoteSpace={isRemoteSpace}
+                            adminCount={members.admins} onUpdate={refresh} />
+      case 'members':
+        return <MembersSection space={space} isRemoteSpace={isRemoteSpace} members={members} onUpdate={refresh} />
+      case 'sections':
+        return <FeaturesSection space={space} onUpdate={refresh} />
+      case 'notifications':
+        return (
+          <div class="sh-ss-card">
+            {notifLevel ? (
+              <SpaceNotificationChoices spaceId={space.id} level={notifLevel}
+                                        onSaved={setNotifLevel} chatNotif={chatNotif} />
+            ) : <p class="sh-muted">{t('common.loading')}</p>}
+          </div>
+        )
+      case 'location':
+        return <LocationSection space={space} onUpdate={refresh} />
+      case 'moderation':
+        return <ModerationSection space={space} isRemoteSpace={isRemoteSpace} onUpdate={refresh} />
+      case 'bots':
+        return (
+          <div class="sh-ss-card">
+            <SpaceBotsTab
+              spaceId={space.id}
+              // Space-scope bots are host-local; elsewhere an admin manages
+              // only their own member-scope bots.
+              canAdmin={viewer === 'admin'}
+              currentUserId={currentUser.value?.user_id ?? null}
+              botEnabled={space.bot_enabled === true}
+              onBotEnabledChange={(next) => setSpace({ ...space, bot_enabled: next })}
+            />
+          </div>
+        )
+      case 'danger':
+        return <DangerSection space={space} isOwner={isOwner} isRemoteSpace={isRemoteSpace}
+                              open={segment === 'danger'} onUpdate={refresh} />
+      case 'you':
+        return <YouSection space={space} seat={me} locationAllowed={sharing.allowed} sharing={sharing.on} />
+      case 'leave':
+        return <LeaveSection space={space} />
+      case 'unfollow':
+        return <UnfollowSection space={space} />
     }
   }
 
   return (
     <div class="sh-space-settings-page">
-      <div class="sh-page-header">
-        <h1>⚙ {t('space.settings_page.title', { name: space.name })}</h1>
-        <Button variant="secondary"
-                onClick={() => route(`/spaces/${spaceId}`)}>
-          ← {t('space.settings_page.back')}
-        </Button>
-      </div>
-
-      {/* A plain member never sees the General tab, so where a global space
-       *  is listed (and whether their household can reach it while the
-       *  host is offline) is shown here, read-only — above the tabs, so it never reads as part
-       *  of the Bots tab. */}
-      {!canAdmin && hasGfsServersToShow(space) && (
-        <section class="sh-gfs-listing-section sh-gfs-listing-section--member"
-                 data-testid="member-gfs-servers">
-          <h2 class="sh-settings-section-heading">{t('space.federation')}</h2>
-          <SpaceGfsServersReadOnly space={space} />
-        </section>
-      )}
-
-      <nav class="sh-space-tabs" role="tablist">
-        {visibleTabs.map(tab => (
-          <button key={tab} type="button" role="tab"
-                  aria-selected={activeTab.value === tab}
-                  class={activeTab.value === tab ? 'sh-tab sh-tab--active' : 'sh-tab'}
-                  onClick={() => { activeTab.value = tab }}>
-            {tabLabel(tab)}
-          </button>
-        ))}
-      </nav>
-
-      {/* Member-only context line — non-admins see just the Bots tab and
-       *  might wonder why the rest are missing.  Naming the scope explicitly
-       *  makes the limited surface read as "your settings for this space"
-       *  rather than as a permissions glitch, and points them at the 🔔 bell
-       *  in the space header for their notification level. */}
-      {!canAdmin && (
-        <p class="sh-muted" style={{ marginTop: 0, fontSize: 'var(--sh-font-size-sm)' }}>
-          {t('space.settings_page.member_note')}
-        </p>
-      )}
-
-      {activeTab.value === 'general' && (
-        <SpaceSettings
-          space={space}
-          onUpdate={() => void reload()}
-          isRemoteSpace={isRemoteSpace}
-          isOwner={isOwner}
-        />
-      )}
-      {activeTab.value === 'about' && (
-        <AboutTab space={space} onSaved={() => void reload()} />
-      )}
-      {activeTab.value === 'theme' && (
-        <SpaceThemeStudio spaceId={space.id} />
-      )}
-      {activeTab.value === 'links' && (
-        <SpaceLinksTab spaceId={space.id} />
-      )}
-      {activeTab.value === 'age' && (
-        <SpaceAgeGating spaceId={space.id} />
-      )}
-      {activeTab.value === 'bots' && (
-        <SpaceBotsTab
-          spaceId={space.id}
-          // Space-scope bot management is host-local; on a remote stub a
-          // remote admin manages only their own member-scope bots.
-          canAdmin={canAdmin && !isRemoteSpace}
-          currentUserId={currentUser.value?.user_id ?? null}
-          botEnabled={space.bot_enabled === true}
-          onBotEnabledChange={(next) => setSpace({ ...space, bot_enabled: next })}
-        />
-      )}
-    </div>
-  )
-}
-
-function AboutTab({
-  space, onSaved,
-}: { space: SpaceDetail; onSaved: () => void }) {
-  const [markdown, setMarkdown] = useState(space.about_markdown ?? '')
-  const [saving, setSaving] = useState(false)
-  const [uploadingCover, setUploadingCover] = useState(false)
-  const [coverUrl, setCoverUrl] = useState<string | null>(space.cover_url)
-  const [uploadingIcon, setUploadingIcon] = useState(false)
-  const [iconUrl, setIconUrl] = useState<string | null>(space.icon_url)
-  const fileRef = useRef<HTMLInputElement | null>(null)
-
-  const uploadIcon = async (e: Event) => {
-    const input = e.target as HTMLInputElement
-    const file = input.files?.[0]
-    if (!file) return
-    setUploadingIcon(true)
-    try {
-      const fd = new FormData()
-      fd.append('file', file)
-      const resp = (await api.upload(`/api/spaces/${space.id}/icon`, fd)) as {
-        icon_url: string
-      }
-      setIconUrl(resp.icon_url)
-      onSaved()
-      showToast(t('space.about.icon_updated'), 'success')
-    } catch (err: unknown) {
-      showToast(t('space.about.upload_failed', { error: String((err as Error).message ?? err) }), 'error')
-    } finally {
-      setUploadingIcon(false)
-      input.value = ''
-    }
-  }
-
-  const clearIcon = async () => {
-    if (!(await confirmDialog(t('space.about.icon_remove_confirm'), { destructive: true }))) return
-    try {
-      await api.delete(`/api/spaces/${space.id}/icon`)
-      setIconUrl(null)
-      onSaved()
-      showToast(t('space.about.icon_removed'), 'info')
-    } catch (err: unknown) {
-      showToast(t('space.about.remove_failed', { error: String((err as Error).message ?? err) }), 'error')
-    }
-  }
-
-  const saveAbout = async () => {
-    setSaving(true)
-    try {
-      await api.patch(`/api/spaces/${space.id}`, {
-        about_markdown: markdown,
-      })
-      showToast(t('space.about.saved'), 'success')
-      onSaved()
-    } catch (err: unknown) {
-      showToast(
-        t('space.about.save_failed', { error: String((err as Error).message ?? err) }), 'error',
-      )
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const uploadCover = async (e: Event) => {
-    const input = e.target as HTMLInputElement
-    const file = input.files?.[0]
-    if (!file) return
-    setUploadingCover(true)
-    try {
-      const fd = new FormData()
-      fd.append('file', file)
-      const resp = await api.upload(
-        `/api/spaces/${space.id}/cover`, fd,
-      ) as { cover_url: string }
-      setCoverUrl(resp.cover_url)
-      onSaved()
-      showToast(t('space.about.cover_updated'), 'success')
-    } catch (err: unknown) {
-      showToast(
-        t('space.about.upload_failed', { error: String((err as Error).message ?? err) }), 'error',
-      )
-    } finally {
-      setUploadingCover(false)
-      input.value = ''
-    }
-  }
-
-  const clearCover = async () => {
-    if (!await confirmDialog(t('space.about.cover_remove_confirm'), { destructive: true })) return
-    try {
-      await api.delete(`/api/spaces/${space.id}/cover`)
-      setCoverUrl(null)
-      onSaved()
-      showToast(t('space.about.cover_removed'), 'info')
-    } catch (err: unknown) {
-      showToast(
-        t('space.about.remove_failed', { error: String((err as Error).message ?? err) }), 'error',
-      )
-    }
-  }
-
-  return (
-    <div class="sh-form sh-about-editor">
-      <section>
-        <h2 class="sh-settings-section-heading" style={{ margin: 0 }}>{t('space.about.cover_title')}</h2>
-        <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
-          {t('space.about.cover_hint')}
-        </p>
-        <div class="sh-about-cover-preview"
-             style={coverUrl ? { backgroundImage: cssUrl(coverUrl) } : {}}>
-          {!coverUrl && (
-            <span class="sh-muted">{t('space.about.cover_empty')}</span>
-          )}
-        </div>
-        <div class="sh-row" style={{ gap: 'var(--sh-space-xs)', flexWrap: 'wrap' }}>
-          <label class="sh-btn sh-btn--secondary">
-            {coverUrl ? t('space.about.cover_change') : t('space.about.cover_upload')}
-            <input ref={fileRef} type="file" accept="image/*"
-                   class="sr-only" onChange={uploadCover} />
-          </label>
-          {uploadingCover && <span class="sh-muted">{t('space.about.uploading')}</span>}
-          {coverUrl && (
-            <Button variant="secondary" onClick={clearCover}>
-              {t('space.about.remove')}
-            </Button>
-          )}
-        </div>
-      </section>
-
-      <section>
-        <h2 class="sh-settings-section-heading" style={{ margin: 0 }}>{t('space.about.icon_title')}</h2>
-        <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
-          {t('space.about.icon_hint')}
-        </p>
-        <div class="sh-row" style={{ gap: 'var(--sh-space-sm)', alignItems: 'center' }}>
-          <span
-            class="sh-about-icon-preview"
-            style={iconUrl ? { backgroundImage: cssUrl(iconUrl) } : {}}
-          >
-            {!iconUrl && spaceGlyph(space.emoji, space.name)}
-          </span>
-          <label class="sh-btn sh-btn--secondary">
-            {iconUrl ? t('space.about.icon_change') : t('space.about.icon_upload')}
-            <input type="file" accept="image/*" class="sr-only" onChange={uploadIcon} />
-          </label>
-          {uploadingIcon && <span class="sh-muted">{t('space.about.uploading')}</span>}
-          {iconUrl && (
-            <Button variant="secondary" onClick={clearIcon}>
-              {t('space.about.remove')}
-            </Button>
-          )}
-        </div>
-      </section>
-
-      <section>
-        <h2 class="sh-settings-section-heading" style={{ margin: 0 }}>{t('space.about.text_title')}</h2>
-        <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
-          {t('space.about.text_hint')}
-        </p>
-        <div class="sh-about-editor-grid">
-          <label class="sh-about-editor-pane">
-            <span class="sh-muted">{t('space.about.write')}</span>
-            <textarea class="sh-about-editor-textarea"
-                      value={markdown}
-                      rows={12} maxLength={8000}
-                      placeholder={t('space.about.placeholder')}
-                      onInput={(e) =>
-                        setMarkdown((e.target as HTMLTextAreaElement).value)} />
-            <span class="sh-char-count">
-              {markdown.length} / 8000
-            </span>
-          </label>
-          <div class="sh-about-editor-pane">
-            <span class="sh-muted">{t('theme.preview')}</span>
-            <div class="sh-about-editor-preview">
-              {markdown.trim()
-                ? <MarkdownView src={markdown} live />
-                : <span class="sh-muted">{t('space.about.preview_empty')}</span>}
+      <header class="sh-ss-head">
+        <a class="sh-ss-head__back" href={addBase(`/spaces/${spaceId}`)}>
+          <span aria-hidden="true" class="sh-flip-rtl">‹</span> {space.name}
+        </a>
+        <h1 class="sh-ss-head__title">{t('nav.settings')}</h1>
+      </header>
+      <div class="sh-ss-layout">
+        <nav class="sh-ss-index" aria-label={t('space.settings_page.index_aria')}>
+          <ul>
+            {sections.map(s => (
+              <li key={s}>
+                <a href={addBase(settingsSectionPath(space.id, s))}
+                   class={'sh-ss-index__link'
+                     + (COLLAPSED.includes(s) ? ' sh-ss-index__link--quiet' : '')}
+                   aria-current={s === active ? 'page' : undefined}
+                   // The router ignores a click on the URL it is already on;
+                   // still take the reader there.
+                   onClick={() => { if (s === active) scrollToSection(s, true) }}>
+                  {settingsSectionLabel(s)}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+        <div class="sh-ss-sections">
+          {sections.map(s => (
+            <section key={s} id={`settings-${s}`} class="sh-ss-section"
+                     aria-labelledby={COLLAPSED.includes(s) ? undefined : `settings-${s}-h`}
+                     aria-label={COLLAPSED.includes(s) ? settingsSectionLabel(s) : undefined}>
+              {!COLLAPSED.includes(s) && (
+                <>
+                  <h2 id={`settings-${s}-h`} class="sh-ss-section__title"
+                      tabIndex={-1} data-section-heading>
+                    {settingsSectionLabel(s)}
+                  </h2>
+                  {LEADS[s] && <p class="sh-ss-section__lead">{t(LEADS[s]!)}</p>}
+                </>
+              )}
+              {body(s)}
+            </section>
+          ))}
+          {dirty > 0 && (
+            <div class="sh-savebar sh-ss-savebar" role="region"
+                 aria-label={t('settings.profile.unsaved')}>
+              <span class="sh-savebar__text" role="status">
+                {isOne(dirty)
+                  ? t('space.settings_page.unsaved_one')
+                  : t('space.settings_page.unsaved', { n: String(dirty) })}
+              </span>
+              <div class="sh-savebar__actions">
+                <Button variant="secondary" onClick={form.reset} disabled={saving}>
+                  {t('settings.profile.discard')}
+                </Button>
+                <Button onClick={() => void save()} loading={saving}>{t('common.save')}</Button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
-        <div class="sh-form-actions">
-          <Button onClick={saveAbout} loading={saving}>{t('space.about.save')}</Button>
-        </div>
-      </section>
+      </div>
     </div>
   )
 }

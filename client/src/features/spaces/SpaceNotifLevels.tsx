@@ -18,7 +18,12 @@
 import { useEffect, useId, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { showToast } from '@/components/Toast'
+import { MuteSection } from '@/features/dms/ConversationMute'
 import { t } from '@/i18n/i18n'
+import type { ConversationNotifLevel } from '@/store/dms'
+import {
+  claimSpaceChat, loadSpaceChat, patchSpaceChat, spaceChatOf,
+} from '@/store/spaceChat'
 
 export type NotifLevel = 'all' | 'mentions' | 'muted'
 
@@ -110,5 +115,64 @@ export function SpaceNotifLevelPicker({ spaceId, level, onSaved }: PickerProps) 
         </label>
       ))}
     </fieldset>
+  )
+}
+
+/** The viewer's space-chat notifications, set next to the space's own
+ *  level in "Your notifications" (one place — the chat has no bell of
+ *  its own). */
+export interface SpaceChatNotif {
+  convId: string
+  mutedUntil: string | null
+  level: ConversationNotifLevel
+  onMute: (mutedUntil: string | null) => void
+  onLevel: (level: ConversationNotifLevel) => void
+}
+
+/** The space chat's notifications for a page that isn't the space page
+ *  (settings): takes the space-chat store while mounted. ``null`` while
+ *  loading, for a follower, or when the space keeps chat off. */
+export function useSpaceChatNotif(spaceId: string, enabled: boolean): SpaceChatNotif | null {
+  useEffect(() => {
+    if (!enabled) return
+    const release = claimSpaceChat(spaceId)
+    void loadSpaceChat(spaceId)
+    return release
+  }, [spaceId, enabled])
+  const chat = enabled ? spaceChatOf(spaceId) : null
+  if (!chat?.enabled || !chat.conversation_id) return null
+  return {
+    convId: chat.conversation_id,
+    mutedUntil: chat.muted_until ?? null,
+    level: chat.notif_level ?? 'mentions',
+    onMute: (until) => patchSpaceChat({ muted_until: until }),
+    onLevel: (next) => patchSpaceChat({ notif_level: next }),
+  }
+}
+
+/** "Your notifications" — the space's posts level and, where the viewer
+ *  has the chat, its level beside it. The ONE place both are set: the
+ *  space's More panel and its settings page render this same block. */
+export function SpaceNotificationChoices({ spaceId, level, onSaved, chatNotif }: {
+  spaceId: string
+  level: NotifLevel
+  onSaved: (level: NotifLevel) => void
+  chatNotif: SpaceChatNotif | null
+}) {
+  return (
+    <>
+      {chatNotif && <h3 class="sh-space-more__subheading">{t('space.more.notif_posts')}</h3>}
+      <SpaceNotifLevelPicker spaceId={spaceId} level={level} onSaved={onSaved} />
+      {chatNotif && (
+        <MuteSection
+          convId={chatNotif.convId}
+          mutedUntil={chatNotif.mutedUntil}
+          onChange={chatNotif.onMute}
+          level={chatNotif.level}
+          onLevelChange={chatNotif.onLevel}
+          heading={t('space.more.notif_chat')}
+        />
+      )}
+    </>
   )
 }

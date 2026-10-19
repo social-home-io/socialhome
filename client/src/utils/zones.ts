@@ -4,7 +4,7 @@
  * household's Home zone on top) and the icon presets the admin picks from.
  */
 import type { IconPickerPreset } from '@/components/IconPicker'
-import { formatLocale } from '@/i18n/i18n'
+import { formatLocale, t } from '@/i18n/i18n'
 
 /** ``zones`` sorted by name — case- and accent-insensitive, in the
  *  viewer's locale — with a household Home zone (``is_home``) first,
@@ -26,6 +26,19 @@ export function formatRadius(m: number): string {
     minimumFractionDigits: digits, maximumFractionDigits: digits,
   }).format(m / 1000)
   return `${km} km`
+}
+
+/** A zone's centre for people: "47.377° N, 8.541° E" — three decimals
+ *  (about 100 m, plenty to recognise a place) with the hemisphere, in the
+ *  UI language's number format. There is no place-name lookup: that would
+ *  be a third-party fetch (docs/principles.md). */
+export function formatPlace(lat: number, lon: number): string {
+  const nf = new Intl.NumberFormat(formatLocale(), {
+    minimumFractionDigits: 3, maximumFractionDigits: 3,
+  })
+  const ns = lat < 0 ? t('zones.coord.s') : t('zones.coord.n')
+  const ew = lon < 0 ? t('zones.coord.w') : t('zones.coord.e')
+  return `${nf.format(Math.abs(lat))}° ${ns}, ${nf.format(Math.abs(lon))}° ${ew}`
 }
 
 const preset = (emoji: string, key: string): IconPickerPreset =>

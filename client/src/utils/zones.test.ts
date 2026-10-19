@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import en from '@/i18n/locales/en.json'
 import { locale } from '@/i18n/i18n'
-import { ZONE_ICON_PRESETS, formatRadius, sortZones } from './zones'
+import { ZONE_ICON_PRESETS, formatPlace, formatRadius, sortZones } from './zones'
 
 describe('sortZones', () => {
   it('orders by name, ignoring case and accents, like Home Assistant', () => {
@@ -81,5 +81,19 @@ describe('formatRadius in the UI language', () => {
     } finally {
       locale.value = before
     }
+  })
+})
+
+describe('formatPlace', () => {
+  it('rounds to three decimals with the hemisphere, never raw device precision', () => {
+    locale.value = 'en'
+    expect(formatPlace(47.37689, 8.54169)).toBe('47.377° N, 8.542° E')
+    expect(formatPlace(-33.8688, -151.2093)).toBe('33.869° S, 151.209° W')
+  })
+
+  it('follows the UI language', () => {
+    locale.value = 'de'
+    expect(formatPlace(47.37689, 8.54169)).toMatch(/^47,377° N, 8,542° /)
+    locale.value = 'en'
   })
 })

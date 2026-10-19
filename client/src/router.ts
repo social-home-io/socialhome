@@ -6,7 +6,10 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/spaces':         lazy(() => import('@/features/spaces/SpaceListPage')),
   '/spaces/browse':  lazy(() => import('@/features/spaces/SpaceBrowseRedirect')),
   '/spaces/:id/about': lazy(() => import('@/features/spaces/SpacePublicDetailPage')),
-  '/spaces/:id/settings': lazy(() => import('@/features/spaces/SpaceSettingsPage')),
+  // One settings page; each section has its own address
+  // (``/spaces/:id/settings/members`` …). One route, optional segment, so a
+  // section jump re-renders instead of remounting (a dirty form survives).
+  '/spaces/:id/settings/:section?': lazy(() => import('@/features/spaces/SpaceSettingsPage')),
   '/spaces/:id/zones': lazy(() => import('@/features/spaces/SpaceZonesPage')),
   // A space and its sections: ``/spaces/:id`` is the feed, ``/spaces/:id/
   // chat``, ``…/calendar`` etc. the rest. ONE route (optional segment) so a

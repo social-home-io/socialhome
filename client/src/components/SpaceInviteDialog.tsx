@@ -582,7 +582,7 @@ export function SpaceInviteDialog() {
                     {viewerRole.value === 'owner' ? (
                       <>
                         {t('invite.via.gfs_off_owner')}{' '}
-                        <a href={addBase(`/spaces/${spaceId.value}/settings`)}
+                        <a href={addBase(`/spaces/${spaceId.value}/settings/find`)}
                            onClick={() => { open.value = false }}>
                           {t('invite.via.open_settings')}
                         </a>

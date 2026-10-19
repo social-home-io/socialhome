@@ -716,12 +716,11 @@ export default function SpaceFeedPage() {
           onMute: (until) => patchSpaceChat({ muted_until: until }),
           onLevel: (level) => patchSpaceChat({ notif_level: level }),
         } : null}
-        // Every full member can open space settings — the page itself
-        // gates what's shown: a non-admin (member or moderator) sees only
-        // their own surface (Bots), a remote admin sees the
-        // forwarding-capable tabs, a local admin sees the full hub.
-        // Followers (read-only) don't.
-        settingsHref={isWriterRole(viewerRole.value) ? addBase(`/spaces/${spaceId}/settings`) : null}
+        // Everyone with a seat opens the space's settings — the page
+        // shows each their own: admins the whole page (a remote admin what
+        // forwards to the host), members their notifications, "You in
+        // this space" and Leave, followers notifications and Unfollow.
+        settingsHref={viewerRole.value ? addBase(`/spaces/${spaceId}/settings`) : null}
         canEditSections={hasSettingsAuthority(viewerRole.value)}
         // Members leave from More; the owner hands ownership on first;
         // a follower unfollows from the feed instead.
