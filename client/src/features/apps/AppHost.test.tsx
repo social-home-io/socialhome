@@ -7,7 +7,13 @@
  *   - mountBridge is called exactly once.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { fireEvent, render, waitFor } from '@testing-library/preact'
+
+const nav = vi.hoisted(() => ({ route: vi.fn() }))
+vi.mock('preact-iso', async (orig) => ({
+  ...(await orig<object>()),
+  useLocation: () => ({ route: nav.route, path: '/apps/chess', url: '/apps/chess', query: {} }),
+}))
 
 // ── Mock @/store/apps ─────────────────────────────────────────────────────
 // getRuntime is the only export AppHostInner calls. Default: resolved runtime.
@@ -87,6 +93,22 @@ describe('AppHostInner', () => {
     await waitFor(() => {
       expect(vi.mocked(mountBridge)).toHaveBeenCalledOnce()
     })
+  })
+
+  it('Back navigates in the app (no page load) and leaving tears the app down', async () => {
+    // A reload used to "tear down" the sandbox. Unmounting already does:
+    // the iframe leaves the DOM (its browsing context is discarded) and
+    // the bridge cleanup drops the message listener + the WS relay.
+    const cleanup = vi.fn()
+    vi.mocked(mountBridge).mockReturnValue(cleanup)
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(vi.mocked(mountBridge)).toHaveBeenCalled())
+    fireEvent.click(view.getByText(/Back/))
+    expect(nav.route).toHaveBeenCalledWith('/apps')
+    view.unmount()
+    await waitFor(() => expect(cleanup).toHaveBeenCalled())
+    expect(document.querySelector('iframe.sh-app-frame')).toBeNull()
+    vi.mocked(mountBridge).mockReturnValue(() => {})
   })
 
   it('shows age-restricted message and no iframe when getRuntime rejects with 403', async () => {

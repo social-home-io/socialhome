@@ -12,6 +12,7 @@
  * Non-admins see no tab chrome — just the enabled apps they can open.
  */
 import { useEffect, useState } from 'preact/hooks'
+import { useLocation } from 'preact-iso'
 import { t, isOne } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
@@ -43,7 +44,6 @@ import { Modal } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
 import { TabHeader } from '@/components/TabHeader'
 import { ApiError } from '@/api'
-import { addBase } from '@/baseUrl'
 import { safeIconSrc } from '@/utils/appIcon'
 
 type AppsTab = 'installed' | 'catalog'
@@ -202,6 +202,7 @@ function AppCard({
   isAdmin: boolean
   update: AppUpdate | null
 }) {
+  const { route } = useLocation()
   const [uninstallOpen, setUninstallOpen] = useState(false)
   const [togglingEnabled, setTogglingEnabled] = useState(false)
   const [uninstalling, setUninstalling]   = useState(false)
@@ -319,7 +320,8 @@ function AppCard({
         {app.enabled ? (
           <Button
             variant="primary"
-            onClick={() => { window.location.href = addBase(`/apps/${encodeURIComponent(app.app_id)}`) }}
+            // In-app navigation (the router keeps the ingress prefix).
+            onClick={() => route(`/apps/${encodeURIComponent(app.app_id)}`)}
           >
             {t('apps.open')}
           </Button>
