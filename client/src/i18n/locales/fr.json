@@ -2249,7 +2249,6 @@
   "space.chat.view_posts": "Fil",
   "space.chat.view_chat": "Discussion",
   "space.chat.view_aria": "Fil ou discussion",
-  "space.chat.audience": "Les membres de {space} peuvent lire cette discussion.",
   "space.chat.load_failed": "Impossible de charger la discussion de l'espace. Réessayez.",
   "space.chat.read_only_archived": "Cet espace est archivé. La discussion est en lecture seule.",
   "space.feature.chat": "Discussion",
@@ -4850,5 +4849,10 @@
   "space.summary.bazaar": "{count} en vente",
   "space.summary.bazaar_none": "Rien en vente",
   "space.summary.events": "{count} à venir",
-  "space.summary.events_none": "Rien à venir"
+  "space.summary.events_none": "Rien à venir",
+  "space.chat.empty": "Pas encore de messages. Les membres de {space} peuvent lire cette discussion.",
+  "space.chat.log_aria": "Discussion dans {space}",
+  "space.more.chat_muted": "Discussion en sourdine",
+  "space.more.notif_posts": "Publications",
+  "space.more.notif_chat": "Discussion"
 }

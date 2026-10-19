@@ -2276,7 +2276,6 @@
   "space.chat.view_posts": "Novedades",
   "space.chat.view_chat": "Chat",
   "space.chat.view_aria": "Novedades o chat",
-  "space.chat.audience": "Los miembros de {space} pueden leer este chat.",
   "space.chat.load_failed": "No se pudo cargar el chat del espacio. Inténtalo de nuevo.",
   "space.chat.read_only_archived": "Este espacio está archivado. El chat es de solo lectura.",
   "space.feature.chat": "Chat",
@@ -4877,5 +4876,10 @@
   "space.summary.bazaar": "{count} a la venta",
   "space.summary.bazaar_none": "Nada a la venta",
   "space.summary.events": "{count} próximos",
-  "space.summary.events_none": "Nada próximamente"
+  "space.summary.events_none": "Nada próximamente",
+  "space.chat.empty": "Aún no hay mensajes. Los miembros de {space} pueden leer este chat.",
+  "space.chat.log_aria": "Chat en {space}",
+  "space.more.chat_muted": "Chat silenciado",
+  "space.more.notif_posts": "Publicaciones",
+  "space.more.notif_chat": "Chat"
 }

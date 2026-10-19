@@ -40,6 +40,9 @@ import {
   type SpaceSection, type SpaceTabFeatures,
 } from '@/features/spaces/spaceTabs'
 import { sectionMeta, useSpaceSummary } from '@/features/spaces/spaceSummary'
+import { MuteSection } from '@/features/dms/ConversationMute'
+import type { ConversationNotifLevel } from '@/store/dms'
+import { isMuteActive } from '@/utils/mute'
 import {
   SpaceNotifLevelPicker, notifLevelLabel, type NotifLevel,
 } from '@/features/spaces/SpaceNotifLevels'
@@ -56,6 +59,17 @@ function isPhone(): boolean {
 export interface SpaceMemberSummary {
   count: number
   admins: number
+}
+
+/** The viewer's space-chat notifications, set next to the space's own
+ *  level in "Your notifications" (one place — the chat has no bell of
+ *  its own). */
+export interface SpaceChatNotif {
+  convId: string
+  mutedUntil: string | null
+  level: ConversationNotifLevel
+  onMute: (mutedUntil: string | null) => void
+  onLevel: (level: ConversationNotifLevel) => void
 }
 
 export interface SpaceNeedsYou {
@@ -80,6 +94,9 @@ interface Props {
   /** The viewer's notification level here; ``null`` → no row. */
   notifLevel: NotifLevel | null
   onNotifLevel: (level: NotifLevel) => void
+  /** The space chat's notifications (a member with the chat open to
+   *  them); ``null`` → the posts level alone. */
+  chatNotif?: SpaceChatNotif | null
   /** Settings link for writer roles; ``null`` hides the gear. */
   settingsHref: string | null
   /** Settings authority: the "Edit sections" footer in More. */
@@ -180,7 +197,7 @@ function membersMeta(m: SpaceMemberSummary): string {
 
 export function SpaceSectionNav({
   spaceId, spaceName, sections, active, features, chatUnread,
-  members, needsYou, notifLevel, onNotifLevel,
+  members, needsYou, notifLevel, onNotifLevel, chatNotif = null,
   settingsHref, canEditSections, leave = null, onLeave,
 }: Props) {
   const rowRef = useRef<HTMLUListElement>(null)
@@ -316,7 +333,11 @@ export function SpaceSectionNav({
           needsYouMeta(needsYou), needs, spaceSectionPath(spaceId, 'moderation'),
           active === 'moderation')}
         {notifLevel && row('notifications', <span class="sh-sidenav-icon">{EXTRA_ICONS.bell}</span>,
-          t('space.more.notifications'), notifLevelLabel(notifLevel), 0, null, false,
+          t('space.more.notifications'),
+          chatNotif && isMuteActive(chatNotif.mutedUntil)
+            ? `${notifLevelLabel(notifLevel)} · ${t('space.more.chat_muted')}`
+            : notifLevelLabel(notifLevel),
+          0, null, false,
           () => setView('notif'))}
       </ul>
       {canEditSections && settingsHref && (
@@ -345,11 +366,23 @@ export function SpaceSectionNav({
         <span aria-hidden="true" class="sh-flip-rtl">‹</span> {t('space.more.back')}
       </button>
       {!sheet && <h2 class="sh-space-more__heading">{t('space.more.notifications')}</h2>}
+      {chatNotif && <h3 class="sh-space-more__subheading">{t('space.more.notif_posts')}</h3>}
       <SpaceNotifLevelPicker
         spaceId={spaceId}
         level={notifLevel}
-        onSaved={(l) => { onNotifLevel(l); setView('rows') }}
+        // With the chat's choice below, stay so both can be set.
+        onSaved={(l) => { onNotifLevel(l); if (!chatNotif) setView('rows') }}
       />
+      {chatNotif && (
+        <MuteSection
+          convId={chatNotif.convId}
+          mutedUntil={chatNotif.mutedUntil}
+          onChange={chatNotif.onMute}
+          level={chatNotif.level}
+          onLevelChange={chatNotif.onLevel}
+          heading={t('space.more.notif_chat')}
+        />
+      )}
     </div>
   )
 

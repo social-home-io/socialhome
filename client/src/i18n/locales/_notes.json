@@ -22,7 +22,6 @@
   "space.chat.view_posts": "Switch option on a space's Feed tab — the posts. Keep short; match feed.tabs.feed.",
   "space.chat.view_chat": "Switch option on a space's Feed tab — the members' group chat. Keep short (one word); match feed.tabs.chat.",
   "space.chat.view_aria": "Screen-reader name of the Feed | Chat switch on a space's Feed tab.",
-  "space.chat.audience": "Note above a space's chat. {space} is the space's name. Followers of the space can't read it.",
   "space.chat.load_failed": "Shown in a space's Chat view when the chat can't be loaded; a Retry button follows.",
   "space.chat.read_only_archived": "Shown in place of the message composer in an archived space's chat (messages can still be read).",
   "space.feature.chat": "Space settings → Features: the toggle for the members' chat.",
@@ -521,5 +520,6 @@
   "space.needs.proposal": "Row title in the 'Needs you' card. {action} is a lowercase infinitive phrase from space.proposal.action.* / fwd.* (e.g. 'permanently delete this space').",
   "space.summary.tasks_mine": "Second half of a meta line like '5 open · 2 yours': tasks assigned to the viewer.",
   "space.summary.events": "Meta line under the Calendar row in a space's More menu: events in the next 30 days.",
-  "space.leave.owner_note": "Shown in a space's More menu to its owner instead of a Leave button. 'Admin › Spaces' is the household admin page path."
+  "space.leave.owner_note": "Shown in a space's More menu to its owner instead of a Leave button. 'Admin › Spaces' is the household admin page path.",
+  "space.chat.empty": "Shown inside an empty space chat thread. {space} is the space's name."
 }

@@ -46,7 +46,7 @@ vi.mock('./SpaceTasksTab', () => ({
 function wire(features: Record<string, boolean>, role: string, extra: Record<string, unknown> = {}) {
   apiGet.mockImplementation(async (url: string) => {
     if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features, my_role: role, ...extra }
-    if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role }]
+    if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role }, { user_id: 'u2', role: 'member' }]
     if (url === '/api/spaces/s1/links') return { links: [] }
     if (url === '/api/spaces/s1/chat') return { enabled: true, conversation_id: 'c1', unread: 0, notif_level: 'all', muted_until: null }
     return []
@@ -85,7 +85,7 @@ describe('SpaceFeedPage /spaces/:id/:section', () => {
     let answer!: (v: unknown) => void
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/spaces/s1') return new Promise((res) => { answer = res })
-      if (url === '/api/spaces/s1/members') return Promise.resolve([{ user_id: 'u1', role: 'member' }])
+      if (url === '/api/spaces/s1/members') return Promise.resolve([{ user_id: 'u1', role: 'member' }, { user_id: 'u2', role: 'member' }])
       if (url === '/api/spaces/s1/links') return Promise.resolve({ links: [] })
       return Promise.resolve([])
     })
@@ -209,7 +209,7 @@ describe('SpaceFeedPage /spaces/:id/:section', () => {
     let fail = true
     apiGet.mockImplementation(async (url: string) => {
       if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features: { calendar: true }, my_role: 'member' }
-      if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role: 'member' }]
+      if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role: 'member' }, { user_id: 'u2', role: 'member' }]
       if (url === '/api/spaces/s1/links') return { links: [] }
       if (url === '/api/spaces/s1/calendar/events') {
         if (fail) throw Object.assign(new Error('boom'), { status: 500 })
@@ -276,7 +276,7 @@ describe('the Members row and the member count', () => {
   it('the hero member count links to the Members section', async () => {
     wire({}, 'member', { about_markdown: 'Hello', cover_url: null, icon_url: null })
     const { tl, r } = await open()
-    const link = await tl.waitFor(() => r.getByRole('link', { name: '1 member' }))
+    const link = await tl.waitFor(() => r.getByRole('link', { name: '2 members' }))
     expect(link.getAttribute('href')).toBe('/spaces/s1/members')
   }, 20000)
 })

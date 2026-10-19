@@ -4386,6 +4386,9 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
     );
   }
 }
+/* An empty space chat says who can read it, centred in the thread. */
+.sh-messages-empty { margin: auto; padding: var(--sh-space-lg) var(--sh-space-md); }
+.sh-messages-empty p { margin: 0; color: var(--sh-text-muted); }
 .sh-space-feed--chat .sh-thread > .sh-composer {
   margin-bottom: 0;
   border-radius: 0;
@@ -5993,7 +5996,11 @@ body.sh-dm-thread-open .sh-messages {
 .sh-receipt--read      { color: var(--sh-primary-text); font-weight: 700; }
 .sh-message--mine .sh-receipt--read      { color: var(--sh-on-primary-fill); }   /* full ink + the bold weight */
 .sh-message--mine .sh-receipt--delivered { color: var(--sh-on-primary-fill); }
-.sh-message--mine .sh-receipt--sent      { color: color-mix(in srgb, var(--sh-on-primary-fill) 80%, transparent); }
+/* On the own bubble every meta mark keeps the full ink: 80 % of it on the
+   dark-theme fill is 4.3:1 (below AA). Sent ✓ and delivered ✓✓ differ by
+   the glyph, not the tint. */
+.sh-message--mine .sh-receipt--sent      { color: var(--sh-on-primary-fill); }
+.sh-message--mine .sh-message-edited     { opacity: 1; }
 
 /* Typing indicator — default (inline pill) shape used by comment
  * threads. The bubble variant below sits at the bottom of a DM
@@ -25051,6 +25058,16 @@ button.sh-page-editor-status {
 }
 .sh-space-more__notif { display: flex; flex-direction: column; gap: var(--sh-space-sm); padding: 4px; }
 .sh-space-more__heading { margin: 0; padding: 0 8px; font-size: var(--sh-font-size-base); }
+/* "Your notifications" with the chat's choice below the posts level. */
+.sh-space-more__subheading,
+.sh-space-more__notif .sh-groupinfo-heading {
+  margin: var(--sh-space-sm) 0 0;
+  padding: 0 8px;
+  color: var(--sh-text-muted);
+  font: 600 var(--sh-font-size-sm) / 1.3 var(--sh-font-family);
+}
+.sh-space-more__notif .sh-groupinfo-mute { padding: 0 8px; }
+.sh-space-more__notif .sh-groupinfo-mute .sh-groupinfo-heading { padding: 0; }
 .sh-space-more__back {
   align-self: flex-start;
   display: inline-flex;

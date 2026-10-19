@@ -90,7 +90,7 @@ vi.mock('@/features/dms/ConversationView', () => ({
   },
 }))
 vi.mock('@/features/dms/ConversationMute', () => ({
-  MuteButton: () => <button type="button">mute</button>,
+  MuteSection: (p: { heading?: string }) => <h3>{p.heading}</h3>,
 }))
 
 const SUMMARY = {
@@ -105,16 +105,19 @@ function wire(opts: {
   features?: Record<string, unknown>
   summary?: Record<string, unknown> | 'fail'
   archived?: boolean
+  /** Only the viewer is a member. */
+  solo?: boolean
 } = {}) {
-  const { role = 'member', features = {}, summary = SUMMARY, archived = false } = opts
+  const { role = 'member', features = {}, summary = SUMMARY, archived = false, solo = false } = opts
   apiGet.mockImplementation(async (url: string) => {
     if (url === '/api/spaces/s1') return { id: 's1', name: 'Choir', features, archived, my_role: role ?? undefined }
-    if (url === '/api/spaces/s1/members') return role ? [{ user_id: 'u1', role }] : []
+    if (url === '/api/spaces/s1/members') return role ? [{ user_id: 'u1', role }, ...(solo ? [] : [{ user_id: 'u2', role: 'member' }])] : []
     if (url === '/api/spaces/s1/chat') {
       if (summary === 'fail') throw new Error('offline')
       return summary
     }
     if (url === '/api/spaces/s1/links') return { links: [] }
+    if (url === '/api/spaces/s1/notif-prefs') return { level: 'all' }
     return []
   })
 }
@@ -171,9 +174,36 @@ describe('SpaceFeedPage — the Chat section', () => {
       allowAttachments: false, allowDelete: true, canModerate: false,
     })
     expect(props.meta).toMatchObject({ type: 'group_dm', notif_level: 'all', last_read_at: '2026-10-08 12:00:00' })
-    expect(r.getByText('Members of Choir can read this chat.')).toBeTruthy()
+    // Who can read it is said in the empty thread, not in a bar above it;
+    // the thread is a named log.
+    expect(props.emptyNote).toBe('No messages yet. Members of Choir can read this chat.')
+    expect(props.logLabel).toBe('Chat in Choir')
+    expect(r.queryByText('Members of Choir can read this chat.')).toBeNull()
+    // No second bell in the chat: its notifications live in More.
+    expect(r.container.querySelector('.sh-feed-chat-bar')).toBeNull()
     goTo(undefined)
     await r.waitFor(() => expect(r.queryByTestId('conversation-view')).toBeNull())
+  })
+
+  it('a space of one has no Chat; it appears with the second member', async () => {
+    wire({ solo: true })
+    const r = await renderPage()
+    await r.findByRole('link', { name: 'Feed' })
+    await r.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1/members'))
+    await new Promise((res) => setTimeout(res, 20))
+    expect(chatLink(r)).toBeNull()
+  })
+
+  it('the chat\'s notifications sit next to the space\'s in More', async () => {
+    wire({ summary: { ...SUMMARY, muted_until: FOREVER } })
+    const r = await renderPage()
+    await r.findByRole('link', { name: 'Chat' })
+    r.fireEvent.click(r.getByRole('button', { name: /^More/ }))
+    const row = await r.findByRole('button', { name: /^Your notifications/ })
+    await r.waitFor(() => expect(row.textContent).toContain('Chat muted'))
+    r.fireEvent.click(row)
+    expect(r.getByRole('heading', { name: 'Posts' })).toBeTruthy()
+    expect(r.getByRole('heading', { name: 'Chat' })).toBeTruthy()
   })
 
   it('the old ?view=chat link moves to /spaces/s1/chat', async () => {
