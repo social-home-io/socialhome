@@ -37,6 +37,8 @@ import { t } from '@/i18n/i18n'
 import { isHomeAssistant, isSupervisorAddon } from '@/platform'
 import { gfsConnectErrorText } from '@/features/connections/gfsErrors'
 import { ShareHomeToggle } from './ShareHomeToggle'
+import { Switch } from './Switch'
+import { toggles, loadToggles } from './HouseholdToggles'
 import { QrCodeImg } from './QrCodeImg'
 import { QrScanner } from './QrScanner'
 
@@ -80,6 +82,14 @@ const scanError = signal<string | null>(null)
 const justPairedInstanceId = signal<string | null>(null)
 /** Display name of the peer that was just paired — shown in the toggle label. */
 const justPairedDisplayName = signal<string | null>(null)
+/** Whether this household's home location goes to the household being
+ *  paired. Chosen on the start step, BEFORE "Show my QR" / "Scan" — the
+ *  code and the scanner's accept carry the home only when it is on.
+ *  Pre-set from the household's ``share_home_default`` on open. */
+const shareHome = signal(true)
+/** The admin flipped the switch since this open — a late household
+ *  default must not overwrite their choice. */
+let shareHomeTouched = false
 
 // ── Reach picker (inviter) ─────────────────────────────────────────────
 /** Active GFS connections that proved ``envelope_relay`` — the only ones a
@@ -468,7 +478,65 @@ export function openPairing(pairingMode: PairingMode = 'household') {
   reachLoading.value = false
   // Any open (GFS mode too) invalidates a lookup still in flight.
   reachLoadSeq++
-  if (pairingMode === 'household') void loadReachOptions()
+  if (pairingMode === 'household') {
+    void loadReachOptions()
+    void presetShareHome()
+  }
+}
+
+/** Pre-set the start step's switch from the household default (on unless
+ *  an admin turned it off). While it loads the switch shows the owner's
+ *  default; nothing is sent before :func:`resolveShareHome` knows it. */
+async function presetShareHome(): Promise<void> {
+  shareHomeTouched = false
+  shareHome.value = householdShareDefault() ?? true
+  if (householdShareDefault() === undefined) {
+    await loadToggles()
+    if (!shareHomeTouched && step.value === 'idle') {
+      // Still unknown (offline): show what will be sent — nothing.
+      shareHome.value = householdShareDefault() ?? false
+    }
+  }
+}
+
+/** The household's ``share_home_default`` once known (``undefined`` while
+ *  ``GET /api/household/preferences`` has not answered, or failed). */
+function householdShareDefault(): boolean | undefined {
+  return toggles.value?.share_home_default
+}
+
+/** The choice to send: the admin's flip, else the household default —
+ *  read now if it was not known yet; unknown after that = off (nothing
+ *  leaves on a guess). */
+async function resolveShareHome(): Promise<boolean> {
+  if (!shareHomeTouched) {
+    if (householdShareDefault() === undefined) await loadToggles()
+    shareHome.value = householdShareDefault() ?? false
+  }
+  return shareHome.value
+}
+
+/** The start step's home-sharing switch — one choice for whichever side
+ *  this household ends up on. */
+function ShareHomeChoice() {
+  const titleId = 'sh-pairing-share-home-title'
+  const helpId = 'sh-pairing-share-home-help'
+  return (
+    <label class="sh-conn-setting sh-pairing-share-home">
+      <span class="sh-conn-setting__text">
+        <b id={titleId}>{t('pairing.share_home_title')}</b>
+        <span id={helpId}>
+          {t(shareHome.value ? 'pairing.share_home_on' : 'pairing.share_home_off')}
+        </span>
+      </span>
+      <Switch
+        checked={shareHome.value}
+        aria-labelledby={titleId}
+        aria-describedby={helpId}
+        onChange={(next) => { shareHomeTouched = true; shareHome.value = next }}
+      />
+    </label>
+  )
 }
 
 function SasInput({ autofilled }: { autofilled?: boolean }) {
@@ -804,7 +872,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
       // [standalone].external_url) — 422 NOT_CONFIGURED if unset. With no
       // relay-capable GFS there is no picker and the body stays empty:
       // the classic ``url`` code.
-      const body: Record<string, string> = {}
+      const body: Record<string, string | boolean> = { share_home: await resolveShareHome() }
       if (relayGfs.value.length > 0) {
         body.reach = reach.value
         if (reach.value !== 'url' && reachGfsId.value) body.gfs_id = reachGfsId.value
@@ -877,7 +945,9 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
     scannedReach.value = scannedGfsHost.value ? parsed.reach as PairingReach : null
     step.value = 'accepting'
     try {
-      const result = await api.post('/api/pairing/accept', parsed) as {
+      // ``share_home`` after the code's own fields: a key planted in a
+      // code (the other household's data) can never decide our sharing.
+      const result = await api.post('/api/pairing/accept', { ...parsed, share_home: await resolveShareHome() }) as {
         verification_code: string
         token: string
       }
@@ -984,6 +1054,9 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
             {/* Above the cards: "Show my QR" mints the code with this
                 choice at once, so it must be seen first. */}
             {relayGfs.value.length > 0 && <ReachPicker />}
+            {/* Before both cards: the code and the scanner's answer carry
+                our home only when this is on. */}
+            <ShareHomeChoice />
             <div class="sh-pairing-role-grid">
               <button
                 ref={startFocusRef}
@@ -1165,7 +1238,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
               <ShareHomeToggle
                 instanceId={justPairedInstanceId.value}
                 peerName={justPairedDisplayName.value || justPairedInstanceId.value}
-                initialValue={true}
+                initialValue={shareHome.value}
               />
             )}
             <Button onClick={() => { open.value = false }}>

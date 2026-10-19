@@ -1342,6 +1342,12 @@ class PairingSession:
     issued_at: str | None = None
     expires_at: str | None = None
     status: PairingStatus = PairingStatus.PENDING_SENT
+    #: Whether this household shares its home location with the household
+    #: on the other end of this session — the admin's choice when the code
+    #: was minted (initiator) or scanned (scanner). The initiator's pair row
+    #: is created only when the scanner's peer-accept arrives, so the
+    #: choice is kept here until then. Local-only; never put on a wire.
+    share_home: bool = False
 
 
 # ─── Broadcast / delivery results ─────────────────────────────────────────

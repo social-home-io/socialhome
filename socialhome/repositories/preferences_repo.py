@@ -82,6 +82,7 @@ class SqlitePreferencesRepo:
             allow_location=bool(row["allow_location"]),
             allow_highlight_share=bool(row["allow_highlight_share"]),
             allow_link_preview=bool(row["allow_link_preview"]),
+            share_home_default=bool(row["share_home_default"]),
         )
 
     async def get_user(self, user_id: str) -> UserPreferences:

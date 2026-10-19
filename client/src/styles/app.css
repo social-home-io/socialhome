@@ -13088,6 +13088,13 @@ a.sh-space-hero-members:focus-visible,
   border-color: color-mix(in srgb, var(--sh-success) 40%, transparent);
 }
 
+/* The start step's "share our home" setting — a settings row, so it reads
+   left to right inside the centred start step. */
+.sh-pairing-share-home {
+  width: 100%;
+  text-align: start;
+}
+
 /* ───── Pairing role picker (Show / Scan) ──────────────────────── */
 .sh-pairing-role-grid {
   display: grid;

@@ -5032,5 +5032,11 @@
   "spaces.discover.invite_link_short": "members can invite you with a link",
   "spaces.list.posts_new": "{n} new posts",
   "spaces.list.posts_new_one": "{n} new post",
-  "spaces.discover.connect": "Connect first"
+  "spaces.discover.connect": "Connect first",
+  "pairing.share_home_title": "Share our home location",
+  "pairing.share_home_on": "On — they see your home on their map. You can change this later under Manage.",
+  "pairing.share_home_off": "Off — your home location isn't sent to them. You can turn it on later under Manage.",
+  "household.toggles.connections_legend": "Connections",
+  "household.toggles.share_home_default": "Share our home with new connections",
+  "household.toggles.share_home_default_hint": "Pre-sets the switch when you pair with a household. Each connection keeps its own setting."
 }

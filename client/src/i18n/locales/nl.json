@@ -4996,5 +4996,11 @@
   "spaces.discover.invite_link_short": "leden kunnen je uitnodigen met een link",
   "spaces.list.posts_new": "{n} nieuwe berichten",
   "spaces.list.posts_new_one": "{n} nieuw bericht",
-  "spaces.discover.connect": "Eerst koppelen"
+  "spaces.discover.connect": "Eerst koppelen",
+  "pairing.share_home_title": "De locatie van ons huis delen",
+  "pairing.share_home_on": "Aan — zij zien jullie huis op hun kaart. Je kunt dit later wijzigen onder Beheren.",
+  "pairing.share_home_off": "Uit — de locatie van jullie huis wordt niet naar hen gestuurd. Je kunt het later aanzetten onder Beheren.",
+  "household.toggles.connections_legend": "Verbindingen",
+  "household.toggles.share_home_default": "Ons huis delen met nieuwe verbindingen",
+  "household.toggles.share_home_default_hint": "Stelt de schakelaar vooraf in wanneer je met een huishouden koppelt. Elke verbinding houdt haar eigen instelling."
 }

@@ -821,8 +821,8 @@ class SqliteFederationRepo:
                 peer_identity_pk, peer_dh_pk, peer_inbox_url, inbox_url,
                 own_local_inbox_id,
                 verification_code, intro_note, relay_via,
-                status, issued_at, expires_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                status, issued_at, expires_at, share_home
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 session.token,
@@ -840,6 +840,7 @@ class SqliteFederationRepo:
                 session.status.value,
                 session.issued_at,
                 session.expires_at,
+                int(session.share_home),
             ),
         )
 
@@ -867,6 +868,7 @@ class SqliteFederationRepo:
             status=PairingStatus(d.get("status", "pending_sent")),
             issued_at=d.get("issued_at"),
             expires_at=d.get("expires_at"),
+            share_home=bool_col(d.get("share_home", 0)),
         )
 
     async def update_pairing(self, session: PairingSession) -> None:

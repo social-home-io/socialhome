@@ -4191,6 +4191,7 @@ class FederationService:
         *,
         reach: str = PAIRING_REACH_URL,
         gfs_id: str | None = None,
+        share_home: bool = False,
     ) -> dict:
         """Delegates to :class:`PairingCoordinator`.
 
@@ -4198,21 +4199,27 @@ class FederationService:
         will POST to. The coordinator appends a freshly-minted
         ``own_local_inbox_id`` before baking the URL into the QR.
         ``reach`` / ``gfs_id`` pick the code's GFS reach (see
-        :mod:`~socialhome.federation.pairing_gfs_reach`).
+        :mod:`~socialhome.federation.pairing_gfs_reach`). ``share_home``
+        is the per-pair home-sharing choice (fails closed).
         """
         return await self._pairing.initiate(
             inbox_base_url,
             reach=reach,
             gfs_id=gfs_id,
+            share_home=share_home,
         )
 
     async def accept_pairing(
         self,
         qr_payload: dict,
         own_inbox_base_url: str | None = None,
+        *,
+        share_home: bool = False,
     ) -> dict:
         """Delegates to :class:`PairingCoordinator`."""
-        return await self._pairing.accept(qr_payload, own_inbox_base_url)
+        return await self._pairing.accept(
+            qr_payload, own_inbox_base_url, share_home=share_home
+        )
 
     async def confirm_pairing(
         self,

@@ -128,7 +128,11 @@ async def test_initiate_carries_home_coords_in_qr_payload():
         }
     )
     coord = PairingCoordinator(repo, _kek(), kp.public_key)
-    payload = await coord.initiate("https://us.example/federation/inbox")
+    # Only when the admin shares the home with this household (the route
+    # pre-sets the switch from ``share_home_default``).
+    payload = await coord.initiate(
+        "https://us.example/federation/inbox", share_home=True
+    )
     assert payload["home_lat"] == 52.52
     assert payload["home_lon"] == 13.405
 

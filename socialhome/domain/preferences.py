@@ -45,6 +45,7 @@ PREFERENCE_SCOPE: dict[str, str] = {
     "allow_location": "household",
     "allow_highlight_share": "household",
     "allow_link_preview": "household",
+    "share_home_default": "household",
     # Per-user (row id = <user_id>)
     "hide_highlights": "user",
     "hide_momentum": "user",
@@ -146,6 +147,13 @@ class HouseholdPreferences:
     #: ``services.link_preview_service``). Not a post type — a household
     #: that turns it off still accepts previews other households send.
     allow_link_preview: bool = True
+    #: "Share our home location with households we pair with" — pre-sets
+    #: the pairing dialog's per-pair switch and is the switch of a pair made
+    #: without one (the auto-pair trust relay). Each pair keeps its own
+    #: ``remote_instances.share_home`` afterwards; changing this never
+    #: touches an existing pair. Column from migration
+    #: ``0107_pairing_share_home.sql``.
+    share_home_default: bool = True
 
     def is_enabled(self, section: str) -> bool:
         """``True`` if the ``feat_{section}`` toggle is on."""

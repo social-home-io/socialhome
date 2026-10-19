@@ -185,7 +185,11 @@ async def test_accept_peer_accept_body_carries_home_coords_when_set():
         "inbox_url": "https://alpha.example/federation/inbox/A-INBOX",
     }
 
-    await coord.accept(qr, own_inbox_base_url="https://beta.example/federation/inbox")
+    await coord.accept(
+        qr,
+        own_inbox_base_url="https://beta.example/federation/inbox",
+        share_home=True,
+    )
 
     assert len(captured) == 1
     body = captured[0]["body"]

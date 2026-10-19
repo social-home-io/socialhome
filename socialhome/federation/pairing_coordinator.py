@@ -89,6 +89,22 @@ def _relay_result(ok: bool) -> PeerPairingResult:
     )
 
 
+def _home_fields(local: dict | None, *, share_home: bool) -> dict:
+    """``{home_lat, home_lon}`` of this household for a pairing body — only
+    when ``share_home`` is on and a home is set, else ``{}``."""
+    if (
+        not share_home
+        or not local
+        or local.get("home_lat") is None
+        or local.get("home_lon") is None
+    ):
+        return {}
+    return {
+        "home_lat": round(float(local["home_lat"]), 4),
+        "home_lon": round(float(local["home_lon"]), 4),
+    }
+
+
 def _require_fields(data: dict, *fields: str) -> None:
     """Raise ``ValueError`` if any of ``fields`` are missing from ``data``."""
     missing = [f for f in fields if f not in data]
@@ -153,8 +169,16 @@ class PairingCoordinator:
         *,
         reach: str = PAIRING_REACH_URL,
         gfs_id: str | None = None,
+        share_home: bool = False,
     ) -> dict:
         """Generate a QR payload for the §11 pairing handshake.
+
+        ``share_home`` is the admin's per-pair home-sharing choice for the
+        household that will scan this code (the route pre-sets it from the
+        household's ``share_home_default``). Only when it is on does the
+        code carry our home location; it is kept on the session so the pair
+        row :meth:`handle_peer_accept` creates carries the same switch.
+        Fails closed: a caller that does not say shares nothing.
 
         ``inbox_base_url`` is the scheme+host+path prefix peers will
         POST to (e.g. ``https://my-instance.example/federation/inbox``).
@@ -206,6 +230,7 @@ class PairingCoordinator:
             issued_at=now.isoformat(),
             expires_at=expires_at,
             status=PairingStatus.PENDING_SENT,
+            share_home=share_home,
         )
         await self._repo.create_pairing(session)
 
@@ -240,22 +265,13 @@ class PairingCoordinator:
         if self._own_pq_pk is not None:
             payload["pq_algorithm"] = "mldsa65"
             payload["pq_identity_pk"] = self._own_pq_pk.hex()
-        # Carry the initiator's home coords in the QR so the scanner
-        # seats our row with coords immediately on ``accept`` — without
-        # this, only the reverse direction (scanner → initiator, via
-        # the peer-accept body) ever picked up coords during the
-        # handshake, and the scanner's view of the initiator stayed
-        # NULL until a later ``LOCAL_HOME_LOCATION_CHANGED`` envelope.
-        # The QR is a one-shot, in-person exchange — exposing the
-        # 4dp-truncated household coords (already a paired-peer
-        # surface) doesn't widen the information set.
-        if (
-            local
-            and local.get("home_lat") is not None
-            and local.get("home_lon") is not None
-        ):
-            payload["home_lat"] = float(local["home_lat"])
-            payload["home_lon"] = float(local["home_lon"])
+        # Our home coords ride the code only when the admin chose to share
+        # them with this household — the per-pair switch, honoured by every
+        # sender (owner decision 2026-10-19). The scanner then seats our row
+        # with them at once instead of waiting for the next
+        # ``LOCAL_HOME_LOCATION_CHANGED``. Nothing about the choice itself
+        # is on the code: "off" reads like "no home set".
+        payload.update(_home_fields(local, share_home=share_home))
         return payload
 
     def _derive_directional_keys(
@@ -304,8 +320,16 @@ class PairingCoordinator:
         self,
         qr_payload: dict,
         own_inbox_base_url: str | None = None,
+        *,
+        share_home: bool = False,
     ) -> dict:
         """Process an incoming QR scan.
+
+        ``share_home`` is the scanning admin's home-sharing choice for the
+        code owner: the peer-accept carries our home location only when it
+        is on, and the pair row gets the same switch. A ``share_home`` key
+        inside the code (the other household's data) is never read. Fails
+        closed when the caller does not say.
 
         ``own_inbox_base_url`` is this instance's externally-reachable
         federation inbox base (e.g. ``https://b.example/federation/inbox``)
@@ -447,6 +471,7 @@ class PairingCoordinator:
         peer_pq_alg = qr_payload.get("pq_algorithm")
         negotiated = negotiate(self._own_sig_suite, peer_suite)
 
+        existing = await self._repo.get_instance(peer_instance_id)
         # Persist a provisional RemoteInstance. Mirror the QR's
         # optional ``home_lat`` / ``home_lon`` onto the row at 4dp
         # precision (same rule the schema enforces). The peer-confirm
@@ -469,6 +494,7 @@ class PairingCoordinator:
             remote_keywrap_pk=peer_keywrap_pk,
             gfs_relay=gfs_reach,
             paired_at=now.isoformat(),
+            share_home=share_home,
             home_lat=(
                 round(float(qr_payload["home_lat"]), 4)
                 if qr_payload.get("home_lat") is not None
@@ -481,6 +507,7 @@ class PairingCoordinator:
             ),
         )
         await self._repo.save_instance(remote_inst)
+        await self._apply_share_home(existing, peer_instance_id, share_home)
         if gfs_reach:
             # Before anything is sent: the relayed confirm and every
             # relayed envelope from A must find the opt-in already set.
@@ -513,13 +540,9 @@ class PairingCoordinator:
             if gfs_reach and self._gfs_reach is not None:
                 peer_accept_body.update(self._gfs_reach.own_keywrap_fields())
                 peer_accept_body["proto_version"] = OURS
-            if (
-                local
-                and local.get("home_lat") is not None
-                and local.get("home_lon") is not None
-            ):
-                peer_accept_body["home_lat"] = float(local["home_lat"])
-                peer_accept_body["home_lon"] = float(local["home_lon"])
+            # Our home only when the scanning admin chose to share it with
+            # the code owner (see ``initiate``).
+            peer_accept_body.update(_home_fields(local, share_home=share_home))
             if self._own_pq_pk is not None:
                 peer_accept_body["pq_algorithm"] = "mldsa65"
                 peer_accept_body["pq_identity_pk"] = self._own_pq_pk.hex()
@@ -550,6 +573,22 @@ class PairingCoordinator:
             "local_inbox_id": own_local_inbox_id,
             "own_dh_pk": own_dh_kp.public_key.hex(),
         }
+
+    async def _apply_share_home(
+        self,
+        existing: RemoteInstance | None,
+        peer_instance_id: str,
+        share_home: bool,
+    ) -> None:
+        """Make the pair row carry the admin's choice.
+
+        A new row takes it from the :class:`RemoteInstance` just saved; an
+        existing one (a household met through an invite link, a re-pair)
+        keeps its local opt-ins across :meth:`save_instance`, so the
+        choice made in this handshake is written explicitly.
+        """
+        if existing is not None and existing.share_home != share_home:
+            await self._repo.set_share_home(peer_instance_id, value=share_home)
 
     async def _seat_relay(
         self,
@@ -847,6 +886,7 @@ class PairingCoordinator:
         negotiated = negotiate(self._own_sig_suite, peer_suite)
 
         now = datetime.now(UTC)
+        existing = await self._repo.get_instance(peer_instance_id)
         remote_inst = RemoteInstance(
             id=peer_instance_id,
             display_name=str(body.get("display_name") or peer_instance_id[:8]),
@@ -863,6 +903,8 @@ class PairingCoordinator:
             remote_keywrap_pk=peer_keywrap_pk,
             gfs_relay=peer_keywrap_pk is not None,
             paired_at=now.isoformat(),
+            # The choice the admin made when the code was minted.
+            share_home=session.share_home,
             home_lat=(
                 round(float(body["home_lat"]), 4)
                 if body.get("home_lat") is not None
@@ -875,6 +917,7 @@ class PairingCoordinator:
             ),
         )
         await self._repo.save_instance(remote_inst)
+        await self._apply_share_home(existing, peer_instance_id, session.share_home)
         if peer_keywrap_pk is not None:
             # Before the SAS reaches our admin: the relayed confirm path
             # and B's first relayed envelopes need the opt-in in place.
@@ -911,6 +954,7 @@ class PairingCoordinator:
             issued_at=session.issued_at,
             expires_at=session.expires_at,
             status=PairingStatus.PENDING_RECEIVED,
+            share_home=session.share_home,
         )
         await self._repo.update_pairing(updated)
 

@@ -18,6 +18,7 @@ vi.mock('@/api', () => ({
       allow_file: true, allow_poll: true, allow_schedule: true,
       allow_highlight_share: true,
       allow_link_preview: true,
+      share_home_default: true,
       household_name: 'Test Household',
     }),
     put: vi.fn().mockResolvedValue({}),
@@ -83,9 +84,10 @@ describe('HouseholdToggles', () => {
     expect(getByText('Text')).toBeTruthy()
     expect(getByText('Allow text posts in the feed')).toBeTruthy()
     expect(getByText('Shared highlight')).toBeTruthy()
-    // 9 features + 7 post types + 1 link-preview switch = 17 cards
+    // 9 features + 7 post types + 1 link-preview switch
+    // + 1 home-sharing default = 18 cards
     const cards = container.querySelectorAll('.sh-radio-card')
-    expect(cards).toHaveLength(17)
+    expect(cards).toHaveLength(18)
   })
 
   it('the admin can switch link previews off', async () => {
@@ -98,6 +100,20 @@ describe('HouseholdToggles', () => {
     fireEvent.click(card.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
     expect(api.put).toHaveBeenCalledWith('/api/household/preferences', {
       toggles: { allow_link_preview: false },
+    })
+  })
+
+  it('the admin can stop sharing the home with new connections by default', async () => {
+    const { api } = await import('@/api')
+    const { HouseholdToggles, loadToggles } = await import('./HouseholdToggles')
+    await loadToggles()
+    const { getByText } = render(<HouseholdToggles />)
+    expect(getByText('Connections')).toBeTruthy()
+    const card = getByText('Share our home with new connections').closest('.sh-radio-card')!
+    expect(card.classList.contains('sh-radio-card--selected')).toBe(true)
+    fireEvent.click(card.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+    expect(api.put).toHaveBeenCalledWith('/api/household/preferences', {
+      toggles: { share_home_default: false },
     })
   })
 

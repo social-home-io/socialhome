@@ -85,6 +85,7 @@ from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.federation_repo import AbstractFederationRepo
+from ..repositories.preferences_repo import AbstractPreferencesRepo
 from ..services.auto_pair_inbox import AutoPairInbox, auto_pair_request_expired
 from .inbound_validator import TIMESTAMP_SKEW_SECONDS
 
@@ -217,6 +218,7 @@ class AutoPairCoordinator:
         "_own_identity_pk",
         "_own_identity_seed",
         "_pending",
+        "_preferences",
         "_repo",
     )
 
@@ -230,8 +232,12 @@ class AutoPairCoordinator:
         own_identity_seed: bytes,
         own_identity_pk: bytes,
         inbox: AutoPairInbox,
+        preferences_repo: AbstractPreferencesRepo | None = None,
     ) -> None:
         self._repo = federation_repo
+        #: The household's ``share_home_default``: a pair made through an
+        #: introducer has no dialog switch, so its row takes the default.
+        self._preferences = preferences_repo
         self._key_manager = key_manager
         self._bus = bus
         self._federation = federation_service
@@ -239,6 +245,13 @@ class AutoPairCoordinator:
         self._own_identity_pk = own_identity_pk
         self._pending: dict[str, _PendingAutoSession] = {}
         self._inbox = inbox
+
+    async def _share_home_default(self) -> bool:
+        """The household's "share our home with households we pair with"
+        setting — on (the documented default) when none is wired."""
+        if self._preferences is None:
+            return True
+        return (await self._preferences.get_household()).share_home_default
 
     # ── Originator (A) ─────────────────────────────────────────────────
 
@@ -312,6 +325,7 @@ class AutoPairCoordinator:
             source=InstanceSource.MANUAL,
             relay_via=via_instance_id,
             paired_at=ts,
+            share_home=await self._share_home_default(),
         )
         await self._repo.save_instance(provisional)
 
@@ -639,6 +653,7 @@ class AutoPairCoordinator:
             source=InstanceSource.MANUAL,
             relay_via=req.via_b_id,
             paired_at=now,
+            share_home=await self._share_home_default(),
         )
         await self._repo.save_instance(approved)
 

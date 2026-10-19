@@ -178,7 +178,7 @@ describe('PairingFlow — scanner paste decoding', () => {
     fireEvent.click(screen.getByText('pairing.paste_submit'))
 
     await new Promise(r => setTimeout(r, 0))
-    expect(apiPost).toHaveBeenCalledWith('/api/pairing/accept', payload)
+    expect(apiPost).toHaveBeenCalledWith('/api/pairing/accept', { ...payload, share_home: false })
   })
 
   it('back-compat: raw JSON paste still works', async () => {
@@ -199,7 +199,7 @@ describe('PairingFlow — scanner paste decoding', () => {
     fireEvent.input(textarea, { target: { value: JSON.stringify(payload) } })
     fireEvent.click(screen.getByText('pairing.paste_submit'))
     await new Promise(r => setTimeout(r, 0))
-    expect(apiPost).toHaveBeenCalledWith('/api/pairing/accept', payload)
+    expect(apiPost).toHaveBeenCalledWith('/api/pairing/accept', { ...payload, share_home: false })
   })
 })
 
@@ -775,7 +775,7 @@ describe('PairingFlow — reach picker', () => {
     fireEvent.change(select, { target: { value: 'gfs-b' } })
     fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
     await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
-      '/api/pairing/initiate', { reach: 'gfs', gfs_id: 'gfs-b' },
+      '/api/pairing/initiate', { share_home: false, reach: 'gfs', gfs_id: 'gfs-b' },
     ))
   })
 
@@ -786,17 +786,17 @@ describe('PairingFlow — reach picker', () => {
     await screen.findByText('pairing.reach.legend')
     fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
     await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
-      '/api/pairing/initiate', { reach: 'url' },
+      '/api/pairing/initiate', { share_home: false, reach: 'url' },
     ))
   })
 
-  it('initiate keeps the empty body when there is no picker', async () => {
+  it('initiate sends no reach when there is no picker', async () => {
     stubReach([], 'https://home.example')
     apiPost.mockResolvedValue({ token: 't', identity_pk: 'i', dh_pk: 'd' })
     await openStart()
     await waitFor(() => expect(apiGet).toHaveBeenCalled())
     fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
-    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/pairing/initiate', {}))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/pairing/initiate', { share_home: false }))
   })
 })
 
@@ -919,7 +919,9 @@ describe('PairingFlow — scan side names the GFS a code uses', () => {
 
   it('an old code without reach fields still decodes and shows no GFS line', async () => {
     const text = await scan(base)
-    expect(apiPost).toHaveBeenCalledWith('/api/pairing/accept', base)
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/pairing/accept', { ...base, share_home: false },
+    ))
     expect(text).not.toContain('pairing.scan.uses_gfs')
   })
 
@@ -961,7 +963,7 @@ describe('PairingFlow — reach picker lifecycle', () => {
     fireEvent.click(show)
     // No URL → GFS only was preselected, never the bare {} body.
     await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
-      '/api/pairing/initiate', { reach: 'gfs', gfs_id: 'gfs-a' },
+      '/api/pairing/initiate', { share_home: false, reach: 'gfs', gfs_id: 'gfs-a' },
     ))
   })
 
@@ -1037,5 +1039,94 @@ describe('PairingFlow — reach picker lifecycle', () => {
     stubReach([RELAY_GFS], 'https://home.example')
     openPairing('household')
     await waitFor(() => expect(radio('pairing.reach.url').checked).toBe(true))
+  })
+})
+
+// ─── Home sharing is chosen before anything leaves (2026-10-19) ─────────
+
+describe('PairingFlow — the home-sharing switch on the start step', () => {
+  function stubPrefs(shareHomeDefault: boolean | null) {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/household/preferences') {
+        return shareHomeDefault === null
+          ? Promise.reject(new Error('offline'))
+          : Promise.resolve({ share_home_default: shareHomeDefault })
+      }
+      if (path === '/api/gfs/connections') return Promise.resolve([])
+      return Promise.resolve({ base: null, effective: 'https://home.example', source: 'auto' })
+    })
+  }
+
+  const homeSwitch = () =>
+    screen.getByRole('switch', { name: 'pairing.share_home_title' }) as HTMLInputElement
+
+  async function pasteCode(code: Record<string, unknown>) {
+    fireEvent.click(screen.getByLabelText('pairing.role_scan_aria'))
+    fireEvent.click(await screen.findByText('pairing.method_paste'))
+    const textarea = await screen.findByPlaceholderText('pairing.paste_placeholder')
+    fireEvent.input(textarea, { target: { value: JSON.stringify(code) } })
+    fireEvent.click(screen.getByText('pairing.paste_submit'))
+  }
+
+  const CODE = { token: 'tk', identity_pk: 'ed', dh_pk: 'x', inbox_url: 'https://b.example/inbox' }
+
+  it('is on by default, and the code is asked for with the home shared', async () => {
+    stubPrefs(true)
+    apiPost.mockResolvedValue({ token: 't', identity_pk: 'i', dh_pk: 'd' })
+    await openStart()
+    await waitFor(() => expect(homeSwitch().checked).toBe(true))
+    expect(screen.getByText('pairing.share_home_on')).toBeTruthy()
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/pairing/initiate', { share_home: true },
+    ))
+  })
+
+  it('follows the household default when an admin turned it off', async () => {
+    stubPrefs(false)
+    apiPost.mockResolvedValue({ token: 't', identity_pk: 'i', dh_pk: 'd' })
+    await openStart()
+    await waitFor(() => expect(homeSwitch().checked).toBe(false))
+    expect(screen.getByText('pairing.share_home_off')).toBeTruthy()
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/pairing/initiate', { share_home: false },
+    ))
+  })
+
+  it('switched off before scanning: the accept says so, over a key planted in the code', async () => {
+    stubPrefs(true)
+    apiPost.mockResolvedValue({ verification_code: '123456', token: 'tk' })
+    await openStart()
+    await waitFor(() => expect(homeSwitch().checked).toBe(true))
+    fireEvent.click(homeSwitch())
+    expect(homeSwitch().checked).toBe(false)
+    await pasteCode({ ...CODE, share_home: true })
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/pairing/accept', { ...CODE, share_home: false },
+    ))
+  })
+
+  it('switched on over an "off" default: the code shares the home', async () => {
+    stubPrefs(false)
+    apiPost.mockResolvedValue({ token: 't', identity_pk: 'i', dh_pk: 'd' })
+    await openStart()
+    await waitFor(() => expect(homeSwitch().checked).toBe(false))
+    fireEvent.click(homeSwitch())
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/pairing/initiate', { share_home: true },
+    ))
+  })
+
+  it('when the household default cannot be read, nothing is shared', async () => {
+    stubPrefs(null)
+    apiPost.mockResolvedValue({ verification_code: '123456', token: 'tk' })
+    await openStart()
+    await waitFor(() => expect(homeSwitch().checked).toBe(false))
+    await pasteCode(CODE)
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/pairing/accept', { ...CODE, share_home: false },
+    ))
   })
 })

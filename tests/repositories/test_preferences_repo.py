@@ -180,3 +180,13 @@ async def test_set_user_value_rejects_garbage_key(repo):
     await repo.ensure_row("henry")
     with pytest.raises(KeyError, match="unknown user preference key"):
         await repo.set_user_value("henry", "DROP TABLE preferences; --", 1)
+
+
+async def test_share_home_default_is_on_and_round_trips(repo):
+    """The household's "share our home location with households we pair
+    with" setting (migration 0107) — on unless an admin turns it off."""
+    assert (await repo.get_household()).share_home_default is True
+    await repo.ensure_row(HOUSEHOLD_ROW_ID)
+    assert (await repo.get_household()).share_home_default is True
+    await repo.set_household_value("share_home_default", 0)
+    assert (await repo.get_household()).share_home_default is False
