@@ -207,7 +207,7 @@ export function CommentOverlay() {
   // The author rendering matches PostCard's logic — display name
   // resolution + signed avatar URL — so the overlay header reads as
   // a continuation of the feed item the user just tapped.
-  const authorName = resolveDisplayName(spaceId, post.author, post.author)
+  const authorName = resolveDisplayName(spaceId, post.author)
   const avatarUrl = resolveAvatar(spaceId, post.author, null)
 
   const handleReply = async (parentId: string | null, content: string) => {

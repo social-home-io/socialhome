@@ -284,7 +284,7 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
   const canDelete = !!onDelete && (isMine || moderates)
   const canEdit = !!onEdit && comment.type === 'text' && (isMine || (!!spaceId && moderates))
 
-  const authorName = resolveDisplayName(spaceId, comment.author, comment.author)
+  const authorName = resolveDisplayName(spaceId, comment.author)
   const avatarUrl = resolveAvatar(spaceId, comment.author, null)
 
   if (comment.content === null || comment.deleted) {
