@@ -322,6 +322,19 @@ truth; the panel follows it.
   cache → dispatch. Never skip signature verification for "trusted" instances.
 - GPS coordinates: truncate to 4 decimal places before any storage or
   transmission — `round(float(lat), 4)`, never raw device precision.
+- **People's locations are never shared by design.** A person's or a
+  household's location leaves the household only when its people chose to
+  trust a specific paired household with it (the per-pair `share_home`
+  home location, live presence location shared with a peer). No default-on
+  sharing, never via a GFS, never as a side effect of joining a space.
+- **Space locations are not people's locations, and still stay minimal:**
+  - A *public local community* (a public space bound to an area) keeps its
+    centre on the host. Paired households get only "local community, within
+    X km" plus the host's own in-area verdict for *them*, computed against
+    the home they already chose to share. No coordinates on the wire.
+  - A *global* space may carry an owner-chosen place pin, used only to sort
+    Discover by distance on the viewer's side; joining does not check it.
+    Never default it to the household's home.
 - WebSocket auth uses `?token=` (unavoidable for browser WS). Tokens leak
   into access logs and browser history — never log the full `/api/ws` query
   string; operators must redact tokens.
@@ -613,8 +626,9 @@ bang.
 - Compare `member.role` against bare role strings — import `SpaceRole` from
   `domain.space` (`OWNER` / `ADMIN` / `MEMBER` / `SUBSCRIBER`). The schema
   CHECK is the on-disk authority; the enum is the in-code authority.
-- Store passwords, emails, phone numbers, or GPS coordinates in federation
-  payloads.
+- Store passwords, emails or phone numbers in federation payloads, or send
+  anyone's location without that person's per-pair opt-in (see "People's
+  locations are never shared by design" above).
 - Bypass `_require_space_admin()` / `_require_space_member()` guards.
 - Add an endpoint without a matching integration test.
 - Add bootstrap logic to `run.sh` — it belongs in `ha_bootstrap.py`.
