@@ -260,3 +260,46 @@ async def test_user_with_no_personal_calendar_is_skipped(env):
     )
     mirror_id = _mint_mirror_id("u-ben", event_id)
     assert await env.cal_repo.get_event(mirror_id) is None
+
+
+async def test_mirror_keeps_the_events_time_zone(env):
+    """An all-day space event in Zurich (stored 23:00Z – 22:59Z) mirrored
+    onto the household calendar keeps ``tz``: read in UTC it would start a
+    day early (the household calendar showed "Sun 8 – Sat 14" for a Mon 9 –
+    Sat 14 holiday)."""
+    ev = await env.space_cal_svc.create_event(
+        space_id="space-1",
+        summary="Holidays",
+        start="2026-11-08T23:00:00+00:00",
+        end="2026-11-14T22:59:00+00:00",
+        all_day=True,
+        tz="Europe/Zurich",
+        created_by="u-anna",
+    )
+    mirror = await env.cal_repo.get_event(_mint_mirror_id("u-anna", ev.id))
+    assert mirror is not None
+    assert (mirror.all_day, mirror.tz) == (True, "Europe/Zurich")
+    assert (mirror.start, mirror.end) == (ev.start, ev.end)
+
+
+async def test_a_source_update_carries_the_new_time_zone_to_the_mirror(env):
+    ev = await env.space_cal_svc.create_event(
+        space_id="space-1",
+        summary="Holidays",
+        start="2026-11-08T23:00:00+00:00",
+        end="2026-11-14T22:59:00+00:00",
+        all_day=True,
+        tz="Europe/Zurich",
+        created_by="u-anna",
+    )
+    await env.space_cal_svc.update_event(
+        ev.id,
+        actor_user_id="u-anna",
+        space_id="space-1",
+        start="2026-11-09T05:00:00+00:00",
+        end="2026-11-15T04:59:00+00:00",
+        tz="America/New_York",
+    )
+    mirror = await env.cal_repo.get_event(_mint_mirror_id("u-anna", ev.id))
+    assert mirror is not None
+    assert mirror.tz == "America/New_York"

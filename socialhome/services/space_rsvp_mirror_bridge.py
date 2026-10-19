@@ -119,6 +119,9 @@ class SpaceRsvpMirrorBridge:
                 end=event.event.end,
                 description=event.event.description,
                 all_day=event.event.all_day,
+                # The zone the event's days are read in (an all-day event
+                # stored 23:00Z in Zurich is the next day, not this one).
+                tz=event.event.tz,
                 rrule=event.event.rrule,
                 cover_url=event.event.cover_url,
             )
@@ -174,6 +177,8 @@ class SpaceRsvpMirrorBridge:
             created_by=user_id,
             description=source.description,
             all_day=source.all_day,
+            # Same days as the space event: its bounds are read in its zone.
+            tz=source.tz,
             attendees=(),
             mirrored_from=source.id,
             rrule=source.rrule,
