@@ -68,6 +68,9 @@ GATED_METHODS: frozenset[str] = frozenset(
         "set_member_picture",
         "clear_member_picture",
         "transfer_ownership",
+        # Household admins only (and only once the owner has left).
+        "reassign_orphaned_ownership",
+        "ownership_candidates",
         "ban",
         "unban",
         "create_invite_token",
@@ -393,6 +396,18 @@ async def stack(tmp_dir):
             "transfer_ownership",
             lambda s: s.space_svc.transfer_ownership(
                 s.space.id, actor_username="bob", to_user_id=s.bob.user_id
+            ),
+        ),
+        (
+            "reassign_orphaned_ownership",
+            lambda s: s.space_svc.reassign_orphaned_ownership(
+                s.space.id, actor_username="bob", to_user_id=s.bob.user_id
+            ),
+        ),
+        (
+            "ownership_candidates",
+            lambda s: s.space_svc.ownership_candidates(
+                s.space.id, actor_username="bob"
             ),
         ),
         (

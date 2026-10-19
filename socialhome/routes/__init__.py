@@ -337,6 +337,7 @@ from .space_polls import (
 from .space_zones import SpaceZoneDetailView, SpaceZonesCollectionView
 from .spaces import (
     AdminSpaceCollectionView,
+    AdminSpaceOwnershipView,
     InviteLinkCodeView,
     LocalInviteCollectionView,
     LocalInviteDecisionView,
@@ -591,6 +592,7 @@ def setup_routes(app: web.Application) -> None:
 
     # ── Spaces ──────────────────────────────────────────────────────────
     app.router.add_view("/api/admin/spaces", AdminSpaceCollectionView)
+    app.router.add_view("/api/admin/spaces/{id}/ownership", AdminSpaceOwnershipView)
     app.router.add_view("/api/spaces", SpaceCollectionView)
     app.router.add_view("/api/spaces/join", SpaceJoinView)
     app.router.add_view("/api/spaces/chat-unread", SpaceChatUnreadView)

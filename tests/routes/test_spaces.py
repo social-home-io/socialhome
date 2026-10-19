@@ -2059,6 +2059,96 @@ async def test_ownership_transfer_to_another_household_is_refused(client):
     assert (await _roles(client, sid))[client._admin_uid] == "owner"
 
 
+async def _deactivate(client, username: str) -> None:
+    await client.app[_db_key].enqueue(
+        "UPDATE users SET state='inactive' WHERE username=?", (username,)
+    )
+
+
+async def test_admin_lists_whether_the_owner_is_still_here(client):
+    sid = await _owned_space(client, "Listed")
+    r = await client.get("/api/admin/spaces", headers=_auth(client._admin_token))
+    row = next(x for x in await r.json() if x["id"] == sid)
+    assert row["owner_active"] is True
+    assert row["hosted_here"] is True
+
+
+async def test_admin_reassign_refused_while_owner_active(client):
+    """pascal is both household admin and owner: while active, he hands
+    the space over himself; the admin path says so."""
+    sid = await _owned_space(client, "Active")
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.post(
+        f"/api/admin/spaces/{sid}/ownership",
+        json={"to_user_id": client._bob_uid},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "OWNER_ACTIVE"
+
+
+async def test_admin_reassign_is_household_admin_only(client):
+    sid = await _owned_space(client, "AdminOnly")
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    for method in ("get", "post"):
+        r = await getattr(client, method)(
+            f"/api/admin/spaces/{sid}/ownership",
+            json={"to_user_id": client._bob_uid} if method == "post" else None,
+            headers=_auth(client._bob_token),
+        )
+        assert r.status == 403
+
+
+async def test_admin_reassigns_a_space_whose_owner_left(client):
+    """The owner (bob) left the household; pascal, a household admin who
+    is not in the space, hands it to a remaining member."""
+    db = client.app[_db_key]
+    r = await client.post(
+        "/api/spaces", json={"name": "Orphan"}, headers=_auth(client._bob_token)
+    )
+    sid = (await r.json())["id"]
+    # carol, a third local user, is a member.
+    carol_uid = "carol-uid-0001"
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
+        ("carol", carol_uid, "Carol"),
+    )
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,'member')",
+        (sid, carol_uid),
+    )
+    await _deactivate(client, "bob")
+    r = await client.get(
+        f"/api/admin/spaces/{sid}/ownership", headers=_auth(client._admin_token)
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["owner_active"] is False
+    assert [c["user_id"] for c in body["candidates"]] == [carol_uid]
+    r = await client.post(
+        f"/api/admin/spaces/{sid}/ownership",
+        json={"to_user_id": carol_uid},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200
+    rows = await db.fetchall(
+        "SELECT user_id, role FROM space_members WHERE space_id=?", (sid,)
+    )
+    roles = {row["user_id"]: row["role"] for row in rows}
+    assert roles[carol_uid] == "owner"
+    assert roles[client._bob_uid] == "member"
+
+
+async def test_admin_reassign_requires_to_user_id(client):
+    sid = await _owned_space(client, "NoTarget")
+    r = await client.post(
+        f"/api/admin/spaces/{sid}/ownership",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422
+
+
 async def test_join_request_lifecycle(client):
     r = await client.post(
         "/api/spaces",

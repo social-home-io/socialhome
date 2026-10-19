@@ -265,4 +265,33 @@ describe('Zones tab', () => {
     fireEvent.click(await view.findByText('Open Settings'))
     expect(view.getByRole('tab', { name: 'Settings' }).getAttribute('aria-selected')).toBe('true')
   })
+
+  it('Spaces offers "Choose a new owner" only for a hosted space whose owner left', async () => {
+    const { api } = await import('@/api')
+    const get = api.get as ReturnType<typeof vi.fn>
+    const row = (over: Record<string, unknown>) => ({
+      emoji: null, description: null, space_type: 'private', join_mode: 'invite_only',
+      owner_instance_id: 'me', member_count: 2, dissolved: false, hosted_here: true, ...over,
+    })
+    get.mockImplementation((path: string) => {
+      if (path === '/api/admin/spaces') {
+        return Promise.resolve([
+          row({ id: 's-gone', name: 'Old club', owner_username: 'tobi', owner_active: false }),
+          row({ id: 's-here', name: 'Family', owner_username: 'pascal', owner_active: true }),
+          row({ id: 's-stub', name: 'Remote', owner_username: 'zoe', owner_active: false, hosted_here: false }),
+        ])
+      }
+      if (path === '/api/admin/tokens') return Promise.resolve({ tokens: [] })
+      if (path === '/api/gfs/publications') return Promise.resolve({ publications: [] })
+      return Promise.resolve([])
+    })
+    const mod = await import('./AdminPage')
+    const view = render(<mod.default />)
+    fireEvent.click(await view.findByRole('tab', { name: 'Spaces' }))
+    await view.findByText(/Old club/)
+    expect(view.getAllByRole('button', { name: 'Choose a new owner' })).toHaveLength(1)
+    expect(view.getByText(/left the household/)).toBeTruthy()
+    // The old prompt() path is gone: no raw "Transfer" on every row.
+    expect(view.queryByRole('button', { name: 'Transfer' })).toBeNull()
+  })
 })

@@ -183,6 +183,7 @@ from ..domain.space import (
     InviteOnlyError,
     JoinMode,
     JoinOwner,
+    OwnerStillActiveError,
     OwnerTransferFollowerError,
     OwnerTransferNotLocalError,
     OwnerTransferSelfError,
@@ -214,6 +215,7 @@ from ..domain.space import (
     role_change_event_type,
     validate_space_link_url,
 )
+from ..domain.user import User
 from ..domain.writer_cert import WriterEntitlement
 from ..federation.invite_link_forward import (
     FORWARDED_INVITE_LINK_ACTION,
@@ -4746,42 +4748,130 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """
         space = await self._require_space(space_id)
         outgoing = await self._require_owner(space, actor_username)
-        if space.owner_instance_id != self._own_instance_id:
-            # Fail closed: only the hosting household can move ownership
-            # (a stub's owner seat is never local, so this is unreachable
-            # through a well-formed roster).
-            raise SpacePermissionError("ownership moves on the hosting household")
+        self._require_hosted_here(space)
         if to_user_id == outgoing.user_id:
             raise OwnerTransferSelfError()
-        new_owner_member = await self._spaces.get_member(space_id, to_user_id)
+        new_owner_user = await self._check_new_owner(space, to_user_id)
+        await self._move_ownership(
+            space,
+            outgoing_user_id=outgoing.user_id,
+            outgoing_role=SpaceRole.ADMIN,
+            new_owner_user_id=to_user_id,
+            new_owner_username=new_owner_user.username,
+        )
+
+    async def reassign_orphaned_ownership(
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+        to_user_id: str,
+    ) -> None:
+        """A household admin hands a space whose owner is gone to another
+        local member (§23.48).
+
+        Only when the owner can't do it themselves: their account here is
+        deactivated or deleted. While the owner is active they hand it over
+        in the space's settings (409 ``OWNER_ACTIVE``). The same rules as a
+        transfer apply to the new owner (a local full member, never a
+        follower or someone from another household). The departed owner's
+        seat, if it is still there, drops to a plain member — someone who
+        left the household keeps no authority over the space.
+        """
+        actor = await self._actor_or_raise(actor_username)
+        if not actor.is_admin:
+            raise SpacePermissionError("household admin required")
+        space = await self._require_space(space_id)
+        self._require_hosted_here(space)
+        owner = await self._users.get(space.owner_username)
+        if owner is not None and owner.is_active():
+            raise OwnerStillActiveError()
+        new_owner_user = await self._check_new_owner(space, to_user_id)
+        seats = await self._spaces.list_members(space_id)
+        outgoing = next((m for m in seats if m.role == SpaceRole.OWNER), None)
+        await self._move_ownership(
+            space,
+            outgoing_user_id=outgoing.user_id if outgoing is not None else None,
+            outgoing_role=SpaceRole.MEMBER,
+            new_owner_user_id=to_user_id,
+            new_owner_username=new_owner_user.username,
+        )
+
+    async def ownership_candidates(
+        self, space_id: str, *, actor_username: str
+    ) -> tuple[bool, list[tuple[SpaceMember, User]]]:
+        """For Admin › Spaces: whether the owner is still active here, and
+        the local full members who could take the space over (household
+        admins only)."""
+        actor = await self._actor_or_raise(actor_username)
+        if not actor.is_admin:
+            raise SpacePermissionError("household admin required")
+        space = await self._require_space(space_id)
+        owner = await self._users.get(space.owner_username)
+        owner_active = owner is not None and owner.is_active()
+        out: list[tuple[SpaceMember, User]] = []
+        for seat in await self._spaces.list_members(space_id):
+            if seat.role in (SpaceRole.OWNER, SpaceRole.SUBSCRIBER):
+                continue
+            user = await self._users.get_by_user_id(seat.user_id)
+            if user is not None and user.is_active():
+                out.append((seat, user))
+        return owner_active, out
+
+    def _require_hosted_here(self, space: Space) -> None:
+        """Fail closed: only the hosting household moves ownership (a
+        stub's owner seat is never local)."""
+        if space.owner_instance_id != self._own_instance_id:
+            raise SpacePermissionError("ownership moves on the hosting household")
+
+    async def _check_new_owner(self, space: Space, to_user_id: str) -> User:
+        """The local account that may become ``space``'s owner, or the
+        refusal: a member from another household, a follower, someone with
+        no active local account, or a protected account for a public /
+        global space."""
+        new_owner_member = await self._spaces.get_member(space.id, to_user_id)
         if new_owner_member is None:
-            if await self._live_remote_seat(space_id, to_user_id) is not None:
+            if await self._live_remote_seat(space.id, to_user_id) is not None:
                 raise OwnerTransferNotLocalError()
             raise KeyError(f"user {to_user_id!r} is not a member")
         if new_owner_member.role == SpaceRole.SUBSCRIBER:
             raise OwnerTransferFollowerError()
+        if new_owner_member.role == SpaceRole.OWNER:
+            raise OwnerTransferSelfError()
         new_owner_user = await self._users.get_by_user_id(to_user_id)
-        if new_owner_user is None:
-            # A seat without a local account can't sign in to own anything.
+        if new_owner_user is None or not new_owner_user.is_active():
+            # A seat without an active local account can't own anything.
             raise OwnerTransferNotLocalError()
         if space.space_type in PUBLIC_SPACE_TIERS and await self._is_protected(
             to_user_id
         ):
             # §CP.R: a protected account never owns a public / global space.
             raise SpacePermissionError(PROTECTED_OWNER_TRANSFER_DETAIL)
-        # The outgoing owner becomes admin; the new owner becomes owner.
-        await self._spaces.set_role(space_id, outgoing.user_id, SpaceRole.ADMIN)
-        await self._spaces.set_role(space_id, to_user_id, SpaceRole.OWNER)
+        return new_owner_user
+
+    async def _move_ownership(
+        self,
+        space: Space,
+        *,
+        outgoing_user_id: str | None,
+        outgoing_role: SpaceRole,
+        new_owner_user_id: str,
+        new_owner_username: str,
+    ) -> None:
+        """Swap the owner seat and tell every member household."""
+        if outgoing_user_id is not None:
+            await self._spaces.set_role(space.id, outgoing_user_id, outgoing_role)
+        await self._spaces.set_role(space.id, new_owner_user_id, SpaceRole.OWNER)
         # ``save`` never rewrites the owner columns, so the owner name moves
         # through the dedicated write — the config change below ships it to
         # every member household.
-        await self._spaces.record_owner_change(space_id, new_owner_user.username)
-        sequence = await self._spaces.increment_config_sequence(space_id)
+        await self._spaces.record_owner_change(space.id, new_owner_username)
+        sequence = await self._spaces.increment_config_sequence(space.id)
         await self._bus.publish(
             SpaceConfigChanged(
-                space_id=space_id,
+                space_id=space.id,
                 event_type=SpaceConfigEventType.OWNERSHIP_TRANSFERRED.value,
-                payload={"new_owner_user_id": to_user_id},
+                payload={"new_owner_user_id": new_owner_user_id},
                 sequence=sequence,
             )
         )
