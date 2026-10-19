@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  parseSettingsSection, resolveSettingsSection, settingsSectionLabel,
+  legacySettingsSection, parseSettingsSection, resolveSettingsSection, settingsSectionLabel,
   settingsSectionPath, settingsSections,
 } from './spaceSettingsSections'
 
@@ -24,6 +24,12 @@ describe('space settings sections', () => {
     for (const v of ['admin', 'remote-admin', 'member', 'follower'] as const) {
       expect(settingsSections(v).filter(s => s === 'bots').length).toBeLessThanOrEqual(1)
     }
+  })
+
+  it('maps an old ?household= link onto Members & joining', () => {
+    expect(legacySettingsSection({ household: 'inst-1' })).toBe('members')
+    expect(legacySettingsSection({})).toBeNull()
+    expect(legacySettingsSection(undefined)).toBeNull()
   })
 
   it('parses a path segment, refusing unknown ones', () => {

@@ -44,7 +44,7 @@ import {
 } from './SpaceNotifLevels'
 import { parseSpaceRole } from './spaceRoles'
 import {
-  resolveSettingsSection, settingsSectionLabel, settingsSectionPath, settingsSections,
+  legacySettingsSection, resolveSettingsSection, settingsSectionLabel, settingsSectionPath, settingsSections,
   type SettingsSection, type SettingsViewer,
 } from './spaceSettingsSections'
 import type { ThemeDraft } from '@/components/SpaceThemeStudio'
@@ -116,9 +116,15 @@ function scrollToSection(section: SettingsSection, focus: boolean) {
 
 export default function SpaceSettingsPage() {
   const { params } = useRoute()
-  const { route } = useLocation()
+  const { route, query } = useLocation()
   const spaceId = params.id
   const segment = params.section
+  // An old link (a stored bell entry: ``/settings?household=…``) → its
+  // section's own path, replacing the entry so Back skips the old form.
+  const legacy = segment ? null : legacySettingsSection(query)
+  useEffect(() => {
+    if (legacy) route(settingsSectionPath(spaceId, legacy), true)
+  }, [spaceId, legacy])
   const [space, setSpace] = useState<SpaceDetail | null>(null)
   const [roster, setRoster] = useState<RosterRow[]>([])
   const [loading, setLoading] = useState(true)

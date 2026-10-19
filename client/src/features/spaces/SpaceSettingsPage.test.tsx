@@ -32,11 +32,11 @@ function emit(type: string, data: Record<string, unknown>) {
   handlers.get(type)?.forEach(h => h({ type, data: { type, ...data } }))
 }
 
-const nav = vi.hoisted(() => ({ section: undefined as string | undefined, route: vi.fn() }))
+const nav = vi.hoisted(() => ({ section: undefined as string | undefined, route: vi.fn(), query: {} as Record<string, string> }))
 vi.mock('preact-iso', async (orig) => ({
   ...(await orig<object>()),
   useRoute: () => ({ params: { id: 'sp-1', section: nav.section } }),
-  useLocation: () => ({ route: nav.route, path: '/spaces/sp-1/settings', url: '/spaces/sp-1/settings' }),
+  useLocation: () => ({ route: nav.route, path: '/spaces/sp-1/settings', url: '/spaces/sp-1/settings', query: nav.query }),
 }))
 vi.mock('@/store/auth', () => ({
   currentUser: { value: { user_id: 'u1', username: 'anna', display_name: 'Anna', is_admin: false } },
@@ -53,6 +53,7 @@ let role: string
 beforeEach(() => {
   handlers.clear()
   nav.section = undefined
+  nav.query = {}
   nav.route.mockReset()
   apiGet.mockReset()
   apiPatch.mockReset()
@@ -105,6 +106,19 @@ describe('SpaceSettingsPage — one page, a URL per section', () => {
     for (const s of ['basics', 'find', 'members', 'sections', 'notifications', 'location', 'moderation', 'bots', 'danger']) {
       expect(view.container.querySelector(`#settings-${s}`)).not.toBeNull()
     }
+  })
+
+  it('an old "Reviewed is not available" bell link (?household=) opens Members & joining', async () => {
+    nav.query = { household: 'inst-old' }
+    await mount()
+    expect(nav.route).toHaveBeenCalledWith('/spaces/sp-1/settings/members', true)
+  })
+
+  it('a section URL with ?household= stays where it is', async () => {
+    nav.section = 'members'
+    nav.query = { household: 'inst-old' }
+    await mount()
+    expect(nav.route).not.toHaveBeenCalled()
   })
 
   it('a section URL marks that section and scrolls to it', async () => {

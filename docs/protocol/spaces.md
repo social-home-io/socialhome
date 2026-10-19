@@ -1773,7 +1773,10 @@ owner, an admin or a moderator.
   available for Tasks in … for members of a household that needs an
   update"): that household cannot submit, and every receiver refuses its
   members' direct changes. It is pushed once per (space, household); a
-  v_43 household warns nobody.
+  v_43 household warns nobody. It links to Settings › Members & joining
+  (`/spaces/{id}/settings/members?household={instance}`), where the access
+  levels are; a row stored with the older `/settings?household=…` link
+  keeps that link as the household's key, and the SPA redirects it there.
 * **Personal bots.** Under `moderated` posts a member-scope bot (its
   maker's voice) is refused — `POST /api/bot-bridge/spaces/{id}` answers 403
   `BOT_POSTS_REVIEWED` — rather than queued: a bot is an unattended
