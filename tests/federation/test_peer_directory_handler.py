@@ -122,6 +122,46 @@ async def test_malformed_payload_ignored(repo):
     assert await repo.list_for_instance("peerA") == []
 
 
+async def test_a_local_community_area_round_trips_revalidated(repo):
+    """v_59 — the area is stored re-truncated to 4 dp; a malformed one is
+    dropped (the entry is kept, with no area) — never guessed."""
+    handler = PeerDirectoryHandler(repo)
+    await handler._on_snapshot(
+        _event(
+            "peerA",
+            [
+                {
+                    "space_id": "local",
+                    "name": "Quartier",
+                    "local_area": {
+                        "lat": 47.376_912_3,
+                        "lon": 8.541_749_9,
+                        "radius_km": 5,
+                    },
+                },
+                {
+                    "space_id": "huge",
+                    "name": "Region",
+                    "local_area": {"lat": 47.0, "lon": 8.0, "radius_km": 500},
+                },
+                {
+                    "space_id": "half",
+                    "name": "Half",
+                    "local_area": {"lat": 47.0, "lon": 8.0},
+                },
+                {"space_id": "plain", "name": "Chess"},
+            ],
+        )
+    )
+    rows = {r.space_id: r for r in await repo.list_for_instance("peerA")}
+    area = rows["local"].local_area
+    assert area is not None
+    assert (area.lat, area.lon, area.radius_km) == (47.3769, 8.5417, 5.0)
+    assert rows["huge"].local_area is None
+    assert rows["half"].local_area is None
+    assert rows["plain"].local_area is None
+
+
 async def test_attach_registers_event_type():
     handler = PeerDirectoryHandler(MagicMock())
     federation_service = MagicMock()

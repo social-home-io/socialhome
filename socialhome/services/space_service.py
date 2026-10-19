@@ -107,6 +107,7 @@ from ..domain.events import (
     SpaceJoinApproved,
     SpaceJoinDenied,
     SpaceJoinRequested,
+    SpaceLocalAreaChanged,
     SpaceLocationFeatureEnabled,
     SpaceLocationModeChanged,
     SpaceMemberJoined,
@@ -137,6 +138,7 @@ from ..domain.federation_capabilities import (
 )
 from ..domain.gfs_server import SignedGfsServerList
 from ..domain.link_preview import card_survives_edit
+from ..domain.local_community import LocalArea, local_area_of, validate_local_area
 from ..domain.media_constraints import (
     SPACE_COVER_MAX_DIMENSION,
     SPACE_COVER_SNAPSHOT_MAX_BYTES,
@@ -184,7 +186,9 @@ from ..domain.space import (
     InviteOnlyError,
     JoinMode,
     JoinOwner,
-    MapPinUnavailableError,
+    LocalAreaDelegatedError,
+    LocalAreaPublicOnlyError,
+    LocalAreaUnavailableError,
     OwnerStillActiveError,
     OwnerTransferFollowerError,
     OwnerTransferNotLocalError,
@@ -216,7 +220,6 @@ from ..domain.space import (
     role_change_allowed,
     role_change_event_type,
     validate_space_link_url,
-    validate_zone_coord,
 )
 from ..domain.user import User
 from ..domain.writer_cert import WriterEntitlement
@@ -241,6 +244,7 @@ from ..repositories.user_repo import AbstractUserRepo
 from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
+from .local_community import require_local_eligibility
 from .protection_gate import ProtectionGateMixin
 from .space_authority_pin import (
     apply_authority_cert,
@@ -955,13 +959,18 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         retention_exempt_types: tuple[str, ...] | list[str] | None = None,
         category: str | None = None,
         gfs_ids: object = None,
+        lat: object = None,
+        lon: object = None,
+        radius_km: object = None,
     ) -> Space:
         """Create a new space and seat the creator as owner.
 
-        A new space carries no map pin: nothing shows one (no map, no
-        directory — GPS never goes to peers or a GFS), so none is
-        collected. A pin stored before that stays editable / removable
-        (:meth:`set_map_pin`).
+        ``lat`` / ``lon`` / ``radius_km`` make a PUBLIC space a local
+        community (``domain/local_community``): a household joins only while
+        its shared home lies inside the circle. All three or none; any other
+        tier with an area is a 422 ``LOCAL_AREA_PUBLIC_ONLY``. The centre is
+        truncated to 4 dp before it is stored. The creator is seated as owner
+        whatever their own home — creating is not joining.
 
         A GLOBAL space is listed on the GFSs in *gfs_ids* (this household's
         active connections, at most 8) and needs at least one while any is
@@ -981,6 +990,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
 
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")
+        area = _local_area_from_input(stype, lat, lon, radius_km)
+        if (
+            area is not None
+            and features is not None
+            and (features.delegated_admin_authority)
+        ):
+            # Same rule as set_local_area: a delegated admin's household
+            # would seat people without the host's area check.
+            raise LocalAreaDelegatedError()
 
         # The owner's GFS choice, checked before anything is stored.
         chosen_gfs: tuple[str, ...] = ()
@@ -1025,6 +1043,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             else None,
             retention_exempt_types=exempt_types,
             category=category,
+            lat=area.lat if area is not None else None,
+            lon=area.lon if area is not None else None,
+            radius_km=area.radius_km if area is not None else None,
         )
         await self._spaces.save(space)
         # Persist the space's Ed25519 PRIVATE seed (KEK-wrapped at rest) so
@@ -2153,49 +2174,60 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             if m.capabilities_seen_at is not None and m.proto_version < min_version
         ]
 
-    async def set_map_pin(
+    async def set_local_area(
         self,
         space_id: str,
         *,
         actor_username: str,
         lat: object,
         lon: object,
-    ) -> tuple[float, float] | None:
-        """Move (or remove, with both ``None``) a space's stored map pin.
-        Owner or admin, on the household hosting the space.
+        radius_km: object,
+    ) -> LocalArea | None:
+        """Make a public space a local community, move its area, or (all
+        three ``None``) stop it being one. Owner or admin, on the household
+        hosting the space (409 ``LOCAL_AREA_UNAVAILABLE`` elsewhere).
 
-        Nothing shows a pin, so none is collected any more: a space without
-        one gets none (409), and only a public space's pin moves. Removing
-        works on any tier, so a pin left on a space that is no longer public
-        can still go.
+        Setting an area needs the PUBLIC tier (422 ``LOCAL_AREA_PUBLIC_ONLY``)
+        and "admins on other households can act without the owner" OFF (409
+        ``LOCAL_AREA_DELEGATED``): a delegated admin's household seats people
+        itself, without the host's check. The centre is truncated to 4 dp.
 
-        Coordinates are truncated to 4 dp (about 11 m) before they are
-        stored. The pin is host-local: it is not part of the space config
-        that federates (no ``config_sequence`` bump, no
-        ``SpaceConfigChanged``) and never goes into a federation payload.
-        Returns the stored pin.
+        Existing members stay when the area moves or shrinks: the check runs
+        when a seat is granted, never as an eviction. Clearing works on any
+        tier, so a pin left on a space that is no longer public can go.
+
+        Host-local: no ``config_sequence`` bump and no ``SpaceConfigChanged``
+        (member households never need it — only the host checks). The
+        paired-household directory is re-sent (:class:`SpaceLocalAreaChanged`)
+        so peers see the new area. Returns the stored area.
         """
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         if space.owner_instance_id != self._own_instance_id:
-            raise MapPinUnavailableError()
-        if lat is None and lon is None:
-            await self._spaces.set_map_pin(space_id, None, None)
+            raise LocalAreaUnavailableError()
+        if lat is None and lon is None and radius_km is None:
+            await self._spaces.set_local_area(space_id, None)
+            await self._bus.publish(SpaceLocalAreaChanged(space_id=space_id))
             return None
-        if lat is None or lon is None:
-            raise ValueError("lat and lon go together")
-        if (
-            space.space_type is not SpaceType.PUBLIC
-            or space.lat is None
-            or space.lon is None
-        ):
-            raise MapPinUnavailableError()
-        pin = (
-            validate_zone_coord(lat, name="lat", limit=90),
-            validate_zone_coord(lon, name="lon", limit=180),
+        area = _local_area_from_input(space.space_type, lat, lon, radius_km)
+        assert area is not None
+        if space.features.delegated_admin_authority:
+            raise LocalAreaDelegatedError()
+        await self._spaces.set_local_area(space_id, area)
+        await self._bus.publish(SpaceLocalAreaChanged(space_id=space_id))
+        return area
+
+    async def require_local_seat(self, space: Space, instance_id: str) -> None:
+        """The local-community check for one seat-granting path of ours
+        (:func:`~socialhome.services.local_community.require_local_eligibility`)
+        — ``instance_id`` is the joining household (our own for a local
+        user)."""
+        await require_local_eligibility(
+            space,
+            household_instance_id=instance_id,
+            own_instance_id=self._own_instance_id,
+            federation_repo=self._federation_repo,
         )
-        await self._spaces.set_map_pin(space_id, *pin)
-        return pin
 
     async def update_config(
         self,
@@ -2256,6 +2288,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             != space.features.delegated_admin_authority
         ):
             await self._require_owner(space, actor_username)
+            # A delegated admin's household seats people without the host's
+            # local-community check (it holds neither the area nor the
+            # joiners' shared homes), so the two never go together.
+            if features.delegated_admin_authority and local_area_of(space):
+                raise LocalAreaDelegatedError()
         # SECURITY: so is turning public readability on or off.
         # ``allow_subscribers`` decides whether STRANGERS on a connection
         # server may read this space — its posts relay, its content key is
@@ -2548,6 +2585,16 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             new_fields["space_type"] = stype
             payload["space_type"] = stype.value
             will_be_global = stype is SpaceType.GLOBAL
+            if stype is not SpaceType.PUBLIC and (
+                space.lat is not None
+                or space.lon is not None
+                or space.radius_km is not None
+            ):
+                # Only a public space is a local community; leaving the tier
+                # drops its area (host-local state — never in ``payload``).
+                new_fields["lat"] = None
+                new_fields["lon"] = None
+                new_fields["radius_km"] = None
         if retention_days is not None:
             # Zero or negative means "no retention limit" → None
             new_fields["retention_days"] = (
@@ -3027,6 +3074,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # §CP.F1 — block underage minors when CP is wired in.
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
+        # A local community: no override for an admin's direct add either.
+        await self.require_local_seat(space, self._own_instance_id or "")
         actor = await self._users.get(actor_username)
         return await self._seat_local_member(
             space,
@@ -3194,6 +3243,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # the accept prompt for a space they couldn't actually join.
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
+        # A local community: refused up front, so nobody is invited into a
+        # space they could not accept (re-checked at acceptance).
+        await self.require_local_seat(space, self._own_instance_id or "")
         # Idempotent re-issue: look for an existing pending row.
         existing = await self._spaces.list_pending_local_invites_for(user_id)
         for row in existing:
@@ -3309,6 +3361,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # age-restricted space.
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space.id, user_id)
+        # A local community: the area or our home may have changed since
+        # the invite went out — the invite stays pending.
+        await self.require_local_seat(space, self._own_instance_id or "")
         member = SpaceMember(
             space_id=space.id,
             user_id=user_id,
@@ -6110,6 +6165,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 "delegated admin authority is not enabled for this space — "
                 "owner approval required",
             )
+        # A local community: the host refuses a household outside the area,
+        # or one whose home it does not know, before any invite goes out
+        # (re-checked when the accept arrives). A delegated admin elsewhere
+        # never reaches here for such a space: the area and delegation never
+        # go together, so its invite was forwarded above.
+        await self.require_local_seat(space, invitee_instance_id)
         actor = await self._users.get(actor_username)
         assert actor is not None
 
@@ -6665,6 +6726,17 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise InviteExpiredError()
         space_id = row["space_id"]
         seat = SpaceRole(row.get("role") or SpaceRole.MEMBER.value)
+        # A local community: an invite link is no override. Refused AFTER the
+        # consume (a dead or banned token answers as before, no oracle) and
+        # the use is handed back — the household may share its home and try
+        # the same link again.
+        hosted = await self._spaces.get(space_id)
+        if hosted is not None:
+            try:
+                await self.require_local_seat(hosted, self._own_instance_id or "")
+            except SpacePermissionError:
+                await self._spaces.release_invite_token_use(token)
+                raise
         # §CP.F1 — an invite link must not seat an under-age protected minor
         # in an age-restricted space. (The token is already consumed above;
         # a blocked minor burns one use, which beats letting them in.)
@@ -6806,6 +6878,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise InviteOnlyError()
         if await self._spaces.is_banned(space_id, user_id):
             raise BannedFromSpaceError()
+        # A local community this household hosts: our home must be inside,
+        # for an open join and for a request alike (re-checked on approval).
+        await self.require_local_seat(space, self._own_instance_id or "")
         if (
             space.join_mode is JoinMode.OPEN
             and space.owner_instance_id == self._own_instance_id
@@ -6978,6 +7053,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 row["space_id"],
                 row["user_id"],
             )
+        # A local community: re-checked at approve time (the area, or the
+        # applicant household's shared home, may have changed since the
+        # request was filed). Refused BEFORE "approved", so the request
+        # stays pending for the admin to deny; a remote applicant is
+        # checked once more when it redeems the token minted below.
+        await self.require_local_seat(
+            space, str(remote_instance or self._own_instance_id or "")
+        )
         await self._spaces.update_join_request_status(
             request_id,
             "approved",
@@ -8024,6 +8107,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise SubscribeNotAllowedError()
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
+        # A local community: a follower lives inside the area too.
+        await self.require_local_seat(space, self._own_instance_id or "")
         # ORDER MATTERS: the GFS-side subscriber registration happens only
         # AFTER every local refusal (public-tier, ban, §CP.F1 age gate) has
         # passed. A locally-refused user must never end up on the GFS's
@@ -9925,6 +10010,23 @@ async def can_seat_remote_stub(
     """
     existing = await space_repo.get(space_id)
     return existing is None or existing.owner_instance_id == issuer_instance_id
+
+
+def _local_area_from_input(
+    space_type: SpaceType, lat: object, lon: object, radius_km: object
+) -> LocalArea | None:
+    """The local area a create / settings body names, or ``None`` when it
+    names none. All three of ``lat`` / ``lon`` / ``radius_km`` or none
+    (``ValueError``, 422); only a PUBLIC space takes one
+    (:class:`LocalAreaPublicOnlyError`)."""
+    given = [v is not None for v in (lat, lon, radius_km)]
+    if not any(given):
+        return None
+    if not all(given):
+        raise ValueError("lat, lon and radius_km go together")
+    if space_type is not SpaceType.PUBLIC:
+        raise LocalAreaPublicOnlyError()
+    return validate_local_area(lat, lon, radius_km)
 
 
 def _coerce_space_type(value: SpaceType | str) -> SpaceType:

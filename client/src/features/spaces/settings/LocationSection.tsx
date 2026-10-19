@@ -5,8 +5,9 @@
  *
  * Sharing your OWN location is personal and stays on the Map section (and
  * a member's "You in this space"); this section is the space's rules.
- * Both switches save as they change. A space hosted here that still has
- * a stored map pin shows it (``MapPin``) to move or remove.
+ * Both switches save as they change. A public space hosted here also
+ * gets its local-community area (``LocalCommunity``): who may join, by
+ * where they live.
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
@@ -14,7 +15,7 @@ import { addBase } from '@/baseUrl'
 import { RadioCardGroup } from '@/components/RadioCardGroup'
 import { t } from '@/i18n/i18n'
 import type { Space } from '@/types'
-import { MapPin } from './MapPin'
+import { LocalCommunity } from './LocalCommunity'
 import { patchSpace, useServerValue } from './spacePatch'
 import { SwitchRow } from './SettingsRows'
 
@@ -24,7 +25,7 @@ interface ZoneRow { id: string; name: string; icon: string | null }
 
 export function LocationSection({ space, isRemoteSpace = false, onUpdate }: {
   space: Space
-  /** Hosted by another household: the map pin is the host's. */
+  /** Hosted by another household: the area is the host's. */
   isRemoteSpace?: boolean
   onUpdate: () => void
 }) {
@@ -64,11 +65,10 @@ export function LocationSection({ space, isRemoteSpace = false, onUpdate }: {
 
   return (
     <>
-      {/* Only while a pin is stored: no new one is collected. */}
-      {!isRemoteSpace && space.map_pin && (
+      {/* Only a public space hosted here can be a local community. */}
+      {!isRemoteSpace && space.space_type === 'public' && (
         <div class="sh-ss-card">
-          <MapPin spaceId={space.id} pin={space.map_pin} canMove={space.space_type === 'public'}
-                  onUpdate={onUpdate} />
+          <LocalCommunity space={space} onUpdate={onUpdate} />
         </div>
       )}
       <div class="sh-ss-card">

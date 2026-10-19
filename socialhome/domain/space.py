@@ -1781,19 +1781,65 @@ def validate_zone_radius(value: object) -> int:
     return coerced
 
 
-class MapPinUnavailableError(CodedError, ValueError):
-    """Only a public space hosted by this household that already has a
-    map pin can move it (nothing shows a pin, so no new one is collected).
-
-    The pin (``spaces.lat`` / ``lon``) is host-local: it is never put in a
-    federation payload (GPS coordinates stay off the wire), so a member
-    household of a space hosted elsewhere has none to edit. A private or
-    household space is never offered to anyone nearby, and a global one is
-    listed on GFSs, whose directory carries no location."""
+class LocalAreaUnavailableError(CodedError, ValueError):
+    """Only the household hosting a space sets or clears its local area:
+    the host is the one that checks every joining household against it, so
+    a member household's stub has no area to edit."""
 
     status = 409
-    code = "MAP_PIN_UNAVAILABLE"
-    detail = "Only a public space hosted here with a stored map pin can move it."
+    code = "LOCAL_AREA_UNAVAILABLE"
+    detail = "Only the household hosting this space can change its area."
+
+
+class LocalAreaPublicOnlyError(CodedError, ValueError):
+    """A local area was sent for a space that is not ``public``. Only a
+    public space (discoverable by paired households, never on a GFS) can
+    be a local community."""
+
+    status = 422
+    code = "LOCAL_AREA_PUBLIC_ONLY"
+    detail = "Only a public space can be a local community."
+
+
+class LocalAreaDelegatedError(CodedError, ValueError):
+    """A local community and "admins on other households can act without
+    the owner" (``delegated_admin_authority``) do not go together.
+
+    A delegated admin's household invites people itself, and only the
+    HOST holds the area and the joining households' shared home locations,
+    so with delegation on an invite could seat a household nobody checked.
+    The owner turns one off before turning the other on."""
+
+    status = 409
+    code = "LOCAL_AREA_DELEGATED"
+    detail = (
+        "A local community can't let admins on other households act without "
+        "the owner. Turn that off first."
+    )
+
+
+class HomeNotSharedError(CodedError, SpacePermissionError):
+    """The space is a local community and the joining household's home is
+    not known to the host: not set, or not shared with the host household
+    (``share_home`` off toward it). Nobody is ever asked to send a location
+    inside a join request — the host reads only what pairing already
+    shares."""
+
+    status = 403
+    code = "HOME_NOT_SHARED"
+    detail = (
+        "This space is a local community. Share your home location with its "
+        "household to join."
+    )
+
+
+class OutsideAreaError(CodedError, SpacePermissionError):
+    """The space is a local community and the joining household's home lies
+    outside its area."""
+
+    status = 403
+    code = "OUTSIDE_AREA"
+    detail = "This space is a local community, and your home is outside its area."
 
 
 #: Longest quick-link URL a space admin may store.

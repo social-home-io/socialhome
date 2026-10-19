@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, fireEvent, act } from '@testing-library/preact'
+import { render, fireEvent } from '@testing-library/preact'
 
 /** Latest ``onPick`` the picker handed to the (mocked) map. */
 let lastOnPick: ((lat: number, lon: number) => void) | undefined
@@ -134,22 +134,6 @@ describe('LocationPicker', () => {
     fireEvent.click(getByRole('button', { name: 'Send location' }))
     expect(onSubmit).toHaveBeenCalledWith({ lat: 48.8584, lon: 2.2945, label: null })
     expect(getPos).not.toHaveBeenCalled()
-  })
-
-  it('opens on an existing pin, without a label field, under its own title', async () => {
-    const onSubmit = vi.fn()
-    const { LocationPicker } = await import('./LocationPicker')
-    const { getByText, findByTestId, getByRole, container } = render(
-      <LocationPicker open onSubmit={onSubmit} onClose={vi.fn()} title="Where is the space?"
-                      submitLabel="Use this spot" initial={{ lat: 47.37691, lon: 8.54172 }} noLabel />,
-    )
-    const map = await findByTestId('map')
-    expect(map.getAttribute('data-marker-count')).toBe('1')
-    expect(getByText('Where is the space?')).toBeTruthy()
-    expect(container.querySelector('input[type="text"]')).toBeNull()
-    await act(async () => { lastOnPick!(46.9481, 7.4474) })
-    fireEvent.click(getByRole('button', { name: 'Use this spot' }))
-    expect(onSubmit).toHaveBeenCalledWith({ lat: 46.9481, lon: 7.4474, label: null })
   })
 
   it('moving a GPS pin by hand drops the GPS accuracy', async () => {

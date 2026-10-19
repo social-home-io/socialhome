@@ -59,7 +59,7 @@ GATED_METHODS: frozenset[str] = frozenset(
         "archive_space",
         "unarchive_space",
         "update_config",
-        "set_map_pin",
+        "set_local_area",
         "add_member",
         "invite_local_user",
         "remove_member",
@@ -113,6 +113,10 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # The §4.3 access gate itself — a decision sibling services (the
         # Bazaar's listing edits) ask; it guards, it mutates nothing.
         "require_content_access",
+        # The local-community seat gate — called by the seat paths after
+        # their own authority checks; it refuses or passes, it mutates
+        # nothing.
+        "require_local_seat",
         # Browse › Your household: the caller's own view of the spaces this
         # household hosts — filtered for THEM (tier, seat, ban, age gate)
         # inside; there is no space to gate on. Read-only.
@@ -376,9 +380,9 @@ async def stack(tmp_dir):
             ),
         ),
         (
-            "set_map_pin",
-            lambda s: s.space_svc.set_map_pin(
-                s.public_space.id, actor_username="bob", lat=1.0, lon=2.0
+            "set_local_area",
+            lambda s: s.space_svc.set_local_area(
+                s.public_space.id, actor_username="bob", lat=1.0, lon=2.0, radius_km=5
             ),
         ),
         (

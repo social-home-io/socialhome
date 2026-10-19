@@ -270,4 +270,22 @@ describe('apiErrorMessage — fallbacks', () => {
   it('a body-less error with no per-status line keeps "API <status>: <path>"', () => {
     expect(apiErrorMessage(409, '/api/foo', null)).toBe('API 409: /api/foo')
   })
+
+  it('local communities are worded for whoever reads them', () => {
+    const msg = (code: string, whose?: string) =>
+      apiErrorMessage(403, '/x', { code, detail: 'x', ...(whose ? { params: { whose } } : {}) })
+    expect(msg('HOME_NOT_SHARED', 'own')).toBe(
+      'This space is a local community, and your household has no home location yet.')
+    expect(msg('HOME_NOT_SHARED', 'peer')).toBe(
+      "That household doesn't share its home location with yours, so it can't join this local community.")
+    expect(msg('HOME_NOT_SHARED', 'host')).toBe(
+      'This space is a local community. Share your home location with its household to join.')
+    expect(msg('OUTSIDE_AREA', 'own')).toBe(
+      "This space is a local community, and your household's home is outside its area.")
+    expect(msg('OUTSIDE_AREA', 'host')).toBe(msg('OUTSIDE_AREA', 'own'))
+    expect(msg('OUTSIDE_AREA', 'peer')).toBe("That household's home is outside this local community's area.")
+    expect(msg('LOCAL_AREA_PUBLIC_ONLY')).toBe('Only a public space can be a local community.')
+    expect(msg('LOCAL_AREA_UNAVAILABLE')).toBe('Only the household hosting this space can change its area.')
+    expect(msg('LOCAL_AREA_DELEGATED')).toContain('Let admins act for me')
+  })
 })

@@ -12725,10 +12725,56 @@ a.sh-space-hero-members:focus-visible,
 }
 
 .sh-ss-zones { display: flex; flex-direction: column; gap: var(--sh-space-xs); }
-/* Settings › Location: a public space's map pin. */
-.sh-ss-pin { display: grid; gap: var(--sh-space-sm); }
-.sh-ss-pin__where { margin: 0; }
-.sh-ss-pin__actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-sm); }
+/* Settings › Location: a public space's local-community area. */
+.sh-ss-local-area { display: grid; gap: var(--sh-space-sm); }
+.sh-ss-local-area__where { margin: 0; }
+.sh-ss-local-area__actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-sm); }
+
+/* Local communities — the area chip, and the "In your area" badge worked out
+   against this household's home. Ink from theme tokens (moss / ember / muted),
+   redefined per theme, so both stay readable on light and dark. */
+.sh-local-area-chip,
+.sh-local-area-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--sh-radius-full);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 500;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.sh-local-area-chip {
+  background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
+  color: var(--sh-primary-on-soft);
+  white-space: nowrap;
+}
+.sh-local-area-badge--inside {
+  background: color-mix(in srgb, var(--sh-success) 16%, transparent);
+  color: var(--sh-success);
+  font-weight: 600;
+}
+.sh-local-area-badge--outside {
+  background: color-mix(in srgb, var(--sh-danger) 12%, transparent);
+  color: var(--sh-danger-on-soft);
+}
+.sh-local-area-badge--no_home,
+.sh-local-area-badge--not_shared {
+  background: color-mix(in srgb, var(--sh-text-muted) 16%, transparent);
+  color: var(--sh-text);
+}
+/* Discover row: the area under the meta line. */
+.sh-spaces-row__note { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+/* The area picker and the create dialog's local-community block. */
+.sh-local-area-picker__where { margin: 0; }
+.sh-local-area-picker__home { align-self: flex-start; min-height: 36px; }
+.sh-local-area-picker__radius { display: grid; gap: var(--sh-space-xs); }
+.sh-local-area-picker__radius-label { font-weight: 600; font-size: var(--sh-font-size-sm); }
+.sh-space-create-local__area { display: grid; gap: var(--sh-space-sm); justify-items: start; }
+.sh-space-create-local__area .sh-location-map { width: 100%; }
+/* About page: the area before joining. */
+.sh-space-public__local { display: grid; gap: var(--sh-space-sm); }
+.sh-space-public__local p { margin: 0; }
+.sh-space-public__local-where { font-weight: 600; }
 .sh-ss-zones__head {
   display: flex;
   flex-wrap: wrap;

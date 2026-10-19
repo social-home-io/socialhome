@@ -1,0 +1,345 @@
+"""Local communities over HTTP — the area on create / PATCH / GET, the
+directory rows, and the seat routes refusing a household outside the area
+or with an unknown home (403 ``OUTSIDE_AREA`` / ``HOME_NOT_SHARED``).
+
+* ``POST /api/spaces`` takes ``lat`` / ``lon`` / ``radius_km`` for a public
+  space (4 dp centre; 422 on any other tier or a partial / bad area).
+* ``PATCH /api/spaces/{id}`` with all three sets or moves the area, all
+  three ``null`` clears it — owner / admin, on the household hosting it.
+  Host-local: no ``config_sequence`` bump.
+* ``GET /api/spaces/{id}`` (member and landing views),
+  ``GET /api/household/spaces`` and ``GET /api/peer_spaces`` carry
+  ``local_area``.
+"""
+
+import pytest
+
+from .test_space_read_gate import _add_user, _seat
+
+_OWNER = ("olive", "uid-olive")
+_ADMIN = ("adam", "uid-adam")
+_MEMBER = ("mia", "uid-mia")
+_NEIGHBOUR = ("ned", "uid-ned")
+
+ZURICH = {"lat": 47.3769, "lon": 8.5417, "radius_km": 5}
+NEAR = (47.3920, 8.5600)
+BERN = (46.9481, 7.4474)
+
+
+async def _set_home(client, home):
+    lat, lon = home if home is not None else (None, None)
+    await client._db.enqueue(
+        "UPDATE instance_identity SET home_lat=?, home_lon=? WHERE id='self'",
+        (lat, lon),
+    )
+
+
+@pytest.fixture
+async def space(client):
+    hdr = {
+        "owner": await _add_user(client, *_OWNER),
+        "admin": await _add_user(client, *_ADMIN),
+        "member": await _add_user(client, *_MEMBER),
+        "neighbour": await _add_user(client, *_NEIGHBOUR),
+    }
+    await _set_home(client, NEAR)
+    r = await client.post(
+        "/api/spaces",
+        json={
+            "name": "Quartier",
+            "space_type": "public",
+            "join_mode": "open",
+            **ZURICH,
+        },
+        headers=hdr["owner"],
+    )
+    assert r.status == 201, await r.text()
+    sid = (await r.json())["id"]
+    await _seat(client, sid, _ADMIN[1], "admin")
+    await _seat(client, sid, _MEMBER[1], "member")
+    return sid, hdr
+
+
+async def _detail(client, sid, hdr):
+    r = await client.get(f"/api/spaces/{sid}", headers=hdr)
+    assert r.status == 200, await r.text()
+    return await r.json()
+
+
+async def _sequence(client, sid):
+    row = await client._db.fetchone(
+        "SELECT config_sequence FROM spaces WHERE id=?", (sid,)
+    )
+    return row["config_sequence"]
+
+
+# ── create ──────────────────────────────────────────────────────────────
+
+
+async def test_create_stores_the_area_and_everyone_sees_it(client, space):
+    sid, hdr = space
+    want = {"lat": 47.3769, "lon": 8.5417, "radius_km": 5.0}
+    for who in ("owner", "admin", "member"):
+        assert (await _detail(client, sid, hdr[who]))["local_area"] == want
+    # Before joining too: the landing view shows the exact area.
+    assert (await _detail(client, sid, hdr["neighbour"]))["local_area"] == want
+
+
+async def test_create_truncates_to_4dp(client, space):
+    _, hdr = space
+    r = await client.post(
+        "/api/spaces",
+        json={
+            "name": "Dorf",
+            "space_type": "public",
+            "lat": 47.376_912_3,
+            "lon": 8.541_749_9,
+            "radius_km": 2,
+        },
+        headers=hdr["owner"],
+    )
+    sid = (await r.json())["id"]
+    row = await client._db.fetchone(
+        "SELECT lat, lon, radius_km FROM spaces WHERE id=?", (sid,)
+    )
+    assert (row["lat"], row["lon"], row["radius_km"]) == (47.3769, 8.5417, 2.0)
+
+
+@pytest.mark.parametrize("tier", ["private", "household", "global"])
+async def test_create_refuses_an_area_on_another_tier(client, space, tier):
+    _, hdr = space
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Family", "space_type": tier, **ZURICH},
+        headers=hdr["owner"],
+    )
+    assert r.status == 422, await r.text()
+    assert (await r.json())["error"]["code"] == "LOCAL_AREA_PUBLIC_ONLY"
+
+
+@pytest.mark.parametrize(
+    "area",
+    [
+        {"lat": 47.0, "lon": 8.0},
+        {"radius_km": 5},
+        {"lat": 47.0, "lon": 8.0, "radius_km": 0.2},
+        {"lat": 47.0, "lon": 8.0, "radius_km": 51},
+        {"lat": "47", "lon": 8.0, "radius_km": 5},
+        {"lat": 47.0, "lon": True, "radius_km": 5},
+    ],
+)
+async def test_create_refuses_a_partial_or_bad_area(client, space, area):
+    _, hdr = space
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Bad", "space_type": "public", **area},
+        headers=hdr["owner"],
+    )
+    assert r.status == 422, await r.text()
+
+
+# ── PATCH ───────────────────────────────────────────────────────────────
+
+
+async def test_patch_moves_the_area_without_a_config_bump(client, space):
+    sid, hdr = space
+    seq = await _sequence(client, sid)
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"lat": 46.948_123, "lon": 7.447_412, "radius_km": 10},
+        headers=hdr["admin"],
+    )
+    assert r.status == 200, await r.text()
+    assert (await r.json())["local_area"] == {
+        "lat": 46.9481,
+        "lon": 7.4474,
+        "radius_km": 10.0,
+    }
+    assert await _sequence(client, sid) == seq
+
+
+async def test_patch_null_clears_the_area(client, space):
+    sid, hdr = space
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"lat": None, "lon": None, "radius_km": None},
+        headers=hdr["owner"],
+    )
+    assert r.status == 200
+    assert (await r.json())["local_area"] is None
+    assert (await _detail(client, sid, hdr["owner"]))["local_area"] is None
+
+
+async def test_a_member_cannot_change_the_area(client, space):
+    sid, hdr = space
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"lat": None, "lon": None, "radius_km": None},
+        headers=hdr["member"],
+    )
+    assert r.status == 403
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"lat": 91, "lon": 0, "radius_km": 5},
+        {"lat": 0, "lon": 181, "radius_km": 5},
+        {"lat": "x", "lon": 0, "radius_km": 5},
+        {"lat": 1.0, "lon": 2.0},
+        {"radius_km": 5},
+        {"lat": None, "lon": 3.0, "radius_km": None},
+        {"lat": 1.0, "lon": 2.0, "radius_km": 0},
+    ],
+)
+async def test_bad_areas_are_refused(client, space, body):
+    sid, hdr = space
+    r = await client.patch(f"/api/spaces/{sid}", json=body, headers=hdr["owner"])
+    assert r.status == 422, await r.text()
+
+
+async def test_patch_on_another_tier_is_422(client, space):
+    _, hdr = space
+    r = await client.post("/api/spaces", json={"name": "Family"}, headers=hdr["owner"])
+    sid = (await r.json())["id"]
+    r = await client.patch(f"/api/spaces/{sid}", json=ZURICH, headers=hdr["owner"])
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "LOCAL_AREA_PUBLIC_ONLY"
+
+
+async def test_a_space_hosted_elsewhere_has_no_area_to_edit(client, space):
+    sid, hdr = space
+    await client._db.enqueue(
+        "UPDATE spaces SET owner_instance_id='inst-other' WHERE id=?", (sid,)
+    )
+    r = await client.patch(f"/api/spaces/{sid}", json=ZURICH, headers=hdr["owner"])
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "LOCAL_AREA_UNAVAILABLE"
+
+
+async def test_area_with_other_fields_saves_both(client, space):
+    sid, hdr = space
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"name": "Allmend", **ZURICH, "radius_km": 2},
+        headers=hdr["owner"],
+    )
+    assert r.status == 200, await r.text()
+    d = await _detail(client, sid, hdr["owner"])
+    assert d["name"] == "Allmend"
+    assert d["local_area"]["radius_km"] == 2.0
+
+
+# ── seat routes ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "home,code",
+    [(BERN, "OUTSIDE_AREA"), (None, "HOME_NOT_SHARED")],
+)
+async def test_join_is_refused_outside_or_without_a_home(client, space, home, code):
+    sid, hdr = space
+    await _set_home(client, home)
+    r = await client.post(
+        f"/api/spaces/{sid}/join-requests", json={}, headers=hdr["neighbour"]
+    )
+    assert r.status == 403, await r.text()
+    body = await r.json()
+    assert body["error"]["code"] == code
+    assert body["error"]["params"] == {"whose": "own"}
+
+
+async def test_join_inside_is_seated(client, space):
+    sid, hdr = space
+    r = await client.post(
+        f"/api/spaces/{sid}/join-requests", json={}, headers=hdr["neighbour"]
+    )
+    assert r.status < 300, await r.text()
+    row = await client._db.fetchone(
+        "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+        (sid, _NEIGHBOUR[1]),
+    )
+    assert row is not None
+
+
+async def test_follow_is_refused_outside(client, space):
+    sid, hdr = space
+    await client._db.enqueue("UPDATE spaces SET allow_subscribers=1 WHERE id=?", (sid,))
+    await _set_home(client, BERN)
+    r = await client.post(f"/api/spaces/{sid}/subscribe", headers=hdr["neighbour"])
+    assert r.status == 403, await r.text()
+    assert (await r.json())["error"]["code"] == "OUTSIDE_AREA"
+
+
+async def test_invite_link_is_refused_outside(client, space):
+    sid, hdr = space
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens", json={"uses": 1}, headers=hdr["owner"]
+    )
+    assert r.status in (200, 201), await r.text()
+    token = (await r.json())["token"]
+    await _set_home(client, BERN)
+    r = await client.post(
+        "/api/spaces/join", json={"token": token}, headers=hdr["neighbour"]
+    )
+    assert r.status == 403, await r.text()
+    assert (await r.json())["error"]["code"] == "OUTSIDE_AREA"
+
+
+# ── directory rows ──────────────────────────────────────────────────────
+
+
+async def test_household_directory_rows_carry_the_area(client, space):
+    sid, hdr = space
+    r = await client.get("/api/household/spaces", headers=hdr["neighbour"])
+    rows = {row["space_id"]: row for row in await r.json()}
+    assert rows[sid]["local_area"] == {
+        "lat": 47.3769,
+        "lon": 8.5417,
+        "radius_km": 5.0,
+    }
+
+
+async def _peer(client, iid: str, *, share_home: bool) -> None:
+    await client._db.enqueue(
+        """
+        INSERT INTO remote_instances(
+            id, display_name, remote_identity_pk, key_self_to_remote,
+            key_remote_to_self, remote_inbox_url, local_inbox_id, status,
+            source, share_home
+        ) VALUES(?, ?, ?, '00', '00', ?, ?, 'confirmed', 'manual', ?)
+        """,
+        (
+            iid,
+            iid.title(),
+            "ab" * 32,
+            f"https://{iid}.example/inbox/x",
+            f"{iid}_local",
+            int(share_home),
+        ),
+    )
+
+
+async def test_peer_directory_rows_carry_the_area_and_our_sharing(client, space):
+    _, hdr = space
+    await _peer(client, "berta", share_home=True)
+    await _peer(client, "carlo", share_home=False)
+    await client._db.enqueue(
+        "INSERT INTO peer_space_directory(instance_id, space_id, name, lat, lon,"
+        " radius_km) VALUES('berta', 'sp-b', 'Nachbarn', 47.3769, 8.5417, 2.0)"
+    )
+    await client._db.enqueue(
+        "INSERT INTO peer_space_directory(instance_id, space_id, name)"
+        " VALUES('carlo', 'sp-c', 'Chess')"
+    )
+    r = await client.get("/api/peer_spaces", headers=hdr["neighbour"])
+    assert r.status == 200
+    rows = {row["space_id"]: row for row in await r.json()}
+    assert rows["sp-b"]["local_area"] == {
+        "lat": 47.3769,
+        "lon": 8.5417,
+        "radius_km": 2.0,
+    }
+    assert rows["sp-b"]["home_shared_with_host"] is True
+    assert rows["sp-c"]["local_area"] is None
+    assert rows["sp-c"]["home_shared_with_host"] is False

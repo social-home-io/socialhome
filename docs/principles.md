@@ -840,7 +840,37 @@ Latitude and longitude are truncated to **4 decimal places** before
 any storage or transmission. `round(float(lat), 4)` — never store raw
 device precision, never cap-at-runtime-but-store-precise. Applied
 uniformly: presence updates, space zones, household zones, household
-location, public-space discovery rows.
+location, public-space discovery rows, a local community's centre.
+
+### Sign-off: a local community's area goes to paired households (2026-10-19)
+
+**Owner decision (2026-10-19):** a `public` space may be a *local
+community* — bound to a centre and a radius, joinable only by households
+whose home lies inside ([`protocol/local-communities.md`](./protocol/local-communities.md)).
+This is the one place a space's coordinates leave the hosting household.
+**What that concedes, exactly:**
+
+- **Every paired household learns the centre and radius** of each local
+  community the host has, at 4 dp (about 11 m), before anyone joins: it rides
+  the encrypted `SPACE_DIRECTORY_SYNC` snapshot (v_59) to the host's social
+  peers only — never to a household met through an invite link, never to a
+  peer below v_59, never to a GFS (public spaces are never on a GFS, and a
+  local community is public only). The owner picks the centre; the create
+  dialog never reads the device position, and offers the household's own home
+  only as an explicit shortcut — so a centre placed on the owner's house tells
+  paired households roughly where the owner lives, which the owner sees on the
+  map before saving.
+- **Eligibility is decided by the host, against what pairing already
+  shares.** The joining household's home is the one it shares with the host
+  (`remote_instances.home_lat` / `home_lon`, governed by that household's
+  per-peer `share_home`); nobody sends coordinates inside a join request, an
+  invite redeem or an accept. A household that does not share its home with
+  the host cannot join (`HOME_NOT_SHARED`). The *In your area* badge a peer
+  shows is computed locally against its own home and never leaves it.
+- **What it does not change:** no GPS is added to any other federation
+  payload; member households never receive the area (it stays host-local
+  state, outside `space_meta` and `SPACE_CONFIG_CHANGED`); the GFS relay and
+  directory stay geo-less.
 
 ## One initial migration
 

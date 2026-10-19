@@ -2014,10 +2014,12 @@ async def test_public_space_without_location_is_allowed(stack):
     assert space.lat is None and space.lon is None
 
 
-async def test_create_space_takes_no_map_pin(stack):
-    """Nothing shows a space's map pin, so create collects none."""
-    with pytest.raises(TypeError):
-        await stack.space_svc.create_space(  # type: ignore[call-arg]
+async def test_create_space_takes_a_whole_area_or_none(stack):
+    """A public space's area (local community) is centre + radius
+    together — a lone pin is refused."""
+    await stack.provision_user("a")
+    with pytest.raises(ValueError):
+        await stack.space_svc.create_space(
             owner_username="a", name="Pub", space_type=SpaceType.PUBLIC, lat=1.0
         )
 
@@ -2347,7 +2349,7 @@ async def test_space_create_post_text_empty_rejected(stack):
 
 
 async def test_public_space_coordinate_truncation(stack):
-    """A stored map pin is moved to 4dp-truncated coordinates."""
+    """A local community's centre is stored truncated to 4 dp."""
     _anna = await stack.provision_user("anna")
     s = await stack.space_svc.create_space(
         owner_username="anna",
@@ -2355,14 +2357,12 @@ async def test_public_space_coordinate_truncation(stack):
         space_type=SpaceType.PUBLIC,
         join_mode=JoinMode.OPEN,
     )
-    # A pin stored before create stopped collecting one.
-    await stack.space_svc._spaces.set_map_pin(s.id, 1.0, 2.0)
-    pin = await stack.space_svc.set_map_pin(
-        s.id, actor_username="anna", lat=52.376543, lon=4.895678
+    area = await stack.space_svc.set_local_area(
+        s.id, actor_username="anna", lat=52.376543, lon=4.895678, radius_km=5
     )
-    assert pin == (52.3765, 4.8957)
+    assert area is not None and (area.lat, area.lon) == (52.3765, 4.8957)
     got = await stack.space_svc._require_space(s.id)
-    assert (got.lat, got.lon) == (52.3765, 4.8957)
+    assert (got.lat, got.lon, got.radius_km) == (52.3765, 4.8957, 5.0)
 
 
 # ── Helper function coverage ──────────────────────────────────────────────

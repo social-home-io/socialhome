@@ -300,6 +300,19 @@ class SpaceConfigChanged(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceLocalAreaChanged(DomainEvent):
+    """A public space hosted here was made a local community, had its area
+    moved, or stopped being one (``spaces.lat`` / ``lon`` / ``radius_km``).
+
+    Host-local state, so no ``config_sequence`` bump and no
+    ``SpaceConfigChanged``: the paired-household directory
+    (``SPACE_DIRECTORY_SYNC``) is re-sent so peers see the new area."""
+
+    space_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceFeaturesApplied(DomainEvent):
     """An inbound ``SPACE_CONFIG_CHANGED`` passed every gate and was saved:
     the STORED space now holds the owner's validated, pinned config.

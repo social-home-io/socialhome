@@ -23,17 +23,23 @@ import { signal } from '@preact/signals'
 import { useLocation, useRoute } from 'preact-iso'
 import { api } from '@/api'
 import { Button } from '@/components/Button'
+import { LocalAreaBadge, verdictAllowsJoin } from '@/components/LocalAreaBadge'
+import { LocalAreaMap } from '@/components/LocalAreaMap'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { isOne, t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
+import { currentUser } from '@/store/auth'
+import { ensureHouseholdHome, householdHome } from '@/store/householdHome'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
-  contentIsGated, discoverAction, GATED_CHIP, hostLabel, joinModeChip, sourceOf, type DiscoverAction,
+  contentIsGated, discoverAction, entryAreaVerdict, GATED_CHIP, hostLabel, joinModeChip, sourceOf,
+  type DiscoverAction,
 } from './discover'
 import { addBase } from '@/baseUrl'
+import { areaLabel, areaShortLabel, type AreaVerdict } from '@/utils/localArea'
 
 type AboutAction = 'open' | Exclude<DiscoverAction, null>
 
@@ -96,6 +102,7 @@ async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
       category:           space.category,
       already_member:     seated && !following,
       already_subscribed: following,
+      local_area:         space.local_area ?? null,
     }
   } catch {
     return null
@@ -116,6 +123,19 @@ function scopeLabel(scope: DirectoryEntry['scope']): string {
   }
 }
 
+/** What to do about a verdict that keeps you out — one sentence under
+ *  the badge. ``null`` when there is nothing to do here. */
+function areaNextStep(verdict: AreaVerdict, isLocal: boolean): string | null {
+  switch (verdict) {
+    case 'outside': return t('local_area.about.outside_next')
+    case 'no_home': return t('local_area.about.no_home_next')
+    case 'not_shared': return currentUser.value?.is_admin
+      ? t('local_area.about.not_shared_admin')
+      : t('local_area.about.not_shared_member')
+    default: return isLocal ? null : t('local_area.about.host_checks')
+  }
+}
+
 export default function SpacePublicDetailPage() {
   const { params } = useRoute()
   const loc = useLocation()
@@ -123,6 +143,7 @@ export default function SpacePublicDetailPage() {
   const [activeModal, setActiveModal] = useState<DirectoryEntry | null>(null)
 
   useTitle(detail.value?.name ?? t('spaces.space_title'))
+  useEffect(() => { void ensureHouseholdHome() }, [])
 
   useEffect(() => {
     loading.value = true
@@ -241,7 +262,12 @@ export default function SpacePublicDetailPage() {
   // A follower may still ask to become a member; Follow is never offered
   // twice.
   const way = discoverAction(entry)
+  // A local community: worked out against our own home. Outside (or a
+  // home the host can't know) offers no join the host would refuse.
+  const verdict = entry.already_member ? null : entryAreaVerdict(entry, householdHome.value)
+  const areaBlocks = verdict !== null && !verdictAllowsJoin(verdict) && way !== 'pending'
   const action: AboutAction | null = entry.already_member ? 'open'
+    : areaBlocks ? null
     : way === 'follow' && entry.already_subscribed ? null
     : way
   const primaryLabel = action === null ? null : ABOUT_LABEL[action]()
@@ -287,6 +313,9 @@ export default function SpacePublicDetailPage() {
         {entry.min_age > 0 && (
           <span class="sh-age-chip">{entry.min_age}+</span>
         )}
+        {entry.local_area && (
+          <span class="sh-local-area-chip">🏘️ {areaShortLabel(entry.local_area)}</span>
+        )}
         {entry.already_subscribed && (
           <span class="sh-subscribed-pill">🔔 {t('spaces.list.subscribed_pill')}</span>
         )}
@@ -299,8 +328,36 @@ export default function SpacePublicDetailPage() {
           </Button>
         </div>
       )}
-      {!action && !entry.already_subscribed && (
+      {!action && !entry.already_subscribed && !areaBlocks && (
         <p class="sh-muted sh-space-public__invite-note">{t('spaces.discover.invite_link')}</p>
+      )}
+
+      {entry.local_area && (
+        <section class="sh-space-public__section sh-space-public__local" aria-labelledby="sh-about-local">
+          <h2 id="sh-about-local">🏘️ {t('local_area.about.title')}</h2>
+          <p>{t('local_area.about.rule')}</p>
+          <p class="sh-space-public__local-where">{areaLabel(entry.local_area)}</p>
+          {verdict && (
+            <p class="sh-space-public__local-verdict" role="status">
+              <LocalAreaBadge verdict={verdict} hostName={hostLabel(entry)} />
+            </p>
+          )}
+          <LocalAreaMap area={entry.local_area} home={householdHome.value} height={200} />
+          {verdict && areaNextStep(verdict, isLocal) && (
+            <p class="sh-muted">
+              {areaNextStep(verdict, isLocal)}
+              {verdict === 'not_shared' && currentUser.value?.is_admin && (
+                <>
+                  {' '}
+                  <a href={addBase('/connections')}
+                     onClick={(ev) => { ev.preventDefault(); loc.route('/connections') }}>
+                    {t('local_area.about.open_connections')}
+                  </a>
+                </>
+              )}
+            </p>
+          )}
+        </section>
       )}
 
       {entry.description && (

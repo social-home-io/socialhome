@@ -367,9 +367,10 @@ export interface Space {
    *  *stub* mirroring a space hosted on another household. The SPA
    *  gates settings + admin gestures on this field so a remote
    *  member never tries to mutate state the host owns. */
-  owner_instance_id?: string  /** ``GET /api/spaces/{id}`` only: a public space's map pin (4 dp), for
-   *  its owner / admins on the hosting household; ``null`` otherwise. */
-  map_pin?: { lat: number; lon: number } | null
+  owner_instance_id?: string
+  /** ``GET /api/spaces/{id}`` only: a local community's area (a public
+   *  space hosted here bound to a centre + radius); ``null`` otherwise. */
+  local_area?: LocalArea | null
   /** ``GET /api/spaces/{id}`` only: at least one OTHER household has a
    *  member here. */
   has_remote_households?: boolean
@@ -826,6 +827,14 @@ export interface TaskListEntry {
 
 /** One row of `GET /api/household/spaces` (Browse › Your household): a
  *  space this household hosts that the caller may find. Never private. */
+/** A local community's area: centre (4 dp) + radius in km. Households
+ *  join only while the home they share with the host lies inside. */
+export interface LocalArea {
+  lat: number
+  lon: number
+  radius_km: number
+}
+
 export interface HouseholdSpaceRow {
   space_id: string
   name: string
@@ -840,6 +849,8 @@ export interface HouseholdSpaceRow {
   member_count: number
   /** The caller's role, `null` when they hold no seat. */
   role: string | null
+  /** A local community's area, `null` otherwise. */
+  local_area?: LocalArea | null
 }
 
 export interface DirectoryEntry {
@@ -886,6 +897,12 @@ export interface DirectoryEntry {
    *  ``space_members``). Distinct from ``already_member``: a subscriber
    *  gets the content stream but can't post, comment, or react. */
   already_subscribed?: boolean
+  /** A local community's area (a public space bound to a centre +
+   *  radius); absent / `null` when it has none or the host is older. */
+  local_area?: LocalArea | null
+  /** Paired rows only: does this household share its home location with
+   *  the host? A local community's host reads only that. */
+  home_shared_with_host?: boolean
 }
 
 export interface RemoteInvite {

@@ -46,6 +46,9 @@ interface Props {
   emoji?: string | null
   name: string
   meta?: string
+  /** Inside the link, under the meta line: e.g. a local community's area
+   *  and badge. */
+  note?: ComponentChildren
   /** Inside the link, after the text: a count. */
   end?: ComponentChildren
   /** Beside the link: the row's own button (Discover's Join / Ask). */
@@ -55,13 +58,14 @@ interface Props {
   muted?: boolean
 }
 
-export function SpaceListRow({ to, iconUrl, emoji, name, meta, end, action, label, muted }: Props) {
+export function SpaceListRow({ to, iconUrl, emoji, name, meta, note, end, action, label, muted }: Props) {
   const inner = (
     <>
       <SpaceIcon iconUrl={iconUrl} emoji={emoji} name={name} />
       <span class="sh-spaces-row__body">
         <span class="sh-spaces-row__t" dir="auto">{name}</span>
         {meta && <span class="sh-spaces-row__m" dir="auto">{meta}</span>}
+        {note && <span class="sh-spaces-row__note">{note}</span>}
       </span>
       {end && <span class="sh-spaces-row__end">{end}</span>}
     </>

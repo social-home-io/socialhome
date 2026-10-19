@@ -8,6 +8,7 @@ from dataclasses import asdict
 from aiohttp import web
 
 from .. import app_keys as K
+from ..domain.local_community import local_area_of, local_area_wire
 from ..domain.space import HostedSpaceListing, normalize_category
 from ..security import sanitise_for_api
 from .base import BaseView
@@ -88,5 +89,12 @@ def _listing_view(row: HostedSpaceListing) -> dict:
             "min_age": space.min_age,
             "member_count": row.member_count,
             "role": row.caller_role,
+            # A local community's area (4 dp centre + radius), else null —
+            # the SPA shows it and checks it against this household's home.
+            "local_area": (
+                local_area_wire(area)
+                if (area := local_area_of(space)) is not None
+                else None
+            ),
         }
     )
