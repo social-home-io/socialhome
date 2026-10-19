@@ -25375,6 +25375,8 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-primary); outl
   .sh-cal-grid__day { padding: 3px; }
   .sh-cal-bar { margin-inline: 1px; padding-inline: 3px; }
   .sh-cal-grid__more { font-size: 11px; }
+}
+
 /* ── "What is <name> for?" (SpaceSetupCard) + "Invite your first member" ──
  * One selected style everywhere: primary-soft tint + primary border (the
  * presets and the section chips alike). Logical properties only. */
