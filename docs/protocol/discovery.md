@@ -2738,6 +2738,10 @@ about. The peer directory is authoritative for the households that
 publish it; GFS is authoritative only for the spaces that explicitly
 advertised to that specific GFS.
 
+Only a **paired** household gets a snapshot — on every trigger, a version
+raise included: never a household we only share a space with (a §D2b
+invite-link `space_session` seat, or a mesh member with no row here).
+
 An entry for a [local community](./local-communities.md) carries
 `local_community: true` and its `radius_km` to peers at v_59+ — never the
 centre and no verdict: whether a home is inside is the host's decision when a
