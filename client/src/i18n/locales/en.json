@@ -5048,6 +5048,6 @@
   "household.toggles.share_home_default_hint": "Pre-sets the switch when you pair with a household. Each connection keeps its own setting.",
   "local_area.badge.edge": "Near the edge — ask to join and the host will check",
   "local_area.about.edge_next": "Your household's home is near the edge of this area. Ask to join — its household checks the home location your household shares with it.",
-  "error.local_area_rate_limited_own": "This local community's household has refused your household as outside its area a few times today. Try again tomorrow.",
-  "error.local_area_rate_limited_peer": "That household was refused as outside this area a few times today. Try again tomorrow."
+  "error.local_area_rate_limited_own": "You've already tried to join this local community a few times today. Try again tomorrow.",
+  "error.local_area_rate_limited_peer": "That household has already tried to join this local community a few times today. Try again tomorrow."
 }

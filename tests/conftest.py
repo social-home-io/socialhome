@@ -371,7 +371,6 @@ from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.feed_service import FeedService
-from socialhome.services.local_community import OUTSIDE_AREA_ATTEMPTS
 from socialhome.services.space_service import SpaceService
 from socialhome.services.user_service import UserService
 from tests import migration_chain
@@ -432,15 +431,6 @@ class _InertZeroconf:
 
     async def async_close(self) -> None:
         return None
-
-
-@pytest.fixture(autouse=True)
-def _fresh_outside_area_attempts():
-    """The local-community refusal counter is process-wide (every seat path
-    shares it): start each test with a clean one."""
-    OUTSIDE_AREA_ATTEMPTS.clear()
-    yield
-    OUTSIDE_AREA_ATTEMPTS.clear()
 
 
 @pytest.fixture(scope="session", autouse=True)

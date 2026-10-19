@@ -1854,16 +1854,17 @@ class OutsideAreaError(CodedError, SpacePermissionError):
 
 
 class LocalAreaRateLimitedError(CodedError, SpacePermissionError):
-    """The space is a local community and the joining household was refused
-    as outside its area too often today: the host does not look at its home
-    again until the window passes. A seat attempt is an exact yes / no, so
-    without this limit it would be a fine-grained way to find the centre."""
+    """The space is a local community and the joining person (or, for a
+    remote person, their household) already used today's checks on it —
+    successful joins count too: the host gives no verdict until the next
+    UTC day. A seat attempt is an exact yes / no, so without this limit it
+    would be a fine-grained way to find the centre."""
 
     status = 429
     code = "LOCAL_AREA_RATE_LIMITED"
     detail = (
-        "This space is a local community, and this household was refused as "
-        "outside its area several times today. Try again tomorrow."
+        "This space is a local community, and you already tried to join it "
+        "several times today. Try again tomorrow."
     )
 
 

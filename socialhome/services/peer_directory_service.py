@@ -40,10 +40,7 @@ invite link.
 from __future__ import annotations
 
 import logging
-import time
-from collections import deque
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 from ..domain.events import (
     PairingConfirmed,
@@ -63,7 +60,12 @@ from ..domain.local_community import (
 )
 from ..domain.space import SpaceType, normalize_category
 from ..infrastructure.event_bus import EventBus
-from .local_community import edge_shift_km, household_home
+from .local_community import (
+    MAX_VERDICT_HOMES_PER_DAY,
+    LocalAreaBudget,
+    edge_shift_km,
+    household_home,
+)
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -72,19 +74,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: How many different shared homes of one peer the local-community verdicts
-#: follow per rolling :data:`_VERDICT_WINDOW_SECONDS`. A home rarely moves;
-#: one that moves over and over is a probe.
-MAX_VERDICT_HOMES_PER_DAY: Final = 4
-_VERDICT_WINDOW_SECONDS: Final = 24 * 60 * 60
+__all__ = ["MAX_VERDICT_HOMES_PER_DAY", "PeerDirectoryService"]
 
 
 class PeerDirectoryService:
     """Outbound fan-out for :data:`FederationEventType.SPACE_DIRECTORY_SYNC`."""
 
     __slots__ = (
+        "_budget",
         "_bus",
-        "_clock",
         "_edge_key",
         "_federation",
         "_federation_repo",
@@ -100,7 +98,7 @@ class PeerDirectoryService:
         federation_repo: AbstractFederationRepo,
         space_repo: AbstractSpaceRepo,
         edge_key: bytes,
-        clock: Callable[[], float] = time.monotonic,
+        budget: LocalAreaBudget,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -109,12 +107,12 @@ class PeerDirectoryService:
         #: The secret the "unsure" band's per-cell shift is drawn with
         #: (:func:`~socialhome.services.local_community.derive_edge_key`).
         self._edge_key = edge_key
-        self._clock = clock
-        #: Per peer: the shared home its verdicts were last computed for,
-        #: and when each newly taken home was taken. In memory only.
-        self._verdict_homes: dict[
-            str, tuple[tuple[float, float] | None, deque[float]]
-        ] = {}
+        #: Counts each peer's newly taken homes per UTC day, in SQLite.
+        self._budget = budget
+        #: Per peer: the shared home its verdicts were last computed for.
+        #: In memory: after a restart a peer already at its day's limit
+        #: gets "unknown" verdicts (fail closed) until the next UTC day.
+        self._verdict_homes: dict[str, tuple[float, float]] = {}
 
     def wire(self) -> None:
         self._bus.subscribe(SpaceConfigChanged, self._on_config_changed)
@@ -157,36 +155,29 @@ class PeerDirectoryService:
         spaces = await self._space_repo.list_by_type(SpaceType.PUBLIC)
         return any(local_area_of(s) is not None for s in spaces)
 
-    def _verdict_home(
+    async def _verdict_home(
         self, peer_id: str, home: tuple[float, float] | None
     ) -> tuple[float, float] | None:
         """The home ``peer_id``'s verdicts are computed for: its shared
         ``home``, unless it already moved :data:`MAX_VERDICT_HOMES_PER_DAY`
-        times today — then the last home taken, or none (unknown) when it
-        withdrew that one. ``None`` (sharing withdrawn) always takes effect
-        but keeps the day's count, so turning sharing off and on again is
-        no way around it."""
-        now = self._clock()
-        last, taken = self._verdict_homes.get(peer_id, (None, deque()))
-        while taken and taken[0] <= now - _VERDICT_WINDOW_SECONDS:
-            taken.popleft()
+        times today (UTC) — then the last home taken, or none (unknown)
+        when it withdrew that one or this process has not seen it.
+        ``None`` (sharing withdrawn) always takes effect but keeps the day's
+        count, so turning sharing off and on again is no way around it."""
         if home is None:
-            if taken:
-                self._verdict_homes[peer_id] = (None, taken)
-            else:
-                self._verdict_homes.pop(peer_id, None)
+            self._verdict_homes.pop(peer_id, None)
             return None
+        last = self._verdict_homes.get(peer_id)
         if last == home:
             return home
-        if len(taken) >= MAX_VERDICT_HOMES_PER_DAY:
+        if not await self._budget.take_verdict_home(peer_id):
             log.info(
                 "peer_directory: %s moved its shared home too often today; "
                 "local-community verdicts stay on the last home taken",
                 peer_id,
             )
             return last
-        taken.append(now)
-        self._verdict_homes[peer_id] = (home, taken)
+        self._verdict_homes[peer_id] = home
         return home
 
     async def _build_snapshot(self, peer_id: str) -> list[dict]:
@@ -200,7 +191,7 @@ class PeerDirectoryService:
         if with_area and any(local_area_of(s) is not None for s in spaces):
             # The home THIS peer shares with us (``None`` when it shares
             # none) — read once per snapshot.
-            home = self._verdict_home(
+            home = await self._verdict_home(
                 peer_id,
                 await household_home(
                     self._federation_repo, peer_id, own_instance_id=None

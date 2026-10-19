@@ -263,6 +263,34 @@ async def test_join_inside_is_seated(client, space):
     assert row is not None
 
 
+async def test_the_fourth_join_of_the_day_is_429(client, space):
+    """Join → leave three times, then a fourth join: every successful join
+    spent a check, so the answer is 429 LOCAL_AREA_RATE_LIMITED — the same
+    shape #1054 shipped — and no seat."""
+    sid, hdr = space
+    for _ in range(3):
+        r = await client.post(
+            f"/api/spaces/{sid}/join-requests", json={}, headers=hdr["neighbour"]
+        )
+        assert r.status < 300, await r.text()
+        r = await client.delete(
+            f"/api/spaces/{sid}/members/{_NEIGHBOUR[1]}", headers=hdr["neighbour"]
+        )
+        assert r.status < 300, await r.text()
+    r = await client.post(
+        f"/api/spaces/{sid}/join-requests", json={}, headers=hdr["neighbour"]
+    )
+    assert r.status == 429, await r.text()
+    error = (await r.json())["error"]
+    assert error["code"] == "LOCAL_AREA_RATE_LIMITED"
+    assert error["params"] == {"whose": "own"}
+    row = await client._db.fetchone(
+        "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
+        (sid, _NEIGHBOUR[1]),
+    )
+    assert row is None
+
+
 async def test_follow_is_refused_outside(client, space):
     sid, hdr = space
     await client._db.enqueue("UPDATE spaces SET allow_subscribers=1 WHERE id=?", (sid,))

@@ -8,8 +8,11 @@ the full public-space snapshot.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
+from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
     PairingConfirmed,
     PeerHomeChanged,
@@ -26,11 +29,15 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.services.local_community import derive_edge_key
+from socialhome.repositories.local_area_attempt_repo import (
+    SqliteLocalAreaAttemptRepo,
+)
+from socialhome.services.local_community import LocalAreaBudget, derive_edge_key
 from socialhome.services.peer_directory_service import (
     MAX_VERDICT_HOMES_PER_DAY,
     PeerDirectoryService,
 )
+from tests.local_area_budget import memory_budget
 
 #: The host's secret for the "unsure" band's shift.
 EDGE_KEY = derive_edge_key(b"\x07" * 32)
@@ -139,6 +146,7 @@ def env():
         federation_repo=fed_repo,
         space_repo=space_repo,
         edge_key=EDGE_KEY,
+        budget=memory_budget(),
     )
     svc.wire()
     return bus, fed, svc
@@ -195,6 +203,7 @@ async def test_empty_public_spaces_still_broadcasts_empty_snapshot():
         federation_repo=fed_repo,
         space_repo=space_repo,
         edge_key=EDGE_KEY,
+        budget=memory_budget(),
     )
     svc.wire()
     await bus.publish(
@@ -219,7 +228,9 @@ NEAR = (47.3850, 8.5500)
 FAR = (46.9481, 7.4474)
 
 
-def _local_env(versions: dict[str, int] | None = None, homes=None, clock=None):
+def _local_env(
+    versions: dict[str, int] | None = None, homes=None, clock=None, budget=None
+):
     community = _space(
         id="sp-local", name="Quartier", lat=CENTRE[0], lon=CENTRE[1], radius_km=5.0
     )
@@ -241,7 +252,9 @@ def _local_env(versions: dict[str, int] | None = None, homes=None, clock=None):
         federation_repo=fed_repo,
         space_repo=space_repo,
         edge_key=EDGE_KEY,
-        **({"clock": clock} if clock is not None else {}),
+        budget=budget
+        if budget is not None
+        else memory_budget(**({"clock": clock} if clock is not None else {})),
     )
     svc.wire()
     return bus, fed, svc, fed_repo
@@ -401,9 +414,9 @@ async def test_a_peer_near_the_rim_gets_unsure_not_yes_or_no():
 
 class _Clock:
     def __init__(self) -> None:
-        self.now = 5_000.0
+        self.now = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
 
-    def __call__(self) -> float:
+    def __call__(self) -> datetime:
         return self.now
 
 
@@ -433,7 +446,7 @@ async def test_a_home_moved_over_and_over_gets_no_new_answers_for_a_day():
     # After the budget the answer is frozen at the last home taken.
     assert len(set(answers[budget - 1 :])) == 1
     # A day later the current home counts again: it is far outside now.
-    clock.now += 24 * 60 * 60 + 1
+    clock.now += timedelta(days=1)
     await svc.send_snapshot("peer-x")
     assert _entries(fed, "peer-x", last=True)["sp-local"]["in_area"] is False
 
@@ -484,3 +497,38 @@ async def test_toggling_sharing_off_and_on_does_not_refill_the_budget():
     budget = MAX_VERDICT_HOMES_PER_DAY
     # Every shared home past the budget reads as unknown — nothing new.
     assert set(answers[budget:]) == {(None, False)}
+
+
+async def test_a_restart_does_not_refill_the_home_budget(tmp_dir):
+    """The day's count is kept in SQLite: after a restart a peer that
+    already moved its home too often gets "unknown" (the last home taken
+    is not kept on disk) — never a fresh answer for a new home."""
+    clock = _Clock()
+    db = AsyncDatabase(tmp_dir / "verdicts.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        budget = LocalAreaBudget(SqliteLocalAreaAttemptRepo(db), clock=clock)
+        bus, fed, _svc, fed_repo = _local_env(homes={"peer-x": NEAR}, budget=budget)
+        for home in _steps(MAX_VERDICT_HOMES_PER_DAY):
+            fed_repo.homes["peer-x"] = home
+            await bus.publish(
+                PeerHomeChanged(
+                    instance_id="peer-x", latitude=home[0], longitude=home[1]
+                )
+            )
+    finally:
+        await db.shutdown()
+    db = AsyncDatabase(tmp_dir / "verdicts.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        budget = LocalAreaBudget(SqliteLocalAreaAttemptRepo(db), clock=clock)
+        _bus, fed, svc, fed_repo = _local_env(homes={"peer-x": FAR}, budget=budget)
+        await svc.send_snapshot("peer-x")
+        entry = _entries(fed, "peer-x", last=True)["sp-local"]
+        assert (entry["in_area"], entry["area_edge"]) == (None, False)
+        # The next UTC day it is answered again.
+        clock.now += timedelta(days=1)
+        await svc.send_snapshot("peer-x")
+        assert _entries(fed, "peer-x", last=True)["sp-local"]["in_area"] is False
+    finally:
+        await db.shutdown()

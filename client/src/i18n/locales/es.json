@@ -5039,6 +5039,6 @@
   "household.toggles.share_home_default_hint": "Preajusta el interruptor al vincularte con un hogar. Cada conexión conserva su propio ajuste.",
   "local_area.badge.edge": "Cerca del límite: pide unirte y el hogar lo comprobará",
   "local_area.about.edge_next": "El hogar de tu familia está cerca del límite de esta zona. Pide unirte: su hogar comprueba la ubicación que tu hogar comparte con él.",
-  "error.local_area_rate_limited_own": "El hogar de esta comunidad local ha rechazado hoy varias veces a tu hogar por estar fuera de su zona. Inténtalo mañana.",
-  "error.local_area_rate_limited_peer": "Ese hogar ha sido rechazado hoy varias veces por estar fuera de esta zona. Inténtalo mañana."
+  "error.local_area_rate_limited_own": "Hoy ya has intentado varias veces unirte a esta comunidad local. Inténtalo mañana.",
+  "error.local_area_rate_limited_peer": "Ese hogar ya ha intentado hoy varias veces unirse a esta comunidad local. Inténtalo mañana."
 }

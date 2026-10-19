@@ -29,10 +29,12 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.federation.invite_token_redeem import (
+    REDEEM_DENY_REASON,
     REDEEM_DENY_REASON_HOME_NOT_SHARED,
     REDEEM_DENY_REASON_OUTSIDE_AREA,
 )
-from socialhome.services.local_community import MAX_OUTSIDE_AREA_REFUSALS
+from socialhome.services.local_community import MAX_LOCAL_AREA_CHECKS_PER_PERSON
+from tests.local_area_budget import memory_budget
 
 from .test_invite_token_redeem import (
     _a_space,
@@ -78,6 +80,7 @@ def _linked(home):
         "sp-1", issuer_fed.own_instance_id
     )
     issuer._federation_repo = _FakeFederationRepo({"sender-1": _peer(home)})
+    issuer._local_area_budget = memory_budget()
     return sender, issuer_repo, members
 
 
@@ -151,6 +154,42 @@ async def test_issuer_ships_the_specific_reason_and_releases_the_use(home, reaso
     assert repo.tokens["tok"]["uses_remaining"] == 3
 
 
+async def test_without_a_budget_the_redeem_is_refused_and_the_use_kept():
+    """Fail closed: an issuer with no check budget wired never seats anyone
+    in a local community uncounted — the uniform reason, the use back."""
+    fed = _FakeFederationService()
+    repo = _FakeSpaceRepo()
+    repo.tokens["tok"] = {"space_id": "sp-1", "created_by": "o", "uses_remaining": 3}
+    repo.space_rows_for_get["sp-1"] = _community("sp-1", fed.own_instance_id)
+    coord = _make_coordinator(
+        federation=fed,
+        space_repo=repo,
+        federation_repo=_FakeFederationRepo({"sender-1": _peer(NEAR)}),
+    )
+    coord._local_area_budget = None
+    await coord._on_redeem(
+        FederationEvent(
+            msg_id="m",
+            event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+            from_instance="sender-1",
+            to_instance="me",
+            timestamp="2026-10-19T00:00:00Z",
+            payload={
+                "redeem_nonce": "n1",
+                "invite_token": "tok",
+                "redeemer_user_id": "u-x",
+            },
+        )
+    )
+    denies = [
+        s["payload"]["reason"]
+        for s in fed.sent
+        if s["event_type"] == FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY
+    ]
+    assert denies == [REDEEM_DENY_REASON]
+    assert repo.tokens["tok"]["uses_remaining"] == 3
+
+
 async def test_a_dead_link_still_answers_the_uniform_reason():
     """The specific reason reaches only a holder of a LIVE link: an
     unknown token is refused before the area is looked at."""
@@ -199,11 +238,11 @@ async def test_a_bootstrap_redeem_is_refused_for_want_of_a_shared_home():
 async def test_redeeming_over_and_over_from_outside_is_held_off():
     """Each redeem is an exact yes / no on the host, and a refused use is
     handed back — so a household moving its shared home could ask over and
-    over. After three OUTSIDE_AREA refusals in a day the host answers with
-    its own reason without looking at the home, and the redeemer maps it to
+    over. After three checks in a day the redeeming person gets the host's
+    own reason and no verdict, and the redeemer maps it to
     LOCAL_AREA_RATE_LIMITED."""
     sender, issuer_repo, members = _linked(BERN)
-    for _ in range(MAX_OUTSIDE_AREA_REFUSALS):
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
         with pytest.raises(OutsideAreaError):
             await _redeem(sender)
     with pytest.raises(LocalAreaRateLimitedError) as exc:
@@ -212,3 +251,19 @@ async def test_redeeming_over_and_over_from_outside_is_held_off():
     assert exc.value.params == {"whose": "host"}
     assert members.added == []
     assert issuer_repo.tokens["good-token"]["uses_remaining"] == 1
+
+
+async def test_successful_redeems_spend_the_budget_too():
+    """Join → leave → move the shared home → redeem again is an exact
+    "inside?" every time, so a seat spends one check like a refusal: the
+    fourth redeem that day is held off even from inside."""
+    sender, issuer_repo, members = _linked(NEAR)
+    issuer_repo.tokens["good-token"]["uses_remaining"] = 10
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
+        await _redeem(sender)
+        members.live.clear()  # the person leaves again
+    with pytest.raises(LocalAreaRateLimitedError) as exc:
+        await _redeem(sender)
+    assert exc.value.status == 429
+    assert exc.value.params == {"whose": "host"}
+    assert len(members.added) == MAX_LOCAL_AREA_CHECKS_PER_PERSON

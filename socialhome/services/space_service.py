@@ -246,7 +246,7 @@ from ..repositories.user_repo import AbstractUserRepo
 from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
-from .local_community import require_local_eligibility
+from .local_community import LocalAreaBudget, require_local_eligibility
 from .protection_gate import ProtectionGateMixin
 from .space_authority_pin import (
     apply_authority_cert,
@@ -412,6 +412,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_invite_keywrap_pk",
         "_invite_keywrap_sig",
         "_link_previews",
+        "_local_area_budget",
         "_media_dir",
         "_media_refs",
         "_member_gfs",
@@ -472,6 +473,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._writer_certs: SpaceWriterCertService | None = None
         self._federation_repo = None
         self._instance_purger: InstancePurger | None = None
+        #: The local-community daily check budget
+        #: (:meth:`attach_local_area_budget`).
+        self._local_area_budget: LocalAreaBudget | None = None
         self._federation = None
         self._remote_members = None
         self._redeem_coordinator = None
@@ -673,6 +677,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             RemoteJoinRequestApproved,
             self._on_remote_join_request_approved_bus,
         )
+
+    def attach_local_area_budget(self, budget: LocalAreaBudget) -> None:
+        """Wire the local-community daily check budget. Unwired, a check a
+        person starts on a local community this household hosts fails
+        closed (``RuntimeError``) instead of going uncounted."""
+        self._local_area_budget = budget
 
     def attach_instance_purger(self, purger: InstancePurger) -> None:
         """Wire the shared ``remote_instances`` teardown
@@ -2262,16 +2272,25 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             await self._gfs.republish_space(space_id)
         return pin
 
-    async def require_local_seat(self, space: Space, instance_id: str) -> None:
+    async def require_local_seat(
+        self,
+        space: Space,
+        instance_id: str,
+        *,
+        seeker_user_id: str | None = None,
+    ) -> None:
         """The local-community check for one seat-granting path of ours
         (:func:`~socialhome.services.local_community.require_local_eligibility`)
         — ``instance_id`` is the joining household (our own for a local
-        user)."""
+        user); ``seeker_user_id`` the person who started it (their daily
+        budget is spent), ``None`` for an admin's step."""
         await require_local_eligibility(
             space,
             household_instance_id=instance_id,
             own_instance_id=self._own_instance_id,
             federation_repo=self._federation_repo,
+            seeker_user_id=seeker_user_id,
+            budget=self._local_area_budget,
         )
 
     async def update_config(
@@ -3409,7 +3428,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             await self._child_protection.check_space_age_gate(space.id, user_id)
         # A local community: the area or our home may have changed since
         # the invite went out — the invite stays pending.
-        await self.require_local_seat(space, self._own_instance_id or "")
+        await self.require_local_seat(
+            space, self._own_instance_id or "", seeker_user_id=user_id
+        )
         member = SpaceMember(
             space_id=space.id,
             user_id=user_id,
@@ -6779,7 +6800,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         hosted = await self._spaces.get(space_id)
         if hosted is not None:
             try:
-                await self.require_local_seat(hosted, self._own_instance_id or "")
+                await self.require_local_seat(
+                    hosted, self._own_instance_id or "", seeker_user_id=user_id
+                )
             except SpacePermissionError:
                 await self._spaces.release_invite_token_use(token)
                 raise
@@ -6924,9 +6947,20 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise InviteOnlyError()
         if await self._spaces.is_banned(space_id, user_id):
             raise BannedFromSpaceError()
+        if space.join_mode is not JoinMode.OPEN:
+            # Asking again while a request is pending answers that request:
+            # no second row, and no second local-community check (it would
+            # be one more inside / outside answer for free).
+            for pending in await self._spaces.list_pending_join_requests(space_id):
+                if pending.get("user_id") == user_id and not pending.get(
+                    "remote_applicant_instance_id"
+                ):
+                    return str(pending["id"])
         # A local community this household hosts: our home must be inside,
         # for an open join and for a request alike (re-checked on approval).
-        await self.require_local_seat(space, self._own_instance_id or "")
+        await self.require_local_seat(
+            space, self._own_instance_id or "", seeker_user_id=user_id
+        )
         if (
             space.join_mode is JoinMode.OPEN
             and space.owner_instance_id == self._own_instance_id
@@ -8154,7 +8188,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
         # A local community: a follower lives inside the area too.
-        await self.require_local_seat(space, self._own_instance_id or "")
+        await self.require_local_seat(
+            space, self._own_instance_id or "", seeker_user_id=user_id
+        )
         # ORDER MATTERS: the GFS-side subscriber registration happens only
         # AFTER every local refusal (public-tier, ban, §CP.F1 age gate) has
         # passed. A locally-refused user must never end up on the GFS's

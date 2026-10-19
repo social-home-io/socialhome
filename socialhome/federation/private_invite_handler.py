@@ -47,7 +47,7 @@ from ..domain.space import (
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_remote_location_repo import SpaceRemoteLocation
-from ..services.local_community import require_local_eligibility
+from ..services.local_community import LocalAreaBudget, require_local_eligibility
 from ..services.space_authority_pin import (
     AuthorityCertOutcome,
     apply_authority_cert,
@@ -183,6 +183,7 @@ class PrivateSpaceInviteHandler:
         "_federation",
         "_federation_repo",
         "_icon_repo",
+        "_local_area_budget",
         "_own_instance_id",
         "_remote_locations",
         "_remote_members",
@@ -204,9 +205,13 @@ class PrivateSpaceInviteHandler:
         space_service=None,
         remote_location_repo=None,
         federation_repo=None,
+        local_area_budget: LocalAreaBudget | None = None,
     ) -> None:
         self._bus = bus
         self._space_repo = space_repo
+        #: The local-community daily check budget an accepting person
+        #: spends (``None`` → an accept into a local community is refused).
+        self._local_area_budget = local_area_budget
         #: Reads an accepting household's shared home for a local
         #: community. ``None`` → an accept into a local community is
         #: refused (fail closed).
@@ -689,8 +694,10 @@ class PrivateSpaceInviteHandler:
                 household_instance_id=event.from_instance,
                 own_instance_id=self._own_instance_id,
                 federation_repo=self._federation_repo,
+                seeker_user_id=invitee_user_id,
+                budget=self._local_area_budget,
             )
-        except SpacePermissionError as exc:
+        except (SpacePermissionError, RuntimeError) as exc:
             log.warning(
                 "SPACE_PRIVATE_INVITE_ACCEPT for %s from %s refused: %s",
                 invite["space_id"],

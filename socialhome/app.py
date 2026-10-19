@@ -226,6 +226,7 @@ from .repositories.highlight_repo import SqliteHighlightRepo
 from .repositories.household_zone_repo import SqliteHouseholdZoneRepo
 from .repositories.instance_ban_repo import SqliteHouseholdInstanceBanRepo
 from .repositories.instance_config_repo import SqliteInstanceConfigRepo
+from .repositories.local_area_attempt_repo import SqliteLocalAreaAttemptRepo
 from .repositories.media_reference_repo import SqliteMediaReferenceRepo
 from .repositories.media_transcode_repo import SqliteMediaTranscodeRepo
 from .repositories.moment_public_repo import (
@@ -329,7 +330,7 @@ from .services.household_zone_service import HouseholdZoneService
 from .services.household_zone_sync import HouseholdZoneSync
 from .services.legacy_album_deletes import LegacyAlbumDeletes
 from .services.link_preview_service import LinkPreviewService
-from .services.local_community import derive_edge_key
+from .services.local_community import LocalAreaBudget, derive_edge_key
 from .services.map_tile_service import MapTileService
 from .services.media_orphan_sweep_service import MediaOrphanSweepService
 from .services.media_transcode_service import MediaTranscodeService
@@ -1195,6 +1196,7 @@ def _build_repos(db: AsyncDatabase):
         household_zone=SqliteHouseholdZoneRepo(db),
         space_sync_watermark=SqliteSpaceSyncWatermarkRepo(db),
         password_reset=SqlitePasswordResetRepo(db),
+        local_area_attempt=SqliteLocalAreaAttemptRepo(db),
         auth_audit_log=SqliteAuthAuditLogRepo(db),
         peer_user_visibility=SqlitePeerUserVisibilityRepo(db),
         instance_config=SqliteInstanceConfigRepo(db),
@@ -1258,6 +1260,7 @@ def _wire_federation_stack(
     media_reference_repo,
     space_timetable_repo,
     preferences_repo,
+    local_area_budget: LocalAreaBudget,
 ):
     """Build :class:`FederationService` + attach the whole federation stack.
 
@@ -1569,8 +1572,10 @@ def _wire_federation_stack(
     SpaceInviteInboundHandlers(
         bus=bus,
         space_repo=space_repo,
-        # A local community: the applicant household's shared home.
+        # A local community: the applicant household's shared home, and
+        # the applicant's daily check budget.
         federation_repo=federation_repo,
+        local_area_budget=local_area_budget,
     ).attach_to(federation_service)
     PeerDirectoryHandler(peer_space_directory_repo).attach_to(federation_service)
     private_invite_handler = PrivateSpaceInviteHandler(
@@ -1581,8 +1586,10 @@ def _wire_federation_stack(
         icon_repo=space_icon_repo,
         space_crypto_service=space_crypto,
         remote_location_repo=space_remote_location_repo,
-        # A local community: the accepting household's shared home.
+        # A local community: the accepting household's shared home, and
+        # the accepting person's daily check budget.
         federation_repo=federation_repo,
+        local_area_budget=local_area_budget,
     )
     private_invite_handler.attach_to(federation_service)
     app[K.private_invite_handler_key] = private_invite_handler
@@ -1937,6 +1944,7 @@ def _wire_federation_stack(
         # The local-community "unsure" band's secret shift — HKDF from
         # the identity seed, never stored or sent.
         edge_key=derive_edge_key(identity.identity_seed),
+        budget=local_area_budget,
     )
     peer_directory_service.wire()
     app[K.peer_directory_service_key] = peer_directory_service
@@ -2569,6 +2577,9 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── Repositories ─────────────────────────────────────────────────────
     repos = _build_repos(db)
+    #: The local-community daily check budgets (SQLite, migration 0109) —
+    #: one instance shared by every seat path and the directory verdicts.
+    local_area_budget = LocalAreaBudget(repos.local_area_attempt)
     # Local aliases so the rest of the wiring stays readable.
     user_repo = repos.user
     post_repo = repos.post
@@ -2634,6 +2645,7 @@ def create_app(config: Config | None = None) -> web.Application:
     space_service.attach_icon_repo(space_icon_repo)
     space_service.attach_gallery_repo(gallery_repo)
     space_service.attach_bazaar_repo(bazaar_repo)
+    space_service.attach_local_area_budget(local_area_budget)
     # Multi-admin approval (quorum) for critical space actions (dissolve /
     # publication-tier). ``own_instance_id`` is patched on startup like
     # SpaceService; ``attach`` wires federation + space_service below.
@@ -3709,6 +3721,7 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         # §CP.F1 age gate on add_member + §CP.R public-tier gate.
         real_space_service.attach_child_protection(child_protection_service)
+        real_space_service.attach_local_area_budget(local_area_budget)
         # A new local user becomes a member of every household space we host.
         # Only this service knows our real instance id — the placeholder
         # built at wiring time is never subscribed.
@@ -3967,6 +3980,7 @@ def create_app(config: Config | None = None) -> web.Application:
             media_reference_repo=repos.media_reference,
             space_timetable_repo=repos.space_timetable,
             preferences_repo=repos.preferences,
+            local_area_budget=local_area_budget,
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager
@@ -4166,6 +4180,7 @@ def create_app(config: Config | None = None) -> web.Application:
             icon_repo=space_icon_repo,
             space_crypto_service=space_crypto,
             child_protection_service=child_protection_service,
+            local_area_budget=local_area_budget,
         )
         invite_redeem_coordinator.attach_to(federation_service)
         invite_redeem_coordinator.attach_writer_certs(writer_certs)
