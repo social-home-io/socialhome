@@ -49,15 +49,44 @@ locations are not shared by design).
   sphere, the same as the zone match). The seat check always uses the
   **exact** distance — the "unsure" band below is only for what the
   directory shows.
-- **Refusals are rate-limited.** A seat attempt is an exact yes / no, and
-  a refused invite-link use is handed back, so a household moving its
-  shared home and asking again would trace the rim. After **3**
-  `OUTSIDE_AREA` refusals for one community in a rolling day, the host
-  answers that household `429 LOCAL_AREA_RATE_LIMITED` without looking at
-  its home until the oldest refusal is a day old (`whose: peer` for an
-  admin acting here, `whose: host` on the redeemer). Only other
-  households are counted, only "outside" answers; in memory
-  (`OutsideAreaAttempts`), so a host restart forgets it.
+- **Checks are budgeted per person.** A seat attempt is an exact yes / no,
+  and a refused invite-link use is handed back, so somebody moving their
+  shared home and asking again would trace the rim — and join → leave →
+  move → rejoin would too, so **a successful check counts like a refusal**
+  (owner decision 2026-10-19). Each **person** gets **3** checks per
+  community per UTC day (`MAX_LOCAL_AREA_CHECKS_PER_PERSON`), counted on
+  every path the person starts: open join, join request, follow, invite
+  accept, invite-link redeem (local, §D2 and §D2b). An admin's own steps —
+  sending an invite, a direct add, approving a request — are not counted.
+  "Home unknown" spends nothing (it says nothing about the area). Past the
+  budget the host answers `429 LOCAL_AREA_RATE_LIMITED` with no verdict
+  until 00:00 UTC (`whose: own` for a local user, `whose: host` on a
+  remote redeemer).
+  - **Per person, never per community or per household:** one person
+    probing does not hold off the rest of their household, and a busy
+    community never locks out newcomers.
+  - **Who is the person.** A local user → their user id (counted too,
+    though the host's own people can read the area anyway). A remote person →
+    the user id the request carries, keyed together with the sending
+    household that the §24.11 envelope authenticates. That user id is the
+    household's to choose, so a **remote household** also has a backstop of
+    **10** checks per community per UTC day
+    (`MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD`) — minting fresh user ids buys
+    no more than that. 10 is above a few people's budgets, and a person
+    already past their own budget spends none of it, so one prober cannot
+    use up the household's day. The host's own household has no backstop
+    (its people are real accounts here).
+  - **Retries are free.** Asking again while a join request is pending is
+    answered by that request — no second row and no second check.
+  - **A remote request costs two.** Filing a request from another
+    household is one check and redeeming the approval's token is another
+    (the redeem can be retried, so it must count); the approval itself
+    is the admin's. A request-mode join over federation is therefore two
+    of the person's three checks that day.
+  - **Kept across restarts** in `local_area_attempts` (migration 0109):
+    one counter per space, kind, subject and UTC day; a person is stored
+    as `sha256(household \n user id)`, never the raw id; days before
+    yesterday are pruned on every write.
 - **Every seat path, no override.** Open join, a join request (when filed
   and again when approved), follow, an invite token / link redeem (local and
   §D2 / §D2b over the wire), a direct invite (when sent and again when the
@@ -106,11 +135,14 @@ step by step and find the rim, and so the centre. The host coarsens it
   unsure says little about where the rim is. "Inside" is still always
   inside and "outside" always outside, for every home in the cell.
 - **Budget.** A peer's verdicts follow at most **4** different shared homes
-  per rolling day; further moves are answered for the last home taken
-  (nothing new) until the day is over. Withdrawing the home always takes
-  effect at once but keeps the day's count — a home shared again past the
-  budget gets no answer (unknown) — so toggling sharing is no way around
-  it. In memory.
+  per UTC day (`MAX_VERDICT_HOMES_PER_DAY`); further moves are answered for
+  the last home taken (nothing new) until 00:00 UTC. Withdrawing the home
+  always takes effect at once but keeps the day's count — a home shared
+  again past the budget gets no answer (unknown) — so toggling sharing is
+  no way around it. The count is kept in `local_area_attempts` (kind
+  `verdict_home`), so a restart does not refill it; the last home taken is
+  not stored, so after a restart a peer already past its budget gets
+  "unknown" until the next UTC day.
 
 What's left: a household moving its home in 20 m steps straight through the
 area, with no budget, narrows the centre only to about one band on average
@@ -130,11 +162,15 @@ No new event type. The feature rides on:
   Redefined in place before release — the unreleased first draft carried
   the centre, the second had no `area_edge` and answered exactly.
 - `SPACE_JOIN_REQUEST` — the host drops a request from a household that is
-  outside or whose home it does not know (logged, like a banned applicant),
-  so it never reaches the admins.
+  outside or whose home it does not know, or from a person past their daily
+  check budget (logged, like a banned applicant), so it never reaches the
+  admins. A repeat from a person whose request is already pending is
+  dropped without a check.
 - `SPACE_INVITE_TOKEN_REDEEM_DENY` — three reasons besides the uniform
   `REDEEM_DENY_REASON`: `"home location not shared"`,
-  `"home outside the local area"` and `"local area refusals rate-limited"`.
+  `"home outside the local area"` and `"local area refusals rate-limited"`
+  (the redeeming person's daily check budget is used up — the wire string
+  is kept from the first revision).
   They are sent only after the token was consumed and the ban check passed
   (a dead or banned link still gets the uniform reason), the use is handed
   back, and the redeemer maps them to its own `HOME_NOT_SHARED` /
@@ -157,16 +193,17 @@ sequenceDiagram
     A->>B: SPACE_DIRECTORY_SYNC {spaces: [{…, local_community, radius_km, in_area, area_edge}]}  (v_59+)
     Note over B: Discover: "Within 5 km" + In your area /<br/>Near the edge — no map, no centre
     B-->>A: LOCAL_HOME_LOCATION_CHANGED (B moves / stops sharing)
-    A->>B: SPACE_DIRECTORY_SYNC (B's fresh verdict — at most 4 new homes a day)
+    A->>B: SPACE_DIRECTORY_SYNC (B's fresh verdict — at most 4 new homes a UTC day)
     B->>A: SPACE_JOIN_REQUEST {space_id, user_id}
-    Note over A: home of B = remote_instances.home_lat/lon<br/>inside? else drop (logged)
+    Note over A: already pending for (B, user_id)? → drop, no check
+    Note over A: home of B = remote_instances.home_lat/lon (unknown → drop)<br/>spend one check of (B, user_id) — 3 a UTC day — and of B — 10<br/>(none left → drop, no verdict) · inside? else drop (logged)
     Note over A: admin approves → re-check (area or sharing may have changed)
     A->>B: SPACE_JOIN_REQUEST_APPROVED {invite_token}
     B->>A: SPACE_INVITE_TOKEN_REDEEM
-    Note over A: consume → ban → area check again
+    Note over A: consume → ban → budget (one more check) → area check
     alt inside
         A->>B: SPACE_INVITE_TOKEN_REDEEM_ACK {space_meta}
-    else outside / home unknown / refused too often today
+    else outside / home unknown / person's checks used up today
         A->>B: SPACE_INVITE_TOKEN_REDEEM_DENY {reason}  (use handed back)
         Note over B: 403 OUTSIDE_AREA / HOME_NOT_SHARED /<br/>429 LOCAL_AREA_RATE_LIMITED (own wording)
     end
@@ -182,8 +219,12 @@ sequenceDiagram
   shape (`local_community_wire` / `parse_local_community_wire`, without).
 - `socialhome/services/local_community.py` — `require_local_eligibility`,
   the one check every seat path calls (whose home, fail closed, the
-  `OutsideAreaAttempts` refusal limit), and `derive_edge_key` /
-  `edge_shift_km` (the host's secret per-cell shift).
+  per-person check budget), `LocalAreaBudget` (the daily budgets, all three
+  limits in one place) and `derive_edge_key` / `edge_shift_km` (the host's
+  secret per-cell shift).
+- `socialhome/repositories/local_area_attempt_repo.py` — the
+  `local_area_attempts` counters: an all-or-nothing `try_spend` under
+  `BEGIN IMMEDIATE`, pruning old days on write.
 - `socialhome/services/peer_directory_service.py` — builds each peer's
   snapshot with its coarsened verdict and the per-peer home budget.
 - `socialhome/services/space_service.py` — `create_space` /

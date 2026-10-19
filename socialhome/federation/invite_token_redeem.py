@@ -73,7 +73,7 @@ from ..domain.space import (
     SpaceRole,
     SpaceType,
 )
-from ..services.local_community import require_local_eligibility
+from ..services.local_community import LocalAreaBudget, require_local_eligibility
 from ..services.space_authority_pin import (
     owner_authority_cert_via,
     owner_statement_via,
@@ -190,8 +190,9 @@ REDEEM_DENY_REASON_TOO_LARGE: str = "space snapshot too large for the relay"
 
 #: The DENY reasons of a LOCAL COMMUNITY (a public space bound to an
 #: area): the redeeming household's home is not known to the issuer (not
-#: shared with it), lies outside the area, or was refused as outside too
-#: often today (the issuer did not look at it this time). Sent only after the token was
+#: shared with it), lies outside the area, or the redeeming person already
+#: used today's checks on it (no verdict this time; the wire string is
+#: kept from the first revision). Sent only after the token was
 #: consumed and the ban check passed — so they tell a holder of a live link
 #: nothing about the issuer's private state, only what the paired-household
 #: directory already shows about the space — and the use is handed back.
@@ -308,6 +309,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_keywrap_private_key",
         "_keywrap_public_key",
         "_keywrap_sig",
+        "_local_area_budget",
         "_pending",
         "_pending_issuer",
         "_rate_limiter",
@@ -341,10 +343,15 @@ class SpaceInviteTokenRedeemCoordinator:
         icon_repo=None,
         space_crypto_service=None,
         child_protection_service=None,
+        local_area_budget: LocalAreaBudget | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
         self._spaces = space_repo
+        #: The local-community daily check budget a redeeming person
+        #: spends (``None`` → a redeem into a local community we host is
+        #: refused: :func:`require_local_eligibility` fails closed).
+        self._local_area_budget = local_area_budget
         self._remote_members = space_remote_member_repo
         self._users = user_repo
         self._federation_repo = federation_repo
@@ -1202,6 +1209,8 @@ class SpaceInviteTokenRedeemCoordinator:
                     household_instance_id=redeemer_instance_id,
                     own_instance_id=self._federation.own_instance_id,
                     federation_repo=self._federation_repo,
+                    seeker_user_id=redeemer_user_id,
+                    budget=self._local_area_budget,
                 )
             except HomeNotSharedError:
                 await self._release_token_use(token, space_id)
@@ -1212,6 +1221,12 @@ class SpaceInviteTokenRedeemCoordinator:
             except LocalAreaRateLimitedError:
                 await self._release_token_use(token, space_id)
                 return None, REDEEM_DENY_REASON_AREA_RATE_LIMITED, None
+            except RuntimeError:
+                # No check budget wired: refused (fail closed), never seated
+                # uncounted.
+                log.exception("invite redeem: local-community check unavailable")
+                await self._release_token_use(token, space_id)
+                return None, REDEEM_DENY_REASON, None
 
         # The seat the ISSUER decided at mint time (migration 0053). The
         # redeemer never gets to ask for a role, so this is read here and

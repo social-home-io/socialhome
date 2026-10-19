@@ -15,6 +15,8 @@ from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceInviteInboundHandlers
+from socialhome.services.local_community import MAX_LOCAL_AREA_CHECKS_PER_PERSON
+from tests.local_area_budget import memory_budget
 
 
 class _FakeRegistry:
@@ -55,6 +57,7 @@ class _FakeSpaceRepo:
     def __init__(self) -> None:
         self.invitations = []
         self.join_requests = []
+        self.pending: list[dict] = []
         self.join_status = []
         self.spaces = {"sp-1": _space()}
         self.banned: set[tuple[str, str]] = set()
@@ -83,6 +86,14 @@ class _FakeSpaceRepo:
         request_id=None,
     ):
         # Accept both positional (legacy) and keyword calls.
+        self.pending.append(
+            {
+                "id": request_id or "req-1",
+                "space_id": space_id,
+                "user_id": user_id,
+                "remote_applicant_instance_id": remote_applicant_instance_id,
+            }
+        )
         self.join_requests.append(
             (
                 space_id,
@@ -93,6 +104,9 @@ class _FakeSpaceRepo:
             )
         )
         return request_id or "req-1"
+
+    async def list_pending_join_requests(self, space_id):
+        return [r for r in self.pending if r["space_id"] == space_id]
 
     async def update_join_request_status(self, request_id, status, *, reviewed_by=None):
         self.join_status.append((request_id, status, reviewed_by))
@@ -373,18 +387,23 @@ class _FedRepo:
         return None
 
 
-def _local_handlers(bus, repo, fed_repo):
+def _local_handlers(bus, repo, fed_repo, budget=None):
     repo.spaces["sp-1"] = replace(_space(), lat=47.3769, lon=8.5417, radius_km=5.0)
-    h = SpaceInviteInboundHandlers(bus=bus, space_repo=repo, federation_repo=fed_repo)
+    h = SpaceInviteInboundHandlers(
+        bus=bus,
+        space_repo=repo,
+        federation_repo=fed_repo,
+        local_area_budget=budget if budget is not None else memory_budget(),
+    )
     h.attach_to(_FakeFederationService())
     return h
 
 
-async def _request(h, from_instance):
+async def _request(h, from_instance, user_id="u-1", request_id=None):
     await h._on_join_request(
         _event(
             FederationEventType.SPACE_JOIN_REQUEST,
-            {"user_id": "u-1"},
+            {"user_id": user_id, **({"request_id": request_id} if request_id else {})},
             from_instance=from_instance,
             space_id="sp-1",
         )
@@ -416,5 +435,48 @@ async def test_a_local_community_drops_a_request_from_outside_or_unknown(
 
 async def test_a_local_community_fails_closed_without_a_federation_repo(bus, repo):
     h = _local_handlers(bus, repo, None)
+    await _request(h, "near")
+    assert repo.join_requests == []
+
+
+async def test_a_request_spends_the_applicants_budget(bus, repo):
+    """Filing a request is a check the applicant starts. Each person has
+    their own budget: one used up does not hold off the next person of the
+    same household."""
+    budget = memory_budget()
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
+        assert await budget.spend_seat_check(
+            "sp-1", household="near", user_id="u-1", remote=True
+        )
+    h = _local_handlers(bus, repo, _FedRepo({"near": _Peer(47.392, 8.56)}), budget)
+    await _request(h, "near", user_id="u-1")
+    assert repo.join_requests == []
+    await _request(h, "near", user_id="u-2")
+    assert [r[1] for r in repo.join_requests] == ["u-2"]
+
+
+async def test_asking_again_while_pending_spends_nothing(bus, repo):
+    """A retry of a request that already waits is answered by that request:
+    no second row and no second check, so retries never burn the budget."""
+    budget = memory_budget()
+    h = _local_handlers(bus, repo, _FedRepo({"near": _Peer(47.392, 8.56)}), budget)
+    for i in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON + 3):
+        await _request(h, "near", request_id=f"req-{i}")
+    assert [r[4] for r in repo.join_requests] == ["req-0"]
+    # Two checks left today for this person.
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON - 1):
+        assert await budget.spend_seat_check(
+            "sp-1", household="near", user_id="u-1", remote=True
+        )
+
+
+async def test_a_local_community_fails_closed_without_a_budget(bus, repo):
+    repo.spaces["sp-1"] = replace(_space(), lat=47.3769, lon=8.5417, radius_km=5.0)
+    h = SpaceInviteInboundHandlers(
+        bus=bus,
+        space_repo=repo,
+        federation_repo=_FedRepo({"near": _Peer(47.392, 8.56)}),
+    )
+    h.attach_to(_FakeFederationService())
     await _request(h, "near")
     assert repo.join_requests == []

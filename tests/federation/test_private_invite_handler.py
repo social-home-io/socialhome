@@ -37,12 +37,14 @@ from socialhome.domain.space import (
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.services.local_community import MAX_LOCAL_AREA_CHECKS_PER_PERSON
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_service import (
     open_join_snapshot,
     resolve_join_owner,
     seat_join_stub,
 )
+from tests.local_area_budget import memory_budget
 
 
 class _RecordingBus:
@@ -275,6 +277,7 @@ async def test_accept_into_a_local_community_rechecks_the_home(handler, home):
     handler.space_repo.get.return_value = _local_community()
     handler.h._own_instance_id = "host-self"
     handler.h._federation_repo = _HomeRepo(home)
+    handler.h._local_area_budget = memory_budget()
     fed = AsyncMock()
     handler.h._federation = fed
     await handler.h._on_accept(_accept_event())
@@ -290,9 +293,40 @@ async def test_accept_into_a_local_community_from_inside_seats(handler):
     handler.space_repo.get.return_value = _local_community()
     handler.h._own_instance_id = "host-self"
     handler.h._federation_repo = _HomeRepo((47.392, 8.56))
+    handler.h._local_area_budget = memory_budget()
     await handler.h._on_accept(_accept_event())
     handler.remote_members.add.assert_awaited_once()
     handler.space_repo.update_invitation_status.assert_awaited_with(42, "accepted")
+
+
+async def test_accepting_spends_the_persons_budget(handler):
+    """An accept is a check the invited person starts: past their daily
+    budget it is declined without a verdict, even from inside."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
+    handler.space_repo.get.return_value = _local_community()
+    handler.h._own_instance_id = "host-self"
+    handler.h._federation_repo = _HomeRepo((47.392, 8.56))
+    handler.h._federation = AsyncMock()
+    handler.h._local_area_budget = budget = memory_budget()
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
+        assert await budget.spend_seat_check(
+            "sp-a", household="peer-1", user_id="u1", remote=True
+        )
+    await handler.h._on_accept(_accept_event())
+    handler.remote_members.add.assert_not_awaited()
+    handler.space_repo.update_invitation_status.assert_awaited_with(42, "declined")
+
+
+async def test_an_unwired_budget_declines_the_accept(handler):
+    """Fail closed: without a budget nobody is seated in a local community."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
+    handler.space_repo.get.return_value = _local_community()
+    handler.h._own_instance_id = "host-self"
+    handler.h._federation_repo = _HomeRepo((47.392, 8.56))
+    handler.h._federation = AsyncMock()
+    await handler.h._on_accept(_accept_event())
+    handler.remote_members.add.assert_not_awaited()
+    handler.space_repo.update_invitation_status.assert_awaited_with(42, "declined")
 
 
 async def test_accept_broadcasts_member_joined_gossip(handler):

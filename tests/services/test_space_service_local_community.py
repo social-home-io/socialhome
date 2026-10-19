@@ -23,6 +23,7 @@ from socialhome.domain.space import (
     JoinMode,
     LocalAreaDelegatedError,
     LocalAreaPublicOnlyError,
+    LocalAreaRateLimitedError,
     LocalAreaUnavailableError,
     OutsideAreaError,
     SpaceFeatures,
@@ -32,9 +33,16 @@ from socialhome.domain.space import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.repositories.local_area_attempt_repo import (
+    SqliteLocalAreaAttemptRepo,
+)
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.local_community import (
+    MAX_LOCAL_AREA_CHECKS_PER_PERSON,
+    LocalAreaBudget,
+)
 from socialhome.services.space_service import SpaceService
 from socialhome.services.user_service import UserService
 
@@ -83,6 +91,7 @@ async def stack(tmp_dir):
         space_repo, SqliteSpacePostRepo(db), user_repo, bus, own_instance_id=iid
     )
     svc._federation_repo = _FedRepo(own=NEAR)
+    svc.attach_local_area_budget(LocalAreaBudget(SqliteLocalAreaAttemptRepo(db)))
 
     class S:
         pass
@@ -429,3 +438,52 @@ async def test_direct_remote_invite_refused_before_anything_is_minted(stack):
         )
     fed.send_with_mesh_fallback.assert_not_awaited()
     assert await stack.repo.list_live_invite_tokens(space.id) == []
+
+
+# ── the daily per-person check budget ───────────────────────────────────
+
+
+async def test_joining_and_leaving_spends_the_persons_budget(stack):
+    """Every open join is a check Ben starts — successful ones too. The
+    fourth that day is 429 with the shape #1054 shipped; Carl, in the same
+    household, is not held off."""
+    space = await _community(stack)
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
+        assert await stack.svc.request_join(space.id, user_id=stack.ben.user_id) is None
+        await stack.repo.delete_member(space.id, stack.ben.user_id)
+    with pytest.raises(LocalAreaRateLimitedError) as exc:
+        await stack.svc.request_join(space.id, user_id=stack.ben.user_id)
+    assert (exc.value.status, exc.value.code) == (429, "LOCAL_AREA_RATE_LIMITED")
+    assert exc.value.params == {"whose": "own"}
+    assert await stack.repo.get_member(space.id, stack.ben.user_id) is None
+    assert await stack.svc.request_join(space.id, user_id=stack.carl.user_id) is None
+
+
+async def test_asking_again_while_pending_returns_that_request(stack):
+    """A re-request of a pending request is answered by it: no second row,
+    and no budget spent."""
+    space = await _community(stack, join_mode=JoinMode.REQUEST)
+    first = await stack.svc.request_join(space.id, user_id=stack.ben.user_id)
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON + 2):
+        again = await stack.svc.request_join(space.id, user_id=stack.ben.user_id)
+        assert again == first
+    pending = await stack.repo.list_pending_join_requests(space.id)
+    assert [r["id"] for r in pending] == [first]
+
+
+async def test_an_admins_add_and_approval_spend_nothing(stack):
+    """Admin-started checks are the admin's, not the joining person's."""
+    space = await _community(stack, join_mode=JoinMode.REQUEST)
+    rid = await stack.svc.request_join(space.id, user_id=stack.ben.user_id)
+    await stack.svc.approve_join_request(rid, actor_username="anna")
+    await stack.repo.delete_member(space.id, stack.ben.user_id)
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
+        await stack.svc.add_member(
+            space.id, actor_username="anna", user_id=stack.carl.user_id
+        )
+        await stack.repo.delete_member(space.id, stack.carl.user_id)
+    # Ben spent one (the request); two left.
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON - 1):
+        assert await stack.svc.request_join(space.id, user_id=stack.ben.user_id)
+        for row in await stack.repo.list_pending_join_requests(space.id):
+            await stack.repo.update_join_request_status(row["id"], "withdrawn")

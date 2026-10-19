@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
+from socialhome.db.database import AsyncDatabase
 from socialhome.domain.local_community import (
     LocalArea,
     directory_verdict,
@@ -24,15 +26,20 @@ from socialhome.domain.space import (
     SpacePermissionError,
     SpaceType,
 )
+from socialhome.repositories.local_area_attempt_repo import (
+    SqliteLocalAreaAttemptRepo,
+)
 from socialhome.services.local_community import (
-    MAX_OUTSIDE_AREA_REFUSALS,
-    OUTSIDE_AREA_WINDOW_SECONDS,
-    OutsideAreaAttempts,
+    MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD,
+    MAX_LOCAL_AREA_CHECKS_PER_PERSON,
+    MAX_VERDICT_HOMES_PER_DAY,
+    LocalAreaBudget,
     derive_edge_key,
     edge_shift_km,
     household_home,
     require_local_eligibility,
 )
+from tests.local_area_budget import InMemoryLocalAreaAttemptRepo, memory_budget
 
 HOST = "host-inst"
 ZURICH = (47.3769, 8.5417)
@@ -299,86 +306,208 @@ def test_the_exact_answer_would_give_the_centre_away():
     assert max(feasible) - min(feasible) <= 0.05
 
 
-# ── refused "outside" seats are rate-limited per household ──────────────
+# ── every check a person starts is budgeted, per person ─────────────────
 
 
 class _Clock:
     def __init__(self) -> None:
-        self.now = 1_000_000.0
+        self.now = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
 
-    def __call__(self) -> float:
+    def __call__(self) -> datetime:
         return self.now
 
 
-async def _attempt(space, household, repo, guard):
+async def _attempt(space, household, repo, budget, *, user="u1"):
     await require_local_eligibility(
         space,
         household_instance_id=household,
         own_instance_id=HOST,
         federation_repo=repo,
-        attempts=guard,
+        seeker_user_id=user,
+        budget=budget,
     )
 
 
-async def test_a_household_refused_outside_three_times_is_then_held_off():
-    """A seat attempt is an exact yes / no, so it must not be repeatable at
-    will: after three OUTSIDE_AREA refusals in a day the host answers
-    LOCAL_AREA_RATE_LIMITED without looking at the home — even one that
-    has since moved inside."""
+async def test_a_person_gets_three_checks_a_day_successful_ones_included():
+    """Join → leave → move the shared home → rejoin is an exact "inside?"
+    each time, so a success spends the budget like a refusal. The fourth
+    check that day is answered 429 without a verdict — even inside."""
     clock = _Clock()
-    guard = OutsideAreaAttempts(clock=clock)
-    repo = _FedRepo(peers={"b": _Peer(*BERN)})
-    for _ in range(MAX_OUTSIDE_AREA_REFUSALS):
-        with pytest.raises(OutsideAreaError):
-            await _attempt(_space(), "b", repo, guard)
+    budget = memory_budget(clock=clock)
+    repo = _FedRepo(peers={"b": _Peer(*INSIDE)})
+    await _attempt(_space(), "b", repo, budget)
+    repo.peers["b"] = _Peer(*BERN)
+    with pytest.raises(OutsideAreaError):
+        await _attempt(_space(), "b", repo, budget)
     repo.peers["b"] = _Peer(*INSIDE)
+    await _attempt(_space(), "b", repo, budget)
+    assert MAX_LOCAL_AREA_CHECKS_PER_PERSON == 3
     with pytest.raises(LocalAreaRateLimitedError) as exc:
-        await _attempt(_space(), "b", repo, guard)
+        await _attempt(_space(), "b", repo, budget)
+    # The 429 shape #1054 shipped.
     assert exc.value.status == 429
     assert exc.value.code == "LOCAL_AREA_RATE_LIMITED"
     assert exc.value.params == {"whose": "peer"}
     assert isinstance(exc.value, SpacePermissionError)
-    # A day after the first refusal the household may try again.
-    clock.now += OUTSIDE_AREA_WINDOW_SECONDS + 1
-    await _attempt(_space(), "b", repo, guard)
+    # The next UTC day refills it.
+    clock.now += timedelta(days=1)
+    await _attempt(_space(), "b", repo, budget)
 
 
-async def test_the_limit_is_per_space_and_per_household():
-    guard = OutsideAreaAttempts(clock=_Clock())
+async def test_one_person_probing_does_not_block_the_rest_of_their_household():
+    budget = memory_budget(clock=_Clock())
     repo = _FedRepo(peers={"b": _Peer(*BERN), "c": _Peer(*BERN)})
-    for _ in range(MAX_OUTSIDE_AREA_REFUSALS):
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
         with pytest.raises(OutsideAreaError):
-            await _attempt(_space(), "b", repo, guard)
-    with pytest.raises(OutsideAreaError):  # another household
-        await _attempt(_space(), "c", repo, guard)
-    with pytest.raises(OutsideAreaError):  # another community
-        await _attempt(_space(id="s2"), "b", repo, guard)
-
-
-async def test_inside_and_home_not_shared_are_not_counted():
-    """Only "outside" answers are counted: they are what tells a prober
-    where the rim is not."""
-    guard = OutsideAreaAttempts(clock=_Clock())
-    repo = _FedRepo(peers={"b": _Peer(*INSIDE), "n": _Peer(None, None)})
-    for _ in range(MAX_OUTSIDE_AREA_REFUSALS + 2):
-        await _attempt(_space(), "b", repo, guard)
-        with pytest.raises(HomeNotSharedError):
-            await _attempt(_space(), "n", repo, guard)
-
-
-async def test_this_households_own_people_are_never_held_off():
-    """The host's own people see the centre anyway (Settings)."""
-    guard = OutsideAreaAttempts(clock=_Clock())
-    repo = _FedRepo(own=BERN)
-    for _ in range(MAX_OUTSIDE_AREA_REFUSALS + 2):
-        with pytest.raises(OutsideAreaError):
-            await _attempt(_space(), HOST, repo, guard)
-
-
-async def test_by_default_the_process_wide_counter_is_used():
-    repo = _FedRepo(peers={"b": _Peer(*BERN)})
-    for _ in range(MAX_OUTSIDE_AREA_REFUSALS):
-        with pytest.raises(OutsideAreaError):
-            await _check(_space(id="s-default"), "b", repo)
+            await _attempt(_space(), "b", repo, budget, user="prober")
     with pytest.raises(LocalAreaRateLimitedError):
-        await _check(_space(id="s-default"), "b", repo)
+        await _attempt(_space(), "b", repo, budget, user="prober")
+    with pytest.raises(OutsideAreaError):  # another person, same household
+        await _attempt(_space(), "b", repo, budget, user="sibling")
+    with pytest.raises(OutsideAreaError):  # another household
+        await _attempt(_space(), "c", repo, budget, user="prober")
+    with pytest.raises(OutsideAreaError):  # another community
+        await _attempt(_space(id="s2"), "b", repo, budget, user="prober")
+
+
+async def test_a_busy_community_does_not_lock_out_newcomers():
+    """No overall counter: many people joining in one day never hold off
+    the next one."""
+    budget = memory_budget(clock=_Clock())
+    peers = {f"h{i}": _Peer(*INSIDE) for i in range(20)}
+    repo = _FedRepo(own=INSIDE, peers=peers)
+    for household in peers:
+        for user in ("a", "b"):
+            await _attempt(_space(), household, repo, budget, user=user)
+    for i in range(20):
+        await _attempt(_space(), HOST, repo, budget, user=f"local-{i}")
+
+
+async def test_fresh_user_ids_do_not_buy_a_household_fresh_answers():
+    """The user id in a remote request is the household's to choose (the
+    envelope authenticates the household, not the person): past
+    MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD checks a day the household is held
+    off whatever id it names."""
+    budget = memory_budget(clock=_Clock())
+    repo = _FedRepo(peers={"b": _Peer(*BERN), "c": _Peer(*BERN)})
+    for i in range(MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD):
+        with pytest.raises(OutsideAreaError):
+            await _attempt(_space(), "b", repo, budget, user=f"minted-{i}")
+    with pytest.raises(LocalAreaRateLimitedError):
+        await _attempt(_space(), "b", repo, budget, user="minted-new")
+    with pytest.raises(OutsideAreaError):  # another household is untouched
+        await _attempt(_space(), "c", repo, budget, user="minted-new")
+
+
+async def test_a_held_off_person_spends_nothing_of_their_households_backstop():
+    """Asking again past the person's budget is refused before anything is
+    spent — one prober cannot drain the household's backstop."""
+    inner = InMemoryLocalAreaAttemptRepo()
+    budget = LocalAreaBudget(inner, clock=_Clock())
+    repo = _FedRepo(peers={"b": _Peer(*BERN)})
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON + 5):
+        with pytest.raises((OutsideAreaError, LocalAreaRateLimitedError)):
+            await _attempt(_space(), "b", repo, budget, user="prober")
+    household = [v for k, v in inner.rows.items() if k[1] == "household"]
+    assert household == [MAX_LOCAL_AREA_CHECKS_PER_PERSON]
+
+
+async def test_the_hosts_own_people_have_a_person_budget_but_no_household_cap():
+    budget = memory_budget(clock=_Clock())
+    repo = _FedRepo(own=BERN)
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
+        with pytest.raises(OutsideAreaError):
+            await _attempt(_space(), HOST, repo, budget, user="anna")
+    with pytest.raises(LocalAreaRateLimitedError) as exc:
+        await _attempt(_space(), HOST, repo, budget, user="anna")
+    assert exc.value.params == {"whose": "own"}
+    for i in range(MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD + 2):
+        with pytest.raises(OutsideAreaError):
+            await _attempt(_space(), HOST, repo, budget, user=f"p{i}")
+
+
+async def test_home_not_shared_spends_nothing():
+    """ "Home unknown" says nothing about where the area is."""
+    budget = memory_budget(clock=_Clock())
+    repo = _FedRepo(peers={"n": _Peer(None, None)})
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON + 2):
+        with pytest.raises(HomeNotSharedError):
+            await _attempt(_space(), "n", repo, budget)
+    repo.peers["n"] = _Peer(*INSIDE)
+    await _attempt(_space(), "n", repo, budget)
+
+
+async def test_an_admins_step_is_not_counted():
+    """An invite, a direct add or an approval is the admin's, not the
+    joining person's: no ``seeker_user_id``, no budget spent."""
+    repo = _FedRepo(peers={"b": _Peer(*INSIDE)})
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON + 2):
+        await _check(_space(), "b", repo)
+
+
+async def test_a_person_check_without_a_budget_fails_closed():
+    repo = _FedRepo(peers={"b": _Peer(*INSIDE)})
+    with pytest.raises(RuntimeError):
+        await require_local_eligibility(
+            _space(),
+            household_instance_id="b",
+            own_instance_id=HOST,
+            federation_repo=repo,
+            seeker_user_id="u1",
+        )
+
+
+async def test_the_budget_survives_a_restart(tmp_dir):
+    """Kept in SQLite: a new budget over the same database (a host restart)
+    still holds the person off."""
+    clock = _Clock()
+    repo = _FedRepo(peers={"b": _Peer(*INSIDE)})
+    db = AsyncDatabase(tmp_dir / "budget.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        before = LocalAreaBudget(SqliteLocalAreaAttemptRepo(db), clock=clock)
+        for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
+            await _attempt(_space(), "b", repo, before)
+    finally:
+        await db.shutdown()
+    db = AsyncDatabase(tmp_dir / "budget.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        after = LocalAreaBudget(SqliteLocalAreaAttemptRepo(db), clock=clock)
+        with pytest.raises(LocalAreaRateLimitedError):
+            await _attempt(_space(), "b", repo, after)
+    finally:
+        await db.shutdown()
+
+
+async def test_days_are_utc_calendar_days():
+    """A check at 23:59 UTC and one at 00:01 UTC fall on different days,
+    whatever zone the clock reads in."""
+    clock = _Clock()
+    clock.now = datetime(2026, 10, 19, 23, 59, tzinfo=UTC)
+    budget = memory_budget(clock=clock)
+    repo = _FedRepo(peers={"b": _Peer(*INSIDE)})
+    for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
+        await _attempt(_space(), "b", repo, budget)
+    # 01:59 at UTC+2 is still 19 Oct in UTC.
+    clock.now = datetime(2026, 10, 20, 1, 59, tzinfo=timezone(timedelta(hours=2)))
+    with pytest.raises(LocalAreaRateLimitedError):
+        await _attempt(_space(), "b", repo, budget)
+    clock.now = datetime(2026, 10, 20, 0, 1, tzinfo=UTC)
+    await _attempt(_space(), "b", repo, budget)
+
+
+async def test_take_verdict_home_allows_four_new_homes_a_day():
+    budget = memory_budget(clock=_Clock())
+    assert MAX_VERDICT_HOMES_PER_DAY == 4
+    for _ in range(MAX_VERDICT_HOMES_PER_DAY):
+        assert await budget.take_verdict_home("peer-x") is True
+    assert await budget.take_verdict_home("peer-x") is False
+    assert await budget.take_verdict_home("peer-y") is True
+
+
+async def test_person_subjects_never_store_the_raw_user_id():
+    inner = InMemoryLocalAreaAttemptRepo()
+    budget = LocalAreaBudget(inner, clock=_Clock())
+    await budget.spend_seat_check("s1", household="b", user_id="alice", remote=True)
+    assert all("alice" not in k[2] for k in inner.rows)

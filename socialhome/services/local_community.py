@@ -23,6 +23,11 @@ A home that is not known is refused (:class:`HomeNotSharedError`), never
 assumed inside — and nobody is ever asked to send coordinates inside a
 join request. A space hosted by another household is that household's to
 check: on a member household's stub this is a no-op.
+
+Every check a PERSON starts is budgeted (:class:`LocalAreaBudget`, kept in
+SQLite so a restart refills nothing): a few a UTC day per person and
+community, successful ones included, plus a backstop per remote household;
+see :data:`MAX_LOCAL_AREA_CHECKS_PER_PERSON`.
 """
 
 from __future__ import annotations
@@ -31,9 +36,8 @@ import hashlib
 import hmac
 import logging
 import struct
-import time
-from collections import deque
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 from cryptography.hazmat.primitives import hashes
@@ -52,16 +56,20 @@ from ..domain.space import (
     LocalAreaRateLimitedError,
     OutsideAreaError,
 )
+from ..repositories.local_area_attempt_repo import (
+    AbstractLocalAreaAttemptRepo,
+    BudgetLine,
+)
 
 if TYPE_CHECKING:
     from ..domain.space import Space
     from ..repositories.federation_repo import AbstractFederationRepo
 
 __all__ = [
-    "MAX_OUTSIDE_AREA_REFUSALS",
-    "OUTSIDE_AREA_ATTEMPTS",
-    "OUTSIDE_AREA_WINDOW_SECONDS",
-    "OutsideAreaAttempts",
+    "MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD",
+    "MAX_LOCAL_AREA_CHECKS_PER_PERSON",
+    "MAX_VERDICT_HOMES_PER_DAY",
+    "LocalAreaBudget",
     "derive_edge_key",
     "edge_shift_km",
     "household_home",
@@ -117,59 +125,87 @@ def _coords(lat: object, lon: object) -> tuple[float, float] | None:
         return None
 
 
-#: How many OUTSIDE_AREA refusals one paired household may get for one
-#: local community within :data:`OUTSIDE_AREA_WINDOW_SECONDS` …
-MAX_OUTSIDE_AREA_REFUSALS: Final = 3
-#: … a rolling day.
-OUTSIDE_AREA_WINDOW_SECONDS: Final = 24 * 60 * 60
+#: How many local-community checks one PERSON may start per community per
+#: UTC day — open join, join request, follow, invite accept, link redeem;
+#: successful ones count too (join → leave → move the home → rejoin would
+#: otherwise be an exact "inside?" answer each time). Admin-started checks
+#: (invite, direct add, approval) are not counted.
+MAX_LOCAL_AREA_CHECKS_PER_PERSON: Final = 3
+#: The backstop per REMOTE household per community per UTC day: the user id
+#: in a remote request is the household's to choose (the §24.11 envelope
+#: authenticates the household, not the person), so fresh ids must not buy
+#: fresh answers. Above a few people's budgets, so one prober cannot use up
+#: a whole household's day.
+MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD: Final = 10
+#: How many different shared homes of one paired household the directory
+#: verdicts follow per UTC day
+#: (:class:`~socialhome.services.peer_directory_service.PeerDirectoryService`).
+#: A home rarely moves; one that moves over and over is a probe.
+MAX_VERDICT_HOMES_PER_DAY: Final = 4
+
+#: Budget kinds (``local_area_attempts.subject_kind``, migration 0109).
+_KIND_PERSON: Final = "person"
+_KIND_HOUSEHOLD: Final = "household"
+_KIND_VERDICT_HOME: Final = "verdict_home"
 
 
-class OutsideAreaAttempts:
-    """Counts OUTSIDE_AREA refusals per (local community, paired household).
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
-    A seat attempt is answered with the exact distance (the directory's
-    "unsure" band is for showing, not for deciding), so a household moving
-    its shared home and asking again and again could find the rim — and
-    the centre — that way. After :data:`MAX_OUTSIDE_AREA_REFUSALS` in a
-    rolling :data:`OUTSIDE_AREA_WINDOW_SECONDS` the host stops looking at
-    that household's home for that community
-    (:class:`~socialhome.domain.space.LocalAreaRateLimitedError`) until the
-    oldest refusal ages out. In memory only: a restart forgets it, which
-    costs a prober a host restart it does not control.
+
+class LocalAreaBudget:
+    """The local-community daily budgets, kept in SQLite
+    (``local_area_attempts``) so a restart forgets nothing.
+
+    Days are UTC calendar days: a budget refills at 00:00 UTC.
     """
 
-    __slots__ = ("_clock", "_refusals")
+    __slots__ = ("_clock", "_repo")
 
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        repo: AbstractLocalAreaAttemptRepo,
+        *,
+        clock: Callable[[], datetime] = _utc_now,
+    ) -> None:
+        self._repo = repo
         self._clock = clock
-        self._refusals: dict[tuple[str, str], deque[float]] = {}
 
-    def _recent(self, key: tuple[str, str]) -> deque[float]:
-        window = self._refusals.get(key)
-        if window is None:
-            return deque()
-        cutoff = self._clock() - OUTSIDE_AREA_WINDOW_SECONDS
-        while window and window[0] <= cutoff:
-            window.popleft()
-        if not window:
-            del self._refusals[key]
-        return window
+    def _days(self) -> tuple[str, str]:
+        """Today, and the first day still kept (yesterday)."""
+        today = self._clock().astimezone(UTC).date()
+        return today.isoformat(), (today - timedelta(days=1)).isoformat()
 
-    def held_off(self, space_id: str, household: str) -> bool:
-        """Has ``household`` used up its refusals for ``space_id``?"""
-        return len(self._recent((space_id, household))) >= MAX_OUTSIDE_AREA_REFUSALS
+    async def spend_seat_check(
+        self, space_id: str, *, household: str, user_id: str, remote: bool
+    ) -> bool:
+        """Spend one check of ``user_id`` at ``household`` on ``space_id``
+        (and one of the household's, when ``remote``). ``False`` — nothing
+        spent — when either budget is used up today."""
+        person = hashlib.sha256(f"{household}\n{user_id}".encode()).hexdigest()
+        lines: list[BudgetLine] = [
+            (_KIND_PERSON, person, MAX_LOCAL_AREA_CHECKS_PER_PERSON)
+        ]
+        if remote:
+            lines.append(
+                (_KIND_HOUSEHOLD, household, MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD)
+            )
+        today, keep_from = self._days()
+        return await self._repo.try_spend(
+            space_id, today, lines, prune_before=keep_from
+        )
 
-    def record_refusal(self, space_id: str, household: str) -> None:
-        key = (space_id, household)
-        self._recent(key)
-        self._refusals.setdefault(key, deque()).append(self._clock())
-
-    def clear(self) -> None:
-        self._refusals.clear()
-
-
-#: The process-wide counter every seat path shares (tests reset it).
-OUTSIDE_AREA_ATTEMPTS: Final = OutsideAreaAttempts()
+    async def take_verdict_home(self, peer_id: str) -> bool:
+        """Spend one of ``peer_id``'s new shared homes for today's directory
+        verdicts; ``False`` when it already moved
+        :data:`MAX_VERDICT_HOMES_PER_DAY` times today."""
+        today, keep_from = self._days()
+        return await self._repo.try_spend(
+            "",
+            today,
+            [(_KIND_VERDICT_HOME, peer_id, MAX_VERDICT_HOMES_PER_DAY)],
+            prune_before=keep_from,
+        )
 
 
 async def household_home(
@@ -199,7 +235,8 @@ async def require_local_eligibility(
     household_instance_id: str,
     own_instance_id: str | None,
     federation_repo: AbstractFederationRepo | None,
-    attempts: OutsideAreaAttempts | None = None,
+    seeker_user_id: str | None = None,
+    budget: LocalAreaBudget | None = None,
 ) -> None:
     """Raise unless ``household_instance_id`` may take a seat in ``space``.
 
@@ -207,47 +244,65 @@ async def require_local_eligibility(
     household hosts (the host checks). Otherwise the household's home must
     be known here (:class:`HomeNotSharedError`, 403 ``HOME_NOT_SHARED``)
     and inside the area (:class:`OutsideAreaError`, 403 ``OUTSIDE_AREA``),
-    on the exact distance. Another household refused as outside too often
-    today is held off without its home being looked at
-    (:class:`LocalAreaRateLimitedError`, 429 ``LOCAL_AREA_RATE_LIMITED``;
-    ``attempts`` defaults to :data:`OUTSIDE_AREA_ATTEMPTS`).
+    on the exact distance.
+
+    ``seeker_user_id`` — the person who started this check (a join, a
+    request, a follow, an accept, a redeem); ``None`` for an admin's own
+    step (an invite, a direct add, an approval). A person's check is
+    answered only while their daily budget (:class:`LocalAreaBudget`,
+    :data:`MAX_LOCAL_AREA_CHECKS_PER_PERSON`; for a remote person also
+    their household's, :data:`MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD`) has
+    room — else :class:`LocalAreaRateLimitedError` (429
+    ``LOCAL_AREA_RATE_LIMITED``) and no answer. Inside and outside alike
+    spend one; "home unknown" spends nothing (it says nothing about where
+    the area is).
     """
     area = local_area_of(space)
     if area is None:
         return
     if not own_instance_id or space.owner_instance_id != own_instance_id:
         return
-    counter = OUTSIDE_AREA_ATTEMPTS if attempts is None else attempts
-    # Our own people see the centre anyway: only another household is
-    # counted, and only "outside" answers (what traces the rim).
     remote = household_instance_id != own_instance_id
-    if remote and counter.held_off(space.id, household_instance_id):
-        log.info(
-            "local community %s: held off household %s (refused as outside "
-            "too often today)",
-            space.id,
-            household_instance_id,
-        )
-        raise LocalAreaRateLimitedError(params={"whose": "peer"})
+    # ``whose`` lets the SPA word it for the person reading it: ``own`` —
+    # this household's home (a local user, or an admin seating one);
+    # ``peer`` — another household's (an admin inviting or approving it, or
+    # a remote person's request the host refuses).
+    whose = "peer" if remote else "own"
     home = await household_home(
         federation_repo, household_instance_id, own_instance_id=own_instance_id
     )
     verdict = eligibility(area, home)
+    # Never the coordinates in the log: which household, and why.
+    if verdict is Eligibility.HOME_UNKNOWN:
+        log.info(
+            "local community %s: refused a seat for household %s (home unknown)",
+            space.id,
+            household_instance_id,
+        )
+        raise HomeNotSharedError(params={"whose": whose})
+    if seeker_user_id is not None:
+        if budget is None:
+            # Fail closed: an unwired budget must never mean "unlimited".
+            raise RuntimeError("local community check without a LocalAreaBudget")
+        if not await budget.spend_seat_check(
+            space.id,
+            household=household_instance_id,
+            user_id=seeker_user_id,
+            remote=remote,
+        ):
+            log.info(
+                "local community %s: held off a person of household %s "
+                "(daily check budget used up)",
+                space.id,
+                household_instance_id,
+            )
+            raise LocalAreaRateLimitedError(params={"whose": whose})
     if verdict is Eligibility.INSIDE:
         return
-    # Never the coordinates in the log: which household was refused, and why.
     log.info(
         "local community %s: refused a seat for household %s (%s)",
         space.id,
         household_instance_id,
         verdict.value,
     )
-    # ``whose`` lets the SPA word it for the person reading it: ``own`` —
-    # this household's home (a local user, or an admin seating one);
-    # ``peer`` — another household's (an admin inviting or approving it).
-    whose = "own" if household_instance_id == own_instance_id else "peer"
-    if verdict is Eligibility.HOME_UNKNOWN:
-        raise HomeNotSharedError(params={"whose": whose})
-    if remote:
-        counter.record_refusal(space.id, household_instance_id)
     raise OutsideAreaError(params={"whose": whose})

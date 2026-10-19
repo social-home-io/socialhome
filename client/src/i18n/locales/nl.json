@@ -5012,6 +5012,6 @@
   "household.toggles.share_home_default_hint": "Stelt de schakelaar vooraf in wanneer je met een huishouden koppelt. Elke verbinding houdt haar eigen instelling.",
   "local_area.badge.edge": "Dicht bij de rand — vraag om lid te worden, het huishouden controleert het",
   "local_area.about.edge_next": "Het huis van je huishouden ligt dicht bij de rand van dit gebied. Vraag om lid te worden — het huishouden controleert de locatie die jouw huishouden ermee deelt.",
-  "error.local_area_rate_limited_own": "Het huishouden van deze buurtgemeenschap heeft je huishouden vandaag al een paar keer afgewezen omdat het buiten het gebied ligt. Probeer het morgen opnieuw.",
-  "error.local_area_rate_limited_peer": "Dat huishouden is vandaag al een paar keer afgewezen omdat het buiten dit gebied ligt. Probeer het morgen opnieuw."
+  "error.local_area_rate_limited_own": "Je hebt vandaag al een paar keer geprobeerd lid te worden van deze buurtgemeenschap. Probeer het morgen opnieuw.",
+  "error.local_area_rate_limited_peer": "Dat huishouden heeft vandaag al een paar keer geprobeerd lid te worden van deze buurtgemeenschap. Probeer het morgen opnieuw."
 }

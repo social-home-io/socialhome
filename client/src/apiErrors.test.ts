@@ -284,10 +284,13 @@ describe('apiErrorMessage — fallbacks', () => {
       "This space is a local community, and your household's home is outside its area.")
     expect(msg('OUTSIDE_AREA', 'host')).toBe(msg('OUTSIDE_AREA', 'own'))
     expect(msg('OUTSIDE_AREA', 'peer')).toBe("That household's home is outside this local community's area.")
+    // Every join a person starts counts, successful ones too — not only
+    // "outside" refusals — so the wording says "tried", not "refused".
     expect(msg('LOCAL_AREA_RATE_LIMITED', 'host')).toBe(
-      "This local community's household has refused your household as outside its area a few times today. Try again tomorrow.")
+      "You've already tried to join this local community a few times today. Try again tomorrow.")
+    expect(msg('LOCAL_AREA_RATE_LIMITED', 'own')).toBe(msg('LOCAL_AREA_RATE_LIMITED', 'host'))
     expect(msg('LOCAL_AREA_RATE_LIMITED', 'peer')).toBe(
-      'That household was refused as outside this area a few times today. Try again tomorrow.')
+      'That household has already tried to join this local community a few times today. Try again tomorrow.')
     expect(msg('LOCAL_AREA_PUBLIC_ONLY')).toBe('Only a public space can be a local community.')
     expect(msg('LOCAL_AREA_UNAVAILABLE')).toBe('Only the household hosting this space can change its area.')
     expect(msg('LOCAL_AREA_DELEGATED')).toContain('Let admins act for me')

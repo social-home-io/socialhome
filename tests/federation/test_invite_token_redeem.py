@@ -77,6 +77,7 @@ from socialhome.rate_limiter import RateLimiter
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
 from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
+from tests.local_area_budget import memory_budget
 
 # ── Test doubles ──────────────────────────────────────────────────────
 
@@ -433,6 +434,7 @@ def _make_coordinator(
         federation_repo=federation_repo or _FakeFederationRepo(),
         timeout=timeout,
         child_protection_service=child_protection,
+        local_area_budget=memory_budget(),
     )
 
 
