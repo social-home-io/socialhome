@@ -362,6 +362,25 @@ describe('SpacePublicDetailPage — a global space\'s place pin', () => {
     expect(getByText('You’re expected to follow this space’s rules.')).toBeTruthy()
   })
 
+  it('a radius hint: the suggestion, our verdict and the circle on a small map — a hint only', async () => {
+    api.get.mockImplementation((url: string) => Promise.resolve(
+      url === '/api/friends' ? { instance: { home_lat: 47.37, home_lon: 8.563 } } : {},
+    ))
+    cacheDirectoryEntries([entry({
+      scope: 'global', host_instance_id: 'iid-far', host_is_paired: true, join_mode: 'request',
+      lat: 46.9481, lon: 7.4474, radius_km: 10,
+    })])
+    const { getByTestId, getByText } = await renderPage()
+    await waitFor(() => expect(getByTestId('place-hint').textContent)
+      .toContain('about 95 km away · outside the suggested 10 km'))
+    expect(getByTestId('place-hint-where').textContent).toBe('Best for people within 10 km')
+    expect(getByTestId('area-map')).toBeTruthy()
+    expect(getByText('A hint only — nobody checks where people live when they join.')).toBeTruthy()
+    // Still joinable — the rules apply, not the radius.
+    expect(getByText('Request to join')).toBeTruthy()
+    expect(getByText('You’re expected to follow this space’s rules.')).toBeTruthy()
+  })
+
   it('no pin (or no home): no distance', async () => {
     api.get.mockImplementation(() => Promise.resolve({}))
     cacheDirectoryEntries([entry({ scope: 'global', host_instance_id: 'iid-far' })])

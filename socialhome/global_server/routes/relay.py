@@ -8,6 +8,7 @@ from dataclasses import asdict
 
 from aiohttp import web
 
+from ...domain.space_place import PlacePin, place_pin_wire
 from ...gfs_proof import PROOF_CAPABILITY, bindable_base_url, parse_proof_nonce
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
@@ -48,11 +49,15 @@ def public_space_dict(space) -> dict:
     """
     body = asdict(space)
     body.pop("authority_cert", None)
-    # The owner's place pin, as the ``{lat, lon}`` it was published as (or
-    # null) — for sorting by distance on the reader's side only.
+    # The owner's place pin, as the ``{lat, lon, radius_km?}`` it was
+    # published as (or null) — for sorting by distance and the reader's
+    # "within the area" hint, both on the reader's side only.
     lat, lon = body.pop("place_lat", None), body.pop("place_lon", None)
+    radius = body.pop("place_radius_km", None)
     body["place"] = (
-        {"lat": lat, "lon": lon} if lat is not None and lon is not None else None
+        place_pin_wire(PlacePin(lat=lat, lon=lon, radius_km=radius))
+        if lat is not None and lon is not None
+        else None
     )
     return body
 

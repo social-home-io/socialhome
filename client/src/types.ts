@@ -373,7 +373,7 @@ export interface Space {
   local_area?: LocalArea | null
   /** ``GET /api/spaces/{id}`` only: a GLOBAL space's place pin (4 dp),
    *  listed with it on its GFSs for sorting by distance; ``null`` otherwise. */
-  place?: { lat: number; lon: number } | null
+  place?: { lat: number; lon: number; radius_km?: number | null } | null
   /** ``GET /api/spaces/{id}`` only: at least one OTHER household has a
    *  member here. */
   has_remote_households?: boolean
@@ -925,6 +925,9 @@ export interface DirectoryEntry {
    *  distance to it is worked out in this browser, for sorting only. */
   lat?: number | null
   lon?: number | null
+  /** Global rows only: the owner's radius hint beside the pin ("best for
+   *  people within …") — compared in this browser; never enforced. */
+  radius_km?: number | null
 }
 
 export interface RemoteInvite {

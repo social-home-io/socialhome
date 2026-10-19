@@ -34,7 +34,7 @@ describe('LocalAreaPicker', () => {
     expect(view.getByRole('status').textContent).toBe('Centre: 47.3769° N, 8.5417° E')
     expect(map.area).toEqual({ lat: 47.3769, lon: 8.5417, radius_km: 2 })
     fireEvent.click(submitButton(view))
-    expect(onSubmit).toHaveBeenCalledWith({ lat: 47.3769, lon: 8.5417, radius_km: 2 })
+    expect(onSubmit).toHaveBeenCalledWith({ lat: 47.3769, lon: 8.5417, radius_km: 2 }, null)
   })
 
   it('never asks for the device position; "Use our home" takes the household home', async () => {
@@ -50,7 +50,7 @@ describe('LocalAreaPicker', () => {
     fireEvent.click(view.getByRole('button', { name: /Use our home as the centre/ }))
     fireEvent.click(view.getByRole('radio', { name: '10 km' }))
     fireEvent.click(submitButton(view))
-    expect(onSubmit).toHaveBeenCalledWith({ lat: 46.9481, lon: 7.4474, radius_km: 10 })
+    expect(onSubmit).toHaveBeenCalledWith({ lat: 46.9481, lon: 7.4474, radius_km: 10 }, null)
     expect(getCurrentPosition).not.toHaveBeenCalled()
   })
 
@@ -88,7 +88,7 @@ describe('LocalAreaPicker', () => {
     expect(map.area).toEqual({ lat: 47.3769, lon: 8.5417, radius_km: 2 })
     expect(view.getByRole('status').textContent).toBe('Centre: 47.3769° N, 8.5417° E')
     fireEvent.click(submitButton(view))
-    expect(onSubmit).toHaveBeenCalledWith({ lat: 47.3769, lon: 8.5417, radius_km: 2 })
+    expect(onSubmit).toHaveBeenCalledWith({ lat: 47.3769, lon: 8.5417, radius_km: 2 }, null)
   })
 
   it('a bad coordinate is flagged and blocks the save', () => {
@@ -142,5 +142,35 @@ describe('LocalAreaPicker — a global space\'s place pin (mode="pin")', () => {
     expect(view.getByRole('status').textContent).toBe('Pin: 47.3769° N, 8.5417° E')
     fireEvent.click(view.getByRole('button', { name: 'Use this place' }))
     expect(onSubmit.mock.calls[0][0]).toMatchObject({ lat: 47.3769, lon: 8.5417 })
+  })
+})
+
+describe('LocalAreaPicker — the place pin\'s radius hint', () => {
+  it('starts on "No radius"; a preset draws its circle and is handed back as the hint', async () => {
+    const onSubmit = vi.fn()
+    const view = render(
+      <LocalAreaPicker mode="pin" open initial={null} home={null}
+                       onClose={vi.fn()} onSubmit={onSubmit} />,
+    )
+    expect(view.getByText('Best for people within')).toBeTruthy()
+    expect(view.getByText('A hint only — nobody checks where people live when they join.')).toBeTruthy()
+    expect(view.getByRole('radio', { name: 'No radius' }).getAttribute('aria-checked')).toBe('true')
+    await act(async () => { map.onPick!(47.3769, 8.5417) })
+    fireEvent.click(view.getByRole('radio', { name: '10 km' }))
+    expect((map.area as { radius_km: number }).radius_km).toBe(10)
+    fireEvent.click(view.getByRole('button', { name: 'Use this place' }))
+    expect(onSubmit.mock.calls[0][1]).toBe(10)
+  })
+
+  it('opens on the stored hint, and "No radius" hands back none', async () => {
+    const onSubmit = vi.fn()
+    const view = render(
+      <LocalAreaPicker mode="pin" open initial={{ lat: 47.3769, lon: 8.5417, radius_km: 0.15 }}
+                       initialHintKm={25} home={null} onClose={vi.fn()} onSubmit={onSubmit} />,
+    )
+    expect(view.getByRole('radio', { name: '25 km' }).getAttribute('aria-checked')).toBe('true')
+    fireEvent.click(view.getByRole('radio', { name: 'No radius' }))
+    fireEvent.click(view.getByRole('button', { name: 'Use this place' }))
+    expect(onSubmit.mock.calls[0][1]).toBeNull()
   })
 })

@@ -272,9 +272,9 @@ class SqliteGfsFederationRepo:
                 accent_color,
                 primary_color, status, subscriber_count, posts_per_week,
                 published_at, identity_public_key, withdrawn, authority_cert,
-                place_lat, place_lon
+                place_lat, place_lon, place_radius_km
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     COALESCE(?, datetime('now')), ?, ?, ?, ?, ?)
+                     COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -303,7 +303,8 @@ class SqliteGfsFederationRepo:
                 ),
                 withdrawn = excluded.withdrawn,
                 place_lat = excluded.place_lat,
-                place_lon = excluded.place_lon
+                place_lon = excluded.place_lon,
+                place_radius_km = excluded.place_radius_km
             """,
             (
                 space.space_id,
@@ -328,6 +329,11 @@ class SqliteGfsFederationRepo:
                 _dump_cert(space.authority_cert),
                 space.place_lat if space.place_lon is not None else None,
                 space.place_lon if space.place_lat is not None else None,
+                (
+                    space.place_radius_km
+                    if space.place_lat is not None and space.place_lon is not None
+                    else None
+                ),
             ),
         )
 
@@ -1453,6 +1459,7 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         ),
         place_lat=row.get("place_lat"),
         place_lon=row.get("place_lon"),
+        place_radius_km=row.get("place_radius_km"),
     )
 
 

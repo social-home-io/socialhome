@@ -109,3 +109,36 @@ async def test_a_malformed_pin_is_422(client, space, bad):
         f"/api/spaces/{sid}", json={"place": bad}, headers=hdr["owner"]
     )
     assert r.status == 422
+
+
+async def test_the_radius_hint_round_trips_and_can_be_dropped(client, space):
+    """``place: {lat, lon, radius_km}`` — a hint, so nothing else changes."""
+    sid, hdr = space
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"place": {"lat": 47.3769, "lon": 8.5417, "radius_km": 10}},
+        headers=hdr["owner"],
+    )
+    assert r.status == 200, await r.text()
+    want = {"lat": 47.3769, "lon": 8.5417, "radius_km": 10.0}
+    assert (await r.json())["place"] == want
+    assert (await _detail(client, sid, hdr["owner"]))["place"] == want
+    # Members read it too: it is the space's published listing metadata.
+    assert (await _detail(client, sid, hdr["member"]))["place"] == want
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"place": {"lat": 47.3769, "lon": 8.5417}},
+        headers=hdr["owner"],
+    )
+    assert (await r.json())["place"] == {"lat": 47.3769, "lon": 8.5417}
+
+
+@pytest.mark.parametrize("bad", [0.2, 51, "10", True])
+async def test_a_hint_out_of_bounds_is_422(client, space, bad):
+    sid, hdr = space
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"place": {"lat": 47.0, "lon": 8.0, "radius_km": bad}},
+        headers=hdr["owner"],
+    )
+    assert r.status == 422

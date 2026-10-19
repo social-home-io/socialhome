@@ -341,3 +341,22 @@ async def test_adult_sees_all_listings(client):
     adult = next(s for s in body if s["space_id"] == "sp-adult")
     assert adult["min_age"] == 18
     assert adult["category"] == "general"
+
+
+async def test_list_carries_the_pin_and_its_radius_hint(client):
+    """A global row's pin and radius hint, for the browser to compare with
+    its OWN home — the request carries no location of ours."""
+    repo = SqlitePublicSpaceRepo(client._db)
+    await repo.upsert(
+        PublicSpaceListing(
+            space_id="sp-pin",
+            instance_id="remote-1",
+            name="Chess",
+            lat=47.3769,
+            lon=8.5417,
+            radius_km=10.0,
+        )
+    )
+    r = await client.get("/api/public_spaces", headers=_auth(client._tok))
+    entry = next(s for s in await r.json() if s["space_id"] == "sp-pin")
+    assert (entry["lat"], entry["lon"], entry["radius_km"]) == (47.3769, 8.5417, 10.0)

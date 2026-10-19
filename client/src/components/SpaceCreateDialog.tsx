@@ -19,7 +19,7 @@ import { addBase } from '@/baseUrl'
 import { currentUser } from '@/store/auth'
 import { ensureHouseholdHome, householdHome } from '@/store/householdHome'
 import type { LocalArea } from '@/types'
-import { areaLabel } from '@/utils/localArea'
+import { areaLabel, radiusLabel } from '@/utils/localArea'
 import { coordLabel } from '@/utils/coordLabel'
 import { loadSpaces } from '@/store/spaces'
 import { Modal } from './Modal'
@@ -53,7 +53,7 @@ const joinMode = signal('invite_only')
 const localOn = signal(false)
 const localArea = signal<LocalArea | null>(null)
 // A global space's optional place pin (sorting only) — never the home.
-const placePin = signal<{ lat: number; lon: number } | null>(null)
+const placePin = signal<{ lat: number; lon: number; radius_km?: number } | null>(null)
 const pickingPin = signal(false)
 const pickingArea = signal(false)
 const submitting = signal(false)
@@ -304,10 +304,14 @@ export function SpaceCreateDialog() {
             <legend>📍 {t('place_pin.create.legend')}</legend>
             {placePin.value ? (
               <div class="sh-space-create-local__area">
-                <LocalAreaMap area={{ ...placePin.value, radius_km: PIN_DOT_KM }} height={140}
+                <LocalAreaMap area={{ lat: placePin.value.lat, lon: placePin.value.lon,
+                                      radius_km: placePin.value.radius_km ?? PIN_DOT_KM }} height={140}
                               zoneName={t('place_pin.map_zone')} ariaLabel={t('place_pin.map_label')} />
                 <p class="sh-muted" role="status">
                   {t('place_pin.settings.where', { place: coordLabel(placePin.value.lat, placePin.value.lon) })}
+                  {placePin.value.radius_km != null && (
+                    <> · {t('place_pin.hint.within', { radius: radiusLabel(placePin.value.radius_km) })}</>
+                  )}
                 </p>
                 <div class="sh-row" style={{ gap: 'var(--sh-space-sm)' }}>
                   <Button variant="secondary" onClick={() => { pickingPin.value = true }}>
@@ -389,11 +393,13 @@ export function SpaceCreateDialog() {
       <LocalAreaPicker
         mode="pin"
         open={pickingPin.value}
-        initial={placePin.value ? { ...placePin.value, radius_km: PIN_DOT_KM } : null}
+        initial={placePin.value
+          ? { lat: placePin.value.lat, lon: placePin.value.lon, radius_km: PIN_DOT_KM } : null}
+        initialHintKm={placePin.value?.radius_km ?? null}
         home={null}
         onClose={() => { pickingPin.value = false }}
-        onSubmit={(p) => {
-          placePin.value = { lat: p.lat, lon: p.lon }
+        onSubmit={(p, hintKm) => {
+          placePin.value = { lat: p.lat, lon: p.lon, ...(hintKm != null ? { radius_km: hintKm } : {}) }
           pickingPin.value = false
         }}
       />

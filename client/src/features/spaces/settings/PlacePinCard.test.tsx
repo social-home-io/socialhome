@@ -11,11 +11,12 @@ vi.mock('@/components/LocalAreaPicker', () => ({
     open: boolean
     mode?: string
     home: unknown
-    onSubmit: (a: { lat: number; lon: number; radius_km: number }) => void
+    onSubmit: (a: { lat: number; lon: number; radius_km: number }, hintKm: number | null) => void
   }) => (open
     ? (
       <div role="dialog" data-mode={mode} data-home={home === null ? 'none' : 'some'}>
-        <button type="button" onClick={() => onSubmit({ lat: 46.9481, lon: 7.4474, radius_km: 0.15 })}>pick</button>
+        <button type="button" onClick={() => onSubmit({ lat: 46.9481, lon: 7.4474, radius_km: 0.15 }, null)}>pick</button>
+        <button type="button" onClick={() => onSubmit({ lat: 46.9481, lon: 7.4474, radius_km: 0.15 }, 10)}>pick with 10 km</button>
       </div>
     )
     : null),
@@ -71,5 +72,23 @@ describe('PlacePinCard', () => {
     remote.unmount()
     const pub = render(<LocationSection space={space({ space_type: 'public' })} onUpdate={vi.fn()} />)
     expect(pub.queryByTestId('settings-place-pin')).toBeNull()
+  })
+})
+
+describe('PlacePinCard — the radius hint', () => {
+  it('saves the hint with the pin and says it', async () => {
+    const view = render(<PlacePinCard space={space()} onUpdate={vi.fn()} />)
+    fireEvent.click(view.getByRole('button', { name: 'Pin a place' }))
+    fireEvent.click(view.getByRole('button', { name: 'pick with 10 km' }))
+    await waitFor(() => expect(patch).toHaveBeenCalledWith(
+      '/api/spaces/s1', { place: { lat: 46.9481, lon: 7.4474, radius_km: 10 } }))
+    expect(view.getByRole('status').textContent)
+      .toBe('Pinned at 46.9481° N, 7.4474° E · Best for people within 10 km')
+  })
+
+  it('shows a stored hint', () => {
+    const view = render(<PlacePinCard
+      space={space({ place: { lat: 47.3769, lon: 8.5417, radius_km: 25 } })} onUpdate={vi.fn()} />)
+    expect(view.getByRole('status').textContent).toContain('Best for people within 25 km')
   })
 })

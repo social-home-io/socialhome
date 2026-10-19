@@ -285,13 +285,14 @@ class PublicSpaceDiscoveryService:
                         ),
                         name=str(item.get("name", "")),
                         description=item.get("description"),
-                        # The GFS directory carries no emoji and no area; a
-                        # radius belongs to a public local community, which
-                        # is never on a GFS.
+                        # The GFS directory carries no emoji and no area (a
+                        # public local community is never on a GFS); on a
+                        # global row ``radius_km`` is the owner's radius
+                        # HINT beside the pin — never enforced anywhere.
                         emoji=None,
                         lat=pin.lat if pin is not None else None,
                         lon=pin.lon if pin is not None else None,
-                        radius_km=None,
+                        radius_km=pin.radius_km if pin is not None else None,
                         member_count=int(
                             item.get("subscriber_count")
                             or item.get("member_count", 0)

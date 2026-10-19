@@ -114,6 +114,9 @@ class GlobalSpace:
     #: by distance on the reader's side only. Both or neither.
     place_lat: float | None = None
     place_lon: float | None = None
+    #: The owner's optional radius hint beside the pin (GFS migration
+    #: 0020), 0.5–50 km — "best for people within …", never enforced.
+    place_radius_km: float | None = None
 
 
 @dataclass(slots=True, frozen=True)

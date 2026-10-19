@@ -415,6 +415,48 @@ describe('SpaceListPage — Discover', () => {
     for (const call of apiGet.mock.calls) expect(String(call[0])).not.toMatch(/47\.37|lat=|home/)
   })
 
+  it('a global radius hint: "Within the area" or how far outside; "Near me" narrows to them', async () => {
+    const g = (space_id: string, name: string, pin?: { lat: number; lon: number; radius_km?: number }) => ({
+      space_id, host_instance_id: 'iid-far', host_display_name: 'iid-far', host_is_paired: false,
+      name, description: null, emoji: '♟', member_count: 5, join_mode: 'request' as const,
+      min_age: 0, allow_subscribers: true, lat: pin?.lat ?? null, lon: pin?.lon ?? null,
+      radius_km: pin?.radius_km ?? null,
+    })
+    wire({
+      gfs: [{ id: 'g1', status: 'active' }],
+      global: [
+        g('gNone', 'Chess online'),
+        g('gBern', 'Chess Bern', { lat: 46.9481, lon: 7.4474, radius_km: 10 }),
+        g('gZh', 'Chess Zürich', { lat: 47.3769, lon: 8.5417, radius_km: 10 }),
+        g('gPin', 'Go Zürich', { lat: 47.3769, lon: 8.5417 }),
+      ],
+    })
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => (
+      url === '/api/friends' ? { instance: { home_lat: 47.37, home_lon: 8.563 } } : base(url)))
+    const r = await renderPage('/spaces?discover=global')
+    await r.findByText('Chess Bern')
+    const row = (name: string) => r.getByText(name).closest('li') as HTMLElement
+    await r.waitFor(() => expect(row('Chess Zürich').textContent).toContain('Within the area'))
+    expect(row('Chess Bern').textContent).toContain('about 95 km away · outside the suggested 10 km')
+    // A hint only: the join stays on offer either way.
+    expect(r.getByRole('button', { name: /Chess Bern/ })).toBeTruthy()
+    // No hint: the plain distance, as before.
+    expect(row('Go Zürich').textContent).toContain('about 2 km away')
+    const names = () => [...r.container.querySelectorAll('#discover .sh-spaces-row__t')].map((n) => n.textContent)
+    const near = r.getByTestId('discover-near-me')
+    expect(near.getAttribute('aria-pressed')).toBe('false')
+    r.fireEvent.click(near)
+    expect(near.getAttribute('aria-pressed')).toBe('true')
+    expect(names()).toEqual(['Chess Zürich'])
+    r.fireEvent.click(near)
+    expect(names()).toHaveLength(4)
+    // Our home stays in the browser: no request carries it.
+    for (const call of [...apiGet.mock.calls, ...apiPost.mock.calls]) {
+      expect(JSON.stringify(call)).not.toMatch(/47\.37[^6]|8\.563|home_lat":4|lat=|near/)
+    }
+  })
+
   it('asking to join shows "Requested" at once, no reload', async () => {
     const r = await renderPage('/spaces?discover=paired')
     await r.findByText('Müller family market')
