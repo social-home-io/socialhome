@@ -1080,3 +1080,22 @@ describe('SpaceInviteDialog — the space\'s home household', () => {
     })
   })
 })
+
+describe('SpaceInviteDialog — a local community', () => {
+  it('says a link works only for households in the area, the edge to an admin', async () => {
+    mockReads({ space: { space_type: 'public', local_area: { lat: 47.3769, lon: 8.5417, radius_km: 5 } } })
+    const result = await openDialog()
+    await waitFor(() => expect(result.queryByTestId('invite-local-area')).not.toBeNull())
+    expect(result.getByTestId('invite-local-area').textContent).toBe(
+      'This is a local community: a link works only for households whose home is in the area. '
+      + 'Near the edge, an admin decides.',
+    )
+  })
+
+  it('says nothing about an area for a space without one', async () => {
+    mockReads({ space: { space_type: 'public' } })
+    const result = await openDialog()
+    await waitFor(() => expect(api.get).toHaveBeenCalled())
+    expect(result.queryByTestId('invite-local-area')).toBeNull()
+  })
+})

@@ -25,6 +25,15 @@ describe('MembersSection', () => {
     expect(view.getByText('Everyone in your home is a member automatically.')).toBeTruthy()
   })
 
+  it('a local community\'s join modes never say "anyone" — households in the area, the edge to an admin', () => {
+    const view = render(<MembersSection space={space({ local_area: { lat: 47.3769, lon: 8.5417, radius_km: 5 } })}
+                                        isRemoteSpace={false} members={null} onUpdate={vi.fn()} />)
+    expect(view.container.textContent).not.toMatch(/Anyone can join/)
+    expect(view.getByText('Households in the area join right away. Near the edge, an admin decides.')).toBeTruthy()
+    const plain = render(<MembersSection space={space()} isRemoteSpace={false} members={null} onUpdate={vi.fn()} />)
+    expect(plain.getByText('Anyone can join right away.')).toBeTruthy()
+  })
+
   it('the join mode saves the moment it is picked', async () => {
     const onUpdate = vi.fn()
     const view = render(<MembersSection space={space()} isRemoteSpace={false} members={null} onUpdate={onUpdate} />)

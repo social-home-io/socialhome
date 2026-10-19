@@ -217,14 +217,28 @@ export const GATED_CHIP = {
 }
 
 /** How a person becomes someone who can post here (membership only —
- *  readability is {@link GATED_CHIP}). */
-export function joinModeChip(mode: DirectoryEntry['join_mode']) {
+ *  readability is {@link GATED_CHIP}). ``local``: a local community, whose
+ *  open mode is open to households in the area only. */
+export function joinModeChip(mode: DirectoryEntry['join_mode'], local = false) {
   switch (mode) {
     case 'open':
-      return { cls: 'sh-join-mode-chip sh-join-mode-chip--open', icon: '🔓', label: t('space.card.open_to_join') }
+      return {
+        cls: 'sh-join-mode-chip sh-join-mode-chip--open', icon: '🔓',
+        label: local ? t('space.card.open_to_area') : t('space.card.open_to_join'),
+      }
     case 'request':
       return { cls: 'sh-join-mode-chip sh-join-mode-chip--request', icon: '✉', label: t('space.card.approval_required') }
     case 'invite_only':
       return { cls: 'sh-join-mode-chip sh-join-mode-chip--invite', icon: '🎟', label: t('space.card.invite_only') }
   }
+}
+
+/** The join mode as a word in a Discover row's meta line ("ask to join",
+ *  "open", "open to the area" for a local community), or ``null`` for an
+ *  invite-only space (the row says nothing about it). */
+export function joinModeWord(e: DirectoryEntry): string | null {
+  if (e.join_mode === 'request') return t('spaces.discover.mode_request')
+  if (e.join_mode !== 'open') return null
+  if (e.scope === 'household') return t('spaces.discover.mode_household')
+  return entryRadiusKm(e) !== null ? t('spaces.discover.mode_open_local') : t('spaces.discover.mode_open')
 }

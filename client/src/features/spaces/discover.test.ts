@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { DirectoryEntry } from '@/types'
 import {
   buildHouseholdEntries, canFollow, contentIsGated, discoverAction, discoverable, entryAreaVerdict,
-  entryRadiusKm, joinCarriesLocation,
+  entryRadiusKm, joinCarriesLocation, joinModeChip, joinModeWord,
   hostLabel, matchesTerm, parseDiscoverSource, sourceOf, withMembership,
 } from './discover'
 
@@ -153,6 +153,18 @@ describe('entryAreaVerdict (local communities)', () => {
     expect(joinCarriesLocation(entry({ local_community: { radius_km: 2 } }))).toBe(true)
     expect(joinCarriesLocation(local({ local_area: area }))).toBe(false)
     expect(joinCarriesLocation(entry())).toBe(false)
+  })
+
+  it('an open local community is "open to the area", never just "open"', () => {
+    expect(joinModeChip('open', true).label).toBe('Open to the area')
+    expect(joinModeChip('open').label).toBe('Open to join')
+    expect(joinModeChip('request', true).label).toBe('Approval required')
+    expect(joinModeWord(entry({ local_community: { radius_km: 2 } }))).toBe('open to the area')
+    expect(joinModeWord(local({ local_area: area }))).toBe('open to the area')
+    expect(joinModeWord(entry())).toBe('open')
+    expect(joinModeWord(entry({ join_mode: 'request', local_community: { radius_km: 2 } }))).toBe('ask to join')
+    expect(joinModeWord(entry({ scope: 'household' }))).toBe('anyone at home can join')
+    expect(joinModeWord(entry({ join_mode: 'invite_only' }))).toBeNull()
   })
 
   it('household rows carry the area', () => {

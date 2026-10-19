@@ -63,26 +63,28 @@ export function categoryLabel(value: string | null | undefined): string {
   return SPACE_CATEGORIES.find(c => c.value === value)?.label ?? t('space.category.general')
 }
 
-/** The join modes, in the UI language. */
-export function joinModeOptions(): RadioCardOption[] {
+/** The join modes, in the UI language. ``local``: the space is a local
+ *  community — only households in the area get in, and near the edge an
+ *  admin decides whatever the mode — so the subtitles never say "anyone". */
+export function joinModeOptions({ local = false }: { local?: boolean } = {}): RadioCardOption[] {
   return [
     {
       value: 'invite_only',
       icon: '✉️',
       title: t('space.join.invite_only'),
-      subtitle: t('space.join.invite_only_sub'),
+      subtitle: local ? t('space.join.invite_only_sub_local') : t('space.join.invite_only_sub'),
     },
     {
       value: 'request',
       icon: '🙋',
       title: t('space.join.request'),
-      subtitle: t('space.join.request_sub'),
+      subtitle: local ? t('space.join.request_sub_local') : t('space.join.request_sub'),
     },
     {
       value: 'open',
       icon: '🔓',
       title: t('space.join.open'),
-      subtitle: t('space.join.open_sub'),
+      subtitle: local ? t('space.join.open_sub_local') : t('space.join.open_sub'),
     },
   ]
 }
@@ -93,8 +95,10 @@ export function joinModeOptions(): RadioCardOption[] {
  * hidden), so the non-invite options are shown but disabled — the
  * constraint is visible rather than hidden.
  */
-export function joinOptionsForVisibility(spaceType: string): RadioCardOption[] {
-  const options = joinModeOptions()
+export function joinOptionsForVisibility(
+  spaceType: string, { local = false }: { local?: boolean } = {},
+): RadioCardOption[] {
+  const options = joinModeOptions({ local })
   if (spaceType !== 'private') return options
   return options.map((o) =>
     o.value === 'invite_only' ? o : { ...o, disabled: true },

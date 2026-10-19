@@ -121,6 +121,17 @@ describe('SpaceCreateDialog — local community', () => {
     })
   })
 
+  it('a local community\'s join modes say "households in the area", not "anyone"', async () => {
+    const { container } = await open()
+    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
+    expect(container.textContent).toContain('space.join.open_sub')
+    expect(container.textContent).not.toContain('space.join.open_sub_local')
+    await act(async () => { fireEvent.click(localToggle(container)!) })
+    expect(container.textContent).toContain('space.join.open_sub_local')
+    expect(container.textContent).toContain('space.join.request_sub_local')
+    expect(container.textContent).toContain('space.join.invite_only_sub_local')
+  })
+
   it('backing out of the first pick turns it off again', async () => {
     const { container } = await open()
     await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })

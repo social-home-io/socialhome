@@ -264,7 +264,7 @@ export function SpaceCreateDialog() {
             legend={t('space.join.legend')}
             name="space-create-join-mode"
             value={joinMode.value}
-            options={joinOptionsForVisibility(spaceType.value)}
+            options={joinOptionsForVisibility(spaceType.value, { local: isPublic() && localOn.value })}
             onChange={(v) => joinMode.value = v}
           />
         )}

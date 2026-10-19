@@ -45,7 +45,7 @@ import type { DirectoryEntry, GfsConnection, HouseholdSpaceRow } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
   buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, entryRadiusKm, hostLabel,
-  joinCarriesLocation, matchesTerm, withMembership, DISCOVER_SOURCES, type DiscoverAction,
+  joinCarriesLocation, joinModeWord, matchesTerm, withMembership, DISCOVER_SOURCES, type DiscoverAction,
   type DiscoverSource,
 } from './discover'
 import { SpaceListRow, membersLabel } from './SpaceListRow'
@@ -120,10 +120,8 @@ function entryMeta(e: DirectoryEntry, source: DiscoverSource, home: Home | null 
   if (km !== null) parts.push(distanceLabel(km))
   if (source !== 'household') parts.push(hostLabel(e))
   parts.push(membersLabel(e.member_count))
-  if (e.join_mode === 'request') parts.push(t('spaces.discover.mode_request'))
-  else if (e.join_mode === 'open') {
-    parts.push(e.scope === 'household' ? t('spaces.discover.mode_household') : t('spaces.discover.mode_open'))
-  }
+  const mode = joinModeWord(e)
+  if (mode) parts.push(mode)
   return parts.join(' · ')
 }
 
