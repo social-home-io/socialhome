@@ -1050,7 +1050,7 @@ bell for it reads "{sender} in Household chat" and opens `/?tab=chat`.
 | POST | `/api/public_spaces/{space_id}/join-request` | Ask to join. |
 | POST | `/api/public_spaces/{space_id}/hide` | Hide locally. |
 | POST / DELETE | `/api/public_spaces/blocked_instances/{id}` | Block a GFS. |
-| GET | `/api/peer_spaces` | Spaces advertised by directly-paired peers. Each row: `{space_id, host_instance_id, host_display_name, host_is_paired, name, description, emoji, member_count, join_mode, min_age, category, local_area, home_shared_with_host}` — `local_area` is a [local community](./protocol/local-communities.md)'s `{lat, lon, radius_km}` (from a v_59 host) or `null`; `home_shared_with_host` is whether this household shares its home location with that host (its per-peer `share_home`) — a local community's host reads only that, so the SPA can say *Share your home with …* before anyone asks. |
+| GET | `/api/peer_spaces` | Spaces advertised by directly-paired peers. Each row: `{space_id, host_instance_id, host_display_name, host_is_paired, name, description, emoji, member_count, join_mode, min_age, category, local_community, home_shared_with_host}` — `local_community` is a [local community](./protocol/local-communities.md)'s `{radius_km, in_area}` (from a v_59 host) or `null`: `in_area` is the host's verdict for **this** household's shared home (`true` / `false`, `null` when the host does not know it) — never a centre, which stays on the host; `home_shared_with_host` is whether this household shares its home location with that host (its per-peer `share_home`) — a local community's host reads only that, so the SPA can say *Share your home with …* before anyone asks. |
 
 **Public-Momentum (§Momentum-public)**
 

@@ -2,7 +2,9 @@
 
 Receives :data:`FederationEventType.SPACE_DIRECTORY_SYNC` envelopes
 carrying a full snapshot of the sender's ``type=public`` spaces.
-Atomically replaces the cached rows for that peer.
+Atomically replaces the cached rows for that peer. A local community's
+entry carries its radius and the host's verdict for this household (v_59)
+— never a centre; anything a sender puts there is ignored.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..domain.federation import FederationEventType
-from ..domain.local_community import parse_local_area_wire
+from ..domain.local_community import parse_local_community_wire
 from ..domain.space import normalize_category
 from ..repositories.peer_space_directory_repo import (
     AbstractPeerSpaceDirectoryRepo,
@@ -66,9 +68,10 @@ class PeerDirectoryHandler:
                         min_age=int(item.get("min_age") or 0),
                         category=normalize_category(item.get("category")),
                         updated_at=item.get("updated_at"),
-                        # v_59 — re-validated (4 dp, bounds); a malformed
-                        # area is dropped, never guessed.
-                        local_area=parse_local_area_wire(item.get("local_area")),
+                        # v_59 — the radius (re-validated) and the host's
+                        # verdict for us; a malformed one is dropped, never
+                        # guessed, and a centre is never read.
+                        local_community=parse_local_community_wire(item),
                     )
                 )
             except KeyError, TypeError, ValueError:

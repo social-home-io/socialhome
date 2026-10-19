@@ -4,17 +4,23 @@ A **public** space can be bound to an area — a centre and a radius — and
 become a *local community*: a neighbourhood, a village, a street. A
 household holds a seat only while the home it **already shares with the
 hosting household** lies inside the circle. The host decides, on every path
-that grants a seat; nobody is ever asked to send a location to join.
+that grants a seat; nobody is ever asked to send a location to join — and
+the centre never leaves the host (owner decision 2026-10-19: people's
+locations are not shared by design).
 
 ## Scope
 
 - **HFS (host)**: stores the area (`spaces.lat` / `lon` / `radius_km`,
-  host-local), shows it to its own people, sends it to paired peers in its
-  directory snapshot, and checks every seat against the joiner's shared home.
-- **HFS (paired peer)**: keeps the area of each directory entry, shows it
-  before joining ("Within 5 km of …" with a small map) and computes an
-  *In your area* / *Outside your area* / *Share your home* badge against its
-  **own** home. The badge is a convenience; the host's check is the rule.
+  host-local) and shows the centre on a map to its own people only. Each
+  paired peer's directory snapshot gets "local community, within X km" and
+  the host's verdict for **that peer's** shared home — no centre. Checks
+  every seat against the joiner's shared home.
+- **HFS (paired peer)**: keeps the radius and its verdict for each directory
+  entry and shows them before joining ("Local community · within 5 km of
+  the host's chosen centre", *In your area* / *Outside your area* /
+  *Share your home with …*) — no map, no centre. Discover sorts in-area
+  communities first, can narrow to them ("Near you"), and offers no Join on
+  an outside one. The verdict is a convenience; the host's check is the rule.
 - **GFS**: uninvolved. Only the `public` tier can be a local community, and a
   public space is never on a GFS. A household met through a GFS never shares
   a home with the host, so a local community's invite link never seats it.
@@ -54,13 +60,31 @@ that grants a seat; nobody is ever asked to send a location to join.
 - **Host-local config.** Setting the area bumps no `config_sequence` and sends
   no `SPACE_CONFIG_CHANGED`; it re-sends the directory snapshot.
 
+## What a paired household learns
+
+- `local_community: true` and `radius_km` — "within X km". The radius is not
+  a location.
+- `in_area` — the host's answer for the **receiving** household's home, as
+  that household chose to share it with the host: `true`, `false`, or
+  `null` when it shares none. Each peer's snapshot is built for it alone, so
+  no household ever receives another household's verdict.
+- Nothing else: no centre, no distance. The host re-sends a peer's snapshot
+  when the home that peer shares with it changes (including sharing turned
+  off) and when the peer first advertises v_59.
+
+The one bit it concedes: a household sharing its home learns whether it is
+inside. Moving the shared home and watching the verdict (or a seat attempt)
+flip is an oracle on the rim, visible to the host as that household's home
+moving ([`../principles.md`](../principles.md#peoples-locations-are-never-shared-by-design)).
+
 ## Event types
 
 No new event type. The feature rides on:
 
-- `SPACE_DIRECTORY_SYNC` — an entry carries
-  `local_area: {lat, lon, radius_km}` when the space is a local community
-  (v_59, sender-gated: a peer below v_59 gets the entry without it).
+- `SPACE_DIRECTORY_SYNC` — an entry carries `local_community: true`,
+  `radius_km` and `in_area` when the space is a local community (v_59,
+  sender-gated: a peer below v_59 gets the entry without them). Redefined in
+  place before release — the unreleased first draft carried the centre.
 - `SPACE_JOIN_REQUEST` — the host drops a request from a household that is
   outside or whose home it does not know (logged, like a banned applicant),
   so it never reaches the admins.
@@ -84,8 +108,11 @@ sequenceDiagram
     participant A as HFS A (host)
 
     Note over A,B: paired · B shares its home with A (share_home on)
-    A->>B: SPACE_DIRECTORY_SYNC {spaces: [{…, local_area}]}  (v_59+)
-    Note over B: Discover: "Within 5 km of …" + badge<br/>computed against B's own home
+    Note over A: in_area for B = B's shared home inside?<br/>(snapshot built for B alone)
+    A->>B: SPACE_DIRECTORY_SYNC {spaces: [{…, local_community, radius_km, in_area}]}  (v_59+)
+    Note over B: Discover: "Within 5 km" + In your area<br/>no map, no centre
+    B-->>A: LOCAL_HOME_LOCATION_CHANGED (B moves / stops sharing)
+    A->>B: SPACE_DIRECTORY_SYNC (B's fresh verdict)
     B->>A: SPACE_JOIN_REQUEST {space_id, user_id}
     Note over A: home of B = remote_instances.home_lat/lon<br/>inside? else drop (logged)
     Note over A: admin approves → re-check (area or sharing may have changed)
@@ -104,7 +131,9 @@ sequenceDiagram
 
 - `socialhome/domain/local_community.py` — the pure rules: `LocalArea`,
   `validate_local_area` (4 dp, bounds), `local_area_of` (public tier, whole
-  area), `eligibility` (haversine), the wire shape.
+  area), `eligibility` (haversine), the host-API shape (`local_area_wire`,
+  with the centre) and the directory shape (`local_community_wire` /
+  `parse_local_community_wire`, without).
 - `socialhome/services/local_community.py` — `require_local_eligibility`,
   the one check every seat path calls (whose home, fail closed).
 - `socialhome/services/space_service.py` — `create_space` /
@@ -119,14 +148,20 @@ sequenceDiagram
   `_consume_seat_and_build_ack`, the two DENY reasons and their redeemer-side
   mapping (§D2 and §D2b).
 - `socialhome/federation/private_invite_handler.py` — the accept re-check.
-- `socialhome/services/peer_directory_service.py` /
-  `socialhome/federation/peer_directory_handler.py` — the v_59 directory
-  field (sent gated, received re-validated) into
-  `peer_space_directory.lat` / `lon` / `radius_km` (migration 0105).
+- `socialhome/services/peer_directory_service.py` — the per-peer snapshot
+  with that peer's verdict (v_59-gated), re-sent on `PeerHomeChanged` /
+  `PeerProtoVersionRaised`.
+- `socialhome/federation/peer_directory_handler.py` — received and
+  re-validated into `peer_space_directory.radius_km` / `in_area`
+  (migrations 0105, 0106).
+- SPA: `client/src/features/spaces/discover.ts` (`entryAreaVerdict`,
+  `sortNearFirst`), `SpaceDiscover.tsx` ("Near you"),
+  `SpacePublicDetailPage.tsx` (About: map for the host's own people only).
 
 ## Spec references
 
 §D1a (peer directory sync), §D2 / §D2b (join requests, invite redeem),
 §11 (pairing — the home location it shares), §25.8.21 (the directory
 snapshot travels encrypted to paired peers only), §2 GPS rule
-([`../principles.md`](../principles.md#gps-truncation-4-dimension)).
+([`../principles.md`](../principles.md#gps-truncation-4-dimension),
+[people's locations](../principles.md#peoples-locations-are-never-shared-by-design)).

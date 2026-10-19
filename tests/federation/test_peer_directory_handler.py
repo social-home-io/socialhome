@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.local_community import PeerLocalCommunity
 from socialhome.federation.peer_directory_handler import PeerDirectoryHandler
 from socialhome.repositories.peer_space_directory_repo import (
     SqlitePeerSpaceDirectoryRepo,
@@ -122,44 +123,79 @@ async def test_malformed_payload_ignored(repo):
     assert await repo.list_for_instance("peerA") == []
 
 
-async def test_a_local_community_area_round_trips_revalidated(repo):
-    """v_59 — the area is stored re-truncated to 4 dp; a malformed one is
-    dropped (the entry is kept, with no area) — never guessed."""
+async def test_a_local_community_round_trips_revalidated(repo):
+    """v_59 — the radius and the host's verdict for us are stored, the
+    radius re-validated; a malformed entry is kept as no community — never
+    guessed."""
     handler = PeerDirectoryHandler(repo)
     await handler._on_snapshot(
         _event(
             "peerA",
             [
                 {
-                    "space_id": "local",
+                    "space_id": "in",
                     "name": "Quartier",
-                    "local_area": {
-                        "lat": 47.376_912_3,
-                        "lon": 8.541_749_9,
-                        "radius_km": 5,
-                    },
+                    "local_community": True,
+                    "radius_km": 2,
+                    "in_area": True,
+                },
+                {
+                    "space_id": "out",
+                    "name": "Village",
+                    "local_community": True,
+                    "radius_km": 5.0,
+                    "in_area": False,
+                },
+                {
+                    "space_id": "unknown",
+                    "name": "Street",
+                    "local_community": True,
+                    "radius_km": 1.0,
+                    "in_area": None,
                 },
                 {
                     "space_id": "huge",
                     "name": "Region",
-                    "local_area": {"lat": 47.0, "lon": 8.0, "radius_km": 500},
-                },
-                {
-                    "space_id": "half",
-                    "name": "Half",
-                    "local_area": {"lat": 47.0, "lon": 8.0},
+                    "local_community": True,
+                    "radius_km": 500,
+                    "in_area": True,
                 },
                 {"space_id": "plain", "name": "Chess"},
             ],
         )
     )
     rows = {r.space_id: r for r in await repo.list_for_instance("peerA")}
-    area = rows["local"].local_area
-    assert area is not None
-    assert (area.lat, area.lon, area.radius_km) == (47.3769, 8.5417, 5.0)
-    assert rows["huge"].local_area is None
-    assert rows["half"].local_area is None
-    assert rows["plain"].local_area is None
+    assert rows["in"].local_community == PeerLocalCommunity(2.0, True)
+    assert rows["out"].local_community == PeerLocalCommunity(5.0, False)
+    assert rows["unknown"].local_community == PeerLocalCommunity(1.0, None)
+    assert rows["huge"].local_community is None
+    assert rows["plain"].local_community is None
+
+
+async def test_a_centre_a_sender_puts_in_is_never_stored(repo):
+    """A pre-rework (or hostile) host sending ``local_area: {lat, lon, …}``
+    or bare coordinates: the entry is listed, nothing of the centre lands
+    on disk — there is not even a column for it."""
+    handler = PeerDirectoryHandler(repo)
+    await handler._on_snapshot(
+        _event(
+            "peerA",
+            [
+                {
+                    "space_id": "old",
+                    "name": "Quartier",
+                    "local_area": {"lat": 47.3769, "lon": 8.5417, "radius_km": 5},
+                    "lat": 47.3769,
+                    "lon": 8.5417,
+                },
+            ],
+        )
+    )
+    (row,) = await repo.list_for_instance("peerA")
+    assert row.local_community is None
+    raw = await repo._db.fetchall("SELECT * FROM peer_space_directory")
+    stored = [str(v) for r in raw for v in tuple(r)]
+    assert not any(v.startswith(("47.3769", "8.5417")) for v in stored)
 
 
 async def test_attach_registers_event_type():

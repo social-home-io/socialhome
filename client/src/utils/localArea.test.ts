@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
-  areaLabel, areaShortLabel, areaVerdict, distanceKm, radiusInBounds, radiusLabel, round4,
+  areaLabel, areaShortLabel, areaVerdict, distanceKm, peerAreaLabel, peerAreaVerdict, radiusInBounds,
+  radiusLabel, round4,
 } from './localArea'
 
 const ZURICH = { lat: 47.3769, lon: 8.5417, radius_km: 5 }
@@ -39,7 +40,8 @@ describe('areaVerdict', () => {
 describe('labels', () => {
   it('says the radius and the exact centre', () => {
     expect(areaLabel(ZURICH)).toBe('Within 5 km of 47.3769° N, 8.5417° E')
-    expect(areaShortLabel({ ...ZURICH, radius_km: 0.5 })).toBe('Within 0.5 km')
+    expect(areaShortLabel(0.5)).toBe('Within 0.5 km')
+    expect(peerAreaLabel(2)).toBe('Local community · within 2 km of the host’s chosen centre')
     expect(radiusLabel(25)).toBe('25 km')
   })
 })
@@ -61,5 +63,27 @@ describe('helpers', () => {
     expect(radiusInBounds(0.4)).toBe(false)
     expect(radiusInBounds(51)).toBe(false)
     expect(radiusInBounds(Number.NaN)).toBe(false)
+  })
+})
+
+describe('peerAreaVerdict (a paired household\'s community — no centre)', () => {
+  const home = { lat: 1, lon: 2 }
+  it('reads the host\'s verdict for our shared home', () => {
+    expect(peerAreaVerdict({ radius_km: 2, in_area: true }, home, true)).toBe('inside')
+    expect(peerAreaVerdict({ radius_km: 2, in_area: false }, home, true)).toBe('outside')
+  })
+  it('outside wins over not shared — no pointless errand', () => {
+    expect(peerAreaVerdict({ radius_km: 2, in_area: false }, home, false)).toBe('outside')
+  })
+  it('a home we stopped sharing beats a stale inside', () => {
+    expect(peerAreaVerdict({ radius_km: 2, in_area: true }, home, false)).toBe('not_shared')
+    expect(peerAreaVerdict({ radius_km: 2, in_area: null }, home, false)).toBe('not_shared')
+  })
+  it('no home set says so', () => {
+    expect(peerAreaVerdict({ radius_km: 2, in_area: null }, null, true)).toBe('no_home')
+  })
+  it('shared but not answered yet: no badge, the host checks', () => {
+    expect(peerAreaVerdict({ radius_km: 2, in_area: null }, home, true)).toBe('unknown')
+    expect(peerAreaVerdict({ radius_km: 2, in_area: null }, undefined, true)).toBe('unknown')
   })
 })
