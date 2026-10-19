@@ -25066,7 +25066,8 @@ button.sh-page-editor-status {
   color: var(--sh-text-muted);
   font: 600 var(--sh-font-size-sm) / 1.3 var(--sh-font-family);
 }
-.sh-space-more__notif .sh-groupinfo-mute { padding: 0 4px; }
+.sh-space-more__notif .sh-groupinfo-mute { padding: 0 8px; }
+.sh-space-more__notif .sh-groupinfo-mute .sh-groupinfo-heading { padding: 0; }
 .sh-space-more__back {
   align-self: flex-start;
   display: inline-flex;
