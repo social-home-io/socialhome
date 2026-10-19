@@ -388,9 +388,6 @@ async def test_request_join_remote_happy(stack):
         owner_username="alicehost",
         name="S",
         space_type=SpaceType.PUBLIC,
-        lat=52.37,
-        lon=4.89,
-        radius_km=50,
     )
     rid = await stack.svc.request_join_remote(
         space.id,
@@ -429,9 +426,6 @@ async def test_on_remote_join_request_approved_routes_cross_instance(stack):
         owner_username="alicehost",
         name="S",
         space_type=SpaceType.PUBLIC,
-        lat=52.37,
-        lon=4.89,
-        radius_km=50,
     )
     # Applicant-side remote join request: host = "peer" (a DIFFERENT
     # instance from ours). Seeds the local request row with
@@ -520,9 +514,6 @@ async def test_on_remote_join_request_approved_failure_is_logged(stack, caplog):
         owner_username="alicehost",
         name="S",
         space_type=SpaceType.PUBLIC,
-        lat=52.37,
-        lon=4.89,
-        radius_km=50,
     )
     rid = await stack.svc.request_join_remote(
         space.id,

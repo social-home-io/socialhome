@@ -145,8 +145,6 @@ async def test_a_public_space_never_contacts_a_gfs(stack):
     space = await svc.create_space(
         owner_username="alice",
         name="Club",
-        lat=47.0,
-        lon=8.0,
         space_type=SpaceType.PUBLIC,
         join_mode=JoinMode.OPEN,
     )
@@ -462,8 +460,6 @@ async def test_public_space_turning_private_is_withdrawn_from_listing_gfs(stack)
     space = await svc.create_space(
         owner_username="alice",
         name="Club",
-        lat=47.0,
-        lon=8.0,
         space_type=SpaceType.PUBLIC,
     )
     await svc.update_config(
@@ -477,8 +473,6 @@ async def test_public_space_turning_household_is_withdrawn(stack):
     space = await svc.create_space(
         owner_username="alice",
         name="Club",
-        lat=47.0,
-        lon=8.0,
         space_type=SpaceType.PUBLIC,
     )
     await svc.update_config(
@@ -492,8 +486,6 @@ async def test_public_space_turning_global_is_listed_on_the_choice(stack):
     space = await svc.create_space(
         owner_username="alice",
         name="Club",
-        lat=47.0,
-        lon=8.0,
         space_type=SpaceType.PUBLIC,
     )
     await svc.update_config(
@@ -525,8 +517,6 @@ async def test_private_space_turning_public_is_not_withdrawn(stack):
     space = await svc.create_space(
         owner_username="alice",
         name="Club",
-        lat=47.0,
-        lon=8.0,
         space_type=SpaceType.PRIVATE,
     )
     await svc.update_config(

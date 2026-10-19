@@ -2014,19 +2014,12 @@ async def test_public_space_without_location_is_allowed(stack):
     assert space.lat is None and space.lon is None
 
 
-async def test_public_space_with_coordinates(stack):
-    """Public space stores 4dp-truncated coordinates."""
-    await stack.provision_user("a")
-    s = await stack.space_svc.create_space(
-        owner_username="a",
-        name="Pub",
-        space_type=SpaceType.PUBLIC,
-        join_mode=JoinMode.OPEN,
-        lat=52.376543,
-        lon=4.895678,
-        radius_km=5.0,
-    )
-    assert s.lat == 52.3765 and s.lon == 4.8957
+async def test_create_space_takes_no_map_pin(stack):
+    """Nothing shows a space's map pin, so create collects none."""
+    with pytest.raises(TypeError):
+        await stack.space_svc.create_space(  # type: ignore[call-arg]
+            owner_username="a", name="Pub", space_type=SpaceType.PUBLIC, lat=1.0
+        )
 
 
 async def test_non_member_cannot_post(stack):
@@ -2354,19 +2347,22 @@ async def test_space_create_post_text_empty_rejected(stack):
 
 
 async def test_public_space_coordinate_truncation(stack):
-    """Public space coordinates are truncated to 4dp."""
+    """A stored map pin is moved to 4dp-truncated coordinates."""
     _anna = await stack.provision_user("anna")
     s = await stack.space_svc.create_space(
         owner_username="anna",
         name="Pub",
         space_type=SpaceType.PUBLIC,
         join_mode=JoinMode.OPEN,
-        lat=52.376543,
-        lon=4.895678,
-        radius_km=5.0,
     )
-    assert s.lat == 52.3765
-    assert s.lon == 4.8957
+    # A pin stored before create stopped collecting one.
+    await stack.space_svc._spaces.set_map_pin(s.id, 1.0, 2.0)
+    pin = await stack.space_svc.set_map_pin(
+        s.id, actor_username="anna", lat=52.376543, lon=4.895678
+    )
+    assert pin == (52.3765, 4.8957)
+    got = await stack.space_svc._require_space(s.id)
+    assert (got.lat, got.lon) == (52.3765, 4.8957)
 
 
 # ── Helper function coverage ──────────────────────────────────────────────
@@ -6082,8 +6078,6 @@ async def test_create_space_accepts_known_category(stack):
         name="Sporty",
         space_type="public",
         join_mode=JoinMode.OPEN,
-        lat=52.52,
-        lon=13.405,
         category="sports_outdoors",
     )
     assert space.category == "sports_outdoors"
@@ -6098,8 +6092,6 @@ async def test_create_space_rejects_unknown_category(stack):
             name="Bad",
             space_type="public",
             join_mode=JoinMode.OPEN,
-            lat=1.0,
-            lon=1.0,
             category="banana",
         )
 

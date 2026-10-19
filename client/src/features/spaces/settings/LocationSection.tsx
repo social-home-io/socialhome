@@ -5,8 +5,8 @@
  *
  * Sharing your OWN location is personal and stays on the Map section (and
  * a member's "You in this space"); this section is the space's rules.
- * Both switches save as they change. A public space hosted here also gets
- * its map pin (``MapPin``) — where the space itself sits.
+ * Both switches save as they change. A space hosted here that still has
+ * a stored map pin shows it (``MapPin``) to move or remove.
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
@@ -64,9 +64,11 @@ export function LocationSection({ space, isRemoteSpace = false, onUpdate }: {
 
   return (
     <>
-      {space.space_type === 'public' && !isRemoteSpace && (
+      {/* Only while a pin is stored: no new one is collected. */}
+      {!isRemoteSpace && space.map_pin && (
         <div class="sh-ss-card">
-          <MapPin spaceId={space.id} pin={space.map_pin ?? null} onUpdate={onUpdate} />
+          <MapPin spaceId={space.id} pin={space.map_pin} canMove={space.space_type === 'public'}
+                  onUpdate={onUpdate} />
         </div>
       )}
       <div class="sh-ss-card">

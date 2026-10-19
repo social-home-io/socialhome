@@ -1782,7 +1782,8 @@ def validate_zone_radius(value: object) -> int:
 
 
 class MapPinUnavailableError(CodedError, ValueError):
-    """Only a public space hosted by this household has a map pin.
+    """Only a public space hosted by this household that already has a
+    map pin can move it (nothing shows a pin, so no new one is collected).
 
     The pin (``spaces.lat`` / ``lon``) is host-local: it is never put in a
     federation payload (GPS coordinates stay off the wire), so a member
@@ -1792,7 +1793,7 @@ class MapPinUnavailableError(CodedError, ValueError):
 
     status = 409
     code = "MAP_PIN_UNAVAILABLE"
-    detail = "Only a public space hosted here has a map pin."
+    detail = "Only a public space hosted here with a stored map pin can move it."
 
 
 #: Longest quick-link URL a space admin may store.

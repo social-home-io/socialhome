@@ -33,7 +33,6 @@ import {
 } from './spaceModeOptions'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
-import { coordLabel } from '@/utils/coordLabel'
 import { markSetupPending } from '@/features/spaces/spaceSetup'
 
 const open = signal(false)
@@ -42,13 +41,8 @@ const description = signal('')
 const emoji = signal('')
 const spaceType = signal('private')
 const joinMode = signal('invite_only')
-// Public spaces can be pinned on the public map, so they may carry a
-// location: this device's, rounded to 4dp here and again on the server.
-// Optional — a public space without one simply isn't pinned.
-const showOnMap = signal(false)
-const lat = signal<number | null>(null)
-const lon = signal<number | null>(null)
-const locating = signal(false)
+// No map location: nothing shows a space's pin (no map, and GPS never
+// goes to other households or a GFS), so create doesn't ask for one.
 const submitting = signal(false)
 // Discovery metadata, sent only for public/global spaces (§23.50).
 const minAge = signal(0)
@@ -72,10 +66,6 @@ export function openSpaceCreate() {
   emoji.value = ''
   spaceType.value = 'private'
   joinMode.value = 'invite_only'
-  showOnMap.value = false
-  lat.value = null
-  lon.value = null
-  locating.value = false
   minAge.value = 0
   category.value = 'general'
   gfsChoices.value = []
@@ -94,42 +84,9 @@ export function openSpaceCreate() {
     .catch(() => { gfsChoices.value = [] })
 }
 
-const isPublic = () => spaceType.value === 'public'
 const isGlobal = () => spaceType.value === 'global'
 const isDiscoverable = () =>
   spaceType.value === 'public' || spaceType.value === 'global'
-
-/** Round to 4 decimal places (≈ 11 m) — never keep or send raw device
- *  precision (§GPS); the server rounds again. */
-export function round4(v: number): number {
-  return Math.round(v * 1e4) / 1e4
-}
-
-function locate() {
-  if (!navigator.geolocation) {
-    showToast(t('space.create.location_unavailable'), 'error')
-    showOnMap.value = false
-    return
-  }
-  locating.value = true
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      lat.value = round4(pos.coords.latitude)
-      lon.value = round4(pos.coords.longitude)
-      locating.value = false
-    },
-    () => {
-      showToast(t('space.create.location_failed_map'), 'info')
-      locating.value = false
-      showOnMap.value = false
-    },
-  )
-}
-
-function toggleMap(on: boolean) {
-  showOnMap.value = on
-  if (on && lat.value === null) locate()
-}
 
 export function SpaceCreateDialog() {
   const gfsChecklistRef = useRef<HTMLFieldSetElement | null>(null)
@@ -152,9 +109,6 @@ export function SpaceCreateDialog() {
         emoji: emoji.value || undefined,
         space_type: spaceType.value,
         join_mode: joinMode.value,
-        ...(isPublic() && showOnMap.value && lat.value !== null && lon.value !== null
-          ? { lat: lat.value, lon: lon.value }
-          : {}),
         ...(discoverable ? { category: category.value } : {}),
         ...(discoverable && minAge.value ? { min_age: minAge.value } : {}),
         ...(isGlobal() ? { gfs_ids: gfsSelected.value } : {}),
@@ -312,28 +266,6 @@ export function SpaceCreateDialog() {
                 </select>
               </label>
             </div>
-          </fieldset>
-        )}
-        {isPublic() && (
-          <fieldset class="sh-form-fieldset sh-space-create-location">
-            <legend>📍 {t('space.create.map_location')}</legend>
-            <label class="sh-toggle-row">
-              <input type="checkbox" checked={showOnMap.value}
-                     onChange={(e) => toggleMap((e.target as HTMLInputElement).checked)} />
-              <span class="sh-toggle-row__text">
-                <span>{t('space.create.show_on_map')}</span>
-                <span class="sh-toggle-row__sub">{t('space.create.map_intro')}</span>
-              </span>
-            </label>
-            {showOnMap.value && (
-              <p class="sh-muted sh-space-create-location__where" role="status">
-                {locating.value
-                  ? t('space.create.locating')
-                  : lat.value !== null && lon.value !== null
-                    ? t('space.create.pinned_at', { place: coordLabel(lat.value, lon.value) })
-                    : null}
-              </p>
-            )}
           </fieldset>
         )}
         <div class="sh-form-actions">

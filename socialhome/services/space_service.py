@@ -953,13 +953,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         features: SpaceFeatures | None = None,
         retention_days: int | None = None,
         retention_exempt_types: tuple[str, ...] | list[str] | None = None,
-        lat: float | None = None,
-        lon: float | None = None,
-        radius_km: float | None = None,
         category: str | None = None,
         gfs_ids: object = None,
     ) -> Space:
         """Create a new space and seat the creator as owner.
+
+        A new space carries no map pin: nothing shows one (no map, no
+        directory — GPS never goes to peers or a GFS), so none is
+        collected. A pin stored before that stays editable / removable
+        (:meth:`set_map_pin`).
 
         A GLOBAL space is listed on the GFSs in *gfs_ids* (this household's
         active connections, at most 8) and needs at least one while any is
@@ -1001,9 +1003,6 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     f"instance already advertises {count} public spaces "
                     f"(max {MAX_PUBLIC_SPACES})"
                 )
-        else:
-            # Non-public spaces never carry location metadata.
-            lat = lon = radius_km = None
 
         kp = generate_identity_keypair()
         exempt_types = normalize_retention_exempt_types(
@@ -1025,9 +1024,6 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             if (retention_days is None or retention_days > 0)
             else None,
             retention_exempt_types=exempt_types,
-            lat=_round4(lat),
-            lon=_round4(lon),
-            radius_km=radius_km,
             category=category,
         )
         await self._spaces.save(space)
@@ -2165,10 +2161,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         lat: object,
         lon: object,
     ) -> tuple[float, float] | None:
-        """Move (or remove, with both ``None``) a public space's map pin.
-        Owner or admin, on the household hosting the space. Only a public
-        space has one, as at creation: a global space is listed on GFSs,
-        whose directory carries no location.
+        """Move (or remove, with both ``None``) a space's stored map pin.
+        Owner or admin, on the household hosting the space.
+
+        Nothing shows a pin, so none is collected any more: a space without
+        one gets none (409), and only a public space's pin moves. Removing
+        works on any tier, so a pin left on a space that is no longer public
+        can still go.
 
         Coordinates are truncated to 4 dp (about 11 m) before they are
         stored. The pin is host-local: it is not part of the space config
@@ -2178,16 +2177,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
-        if (
-            space.owner_instance_id != self._own_instance_id
-            or space.space_type is not SpaceType.PUBLIC
-        ):
+        if space.owner_instance_id != self._own_instance_id:
             raise MapPinUnavailableError()
         if lat is None and lon is None:
             await self._spaces.set_map_pin(space_id, None, None)
             return None
         if lat is None or lon is None:
             raise ValueError("lat and lon go together")
+        if (
+            space.space_type is not SpaceType.PUBLIC
+            or space.lat is None
+            or space.lon is None
+        ):
+            raise MapPinUnavailableError()
         pin = (
             validate_zone_coord(lat, name="lat", limit=90),
             validate_zone_coord(lon, name="lon", limit=180),
@@ -10010,10 +10012,3 @@ def _validate_text_length(
         return
     if len(content) > limit:
         raise ValueError(f"content exceeds maximum length of {limit} characters")
-
-
-def _round4(value: float | None) -> float | None:
-    """Truncate a GPS coordinate to 4dp (§25 rule)."""
-    if value is None:
-        return None
-    return round(float(value), 4)

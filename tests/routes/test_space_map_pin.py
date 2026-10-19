@@ -1,5 +1,8 @@
 """A public space's map pin, edited in Settings › Location.
 
+New spaces no longer collect one (``POST /api/spaces`` ignores lat / lon:
+nothing shows a pin); a pin stored before that can be moved or removed.
+
 * ``PATCH /api/spaces/{id}`` with ``{lat, lon}`` moves the pin (4 dp),
   ``{lat: null, lon: null}`` removes it — owner / admin, on a public
   space hosted here (as at creation); anything else is refused.
@@ -26,16 +29,15 @@ async def space(client):
     }
     r = await client.post(
         "/api/spaces",
-        json={
-            "name": "Garden",
-            "space_type": "public",
-            "lat": 47.3769123,
-            "lon": 8.5417456,
-        },
+        json={"name": "Garden", "space_type": "public"},
         headers=hdr["owner"],
     )
     assert r.status == 201, await r.text()
     sid = (await r.json())["id"]
+    # A pin stored before create stopped collecting one.
+    await client._db.enqueue(
+        "UPDATE spaces SET lat=47.3769, lon=8.5417 WHERE id=?", (sid,)
+    )
     await _seat(client, sid, _ADMIN[1], "admin")
     await _seat(client, sid, _MEMBER[1], "member")
     return sid, hdr
@@ -52,6 +54,21 @@ async def _sequence(client, sid):
         "SELECT config_sequence FROM spaces WHERE id=?", (sid,)
     )
     return row["config_sequence"]
+
+
+async def test_create_collects_no_pin(client, space):
+    """Nothing shows a pin, so ``POST /api/spaces`` ignores lat / lon."""
+    _, hdr = space
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Club", "space_type": "public", "lat": 47.1, "lon": 8.1},
+        headers=hdr["owner"],
+    )
+    assert r.status == 201, await r.text()
+    sid = (await r.json())["id"]
+    row = await client._db.fetchone("SELECT lat, lon FROM spaces WHERE id=?", (sid,))
+    assert (row["lat"], row["lon"]) == (None, None)
+    assert (await _detail(client, sid, hdr["owner"]))["map_pin"] is None
 
 
 async def test_owner_and_admins_see_the_pin_members_do_not(client, space):
@@ -135,6 +152,38 @@ async def test_only_a_public_space_has_a_pin(client, space, tier):
     )
     assert r.status == 409
     assert (await r.json())["error"]["code"] == "MAP_PIN_UNAVAILABLE"
+    assert (await _detail(client, sid, hdr["owner"]))["map_pin"] is None
+
+
+async def test_a_space_without_a_pin_gets_none(client, space):
+    """Nothing shows a pin, so a space without one is not given one."""
+    sid, hdr = space
+    r = await client.patch(
+        f"/api/spaces/{sid}", json={"lat": None, "lon": None}, headers=hdr["owner"]
+    )
+    assert r.status == 200
+    r = await client.patch(
+        f"/api/spaces/{sid}", json={"lat": 1.0, "lon": 2.0}, headers=hdr["owner"]
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "MAP_PIN_UNAVAILABLE"
+    assert (await _detail(client, sid, hdr["owner"]))["map_pin"] is None
+
+
+async def test_a_pin_left_on_a_space_no_longer_public_can_be_removed(client, space):
+    sid, hdr = space
+    await client._db.enqueue(
+        "UPDATE spaces SET space_type='private' WHERE id=?", (sid,)
+    )
+    assert (await _detail(client, sid, hdr["owner"]))["map_pin"] is not None
+    r = await client.patch(
+        f"/api/spaces/{sid}", json={"lat": 1.0, "lon": 2.0}, headers=hdr["owner"]
+    )
+    assert r.status == 409
+    r = await client.patch(
+        f"/api/spaces/{sid}", json={"lat": None, "lon": None}, headers=hdr["owner"]
+    )
+    assert r.status == 200
     assert (await _detail(client, sid, hdr["owner"]))["map_pin"] is None
 
 
