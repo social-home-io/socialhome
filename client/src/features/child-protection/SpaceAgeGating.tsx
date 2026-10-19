@@ -12,12 +12,14 @@
  *
  * Listens for ``cp.age_gate_changed`` so a min-age change on another session
  * refreshes this one live. Category has no WS event (no live-refresh needed).
+ *
+ * Lives in Settings › Moderation & age, so it has no heading of its own,
+ * and like the rest of that page each select saves the moment it changes.
  */
 import { useEffect } from 'preact/hooks'
 import { useSignal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
-import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { SPACE_CATEGORIES } from '@/components/spaceModeOptions'
 import { t } from '@/i18n/i18n'
@@ -68,15 +70,24 @@ export function SpaceAgeGating({ spaceId }: { spaceId: string }) {
     return () => { off() }
   }, [spaceId])
 
-  const save = async () => {
+  /** Save one select; put it back if the server says no. */
+  const save = async (
+    which: 'min_age' | 'category', next: number | string,
+  ) => {
+    const before = which === 'min_age' ? minAge.value : category.value
+    if (which === 'min_age') minAge.value = next as number
+    else category.value = next as string
     saving.value = true
     try {
-      await Promise.all([
-        api.patch(`/api/spaces/${spaceId}`, { category: category.value }),
-        api.patch(`/api/cp/spaces/${spaceId}/age-gate`, { min_age: minAge.value }),
-      ])
+      if (which === 'min_age') {
+        await api.patch(`/api/cp/spaces/${spaceId}/age-gate`, { min_age: next })
+      } else {
+        await api.patch(`/api/spaces/${spaceId}`, { category: next })
+      }
       showToast(t('space.age.saved'), 'success')
     } catch (e: unknown) {
+      if (which === 'min_age') minAge.value = before as number
+      else category.value = before as string
       showToast((e as Error).message || t('space.age.save_failed'), 'error')
     } finally {
       saving.value = false
@@ -86,17 +97,15 @@ export function SpaceAgeGating({ spaceId }: { spaceId: string }) {
   if (!loaded.value) return null
 
   return (
-    <div class="sh-age-gating sh-card">
-      <h2 class="sh-settings-section-heading">{t('space.settings_page.tab_age')}</h2>
-      <p class="sh-muted">
-        {t('space.age.intro')}
-      </p>
+    <div class="sh-age-gating">
+      <p class="sh-ss-hint">{t('space.age.intro')}</p>
       <div class="sh-form-row">
         <label>
           {t('space.age.min_age')}
           <select
             value={String(minAge.value)}
-            onChange={(e) => minAge.value = Number((e.target as HTMLSelectElement).value)}>
+            disabled={saving.value}
+            onChange={(e) => void save('min_age', Number((e.target as HTMLSelectElement).value))}>
             {VALID_MIN_AGES.map(a => (
               <option key={a} value={String(a)}>
                 {a === 0 ? t('space.age.no_restriction') : `${a}+`}
@@ -108,13 +117,13 @@ export function SpaceAgeGating({ spaceId }: { spaceId: string }) {
           {t('space.age.category')}
           <select
             value={category.value}
-            onChange={(e) => category.value = (e.target as HTMLSelectElement).value}>
+            disabled={saving.value}
+            onChange={(e) => void save('category', (e.target as HTMLSelectElement).value)}>
             {SPACE_CATEGORIES.map(c => (
               <option key={c.value} value={c.value}>{c.label}</option>
             ))}
           </select>
         </label>
-        <Button onClick={save} loading={saving.value}>{t('common.save')}</Button>
       </div>
     </div>
   )

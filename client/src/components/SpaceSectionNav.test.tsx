@@ -225,7 +225,8 @@ describe('More on a desktop: a non-modal popover', () => {
     layout(2000)
     const { getByRole, queryByRole } = renderNav({ canEditSections: true })
     fireEvent.click(getByRole('button', { name: /^More/ }))
-    expect(getByRole('link', { name: 'Edit sections' }).getAttribute('href')).toBe('/spaces/s1/settings')
+    // Deep-links to the Sections part of the settings page.
+    expect(getByRole('link', { name: 'Edit sections' }).getAttribute('href')).toBe('/spaces/s1/settings/sections')
     cleanup()
     const r2 = renderNav({ canEditSections: false })
     fireEvent.click(r2.getByRole('button', { name: /^More/ }))
@@ -326,7 +327,7 @@ describe('Leave space', () => {
     expect(container.querySelector('.sh-space-more__owner-note')?.textContent).toContain('You own this space')
     // …and where to hand it on: the owner's transfer lives in settings.
     expect(getByRole('link', { name: 'Hand over ownership' }).getAttribute('href'))
-      .toBe('/spaces/s1/settings')
+      .toBe('/spaces/s1/settings/danger')
     unmount()
     const r = renderNav({ leave: null })
     fireEvent.click(r.getByRole('button', { name: /^More/ }))

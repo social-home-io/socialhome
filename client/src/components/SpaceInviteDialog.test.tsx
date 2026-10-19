@@ -728,7 +728,7 @@ describe('SpaceInviteDialog — link type on a private space', () => {
       "This space doesn't use the GFS.",
     )
     expect(hint.querySelector('a')!.getAttribute('href'))
-      .toMatch(/^\/spaces\/space-[a-z0-9]+\/settings$/)
+      .toMatch(/^\/spaces\/space-[a-z0-9]+\/settings\/find$/)
   })
 
   it('tells a non-owner admin that only the owner can turn it on', async () => {

@@ -11,7 +11,9 @@ const { mockGet, mockPut, toast } = vi.hoisted(() => ({
 vi.mock('@/api', () => ({ api: { get: mockGet, put: mockPut } }))
 vi.mock('@/components/Toast', () => ({ showToast: toast }))
 
-import { SpaceNotifLevelPicker, useSpaceNotifLevel } from './SpaceNotifLevels'
+import {
+  SpaceNotifLevelPicker, SpaceNotificationChoices, useSpaceChatNotif, useSpaceNotifLevel,
+} from './SpaceNotifLevels'
 
 beforeEach(() => {
   mockGet.mockReset()
@@ -62,5 +64,40 @@ describe('SpaceNotifLevelPicker', () => {
     fireEvent.click(getByRole('radio', { name: /^Muted/ }))
     await waitFor(() => expect(toast).toHaveBeenCalledWith("Couldn't save: offline", 'error'))
     expect(onSaved).not.toHaveBeenCalled()
+  })
+})
+
+describe('SpaceNotificationChoices — the one place both levels are set', () => {
+  it('posts only, without the chat', () => {
+    const { getByRole, queryByText } = render(
+      <SpaceNotificationChoices spaceId="s1" level="all" onSaved={vi.fn()} chatNotif={null} />,
+    )
+    expect(getByRole('group', { name: 'Your notifications' })).toBeTruthy()
+    expect(queryByText('Chat')).toBeNull()
+  })
+
+  it('posts and chat side by side when the viewer has the chat', () => {
+    const { getByText } = render(
+      <SpaceNotificationChoices spaceId="s1" level="all" onSaved={vi.fn()} chatNotif={{
+        convId: 'c1', mutedUntil: null, level: 'mentions', onMute: vi.fn(), onLevel: vi.fn(),
+      }} />,
+    )
+    expect(getByText('Posts')).toBeTruthy()
+    expect(getByText('Chat')).toBeTruthy()
+  })
+})
+
+describe('useSpaceChatNotif', () => {
+  it('reads the space chat for a member, and nothing while disabled', async () => {
+    mockGet.mockResolvedValue({
+      enabled: true, conversation_id: 'c9', notif_level: 'all', muted_until: null, unread: 0,
+    })
+    const off = renderHook(() => useSpaceChatNotif('s1', false))
+    expect(off.result.current).toBeNull()
+    expect(mockGet).not.toHaveBeenCalled()
+    const { result } = renderHook(() => useSpaceChatNotif('s1', true))
+    await waitFor(() => expect(result.current?.convId).toBe('c9'))
+    expect(mockGet).toHaveBeenCalledWith('/api/spaces/s1/chat')
+    expect(result.current?.level).toBe('all')
   })
 })

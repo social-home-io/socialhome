@@ -192,6 +192,15 @@ describe('SpaceZonesAdmin', () => {
     )
   })
 
+  it('shows a zone centre for people, not raw coordinates', async () => {
+    mockApi.get.mockResolvedValueOnce({ zones: [_zone()] })
+    const { findByText, container } = render(<SpaceZonesAdmin spaceId="sp_test" />)
+    await findByText('Office')
+    const meta = container.querySelector('[data-testid="zone-list"]')!.textContent!
+    expect(meta).toContain('47.377° N, 8.542° E')
+    expect(meta).not.toContain('47.3769')
+  })
+
   it('deletes through ConfirmDialog', async () => {
     mockApi.get.mockResolvedValueOnce({ zones: [_zone()] })
     mockApi.delete.mockResolvedValueOnce(undefined)
@@ -201,6 +210,9 @@ describe('SpaceZonesAdmin', () => {
       <SpaceZonesAdmin spaceId="sp_test" />,
     )
     await findByText('Office')
+    // The row's Delete is quiet (no solid red per row); the confirm asks.
+    const rowDelete = getAllByText('Delete')[0].closest('button')!
+    expect(rowDelete.className).not.toContain('sh-btn--danger')
     fireEvent.click(getAllByText('Delete')[0])  // row button
     // Two "Delete" labels are now in the DOM — the row button (still
     // there) and the ConfirmDialog's confirm button. Click the

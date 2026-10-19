@@ -40,11 +40,11 @@ beforeEach(() => {
 })
 
 describe('SpaceAgeGating', () => {
-  it('titles the tab with an h2 — one level under the settings page h1', async () => {
+  it('has no heading of its own — it sits under Settings › Moderation & age', async () => {
     const { findByText, container } = render(<SpaceAgeGating spaceId={SPACE_ID} />)
     await findByText('Minimum age')
-    expect(container.querySelector('h2.sh-settings-section-heading')).not.toBeNull()
-    expect(container.querySelector('h3, h4')).toBeNull()
+    expect(container.querySelector('h1, h2, h3, h4')).toBeNull()
+    expect(container.querySelector('button')).toBeNull()
   })
 
   it('does not render the old audience age-band options', async () => {
@@ -56,11 +56,10 @@ describe('SpaceAgeGating', () => {
     expect(queryByText('Adult')).toBeNull()
   })
 
-  it('saves min_age (only) via the cp age-gate endpoint', async () => {
-    const { findByLabelText, getByText } = render(<SpaceAgeGating spaceId={SPACE_ID} />)
+  it('saves min_age (only) via the cp age-gate endpoint as soon as it changes', async () => {
+    const { findByLabelText } = render(<SpaceAgeGating spaceId={SPACE_ID} />)
     const minAge = await findByLabelText('Minimum age') as HTMLSelectElement
     fireEvent.change(minAge, { target: { value: '18' } })
-    fireEvent.click(getByText('Save'))
     await waitFor(() => {
       expect(apiPatch).toHaveBeenCalledWith(
         `/api/cp/spaces/${SPACE_ID}/age-gate`,
@@ -70,18 +69,25 @@ describe('SpaceAgeGating', () => {
   })
 
   it('renders a Category select and saves it via the space PATCH', async () => {
-    const { findByLabelText, getByText } = render(<SpaceAgeGating spaceId={SPACE_ID} />)
+    const { findByLabelText } = render(<SpaceAgeGating spaceId={SPACE_ID} />)
     const category = await findByLabelText('Category') as HTMLSelectElement
     // initial value loaded from GET /api/spaces/{id}
     expect(category.value).toBe('gaming')
     fireEvent.change(category, { target: { value: 'tech' } })
-    fireEvent.click(getByText('Save'))
     await waitFor(() => {
       expect(apiPatch).toHaveBeenCalledWith(
         `/api/spaces/${SPACE_ID}`,
         { category: 'tech' },
       )
     })
+  })
+
+  it('a refused save puts the select back', async () => {
+    apiPatch.mockRejectedValue(new Error('nope'))
+    const { findByLabelText } = render(<SpaceAgeGating spaceId={SPACE_ID} />)
+    const minAge = await findByLabelText('Minimum age') as HTMLSelectElement
+    fireEvent.change(minAge, { target: { value: '18' } })
+    await waitFor(() => expect(minAge.value).toBe('13'))
   })
 
   it('defaults category to general when the space has none', async () => {

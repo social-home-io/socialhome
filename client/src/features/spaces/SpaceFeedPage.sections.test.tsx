@@ -130,7 +130,7 @@ describe('SpaceFeedPage /spaces/:id/:section', () => {
     expect(r.getByRole('link', { name: /^Moderation/ }).getAttribute('href')).toBe('/spaces/s1/moderation')
   }, 20000)
 
-  it('a follower on /map falls back to the feed: no Map, no Settings, no proposals', async () => {
+  it('a follower on /map falls back to the feed: no Map, no proposals; Settings is theirs too', async () => {
     apiGet.mockImplementation(async (url: string) => {
       if (url === '/api/spaces/s1') {
         return { id: 's1', name: 'Trip', features: { location: true, todo: true }, my_role: 'subscriber' }
@@ -143,7 +143,9 @@ describe('SpaceFeedPage /spaces/:id/:section', () => {
     const { tl, r } = await open('map')
     await tl.waitFor(() => expect(route.go).toHaveBeenCalledWith('/spaces/s1', true))
     expect(r.queryByRole('link', { name: 'Map' })).toBeNull()
-    expect(r.queryByRole('link', { name: 'Space settings' })).toBeNull()
+    // A follower's settings: their notifications and Unfollow.
+    expect(r.getByRole('link', { name: 'Space settings' }).getAttribute('href'))
+      .toBe('/spaces/s1/settings')
     expect(r.getByRole('link', { name: 'Tasks' })).toBeTruthy()
     tl.fireEvent.click(r.getByRole('button', { name: /^More/ }))
     expect(r.queryByRole('link', { name: /^Map/ })).toBeNull()

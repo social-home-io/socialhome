@@ -34,7 +34,7 @@ import { api } from '@/api'
 import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
 import { escapeHtml } from '@/utils/html'
 import { ZONE_PALETTE, safeZoneHex, zoneColor } from '@/utils/zoneColor'
-import { ZONE_ICON_PRESETS, formatRadius, sortZones } from '@/utils/zones'
+import { ZONE_ICON_PRESETS, formatPlace, formatRadius, sortZones } from '@/utils/zones'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { IconPicker } from './IconPicker'
@@ -340,7 +340,7 @@ export function ZonesAdmin({
                 )}
                 <span class="sh-muted">
                   {formatRadius(z.radius_m)} ·{' '}
-                  {z.latitude.toFixed(4)}, {z.longitude.toFixed(4)}
+                  <span style={{ whiteSpace: 'nowrap' }}>{formatPlace(z.latitude, z.longitude)}</span>
                 </span>
                 {z.read_only && (
                   <span class="sh-muted sh-zones-admin__note">{t('zones.synced.hint')}</span>
@@ -351,7 +351,7 @@ export function ZonesAdmin({
                   <Button variant="secondary" onClick={() => startEdit(z)}>{t('common.edit')}</Button>
                   {/* Home can't be deleted — it moves when another zone is marked Home. */}
                   {!z.is_home && (
-                    <Button variant="danger" onClick={() => setPendingDelete(z)}>{t('common.delete')}</Button>
+                    <Button variant="ghost" onClick={() => setPendingDelete(z)}>{t('common.delete')}</Button>
                   )}
                 </div>
               )}

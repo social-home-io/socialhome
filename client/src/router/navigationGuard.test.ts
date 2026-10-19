@@ -26,6 +26,25 @@ describe('navigationGuard', () => {
     expect(shouldConfirmLeave('/settings-other')).toBe(true)
   })
 
+  it('a page that owns its subpaths moves between them without asking', () => {
+    release = setNavigationGuard({
+      path: '/spaces/s1/settings', subpaths: true,
+      isDirty: () => true, confirm: async () => true,
+    })
+    expect(shouldConfirmLeave('/spaces/s1/settings/members')).toBe(false)
+    expect(shouldConfirmLeave('/spaces/s1/settings/basics#x')).toBe(false)
+    expect(shouldConfirmLeave('/spaces/s1')).toBe(true)
+    expect(shouldConfirmLeave('/spaces/s1/settings-x')).toBe(true)
+    expect(shouldConfirmLeave('/spaces/s2/settings/basics')).toBe(true)
+  })
+
+  it('without subpaths a deeper path still asks', () => {
+    release = setNavigationGuard({
+      path: '/settings', isDirty: () => true, confirm: async () => true,
+    })
+    expect(shouldConfirmLeave('/settings/privacy')).toBe(true)
+  })
+
   it('confirmLeave returns the page answer', async () => {
     release = setNavigationGuard({
       path: '/settings', isDirty: () => true, confirm: async () => false,
