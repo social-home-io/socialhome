@@ -14,10 +14,8 @@ import { ws } from '@/ws'
 import { Avatar } from './Avatar'
 import { Button } from './Button'
 import { showToast } from './Toast'
-import {
-  householdDisplayName,
-  loadHouseholdUsers,
-} from '@/store/householdUsers'
+import { loadHouseholdUsers } from '@/store/householdUsers'
+import { resolveDisplayName } from '@/utils/avatar'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import { formatLocale, t } from '@/i18n/i18n'
 
@@ -106,7 +104,9 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
     <div class="sh-join-requests sh-card" aria-label={t('join_requests.aria')}>
       <h4>{t('join_requests.title', { n: String(rows.length) })}</h4>
       {rows.map(r => {
-        const name = r.display_name || householdDisplayName(r.user_id)
+        // The server resolves a remote applicant's name when it can; else a
+        // member of this household, else "Someone" — never the raw id.
+        const name = r.display_name || resolveDisplayName(spaceId, r.user_id)
         return (
           <div key={r.id} class="sh-join-request">
             <Avatar name={name} size={32} />
