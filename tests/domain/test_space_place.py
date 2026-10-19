@@ -63,10 +63,59 @@ def test_only_a_global_space_has_a_pin():
         assert place_pin_of(_space(space_type=tier)) is None
 
 
-def test_no_pin_or_an_area_is_no_pin():
+def test_no_pin_is_no_pin():
     assert place_pin_of(_space(lat=None, lon=None)) is None
-    # A radius is a local community's area, never a pin.
-    assert place_pin_of(_space(radius_km=5.0)) is None
+    # A radius alone is no pin.
+    assert place_pin_of(_space(lat=None, lon=None, radius_km=5.0)) is None
+
+
+def test_a_global_pin_carries_its_radius_hint():
+    """On a GLOBAL space ``radius_km`` is the owner's hint ("best for people
+    within 10 km") — never enforced; on a public space the same column is a
+    local community's area, which is never a pin."""
+    assert place_pin_of(_space(radius_km=10.0)) == PlacePin(47.3769, 8.5417, 10.0)
+    assert place_pin_of(_space(space_type=SpaceType.PUBLIC, radius_km=10.0)) is None
+
+
+def test_validate_takes_an_optional_radius_hint():
+    assert validate_place_pin({"lat": 47.0, "lon": 8.0, "radius_km": 10}) == PlacePin(
+        47.0, 8.0, 10.0
+    )
+    assert validate_place_pin({"lat": 47.0, "lon": 8.0, "radius_km": 2.345}) == (
+        PlacePin(47.0, 8.0, 2.3)
+    )
+    # Absent or null: no hint.
+    assert validate_place_pin({"lat": 47.0, "lon": 8.0, "radius_km": None}) == (
+        PlacePin(47.0, 8.0)
+    )
+
+
+@pytest.mark.parametrize("bad", [0.4, 50.5, 0, -1, "10", True, float("inf")])
+def test_a_radius_hint_out_of_bounds_is_refused(bad):
+    with pytest.raises(ValueError):
+        validate_place_pin({"lat": 47.0, "lon": 8.0, "radius_km": bad})
+
+
+def test_the_wire_names_the_hint_only_when_there_is_one():
+    """An unhinted pin is byte-for-byte what it was before the hint
+    existed, so its signed publish body is unchanged."""
+    assert place_pin_wire(PlacePin(47.0, 8.0)) == {"lat": 47.0, "lon": 8.0}
+    assert place_pin_wire(PlacePin(47.0, 8.0, 10.0)) == {
+        "lat": 47.0,
+        "lon": 8.0,
+        "radius_km": 10.0,
+    }
+
+
+def test_a_bad_hint_on_receipt_keeps_the_pin():
+    """The hint only ever labels: a malformed one is dropped, the pin is
+    kept for sorting."""
+    assert parse_place_pin_wire({"lat": 47.0, "lon": 8.0, "radius_km": 999}) == (
+        PlacePin(47.0, 8.0)
+    )
+    assert parse_place_pin_wire({"lat": 47.0, "lon": 8.0, "radius_km": 5}) == (
+        PlacePin(47.0, 8.0, 5.0)
+    )
 
 
 def test_wire_round_trip_and_bad_wire_is_unpinned():

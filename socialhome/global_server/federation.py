@@ -1448,6 +1448,8 @@ class GfsFederationService:
             withdrawn=(existing.withdrawn if existing and not has_ts else False),
             place_lat=pin.lat if pin is not None else None,
             place_lon=pin.lon if pin is not None else None,
+            # The hint is inside the same signed ``place`` object.
+            place_radius_km=pin.radius_km if pin is not None else None,
         )
         if existing is not None and existing.withdrawn and not has_ts:
             log.info(

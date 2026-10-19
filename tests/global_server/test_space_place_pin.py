@@ -115,3 +115,79 @@ def test_cluster_gossip_carries_the_pin_revalidated():
     )
     bad = _wire_to_space({**wire, "place": {"lat": 999, "lon": 0}})
     assert (bad.place_lat, bad.place_lon) == (None, None)
+
+
+# ── the radius hint ─────────────────────────────────────────────────────
+
+
+async def test_a_signed_radius_hint_is_stored_and_listed(gfs_client):
+    seed, _ = await _register_owner(gfs_client.server.app)
+    body = _sign_publish_body(
+        {**_BASE, "place": {"lat": 47.3769, "lon": 8.5417, "radius_km": 10}},
+        seed=seed,
+    )
+    assert (
+        await gfs_client.post("/gfs/spaces/sp-chess/publish", json=body)
+    ).status == 200
+    want = {"lat": 47.3769, "lon": 8.5417, "radius_km": 10.0}
+    assert (await _listed(gfs_client))["place"] == want
+    assert "place_radius_km" not in await _listed(gfs_client)
+    detail = await (await gfs_client.get("/gfs/spaces/sp-chess")).json()
+    assert detail["place"] == want
+
+
+async def test_a_hint_bolted_onto_a_signed_pin_is_refused(gfs_client):
+    """The hint is inside the signed ``place``: nobody but the owner can
+    add or change it."""
+    seed, _ = await _register_owner(gfs_client.server.app)
+    body = _sign_publish_body(
+        {**_BASE, "place": {"lat": 47.3769, "lon": 8.5417}}, seed=seed
+    )
+    body["place"] = {**body["place"], "radius_km": 50}
+    assert (
+        await gfs_client.post("/gfs/spaces/sp-chess/publish", json=body)
+    ).status == 403
+
+
+async def test_a_malformed_signed_hint_keeps_the_pin(gfs_client):
+    seed, _ = await _register_owner(gfs_client.server.app)
+    body = _sign_publish_body(
+        {**_BASE, "place": {"lat": 47.3769, "lon": 8.5417, "radius_km": 999}},
+        seed=seed,
+    )
+    assert (
+        await gfs_client.post("/gfs/spaces/sp-chess/publish", json=body)
+    ).status == 200
+    assert (await _listed(gfs_client))["place"] == {"lat": 47.3769, "lon": 8.5417}
+
+
+async def test_the_repo_round_trips_the_hint(gfs_client):
+    repo = gfs_client.server.app[gfs_fed_repo_key]
+    await _register_owner(gfs_client.server.app)
+    await repo.upsert_space(
+        GlobalSpace(
+            space_id="sp-chess",
+            owning_instance="owner.home",
+            name="C",
+            place_lat=47.3769,
+            place_lon=8.5417,
+            place_radius_km=25.0,
+        )
+    )
+    got = await repo.get_space("sp-chess")
+    assert got.place_radius_km == 25.0
+
+
+def test_cluster_gossip_carries_the_hint():
+    space = GlobalSpace(
+        space_id="s",
+        owning_instance="o",
+        place_lat=47.3769,
+        place_lon=8.5417,
+        place_radius_km=5.0,
+    )
+    wire = _space_to_wire(space)
+    assert wire["place"] == {"lat": 47.3769, "lon": 8.5417, "radius_km": 5.0}
+    assert _wire_to_space(wire).place_radius_km == 5.0
+    bad = _wire_to_space({**wire, "place": {**wire["place"], "radius_km": "x"}})
+    assert (bad.place_lat, bad.place_radius_km) == (47.3769, None)

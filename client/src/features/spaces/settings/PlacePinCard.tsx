@@ -16,9 +16,10 @@ import { LocalAreaPicker, PIN_DOT_KM } from '@/components/LocalAreaPicker'
 import { t } from '@/i18n/i18n'
 import type { Space } from '@/types'
 import { coordLabel } from '@/utils/coordLabel'
+import { radiusLabel } from '@/utils/localArea'
 import { patchSpace, useServerValue } from './spacePatch'
 
-type Pin = { lat: number; lon: number }
+type Pin = { lat: number; lon: number; radius_km?: number | null }
 
 export function PlacePinCard({ space, onUpdate }: {
   space: Space
@@ -59,9 +60,13 @@ export function PlacePinCard({ space, onUpdate }: {
       <p class="sh-ss-local-area__where" role="status">
         {pin ? t('place_pin.settings.where', { place: coordLabel(pin.lat, pin.lon) })
           : t('place_pin.settings.none')}
+        {pin?.radius_km != null && (
+          <> · {t('place_pin.hint.within', { radius: radiusLabel(pin.radius_km) })}</>
+        )}
       </p>
       {pin && (
-        <LocalAreaMap area={{ ...pin, radius_km: PIN_DOT_KM }} height={180}
+        <LocalAreaMap area={{ lat: pin.lat, lon: pin.lon, radius_km: pin.radius_km ?? PIN_DOT_KM }}
+                      height={180}
                       zoneName={t('place_pin.map_zone')} ariaLabel={t('place_pin.map_label')} />
       )}
       <div class="sh-ss-local-area__actions">
@@ -81,10 +86,14 @@ export function PlacePinCard({ space, onUpdate }: {
       <LocalAreaPicker
         mode="pin"
         open={picking}
-        initial={pin ? { ...pin, radius_km: PIN_DOT_KM } : null}
+        initial={pin ? { lat: pin.lat, lon: pin.lon, radius_km: PIN_DOT_KM } : null}
+        initialHintKm={pin?.radius_km ?? null}
         home={null}
         onClose={() => setPicking(false)}
-        onSubmit={(next) => { setPicking(false); void save({ lat: next.lat, lon: next.lon }) }}
+        onSubmit={(next, hintKm) => {
+          setPicking(false)
+          void save({ lat: next.lat, lon: next.lon, ...(hintKm != null ? { radius_km: hintKm } : {}) })
+        }}
       />
     </section>
   )

@@ -12762,6 +12762,22 @@ a.sh-space-hero-members:focus-visible,
   background: color-mix(in srgb, var(--sh-text-muted) 16%, transparent);
   color: var(--sh-text);
 }
+/* A global space's radius hint, as seen from our home (a hint, never a
+   rule — so neither the yes-green nor the no-red of a local community). */
+.sh-place-hint {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--sh-radius-full);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 500;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--sh-text-muted) 14%, transparent);
+  color: var(--sh-text);
+}
+.sh-place-hint--inside {
+  background: color-mix(in srgb, var(--sh-success) 14%, transparent);
+}
 /* Discover row: the area under the meta line. */
 .sh-spaces-row__note { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
 /* The area picker and the create dialog's local-community block. */

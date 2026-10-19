@@ -38,7 +38,9 @@ import { askAdmins } from '@/features/connections/AdminContactNote'
 import { householdAdmins, loadHouseholdAdmins } from '@/features/connections/connectionsData'
 import { ConnIcon } from '@/features/connections/ConnIcon'
 import { areaShortLabel, type Home } from '@/utils/localArea'
-import { distanceLabel, pinDistanceKm, sortByDistance } from '@/utils/placePin'
+import {
+  distanceLabel, hasHint, hintLabel, hintVerdict, nearMe, pinDistanceKm, sortByDistance,
+} from '@/utils/placePin'
 import type { DirectoryEntry, GfsConnection, HouseholdSpaceRow } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
@@ -109,10 +111,11 @@ function actionLabel(a: Exclude<DiscoverAction, null>): string {
 }
 
 /** "Sara's household · 6 members · ask to join" — and, for a pinned
- *  global space, "about 3 km away" from our home. */
+ *  global space without a radius hint, "about 3 km away" from our home
+ *  (with a hint the distance is in the row's hint chip). */
 function entryMeta(e: DirectoryEntry, source: DiscoverSource, home: Home | null | undefined): string {
   const parts: string[] = []
-  const km = source === 'global' ? pinDistanceKm(e, home) : null
+  const km = source === 'global' && hintVerdict(e, home) === null ? pinDistanceKm(e, home) : null
   if (km !== null) parts.push(distanceLabel(km))
   if (source !== 'household') parts.push(hostLabel(e))
   parts.push(membersLabel(e.member_count))
@@ -134,6 +137,9 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
   const [asking, setAsking] = useState<DirectoryEntry | null>(null)
   /** Paired › "Near you": only the local communities our home is in. */
   const [nearOnly, setNearOnly] = useState(false)
+  /** Global › "Near me": only the spaces whose suggested area (the owner's
+   *  radius hint) our home is in — worked out here, sent nowhere. */
+  const [nearMeOnly, setNearMeOnly] = useState(false)
 
   const reload = async () => {
     const r = await loadDiscover()
@@ -233,6 +239,9 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
       home,
     ),
   }
+  // "Near me" only means something with our home and a hinted space.
+  const canNearMe = home != null && hasHint(shown.global)
+  if (nearMeOnly && canNearMe) shown.global = nearMe(shown.global, home)
   const rows = shown[source]
   const searching = term.trim() !== ''
 
@@ -319,6 +328,19 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           </button>
         </div>
       )}
+      {source === 'global' && canNearMe && (
+        <div class="sh-spaces-filter">
+          <button
+            type="button"
+            class="sh-spaces-chip"
+            aria-pressed={nearMeOnly}
+            data-testid="discover-near-me"
+            onClick={() => setNearMeOnly(!nearMeOnly)}
+          >
+            <span aria-hidden="true">📍</span> {t('place_pin.discover.near_me')}
+          </button>
+        </div>
+      )}
       {rows.length === 0 ? emptyLine() : (
         <ul class="sh-spaces-card sh-spaces-list" aria-label={t(CHIP_LABEL[source])}>
           {rows.map((e) => {
@@ -334,10 +356,12 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
             const meta = a === null && !areaBlocks
               ? `${entryMeta(e, source, home)} · ${t('spaces.discover.invite_link_short')}`
               : entryMeta(e, source, home)
+            // A global space's radius hint: compared with OUR home, here.
+            const hint = source === 'global' ? hintVerdict(e, home) : null
             const areaText = radius !== null
               ? [areaShortLabel(radius), verdict ? localAreaVerdictText(verdict, hostLabel(e)) : null]
                 .filter(Boolean).join(' · ')
-              : ''
+              : hint ? hintLabel(hint) : ''
             return (
               <SpaceListRow
                 key={e.space_id}
@@ -346,11 +370,15 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
                 name={e.name}
                 meta={meta}
                 muted={verdict === 'outside'}
-                note={radius !== null && (
+                note={radius !== null ? (
                   <>
                     <span class="sh-local-area-chip">🏘️ {areaShortLabel(radius)}</span>
                     {verdict && <LocalAreaBadge verdict={verdict} hostName={hostLabel(e)} />}
                   </>
+                ) : hint && (
+                  <span class={`sh-place-hint sh-place-hint--${hint.kind}`} data-testid="place-hint">
+                    <span aria-hidden="true">📍</span> {hintLabel(hint)}
+                  </span>
                 )}
                 label={areaText ? `${e.name}, ${meta}, ${areaText}` : `${e.name}, ${meta}`}
                 action={a && (

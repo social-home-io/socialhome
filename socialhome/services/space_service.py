@@ -1054,7 +1054,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             category=category,
             lat=area.lat if area is not None else pin.lat if pin is not None else None,
             lon=area.lon if area is not None else pin.lon if pin is not None else None,
-            radius_km=area.radius_km if area is not None else None,
+            # A public space's area, or a global pin's radius hint.
+            radius_km=(
+                area.radius_km
+                if area is not None
+                else pin.radius_km
+                if pin is not None
+                else None
+            ),
         )
         await self._spaces.save(space)
         # Persist the space's Ed25519 PRIVATE seed (KEK-wrapped at rest) so

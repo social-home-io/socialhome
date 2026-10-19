@@ -904,9 +904,14 @@ household:
 - **The viewer's location goes nowhere.** Discover › Global sorts by the
   distance from the viewer's own household home, computed in the browser
   ("about 3 km away", rounded).
-- **Joining never checks it.** A join request or a follow works as for any
-  global space; the About page says "You're expected to follow this
-  space's rules."
+- **An optional radius hint** ("best for people within 10 km") rides with
+  the pin, in the same signed listing metadata. The viewer's browser
+  compares it with the distance from its own home ("Within the area" /
+  "about 12 km away · outside the suggested 10 km", a "Near me" filter) —
+  still nothing about the viewer is sent anywhere.
+- **Joining never checks it** — neither the pin nor the hint. A join request
+  or a follow works as for any global space; the About page says "You're
+  expected to follow this space's rules."
 - A `public` (non-local) space has no pin: its location is its local
   community's area or nothing.
 

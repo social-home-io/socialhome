@@ -788,13 +788,15 @@ class SqliteSpaceRepo:
 
     async def set_place_pin(self, space_id: str, pin: PlacePin | None) -> None:
         """Set (or, with ``None``, clear) a GLOBAL space's place pin —
-        ``spaces.lat`` / ``lon``, with ``radius_km`` NULL (a radius is a
-        local community's area). The caller has validated it (4 dp)."""
+        ``spaces.lat`` / ``lon`` and its radius hint in ``radius_km`` (on a
+        global space that column is the hint, never an area). The caller
+        has validated it (4 dp, hint 0.5–50 km)."""
         await self._db.enqueue(
-            "UPDATE spaces SET lat=?, lon=?, radius_km=NULL WHERE id=?",
+            "UPDATE spaces SET lat=?, lon=?, radius_km=? WHERE id=?",
             (
                 pin.lat if pin is not None else None,
                 pin.lon if pin is not None else None,
+                pin.radius_km if pin is not None else None,
                 space_id,
             ),
         )

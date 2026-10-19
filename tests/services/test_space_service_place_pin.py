@@ -108,3 +108,47 @@ async def test_leaving_the_global_tier_drops_the_pin(stack):
     )
     got = await stack.repo.get(space.id)
     assert (got.lat, got.lon, got.radius_km) == (None, None, None)
+
+
+# ── the radius hint ("best for people within 10 km") ───────────────────
+
+
+async def test_create_stores_the_radius_hint(stack):
+    space = await _global(stack, place={"lat": 47.3769, "lon": 8.5417, "radius_km": 10})
+    got = await stack.repo.get(space.id)
+    assert (got.lat, got.lon, got.radius_km) == (47.3769, 8.5417, 10.0)
+
+
+async def test_set_changes_and_drops_the_hint(stack):
+    stack.svc._gfs = AsyncMock()
+    space = await _global(stack, place={"lat": 47.3769, "lon": 8.5417, "radius_km": 10})
+    pin = await stack.svc.set_place_pin(
+        space.id,
+        actor_username="anna",
+        place={"lat": 47.3769, "lon": 8.5417, "radius_km": 25},
+    )
+    assert pin == PlacePin(47.3769, 8.5417, 25.0)
+    assert (await stack.repo.get(space.id)).radius_km == 25.0
+    # "No radius": the pin stays, the hint goes.
+    pin = await stack.svc.set_place_pin(
+        space.id, actor_username="anna", place={"lat": 47.3769, "lon": 8.5417}
+    )
+    assert pin == PlacePin(47.3769, 8.5417)
+    assert (await stack.repo.get(space.id)).radius_km is None
+
+
+async def test_a_hint_out_of_bounds_is_a_value_error(stack):
+    with pytest.raises(ValueError):
+        await _global(stack, place={"lat": 47.0, "lon": 8.0, "radius_km": 60})
+
+
+async def test_a_hinted_pin_never_becomes_a_local_community(stack):
+    """``spaces.radius_km`` is a hint on a global space and an area on a
+    public one: leaving the global tier must drop pin AND hint, or the
+    space would turn into a local community nobody chose."""
+    space = await _global(stack, place={"lat": 47.3769, "lon": 8.5417, "radius_km": 5})
+    await stack.svc.update_config(
+        space.id, actor_username="anna", space_type=SpaceType.PUBLIC
+    )
+    got = await stack.repo.get(space.id)
+    assert (got.lat, got.lon, got.radius_km) == (None, None, None)

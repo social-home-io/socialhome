@@ -9,6 +9,7 @@ import pytest
 
 from socialhome.crypto import b64url_decode, generate_identity_keypair, verify_ed25519
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.domain.space_place import PlacePin
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 
@@ -89,3 +90,21 @@ async def test_an_unpinned_space_never_probes_or_ships_one(env, monkeypatch, lat
     await svc.publish_space("sp-pin", "gfs-p")
     assert "place" not in session._last_body  # type: ignore[attr-defined]
     assert "place_pin" not in probed
+
+
+async def test_the_radius_hint_rides_inside_the_signed_place(env, monkeypatch):
+    """No new capability: the GFS folds the whole ``place`` object into the
+    bytes it verifies, so the hint is signed with the pin (no GFS has
+    shipped ``place_pin`` without it)."""
+    svc, session, kp, _ = await _svc(
+        env, lat=47.3769, lon=8.5417, place_pin_cap=True, monkeypatch=monkeypatch
+    )
+    await svc._space_repo.set_place_pin(  # type: ignore[union-attr]
+        "sp-pin", PlacePin(47.3769, 8.5417, 10.0)
+    )
+    await svc.publish_space("sp-pin", "gfs-p")
+    body = dict(session._last_body)  # type: ignore[attr-defined]
+    assert body["place"] == {"lat": 47.3769, "lon": 8.5417, "radius_km": 10.0}
+    sig = body.pop("signature")
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig))

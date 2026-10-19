@@ -39,8 +39,9 @@ import {
   sourceOf, type DiscoverAction,
 } from './discover'
 import { addBase } from '@/baseUrl'
-import { areaLabel, areaShortLabel, peerAreaLabel, type AreaVerdict } from '@/utils/localArea'
-import { distanceLabel, pinDistanceKm } from '@/utils/placePin'
+import { areaLabel, areaShortLabel, peerAreaLabel, radiusLabel, type AreaVerdict } from '@/utils/localArea'
+import { distanceLabel, hintLabel, hintVerdict, pinDistanceKm } from '@/utils/placePin'
+import { PIN_DOT_KM } from '@/components/LocalAreaPicker'
 
 type AboutAction = 'open' | Exclude<DiscoverAction, null>
 
@@ -104,6 +105,10 @@ async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
       already_member:     seated && !following,
       already_subscribed: following,
       local_area:         space.local_area ?? null,
+      // A global space's place pin and radius hint (listing metadata).
+      lat:                space.place?.lat ?? null,
+      lon:                space.place?.lon ?? null,
+      radius_km:          space.place?.radius_km ?? null,
     }
   } catch {
     return null
@@ -280,6 +285,11 @@ export default function SpacePublicDetailPage() {
   // A global space's place pin: "about 3 km away" from our home, worked
   // out here. Sorting / a hint only — joining never checks it.
   const pinKm = entry.scope === 'global' ? pinDistanceKm(entry, householdHome.value) : null
+  // …and the owner's radius hint, compared with our home here too.
+  const place = entry.scope === 'global' && entry.lat != null && entry.lon != null
+    ? { lat: entry.lat, lon: entry.lon, radius_km: entry.radius_km ?? null }
+    : null
+  const hint = entry.scope === 'global' ? hintVerdict(entry, householdHome.value) : null
   const joining = action === 'join' || action === 'request'
 
   return (
@@ -374,6 +384,30 @@ export default function SpacePublicDetailPage() {
                 </>
               )}
             </p>
+          )}
+        </section>
+      )}
+
+      {place && (
+        <section class="sh-space-public__section sh-space-public__local" aria-labelledby="sh-about-place">
+          <h2 id="sh-about-place">📍 {t('place_pin.settings.title')}</h2>
+          {place.radius_km !== null && (
+            <p class="sh-space-public__local-where" data-testid="place-hint-where">
+              {t('place_pin.hint.within', { radius: radiusLabel(place.radius_km) })}
+            </p>
+          )}
+          {hint && (
+            <p class="sh-space-public__local-verdict" role="status">
+              <span class={`sh-place-hint sh-place-hint--${hint.kind}`} data-testid="place-hint">
+                <span aria-hidden="true">📍</span> {hintLabel(hint)}
+              </span>
+            </p>
+          )}
+          <LocalAreaMap area={{ lat: place.lat, lon: place.lon, radius_km: place.radius_km ?? PIN_DOT_KM }}
+                        home={householdHome.value} height={180}
+                        zoneName={t('place_pin.map_zone')} ariaLabel={t('place_pin.map_label')} />
+          {place.radius_km !== null && (
+            <p class="sh-muted">{t('place_pin.hint.only_a_hint')}</p>
           )}
         </section>
       )}

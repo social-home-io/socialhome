@@ -2751,17 +2751,29 @@ malformed one. Each entry is
 
 A global space's owner may pin it to a place — sorting metadata, never a
 household's location. The owner's signed publish body carries
-`place: {lat, lon}` (4 dp) **only** to a GFS whose signed `/gfs/info`
+`place: {lat, lon, radius_km?}` (4 dp; `radius_km` the owner's optional
+**radius hint**, 0.5–50 km — "best for people within 10 km") **only** to a
+GFS whose signed `/gfs/info`
 capability block says `place_pin: true` (it folds the field into the
 canonical bytes it verifies; an older GFS would 403 the whole publish, so it
-gets the body without it). The GFS stores it (`global_spaces.place_lat` /
-`place_lon`, GFS migration `0019`; malformed ⇒ none), gossips it to cluster
-peers as `place`, and serves `place: {lat, lon} | null` on `GET /gfs/spaces`
-and `GET /gfs/spaces/{id}`. A publish without the field clears it. The
-household re-validates it into `public_space_cache.lat` / `lon`, and the SPA
-sorts Discover › Global by the distance from its own home — computed in the
-browser, sent nowhere. Joining never checks it. Setting or moving it
-re-publishes to every GFS that already lists the space.
+gets the body without it). The hint rides inside the same signed `place`
+object under the same `place_pin` capability — no GFS release ever shipped
+`place_pin` without it, and a GFS signs `place` as sent, so nobody but the
+owner can add or change a hint. The GFS stores the pin
+(`global_spaces.place_lat` / `place_lon`, GFS migration `0019`; malformed ⇒
+none) and the hint (`place_radius_km`, `0020`; a malformed hint alone is
+dropped, the pin kept), gossips both to cluster peers as `place`, and serves
+`place: {lat, lon, radius_km?} | null` on `GET /gfs/spaces` and
+`GET /gfs/spaces/{id}`. A publish without the field clears it. The household
+re-validates it into `public_space_cache.lat` / `lon` / `radius_km`, and the
+SPA sorts Discover › Global by the distance from its own home — computed in
+the browser, sent nowhere — and, with a hint, says "Within the area" or
+"about 12 km away · outside the suggested 10 km" and offers a **Near me**
+filter (spaces whose suggested area that home is in); the About page draws
+the pin and the suggested circle on a small map. Joining and following never
+check the pin or the hint ("You're expected to follow this space's rules").
+Setting or moving either re-publishes to every GFS that already lists the
+space.
 
 ## Withdrawal
 

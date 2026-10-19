@@ -42,7 +42,7 @@ from ..crypto import (
     verify_ed25519,
 )
 from ..domain.space import normalize_category, normalize_join_mode
-from ..domain.space_place import parse_place_pin_wire
+from ..domain.space_place import PlacePin, parse_place_pin_wire, place_pin_wire
 from ..gfs_proof import sign_possession_proof
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
 from .envelope_relay import ENVELOPE_INSTANCE_ID_RE
@@ -2399,11 +2399,7 @@ def _space_to_wire(s: GlobalSpace) -> dict:
         "withdrawn": s.withdrawn,
         # The owner's place pin travels too, or a peer sync would drop it
         # until the owner's next publish.
-        "place": (
-            {"lat": s.place_lat, "lon": s.place_lon}
-            if s.place_lat is not None and s.place_lon is not None
-            else None
-        ),
+        "place": _place_wire(s),
     }
 
 
@@ -2435,13 +2431,26 @@ def _wire_to_space(d: dict) -> GlobalSpace:
         # Re-validated like any wire point; malformed ⇒ no pin.
         place_lat=_wire_place(d)[0],
         place_lon=_wire_place(d)[1],
+        place_radius_km=_wire_place(d)[2],
     )
 
 
-def _wire_place(d: dict) -> tuple[float | None, float | None]:
-    """A gossiped place pin, re-validated; malformed or absent ⇒ none."""
+def _place_wire(s: GlobalSpace) -> dict | None:
+    """A listing's pin (and radius hint) as gossiped, or ``None``."""
+    if s.place_lat is None or s.place_lon is None:
+        return None
+    return place_pin_wire(
+        PlacePin(lat=s.place_lat, lon=s.place_lon, radius_km=s.place_radius_km)
+    )
+
+
+def _wire_place(d: dict) -> tuple[float | None, float | None, float | None]:
+    """A gossiped place pin, re-validated; malformed or absent ⇒ none (a
+    malformed hint alone ⇒ the pin without it)."""
     pin = parse_place_pin_wire(d.get("place"))
-    return (pin.lat, pin.lon) if pin is not None else (None, None)
+    if pin is None:
+        return (None, None, None)
+    return (pin.lat, pin.lon, pin.radius_km)
 
 
 def _wire_rotation_seq(raw: object) -> int:

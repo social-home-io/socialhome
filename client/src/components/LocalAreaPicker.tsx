@@ -2,9 +2,11 @@
  * LocalAreaPicker — choose a local community's area: a centre and a
  * radius. Households join the space only while their home lies inside.
  *
- * ``mode="pin"`` picks a GLOBAL space's place pin instead: a point only
- * (no radius), and NO "Use our home" shortcut — a pin is shown to everyone
+ * ``mode="pin"`` picks a GLOBAL space's place pin instead: a point with an
+ * optional radius HINT ("best for people within 10 km", or "No radius" —
+ * the default), and NO "Use our home" shortcut — a pin is shown to everyone
  * who can find the space, so it is never the household's home by default.
+ * The hint is never enforced.
  *
  * The centre is tapped on the map, typed as latitude / longitude (the
  * keyboard way in — there is no place search, which would be a third-party
@@ -41,7 +43,7 @@ const fmt4 = (v: number): string => v.toFixed(4)
 export const PIN_DOT_KM = 0.15
 
 export function LocalAreaPicker({
-  open, initial, home, onClose, onSubmit, mode = 'area',
+  open, initial, home, onClose, onSubmit, mode = 'area', initialHintKm = null,
 }: {
   open: boolean
   /** The current area (editing), or ``null`` for a new one. */
@@ -50,15 +52,20 @@ export function LocalAreaPicker({
    *  (area mode only). */
   home: Home | null | undefined
   onClose: () => void
-  /** In pin mode the radius is meaningless — read ``lat`` / ``lon``. */
-  onSubmit: (area: LocalArea) => void
+  /** In pin mode read ``lat`` / ``lon`` and the second argument: the
+   *  radius hint in km, or ``null`` for none. */
+  onSubmit: (area: LocalArea, hintKm: number | null) => void
   mode?: 'area' | 'pin'
+  /** Pin mode: the stored radius hint (``null`` = none). */
+  initialHintKm?: number | null
 }) {
   const pin = mode === 'pin'
   // A pin never starts from — or offers — the household's home.
   const ownHome = pin ? null : home
   const [centre, setCentre] = useState<Home | null>(null)
   const [radius, setRadius] = useState<number>(DEFAULT_RADIUS_KM)
+  /** Pin mode: the suggested radius, or ``null`` ("No radius"). */
+  const [hint, setHint] = useState<number | null>(null)
   // The typed fields mirror the centre; a map tap or "Use our home"
   // rewrites them, typing a valid pair moves the centre.
   const [latText, setLatText] = useState('')
@@ -87,18 +94,25 @@ export function LocalAreaPicker({
     setRadius(initial && RADIUS_PRESETS_KM.includes(initial.radius_km)
       ? initial.radius_km
       : initial?.radius_km ?? DEFAULT_RADIUS_KM)
+    setHint(initialHintKm)
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps -- read on open only
 
   const area: LocalArea | null = centre
-    ? { ...centre, radius_km: pin ? PIN_DOT_KM : radius }
+    ? { ...centre, radius_km: pin ? hint ?? PIN_DOT_KM : radius }
     : null
   const radiusOptions = (RADIUS_PRESETS_KM.includes(radius)
     ? RADIUS_PRESETS_KM : [...RADIUS_PRESETS_KM, radius].sort((a, b) => a - b))
     .map((km) => ({ value: String(km), label: radiusLabel(km) }))
+  const hintOptions = [
+    { value: 'none', label: t('place_pin.hint.none') },
+    ...(hint === null || RADIUS_PRESETS_KM.includes(hint)
+      ? RADIUS_PRESETS_KM : [...RADIUS_PRESETS_KM, hint].sort((a, b) => a - b))
+      .map((km) => ({ value: String(km), label: radiusLabel(km) })),
+  ]
 
   const submit = (e: Event) => {
     e.preventDefault()
-    if (area) onSubmit(area)
+    if (area) onSubmit(area, pin ? hint : null)
   }
 
   return (
@@ -157,6 +171,18 @@ export function LocalAreaPicker({
             onChange={(v) => setRadius(Number(v))}
             labelledBy="local-area-radius-label"
           />
+        </div>}
+        {pin && <div class="sh-local-area-picker__radius">
+          <span id="place-pin-hint-label" class="sh-local-area-picker__radius-label">
+            {t('place_pin.hint.legend')}
+          </span>
+          <ChipRadioGroup
+            options={hintOptions}
+            value={hint === null ? 'none' : String(hint)}
+            onChange={(v) => setHint(v === 'none' ? null : Number(v))}
+            labelledBy="place-pin-hint-label"
+          />
+          <p class="sh-ss-hint">{t('place_pin.hint.only_a_hint')}</p>
         </div>}
         <p class="sh-ss-hint">{pin ? t('place_pin.privacy') : t('local_area.picker.privacy')}</p>
         <div class="sh-form-actions">
