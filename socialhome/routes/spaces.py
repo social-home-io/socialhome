@@ -50,10 +50,12 @@ from ..domain.link_preview import link_preview_to_dict
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..domain.post import LocationData, PostType
 from ..domain.space import (
+    CONTENT_AUTHORITY_ROLES,
     INVITE_VIA_INTERNAL,
     INVITE_VIAS,
     PUBLIC_SPACE_TIERS,
     WRITER_ROLES,
+    MemberSpaceListing,
     Space,
     SpaceFeatures,
     SpacePermissionError,
@@ -67,7 +69,7 @@ from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..rate_limiter import client_bucket
 from ..security import error_response, sanitise_for_api
 from ..services.gfs_connection_service import GfsConnectionError
-from ..services.space_attention import space_attention
+from ..services.space_attention import needs_you_count, space_attention
 from ..services.space_member_guard import require_member_seat
 from ..services.space_service import (
     _UNSET_MEMBER_PROFILE,
@@ -130,56 +132,90 @@ class SpaceCollectionView(BaseView):
     """``GET /api/spaces`` + ``POST /api/spaces`` — list-or-create spaces."""
 
     async def get(self) -> web.Response:
-        """List every space the caller is a member of (§23.48).
+        """List every space the caller holds a seat in (§23.48) — a
+        follower's included (``my_role`` ``subscriber``).
 
-        Returns a lightweight row per space — enough for the sidebar
-        rendering. Use ``GET /api/spaces/{id}`` for the full config.
+        A lightweight row per space — enough for the sidebar and the
+        Spaces page. Use ``GET /api/spaces/{id}`` for the full config.
         """
         ctx = self.user
-        repo = self.svc(space_repo_key)
-        spaces = await repo.list_for_user(ctx.user_id)
-        return web.json_response(
-            [
-                sanitise_for_api(
-                    {
-                        "id": s.id,
-                        "name": s.name,
-                        "emoji": s.emoji,
-                        # The list-card is the SPA's first read of a
-                        # space — surfacing the description here avoids
-                        # the per-space ``GET /api/spaces/{id}`` round-
-                        # trip the SpaceList page would otherwise need
-                        # just to render the subtitle on each card.
-                        "description": s.description,
-                        "space_type": s.space_type.value,
-                        "join_mode": s.join_mode.value,
-                        # Same block the detail endpoint emits — the space
-                        # browser reads ``features.allow_subscribers`` off
-                        # each row to decide whether a discoverable space
-                        # wears the 🔒 "content is private" chip, and
-                        # withholding it here made the SPA fetch
-                        # ``/api/spaces/{id}`` once per space on every
-                        # browse load just to learn one boolean.
-                        "features": s.features.to_wire_dict(),
-                        # Read-only archive state — the SPA groups
-                        # archived spaces out of the active sidebar list.
-                        "archived": s.archived,
-                        # Why archived: NULL = normal reversible admin
-                        # archive; 'dissolved'/'removed' = remote-terminated
-                        # (read-only, not unarchivable). The SPA picks the
-                        # banner copy + hides Unarchive off this.
-                        "archived_reason": s.archived_reason,
-                        # §D1b — the creator's instance. When it
-                        # differs from our own, the row is a remote
-                        # stub: the SPA gates the Settings link + any
-                        # admin gestures on this field so a member
-                        # never tries to mutate state the host owns.
-                        "owner_instance_id": s.owner_instance_id,
-                    }
-                )
-                for s in spaces
-            ]
+        listings = await self.svc(space_repo_key).list_member_listings(ctx.user_id)
+        rows = [await self._row(listing) for listing in listings]
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(rows, signer)
+        return web.json_response(rows)
+
+    async def _row(self, listing: MemberSpaceListing) -> dict:
+        s = listing.space
+        return sanitise_for_api(
+            {
+                "id": s.id,
+                "name": s.name,
+                "emoji": s.emoji,
+                # The list-card is the SPA's first read of a
+                # space — surfacing the description here avoids
+                # the per-space ``GET /api/spaces/{id}`` round-
+                # trip the SpaceList page would otherwise need
+                # just to render the subtitle on each card.
+                "description": s.description,
+                "space_type": s.space_type.value,
+                "join_mode": s.join_mode.value,
+                # Same block the detail endpoint emits — the space
+                # browser reads ``features.allow_subscribers`` off
+                # each row to decide whether a discoverable space
+                # wears the 🔒 "content is private" chip, and
+                # withholding it here made the SPA fetch
+                # ``/api/spaces/{id}`` once per space on every
+                # browse load just to learn one boolean.
+                "features": s.features.to_wire_dict(),
+                # Read-only archive state — the SPA groups
+                # archived spaces out of the active sidebar list.
+                "archived": s.archived,
+                # Why archived: NULL = normal reversible admin
+                # archive; 'dissolved'/'removed' = remote-terminated
+                # (read-only, not unarchivable). The SPA picks the
+                # banner copy + hides Unarchive off this.
+                "archived_reason": s.archived_reason,
+                # §D1b — the creator's instance. When it
+                # differs from our own, the row is a remote
+                # stub: the SPA gates the Settings link + any
+                # admin gestures on this field so a member
+                # never tries to mutate state the host owns.
+                "owner_instance_id": s.owner_instance_id,
+                # The Spaces page: who the caller is here (a follower
+                # lists under Following), the members the space's people
+                # list shows, and when its feed last moved.
+                "my_role": listing.role,
+                "member_count": listing.member_count,
+                "last_activity_at": listing.last_activity_at,
+                # The uploaded icon (signed below), else the SPA draws the
+                # emoji or the name's initial.
+                "icon_url": (
+                    f"/api/spaces/{s.id}/icon?v={s.icon_hash}" if s.icon_hash else None
+                ),
+                # "Needs you" — the total the space's More badge shows;
+                # null unless the caller has content authority here.
+                "needs_you": await self._needs_you(s.id, listing.role),
+            }
         )
+
+    async def _needs_you(self, space_id: str, role: str) -> int | None:
+        if role not in CONTENT_AUTHORITY_ROLES:
+            return None
+        seat = await self.svc(space_repo_key).get_member(space_id, self.user.user_id)
+        if seat is None:
+            return None
+        attention = await space_attention(
+            space_id,
+            seat=seat,
+            username=self.user.username,
+            space_service=self.svc(space_service_key),
+            approvals=self.svc(space_approval_service_key),
+            reports=self.svc(report_service_key),
+            moderation=self.request.app.get(space_moderation_service_key),
+        )
+        return needs_you_count(attention, seat.role)
 
     async def post(self) -> web.Response:
         ctx = self.user

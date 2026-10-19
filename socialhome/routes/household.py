@@ -55,7 +55,7 @@ class HouseholdChatView(BaseView):
 
 
 class HouseholdSpacesView(BaseView):
-    """``GET /api/household/spaces`` — Browse › Your household.
+    """``GET /api/household/spaces`` — Spaces › Discover › Your household.
 
     The spaces THIS household hosts that the caller may find
     (:meth:`SpaceService.household_directory`): every one they hold a seat

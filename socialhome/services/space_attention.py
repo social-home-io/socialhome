@@ -28,6 +28,7 @@ from ..domain.space import (
     SETTINGS_AUTHORITY_ROLES,
     SpaceMember,
     SpacePermissionError,
+    SpaceRole,
 )
 
 if TYPE_CHECKING:
@@ -105,3 +106,25 @@ async def space_attention(
         "join_requests": join_requests,
         "proposals": proposals,
     }
+
+
+def needs_you_count(attention: dict | None, role: str) -> int | None:
+    """One number for "needs you" — the same total the space's More badge
+    and Needs-you card show (the SPA's ``needsYouTotal``): held items +
+    reports + join requests + open proposals awaiting *this* viewer's
+    vote (not one they made or already voted on; an owner-only proposal
+    only for the owner). ``None`` when nothing can wait for them."""
+    if attention is None:
+        return None
+    awaiting = sum(
+        1
+        for p in attention["proposals"]
+        if not p.get("voted_by_me")
+        and (not p.get("owner_only") or role == SpaceRole.OWNER)
+    )
+    return (
+        attention["pending_review"]
+        + attention["reports"]
+        + attention["join_requests"]
+        + awaiting
+    )

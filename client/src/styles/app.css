@@ -2174,15 +2174,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-skeleton-calendar-day {
   display: block;
 }
-.sh-spaces--skeleton .sh-space-card--skeleton {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-md);
-  padding: var(--sh-space-md);
-  border-radius: var(--sh-radius-md);
-  background: var(--sh-bg-secondary);
-  margin-bottom: var(--sh-space-sm);
-}
+
 .sh-bazaar--skeleton .sh-bazaar-card--skeleton {
   display: flex;
   gap: var(--sh-space-md);
@@ -2411,7 +2403,6 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   color: var(--sh-text-muted);
 }
 .sh-friends-error .sh-btn { margin-top: var(--sh-space-sm); min-height: 44px; }
-
 
 /* PersonButton — a name / avatar that opens the person sheet. Looks
  * exactly like what it wraps; the underline on hover / focus is the
@@ -8302,8 +8293,6 @@ button.sh-shopping-item__text:focus-visible {
 .sh-shopping-edit__text { flex: 2 1 200px; }
 .sh-shopping-edit__cancel { flex-shrink: 0; }
 
-
-
 /* ── Store catalogue manager (header "Stores" dialog) ────────────────
  * The single place a household renames / reorders / deletes / adds a
  * shop. Lives in a Modal, so it stays reachable with an empty list —
@@ -9996,7 +9985,6 @@ button.sh-presence-card:hover strong { text-decoration: underline; text-underlin
   .sh-page-editor-actions .sh-page-pending-pill { flex-basis: 100%; justify-content: center; }
 }
 
-
 /* HR — visual separators */
 hr {
   border: none;
@@ -10013,89 +10001,7 @@ hr {
  * hover. Scope-typed left edge (private = terracotta, household =
  * moss, public/global = honey) reads as the website's tile__edge. */
 .sh-spaces { display: flex; flex-direction: column; gap: var(--sh-space-lg); padding-top: 12px; }
-.sh-space-card {
-  position: relative;
-  display: flex;
-  gap: var(--sh-space-md);
-  padding: var(--sh-space-md);
-  background: var(--sh-bg-tertiary);
-  border: 1px solid var(--sh-border);
-  border-left: 4px solid var(--sh-border);
-  border-radius: var(--sh-radius-lg);
-  cursor: pointer;
-  text-decoration: none;
-  color: inherit;
-  box-shadow: var(--sh-shadow-pinned);
-  transform: rotate(var(--sh-space-rot, 0deg));
-  transition: transform var(--sh-transition-normal),
-              box-shadow var(--sh-transition-fast),
-              border-color var(--sh-transition-fast);
-}
-.sh-space-card::before {
-  content: "";
-  position: absolute;
-  top: -10px;
-  left: 28px;
-  width: 56px;
-  height: 14px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  transform: rotate(-5deg);
-  pointer-events: none;
-  z-index: 1;
-}
-.sh-space-card:nth-child(odd)::before {
-  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
-  left: auto;
-  right: 28px;
-  transform: rotate(7deg);
-}
-.sh-space-card:nth-child(even)::before {
-  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
-}
-.sh-space-card:nth-child(4n+1) { --sh-space-rot: -1.2deg; }
-.sh-space-card:nth-child(4n+2) { --sh-space-rot:  0.9deg; }
-.sh-space-card:nth-child(4n+3) { --sh-space-rot: -0.6deg; }
-.sh-space-card:nth-child(4n)   { --sh-space-rot:  0.8deg; }
-@media (max-width: 640px) {
-  .sh-space-card:nth-child(4n+1) { --sh-space-rot: -0.7deg; }
-  .sh-space-card:nth-child(4n+2) { --sh-space-rot:  0.5deg; }
-  .sh-space-card:nth-child(4n+3) { --sh-space-rot: -0.3deg; }
-  .sh-space-card:nth-child(4n)   { --sh-space-rot:  0.5deg; }
-}
-.sh-space-card:hover {
-  transform: rotate(0deg) translateY(-2px);
-  box-shadow:
-    0 1px 0 var(--sh-border),
-    0 28px 60px -28px rgba(26, 24, 20, 0.55);
-  border-color: var(--sh-border-strong);
-  border-left-color: var(--sh-primary);
-  text-decoration: none;
-  z-index: 2;
-}
-/* Settle-in on first paint — stagger so the cards "pin themselves
- * one after another". Same mechanic the feed uses, but keyframed to
- * the space-rot var so each card lands at its assigned tilt. */
-.sh-space-card { animation: sh-space-settle 460ms cubic-bezier(0.22, 1, 0.36, 1) both; }
-.sh-space-card:nth-child(1) { animation-delay: 60ms; }
-.sh-space-card:nth-child(2) { animation-delay: 130ms; }
-.sh-space-card:nth-child(3) { animation-delay: 200ms; }
-.sh-space-card:nth-child(4) { animation-delay: 270ms; }
-.sh-space-card:nth-child(n+5) { animation-delay: 320ms; }
-@keyframes sh-space-settle {
-  from { opacity: 0; transform: rotate(0deg) translateY(8px) scale(0.985); }
-  to   { opacity: 1; transform: rotate(var(--sh-space-rot, 0deg)) translateY(0) scale(1); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .sh-space-card { animation: none; transform: none; }
-}
-/* Scope-colored left edge — communicates the space's reach at a glance
- * (mirrors the website's tile__edge--private / --group / --global). */
-.sh-space-card--private    { border-left-color: var(--sh-primary); }
-.sh-space-card--household  { border-left-color: var(--sh-success); }
-.sh-space-card--public,
-.sh-space-card--global     { border-left-color: var(--sh-warning); }
+
 .sh-space-cover {
   width: 96px;
   aspect-ratio: 1;
@@ -17401,151 +17307,6 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   position: absolute; width: 0; height: 0; opacity: 0;
 }
 
-/* ─── Space browser (§D3) ───────────────────────────────────────────── */
-.sh-space-browser {
-  display: flex; flex-direction: column; gap: var(--sh-space-md);
-  padding: var(--sh-space-md);
-  max-width: 1200px; margin: 0 auto;
-}
-.sh-browser-header {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  gap: var(--sh-space-md);
-  padding: 0 var(--sh-space-xs);
-  flex-wrap: wrap;
-}
-.sh-browser-header__copy h1 {
-  margin: 0 0 var(--sh-space-xs);
-  font-size: 1.4rem;
-}
-.sh-browser-header__copy p {
-  margin: 0;
-  max-width: 60ch;
-}
-.sh-browser-header__actions {
-  display: flex; gap: var(--sh-space-sm);
-  flex-wrap: wrap;
-}
-.sh-browser-toolbar {
-  display: flex; gap: var(--sh-space-sm); align-items: center;
-  padding: 0 var(--sh-space-xs);
-}
-.sh-browser-toolbar__clear {
-  background: transparent;
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-sm);
-  padding: var(--sh-space-xs) var(--sh-space-sm);
-  color: var(--sh-text-muted);
-  cursor: pointer;
-  font: inherit;
-}
-.sh-browser-toolbar__clear:hover {
-  color: var(--sh-text);
-  border-color: var(--sh-accent, var(--sh-primary));
-}
-.sh-browser-toolbar .sh-input {
-  flex: 1;
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  background: var(--sh-bg);
-  color: inherit;
-}
-.sh-browser-tabs {
-  display: flex; gap: var(--sh-space-xs);
-  border-bottom: 1px solid var(--sh-border);
-  overflow-x: auto;
-}
-/* On a phone the three tab labels (each carrying a count) overflow 390 px,
-   and `overflow-x: auto` hid the third one — "Global" — off the right edge
-   with no scrollbar to hint at it, so the whole global directory was
-   unreachable, and the ACTIVE tab could sit off-screen. Wrap instead: two
-   short rows beat one invisible one. */
-@media (max-width: 560px) {
-  .sh-browser-tabs { flex-wrap: wrap; overflow-x: visible; }
-}
-.sh-browser-tab {
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  background: transparent; border: none;
-  border-bottom: 3px solid transparent;
-  color: var(--sh-text-muted); font-weight: 500;
-  cursor: pointer; white-space: nowrap;
-  transition: color 120ms, border-color 120ms;
-}
-.sh-browser-tab:hover { color: var(--sh-text); }
-.sh-browser-tab--active {
-  color: var(--sh-accent, var(--sh-primary-text));
-  border-bottom-color: var(--sh-accent, var(--sh-primary));
-}
-.sh-browser-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--sh-space-md);
-}
-.sh-browser-empty {
-  grid-column: 1 / -1;
-  padding: var(--sh-space-xl);
-  text-align: center;
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  gap: var(--sh-space-sm);
-}
-
-/* Card — repeating unit across all three browser tabs. Picks up the
- * same warm pinned-card aesthetic as ``.sh-space-card`` (cream paper,
- * tape ::before, scope-color left edge) but stays grid-friendly with
- * a smaller tape and no rotation, since browse-spaces lays the cards
- * out in a multi-column grid where rotation reads as misalignment. */
-.sh-browser-card {
-  position: relative;
-  display: flex; flex-direction: column; gap: var(--sh-space-sm);
-  /* Grid items default to ``min-width: auto`` — an unbreakable label
-     (a raw 52-char instance id in the "Connect with … first" CTA) would
-     otherwise push the card wider than its track and draw outside it. */
-  min-width: 0;
-  padding: var(--sh-space-md);
-  background: var(--sh-bg-tertiary);
-  border: 1px solid var(--sh-border);
-  border-left: 4px solid var(--sh-border);
-  border-radius: var(--sh-radius-lg);
-  box-shadow: var(--sh-shadow-pinned);
-  transition: transform var(--sh-transition-fast),
-              box-shadow var(--sh-transition-fast),
-              border-color var(--sh-transition-fast);
-}
-.sh-browser-card::before {
-  content: "";
-  position: absolute;
-  top: -8px;
-  right: 22px;
-  width: 48px;
-  height: 12px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  transform: rotate(6deg);
-  pointer-events: none;
-}
-.sh-browser-card:nth-child(odd)::before {
-  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
-}
-.sh-browser-card:nth-child(even)::before {
-  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
-}
-.sh-browser-card:hover {
-  transform: translateY(-2px);
-  box-shadow:
-    0 1px 0 var(--sh-border),
-    0 28px 60px -28px rgba(26, 24, 20, 0.55);
-  border-color: var(--sh-border-strong);
-}
-.sh-browser-card--tappable {
-  cursor: pointer;
-}
-.sh-browser-card--tappable:focus-visible {
-  outline: 2px solid var(--sh-accent, var(--sh-primary));
-  outline-offset: 2px;
-}
-
 /* Public space detail page — sh-side analogue to GFS /spaces/{id}.
  * Routed at /spaces/:id/about. Aims for the same warm pinned-paper
  * vocabulary (cream surface, accent bar, soft shadows) as the rest
@@ -17636,57 +17397,6 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   margin: 0;
   line-height: 1.55;
 }
-.sh-browser-card--private    { border-left-color: var(--sh-primary); }
-.sh-browser-card--household  { border-left-color: var(--sh-success); }
-.sh-browser-card--public,
-.sh-browser-card--global     { border-left-color: var(--sh-warning); }
-.sh-browser-card__hd {
-  display: flex; align-items: center; gap: var(--sh-space-sm);
-  min-width: 0;
-}
-.sh-browser-card__hd .sh-space-emoji {
-  font-size: 1.75rem;
-}
-.sh-browser-card__title {
-  display: flex; flex-direction: column; gap: 2px;
-  min-width: 0;
-}
-.sh-browser-card__title strong {
-  font-size: 1.05rem;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.sh-browser-card__count { font-size: var(--sh-font-size-xs); }
-.sh-browser-card__desc {
-  margin: 0;
-  font-size: var(--sh-font-size-sm);
-  line-height: 1.4;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.sh-browser-card__chips {
-  display: flex; flex-wrap: wrap; gap: var(--sh-space-xs);
-}
-.sh-browser-card__actions {
-  margin-top: auto;
-  display: flex; gap: var(--sh-space-xs);
-  align-items: center;
-  flex-wrap: wrap;
-  min-width: 0;
-}
-/* ``.sh-btn`` is ``white-space: nowrap`` by design, but a card action can
-   carry a host household name of any length. Inside the card the button
-   wraps and breaks mid-token instead, so no label — however pathological
-   — can escape the card on a 360 px phone. */
-.sh-browser-card__actions > .sh-btn {
-  min-width: 0;
-  max-width: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  text-align: center;
-  line-height: 1.25;
-}
 
 /* Subscribe button — used on SpaceCard when the space is public/global
    and the user isn't a full member. Distinct from the primary Join /
@@ -17742,83 +17452,6 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
   color: var(--sh-primary-on-soft);
   white-space: nowrap;
-}
-
-/* §D1b — informational chip on a space card when the space lives on
- * another household. Muted treatment because it's not a status the
- * user should act on; it just answers "why does my admin gear not
- * show on this card?" */
-.sh-space-remote-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: var(--sh-radius-full);
-  font-size: var(--sh-font-size-xs);
-  font-weight: 500;
-  background: var(--sh-bg-tertiary);
-  color: var(--sh-text-muted);
-  border: 1px solid var(--sh-border);
-  white-space: nowrap;
-}
-
-/* SpaceListPage — "Your spaces" / "Subscribed" sections. Only
-   rendered when both groups are non-empty; with just one group the
-   list renders flat as before to keep the familiar layout. */
-.sh-spaces-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-xs);
-  margin-top: var(--sh-space-md);
-}
-.sh-spaces-section__title {
-  font-size: var(--sh-font-size-sm);
-  font-weight: 600;
-  color: var(--sh-text-muted);
-  margin: 0 0 var(--sh-space-xs) 0;
-  display: flex; align-items: baseline; gap: var(--sh-space-xs);
-}
-.sh-spaces-section__hint {
-  font-weight: 400;
-  font-size: var(--sh-font-size-xs);
-}
-
-/* SpaceListPage card accommodates the optional unsubscribe button on
-   the right — body grows, button hugs the edge. */
-.sh-space-card__body {
-  flex: 1;
-  min-width: 0;
-}
-.sh-space-card__chips {
-  display: flex; flex-wrap: wrap; gap: var(--sh-space-xs);
-  margin-top: 4px;
-}
-/* Name + the chat-unread pill on one line; a long name wraps (never
-   pushes the pill off the card). */
-.sh-space-card__title {
-  display: flex; align-items: center; gap: var(--sh-space-xs);
-  min-width: 0;
-}
-.sh-space-card__title > strong {
-  min-width: 0; overflow-wrap: anywhere;
-}
-.sh-space-card__chat-unread {
-  flex: none;
-  display: inline-flex; align-items: center; gap: 4px;
-  height: 20px;
-  padding: 0 7px;
-  border-radius: var(--sh-radius-full);
-  background: var(--sh-primary-fill);
-  color: var(--sh-on-primary-fill);
-  font-size: 0.72rem;
-  font-weight: 700;
-  line-height: 1;
-}
-.sh-space-card__chat-unread .sh-sidenav-icon {
-  width: 12px; height: 12px; flex: 0 0 12px;
-}
-.sh-space-card__chat-unread .sh-sidenav-icon svg {
-  width: 12px; height: 12px;
 }
 
 /* Subscriber read-only banner on SpaceFeedPage. Replaces the post
@@ -25148,4 +24781,138 @@ button.sh-page-editor-status {
 @media (max-width: 640px) {
   .sh-space-section { padding: 0 8px; font-size: var(--sh-font-size-base); }
   .sh-space-section--active::after { inset-inline: 8px; }
+}
+
+/* ── Spaces page (redesign PR 11) ──────────────────────────────────
+ * Connections / Friends card anatomy, flat: one card per section, rows
+ * divided by a hairline, a 44 px picture, the name clamped to two lines,
+ * one muted meta line, an end slot with ONE number. Logical properties
+ * throughout so RTL mirrors. */
+.sh-spaces { display: flex; flex-direction: column; gap: var(--sh-space-xl); padding-block-start: 12px; }
+.sh-spaces-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sh-space-sm) var(--sh-space-md); }
+.sh-spaces-head__actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-sm); }
+.sh-spaces-head__actions .sh-conn-ico { width: 18px; height: 18px; }
+.sh-spaces-find {
+  flex: 1 1 280px; display: flex; align-items: center; gap: 10px; min-height: 44px;
+  padding-inline: 16px; border-radius: var(--sh-radius-full);
+  background: var(--sh-bg-tertiary); border: 1px solid var(--sh-border-strong); color: var(--sh-text-muted);
+}
+.sh-spaces-find:focus-within { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-spaces-find .sh-conn-ico { width: 18px; height: 18px; flex: none; }
+/* Beat the global form-field chrome: the pill is the field. */
+.sh-spaces .sh-spaces-find input.sh-spaces-find__input[type="search"],
+.sh-spaces .sh-spaces-find input.sh-spaces-find__input[type="search"]:focus {
+  flex: 1; min-width: 0; width: auto; height: 42px; min-height: 0; margin: 0; padding: 0;
+  border: 0; border-radius: 0; background: transparent; box-shadow: none; outline: none;
+  font: inherit; font-size: var(--sh-font-size-base); color: var(--sh-text);
+}
+.sh-spaces .sh-spaces-find input.sh-spaces-find__input[type="search"]::placeholder { color: var(--sh-text-muted); opacity: 1; }
+.sh-spaces-sect { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-spaces-card {
+  margin: 0; padding: 6px; list-style: none;
+  border-radius: var(--sh-radius-lg); background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border); box-shadow: var(--sh-shadow-xs);
+}
+.sh-spaces-list { display: flex; flex-direction: column; }
+.sh-spaces-row { display: flex; align-items: center; gap: var(--sh-space-sm); min-width: 0; }
+.sh-spaces-row + .sh-spaces-row { border-block-start: 1px solid color-mix(in srgb, var(--sh-border) 80%, transparent); }
+.sh-spaces-row__main {
+  flex: 1; min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 12px; min-height: 64px; padding: 8px 10px;
+  border-radius: var(--sh-radius-md); color: inherit; text-decoration: none;
+}
+a.sh-spaces-row__main { transition: background-color var(--sh-transition-fast); }
+a.sh-spaces-row__main:hover { background: color-mix(in srgb, var(--sh-text) 5%, transparent); }
+a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 0; }
+.sh-spaces-row__ic {
+  width: 44px; height: 44px; flex: none; display: flex; align-items: center; justify-content: center;
+  border-radius: 12px; overflow: hidden; background: var(--sh-bg-secondary);
+  font-size: 22px; font-weight: 700; line-height: 1; color: var(--sh-text-muted);
+}
+.sh-spaces-row__ic img { width: 100%; height: 100%; object-fit: cover; }
+.sh-spaces-row__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sh-spaces-row__t {
+  font-weight: 600; color: var(--sh-text); line-height: var(--sh-line-height-snug);
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.sh-spaces-row__m { font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); overflow-wrap: anywhere; }
+.sh-spaces-row__end { display: flex; align-items: center; gap: 8px; flex: none; }
+.sh-spaces-row__action { flex: none; padding-inline-end: 8px; }
+.sh-spaces-row__action .sh-btn { min-height: 36px; padding: 8px 14px; }
+.sh-spaces-row--muted .sh-spaces-row__ic { filter: grayscale(1); opacity: .7; }
+/* The quiet count (unread) and the filled one (needs you): never both. */
+.sh-spaces-new {
+  display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border-radius: var(--sh-radius-full);
+  background: var(--sh-primary-soft); color: var(--sh-primary-on-soft);
+  font-size: var(--sh-font-size-xs); font-weight: 700; white-space: nowrap;
+}
+.sh-spaces-attn {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 6px;
+  border-radius: var(--sh-radius-full); background: var(--sh-primary-fill); color: var(--sh-on-primary-fill);
+  font-size: var(--sh-font-size-xs); font-weight: 700;
+}
+/* Discover: one selected-chip style app-wide — primary-soft + primary border. */
+.sh-spaces-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.sh-spaces-chip {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 14px;
+  border-radius: var(--sh-radius-full); border: 1px solid var(--sh-border-strong);
+  background: var(--sh-bg-tertiary); color: var(--sh-text); font: inherit;
+  font-size: var(--sh-font-size-sm); font-weight: 600; cursor: pointer;
+}
+.sh-spaces-chip:hover { border-color: var(--sh-text-muted); }
+.sh-spaces-chip:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-spaces-chip[aria-pressed="true"] {
+  background: var(--sh-primary-soft); color: var(--sh-primary-on-soft);
+  border-color: color-mix(in srgb, var(--sh-primary) 45%, transparent);
+}
+.sh-spaces-chip__n { font-size: var(--sh-font-size-xs); font-weight: 600; opacity: .8; }
+.sh-spaces-note { margin: 0; font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); }
+.sh-spaces-link {
+  padding: 0; border: 0; background: none; cursor: pointer; font: inherit; font-weight: 600;
+  color: var(--sh-primary-text); text-decoration: none;
+}
+.sh-spaces-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.sh-spaces-link:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; border-radius: 2px; }
+.sh-spaces-inline { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+.sh-spaces-inline p { margin: 0; color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
+.sh-spaces-inline__ic {
+  width: 36px; height: 36px; flex: none; display: flex; align-items: center; justify-content: center;
+  border-radius: var(--sh-radius-full); background: var(--sh-bg-secondary); color: var(--sh-text-muted);
+}
+.sh-spaces-inline__ic .sh-conn-ico { width: 18px; height: 18px; }
+/* Archived: one collapsed row at the bottom. */
+.sh-spaces-archived { padding: 0; }
+.sh-spaces-archived__sum {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px;
+  min-height: 64px; padding: 8px 16px; cursor: pointer; list-style: none; border-radius: var(--sh-radius-lg);
+}
+.sh-spaces-archived__sum::-webkit-details-marker { display: none; }
+.sh-spaces-archived__sum:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-spaces-archived__ic { display: inline-flex; width: 28px; justify-content: center; color: var(--sh-text-muted); }
+.sh-spaces-archived__ic svg { width: 22px; height: 22px; }
+.sh-spaces-archived__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sh-spaces-archived__t { margin: 0; font-family: inherit; font-size: var(--sh-font-size-base); font-weight: 600; }
+.sh-spaces-archived__chev { display: inline-flex; color: var(--sh-text-muted); transform: rotate(90deg); transition: transform var(--sh-transition-fast); }
+.sh-spaces-archived[open] .sh-spaces-archived__chev { transform: rotate(-90deg); }
+.sh-spaces-archived > .sh-spaces-list { padding: 0 6px 6px; }
+.sh-spaces-archived .sh-conn-count { transform: none; }
+/* No space at all: one card, one set of CTAs. */
+.sh-spaces-empty { display: flex; flex-direction: column; align-items: center; gap: var(--sh-space-sm); padding: var(--sh-space-2xl) var(--sh-space-lg); text-align: center; }
+.sh-spaces-empty__art { font-size: 48px; line-height: 1; }
+.sh-spaces-empty h2 { margin: var(--sh-space-sm) 0 0; font-family: var(--sh-font-family-display); font-size: var(--sh-font-size-xl); }
+.sh-spaces-empty p { margin: 0; color: var(--sh-text-muted); max-width: 48ch; }
+.sh-spaces-empty__actions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--sh-space-sm); margin-block-start: var(--sh-space-sm); }
+.sh-spaces-empty__actions .sh-conn-ico { width: 18px; height: 18px; }
+.sh-spaces--skeleton .sh-spaces-row__main { min-height: 64px; }
+@media (prefers-reduced-motion: reduce) {
+  a.sh-spaces-row__main, .sh-spaces-archived__chev { transition: none; }
+}
+@media (max-width: 600px) {
+  .sh-spaces { gap: var(--sh-space-lg); }
+  .sh-spaces-head__actions { order: -1; width: 100%; }
+  .sh-spaces-head__actions .sh-btn { flex: 1; }
+  .sh-spaces-find { flex-basis: 100%; }
+  .sh-spaces-row__main { padding: 8px 6px; gap: 10px; }
+  .sh-spaces-empty { padding: var(--sh-space-xl) var(--sh-space-md); }
 }

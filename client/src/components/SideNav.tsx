@@ -190,7 +190,7 @@ export function SideNav() {
 
   // Resolve the active space when the URL points at a specific space
   // page (``/spaces/{id}`` and its sub-routes), excluding ``/spaces``
-  // (the listing page) and ``/spaces/browse`` (the public catalogue).
+  // (the listing page) and ``/spaces/browse`` (redirects to Discover).
   const activeSpaceFromUrl = useComputed(() => {
     const path = loc.path ?? ''
     const m = path.match(/^\/spaces\/([^/]+)/)

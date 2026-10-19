@@ -11,7 +11,7 @@ describe('router', () => {
     //   /feed            — explicit household-feed route (§23 dashboard)
     //   /spaces/:id/settings — admin space settings (§23 customization)
     //   /spaces/:id/about — public-style space landing (parallel to GFS)
-    //   /spaces/browse   — unified space browser (§D3)
+    //   /spaces/browse   — redirects to the Spaces page's Discover
     //   /spaces/:id/zones — per-space zones admin (§23.8.7)
     //   /setup           — first-boot wizard (platform/v2)
     //   /friends         — connected-people dashboard under Browse

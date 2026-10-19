@@ -168,28 +168,24 @@ export function CalendarSkeleton() {
 }
 
 
-/** Stand-in for ``SpaceListPage`` and ``SpaceBrowserPage``: N space-card
- *  shapes with emoji + name + description bars. */
+/** Stand-in for ``SpaceListPage``: one card of N space rows (icon,
+ *  name and meta bars), the shape the loaded list takes. */
 export function SpaceListSkeleton({ count = 4 }: { count?: number } = {}) {
   return (
     <div class="sh-spaces sh-spaces--skeleton" aria-busy="true">
-      <div class="sh-page-header">
-        <Skeleton shape="line" width={120} height={22} />
-      </div>
-      {Array.from({ length: count }).map((_, i) => (
-        <div key={i} class="sh-space-card sh-space-card--skeleton">
-          <Skeleton shape="circle" width={44} height={44} />
-          <div class="sh-space-card__body">
-            <Skeleton shape="line" width="50%" height={14} />
-            <Skeleton
-              shape="line"
-              width="80%"
-              height={11}
-              class="sh-skeleton-spaced"
-            />
-          </div>
-        </div>
-      ))}
+      <ul class="sh-spaces-card sh-spaces-list">
+        {Array.from({ length: count }).map((_, i) => (
+          <li key={i} class="sh-spaces-row">
+            <div class="sh-spaces-row__main">
+              <Skeleton shape="rect" width={44} height={44} />
+              <span class="sh-spaces-row__body">
+                <Skeleton shape="line" width="50%" height={14} />
+                <Skeleton shape="line" width="70%" height={11} class="sh-skeleton-spaced" />
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

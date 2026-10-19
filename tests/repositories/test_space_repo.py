@@ -2185,6 +2185,46 @@ async def test_list_hosted_listings_with_no_tiers_is_empty(env):
     assert await env.repo.list_hosted_listings("inst-x", "u", tiers=frozenset()) == []
 
 
+async def test_list_member_listings_reads_role_members_and_activity(env):
+    """One row per non-dissolved space the user holds a seat in (a follower's
+    included), with their role, the members (local + live remote seats,
+    never a follower) and the newest visible feed post — else creation."""
+    await env.repo.save(_space("a", "Alpha"))
+    await env.repo.save(_space("b", "Beta", SpaceType.PUBLIC))
+    await env.repo.save(replace(_space("gone", "Gone"), dissolved=True))
+    await env.repo.save(_space("other", "Other"))
+    await env.repo.save_member(_member("a", "uid-alice", "owner"))
+    await env.repo.save_member(_member("a", "uid-bob"))
+    await env.repo.save_member(_member("b", "uid-carol", "owner"))
+    await env.repo.save_member(_member("b", "uid-alice", "subscriber"))
+    await env.repo.save_member(_member("gone", "uid-alice", "owner"))
+    await env.repo.save_member(_member("other", "uid-bob", "owner"))
+    await env.db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role,"
+        " tombstoned) VALUES('a', 'p', 'r1', 'member', 0),"
+        " ('a', 'p', 'r2', 'member', 1), ('a', 'p', 'r3', 'subscriber', 0)"
+    )
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, created_at,"
+        " deleted) VALUES('p1', 'a', 'uid-bob', 'text', 'x', '2030-01-01 00:00:00', 0),"
+        " ('p2', 'a', 'uid-bob', 'text', NULL, '2031-01-01 00:00:00', 1),"
+        # Python writes tz-aware ISO: one hour later in UTC, though it sorts
+        # first as a string — the time is compared, not the text.
+        " ('p3', 'a', 'uid-bob', 'text', 'y', '2029-12-31T23:00:00-02:00', 0)"
+    )
+
+    rows = await env.repo.list_member_listings("uid-alice")
+    assert [r.space.id for r in rows] == ["a", "b"]  # sorted, no dissolved
+    a, b = rows
+    assert (a.role, a.member_count, a.last_activity_at) == (
+        "owner",
+        3,
+        "2030-01-01 01:00:00",
+    )
+    assert (b.role, b.member_count) == ("subscriber", 1)
+    assert b.last_activity_at  # no post: the space's creation time
+
+
 async def test_ban_member_is_all_or_nothing(env):
     """Regression: the ban row and the seat delete were two separate
     writes (two transactions) — a failure between them left a ban record

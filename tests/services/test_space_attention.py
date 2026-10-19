@@ -8,7 +8,7 @@ import logging
 import pytest
 
 from socialhome.domain.space import SpaceMember, SpacePermissionError, SpaceRole
-from socialhome.services.space_attention import space_attention
+from socialhome.services.space_attention import needs_you_count, space_attention
 
 _SID = "sp-1"
 
@@ -121,3 +121,20 @@ async def test_a_refused_read_counts_nothing_and_is_logged(caplog):
     assert out["reports"] == 0
     assert out["pending_review"] == 2
     assert "reports refused" in caplog.text
+
+
+def test_needs_you_count_is_the_more_badge_total():
+    """Held + reports + join requests + proposals awaiting my vote."""
+    attention = {
+        "pending_review": 2,
+        "reports": 1,
+        "join_requests": 1,
+        "proposals": [
+            {"voted_by_me": False, "owner_only": False},
+            {"voted_by_me": True, "owner_only": False},
+            {"voted_by_me": False, "owner_only": True},
+        ],
+    }
+    assert needs_you_count(attention, "admin") == 5
+    assert needs_you_count(attention, "owner") == 6
+    assert needs_you_count(None, "member") is None

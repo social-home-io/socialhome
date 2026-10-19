@@ -341,7 +341,7 @@ export interface Space {
   category?: string
   /** Present on `GET /api/spaces/{id}` AND on every `GET /api/spaces` list
    *  row. Optional only because an older backend's list withheld it — see
-   *  `hydrateLocalReadability` in `SpaceBrowserPage`. */
+   *  the Spaces page Discover. */
   features?: SpaceFeatures
   retention_days: number | null
   /** Post types (``PostType`` values) the retention sweep never deletes.
@@ -381,6 +381,18 @@ export interface Space {
   /** ``GET /api/spaces/{id}`` only: global but listed on no GFS ("global,
    *  not listed") — the SPA shows a banner until the owner picks one. */
   gfs_unlisted?: boolean
+  /** ``GET /api/spaces`` rows: the caller's seat (``subscriber`` = follows). */
+  my_role?: string
+  /** ``GET /api/spaces`` rows: members (local + remote, never followers). */
+  member_count?: number
+  /** ``GET /api/spaces`` rows: newest feed post, else when the space was
+   *  created here (naive UTC). */
+  last_activity_at?: string | null
+  /** ``GET /api/spaces`` rows: what waits for the caller (the More badge's
+   *  total) — ``null`` unless they are owner / admin / moderator. */
+  needs_you?: number | null
+  /** The uploaded icon (signed), ``null`` without one. */
+  icon_url?: string | null
 }
 
 /** One GFS a global space is listed on, as every member sees it. */

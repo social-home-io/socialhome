@@ -1,6 +1,6 @@
 /**
  * Module-level cache of space DirectoryEntry rows the user has seen on
- * /spaces/browse, keyed by space_id.
+ * the Spaces page's Discover section, keyed by space_id.
  *
  * The :class:`SpacePublicDetailPage` reads from this cache so a tap
  * from the browser lands instantly on a populated detail view — no
