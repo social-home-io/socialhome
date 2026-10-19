@@ -2249,7 +2249,6 @@
   "space.chat.view_posts": "Feed",
   "space.chat.view_chat": "Chat",
   "space.chat.view_aria": "Feed of chat",
-  "space.chat.audience": "Leden van {space} kunnen deze chat lezen.",
   "space.chat.load_failed": "De chat van de space kon niet worden geladen. Probeer het opnieuw.",
   "space.chat.read_only_archived": "Deze space is gearchiveerd. De chat is alleen-lezen.",
   "space.feature.chat": "Chat",
@@ -4850,5 +4849,10 @@
   "space.summary.bazaar": "{count} te koop",
   "space.summary.bazaar_none": "Niets te koop",
   "space.summary.events": "{count} binnenkort",
-  "space.summary.events_none": "Binnenkort niets"
+  "space.summary.events_none": "Binnenkort niets",
+  "space.chat.empty": "Nog geen berichten. De leden van {space} kunnen deze chat lezen.",
+  "space.chat.log_aria": "Chat in {space}",
+  "space.more.chat_muted": "Chat gedempt",
+  "space.more.notif_posts": "Berichten",
+  "space.more.notif_chat": "Chat"
 }

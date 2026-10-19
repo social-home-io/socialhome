@@ -1,7 +1,10 @@
 /**
- * SpaceChatView — the Chat view of a space's Feed tab: the space chat
- * thread under a slim bar naming who can read it, with the viewer's mute
- * / notification level (the household feed's Chat tab twin).
+ * SpaceChatView — a space's Chat section (``/spaces/:id/chat``): the
+ * space chat thread, full height under the section row. Who can read it
+ * is said in the empty thread (an empty chat is where the question comes
+ * up); the viewer's chat notifications live with the space's in More ›
+ * Your notifications — one place, not a second bell here. The message
+ * list is a ``role="log"``, so a screen reader hears new messages.
  *
  * The thread is the shared :func:`ConversationView`, embedded with the
  * summary's metadata (a system chat 404s on ``GET /api/conversations/{id}``):
@@ -19,7 +22,6 @@ import { isMuteActive } from '@/utils/mute'
 import { Button } from '@/components/Button'
 import { DmThreadSkeleton } from '@/components/Skeleton'
 import { ConversationView, type ConversationMeta } from '@/features/dms/ConversationView'
-import { MuteButton } from '@/features/dms/ConversationMute'
 import {
   clearSpaceChatUnread,
   isSpaceChatFrame,
@@ -76,18 +78,6 @@ export function SpaceChatView({ spaceId, spaceName, canModerate, archived = fals
   }
   return (
     <>
-      <div class="sh-feed-chat-bar">
-        <span class="sh-feed-chat-audience">
-          {t('space.chat.audience', { space: spaceName })}
-        </span>
-        <MuteButton
-          convId={convId}
-          mutedUntil={mutedUntil}
-          onChange={(until) => patchSpaceChat({ muted_until: until })}
-          level={level}
-          onLevelChange={(next) => patchSpaceChat({ notif_level: next })}
-        />
-      </div>
       <ConversationView
         key={convId}
         conversationId={convId}
@@ -101,6 +91,8 @@ export function SpaceChatView({ spaceId, spaceName, canModerate, archived = fals
         readOnly={archived}
         readOnlyNote={t('space.chat.read_only_archived')}
         meta={meta}
+        emptyNote={t('space.chat.empty', { space: spaceName })}
+        logLabel={t('space.chat.log_aria', { space: spaceName })}
       />
     </>
   )

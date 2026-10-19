@@ -71,7 +71,7 @@ import {
 } from '@/store/spaceAttention'
 import { confirmDialog } from '@/components/confirm'
 import { SpaceChatView, useSpaceChatSummary } from './SpaceChatView'
-import { spaceChatOf, spaceChatOpenTo } from '@/store/spaceChat'
+import { patchSpaceChat, spaceChatOf, spaceChatOpenTo } from '@/store/spaceChat'
 import { isMuteActive } from '@/utils/mute'
 import { resolveAvatar } from '@/utils/avatar'
 
@@ -459,7 +459,11 @@ export default function SpaceFeedPage() {
   // The space chat is a section for a member (never a follower) while
   // the space keeps chat on and the server agrees.
   const chatEligible = features?.chat !== false && isWriterRole(viewerRole.value)
-  const chatOn = spaceChatOpenTo(features, viewerRole.value, spaceChatOf(spaceId))
+  // A space of one has nobody to chat with: Chat appears when the second
+  // member joins (an unknown count doesn't hide it, so the section never
+  // falls back to the feed while the roster loads).
+  const soloSpace = memberCount.value === 1
+  const chatOn = !soloSpace && spaceChatOpenTo(features, viewerRole.value, spaceChatOf(spaceId))
   const follower = isFollower(viewerRole.value)
   const canModerateHere = roleCanModerate(viewerRole.value)
   // A section the viewer can't have here (feature off, a follower on the
@@ -681,6 +685,13 @@ export default function SpaceFeedPage() {
           : null}
         notifLevel={notifLevel}
         onNotifLevel={setNotifLevel}
+        chatNotif={chatOn && chatSummary?.enabled && chatSummary.conversation_id ? {
+          convId: chatSummary.conversation_id,
+          mutedUntil: chatSummary.muted_until ?? null,
+          level: chatSummary.notif_level ?? 'mentions',
+          onMute: (until) => patchSpaceChat({ muted_until: until }),
+          onLevel: (level) => patchSpaceChat({ notif_level: level }),
+        } : null}
         // Every full member can open space settings — the page itself
         // gates what's shown: a non-admin (member or moderator) sees only
         // their own surface (Bots), a remote admin sees the

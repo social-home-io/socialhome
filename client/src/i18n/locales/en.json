@@ -2564,7 +2564,6 @@
   "space.chat.view_posts": "Feed",
   "space.chat.view_chat": "Chat",
   "space.chat.view_aria": "Feed or chat",
-  "space.chat.audience": "Members of {space} can read this chat.",
   "space.chat.load_failed": "Couldn't load the space chat. Try again.",
   "space.chat.read_only_archived": "This space is archived. The chat is read-only.",
   "space.feature.chat": "Chat",
@@ -4886,5 +4885,10 @@
   "space.summary.bazaar": "{count} for sale",
   "space.summary.bazaar_none": "Nothing for sale",
   "space.summary.events": "{count} coming up",
-  "space.summary.events_none": "Nothing coming up"
+  "space.summary.events_none": "Nothing coming up",
+  "space.chat.empty": "No messages yet. Members of {space} can read this chat.",
+  "space.chat.log_aria": "Chat in {space}",
+  "space.more.chat_muted": "Chat muted",
+  "space.more.notif_posts": "Posts",
+  "space.more.notif_chat": "Chat"
 }

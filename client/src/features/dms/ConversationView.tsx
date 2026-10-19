@@ -725,6 +725,12 @@ export interface ConversationViewProps {
   readOnly?: boolean
   /** The note shown instead of the composer while ``readOnly``. */
   readOnlyNote?: string
+  /** Shown in the message list while the thread has no messages yet
+   *  (a space chat says who can read it). */
+  emptyNote?: string
+  /** Given, the message list is a ``role="log"`` region with this name,
+   *  so a screen reader hears new messages as they arrive. */
+  logLabel?: string
 }
 
 /** One conversation's thread — header, message list, composer — usable
@@ -744,6 +750,8 @@ export function ConversationView({
   canModerate = false,
   readOnly = false,
   readOnlyNote,
+  emptyNote,
+  logLabel,
 }: ConversationViewProps) {
   const convId = conversationId
   const location = useLocation()
@@ -2448,7 +2456,8 @@ export function ConversationView({
           </span>
         </div>
       )}
-      <div class="sh-messages" ref={messagesScrollRef} onScroll={handleScroll}>
+      <div class="sh-messages" ref={messagesScrollRef} onScroll={handleScroll}
+           role={logLabel ? 'log' : undefined} aria-label={logLabel}>
         {/* In-thread typing indicator — rendered FIRST in DOM so the
          *  ``column-reverse`` flex flip lands it at the visual
          *  BOTTOM of the messages area, right above the composer
@@ -2457,6 +2466,12 @@ export function ConversationView({
          *  height impact on the scroll position. The ``bubble``
          *  prop opts into the bubble shape. */}
         <TypingIndicator scope={convId} bubble />
+        {emptyNote && messages.value.length === 0 && (
+          <div class="sh-messages-empty sh-empty-state">
+            <div aria-hidden="true">💬</div>
+            <p>{emptyNote}</p>
+          </div>
+        )}
         {/* Floating "↓ N new messages" chip — appears in the
          *  bottom-right corner of the scrollable container when the
          *  user has scrolled up reading history and one or more new

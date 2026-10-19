@@ -63,3 +63,17 @@ describe('theme preview chip', () => {
     expect(color).toBe('var(--sh-text)')
   })
 })
+
+describe('own chat bubble meta', () => {
+  // Dark: --sh-on-primary-fill at 80 % on the hearth fill is ~4.3:1 — the
+  // time, receipts and "edited" on your own bubble keep the full ink.
+  it('never fades the time, a receipt or "edited" on your own bubble', () => {
+    const sent = rules().find(([sel]) => sel === '.sh-message--mine .sh-receipt--sent')
+    expect(sent?.[1]).toMatch(/color\s*:\s*var\(--sh-on-primary-fill\)\s*;/)
+    const edited = rules().find(([sel]) => sel === '.sh-message--mine .sh-message-edited')
+    expect(edited?.[1]).toMatch(/opacity\s*:\s*1\s*;/)
+    const meta = rules().find(([sel]) => sel === '.sh-message--mine .sh-message-meta')
+    expect(meta?.[1]).toMatch(/color\s*:\s*var\(--sh-on-primary-fill\)/)
+    expect(meta?.[1]).not.toMatch(/opacity/)
+  })
+})

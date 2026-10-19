@@ -43,6 +43,8 @@ interface Props {
   /** Groups only: the viewer's level, and its setter. */
   level?: ConversationNotifLevel
   onLevelChange?: (level: ConversationNotifLevel) => void
+  /** :func:`MuteSection` only: its heading (default "Notifications"). */
+  heading?: string
 }
 
 const LEVELS: readonly ConversationNotifLevel[] = ['all', 'mentions']
@@ -205,7 +207,7 @@ export function MuteButton({ convId, mutedUntil, onChange, level, onLevelChange 
   )
 }
 
-export function MuteSection({ convId, mutedUntil, onChange, level, onLevelChange }: Props) {
+export function MuteSection({ convId, mutedUntil, onChange, level, onLevelChange, heading }: Props) {
   const [saving, setSaving] = useState(false)
   const muted = isMuteActive(mutedUntil)
   const run = async (duration: MuteDuration | null) => {
@@ -224,7 +226,7 @@ export function MuteSection({ convId, mutedUntil, onChange, level, onLevelChange
   return (
     <section class="sh-groupinfo-mute" aria-labelledby={`sh-mute-${convId}`}>
       <h3 class="sh-groupinfo-heading" id={`sh-mute-${convId}`}>
-        {t('dms.mute.section')}
+        {heading ?? t('dms.mute.section')}
       </h3>
       {hasLevels && (
         <fieldset class="sh-groupinfo-level" disabled={saving}>

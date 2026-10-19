@@ -204,3 +204,31 @@ describe('ConversationView — read-only (an archived space chat)', () => {
     expect(r.getByRole('button', { name: 'Edit your message' })).toBeTruthy()
   })
 })
+
+describe('ConversationView — as a space chat section', () => {
+  it('logLabel makes the message list a named log', async () => {
+    const r = await renderView({ logLabel: 'Chat in Choir' })
+    const log = r.getByRole('log', { name: 'Chat in Choir' })
+    expect(log.classList.contains('sh-messages')).toBe(true)
+  })
+
+  it('no log role without a label (a DM thread)', async () => {
+    const r = await renderView({})
+    expect(r.queryByRole('log')).toBeNull()
+  })
+
+  it('emptyNote shows only while the thread has no messages', async () => {
+    const r = await renderView({ emptyNote: 'Members of Choir can read this chat.' })
+    expect(r.queryByText('Members of Choir can read this chat.')).toBeNull()
+    r.cleanup()
+    apiGet.mockImplementation(async (url: string) =>
+      url.startsWith('/api/conversations/sc-1/messages') ? [] : url.endsWith('/members') ? [] : {})
+    const { ConversationView } = await import('./ConversationView')
+    const e = r.render(
+      <ConversationView conversationId="sc-1" embedded showHeader={false} meta={META}
+                        emptyNote="Members of Choir can read this chat." />,
+    )
+    await r.waitFor(() => expect(e.getByText('Members of Choir can read this chat.')).toBeTruthy(),
+                    { timeout: RENDER_WAIT })
+  })
+})
