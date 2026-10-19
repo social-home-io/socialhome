@@ -845,10 +845,14 @@ location, public-space discovery rows, a local community's centre.
 ## People's locations are never shared by design
 
 **Owner decision (2026-10-19).** A person's or a household's location
-leaves the household only when its people chose to trust a specific
-paired household with it: the per-pair `share_home` home location, and
-live presence location shared with a peer. No default-on sharing, never
-via a GFS, never as a side effect of joining a space. Every other
+leaves the household only toward a specific paired household its people
+trust, under a per-pair switch they control: the per-pair `share_home`
+home location — on by default for a new pair, pre-set from the
+household's `share_home_default` and shown on the pairing dialog before
+anything is sent — and live presence location shared with a peer. Every
+sender honours that switch, the pairing code and the scanner's
+peer-accept included ([`protocol/pairing.md`](./protocol/pairing.md#home-sharing-is-chosen-before-the-handshake)).
+Never via a GFS, never as a side effect of joining a space. Every other
 federation payload is location-free.
 
 Space locations are not people's locations, and still stay minimal.

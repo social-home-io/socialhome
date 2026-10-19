@@ -23,6 +23,9 @@ export interface Toggles {
   allow_highlight_share: boolean
   /** Author-side link preview cards (default on). */
   allow_link_preview: boolean
+  /** Pre-sets the pairing dialog's "share our home location" switch, and
+   *  is the switch of a pair made through an introducer (default on). */
+  share_home_default: boolean
   household_name: string
 }
 
@@ -93,6 +96,15 @@ export function HouseholdToggles() {
     },
   ]
 
+  const connectionCards: { value: keyof Toggles; icon: string; title: string; subtitle: string }[] = [
+    {
+      value: 'share_home_default',
+      icon: '🏠',
+      title: t('household.toggles.share_home_default'),
+      subtitle: t('household.toggles.share_home_default_hint'),
+    },
+  ]
+
   const toOption = (c: { value: keyof Toggles; icon: string; title: string; subtitle: string }): CheckboxCardOption => ({
     value: c.value,
     icon: c.icon,
@@ -116,6 +128,11 @@ export function HouseholdToggles() {
       <CheckboxCardGroup
         legend={t('link_preview.admin_legend')}
         options={linkCards.map(toOption)}
+        onToggle={(k) => void toggle(k as keyof Toggles)}
+      />
+      <CheckboxCardGroup
+        legend={t('household.toggles.connections_legend')}
+        options={connectionCards.map(toOption)}
         onToggle={(k) => void toggle(k as keyof Toggles)}
       />
     </div>

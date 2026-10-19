@@ -4996,5 +4996,11 @@
   "spaces.discover.invite_link_short": "les membres peuvent vous inviter par lien",
   "spaces.list.posts_new": "{n} nouvelles publications",
   "spaces.list.posts_new_one": "{n} nouvelle publication",
-  "spaces.discover.connect": "Associer d'abord"
+  "spaces.discover.connect": "Associer d'abord",
+  "pairing.share_home_title": "Partager l'emplacement de notre domicile",
+  "pairing.share_home_on": "Activé — ils voient votre domicile sur leur carte. Vous pourrez le modifier plus tard sous Gérer.",
+  "pairing.share_home_off": "Désactivé — l'emplacement de votre domicile ne leur est pas envoyé. Vous pourrez l'activer plus tard sous Gérer.",
+  "household.toggles.connections_legend": "Connexions",
+  "household.toggles.share_home_default": "Partager notre domicile avec les nouvelles connexions",
+  "household.toggles.share_home_default_hint": "Préréglage de l'interrupteur lors de l'appairage avec un foyer. Chaque connexion garde son propre réglage."
 }

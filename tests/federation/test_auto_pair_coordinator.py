@@ -31,6 +31,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.preferences import HouseholdPreferences
 from socialhome.federation.auto_pair_coordinator import (
     AutoPairCoordinator,
     _ack_blob,
@@ -1245,3 +1246,78 @@ async def test_an_ack_whose_target_id_is_not_its_key_is_ignored(
     await coord.on_ack_at_originator(_evt("b", ack))
 
     assert fed_repo.instances[c_id].status is PairingStatus.PENDING_SENT
+
+
+# ── The household's home-sharing default (owner decision 2026-10-19) ──
+
+
+class _Prefs:
+    def __init__(self, share_home_default: bool) -> None:
+        self._value = share_home_default
+
+    async def get_household(self) -> HouseholdPreferences:
+        return HouseholdPreferences(share_home_default=self._value)
+
+
+def _coord_with_default(
+    value: bool | None, fed_repo, kek_manager, bus, fed_service, identity, inbox
+) -> AutoPairCoordinator:
+    return AutoPairCoordinator(
+        federation_repo=fed_repo,
+        key_manager=kek_manager,
+        bus=bus,
+        federation_service=fed_service,
+        own_identity_seed=identity.private_key,
+        own_identity_pk=identity.public_key,
+        inbox=inbox,
+        preferences_repo=None if value is None else _Prefs(value),
+    )
+
+
+@pytest.mark.parametrize("value", [True, False])
+async def test_requested_pair_takes_the_households_sharing_default(
+    value, fed_repo, kek_manager, bus, fed_service, identity, inbox
+):
+    """A pair made through an introducer has no dialog switch: its
+    ``share_home`` is the household's default."""
+    coord = _coord_with_default(
+        value, fed_repo, kek_manager, bus, fed_service, identity, inbox
+    )
+    b = _make_peer_remote_instance(generate_identity_keypair().public_key.hex())
+    fed_repo.instances[b.id] = b
+    c_id = derive_instance_id(generate_identity_keypair().public_key)
+    await coord.request_via(
+        via_instance_id=b.id,
+        target_instance_id=c_id,
+        target_display_name="C",
+        own_inbox_base_url=_OWN_INBOX_BASE,
+    )
+    assert fed_repo.instances[c_id].share_home is value
+
+
+@pytest.mark.parametrize("value", [True, False])
+async def test_approved_pair_takes_the_households_sharing_default(
+    value, fed_repo, kek_manager, bus, fed_service, identity, inbox
+):
+    coord = _coord_with_default(
+        value, fed_repo, kek_manager, bus, fed_service, identity, inbox
+    )
+    req = _queued_request(inbox)
+    inst = await coord.finalize_pending(
+        req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+    )
+    assert inst.share_home is value
+    assert fed_repo.instances[req.from_a_id].share_home is value
+
+
+async def test_without_preferences_the_documented_default_applies(
+    fed_repo, kek_manager, bus, fed_service, identity, inbox
+):
+    coord = _coord_with_default(
+        None, fed_repo, kek_manager, bus, fed_service, identity, inbox
+    )
+    req = _queued_request(inbox)
+    inst = await coord.finalize_pending(
+        req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+    )
+    assert inst.share_home is True

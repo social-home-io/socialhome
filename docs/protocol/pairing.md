@@ -72,10 +72,10 @@ sequenceDiagram
     participant A as HFS A<br/>(inviter)
     participant B as HFS B<br/>(scanner)
 
-    A->>A: generate QR<br/>(own_inbox_id, identity_pk,<br/>dh_pk, inbox_url, token, expiry)
+    A->>A: admin picks "share our home"<br/>(pre-set from share_home_default)<br/>→ generate QR (own_inbox_id, identity_pk,<br/>dh_pk, inbox_url, token, expiry,<br/>home_lat? / home_lon? only when on)
     Note over A,B: user shows QR to B
 
-    B->>B: scan QR → accept_pairing()<br/>derives shared DH secret,<br/>stores local RemoteInstance for A
+    B->>B: admin picks "share our home" → scan QR<br/>→ accept_pairing(share_home)<br/>derives shared DH secret,<br/>stores local RemoteInstance for A<br/>(share_home = B's choice)
     B->>A: POST {A.inbox_url}<br/>{event_type: PAIRING_PEER_ACCEPT,<br/>B.identity_pk, B.dh_pk,<br/>B.inbox_url, B.display_name,<br/>token, SAS, home_lat?, home_lon?,<br/>Ed25519 signature}
 
     A->>A: federation-inbox view dispatches<br/>PAIRING_PEER_ACCEPT → handle_peer_accept:<br/>TOFU verify sig, derive shared secret,<br/>KEK-encrypt keys, save RemoteInstance for B,<br/>publish PairingAcceptReceived
@@ -106,7 +106,7 @@ sequenceDiagram
 | `sig_suite` | no | `"ed25519+mldsa65"` when B supports hybrid PQ signatures. |
 | `pq_identity_pk` | no | B's ML-DSA-65 public key (when `sig_suite` is hybrid). |
 | `pq_algorithm` | no | PQ algorithm name (when `sig_suite` is hybrid). |
-| `home_lat` | no | B's household latitude, truncated to 4 decimal places. Sent only when both `home_lat` and `home_lon` are available (HA / HAOS mode, or operator-configured). See [home-location.md](./home-location.md). |
+| `home_lat` | no | B's household latitude, truncated to 4 decimal places. Sent only when B's admin shares B's home with A ([below](#home-sharing-is-chosen-before-the-handshake)) and both `home_lat` and `home_lon` are available (HA / HAOS mode, or operator-configured). See [home-location.md](./home-location.md). |
 | `home_lon` | no | B's household longitude, truncated to 4 decimal places. |
 | `keywrap_pk` | GFS reach | B's static X25519 key-wrap public key (hex) — what A seals relayed traffic to. |
 | `keywrap_sig` | GFS reach | Ed25519 self-signature of `keywrap_pk` by B's identity key (b64url). A verifies the binding and refuses the accept on a mismatch (fail closed). |
@@ -146,6 +146,39 @@ When `home_lat` / `home_lon` are present, A records them on B's newly-created
 `remote_instances` row immediately — the map pin is available as soon as the
 pair is confirmed, without waiting for a separate `LOCAL_HOME_LOCATION_CHANGED`
 broadcast.
+
+### Home sharing is chosen before the handshake
+
+Sharing a household's home location with a paired household is a per-pair
+switch (`remote_instances.share_home`), **on by default** for a new pair
+(owner decision 2026-10-19) — and every sender of the home honours it, the
+handshake included. No pair row exists when a code is minted or scanned, so
+the admin chooses on the pairing dialog's start step, before *Show my QR* or
+*Scan*:
+
+- The switch is pre-set from the household setting **Share our home with new
+  connections** (`preferences.share_home_default`, Admin › Household ›
+  Connections, on by default). Changing that setting never touches an
+  existing pair.
+- **A (code owner):** `POST /api/pairing/initiate {share_home}` — the code
+  carries A's `home_lat` / `home_lon` only when it is on. The choice is kept
+  on the pairing session (`pending_pairings.share_home`) and becomes the
+  `share_home` of the row A creates when B's peer-accept arrives.
+- **B (scanner):** `POST /api/pairing/accept {…code, share_home}` — the
+  peer-accept carries B's home only when it is on, and B's row for A gets the
+  same switch. A `share_home` key inside a code is the other household's data
+  and never decides it: the SPA sets the field after the code's own ones.
+- Neither the code nor the peer-accept says what was chosen: "off" reads
+  exactly like "no home set".
+- A pair made through an introducer ([auto-pair](#flow--auto-pair-via-relay))
+  carries no home in its handshake; its row takes the household default.
+- Server side, a missing choice fails closed in the coordinator; the routes
+  fill it from the household default, and the SPA sends it explicitly (off
+  when the default cannot be read).
+
+After that, the switch is changed per connection under Manage
+(`PATCH /api/pairing/connections/{id} {share_home}`), which revokes or
+restores the peer's pin at once ([home-location.md](./home-location.md#revoking-access)).
 
 ## Reach — pairing through a GFS
 
@@ -569,12 +602,13 @@ alias because the upsert doesn't touch the `local_alias` column.
 After the SAS verification succeeds and the pair is confirmed, the pairing
 wizard advances to a **Configure sharing** step instead of closing
 immediately. The step shows the `<ShareHomeToggle/>` component for the
-just-paired peer, defaulting to ON (`share_home = true`). Operators can
+just-paired peer, showing the choice made on the start step
+([above](#home-sharing-is-chosen-before-the-handshake)). Operators can
 flip it before hitting the final **Done** button; the change is applied via
 `PATCH /api/pairing/connections/{instance_id}` with `{"share_home": false}`
 and fires the one-shot null-coord revoke envelope described in
 [home-location.md](./home-location.md#revoking-access). Leaving the toggle
-ON (the default) requires no extra API call.
+as it is requires no extra API call.
 
 This step only appears for household pairings (the QR and copy-code flows);
 GFS pairings do not expose the toggle.

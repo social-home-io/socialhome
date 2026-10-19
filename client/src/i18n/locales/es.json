@@ -5023,5 +5023,11 @@
   "spaces.discover.invite_link_short": "los miembros pueden invitarte con un enlace",
   "spaces.list.posts_new": "{n} publicaciones nuevas",
   "spaces.list.posts_new_one": "{n} publicación nueva",
-  "spaces.discover.connect": "Vincular primero"
+  "spaces.discover.connect": "Vincular primero",
+  "pairing.share_home_title": "Compartir la ubicación de nuestro hogar",
+  "pairing.share_home_on": "Activado: ven vuestro hogar en su mapa. Puedes cambiarlo más tarde en Gestionar.",
+  "pairing.share_home_off": "Desactivado: no se les envía la ubicación de vuestro hogar. Puedes activarlo más tarde en Gestionar.",
+  "household.toggles.connections_legend": "Conexiones",
+  "household.toggles.share_home_default": "Compartir nuestro hogar con nuevas conexiones",
+  "household.toggles.share_home_default_hint": "Preajusta el interruptor al vincularte con un hogar. Cada conexión conserva su propio ajuste."
 }

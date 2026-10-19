@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -89,6 +90,30 @@ async def test_federation_pairing_lifecycle(env):
 
     await env.fed_repo.delete_pairing("tok-abc")
     assert await env.fed_repo.get_pairing("tok-abc") is None
+
+
+async def test_pairing_session_keeps_the_home_sharing_choice(env):
+    """The code owner's ``share_home`` choice outlives the request that
+    minted the code (migration 0107) — and an update keeps it."""
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    for token, choice in (("tok-on", True), ("tok-off", False)):
+        session = PairingSession(
+            token=token,
+            own_identity_pk="aa" * 32,
+            own_dh_pk="bb" * 32,
+            own_dh_sk="cc" * 32,
+            inbox_url="https://local/inbox/own-id",
+            own_local_inbox_id=f"own-{token}",
+            issued_at=datetime.now(UTC).isoformat(),
+            expires_at=expires,
+            share_home=choice,
+        )
+        await env.fed_repo.create_pairing(session)
+        assert (await env.fed_repo.get_pairing(token)).share_home is choice
+        await env.fed_repo.update_pairing(
+            dataclasses.replace(session, status=PairingStatus.PENDING_RECEIVED)
+        )
+        assert (await env.fed_repo.get_pairing(token)).share_home is choice
 
 
 async def test_cleanup_expired_pairings_no_rows(env):

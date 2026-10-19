@@ -63,7 +63,7 @@ const TOGGLES = {
   feat_household_chat: true,
   allow_text: true, allow_image: true, allow_video: true, allow_file: true,
   allow_poll: true, allow_schedule: true, allow_highlight_share: true,
-  allow_link_preview: true, household_name: 'Home',
+  allow_link_preview: true, share_home_default: true, household_name: 'Home',
 }
 const SUMMARY = {
   enabled: true, conversation_id: 'hc-1', unread: 0,

@@ -1256,6 +1256,7 @@ def _wire_federation_stack(
     peer_user_visibility_repo,
     media_reference_repo,
     space_timetable_repo,
+    preferences_repo,
 ):
     """Build :class:`FederationService` + attach the whole federation stack.
 
@@ -1532,6 +1533,7 @@ def _wire_federation_stack(
         own_identity_seed=identity.identity_seed,
         own_identity_pk=identity.identity_public_key,
         inbox=auto_pair_inbox,
+        preferences_repo=preferences_repo,
     )
     federation_service._event_registry.register(
         FederationEventType.PAIRING_INTRO_AUTO,
@@ -3960,6 +3962,7 @@ def create_app(config: Config | None = None) -> web.Application:
             peer_user_visibility_repo=repos.peer_user_visibility,
             media_reference_repo=repos.media_reference,
             space_timetable_repo=repos.space_timetable,
+            preferences_repo=repos.preferences,
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager

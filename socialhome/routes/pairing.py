@@ -42,6 +42,7 @@ from ..app_keys import (
     peer_unpair_service_key,
     peer_user_visibility_repo_key,
     platform_adapter_key,
+    preferences_service_key,
     profile_federation_outbound_key,
     user_repo_key,
 )
@@ -203,6 +204,21 @@ async def _gfs_route_count(view: BaseView, instance_id: str) -> int:
     return len(await view.svc(federation_repo_key).list_gfs_routes(instance_id))
 
 
+async def _share_home_choice(view: BaseView, body: dict) -> bool | None:
+    """The admin's home-sharing choice for the household being paired:
+    the body's boolean ``share_home``, else the household's
+    ``share_home_default``. ``None`` for a non-boolean value."""
+    if "share_home" in body:
+        value = body["share_home"]
+        return value if isinstance(value, bool) else None
+    prefs = await view.svc(preferences_service_key).get_household()
+    return prefs.share_home_default
+
+
+def _share_home_invalid() -> web.Response:
+    return error_response(422, "UNPROCESSABLE", "share_home must be a boolean.")
+
+
 class PairingInitiateView(BaseView):
     """``POST /api/pairing/initiate`` — generate QR pairing payload.
 
@@ -212,9 +228,11 @@ class PairingInitiateView(BaseView):
     integration has pushed into ``instance_config`` (Nabu Casa Remote
     UI or admin-set ``external_url``).
 
-    Optional body ``{reach?: "url" | "url_gfs" | "gfs", gfs_id?: str}``
-    picks how the scanner reaches us (an empty or unparseable body is the
-    classic ``url`` code):
+    Optional body ``{reach?: "url" | "url_gfs" | "gfs", gfs_id?: str,
+    share_home?: bool}`` picks how the scanner reaches us (an empty or
+    unparseable body is the classic ``url`` code) and whether the code
+    carries our home location — absent ``share_home`` is the household's
+    ``share_home_default``, a non-boolean one 422:
 
     * ``url`` / ``url_gfs`` need a federation base — 422
       ``NOT_CONFIGURED`` without one, as before;
@@ -231,6 +249,9 @@ class PairingInitiateView(BaseView):
         if not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
         body = await self._lenient_body()
+        share_home = await _share_home_choice(self, body)
+        if share_home is None:
+            return _share_home_invalid()
         reach = parse_reach(body.get("reach"))
         raw_gfs_id = body.get("gfs_id")
         gfs_id = raw_gfs_id if isinstance(raw_gfs_id, str) and raw_gfs_id else None
@@ -252,6 +273,7 @@ class PairingInitiateView(BaseView):
             base,
             reach=reach,
             gfs_id=gfs_id,
+            share_home=share_home,
         )
         return web.json_response(qr, status=201)
 
@@ -278,17 +300,29 @@ class PairingAcceptView(BaseView):
     auth middleware (bearer token, or ingress headers under haos) and is
     admin-only — it creates pairing state and makes this household POST a
     signed body to the scanned inbox URL.
+
+    The body is the scanned code plus the scanning admin's
+    ``share_home?: bool`` — whether our peer-accept carries our home
+    location (absent = the household's ``share_home_default``; a
+    non-boolean 422 before anything is stored or sent). The SPA always
+    sets it, after the code's own fields, so a ``share_home`` key planted
+    in a code can never decide it.
     """
 
     async def post(self) -> web.Response:
         if not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
-        body = await self.body()
+        body = dict(await self.body())
+        share_home = await _share_home_choice(self, body)
+        if share_home is None:
+            return _share_home_invalid()
+        body.pop("share_home", None)
         adapter = self.svc(platform_adapter_key)
         own_base = await adapter.get_federation_base()
         result = await self.svc(federation_service_key).accept_pairing(
             body,
             own_inbox_base_url=own_base,
+            share_home=share_home,
         )
         return web.json_response(result)
 

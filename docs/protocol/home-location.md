@@ -75,13 +75,17 @@ the Leaflet map pins in-place without a page reload.
 
 ## Location seeded at pairing time
 
-When B scans A's QR and sends `PAIRING_PEER_ACCEPT`, B includes
-its `home_lat` / `home_lon` in the body if both values are set (see
-[`pairing.md`](./pairing.md) — `PAIRING_PEER_ACCEPT` body fields).
-A stores the coordinates on B's `remote_instances` row immediately
-so the Map tab shows B's pin as soon as the pair is confirmed,
-without waiting for a subsequent `LOCAL_HOME_LOCATION_CHANGED`
-broadcast.
+The pairing code (QR / copy code) carries A's `home_lat` / `home_lon`, and
+B's `PAIRING_PEER_ACCEPT` carries B's, only when that household's admin
+shares its home with the other one — the per-pair switch, chosen on the
+pairing dialog's start step and pre-set from the household setting
+`share_home_default` (on by default); see
+[`pairing.md`](./pairing.md#home-sharing-is-chosen-before-the-handshake).
+Each side stores what it receives on the other's `remote_instances` row
+immediately, so the Map tab shows the pin as soon as the pair is confirmed,
+without waiting for a subsequent `LOCAL_HOME_LOCATION_CHANGED` broadcast.
+The row it creates carries the same `share_home` switch, so the later
+fan-out keeps honouring it.
 
 ## GPS precision
 
@@ -90,8 +94,8 @@ before any storage or transmission — `round(float(val), 4)`. This
 applies at three enforcement points:
 
 1. **Adapter `on_startup`** — when the value is read from HA Core.
-2. **Pairing coordinator** — when `home_lat` / `home_lon` arrive in
-   the `PAIRING_PEER_ACCEPT` body.
+2. **Pairing coordinator** — when `home_lat` / `home_lon` go into or
+   arrive in the pairing code or the `PAIRING_PEER_ACCEPT` body.
 3. **Inbound handler** — when `LOCAL_HOME_LOCATION_CHANGED` is
    processed.
 
