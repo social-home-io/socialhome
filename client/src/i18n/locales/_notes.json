@@ -505,6 +505,8 @@
   "spaces.discover.chip_global": "Discover filter chip: spaces listed on a GFS (Global Federation Server).",
   "spaces.discover.ask": "Button on a space that needs approval to join.",
   "local_area.within": "A local community (a public space only for households living nearby): '{radius}' is a distance like '5 km', '{place}' a coordinate like '47.3769° N, 8.5417° E'.",
+  "local_area.discover.near_you": "Toggle chip in Discover › Paired households: show only the local communities your home lies in.",
+  "local_area.within_host_centre": "About page of another household's local community (a public space only for households living nearby). '{radius}' is a distance like '5 km'. The centre itself is never shown to other households.",
   "local_area.badge.not_shared": "Badge on a space row. '{host}' is the name of another household. That household checks the home location your household shares with it.",
   "local_area.create.legend": "Name of the feature: a public space bound to an area (a neighbourhood, a village). Households join only while their home lies inside.",
   "capability.local_communities": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase. Public spaces only for households living nearby."

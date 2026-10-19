@@ -298,12 +298,13 @@ describe('SpaceListPage — Discover', () => {
     expect(r.getByText(/never listed on a GFS/)).toBeTruthy()
   })
 
-  it('local communities: the row shows the area and a badge; outside or unshared offers no join', async () => {
-    const area = { lat: 47.3769, lon: 8.5417, radius_km: 5 }
+  it('local communities: the row shows the radius and the host\'s verdict; outside or unshared offers no join', async () => {
+    const lc = (in_area: boolean | null) => ({ radius_km: 5, in_area })
     const paired = [
-      { ...PAIRED[1], space_id: 'pIn', name: 'Hottingen street party', local_area: area, home_shared_with_host: true },
-      { ...PAIRED[1], space_id: 'pOut', name: 'Bern neighbours', local_area: { ...area, lat: 46.9481, lon: 7.4474 }, home_shared_with_host: true },
-      { ...PAIRED[1], space_id: 'pHidden', name: 'Seefeld parents', local_area: area, home_shared_with_host: false },
+      { ...PAIRED[1], space_id: 'pOut', name: 'Bern neighbours', local_community: lc(false), home_shared_with_host: true },
+      { ...PAIRED[1], space_id: 'pPlain', name: 'Chess club', local_community: null, home_shared_with_host: true },
+      { ...PAIRED[1], space_id: 'pHidden', name: 'Seefeld parents', local_community: lc(null), home_shared_with_host: false },
+      { ...PAIRED[1], space_id: 'pIn', name: 'Hottingen street party', local_community: lc(true), home_shared_with_host: true },
     ]
     const base = apiGet.getMockImplementation()!
     apiGet.mockImplementation(async (url: string) => {
@@ -319,11 +320,35 @@ describe('SpaceListPage — Discover', () => {
     expect(r.getByRole('button', { name: 'Join: Hottingen street party' })).toBeTruthy()
     expect(row('Bern neighbours').textContent).toContain('Outside your area')
     expect(r.queryByRole('button', { name: 'Join: Bern neighbours' })).toBeNull()
-    expect(row('Seefeld parents').textContent).toContain('Share your home with Keller household to join')
+    expect(row('Seefeld parents').textContent).toContain('Share your home with Keller household to check')
     expect(r.queryByRole('button', { name: 'Join: Seefeld parents' })).toBeNull()
     // The row's link reads the area out too.
     const link = row('Bern neighbours').querySelector('a')!
     expect(link.getAttribute('aria-label')).toContain('Outside your area')
+    // Near you first, outside last and quieter.
+    const names = () => [...r.container.querySelectorAll('#discover .sh-spaces-row__t')].map((n) => n.textContent)
+    expect(names()).toEqual(['Hottingen street party', 'Chess club', 'Seefeld parents', 'Bern neighbours'])
+    expect(row('Bern neighbours').classList.contains('sh-spaces-row--muted')).toBe(true)
+    expect(row('Hottingen street party').classList.contains('sh-spaces-row--muted')).toBe(false)
+    // "Near you" narrows to the communities our home is in — and back.
+    const near = r.getByTestId('discover-near-you')
+    expect(near.getAttribute('aria-pressed')).toBe('false')
+    r.fireEvent.click(near)
+    expect(near.getAttribute('aria-pressed')).toBe('true')
+    expect(names()).toEqual(['Hottingen street party'])
+    r.fireEvent.click(near)
+    expect(names()).toHaveLength(4)
+  })
+
+  it('"Near you" only appears when a paired household hosts a local community', async () => {
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/api/peer_spaces') return [{ ...PAIRED[1], local_community: null }]
+      return base(url)
+    })
+    const r = await renderPage('/spaces?discover=paired')
+    await r.findByText(PAIRED[1].name)
+    expect(r.queryByTestId('discover-near-you')).toBeNull()
   })
 
   it('?discover=global with no GFS: an admin is offered "Add a GFS"', async () => {

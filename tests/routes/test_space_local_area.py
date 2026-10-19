@@ -7,9 +7,10 @@ or with an unknown home (403 ``OUTSIDE_AREA`` / ``HOME_NOT_SHARED``).
 * ``PATCH /api/spaces/{id}`` with all three sets or moves the area, all
   three ``null`` clears it — owner / admin, on the household hosting it.
   Host-local: no ``config_sequence`` bump.
-* ``GET /api/spaces/{id}`` (member and landing views),
-  ``GET /api/household/spaces`` and ``GET /api/peer_spaces`` carry
-  ``local_area``.
+* ``GET /api/spaces/{id}`` (member and landing views) and
+  ``GET /api/household/spaces`` carry ``local_area`` (the centre — the
+  host's own people only). ``GET /api/peer_spaces`` carries
+  ``local_community`` (radius + the host's verdict for us), never a centre.
 """
 
 import pytest
@@ -320,13 +321,21 @@ async def _peer(client, iid: str, *, share_home: bool) -> None:
     )
 
 
-async def test_peer_directory_rows_carry_the_area_and_our_sharing(client, space):
+async def test_peer_directory_rows_carry_the_verdict_never_a_centre(client, space):
+    """``GET /api/peer_spaces``: a paired household's local community is
+    "within X km" + the host's verdict for us, and our own sharing state —
+    no coordinates anywhere in the row."""
     _, hdr = space
     await _peer(client, "berta", share_home=True)
     await _peer(client, "carlo", share_home=False)
+    await _peer(client, "dora", share_home=True)
     await client._db.enqueue(
-        "INSERT INTO peer_space_directory(instance_id, space_id, name, lat, lon,"
-        " radius_km) VALUES('berta', 'sp-b', 'Nachbarn', 47.3769, 8.5417, 2.0)"
+        "INSERT INTO peer_space_directory(instance_id, space_id, name,"
+        " radius_km, in_area) VALUES('berta', 'sp-b', 'Nachbarn', 2.0, 1)"
+    )
+    await client._db.enqueue(
+        "INSERT INTO peer_space_directory(instance_id, space_id, name,"
+        " radius_km, in_area) VALUES('dora', 'sp-d', 'Dorf', 5.0, NULL)"
     )
     await client._db.enqueue(
         "INSERT INTO peer_space_directory(instance_id, space_id, name)"
@@ -334,12 +343,12 @@ async def test_peer_directory_rows_carry_the_area_and_our_sharing(client, space)
     )
     r = await client.get("/api/peer_spaces", headers=hdr["neighbour"])
     assert r.status == 200
-    rows = {row["space_id"]: row for row in await r.json()}
-    assert rows["sp-b"]["local_area"] == {
-        "lat": 47.3769,
-        "lon": 8.5417,
-        "radius_km": 2.0,
-    }
+    body = await r.json()
+    rows = {row["space_id"]: row for row in body}
+    assert rows["sp-b"]["local_community"] == {"radius_km": 2.0, "in_area": True}
     assert rows["sp-b"]["home_shared_with_host"] is True
-    assert rows["sp-c"]["local_area"] is None
+    assert rows["sp-d"]["local_community"] == {"radius_km": 5.0, "in_area": None}
+    assert rows["sp-c"]["local_community"] is None
     assert rows["sp-c"]["home_shared_with_host"] is False
+    for row in body:
+        assert not {"lat", "lon", "local_area"} & set(row)

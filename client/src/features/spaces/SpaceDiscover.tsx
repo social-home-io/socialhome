@@ -11,6 +11,11 @@
  *   (``GET /api/public_spaces``). With no GFS, one inline row says so
  *   ("Add a GFS" for admins, "Ask …" for everyone else).
  *
+ * A paired household's local community carries only "within X km" and the
+ * host's verdict for our home (never its centre): Paired lists the ones
+ * your home is in first, the ones you're outside of last and dimmed, and
+ * "Near you" narrows the list to the first kind.
+ *
  * Invite-only spaces are never listed, nor a space you're already in or
  * follow. Each row opens the space's About page; its one button joins,
  * asks to join or follows, by the space's rules. The chosen chip lives in
@@ -34,8 +39,8 @@ import { areaShortLabel } from '@/utils/localArea'
 import type { DirectoryEntry, GfsConnection, HouseholdSpaceRow } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
-  buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, hostLabel, matchesTerm,
-  withMembership, DISCOVER_SOURCES, type DiscoverAction, type DiscoverSource,
+  buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, entryRadiusKm, hostLabel,
+  matchesTerm, sortNearFirst, withMembership, DISCOVER_SOURCES, type DiscoverAction, type DiscoverSource,
 } from './discover'
 import { SpaceListRow, membersLabel } from './SpaceListRow'
 
@@ -121,6 +126,8 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
   const [loaded, setLoaded] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [asking, setAsking] = useState<DirectoryEntry | null>(null)
+  /** Paired › "Near you": only the local communities our home is in. */
+  const [nearOnly, setNearOnly] = useState(false)
 
   const reload = async () => {
     const r = await loadDiscover()
@@ -203,9 +210,18 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
     markPending(e.space_id)
   }
 
+  const home = householdHome.value
+  const paired = sortNearFirst(
+    discoverable(lists.paired, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
+    home,
+  )
+  // The toggle only means something when a paired household hosts a
+  // local community at all.
+  const hasCommunity = paired.some((e) => entryRadiusKm(e) !== null)
+  const near = nearOnly && hasCommunity
   const shown: Lists = {
     household: discoverable(lists.household, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
-    paired: discoverable(lists.paired, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
+    paired: near ? paired.filter((e) => entryAreaVerdict(e, home) === 'inside') : paired,
     global: discoverable(lists.global, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
   }
   const rows = shown[source]
@@ -222,6 +238,9 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           </button>
         </p>
       )
+    }
+    if (source === 'paired' && near) {
+      return <p class="sh-spaces-note">{t('local_area.discover.near_you_none')}</p>
     }
     if (searching) return <p class="sh-spaces-note">{t('spaces.discover.no_match', { term })}</p>
     if (source === 'global' && !hasGfs) {
@@ -278,10 +297,24 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           </button>
         ))}
       </div>
+      {source === 'paired' && hasCommunity && (
+        <div class="sh-spaces-filter">
+          <button
+            type="button"
+            class="sh-spaces-chip"
+            aria-pressed={near}
+            data-testid="discover-near-you"
+            onClick={() => setNearOnly(!nearOnly)}
+          >
+            <span aria-hidden="true">📍</span> {t('local_area.discover.near_you')}
+          </button>
+        </div>
+      )}
       {rows.length === 0 ? emptyLine() : (
         <ul class="sh-spaces-card sh-spaces-list" aria-label={t(CHIP_LABEL[source])}>
           {rows.map((e) => {
-            const verdict = entryAreaVerdict(e, householdHome.value)
+            const verdict = entryAreaVerdict(e, home)
+            const radius = entryRadiusKm(e)
             // A local community you can't get into from here (outside, or
             // your home isn't known to its host): the badge says why, and
             // no button offers a join the host would refuse.
@@ -292,8 +325,8 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
             const meta = a === null && !areaBlocks
               ? `${entryMeta(e, source)} · ${t('spaces.discover.invite_link_short')}`
               : entryMeta(e, source)
-            const areaText = e.local_area
-              ? [areaShortLabel(e.local_area), verdict ? localAreaVerdictText(verdict, hostLabel(e)) : null]
+            const areaText = radius !== null
+              ? [areaShortLabel(radius), verdict ? localAreaVerdictText(verdict, hostLabel(e)) : null]
                 .filter(Boolean).join(' · ')
               : ''
             return (
@@ -303,9 +336,10 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
                 emoji={e.emoji}
                 name={e.name}
                 meta={meta}
-                note={e.local_area && (
+                muted={verdict === 'outside'}
+                note={radius !== null && (
                   <>
-                    <span class="sh-local-area-chip">🏘️ {areaShortLabel(e.local_area)}</span>
+                    <span class="sh-local-area-chip">🏘️ {areaShortLabel(radius)}</span>
                     {verdict && <LocalAreaBadge verdict={verdict} hostName={hostLabel(e)} />}
                   </>
                 )}

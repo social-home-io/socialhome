@@ -35,11 +35,11 @@ import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
-  contentIsGated, discoverAction, entryAreaVerdict, GATED_CHIP, hostLabel, joinModeChip, sourceOf,
-  type DiscoverAction,
+  contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, joinModeChip,
+  sourceOf, type DiscoverAction,
 } from './discover'
 import { addBase } from '@/baseUrl'
-import { areaLabel, areaShortLabel, type AreaVerdict } from '@/utils/localArea'
+import { areaLabel, areaShortLabel, peerAreaLabel, type AreaVerdict } from '@/utils/localArea'
 
 type AboutAction = 'open' | Exclude<DiscoverAction, null>
 
@@ -271,6 +271,11 @@ export default function SpacePublicDetailPage() {
     : way === 'follow' && entry.already_subscribed ? null
     : way
   const primaryLabel = action === null ? null : ABOUT_LABEL[action]()
+  // A local community: its radius whoever hosts it — but the centre (and
+  // so the map) only for a space this household hosts. A paired
+  // household's centre never leaves it.
+  const radius = entryRadiusKm(entry)
+  const ownArea = isLocal ? entry.local_area ?? null : null
 
   return (
     <div class="sh-space-public">
@@ -313,8 +318,8 @@ export default function SpacePublicDetailPage() {
         {entry.min_age > 0 && (
           <span class="sh-age-chip">{entry.min_age}+</span>
         )}
-        {entry.local_area && (
-          <span class="sh-local-area-chip">🏘️ {areaShortLabel(entry.local_area)}</span>
+        {radius !== null && (
+          <span class="sh-local-area-chip">🏘️ {areaShortLabel(radius)}</span>
         )}
         {entry.already_subscribed && (
           <span class="sh-subscribed-pill">🔔 {t('spaces.list.subscribed_pill')}</span>
@@ -332,17 +337,19 @@ export default function SpacePublicDetailPage() {
         <p class="sh-muted sh-space-public__invite-note">{t('spaces.discover.invite_link')}</p>
       )}
 
-      {entry.local_area && (
+      {radius !== null && (
         <section class="sh-space-public__section sh-space-public__local" aria-labelledby="sh-about-local">
           <h2 id="sh-about-local">🏘️ {t('local_area.about.title')}</h2>
           <p>{t('local_area.about.rule')}</p>
-          <p class="sh-space-public__local-where">{areaLabel(entry.local_area)}</p>
+          <p class="sh-space-public__local-where" data-testid="local-area-where">
+            {ownArea ? areaLabel(ownArea) : peerAreaLabel(radius)}
+          </p>
           {verdict && (
             <p class="sh-space-public__local-verdict" role="status">
               <LocalAreaBadge verdict={verdict} hostName={hostLabel(entry)} />
             </p>
           )}
-          <LocalAreaMap area={entry.local_area} home={householdHome.value} height={200} />
+          {ownArea && <LocalAreaMap area={ownArea} home={householdHome.value} height={200} />}
           {verdict && areaNextStep(verdict, isLocal) && (
             <p class="sh-muted">
               {areaNextStep(verdict, isLocal)}

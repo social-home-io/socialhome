@@ -8,8 +8,8 @@ describe('LocalAreaBadge', () => {
     expect(localAreaVerdictText('outside')).toBe('Outside your area')
     expect(localAreaVerdictText('no_home')).toBe("Your home location isn't set")
     expect(localAreaVerdictText('not_shared', 'Sara’s household'))
-      .toBe('Share your home with Sara’s household to join')
-    expect(localAreaVerdictText('not_shared', null)).toBe('Share your home with its household to join')
+      .toBe('Share your home with Sara’s household to check')
+    expect(localAreaVerdictText('not_shared', null)).toBe('Share your home with its household to check')
   })
 
   it('says nothing while the home is loading', () => {

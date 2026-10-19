@@ -358,12 +358,11 @@ describe('SpacePublicDetailPage — local community', () => {
     currentUser.value = null
   })
 
-  it('shows the exact area, a map and "In your area" with the join button', async () => {
+  const LC = (in_area: boolean | null) => ({ radius_km: 5, in_area })
+
+  it('a space this household hosts: the exact area, a map and "In your area"', async () => {
     home({ lat: 47.392, lon: 8.56 })
-    cacheDirectoryEntries([entry({
-      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_area: AREA,
-      home_shared_with_host: true,
-    })])
+    cacheDirectoryEntries([entry({ host_instance_id: 'local', local_area: AREA })])
     const { getByText, getByTestId, container } = await renderPage()
     await waitFor(() => getByText('In your area'))
     expect(container.textContent).toContain('Within 5 km of 47.3769° N, 8.5417° E')
@@ -372,9 +371,24 @@ describe('SpacePublicDetailPage — local community', () => {
     expect(getByText('Join space')).toBeTruthy()
   })
 
+  it('a paired household\'s community: no map, no centre — the radius and the host\'s verdict', async () => {
+    home({ lat: 47.392, lon: 8.56 })
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_community: LC(true),
+      home_shared_with_host: true,
+    })])
+    const { getByText, queryByTestId, getByTestId, container } = await renderPage()
+    await waitFor(() => getByText('In your area'))
+    expect(getByTestId('local-area-where').textContent)
+      .toBe('Local community · within 5 km of the host’s chosen centre')
+    expect(queryByTestId('area-map')).toBeNull()
+    expect(container.textContent).not.toMatch(/°\s*[NSEW]/)
+    expect(getByText('Join space')).toBeTruthy()
+  })
+
   it('outside: says so and offers no join the host would refuse', async () => {
     home({ lat: 46.9481, lon: 7.4474 })
-    cacheDirectoryEntries([entry({ host_instance_id: 'iid-b', local_area: AREA, home_shared_with_host: true })])
+    cacheDirectoryEntries([entry({ host_instance_id: 'iid-b', local_community: LC(false), home_shared_with_host: true })])
     const { getByText, queryByText, container } = await renderPage()
     await waitFor(() => getByText('Outside your area'))
     expect(queryByText('Join space')).toBeNull()
@@ -387,11 +401,11 @@ describe('SpacePublicDetailPage — local community', () => {
     home({ lat: 47.392, lon: 8.56 })
     currentUser.value = { user_id: 'u1', username: 'u', display_name: 'U', is_admin: true } as typeof currentUser.value
     cacheDirectoryEntries([entry({
-      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_area: AREA,
+      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_community: LC(null),
       home_shared_with_host: false,
     })])
     const { getByText, queryByText } = await renderPage()
-    await waitFor(() => getByText('Share your home with Keller household to join'))
+    await waitFor(() => getByText('Share your home with Keller household to check'))
     expect(queryByText('Join space')).toBeNull()
     const link = getByText('Open Connections') as HTMLAnchorElement
     // Ingress: the href goes through addBase (mocked to identity here).

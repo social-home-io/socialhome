@@ -24743,6 +24743,10 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
 }
 /* Discover: one selected-chip style app-wide — primary-soft + primary border. */
 .sh-spaces-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* Discover › Paired: the "Near you" toggle, a filter under the source chips. */
+.sh-spaces-filter { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+/* A local community you are outside of: the row reads quieter. */
+.sh-spaces-row--muted .sh-spaces-row__t { color: var(--sh-text-muted); }
 .sh-spaces-chip {
   display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 14px;
   border-radius: var(--sh-radius-full); border: 1px solid var(--sh-border-strong);

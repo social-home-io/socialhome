@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { DirectoryEntry } from '@/types'
 import {
   buildHouseholdEntries, canFollow, contentIsGated, discoverAction, discoverable, entryAreaVerdict,
+  entryRadiusKm, sortNearFirst,
   hostLabel, matchesTerm, parseDiscoverSource, sourceOf, withMembership,
 } from './discover'
 
@@ -122,30 +123,51 @@ describe('entryAreaVerdict (local communities)', () => {
   const area = { lat: 47.3769, lon: 8.5417, radius_km: 5 }
   const near = { lat: 47.392, lon: 8.56 }
   const bern = { lat: 46.9481, lon: 7.4474 }
+  const local = (over: Partial<DirectoryEntry> = {}) => entry({ host_instance_id: 'local', ...over })
 
   it('a space without an area has no verdict', () => {
     expect(entryAreaVerdict(entry(), near)).toBeNull()
-    expect(entryAreaVerdict(entry({ local_area: null }), near)).toBeNull()
+    expect(entryAreaVerdict(entry({ local_area: null, local_community: null }), near)).toBeNull()
   })
 
-  it('checks our home against the area', () => {
-    expect(entryAreaVerdict(entry({ local_area: area }), near)).toBe('inside')
-    expect(entryAreaVerdict(entry({ local_area: area }), bern)).toBe('outside')
-    expect(entryAreaVerdict(entry({ local_area: area }), null)).toBe('no_home')
-    expect(entryAreaVerdict(entry({ local_area: area }), undefined)).toBe('unknown')
+  it('a space this household hosts is checked here against our home', () => {
+    expect(entryAreaVerdict(local({ local_area: area }), near)).toBe('inside')
+    expect(entryAreaVerdict(local({ local_area: area }), bern)).toBe('outside')
+    expect(entryAreaVerdict(local({ local_area: area }), null)).toBe('no_home')
+    expect(entryAreaVerdict(local({ local_area: area }), undefined)).toBe('unknown')
+    // …and needs no sharing.
+    expect(entryAreaVerdict(local({ local_area: area, home_shared_with_host: false }), near))
+      .toBe('inside')
   })
 
-  it('a paired host we do not share our home with can not check it', () => {
-    expect(entryAreaVerdict(entry({ local_area: area, home_shared_with_host: false }), near))
+  it('a paired community uses the host\'s verdict — never a centre here', () => {
+    const lc = (in_area: boolean | null) => ({ local_community: { radius_km: 2, in_area } })
+    expect(entryAreaVerdict(entry(lc(true)), near)).toBe('inside')
+    expect(entryAreaVerdict(entry(lc(false)), near)).toBe('outside')
+    expect(entryAreaVerdict(entry({ ...lc(true), home_shared_with_host: false }), near))
       .toBe('not_shared')
-    // An older backend says nothing: the host decides.
-    expect(entryAreaVerdict(entry({ local_area: area }), near)).toBe('inside')
+    expect(entryAreaVerdict(entry(lc(null)), near)).toBe('unknown')
+    expect(entryAreaVerdict(entry(lc(null)), null)).toBe('no_home')
+    // A centre on a paired row (an old cache) is ignored, never computed on.
+    expect(entryAreaVerdict(entry({ local_area: area }), bern)).toBeNull()
   })
 
-  it('a space this household hosts needs no sharing', () => {
-    expect(entryAreaVerdict(
-      entry({ host_instance_id: 'local', local_area: area, home_shared_with_host: false }), near,
-    )).toBe('inside')
+  it('the radius comes from either shape', () => {
+    expect(entryRadiusKm(local({ local_area: area }))).toBe(5)
+    expect(entryRadiusKm(entry({ local_community: { radius_km: 2, in_area: null } }))).toBe(2)
+    expect(entryRadiusKm(entry())).toBeNull()
+  })
+
+  it('sorts in-area communities first and outside ones last, else keeps the order', () => {
+    const rows = [
+      entry({ space_id: 'out', local_community: { radius_km: 2, in_area: false } }),
+      entry({ space_id: 'plain1' }),
+      entry({ space_id: 'unknown', local_community: { radius_km: 2, in_area: null } }),
+      entry({ space_id: 'in', local_community: { radius_km: 2, in_area: true } }),
+      entry({ space_id: 'plain2' }),
+    ]
+    expect(sortNearFirst(rows, near).map((e) => e.space_id))
+      .toEqual(['in', 'plain1', 'plain2', 'unknown', 'out'])
   })
 
   it('household rows carry the area', () => {

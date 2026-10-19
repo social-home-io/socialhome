@@ -11,7 +11,7 @@
  */
 import { t } from '@/i18n/i18n'
 import type { DirectoryEntry, HouseholdSpaceRow } from '@/types'
-import { areaVerdict, type AreaVerdict, type Home } from '@/utils/localArea'
+import { areaVerdict, peerAreaVerdict, type AreaVerdict, type Home } from '@/utils/localArea'
 
 export type DiscoverSource = 'household' | 'paired' | 'global'
 
@@ -116,19 +116,56 @@ export function matchesTerm(
 
 export type DiscoverAction = 'join' | 'request' | 'follow' | 'pending' | null
 
+function hostedHere(entry: DirectoryEntry): boolean {
+  return entry.host_instance_id === 'local' || entry.scope === 'household'
+}
+
 /**
- * A local community's badge for ``entry`` seen from this household's
- * ``home`` — ``null`` when the space has no area. A space this household
- * hosts reads its own home; a paired household's needs our home SHARED
- * with that host too (an older backend's row says nothing: assume shared,
- * the host decides).
+ * A local community's badge for ``entry`` seen from this household —
+ * ``null`` when the space is not one. A space this household hosts is
+ * checked here against our own ``home`` (we know its centre); a paired
+ * household's carries only the host's verdict for our shared home
+ * (``local_community.in_area``) — the centre never leaves the host. An
+ * older backend's row says nothing about sharing: assume shared, the host
+ * decides.
  */
 export function entryAreaVerdict(
   entry: DirectoryEntry, home: Home | null | undefined,
 ): AreaVerdict | null {
-  if (!entry.local_area) return null
-  const local = entry.host_instance_id === 'local' || entry.scope === 'household'
-  return areaVerdict(entry.local_area, home, local || entry.home_shared_with_host !== false)
+  if (entry.local_area && hostedHere(entry)) return areaVerdict(entry.local_area, home)
+  if (entry.local_community) {
+    return peerAreaVerdict(entry.local_community, home, entry.home_shared_with_host !== false)
+  }
+  return null
+}
+
+/** A local community's radius (km), whoever hosts it; ``null`` otherwise. */
+export function entryRadiusKm(entry: DirectoryEntry): number | null {
+  if (entry.local_area && hostedHere(entry)) return entry.local_area.radius_km
+  return entry.local_community?.radius_km ?? null
+}
+
+/** Where a row goes in a "near you first" list: communities your home is
+ *  in, then ordinary spaces, then communities the host can't check you
+ *  for, then the ones you're outside of. */
+function nearRank(v: AreaVerdict | null): number {
+  switch (v) {
+    case 'inside': return 0
+    case null: return 1
+    case 'outside': return 3
+    default: return 2
+  }
+}
+
+/** ``entries`` with in-area communities first and outside ones last;
+ *  otherwise the order is kept (the server sorts by members). */
+export function sortNearFirst(
+  entries: DirectoryEntry[], home: Home | null | undefined,
+): DirectoryEntry[] {
+  return entries
+    .map((e, i) => ({ e, i, r: nearRank(entryAreaVerdict(e, home)) }))
+    .sort((a, b) => a.r - b.r || a.i - b.i)
+    .map((x) => x.e)
 }
 
 /** Is the entry's host reachable for a join (this household, or paired)? */

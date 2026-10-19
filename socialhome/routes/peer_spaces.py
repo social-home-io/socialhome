@@ -11,7 +11,6 @@ from aiohttp import web
 
 from .. import app_keys as K
 from ..domain.federation import PairingStatus
-from ..domain.local_community import local_area_wire
 from ..domain.space import normalize_category
 from .base import BaseView
 
@@ -70,10 +69,14 @@ class PeerSpaceCollectionView(BaseView):
                     "join_mode": e.join_mode,
                     "min_age": e.min_age,
                     "category": normalize_category(e.category),
-                    # A local community's area (v_59 hosts), else null.
-                    "local_area": (
-                        local_area_wire(e.local_area)
-                        if e.local_area is not None
+                    # A local community (v_59 hosts): its radius and the
+                    # host's verdict for THIS household — never a centre.
+                    "local_community": (
+                        {
+                            "radius_km": e.local_community.radius_km,
+                            "in_area": e.local_community.in_area,
+                        }
+                        if e.local_community is not None
                         else None
                     ),
                     "home_shared_with_host": shares_home.get(e.instance_id, False),

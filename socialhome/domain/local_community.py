@@ -16,8 +16,13 @@ require_local_eligibility`.
   the create dialog took ``lat`` / ``lon`` only) is no area.
 * The centre is truncated to 4 dp (the GPS rule) and the radius kept to
   one decimal between :data:`MIN_LOCAL_AREA_RADIUS_KM` and
-  :data:`MAX_LOCAL_AREA_RADIUS_KM`, both on write and when a peer's
-  directory entry is read.
+  :data:`MAX_LOCAL_AREA_RADIUS_KM`.
+* **The centre never leaves the host** (owner decision 2026-10-19: people's
+  locations are not shared by design, and a neighbourhood's centre is
+  usually somebody's street). Only the host's own people see it. A paired
+  household's directory entry carries :func:`local_community_wire` — "a
+  local community, within X km" and the host's verdict for THAT household's
+  home (the one it already chose to share) — and nothing else.
 """
 
 from __future__ import annotations
@@ -38,11 +43,14 @@ __all__ = [
     "MIN_LOCAL_AREA_RADIUS_KM",
     "Eligibility",
     "LocalArea",
+    "PeerLocalCommunity",
     "eligibility",
     "local_area_of",
     "local_area_wire",
-    "parse_local_area_wire",
+    "local_community_wire",
+    "parse_local_community_wire",
     "validate_local_area",
+    "validate_radius_km",
 ]
 
 #: Smallest radius a local community may have — about a city block.
@@ -65,6 +73,18 @@ class LocalArea:
     radius_km: float
 
 
+@dataclass(slots=True, frozen=True)
+class PeerLocalCommunity:
+    """What a paired household learns about another household's local
+    community: its radius, and the host's verdict for the receiving
+    household's own home. No centre."""
+
+    radius_km: float
+    #: ``True`` inside, ``False`` outside, ``None`` when the host does not
+    #: know the receiving household's home (it does not share it).
+    in_area: bool | None
+
+
 class Eligibility(StrEnum):
     """Where a household's home lies relative to a local area."""
 
@@ -84,6 +104,18 @@ def _number(value: object, *, name: str) -> float:
     return coerced
 
 
+def validate_radius_km(radius_km: object) -> float:
+    """``radius_km`` within the bounds, rounded to one decimal, or
+    :class:`ValueError` (a number only — never a string or a boolean)."""
+    r = _number(radius_km, name="radius_km")
+    if not MIN_LOCAL_AREA_RADIUS_KM <= r <= MAX_LOCAL_AREA_RADIUS_KM:
+        raise ValueError(
+            f"radius_km must be between {MIN_LOCAL_AREA_RADIUS_KM:g} and "
+            f"{MAX_LOCAL_AREA_RADIUS_KM:g}"
+        )
+    return round(r, 1)
+
+
 def validate_local_area(lat: object, lon: object, radius_km: object) -> LocalArea:
     """The area ``(lat, lon, radius_km)`` names, or :class:`ValueError`.
 
@@ -93,21 +125,16 @@ def validate_local_area(lat: object, lon: object, radius_km: object) -> LocalAre
     """
     la = _number(lat, name="lat")
     lo = _number(lon, name="lon")
-    r = _number(radius_km, name="radius_km")
     if not -90.0 <= la <= 90.0:
         raise ValueError("lat out of range")
     if not -180.0 <= lo <= 180.0:
         raise ValueError("lon out of range")
-    if not MIN_LOCAL_AREA_RADIUS_KM <= r <= MAX_LOCAL_AREA_RADIUS_KM:
-        raise ValueError(
-            f"radius_km must be between {MIN_LOCAL_AREA_RADIUS_KM:g} and "
-            f"{MAX_LOCAL_AREA_RADIUS_KM:g}"
-        )
+    r = validate_radius_km(radius_km)
     # ``+ 0.0`` folds a rounded ``-0.0`` into ``0.0``.
     return LocalArea(
         lat=float(truncate_coord(la)) + 0.0,  # type: ignore[arg-type]
         lon=float(truncate_coord(lo)) + 0.0,  # type: ignore[arg-type]
-        radius_km=round(r, 1),
+        radius_km=r,
     )
 
 
@@ -135,18 +162,45 @@ def eligibility(area: LocalArea, home: tuple[float, float] | None) -> Eligibilit
 
 
 def local_area_wire(area: LocalArea) -> dict[str, float]:
-    """The ``{lat, lon, radius_km}`` shape the API and the paired-household
-    directory carry."""
+    """The ``{lat, lon, radius_km}`` shape of the HOSTING household's own
+    API (its people see and edit the centre). Never put on the wire to
+    another household — that is :func:`local_community_wire`."""
     return {"lat": area.lat, "lon": area.lon, "radius_km": area.radius_km}
 
 
-def parse_local_area_wire(raw: object) -> LocalArea | None:
-    """A received ``{lat, lon, radius_km}``, validated like a local write
-    (4 dp, bounds) — or ``None`` when absent or malformed: an entry with a
-    broken area shows no area rather than a guessed one."""
-    if not isinstance(raw, dict):
+#: :class:`Eligibility` → the ``in_area`` the directory carries.
+_IN_AREA: Final = {
+    Eligibility.INSIDE: True,
+    Eligibility.OUTSIDE: False,
+    Eligibility.HOME_UNKNOWN: None,
+}
+
+
+def local_community_wire(area: LocalArea, verdict: Eligibility) -> dict[str, object]:
+    """The fields a ``SPACE_DIRECTORY_SYNC`` entry carries for a local
+    community, built for ONE recipient household: ``verdict`` is the host's
+    answer for that household's shared home (``in_area``), so it is never
+    put in a payload for anyone else. No centre — only the radius."""
+    return {
+        "local_community": True,
+        "radius_km": area.radius_km,
+        "in_area": _IN_AREA[verdict],
+    }
+
+
+def parse_local_community_wire(raw: object) -> PeerLocalCommunity | None:
+    """A received directory entry's local-community fields, or ``None``
+    when the entry is not one or they are malformed (a broken entry shows
+    no area rather than a guessed one). The radius is re-validated; an
+    ``in_area`` that is not a boolean reads as unknown. Any centre a sender
+    put in the entry is ignored."""
+    if not isinstance(raw, dict) or raw.get("local_community") is not True:
         return None
     try:
-        return validate_local_area(raw.get("lat"), raw.get("lon"), raw.get("radius_km"))
+        radius = validate_radius_km(raw.get("radius_km"))
     except ValueError:
         return None
+    verdict = raw.get("in_area")
+    return PeerLocalCommunity(
+        radius_km=radius, in_area=verdict if isinstance(verdict, bool) else None
+    )

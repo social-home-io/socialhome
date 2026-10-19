@@ -835,6 +835,14 @@ export interface LocalArea {
   radius_km: number
 }
 
+/** What a paired household learns about another household's local
+ *  community: "within X km" and the host's verdict for our shared home
+ *  (`null` = the host doesn't know it). The centre stays on the host. */
+export interface PeerLocalCommunity {
+  radius_km: number
+  in_area: boolean | null
+}
+
 export interface HouseholdSpaceRow {
   space_id: string
   name: string
@@ -897,9 +905,12 @@ export interface DirectoryEntry {
    *  ``space_members``). Distinct from ``already_member``: a subscriber
    *  gets the content stream but can't post, comment, or react. */
   already_subscribed?: boolean
-  /** A local community's area (a public space bound to a centre +
-   *  radius); absent / `null` when it has none or the host is older. */
+  /** A local community's area WITH its centre — only on rows of a space
+   *  this household hosts (its own people see the centre). */
   local_area?: LocalArea | null
+  /** Paired rows only: a local community hosted by that household — its
+   *  radius and the host's verdict for OUR shared home. Never a centre. */
+  local_community?: PeerLocalCommunity | null
   /** Paired rows only: does this household share its home location with
    *  the host? A local community's host reads only that. */
   home_shared_with_host?: boolean

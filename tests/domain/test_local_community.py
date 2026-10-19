@@ -11,10 +11,12 @@ from socialhome.domain.local_community import (
     MIN_LOCAL_AREA_RADIUS_KM,
     Eligibility,
     LocalArea,
+    PeerLocalCommunity,
     eligibility,
     local_area_of,
     local_area_wire,
-    parse_local_area_wire,
+    local_community_wire,
+    parse_local_community_wire,
     validate_local_area,
 )
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
@@ -127,14 +129,35 @@ def test_an_unknown_home_is_its_own_answer():
     assert eligibility(area, None) is Eligibility.HOME_UNKNOWN
 
 
-# ── wire shape ──────────────────────────────────────────────────────────
+# ── wire shapes ─────────────────────────────────────────────────────────
 
 
-def test_wire_round_trip():
+def test_the_api_shape_names_the_centre():
+    """Only the hosting household's own API carries the centre."""
     area = LocalArea(47.3769, 8.5417, 5.0)
-    wire = local_area_wire(area)
-    assert wire == {"lat": 47.3769, "lon": 8.5417, "radius_km": 5.0}
-    assert parse_local_area_wire(wire) == area
+    assert local_area_wire(area) == {"lat": 47.3769, "lon": 8.5417, "radius_km": 5.0}
+
+
+@pytest.mark.parametrize(
+    "verdict,in_area",
+    [
+        (Eligibility.INSIDE, True),
+        (Eligibility.OUTSIDE, False),
+        (Eligibility.HOME_UNKNOWN, None),
+    ],
+)
+def test_the_directory_shape_carries_no_coordinates(verdict, in_area):
+    """A paired household learns the radius and the host's verdict for
+    ITS OWN home — never the centre."""
+    wire = local_community_wire(LocalArea(47.3769, 8.5417, 5.0), verdict)
+    assert wire == {"local_community": True, "radius_km": 5.0, "in_area": in_area}
+    assert not {"lat", "lon", "latitude", "longitude", "local_area"} & set(wire)
+
+
+@pytest.mark.parametrize("in_area", [True, False, None])
+def test_directory_shape_round_trip(in_area):
+    wire = {"local_community": True, "radius_km": 2.0, "in_area": in_area}
+    assert parse_local_community_wire(wire) == PeerLocalCommunity(2.0, in_area)
 
 
 @pytest.mark.parametrize(
@@ -143,22 +166,33 @@ def test_wire_round_trip():
         None,
         "x",
         [],
-        {"lat": 1, "lon": 2},
-        {"lat": 1, "lon": 2, "radius_km": 500},
-        {"lat": 100, "lon": 2, "radius_km": 5},
-        {"lat": True, "lon": 2, "radius_km": 5},
+        {},
+        {"radius_km": 5},  # no flag
+        {"local_community": "yes", "radius_km": 5},
+        {"local_community": True},
+        {"local_community": True, "radius_km": 500},
+        {"local_community": True, "radius_km": 0.1},
+        {"local_community": True, "radius_km": True},
+        {"local_community": True, "radius_km": "5"},
+        # The pre-rework shape: a centre is never read, whatever it says.
+        {"local_area": {"lat": 47.3769, "lon": 8.5417, "radius_km": 5.0}},
     ],
 )
-def test_a_malformed_wire_area_is_dropped(raw):
-    """A peer's directory entry with a broken area shows no area at all —
-    never a guessed one."""
-    assert parse_local_area_wire(raw) is None
+def test_a_malformed_directory_entry_is_no_local_community(raw):
+    """A broken entry shows no area at all — never a guessed one."""
+    assert parse_local_community_wire(raw) is None
 
 
-def test_a_wire_area_is_truncated_again_on_receipt():
-    """The receiver re-applies the 4 dp rule — it never stores more
-    precision than the GPS rule allows, whatever the sender put there."""
-    got = parse_local_area_wire(
-        {"lat": 47.376_912_3, "lon": 8.541_7499, "radius_km": 5}
+@pytest.mark.parametrize("bad", ["yes", 1, 0, [], {}])
+def test_a_non_boolean_verdict_reads_as_unknown(bad):
+    """Only ``true`` / ``false`` are verdicts; anything else is "the host
+    does not know" — the host checks again on every seat anyway."""
+    got = parse_local_community_wire(
+        {"local_community": True, "radius_km": 5, "in_area": bad}
     )
-    assert got == LocalArea(47.3769, 8.5417, 5.0)
+    assert got == PeerLocalCommunity(5.0, None)
+
+
+def test_the_radius_is_rounded_again_on_receipt():
+    got = parse_local_community_wire({"local_community": True, "radius_km": 2.345})
+    assert got == PeerLocalCommunity(2.3, None)
