@@ -32,6 +32,7 @@ import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from './Button'
+import { askLocationConsent, isApiCode } from './localConsent'
 import { showToast } from './Toast'
 import { isOne, t } from '@/i18n/i18n'
 import {
@@ -151,9 +152,19 @@ export function RemoteInviteInboxBanner({ onAccepted }: { onAccepted?: () => voi
   ) => {
     setInFlight((prev) => ({ ...prev, [invite.invite_token]: decision }))
     try {
-      await api.post(
-        `/api/remote_invites/${invite.invite_token}/${decision}`, {},
-      )
+      try {
+        await api.post(
+          `/api/remote_invites/${invite.invite_token}/${decision}`, {},
+        )
+      } catch (exc) {
+        // A local community: the accept carries our household's approximate
+        // location to the inviting household — only once the person agreed.
+        if (decision !== 'accept' || !isApiCode(exc, 'LOCATION_REQUIRED')) throw exc
+        if (!await askLocationConsent(householdLabel(invite.inviter_instance_id))) return
+        await api.post(
+          `/api/remote_invites/${invite.invite_token}/accept`, { share_location: true },
+        )
+      }
       showToast(
         decision === 'accept' ? t('remote_invite.accepted') : t('remote_invite.declined'),
         decision === 'accept' ? 'success' : 'info',

@@ -2,8 +2,8 @@
 
 A ``public`` space may carry a centre (``spaces.lat`` / ``lon``) and a
 radius (``spaces.radius_km``). That makes it a *local community* (a
-neighbourhood, a village): a household may hold a seat only while the home
-location it shares with the hosting household lies inside the circle.
+neighbourhood, a village): a household may take a seat only while its home
+lies inside the circle.
 
 The rules here are pure (no I/O); the one service-side check every
 seat-granting path calls is :func:`socialhome.services.local_community.
@@ -21,16 +21,15 @@ require_local_eligibility`.
   locations are not shared by design, and a neighbourhood's centre is
   usually somebody's street). Only the host's own people see it. A paired
   household's directory entry carries :func:`local_community_wire` — "a
-  local community, within X km" and the host's verdict for THAT household's
-  home (the one it already chose to share) — and nothing else.
-* **The directory verdict has an "unsure" band near the rim**
-  (:func:`directory_verdict`): within about :func:`edge_band_km` (a tenth of
-  the radius, at least 250 m) of the rim the host says neither yes nor no (``in_area: null``,
-  ``area_edge: true``); the verdict is computed per grid cell
-  (:func:`edge_cell`) and the band slid by a host-secret amount per cell,
-  so moving a shared home step by step and watching the verdict flip does
-  not trace the circle. The seat check (:func:`eligibility`) keeps the
-  exact distance.
+  local community, within X km" — and nothing else.
+* **The joiner's home rides the join, coarsely** (owner decision
+  2026-10-19, "the joiner sends ~1 km with the join"). Every join a
+  household sends to a local community carries its home rounded to
+  :data:`JOIN_LOCATION_PRECISION_DP` decimals (about 1.1 km — never a
+  house or a street), with the person's consent, to the host only, and the
+  host decides on that point alone (:func:`join_verdict`): clearly inside,
+  clearly outside, or near the edge — never on the exact distance, which
+  nobody sends. The point is not stored.
 """
 
 from __future__ import annotations
@@ -46,20 +45,20 @@ from .space import Space, SpaceType
 from .zone_geo import haversine_m
 
 __all__ = [
+    "JOIN_LOCATION_PRECISION_DP",
     "LOCAL_AREA_RADIUS_PRESETS_KM",
     "MAX_LOCAL_AREA_RADIUS_KM",
     "MIN_LOCAL_AREA_RADIUS_KM",
     "Eligibility",
     "LocalArea",
     "PeerLocalCommunity",
-    "directory_verdict",
-    "edge_band_km",
-    "edge_cell",
-    "edge_max_shift_km",
-    "eligibility",
+    "coarse_join_point",
+    "join_location_wire",
+    "join_verdict",
     "local_area_of",
     "local_area_wire",
     "local_community_wire",
+    "parse_join_location",
     "parse_local_community_wire",
     "validate_local_area",
     "validate_radius_km",
@@ -68,31 +67,20 @@ __all__ = [
 #: Smallest radius a local community may have — about a city block.
 MIN_LOCAL_AREA_RADIUS_KM: Final = 0.5
 #: Largest radius — a district or a small town, never a region: a wider
-#: circle is no longer "local", and the area is shown to every paired
+#: circle is no longer "local", and the radius is shown to every paired
 #: household.
 MAX_LOCAL_AREA_RADIUS_KM: Final = 50.0
 #: The radii the SPA offers as one-tap presets (any value within the
 #: bounds is accepted).
 LOCAL_AREA_RADIUS_PRESETS_KM: Final = (1.0, 2.0, 5.0, 10.0, 25.0)
-#: The directory verdict's "unsure" band: this share of the radius on
-#: either side of the rim …
-EDGE_BAND_SHARE: Final = 0.1
-#: … and never less than this (km), so a small community's rim is not
-#: traced to the metre either.
-MIN_EDGE_BAND_KM: Final = 0.25
-#: How the directory verdict is coarsened, in bands (:func:`edge_band_km`):
-#: it is computed per grid cell this many bands wide …
-EDGE_CELL_BANDS: Final = 1.0
-#: … its "unsure" zone is slid by a host-secret amount of up to this many
-#: bands per cell …
-EDGE_SHIFT_BANDS: Final = 0.5
-#: … and reaches this many bands either side of the (slid) rim — enough
-#: that no home in a cell can get a wrong yes or no: the shift plus the
-#: cell's half-diagonal (√2 / 2) stay below it.
-EDGE_UNSURE_BANDS: Final = 1.25
-#: Kilometres per degree of latitude (and of longitude on the equator) on
-#: the sphere :func:`~socialhome.domain.zone_geo.haversine_m` uses.
-_KM_PER_DEGREE: Final = 111.19492664455873
+#: Decimals a joining household's home is rounded to before it rides a join
+#: to a local community's host: 2 dp is about 1.1 km of latitude — a part
+#: of town, never a house or a street. The host rounds again on receipt, so
+#: a sender that sent more is never read more precisely.
+JOIN_LOCATION_PRECISION_DP: Final = 2
+#: Half the side of the uncertainty cell around a rounded point: the home
+#: lies within this many degrees of it on each axis.
+_JOIN_HALF_CELL_DEG: Final = 0.5 * 10.0**-JOIN_LOCATION_PRECISION_DP
 
 
 @dataclass(slots=True, frozen=True)
@@ -107,31 +95,21 @@ class LocalArea:
 @dataclass(slots=True, frozen=True)
 class PeerLocalCommunity:
     """What a paired household learns about another household's local
-    community: its radius, and the host's verdict for the receiving
-    household's own home. No centre."""
+    community: its radius. No centre, and no verdict — whether a home is
+    inside is the host's decision on a join."""
 
     radius_km: float
-    #: ``True`` inside, ``False`` outside, ``None`` when the host does not
-    #: know the receiving household's home (it does not share it) — or
-    #: when it is unsure (:attr:`area_edge`).
-    in_area: bool | None
-    #: The receiving household's home is near the rim: the host says
-    #: neither yes nor no in the directory (it decides with the exact
-    #: distance when someone asks to join). Only ever ``True`` with
-    #: ``in_area`` ``None``.
-    area_edge: bool = False
 
 
 class Eligibility(StrEnum):
-    """Where a household's home lies relative to a local area."""
+    """Where a joining household's coarse point lies relative to a local
+    area (:func:`join_verdict`)."""
 
+    #: The whole uncertainty cell is inside the circle.
     INSIDE = "inside"
+    #: The whole uncertainty cell is outside the circle.
     OUTSIDE = "outside"
-    #: The household's home is not known here: not set, or not shared
-    #: with this household.
-    HOME_UNKNOWN = "home_unknown"
-    #: Near the rim — the directory's "unsure" answer
-    #: (:func:`directory_verdict`). The seat check never returns it.
+    #: The cell straddles the rim: an admin decides.
     EDGE = "edge"
 
 
@@ -156,6 +134,16 @@ def validate_radius_km(radius_km: object) -> float:
     return round(r, 1)
 
 
+def _lat_lon(lat: object, lon: object) -> tuple[float, float]:
+    la = _number(lat, name="lat")
+    lo = _number(lon, name="lon")
+    if not -90.0 <= la <= 90.0:
+        raise ValueError("lat out of range")
+    if not -180.0 <= lo <= 180.0:
+        raise ValueError("lon out of range")
+    return la, lo
+
+
 def validate_local_area(lat: object, lon: object, radius_km: object) -> LocalArea:
     """The area ``(lat, lon, radius_km)`` names, or :class:`ValueError`.
 
@@ -163,12 +151,7 @@ def validate_local_area(lat: object, lon: object, radius_km: object) -> LocalAre
     ``lon`` within ±180, the radius within the bounds. The centre is
     truncated to 4 dp and the radius rounded to one decimal.
     """
-    la = _number(lat, name="lat")
-    lo = _number(lon, name="lon")
-    if not -90.0 <= la <= 90.0:
-        raise ValueError("lat out of range")
-    if not -180.0 <= lo <= 180.0:
-        raise ValueError("lon out of range")
+    la, lo = _lat_lon(lat, lon)
     r = validate_radius_km(radius_km)
     # ``+ 0.0`` folds a rounded ``-0.0`` into ``0.0``.
     return LocalArea(
@@ -190,99 +173,61 @@ def local_area_of(space: Space) -> LocalArea | None:
     )
 
 
-def eligibility(area: LocalArea, home: tuple[float, float] | None) -> Eligibility:
-    """Is ``home`` (``(lat, lon)``, or ``None`` when unknown) inside
-    ``area``? The rim counts as inside."""
-    if home is None:
-        return Eligibility.HOME_UNKNOWN
-    distance_m = haversine_m(area.lat, area.lon, home[0], home[1])
-    if distance_m <= area.radius_km * 1000.0:
-        return Eligibility.INSIDE
-    return Eligibility.OUTSIDE
+def coarse_join_point(lat: object, lon: object) -> tuple[float, float]:
+    """A home rounded to :data:`JOIN_LOCATION_PRECISION_DP` decimals — the
+    only shape a home ever takes on a join — or :class:`ValueError`."""
+    la, lo = _lat_lon(lat, lon)
+    dp = JOIN_LOCATION_PRECISION_DP
+    return round(la, dp) + 0.0, round(lo, dp) + 0.0
 
 
-def edge_band_km(radius_km: float) -> float:
-    """The directory verdict's resolution — how closely a household
-    probing it can place the rim, and so the centre: a tenth of the radius,
-    at least :data:`MIN_EDGE_BAND_KM`. The grid, the secret shift and the
-    "unsure" zone are sized in these bands (``EDGE_*_BANDS``)."""
-    return max(EDGE_BAND_SHARE * float(radius_km), MIN_EDGE_BAND_KM)
+def join_location_wire(point: tuple[float, float]) -> dict[str, float]:
+    """The ``join_location`` field a join carries to a local community's
+    host (inside the join's sealed payload, never anywhere else)."""
+    lat, lon = coarse_join_point(point[0], point[1])
+    return {"lat": lat, "lon": lon}
 
 
-def edge_max_shift_km(radius_km: float) -> float:
-    """The largest secret slide of the "unsure" zone (either way)."""
-    return EDGE_SHIFT_BANDS * edge_band_km(radius_km)
+def parse_join_location(raw: object) -> tuple[float, float] | None:
+    """A received ``join_location``, re-rounded to the join precision, or
+    ``None`` when absent or malformed (refused as "no location", never
+    guessed)."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return coarse_join_point(raw.get("lat"), raw.get("lon"))
+    except ValueError:
+        return None
 
 
-def _cell_km(area: LocalArea) -> float:
-    """Side of a directory-verdict grid cell."""
-    return EDGE_CELL_BANDS * edge_band_km(area.radius_km)
+def _wrap_lon(delta: float) -> float:
+    return (delta + 180.0) % 360.0 - 180.0
 
 
-def _lon_km(lat: float) -> float:
-    """Kilometres per degree of longitude at the whole-degree latitude
-    ``lat`` rounds to — never the centre's, so the grid says nothing about
-    where the centre is."""
-    return _KM_PER_DEGREE * max(math.cos(math.radians(round(lat))), 0.01)
+def join_verdict(area: LocalArea, point: tuple[float, float]) -> Eligibility:
+    """Where the home behind the coarse ``point`` lies: the home is
+    somewhere in the cell ±half a unit of the last decimal around it
+    (:func:`coarse_join_point`), so the host answers for the whole cell.
 
-
-def edge_cell(area: LocalArea, home: tuple[float, float]) -> tuple[int, int]:
-    """The grid cell ``home`` falls in: the unit the directory verdict is
-    computed for (:func:`directory_verdict`). An absolute grid — it never
-    depends on the centre — with cells a band wide, so every home in one
-    cell gets the same answer and the same host-secret shift."""
-    cell = _cell_km(area)
-    lat, lon = float(home[0]), float(home[1])
-    return (
-        math.floor(lat * _KM_PER_DEGREE / cell),
-        math.floor(lon * _lon_km(lat) / cell),
-    )
-
-
-def _cell_centre(area: LocalArea, home: tuple[float, float]) -> tuple[float, float]:
-    cell = _cell_km(area)
-    row, col = edge_cell(area, home)
-    return (
-        (row + 0.5) * cell / _KM_PER_DEGREE,
-        (col + 0.5) * cell / _lon_km(float(home[0])),
-    )
-
-
-def directory_verdict(
-    area: LocalArea, home: tuple[float, float] | None, *, shift_km: float
-) -> Eligibility:
-    """The verdict a paired household's directory entry carries for its
-    shared ``home``: :func:`eligibility`, coarsened so it cannot be used to
-    find the centre.
-
-    * It is computed for the centre of the home's grid cell
-      (:func:`edge_cell`), never the home itself: moving the home within a
-      cell changes nothing, so stepping it along a line finds the rim only
-      to a cell.
-    * Within :data:`EDGE_UNSURE_BANDS` bands of the rim it is
-      :attr:`Eligibility.EDGE` ("unsure") — the zone slid by ``shift_km``,
-      the host's secret amount for this cell (clamped to
-      :func:`edge_max_shift_km`), so where one cell turns unsure says
-      little about where the rim is.
-    * Outside that zone it is exact and never wrong for any home in the
-      cell: "inside" is always inside the rim, "outside" always beyond it
-      (the zone outweighs the cell's half-diagonal plus the shift).
-
-    Not the seat check: every seat path still runs :func:`eligibility` on
-    the exact distance.
+    * INSIDE — every corner of the cell is within the radius (the rim
+      counts as inside);
+    * OUTSIDE — the cell's nearest point is beyond it;
+    * EDGE — the cell straddles the rim: never decided automatically.
     """
-    if home is None:
-        return Eligibility.HOME_UNKNOWN
-    unsure_km = EDGE_UNSURE_BANDS * edge_band_km(area.radius_km)
-    max_shift = edge_max_shift_km(area.radius_km)
-    shift = min(max(float(shift_km), -max_shift), max_shift)
-    q_lat, q_lon = _cell_centre(area, home)
-    distance_km = haversine_m(area.lat, area.lon, q_lat, q_lon) / 1000.0
-    if abs(distance_km - area.radius_km - shift) < unsure_km:
-        return Eligibility.EDGE
-    if distance_km < area.radius_km:
+    lat, lon = coarse_join_point(point[0], point[1])
+    h = _JOIN_HALF_CELL_DEG
+    radius_m = area.radius_km * 1000.0
+    lat_lo, lat_hi = max(lat - h, -90.0), min(lat + h, 90.0)
+    corners = [(a, b) for a in (lat_lo, lat_hi) for b in (lon - h, lon + h)]
+    farthest = max(haversine_m(area.lat, area.lon, a, b) for a, b in corners)
+    if farthest <= radius_m:
         return Eligibility.INSIDE
-    return Eligibility.OUTSIDE
+    near_lat = min(max(area.lat, lat_lo), lat_hi)
+    near_lon = lon + min(max(_wrap_lon(area.lon - lon), -h), h)
+    nearest = haversine_m(area.lat, area.lon, near_lat, near_lon)
+    if nearest > radius_m:
+        return Eligibility.OUTSIDE
+    return Eligibility.EDGE
 
 
 def local_area_wire(area: LocalArea) -> dict[str, float]:
@@ -292,50 +237,22 @@ def local_area_wire(area: LocalArea) -> dict[str, float]:
     return {"lat": area.lat, "lon": area.lon, "radius_km": area.radius_km}
 
 
-#: :class:`Eligibility` → the ``in_area`` the directory carries.
-_IN_AREA: Final = {
-    Eligibility.INSIDE: True,
-    Eligibility.OUTSIDE: False,
-    Eligibility.HOME_UNKNOWN: None,
-    # Unsure: no yes or no — ``area_edge`` says why.
-    Eligibility.EDGE: None,
-}
-
-
-def local_community_wire(area: LocalArea, verdict: Eligibility) -> dict[str, object]:
-    """The fields a ``SPACE_DIRECTORY_SYNC`` entry carries for a local
-    community, built for ONE recipient household: ``verdict`` is the host's
-    answer for that household's shared home (``in_area``), so it is never
-    put in a payload for anyone else. No centre — only the radius.
-
-    Near the rim (:attr:`Eligibility.EDGE`) it is ``in_area: null`` with
-    ``area_edge: true``: a receiver that does not know ``area_edge`` reads
-    "unknown", never a wrong yes or no."""
-    return {
-        "local_community": True,
-        "radius_km": area.radius_km,
-        "in_area": _IN_AREA[verdict],
-        "area_edge": verdict is Eligibility.EDGE,
-    }
+def local_community_wire(area: LocalArea) -> dict[str, object]:
+    """The fields a ``SPACE_DIRECTORY_SYNC`` entry (and an invitation's or a
+    redeem ACK's space snapshot) carries for a local community: "within X
+    km". No centre, no verdict."""
+    return {"local_community": True, "radius_km": area.radius_km}
 
 
 def parse_local_community_wire(raw: object) -> PeerLocalCommunity | None:
-    """A received directory entry's local-community fields, or ``None``
-    when the entry is not one or they are malformed (a broken entry shows
-    no area rather than a guessed one). The radius is re-validated; an
-    ``in_area`` that is not a boolean reads as unknown; ``area_edge`` counts
-    only as ``true`` beside an unknown ``in_area``. Any centre a sender put
-    in the entry is ignored."""
+    """A received entry's local-community fields, or ``None`` when the
+    entry is not one or they are malformed (a broken entry shows no area
+    rather than a guessed one). The radius is re-validated; anything else
+    a sender put in the entry (a centre, a verdict) is ignored."""
     if not isinstance(raw, dict) or raw.get("local_community") is not True:
         return None
     try:
         radius = validate_radius_km(raw.get("radius_km"))
     except ValueError:
         return None
-    verdict = raw.get("in_area")
-    in_area = verdict if isinstance(verdict, bool) else None
-    return PeerLocalCommunity(
-        radius_km=radius,
-        in_area=in_area,
-        area_edge=in_area is None and raw.get("area_edge") is True,
-    )
+    return PeerLocalCommunity(radius_km=radius)

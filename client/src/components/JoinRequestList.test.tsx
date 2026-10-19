@@ -31,3 +31,22 @@ describe('JoinRequestList', () => {
     expect(view.container.textContent).not.toContain(RAW)
   })
 })
+
+describe('JoinRequestList — local communities', () => {
+  it('flags a request whose home is near the edge, and only that one', async () => {
+    householdUsers.value = new Map() as never
+    get.mockImplementation(async (url: string) => (url.endsWith('/join-requests')
+      ? [
+        { id: 'e1', space_id: 's2', user_id: 'u-a', display_name: 'Ana', requested_at: '', area_verdict: 'edge' },
+        { id: 'i1', space_id: 's2', user_id: 'u-b', display_name: 'Ben', requested_at: '', area_verdict: 'inside' },
+        { id: 'n1', space_id: 's2', user_id: 'u-c', display_name: 'Cleo', requested_at: '' },
+      ]
+      : []))
+    const view = render(<JoinRequestList spaceId="s2" />)
+    await waitFor(() => expect(view.getByText('Ana')).toBeTruthy())
+    const chips = view.getAllByTestId('join-request-edge')
+    expect(chips).toHaveLength(1)
+    expect(chips[0].textContent).toContain('Near the edge')
+    expect(chips[0].closest('.sh-join-request')?.textContent).toContain('Ana')
+  })
+})

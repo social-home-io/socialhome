@@ -27,12 +27,16 @@ import { QrCodeImg } from '@/components/QrCodeImg'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 
-type Status = 'loading' | 'joined' | 'wrong-instance' | 'error'
+type Status = 'loading' | 'joined' | 'requested' | 'wrong-instance' | 'error'
 
 const status  = signal<Status>('loading')
 const message = signal<string>('')
 const joined  = signal<{ space_id: string; role?: string } | null>(null)
 const pasteCode = signal<string>('')
+
+/** A local community's refusals — about this household's home, never a
+ *  sign of the wrong household. */
+const LOCAL_AREA_CODES = new Set(['OUTSIDE_AREA', 'HOME_NOT_SET', 'LOCAL_AREA_RATE_LIMITED'])
 
 async function consumeToken(token: string, spaceId: string | null) {
   try {
@@ -43,6 +47,18 @@ async function consumeToken(token: string, spaceId: string | null) {
     joined.value = r
     status.value = 'joined'
   } catch (err: unknown) {
+    // A local community of this household: near the edge the admins
+    // decide (answered like any request); outside / no home is said as is
+    // — neither means the link landed on the wrong household.
+    if (err instanceof ApiError && err.code === 'JOIN_REQUEST_SENT') {
+      status.value = 'requested'
+      return
+    }
+    if (err instanceof ApiError && err.code !== null && LOCAL_AREA_CODES.has(err.code)) {
+      message.value = err.message
+      status.value = 'error'
+      return
+    }
     if (err instanceof ApiError && [403, 404, 410].includes(err.status)) {
       // The link landed on the ISSUER's instance — which is this one —
       // so our own instance id is exactly the issuer id the receiver's
@@ -139,6 +155,15 @@ export default function SpaceJoinLanding() {
         <Button onClick={() => loc.route(addBase(`/spaces/${joined.value!.space_id}`))}>
           {t('space.join_landing.open')}
         </Button>
+      </div>
+    )
+  }
+  if (status.value === 'requested') {
+    return (
+      <div class="sh-join-landing sh-card" data-testid="join-landing-requested">
+        <h2>{t('space.join_landing.requested_title')}</h2>
+        <p>{t('error.join_request_sent')}</p>
+        <Button onClick={() => loc.route(addBase('/spaces'))}>{t('space.join_landing.back')}</Button>
       </div>
     )
   }

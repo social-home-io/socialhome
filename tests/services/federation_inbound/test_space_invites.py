@@ -84,6 +84,7 @@ class _FakeSpaceRepo:
         remote_applicant_instance_id=None,
         remote_applicant_pk=None,
         request_id=None,
+        area_verdict=None,
     ):
         # Accept both positional (legacy) and keyword calls.
         self.pending.append(
@@ -92,6 +93,7 @@ class _FakeSpaceRepo:
                 "space_id": space_id,
                 "user_id": user_id,
                 "remote_applicant_instance_id": remote_applicant_instance_id,
+                "area_verdict": area_verdict,
             }
         )
         self.join_requests.append(
@@ -371,99 +373,95 @@ async def test_join_request_status_missing_id_is_noop(repo, handlers):
 # ── local communities ───────────────────────────────────────────────────
 
 
-class _Peer:
-    def __init__(self, lat, lon):
-        self.home_lat, self.home_lon = lat, lon
+NEAR = {"lat": 47.39, "lon": 8.56}  # ~2 km from the centre
+EDGE = {"lat": 47.38, "lon": 8.61}  # its ~1 km cell straddles the 5 km rim
+BERN = {"lat": 46.95, "lon": 7.45}
 
 
-class _FedRepo:
-    def __init__(self, peers):
-        self.peers = peers
-
-    async def get_instance(self, iid):
-        return self.peers.get(iid)
-
-    async def get_local_identity(self):
-        return None
-
-
-def _local_handlers(bus, repo, fed_repo, budget=None):
+def _local_handlers(bus, repo, budget=None):
     repo.spaces["sp-1"] = replace(_space(), lat=47.3769, lon=8.5417, radius_km=5.0)
     h = SpaceInviteInboundHandlers(
         bus=bus,
         space_repo=repo,
-        federation_repo=fed_repo,
         local_area_budget=budget if budget is not None else memory_budget(),
     )
     h.attach_to(_FakeFederationService())
     return h
 
 
-async def _request(h, from_instance, user_id="u-1", request_id=None):
+async def _request(h, from_instance, location, user_id="u-1", request_id=None):
+    payload: dict = {"user_id": user_id}
+    if request_id:
+        payload["request_id"] = request_id
+    if location is not None:
+        payload["join_location"] = location
     await h._on_join_request(
         _event(
             FederationEventType.SPACE_JOIN_REQUEST,
-            {"user_id": user_id, **({"request_id": request_id} if request_id else {})},
+            payload,
             from_instance=from_instance,
             space_id="sp-1",
         )
     )
 
 
-async def test_a_local_community_files_a_request_from_inside(bus, repo):
-    h = _local_handlers(bus, repo, _FedRepo({"near": _Peer(47.392, 8.56)}))
-    await _request(h, "near")
+@pytest.mark.parametrize("location,verdict", [(NEAR, "inside"), (EDGE, "edge")])
+async def test_a_local_community_files_inside_and_edge_alike(
+    bus, repo, location, verdict
+):
+    """The applicant hears nothing either way until an admin answers; the
+    admins see the verdict, never the point."""
+    h = _local_handlers(bus, repo)
+    await _request(h, "near", location)
     assert [r[3] for r in repo.join_requests] == ["near"]
+    (row,) = repo.pending
+    assert row["area_verdict"] == verdict
 
 
 @pytest.mark.parametrize(
-    "peers,sender",
+    "location",
     [
-        ({"bern": _Peer(46.9481, 7.4474)}, "bern"),  # outside
-        ({"hidden": _Peer(None, None)}, "hidden"),  # share_home off
-        ({}, "stranger"),  # no pairing row (mesh / link-joined)
+        BERN,  # outside
+        None,  # no consent / an older household: no location
+        {"lat": "47.39", "lon": 8.56},  # malformed
     ],
 )
-async def test_a_local_community_drops_a_request_from_outside_or_unknown(
-    bus, repo, peers, sender
+async def test_a_local_community_drops_a_request_from_outside_or_without_a_point(
+    bus, repo, location
 ):
     """Never in front of the admins — and nothing to approve later."""
-    h = _local_handlers(bus, repo, _FedRepo(peers))
-    await _request(h, sender)
+    h = _local_handlers(bus, repo)
+    await _request(h, "far", location)
     assert repo.join_requests == []
 
 
-async def test_a_local_community_fails_closed_without_a_federation_repo(bus, repo):
-    h = _local_handlers(bus, repo, None)
-    await _request(h, "near")
-    assert repo.join_requests == []
+async def test_a_mesh_or_link_joined_household_is_decided_like_a_paired_one(bus, repo):
+    """The host reads only the point the request carries — no pairing row
+    (and no shared home) is needed."""
+    h = _local_handlers(bus, repo)
+    await _request(h, "stranger-over-the-mesh", NEAR)
+    assert [r[3] for r in repo.join_requests] == ["stranger-over-the-mesh"]
 
 
 async def test_a_request_spends_the_applicants_budget(bus, repo):
-    """Filing a request is a check the applicant starts. Each person has
-    their own budget: one used up does not hold off the next person of the
-    same household."""
     budget = memory_budget()
     for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
         assert await budget.spend_seat_check(
             "sp-1", household="near", user_id="u-1", remote=True
         )
-    h = _local_handlers(bus, repo, _FedRepo({"near": _Peer(47.392, 8.56)}), budget)
-    await _request(h, "near", user_id="u-1")
+    h = _local_handlers(bus, repo, budget)
+    await _request(h, "near", NEAR, user_id="u-1")
     assert repo.join_requests == []
-    await _request(h, "near", user_id="u-2")
+    await _request(h, "near", NEAR, user_id="u-2")
     assert [r[1] for r in repo.join_requests] == ["u-2"]
 
 
 async def test_asking_again_while_pending_spends_nothing(bus, repo):
-    """A retry of a request that already waits is answered by that request:
-    no second row and no second check, so retries never burn the budget."""
     budget = memory_budget()
-    h = _local_handlers(bus, repo, _FedRepo({"near": _Peer(47.392, 8.56)}), budget)
+    h = _local_handlers(bus, repo, budget)
     for i in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON + 3):
-        await _request(h, "near", request_id=f"req-{i}")
+        await _request(h, "near", EDGE, request_id=f"req-{i}")
     assert [r[4] for r in repo.join_requests] == ["req-0"]
-    # Two checks left today for this person.
     for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON - 1):
         assert await budget.spend_seat_check(
             "sp-1", household="near", user_id="u-1", remote=True
@@ -472,11 +470,7 @@ async def test_asking_again_while_pending_spends_nothing(bus, repo):
 
 async def test_a_local_community_fails_closed_without_a_budget(bus, repo):
     repo.spaces["sp-1"] = replace(_space(), lat=47.3769, lon=8.5417, radius_km=5.0)
-    h = SpaceInviteInboundHandlers(
-        bus=bus,
-        space_repo=repo,
-        federation_repo=_FedRepo({"near": _Peer(47.392, 8.56)}),
-    )
+    h = SpaceInviteInboundHandlers(bus=bus, space_repo=repo)
     h.attach_to(_FakeFederationService())
-    await _request(h, "near")
+    await _request(h, "near", NEAR)
     assert repo.join_requests == []

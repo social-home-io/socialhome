@@ -26,7 +26,11 @@ vi.mock('./Toast', () => ({
   showToast: vi.fn(),
 }))
 
+const confirmMock = vi.hoisted(() => vi.fn())
+vi.mock('./confirm', () => ({ confirmDialog: (...a: unknown[]) => confirmMock(...a) }))
+
 import { api } from '@/api'
+import { resetHouseholdHome } from '@/store/householdHome'
 import { showToast } from './Toast'
 import { RemoteInviteInboxBanner } from './RemoteInviteInboxBanner'
 
@@ -182,6 +186,40 @@ describe('RemoteInviteInboxBanner', () => {
       // and gets the empty list); banner unmounts.
       expect(container.querySelector('.sh-remote-invite-banner')).toBeNull()
     })
+  })
+
+  it('a local community\'s invite: Accept asks before the location goes, then accepts with it', async () => {
+    resetHouseholdHome()
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/remote_invites') return Promise.resolve([INVITE])
+      if (url === '/api/friends') {
+        return Promise.resolve({ ...FRIENDS_WITH_ALICE, instance: { home_lat: 47.39, home_lon: 8.56 } })
+      }
+      return Promise.reject(new Error('unknown url'))
+    })
+    apiPost.mockImplementation((_url: string, body: Record<string, unknown>) => (
+      body.share_location === true
+        ? Promise.resolve(undefined)
+        : Promise.reject(Object.assign(new Error('needs it'), { code: 'LOCATION_REQUIRED', status: 403 }))
+    ))
+    confirmMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    const { container } = render(<RemoteInviteInboxBanner />)
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-accept"]')).not.toBeNull()
+    })
+    const accept = () => container.querySelector('[data-testid="invite-accept"]') as HTMLButtonElement
+    // No → nothing about the home is sent.
+    fireEvent.click(accept())
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1))
+    expect(String(confirmMock.mock.calls[0][0])).toContain('sent to Alpha House')
+    await waitFor(() => expect(accept().disabled).toBe(false))
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenLastCalledWith('/api/remote_invites/tok-xyz/accept', {})
+    // Yes → accepted again, with the person's consent.
+    fireEvent.click(accept())
+    await waitFor(() => expect(apiPost).toHaveBeenLastCalledWith(
+      '/api/remote_invites/tok-xyz/accept', { share_location: true },
+    ))
   })
 
   it('also renders pending local-household invitations', async () => {

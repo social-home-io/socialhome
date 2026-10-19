@@ -26,6 +26,12 @@ vi.mock('qrcode', () => ({
   default: { toDataURL: vi.fn(async () => 'data:fake') },
 }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
+const confirmMock = vi.hoisted(() => vi.fn())
+vi.mock('@/components/confirm', () => ({ confirmDialog: (...a: unknown[]) => confirmMock(...a) }))
+vi.mock('@/store/householdHome', () => ({
+  ensureHouseholdHome: async () => {},
+  householdHome: { value: { lat: 47.39, lon: 8.56 } },
+}))
 
 const OUR_INSTANCE_ID = 'aaaabbbbccccddddeeeeffff00001111'
 vi.mock('@/store/instance', () => ({
@@ -146,6 +152,62 @@ describe('SpaceJoinByCodeDialog', () => {
     })
     await act(async () => { fireEvent.click(getByText('Join')) })
   }
+
+  const coded = (code: string) => Object.assign(new ApiError(403, code), { code })
+
+  it('a local community asks for the approximate location, and redeems again only on a yes', async () => {
+    api.post
+      .mockRejectedValueOnce(coded('LOCATION_REQUIRED'))
+      .mockResolvedValueOnce({ space_id: 'space-uuid-fed' })
+    confirmMock.mockResolvedValueOnce(true)
+    const code = buildInviteCode({
+      token: 'a1b2c3d4e5f60718',
+      space_id: 'space-uuid-fed',
+      issuer_instance_id: 'ffffeeeeddddccccbbbb111122223333',
+    })
+    const { container, getByText } = await renderAndOpen()
+    const input = container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
+    await act(async () => { fireEvent.input(input, { target: { value: code } }) })
+    await act(async () => { fireEvent.click(getByText('Join')) })
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2))
+    expect(api.post.mock.calls[0][1]).not.toHaveProperty('share_location')
+    expect(api.post.mock.calls[1][1]).toEqual({
+      token: 'a1b2c3d4e5f60718',
+      issuer_instance_id: 'ffffeeeeddddccccbbbb111122223333',
+      share_location: true,
+    })
+    // The household's name is not known from a code: the generic wording.
+    expect(String(confirmMock.mock.calls[0][0])).toContain("the space's household")
+  })
+
+  it('declining the location sends nothing more', async () => {
+    api.post.mockRejectedValueOnce(coded('LOCATION_REQUIRED'))
+    confirmMock.mockResolvedValueOnce(false)
+    const code = buildInviteCode({
+      token: 'a1b2c3d4e5f60718', space_id: 's', issuer_instance_id: 'ffffeeeeddddccccbbbb111122223333',
+    })
+    const { container, getByText } = await renderAndOpen()
+    const input = container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
+    await act(async () => { fireEvent.input(input, { target: { value: code } }) })
+    await act(async () => { fireEvent.click(getByText('Join')) })
+    await waitFor(() => expect(confirmMock).toHaveBeenCalled())
+    expect(api.post).toHaveBeenCalledTimes(1)
+  })
+
+  it('near the edge: "sent to the admins", like any request', async () => {
+    api.post.mockRejectedValueOnce(coded('JOIN_REQUEST_SENT'))
+    const code = buildInviteCode({
+      token: 'a1b2c3d4e5f60718', space_id: 's', issuer_instance_id: OUR_INSTANCE_ID,
+    })
+    const { container, getByText } = await renderAndOpen()
+    const input = container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
+    await act(async () => { fireEvent.input(input, { target: { value: code } }) })
+    await act(async () => { fireEvent.click(getByText('Join')) })
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
+      'Your request was sent to the admins.', 'success',
+    ))
+    expect(routeSpy).not.toHaveBeenCalled()
+  })
 
   it('names the moderator role when a moderator link seats one', async () => {
     await joinWith({ space_id: 'space-uuid-xyz', role: 'moderator' })

@@ -30,14 +30,15 @@ def conn(tmp_path):
     c.close()
 
 
-@pytest.mark.parametrize("kind", ["person", "household", "verdict_home"])
-def test_the_three_kinds_are_stored(conn, kind):
+@pytest.mark.parametrize("kind", ["person", "household"])
+def test_the_two_kinds_are_stored(conn, kind):
     conn.execute(_INSERT, ("s1", kind, "x", "2026-10-19", 1))
 
 
-def test_an_unknown_kind_is_refused(conn):
+@pytest.mark.parametrize("kind", ["space", "verdict_home"])
+def test_an_unknown_kind_is_refused(conn, kind):
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(_INSERT, ("s1", "space", "x", "2026-10-19", 1))
+        conn.execute(_INSERT, ("s1", kind, "x", "2026-10-19", 1))
 
 
 def test_a_negative_count_is_refused(conn):

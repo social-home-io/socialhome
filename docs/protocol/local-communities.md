@@ -2,31 +2,30 @@
 
 A **public** space can be bound to an area — a centre and a radius — and
 become a *local community*: a neighbourhood, a village, a street. A
-household holds a seat only while the home it **already shares with the
-hosting household** lies inside the circle. The host decides, on every path
-that grants a seat; nobody is ever asked to send a location to join — and
-the centre never leaves the host (owner decision 2026-10-19: people's
-locations are not shared by design).
+household takes a seat only while its home lies inside the circle. The host
+decides, on every path that grants a seat, on **the household's home rounded
+to about 1 km, which the join itself carries** — sent with the person's
+consent, to the host only, sealed end to end, and never stored. The centre
+never leaves the host (owner decisions 2026-10-19: people's locations are not
+shared by design; "the joiner sends ~1 km with the join").
 
 ## Scope
 
 - **HFS (host)**: stores the area (`spaces.lat` / `lon` / `radius_km`,
-  host-local) and shows the centre on a map to its own people only. Each
-  paired peer's directory snapshot gets "local community, within X km" and
-  the host's verdict for **that peer's** shared home — no centre. Checks
-  every seat against the joiner's shared home.
-- **HFS (paired peer)**: keeps the radius and its verdict for each directory
-  entry and shows them before joining ("Local community · within 5 km of
-  the host's chosen centre", *In your area* / *Outside your area* /
-  *Near the edge — ask to join and the host will check* /
-  *Share your home with …*) — no map, no centre. Discover sorts in-area
-  communities first (near-the-edge ones with the ordinary spaces), can
-  narrow to in-area and near-the-edge ones ("Near you"), and offers no Join
-  on an outside one. The verdict is a convenience; the host's check is the
-  rule.
-- **GFS**: uninvolved. Only the `public` tier can be a local community, and a
-  public space is never on a GFS. A household met through a GFS never shares
-  a home with the host, so a local community's invite link never seats it.
+  host-local) and shows the centre on a map to its own people only. Paired
+  peers' directory snapshots say "local community, within X km" — no centre,
+  no verdict. Decides every seat on the point the join carries (its own
+  people: its own home, rounded the same way).
+- **HFS (joiner)**: shows "Local community · within 5 km of the host's chosen
+  centre", asks the person before a join to it carries the household's
+  approximate location ("To check you live in the area, your approximate
+  location (about 1 km) is sent to *host* with this request"), and sends it
+  only inside that join.
+- **Mesh relays / GFS**: carry the join without being able to read the
+  point — it rides inside the SPACE_ROUTED seal (mesh) or the §D2b sealed
+  bootstrap body (GFS relay). A local community is never *listed* on a GFS
+  (only the public tier can be one, and public is never on a GFS); a
+  household met through a GFS reaches one only through an invite link.
 
 ## The rules
 
@@ -34,225 +33,204 @@ locations are not shared by design).
   (all three or none) only for a public space (`422 LOCAL_AREA_PUBLIC_ONLY`
   otherwise). Leaving the public tier drops the area. A pin stored before
   this feature (a centre without a radius) is no area.
-- **Precision.** The centre is truncated to 4 dp (about 11 m) on write and
-  again on receipt; the radius is 0.5–50 km, kept to one decimal. Peers
-  re-validate a received area and drop a malformed one rather than guess.
-- **Whose home.** A local user of the host → the host household's own home
-  (`instance_identity.home_lat` / `home_lon`). A remote household → the home
-  it shares with the host through pairing (`remote_instances.home_lat` /
-  `home_lon`, from `PAIRING_PEER_ACCEPT` and `LOCAL_HOME_LOCATION_CHANGED`,
-  cleared when that household turns `share_home` off toward the host). A
-  household with no pairing row (met over the mesh, or through an invite
-  link — `space_session`, which never receives a home) has none.
-- **Unknown is refused.** No home → `403 HOME_NOT_SHARED`; outside →
-  `403 OUTSIDE_AREA`. The rim counts as inside (haversine on a 6 371 km
-  sphere, the same as the zone match). The seat check always uses the
-  **exact** distance — the "unsure" band below is only for what the
-  directory shows.
-- **Checks are budgeted per person.** A seat attempt is an exact yes / no,
-  and a refused invite-link use is handed back, so somebody moving their
-  shared home and asking again would trace the rim — and join → leave →
-  move → rejoin would too, so **a successful check counts like a refusal**
-  (owner decision 2026-10-19). Each **person** gets **3** checks per
-  community per UTC day (`MAX_LOCAL_AREA_CHECKS_PER_PERSON`), counted on
-  every path the person starts: open join, join request, follow, invite
-  accept, invite-link redeem (local, §D2 and §D2b). An admin's own steps —
-  sending an invite, a direct add, approving a request — are not counted.
-  "Home unknown" spends nothing (it says nothing about the area). Past the
-  budget the host answers `429 LOCAL_AREA_RATE_LIMITED` with no verdict
-  until 00:00 UTC (`whose: own` for a local user, `whose: host` on a
-  remote redeemer).
-  - **Per person, never per community or per household:** one person
-    probing does not hold off the rest of their household, and a busy
-    community never locks out newcomers.
-  - **Who is the person.** A local user → their user id (counted too,
-    though the host's own people can read the area anyway). A remote person →
-    the user id the request carries, keyed together with the sending
-    household that the §24.11 envelope authenticates. That user id is the
-    household's to choose, so a **remote household** also has a backstop of
-    **10** checks per community per UTC day
-    (`MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD`) — minting fresh user ids buys
-    no more than that. 10 is above a few people's budgets, and a person
-    already past their own budget spends none of it, so one prober cannot
-    use up the household's day. The host's own household has no backstop
-    (its people are real accounts here).
-  - **Retries are free.** Asking again while a join request is pending is
-    answered by that request — no second row and no second check.
-  - **A remote request costs two.** Filing a request from another
-    household is one check and redeeming the approval's token is another
-    (the redeem can be retried, so it must count); the approval itself
-    is the admin's. A request-mode join over federation is therefore two
-    of the person's three checks that day.
-  - **Kept across restarts** in `local_area_attempts` (migration 0109):
-    one counter per space, kind, subject and UTC day; a person is stored
-    as `sha256(household \n user id)`, never the raw id; days before
-    yesterday are pruned on every write.
-- **Every seat path, no override.** Open join, a join request (when filed
-  and again when approved), follow, an invite token / link redeem (local and
-  §D2 / §D2b over the wire), a direct invite (when sent and again when the
-  accept arrives), and an admin's direct add. An admin's explicit invite does
-  **not** override the area (owner decision 2026-10-19).
-- **Members stay.** Moving, shrinking or removing the area evicts nobody;
-  the check runs when a seat is granted.
-- **The host only.** A member household's stub never holds the area. For
-  the same reason a local community never has *delegated admin authority*
-  (`409 LOCAL_AREA_DELEGATED` either way round): a delegated admin's household
-  would seat people itself, without the host's check. With delegation off a
-  member household's admin invite is forwarded to the host, and invite links
-  are always minted on the host (v_52), so every seat passes the host.
+- **Precision.** The centre is truncated to 4 dp (about 11 m) on write; the
+  radius is 0.5–50 km, kept to one decimal. Peers re-validate a received
+  radius and drop a malformed one rather than guess.
+- **What the join carries.** `join_location: {lat, lon}` — the joining
+  household's home (`instance_identity.home_lat` / `home_lon`) rounded to
+  **2 decimals** (`JOIN_LOCATION_PRECISION_DP`, ~1.1 km of latitude: a part
+  of town, never a house or a street). It is added only when the person
+  agreed in the SPA (`share_location: true` on the HTTP call); the host rounds
+  it again on receipt, so a sender that sent more is never read more
+  precisely, and a malformed one counts as none. It travels inside the join's
+  own encrypted payload (§25.8.21) and is never stored, logged or forwarded —
+  the only trace is the verdict on a pending request (`area_verdict`). The
+  per-pair `share_home` (pairing) is **not** used for joining.
+- **The verdict** (`join_verdict`). The home lies somewhere in the cell ±half
+  a unit of the last decimal around the point, so the host answers for the
+  whole cell (haversine on a 6 371 km sphere, the rim counts as inside):
+  - **clearly inside** — every corner of the cell inside → the seat proceeds
+    as without an area (an open space seats; a request-mode space files the
+    request);
+  - **clearly outside** — the cell's nearest point beyond the rim →
+    `403 OUTSIDE_AREA`;
+  - **near the edge** — the cell straddles the rim → **never decided
+    automatically**: the join becomes a **pending join request for the
+    space's admins, even in `open` mode**, flagged `area_verdict: 'edge'`
+    ("Near the edge" in the admins' queue). The person learns only that the
+    request was sent — exactly what a request-mode space answers.
+  - An automatic answer therefore reveals only which ~1 km cell is inside,
+    outside or near the rim — never a distance: moving a home and asking again
+    traces nothing finer than the cells.
+- **No point → no decision.** A join from another household without
+  `join_location` (no consent yet, or an older household) is refused
+  `403 LOCATION_REQUIRED` (a link redeem: the SPA asks the person and redeems
+  again; an inbound `SPACE_JOIN_REQUEST`: dropped). A household with no home
+  set cannot send one (`403 HOME_NOT_SET` on the joiner's side; for the
+  host's own people, on the host). Neither spends a check.
+- **Admins decide.** Approving a request — inside or near the edge — seats
+  the person: nothing is re-checked (the point was never kept). An admin's own
+  steps (a direct add, a local invite) use this household's home: refused
+  clearly outside, allowed near the edge (the admin decided). Inviting a
+  household on another instance checks nothing up front (the host knows no
+  home of theirs); the invitee's accept carries the point.
+- **Every person-started path, no override.**
+  - *Open join / join request* (local): inside → seat (open) or request; edge
+    → request (`{joined: false, request_id}`), any join mode.
+  - *Follow, local invite accept, local invite-link redeem*: inside → seat;
+    edge → a join request and `403 JOIN_REQUEST_SENT` ("Your request was sent
+    to the admins"). Asking again while it waits answers the same request.
+  - *Remote `SPACE_JOIN_REQUEST`*: inside and edge are filed alike (the
+    applicant hears nothing until an admin answers); outside / no point →
+    dropped.
+  - *Remote invite-link redeem* (`SPACE_INVITE_TOKEN_REDEEM`, direct,
+    mesh-routed or §D2b): after the consume + ban check; inside → ACK; edge →
+    a host-side request and DENY `"join request sent to the admins"` naming
+    `space_id` + `request_id` (the redeemer keeps its own pending row under
+    that id); refusals hand the use back.
+  - *Remote invite accept* (`SPACE_PRIVATE_INVITE_ACCEPT`): the invitation's
+    `space_meta` carries `local_community: {radius_km}` so the invitee's SPA
+    asks first; inside → seat; refused → declined +
+    `SPACE_REMOTE_MEMBER_REMOVED`; edge → a host-side request, declined, and
+    the REMOVED carries `join_request_id` so the invitee keeps its side.
+  - *An approved person* (`has_approved_join_request`, within 7 days): their
+    redeem — of the token the approval minted, or of the same link again when
+    the approval could not be delivered — seats them with no check.
+- **Checks are budgeted per person — spam control only.** No answer is
+  exact, so the budget only stops retries and floods: **10** checks per
+  person per community per UTC day (`MAX_LOCAL_AREA_CHECKS_PER_PERSON`) on
+  every path a person starts, successful ones and edge reviews included; a
+  remote household also has a backstop of **20**
+  (`MAX_LOCAL_AREA_CHECKS_PER_HOUSEHOLD`) since its user ids are its own to
+  choose. Past it: `429 LOCAL_AREA_RATE_LIMITED`, no verdict, until 00:00
+  UTC. Admin steps are not counted; asking again while a request is pending
+  is free. Kept across restarts in `local_area_attempts` (migration 0109), a
+  person as `sha256(household \n user id)`, days before yesterday pruned.
+- **Members stay.** Moving, shrinking or removing the area evicts nobody.
+- **The host only.** A member household's stub never holds the area, and a
+  local community never has *delegated admin authority* (`409
+  LOCAL_AREA_DELEGATED`): a delegated admin's household would seat people
+  itself. Invite links are always minted on the host (v_52).
 - **Host-local config.** Setting the area bumps no `config_sequence` and sends
   no `SPACE_CONFIG_CHANGED`; it re-sends the directory snapshot.
 
 ## What a paired household learns
 
-- `local_community: true` and `radius_km` — "within X km". The radius is not
-  a location.
-- `in_area` — the host's answer for the **receiving** household's home, as
-  that household chose to share it with the host: `true`, `false`, or
-  `null` when it shares none **or the host is unsure** — then
-  `area_edge: true` says so. Each peer's snapshot is built for it alone, so
-  no household ever receives another household's verdict.
-- Nothing else: no centre, no distance. The host re-sends a peer's snapshot
-  when the home that peer shares with it changes (including sharing turned
-  off) and when the peer first advertises v_59.
-
-### The "unsure" band — the verdict can't be used to find the centre
-
-Answered exactly, the verdict would let a household move its shared home
-step by step and find the rim, and so the centre. The host coarsens it
-(`directory_verdict`); the seat check does not:
-
-- **Band.** `b = max(10 % of the radius, 250 m)`. Near the rim the answer is
-  neither yes nor no: `in_area: null`, `area_edge: true`. A receiver that
-  does not know `area_edge` reads "unknown" — never a wrong yes or no.
-- **Grid.** The answer is computed for the centre of the home's grid cell
-  (an absolute grid, `b` wide, independent of the community's centre), so
-  every home in a cell gets the same answer and moving within it says
-  nothing.
-- **Secret shift.** The unsure zone reaches `1.25 b` either side of the rim,
-  slid by up to `± b/2` per cell by an HMAC under a key HKDF-derived from the
-  host's identity seed (never stored, never sent). Where one cell turns
-  unsure says little about where the rim is. "Inside" is still always
-  inside and "outside" always outside, for every home in the cell.
-- **Budget.** A peer's verdicts follow at most **4** different shared homes
-  per UTC day (`MAX_VERDICT_HOMES_PER_DAY`); further moves are answered for
-  the last home taken (nothing new) until 00:00 UTC. Withdrawing the home
-  always takes effect at once but keeps the day's count — a home shared
-  again past the budget gets no answer (unknown) — so toggling sharing is
-  no way around it. The count is kept in `local_area_attempts` (kind
-  `verdict_home`), so a restart does not refill it; the last home taken is
-  not stored, so after a restart a peer already past its budget gets
-  "unknown" until the next UTC day.
-
-What's left: a household moving its home in 20 m steps straight through the
-area, with no budget, narrows the centre only to about one band on average
-and never below 0.4 of it (`tests/services/test_local_community.py`, 24 host
-secrets) — the same walk against the exact answer finds it within a few
-steps. With the budget such a walk takes months, and every move is visible
-to the host as that household's home changing
-([`../principles.md`](../principles.md#peoples-locations-are-never-shared-by-design)).
+`local_community: true` and `radius_km` — "within X km". Nothing else: no
+centre, no distance, no verdict. Whether *its* home is inside it learns only
+by asking to join, on the coarse cell rules above.
 
 ## Event types
 
 No new event type. The feature rides on:
 
-- `SPACE_DIRECTORY_SYNC` — an entry carries `local_community: true`,
-  `radius_km`, `in_area` and `area_edge` when the space is a local community
-  (v_59, sender-gated: a peer below v_59 gets the entry without them).
-  Redefined in place before release — the unreleased first draft carried
-  the centre, the second had no `area_edge` and answered exactly.
-- `SPACE_JOIN_REQUEST` — the host drops a request from a household that is
-  outside or whose home it does not know, or from a person past their daily
-  check budget (logged, like a banned applicant), so it never reaches the
-  admins. A repeat from a person whose request is already pending is
-  dropped without a check.
-- `SPACE_INVITE_TOKEN_REDEEM_DENY` — three reasons besides the uniform
-  `REDEEM_DENY_REASON`: `"home location not shared"`,
-  `"home outside the local area"` and `"local area refusals rate-limited"`
-  (the redeeming person's daily check budget is used up — the wire string
-  is kept from the first revision).
-  They are sent only after the token was consumed and the ban check passed
-  (a dead or banned link still gets the uniform reason), the use is handed
-  back, and the redeemer maps them to its own `HOME_NOT_SHARED` /
-  `OUTSIDE_AREA` / `LOCAL_AREA_RATE_LIMITED` errors — the issuer's text is
+- `SPACE_DIRECTORY_SYNC` — an entry carries `local_community: true` and
+  `radius_km` (v_59, sender-gated). Redefined in place before release (drafts
+  carried the centre, then a per-recipient `in_area` / `area_edge` verdict on
+  the home shared through pairing).
+- `SPACE_JOIN_REQUEST` — carries `join_location` (with consent). The host
+  drops one that is outside or has none, or from a person past their budget;
+  a repeat while pending is dropped without a check. A filed one keeps only
+  `area_verdict`.
+- `SPACE_INVITE_TOKEN_REDEEM` (and the §D2b sealed bootstrap body) — carries
+  `join_location` once the person agreed. DENY reasons besides the uniform
+  one: `"local area location required"`, `"home outside the local area"`,
+  `"local area refusals rate-limited"`, `"join request sent to the admins"`
+  (+ `space_id`, `request_id`). Sent only after the consume + ban check; the
+  redeemer maps them to its own `LOCATION_REQUIRED` / `OUTSIDE_AREA` /
+  `LOCAL_AREA_RATE_LIMITED` / `JOIN_REQUEST_SENT` — the issuer's text is
   never rendered.
-- `SPACE_PRIVATE_INVITE_ACCEPT` — re-checked on the host; refused → the
-  invitation is declined and the household gets `SPACE_REMOTE_MEMBER_REMOVED`
-  so its accepted stub goes away.
+- `SPACE_PRIVATE_INVITE` — `space_meta.local_community: {radius_km}`.
+- `SPACE_PRIVATE_INVITE_ACCEPT` — carries `join_location` once the person
+  agreed; refused → declined + `SPACE_REMOTE_MEMBER_REMOVED`; edge → the
+  REMOVED carries `join_request_id`.
+- `SPACE_JOIN_REQUEST_APPROVED` / `_DENIED` — sent with mesh fallback, so an
+  applicant that reached the host over the mesh hears the answer.
 
-## Flow — a paired household asks to join
+## Flow — a household joins over the mesh
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant B as HFS B (joiner)
+    participant R as HFS R (mesh relay)
     participant A as HFS A (host)
 
-    Note over A,B: paired · B shares its home with A (share_home on)
-    Note over A: in_area for B = B's shared home's grid cell<br/>inside / outside, or unsure near the rim<br/>(secret per-cell shift; snapshot built for B alone)
-    A->>B: SPACE_DIRECTORY_SYNC {spaces: [{…, local_community, radius_km, in_area, area_edge}]}  (v_59+)
-    Note over B: Discover: "Within 5 km" + In your area /<br/>Near the edge — no map, no centre
-    B-->>A: LOCAL_HOME_LOCATION_CHANGED (B moves / stops sharing)
-    A->>B: SPACE_DIRECTORY_SYNC (B's fresh verdict — at most 4 new homes a UTC day)
-    B->>A: SPACE_JOIN_REQUEST {space_id, user_id}
-    Note over A: already pending for (B, user_id)? → drop, no check
-    Note over A: home of B = remote_instances.home_lat/lon (unknown → drop)<br/>spend one check of (B, user_id) — 3 a UTC day — and of B — 10<br/>(none left → drop, no verdict) · inside? else drop (logged)
-    Note over A: admin approves → re-check (area or sharing may have changed)
-    A->>B: SPACE_JOIN_REQUEST_APPROVED {invite_token}
-    B->>A: SPACE_INVITE_TOKEN_REDEEM
-    Note over A: consume → ban → budget (one more check) → area check
-    alt inside
-        A->>B: SPACE_INVITE_TOKEN_REDEEM_ACK {space_meta}
-    else outside / home unknown / person's checks used up today
-        A->>B: SPACE_INVITE_TOKEN_REDEEM_DENY {reason}  (use handed back)
-        Note over B: 403 OUTSIDE_AREA / HOME_NOT_SHARED /<br/>429 LOCAL_AREA_RATE_LIMITED (own wording)
+    Note over B: B holds an invite link to A's local community<br/>(B and A are not paired — R pairs with both)
+    B->>R: SPACE_ROUTED {sealed: SPACE_INVITE_TOKEN_REDEEM}
+    R->>A: SPACE_ROUTED (R sees ciphertext only)
+    Note over A: consume → ban → no join_location
+    A-->>R: SPACE_ROUTED {sealed: DENY "local area location required"}
+    R-->>B: SPACE_ROUTED
+    Note over B: SPA: "your approximate location (about 1 km)<br/>is sent to A with this request" → person agrees
+    B->>R: SPACE_ROUTED {sealed: REDEEM + join_location (2 dp)}
+    R->>A: SPACE_ROUTED (still ciphertext)
+    Note over A: budget (person 10 / household 20 a day)<br/>verdict on the ~1 km cell — the point is not stored
+    alt clearly inside
+        A-->>B: (via R) REDEEM_ACK {space_meta}
+    else clearly outside
+        A-->>B: (via R) DENY "home outside the local area" (use handed back)
+    else near the edge
+        Note over A: pending request, area_verdict = edge<br/>(admins see "Near the edge")
+        A-->>B: (via R) DENY "join request sent to the admins" {space_id, request_id}
+        Note over B: keeps its pending row · SPA: "Your request was sent to the admins"
+        Note over A: an admin approves
+        A-->>B: (mesh) SPACE_JOIN_REQUEST_APPROVED {request_id, invite_token}
+        B->>A: (mesh) REDEEM {invite_token}
+        Note over A: approved person → seat, no check
+        A-->>B: (mesh) REDEEM_ACK {space_meta}
     end
 ```
+
+A paired household's "Ask to join" is the same decision with a direct
+`SPACE_JOIN_REQUEST {…, join_location}`: inside and edge are filed (the
+applicant hears nothing until an admin answers), outside is dropped. A
+household met through a GFS redeems through the §D2b sealed bootstrap body;
+the relay sees only the addressee and ciphertext.
 
 ## Implementation
 
 - `socialhome/domain/local_community.py` — the pure rules: `LocalArea`,
   `validate_local_area` (4 dp, bounds), `local_area_of` (public tier, whole
-  area), `eligibility` (haversine, exact), `directory_verdict` /
-  `edge_band_km` / `edge_cell` (the coarsened directory answer), the
-  host-API shape (`local_area_wire`, with the centre) and the directory
-  shape (`local_community_wire` / `parse_local_community_wire`, without).
+  area), `JOIN_LOCATION_PRECISION_DP` / `coarse_join_point` /
+  `parse_join_location` / `join_location_wire` (the 2 dp point),
+  `join_verdict` (inside / outside / edge for the cell), the host-API shape
+  (`local_area_wire`, with the centre) and the directory shape
+  (`local_community_wire` / `parse_local_community_wire`, radius only).
 - `socialhome/services/local_community.py` — `require_local_eligibility`,
-  the one check every seat path calls (whose home, fail closed, the
-  per-person check budget), `LocalAreaBudget` (the daily budgets, all three
-  limits in one place) and `derive_edge_key` / `edge_shift_km` (the host's
-  secret per-cell shift).
-- `socialhome/repositories/local_area_attempt_repo.py` — the
-  `local_area_attempts` counters: an all-or-nothing `try_spend` under
-  `BEGIN IMMEDIATE`, pruning old days on write.
-- `socialhome/services/peer_directory_service.py` — builds each peer's
-  snapshot with its coarsened verdict and the per-peer home budget.
-- `socialhome/services/space_service.py` — `create_space` /
-  `set_local_area` / `require_local_seat` and the local seat paths
-  (`request_join`, `approve_join_request`, `subscribe_to_space`,
-  `add_member`, `invite_local_user`, `accept_local_invite`,
-  `accept_invite_token`, `invite_remote_user`); `update_config` drops the
-  area when the tier leaves public and refuses delegated authority with one.
+  the one check every seat path calls; `own_home_point` / `join_location_for`
+  (the joiner's side, consent-gated); `pending_join_request_id`,
+  `file_remote_join_request`; `LocalAreaBudget`.
+- `socialhome/repositories/local_area_attempt_repo.py` — the daily counters.
+- `socialhome/repositories/space_repo.py` — `save_join_request(area_verdict=)`,
+  `has_approved_join_request` (migration 0111).
+- `socialhome/services/space_service.py` — the local seat paths
+  (`request_join`, `subscribe_to_space`, `accept_local_invite`,
+  `accept_invite_token`, `add_member`, `invite_local_user`,
+  `approve_join_request`) and the joiner's side (`request_join_remote`,
+  `redeem_invite_token`, `accept_remote_invite` with `share_location`); the
+  invitation snapshot's `local_community`.
 - `socialhome/services/federation_inbound/space_invites.py` — inbound
   `SPACE_JOIN_REQUEST`.
-- `socialhome/federation/invite_token_redeem.py` — the issuer-side check in
-  `_consume_seat_and_build_ack`, the two DENY reasons and their redeemer-side
-  mapping (§D2 and §D2b).
-- `socialhome/federation/private_invite_handler.py` — the accept re-check.
-- `socialhome/services/peer_directory_service.py` — the per-peer snapshot
-  with that peer's verdict (v_59-gated), re-sent on `PeerHomeChanged` /
-  `PeerProtoVersionRaised`.
-- `socialhome/federation/peer_directory_handler.py` — received and
-  re-validated into `peer_space_directory.radius_km` / `in_area`
-  (migrations 0105, 0106).
-- SPA: `client/src/features/spaces/discover.ts` (`entryAreaVerdict`,
-  `sortNearFirst`), `SpaceDiscover.tsx` ("Near you"),
-  `SpacePublicDetailPage.tsx` (About: map for the host's own people only).
+- `socialhome/federation/invite_token_redeem.py` — the issuer-side decision
+  (`_local_area_refusal`), the DENY reasons and the redeemer-side mapping
+  (§D2, mesh and §D2b).
+- `socialhome/federation/private_invite_handler.py` — the accept decision
+  and the joiner keeping its side of an edge review.
+- `socialhome/services/peer_directory_service.py` /
+  `socialhome/federation/peer_directory_handler.py` — the radius-only
+  directory entry (migrations 0105, 0106, 0110).
+- SPA: `client/src/components/localConsent.ts` (the consent prompt),
+  `features/spaces/SpaceDiscover.tsx`, `SpacePublicDetailPage.tsx`,
+  `JoinRequestModal.tsx`, `SpaceJoinByCodeDialog.tsx`,
+  `components/RemoteInviteInboxBanner.tsx`, `components/JoinRequestList.tsx`
+  ("Near the edge"), `utils/localArea.ts` (`joinVerdict`, the server's rule
+  for our own communities).
 
 ## Spec references
 
 §D1a (peer directory sync), §D2 / §D2b (join requests, invite redeem),
-§11 (pairing — the home location it shares), §25.8.21 (the directory
-snapshot travels encrypted to paired peers only), §2 GPS rule
+§D1b (private invites), §25.8.21 (every join's location rides inside its
+encrypted payload; mesh hops via SPACE_ROUTED), §2 GPS rule
 ([`../principles.md`](../principles.md#gps-truncation-4-dimension),
 [people's locations](../principles.md#peoples-locations-are-never-shared-by-design)).

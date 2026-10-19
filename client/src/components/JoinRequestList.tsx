@@ -33,6 +33,10 @@ interface JoinRequest {
    *  applicant is already a member (an admin/mod invite link seated them)
    *  and is waiting for the owner to approve the admin role. */
   requested_role?: string | null
+  /** A local community's verdict on the ~1 km location the request
+   *  carried (``inside`` / ``edge``; never the location itself). ``edge``
+   *  — the home may be just outside: the admins decide. */
+  area_verdict?: 'inside' | 'edge' | null
 }
 
 const requestsBySpace = signal<Record<string, JoinRequest[]>>({})
@@ -112,6 +116,12 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
             <Avatar name={name} size={32} />
             <div class="sh-join-info">
               <strong>{name}</strong>
+              {r.area_verdict === 'edge' && (
+                <span class="sh-join-edge-chip" data-testid="join-request-edge"
+                      title={t('join_requests.near_edge_hint')}>
+                  <span aria-hidden="true">◐</span> {t('join_requests.near_edge')}
+                </span>
+              )}
               {r.requested_role === 'admin' ? (
                 <p class="sh-join-elevation">
                   {t('join_requests.wants_admin')}

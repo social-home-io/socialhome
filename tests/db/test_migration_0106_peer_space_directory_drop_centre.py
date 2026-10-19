@@ -89,15 +89,15 @@ def test_the_stored_centre_is_gone_and_the_rows_stay(dev):
     assert set(rows) == {"q", "plain"}
     assert not {"lat", "lon"} & set(rows["q"])
     # The area went with the columns; the host's next snapshot refills it.
-    assert rows["q"]["radius_km"] is None and rows["q"]["in_area"] is None
+    assert rows["q"]["radius_km"] is None
 
 
 def test_the_current_writer_works_on_a_repaired_dev_database(dev):
     """The first revision's CHECK refused a radius without a centre — the
     row the current code writes."""
     dev.execute(
-        "INSERT INTO peer_space_directory(instance_id, space_id, name, radius_km,"
-        " in_area) VALUES('peer', 'n', 'New', 2.0, 1)"
+        "INSERT INTO peer_space_directory(instance_id, space_id, name, radius_km)"
+        " VALUES('peer', 'n', 'New', 2.0)"
     )
 
 

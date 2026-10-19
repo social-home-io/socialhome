@@ -274,12 +274,14 @@ describe('apiErrorMessage — fallbacks', () => {
   it('local communities are worded for whoever reads them', () => {
     const msg = (code: string, whose?: string) =>
       apiErrorMessage(403, '/x', { code, detail: 'x', ...(whose ? { params: { whose } } : {}) })
-    expect(msg('HOME_NOT_SHARED', 'own')).toBe(
+    expect(msg('HOME_NOT_SET', 'own')).toBe(
       'This space is a local community, and your household has no home location yet.')
-    expect(msg('HOME_NOT_SHARED', 'peer')).toBe(
-      "That household doesn't share its home location with yours, so it can't join this local community.")
-    expect(msg('HOME_NOT_SHARED', 'host')).toBe(
-      'This space is a local community. Share your home location with its household to join.')
+    expect(msg('LOCATION_REQUIRED', 'host')).toBe(
+      'This space is a local community. Its household needs your approximate location (about 1 km) with the request.')
+    // Near the edge: worded like any request — the person learns only that.
+    expect(msg('JOIN_REQUEST_SENT')).toBe('Your request was sent to the admins.')
+    // The pre-rework code is gone: a stale server's detail shows as is.
+    expect(msg('HOME_NOT_SHARED', 'own')).toBe('x')
     expect(msg('OUTSIDE_AREA', 'own')).toBe(
       "This space is a local community, and your household's home is outside its area.")
     expect(msg('OUTSIDE_AREA', 'host')).toBe(msg('OUTSIDE_AREA', 'own'))

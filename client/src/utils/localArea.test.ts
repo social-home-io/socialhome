@@ -1,14 +1,20 @@
 import { describe, it, expect } from 'vitest'
 import {
-  areaLabel, areaShortLabel, areaVerdict, distanceKm, peerAreaLabel, peerAreaVerdict, radiusInBounds,
-  radiusLabel, round4,
+  areaLabel, areaShortLabel, areaVerdict, coarsePoint, distanceKm, JOIN_PRECISION_DP, joinVerdict,
+  peerAreaLabel, radiusInBounds, radiusLabel, round4,
 } from './localArea'
 
 const ZURICH = { lat: 47.3769, lon: 8.5417, radius_km: 5 }
 const NEAR = { lat: 47.392, lon: 8.56 } // ~2 km
 const BERN = { lat: 46.9481, lon: 7.4474 } // ~95 km
 
-describe('areaVerdict', () => {
+/** ``km`` east of ZURICH on its parallel. */
+function eastKm(km: number) {
+  const perDeg = 111.19492664455873 * Math.cos((ZURICH.lat * Math.PI) / 180)
+  return { lat: ZURICH.lat, lon: ZURICH.lon + km / perDeg }
+}
+
+describe('areaVerdict (our own local community — the server\'s rule)', () => {
   it('inside the circle is "inside"', () => {
     expect(areaVerdict(ZURICH, NEAR)).toBe('inside')
   })
@@ -17,23 +23,40 @@ describe('areaVerdict', () => {
     expect(areaVerdict(ZURICH, BERN)).toBe('outside')
   })
 
-  it('the rim counts as inside, like the server', () => {
-    const area = { lat: 0, lon: 0, radius_km: 1 }
-    expect(areaVerdict(area, { lat: 0, lon: 0.0089 })).toBe('inside')
-    expect(areaVerdict(area, { lat: 0, lon: 0.0091 })).toBe('outside')
+  it('a ~1 km cell straddling the rim is "edge" — an admin decides', () => {
+    expect(areaVerdict(ZURICH, eastKm(5))).toBe('edge')
+    expect(areaVerdict(ZURICH, eastKm(5.3))).toBe('edge')
+    expect(areaVerdict(ZURICH, eastKm(2))).toBe('inside')
+    expect(areaVerdict(ZURICH, eastKm(8))).toBe('outside')
   })
 
   it('no home set → "no_home"; still loading → "unknown"', () => {
     expect(areaVerdict(ZURICH, null)).toBe('no_home')
     expect(areaVerdict(ZURICH, undefined)).toBe('unknown')
   })
+})
 
-  it('inside but not shared with the host → "not_shared"', () => {
-    expect(areaVerdict(ZURICH, NEAR, false)).toBe('not_shared')
+describe('the join\'s coarse point', () => {
+  it('rounds to two decimals, like the server', () => {
+    expect(JOIN_PRECISION_DP).toBe(2)
+    expect(coarsePoint({ lat: 47.376_912, lon: 8.541_749 })).toEqual({ lat: 47.38, lon: 8.54 })
   })
 
-  it('outside wins over "not shared": no pointless errand', () => {
-    expect(areaVerdict(ZURICH, BERN, false)).toBe('outside')
+  it('decides for the whole cell: every home in it gets the same answer', () => {
+    const a = { lat: 47.3751, lon: 8.6049 }
+    const b = { lat: 47.3849, lon: 8.5951 }
+    expect(coarsePoint(a)).toEqual(coarsePoint(b))
+    expect(joinVerdict(ZURICH, a)).toBe(joinVerdict(ZURICH, b))
+  })
+
+  it('inside means every home of the cell is inside; outside, none is', () => {
+    for (let i = 0; i < 2000; i++) {
+      const home = { lat: ZURICH.lat + (i % 40 - 20) * 0.004, lon: ZURICH.lon + (Math.floor(i / 40) - 25) * 0.005 }
+      const v = joinVerdict(ZURICH, home)
+      const inside = distanceKm(ZURICH, home) <= ZURICH.radius_km
+      if (v === 'inside') expect(inside).toBe(true)
+      if (v === 'outside') expect(inside).toBe(false)
+    }
   })
 })
 
@@ -63,33 +86,5 @@ describe('helpers', () => {
     expect(radiusInBounds(0.4)).toBe(false)
     expect(radiusInBounds(51)).toBe(false)
     expect(radiusInBounds(Number.NaN)).toBe(false)
-  })
-})
-
-describe('peerAreaVerdict (a paired household\'s community — no centre)', () => {
-  const home = { lat: 1, lon: 2 }
-  it('reads the host\'s verdict for our shared home', () => {
-    expect(peerAreaVerdict({ radius_km: 2, in_area: true }, home, true)).toBe('inside')
-    expect(peerAreaVerdict({ radius_km: 2, in_area: false }, home, true)).toBe('outside')
-  })
-  it('outside wins over not shared — no pointless errand', () => {
-    expect(peerAreaVerdict({ radius_km: 2, in_area: false }, home, false)).toBe('outside')
-  })
-  it('a home we stopped sharing beats a stale inside', () => {
-    expect(peerAreaVerdict({ radius_km: 2, in_area: true }, home, false)).toBe('not_shared')
-    expect(peerAreaVerdict({ radius_km: 2, in_area: null }, home, false)).toBe('not_shared')
-  })
-  it('no home set says so', () => {
-    expect(peerAreaVerdict({ radius_km: 2, in_area: null }, null, true)).toBe('no_home')
-  })
-  it('near the rim the host is unsure: "near the edge", not unknown', () => {
-    expect(peerAreaVerdict({ radius_km: 2, in_area: null, area_edge: true }, home, true)).toBe('edge')
-    // …but a home we stopped sharing, or never set, says so first.
-    expect(peerAreaVerdict({ radius_km: 2, in_area: null, area_edge: true }, home, false)).toBe('not_shared')
-    expect(peerAreaVerdict({ radius_km: 2, in_area: null, area_edge: true }, null, true)).toBe('no_home')
-  })
-  it('shared but not answered yet: no badge, the host checks', () => {
-    expect(peerAreaVerdict({ radius_km: 2, in_area: null }, home, true)).toBe('unknown')
-    expect(peerAreaVerdict({ radius_km: 2, in_area: null }, undefined, true)).toBe('unknown')
   })
 })

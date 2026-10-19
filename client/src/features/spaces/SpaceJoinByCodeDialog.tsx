@@ -16,6 +16,7 @@
 import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api, ApiError } from '@/api'
+import { askLocationConsent, isApiCode } from '@/components/localConsent'
 import { addBase } from '@/baseUrl'
 import { instanceConfig } from '@/store/instance'
 import { decodeInviteCode } from '@/lib/spaceInviteCode'
@@ -120,10 +121,18 @@ export function SpaceJoinByCodeDialog() {
         if (payload.expires_at) body.expires_at = payload.expires_at
         if (payload.via_gfs?.gfs_url) body.gfs = payload.via_gfs.gfs_url
       }
-      const r = await api.post('/api/spaces/join', body) as {
-        space_id: string
-        role?: string | null
-        pending_role?: string | null
+      const post = (extra: Record<string, unknown> = {}) => api.post(
+        '/api/spaces/join', { ...body, ...extra },
+      ) as Promise<{ space_id: string; role?: string | null; pending_role?: string | null }>
+      let r
+      try {
+        r = await post()
+      } catch (exc) {
+        // A local community: its household needs our approximate location
+        // with the redeem. Ask, then redeem again with it — never without.
+        if (!isApiCode(exc, 'LOCATION_REQUIRED')) throw exc
+        if (!await askLocationConsent(null)) return
+        r = await post({ share_location: true })
       }
       open.value = false
       draft.value = ''
@@ -149,7 +158,13 @@ export function SpaceJoinByCodeDialog() {
       }
       loc.route(dest)
     } catch (e) {
-      if (e instanceof ApiError && (e.status === 404 || e.status === 410)) {
+      if (isApiCode(e, 'JOIN_REQUEST_SENT')) {
+        // Near the edge of a local community: the admins decide — the same
+        // answer as any request.
+        open.value = false
+        draft.value = ''
+        showToast(t('error.join_request_sent'), 'success')
+      } else if (e instanceof ApiError && (e.status === 404 || e.status === 410)) {
         errorMsg.value = t('space.join_code.expired')
       } else if (e instanceof ApiError && e.status === 403) {
         // Prefer the backend's specific reason — e.g. the child-protection

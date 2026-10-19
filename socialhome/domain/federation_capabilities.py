@@ -886,18 +886,24 @@ from __future__ import annotations
 #:   labelled "Removed profile pictures in space catch-up".
 #: * **v_59** (2026-10-19) — local communities: a ``SPACE_DIRECTORY_SYNC``
 #:   entry for a public space bound to an area carries ``local_community:
-#:   true``, its ``radius_km`` and ``in_area`` — the host's verdict for the
-#:   RECEIVING household's shared home (``true`` / ``false``, ``null`` when
-#:   it shares none or the host is unsure — ``area_edge: true``, near the
-#:   rim, coarsened so it cannot be walked to the centre). Never the centre: people's locations are not shared by
-#:   design, so each peer's snapshot is built for it alone and no household
-#:   sees another's verdict. The host still decides every seat against the
-#:   home the joiner already shares through pairing — nothing new is asked
-#:   of the joiner. No new event type. (Redefined in place before release;
-#:   the first draft carried the centre.) **Gated**: a peer below v_59 gets
-#:   the entry WITHOUT the fields; it lists the space as before, and its
-#:   request is refused by the host (``OUTSIDE_AREA`` / ``HOME_NOT_SHARED``)
-#:   like anyone's. Not space-scoped; labelled "Local communities".
+#:   true`` and its ``radius_km`` — never the centre (people's locations are
+#:   not shared by design) and no verdict. Every join to one — a
+#:   ``SPACE_JOIN_REQUEST``, a ``SPACE_INVITE_TOKEN_REDEEM`` (direct,
+#:   mesh-routed or the §D2b sealed body), a ``SPACE_PRIVATE_INVITE_ACCEPT``
+#:   — carries ``join_location``: the joining household's home rounded to
+#:   2 dp (~1.1 km), sent with the person's consent, inside the join's
+#:   sealed payload, to the host only, never stored. The host decides on it:
+#:   inside → as before; outside → refused; near the edge → a join request
+#:   for its admins (a redeem's DENY ``"join request sent to the admins"``
+#:   names it, an accept's ``SPACE_REMOTE_MEMBER_REMOVED`` carries
+#:   ``join_request_id``). A private invitation's ``space_meta`` carries
+#:   ``local_community: {radius_km}`` so the invitee asks first. No new event
+#:   type. (Redefined in place before release; drafts carried the centre,
+#:   then a per-household verdict on the home shared through pairing.)
+#:   **Gated** on the directory fields: a peer below v_59 gets the entry
+#:   WITHOUT them; it lists the space as before, and its join — carrying no
+#:   location — is refused by the host (``LOCATION_REQUIRED``) like any join
+#:   without one. Not space-scoped; labelled "Local communities".
 OURS: int = 59
 
 
@@ -1380,10 +1386,10 @@ class FederationCapability:
     MIN_FOR_MEMBER_PICTURE_RESET_SYNC = 58
 
     #: v_59 — a ``SPACE_DIRECTORY_SYNC`` entry marks a local community
-    #: (``local_community`` + ``radius_km``) with the host's ``in_area``
-    #: verdict for the receiving household (``area_edge`` when unsure near
-    #: the rim) — no centre. Sender-gated: an
-    #: older peer's snapshot omits the fields. Not space-scoped.
+    #: (``local_community`` + ``radius_km``) — no centre, no verdict; a join
+    #: to one carries the joiner's home rounded to ~1 km
+    #: (``join_location``). Sender-gated: an older peer's snapshot omits
+    #: the fields. Not space-scoped.
     MIN_FOR_LOCAL_COMMUNITY_AREA = 59
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant

@@ -8,11 +8,8 @@ the full public-space snapshot.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-
 import pytest
 
-from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
     PairingConfirmed,
     PeerHomeChanged,
@@ -29,18 +26,7 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.repositories.local_area_attempt_repo import (
-    SqliteLocalAreaAttemptRepo,
-)
-from socialhome.services.local_community import LocalAreaBudget, derive_edge_key
-from socialhome.services.peer_directory_service import (
-    MAX_VERDICT_HOMES_PER_DAY,
-    PeerDirectoryService,
-)
-from tests.local_area_budget import memory_budget
-
-#: The host's secret for the "unsure" band's shift.
-EDGE_KEY = derive_edge_key(b"\x07" * 32)
+from socialhome.services.peer_directory_service import PeerDirectoryService
 
 
 def _space(**over) -> Space:
@@ -82,6 +68,8 @@ class _PeerRow:
     def __init__(self, id: str, status: PairingStatus, home=None) -> None:
         self.id = id
         self.status = status
+        #: A home this peer shares through pairing — never read for the
+        #: directory any more.
         self.home_lat = home[0] if home else None
         self.home_lon = home[1] if home else None
 
@@ -89,15 +77,9 @@ class _PeerRow:
 class _FakeFedRepo:
     def __init__(self, peers: list[_PeerRow]) -> None:
         self._peers = peers
-        #: The home each peer shares with us (mutable by a test).
-        self.homes = {p.id: (p.home_lat, p.home_lon) for p in peers}
 
     async def get_instance(self, instance_id):
-        row = next((p for p in self._peers if p.id == instance_id), None)
-        if row is not None:
-            home = self.homes.get(instance_id) or (None, None)
-            row.home_lat, row.home_lon = home
-        return row
+        return next((p for p in self._peers if p.id == instance_id), None)
 
     async def list_social_instances(self):
         return [
@@ -145,8 +127,6 @@ def env():
         federation_service=fed,
         federation_repo=fed_repo,
         space_repo=space_repo,
-        edge_key=EDGE_KEY,
-        budget=memory_budget(),
     )
     svc.wire()
     return bus, fed, svc
@@ -202,8 +182,6 @@ async def test_empty_public_spaces_still_broadcasts_empty_snapshot():
         federation_service=fed,
         federation_repo=fed_repo,
         space_repo=space_repo,
-        edge_key=EDGE_KEY,
-        budget=memory_budget(),
     )
     svc.wire()
     await bus.publish(
@@ -219,28 +197,23 @@ async def test_empty_public_spaces_still_broadcasts_empty_snapshot():
     ]
 
 
-# ── v_59: a local community — radius + per-recipient verdict, no centre ──
+# ── v_59: a local community — the radius only ───────────────────────────
 
 #: The community's centre (Zürich) — must never appear on the wire.
 CENTRE = (47.3769, 8.5417)
-#: Homes the peers share with us: ~1 km away (inside 5 km), Bern (outside).
+#: Homes the peers share with us through pairing — never used for the
+#: directory: ~1 km away (inside 5 km), Bern (outside).
 NEAR = (47.3850, 8.5500)
 FAR = (46.9481, 7.4474)
 
 
-def _local_env(
-    versions: dict[str, int] | None = None, homes=None, clock=None, budget=None
-):
+def _local_env(versions: dict[str, int] | None = None):
     community = _space(
         id="sp-local", name="Quartier", lat=CENTRE[0], lon=CENTRE[1], radius_km=5.0
     )
     pinned = _space(id="sp-pin", name="Old pin", lat=1.0, lon=2.0)
     space_repo = _FakeSpaceRepo(public_spaces=[community, pinned], members={})
-    homes = (
-        {"peer-near": NEAR, "peer-far": FAR, "peer-none": None}
-        if homes is None
-        else homes
-    )
+    homes = {"peer-near": NEAR, "peer-far": FAR, "peer-none": None}
     fed_repo = _FakeFedRepo(
         [_PeerRow(p, PairingStatus.CONFIRMED, home=h) for p, h in homes.items()]
     )
@@ -251,19 +224,14 @@ def _local_env(
         federation_service=fed,
         federation_repo=fed_repo,
         space_repo=space_repo,
-        edge_key=EDGE_KEY,
-        budget=budget
-        if budget is not None
-        else memory_budget(**({"clock": clock} if clock is not None else {})),
     )
     svc.wire()
-    return bus, fed, svc, fed_repo
+    return bus, fed, svc
 
 
-def _entries(fed, to, *, last=False):
+def _entries(fed, to):
     payloads = [p for (peer, _t, p) in fed.sent if peer == to]
-    payload = payloads[-1] if last else payloads[0]
-    return {s["space_id"]: s for s in payload["spaces"]}
+    return {s["space_id"]: s for s in payloads[0]["spaces"]}
 
 
 def _numbers(obj) -> list[float]:
@@ -290,17 +258,21 @@ def _keys(obj) -> set[str]:
     return set()
 
 
-async def test_each_peer_gets_its_own_verdict_and_no_centre():
-    bus, fed, _svc, _repo = _local_env()
+async def test_every_peer_gets_the_radius_and_nothing_else():
+    """No verdict any more: whatever home a peer shares with us, its entry
+    says "a local community, within 5 km" — the same for every peer."""
+    bus, fed, _svc = _local_env()
     await bus.publish(SpaceLocalAreaChanged(space_id="sp-local"))
-    expect = {"peer-near": True, "peer-far": False, "peer-none": None}
-    for peer, in_area in expect.items():
-        entry = _entries(fed, peer)["sp-local"]
+    entries = [
+        _entries(fed, p)["sp-local"] for p in ("peer-near", "peer-far", "peer-none")
+    ]
+    for entry in entries:
         assert entry["local_community"] is True
         assert entry["radius_km"] == 5.0
-        assert entry["in_area"] is in_area
+        assert not {"in_area", "area_edge"} & set(entry)
+    assert entries[0] == entries[1] == entries[2]
     # A pin without a radius is no community — nothing about it is sent.
-    assert not {"local_community", "radius_km", "in_area"} & set(
+    assert not {"local_community", "radius_km"} & set(
         _entries(fed, "peer-near")["sp-pin"]
     )
 
@@ -308,79 +280,48 @@ async def test_each_peer_gets_its_own_verdict_and_no_centre():
 async def test_no_payload_carries_any_coordinate():
     """The adversarial check: no coordinate key anywhere in any payload,
     and none of the centre's or a peer's home's numbers either."""
-    bus, fed, svc, _repo = _local_env()
+    bus, fed, svc = _local_env()
     await bus.publish(SpaceLocalAreaChanged(space_id="sp-local"))
     await svc.send_snapshot("peer-near")
     secrets = {*CENTRE, *NEAR, *FAR, 1.0, 2.0}
     assert fed.sent
     for _to, _t, payload in fed.sent:
         assert not _COORD_KEYS & _keys(payload)
-        # ``member_count`` is 0 and the radius is 5.0 — neither collides.
         assert not secrets & set(_numbers(payload)) - {0.0, 5.0}
         assert "47.37" not in repr(payload) and "8.54" not in repr(payload)
 
 
-async def test_a_peer_never_gets_another_peers_verdict():
-    bus, fed, _svc, _repo = _local_env()
-    await bus.publish(SpaceLocalAreaChanged(space_id="sp-local"))
-    for peer in ("peer-near", "peer-far", "peer-none"):
-        payloads = [p for (to, _t, p) in fed.sent if to == peer]
-        assert len(payloads) == 1
-        # One local-community entry per payload, carrying one verdict.
-        verdicts = [e["in_area"] for e in payloads[0]["spaces"] if "in_area" in e]
-        assert len(verdicts) == 1
-        # …and it is this peer's, whatever order the peers were served in.
-        assert verdicts[0] is {"peer-near": True, "peer-far": False}.get(peer)
-
-
 async def test_below_v59_the_entry_has_no_local_community_fields():
     old = FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA - 1
-    _bus, fed, svc, _repo = _local_env({"peer-far": old})
+    _bus, fed, svc = _local_env({"peer-far": old})
     await svc.send_snapshot("peer-far")
     await svc.send_snapshot("peer-near")
     assert set(_entries(fed, "peer-far")) == {"sp-local", "sp-pin"}
     assert all(
-        not {"local_community", "radius_km", "in_area"} & set(e)
+        not {"local_community", "radius_km"} & set(e)
         for e in _entries(fed, "peer-far").values()
     )
-    assert _entries(fed, "peer-near")["sp-local"]["in_area"] is True
+    assert _entries(fed, "peer-near")["sp-local"]["radius_km"] == 5.0
 
 
-async def test_a_peer_sharing_its_home_gets_a_fresh_verdict():
-    """Its home moved or appeared, or it stopped sharing: only ITS
-    snapshot is re-sent, with the new verdict."""
-    bus, fed, _svc, fed_repo = _local_env()
-    fed_repo.homes["peer-none"] = NEAR
+async def test_a_peers_home_change_sends_nothing():
+    """The directory no longer depends on any household's home."""
+    bus, fed, _svc = _local_env()
     await bus.publish(
         PeerHomeChanged(instance_id="peer-none", latitude=NEAR[0], longitude=NEAR[1])
-    )
-    assert [to for (to, _t, _p) in fed.sent] == ["peer-none"]
-    assert _entries(fed, "peer-none")["sp-local"]["in_area"] is True
-    # …and turning sharing off again makes it unknown.
-    fed_repo.homes["peer-none"] = None
-    await bus.publish(
-        PeerHomeChanged(instance_id="peer-none", latitude=None, longitude=None)
-    )
-    assert _entries(fed, "peer-none", last=True)["sp-local"]["in_area"] is None
-
-
-async def test_a_home_change_without_any_community_sends_nothing(env):
-    bus, fed, _svc = env
-    await bus.publish(
-        PeerHomeChanged(instance_id="peer-1", latitude=1.0, longitude=2.0)
     )
     assert fed.sent == []
 
 
 async def test_reaching_v59_sends_the_community_fields():
     floor = FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA
-    bus, fed, _svc, _repo = _local_env()
+    bus, fed, _svc = _local_env()
     await bus.publish(
         PeerProtoVersionRaised(
             instance_id="peer-near", old_version=floor - 1, new_version=floor
         )
     )
-    assert _entries(fed, "peer-near")["sp-local"]["in_area"] is True
+    assert _entries(fed, "peer-near")["sp-local"]["radius_km"] == 5.0
     # A later raise (already past v_59) sends nothing new.
     await bus.publish(
         PeerProtoVersionRaised(
@@ -388,147 +329,3 @@ async def test_reaching_v59_sends_the_community_fields():
         )
     )
     assert len(fed.sent) == 1
-
-
-# ── the "unsure" band and the verdict budget ────────────────────────────
-
-#: ~5 km from CENTRE, right on the 5 km rim (east along the parallel).
-RIM = (47.3769, 8.6080)
-
-
-async def test_a_peer_near_the_rim_gets_unsure_not_yes_or_no():
-    """Near the rim the host says neither: ``in_area: null`` with
-    ``area_edge: true`` — and still no coordinate anywhere."""
-    bus, fed, _svc, _repo = _local_env(
-        homes={"peer-rim": RIM, "peer-near": NEAR, "peer-far": FAR}
-    )
-    await bus.publish(SpaceLocalAreaChanged(space_id="sp-local"))
-    rim = _entries(fed, "peer-rim")["sp-local"]
-    assert rim["in_area"] is None
-    assert rim["area_edge"] is True
-    assert _entries(fed, "peer-near")["sp-local"]["area_edge"] is False
-    assert _entries(fed, "peer-far")["sp-local"]["area_edge"] is False
-    for _to, _t, payload in fed.sent:
-        assert not _COORD_KEYS & _keys(payload)
-
-
-class _Clock:
-    def __init__(self) -> None:
-        self.now = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-
-def _steps(n: int) -> list[tuple[float, float]]:
-    """``n`` homes stepping east across the rim (inside → outside)."""
-    return [(47.3769, 8.5417 + 0.012 * i) for i in range(n)]
-
-
-async def test_a_home_moved_over_and_over_gets_no_new_answers_for_a_day():
-    """Every move of a shared home is a fresh probe: the host takes at most
-    a few new homes per peer per day into account, and answers further
-    moves with the verdict for the last home it took — no new information
-    — until the day has passed."""
-    clock = _Clock()
-    bus, fed, svc, fed_repo = _local_env(homes={"peer-x": NEAR}, clock=clock)
-    homes = _steps(12)
-    for home in homes:
-        fed_repo.homes["peer-x"] = home
-        await bus.publish(
-            PeerHomeChanged(instance_id="peer-x", latitude=home[0], longitude=home[1])
-        )
-    answers = [
-        (p["spaces"][0]["in_area"], p["spaces"][0]["area_edge"])
-        for (_to, _t, p) in fed.sent
-    ]
-    budget = MAX_VERDICT_HOMES_PER_DAY
-    # After the budget the answer is frozen at the last home taken.
-    assert len(set(answers[budget - 1 :])) == 1
-    # A day later the current home counts again: it is far outside now.
-    clock.now += timedelta(days=1)
-    await svc.send_snapshot("peer-x")
-    assert _entries(fed, "peer-x", last=True)["sp-local"]["in_area"] is False
-
-
-async def test_withdrawing_the_home_always_takes_effect():
-    """Turning sharing off is never held back by the budget: the host
-    stops answering for a home it no longer has."""
-    clock = _Clock()
-    bus, fed, _svc, fed_repo = _local_env(homes={"peer-x": NEAR}, clock=clock)
-    for home in _steps(MAX_VERDICT_HOMES_PER_DAY + 2):
-        fed_repo.homes["peer-x"] = home
-        await bus.publish(
-            PeerHomeChanged(instance_id="peer-x", latitude=home[0], longitude=home[1])
-        )
-    fed_repo.homes["peer-x"] = None
-    await bus.publish(
-        PeerHomeChanged(instance_id="peer-x", latitude=None, longitude=None)
-    )
-    last = _entries(fed, "peer-x", last=True)["sp-local"]
-    assert last["in_area"] is None
-    assert last["area_edge"] is False
-
-
-async def test_toggling_sharing_off_and_on_does_not_refill_the_budget():
-    """Withdrawing the home takes effect, but it must not reset the day's
-    budget: off → move → on, over and over, would otherwise be a fresh
-    probe every time. Past the budget a newly shared home gets no answer
-    (unknown) until the day has passed."""
-    clock = _Clock()
-    bus, fed, _svc, fed_repo = _local_env(homes={"peer-x": NEAR}, clock=clock)
-    answers = []
-    for home in _steps(10):
-        for shared in (home, None):
-            fed_repo.homes["peer-x"] = shared
-            await bus.publish(
-                PeerHomeChanged(
-                    instance_id="peer-x",
-                    latitude=shared[0] if shared else None,
-                    longitude=shared[1] if shared else None,
-                )
-            )
-        answers.append(
-            [
-                (p["spaces"][0]["in_area"], p["spaces"][0]["area_edge"])
-                for (_to, _t, p) in fed.sent
-            ][-2]
-        )
-    budget = MAX_VERDICT_HOMES_PER_DAY
-    # Every shared home past the budget reads as unknown — nothing new.
-    assert set(answers[budget:]) == {(None, False)}
-
-
-async def test_a_restart_does_not_refill_the_home_budget(tmp_dir):
-    """The day's count is kept in SQLite: after a restart a peer that
-    already moved its home too often gets "unknown" (the last home taken
-    is not kept on disk) — never a fresh answer for a new home."""
-    clock = _Clock()
-    db = AsyncDatabase(tmp_dir / "verdicts.db", batch_timeout_ms=10)
-    await db.startup()
-    try:
-        budget = LocalAreaBudget(SqliteLocalAreaAttemptRepo(db), clock=clock)
-        bus, fed, _svc, fed_repo = _local_env(homes={"peer-x": NEAR}, budget=budget)
-        for home in _steps(MAX_VERDICT_HOMES_PER_DAY):
-            fed_repo.homes["peer-x"] = home
-            await bus.publish(
-                PeerHomeChanged(
-                    instance_id="peer-x", latitude=home[0], longitude=home[1]
-                )
-            )
-    finally:
-        await db.shutdown()
-    db = AsyncDatabase(tmp_dir / "verdicts.db", batch_timeout_ms=10)
-    await db.startup()
-    try:
-        budget = LocalAreaBudget(SqliteLocalAreaAttemptRepo(db), clock=clock)
-        _bus, fed, svc, fed_repo = _local_env(homes={"peer-x": FAR}, budget=budget)
-        await svc.send_snapshot("peer-x")
-        entry = _entries(fed, "peer-x", last=True)["sp-local"]
-        assert (entry["in_area"], entry["area_edge"]) == (None, False)
-        # The next UTC day it is answered again.
-        clock.now += timedelta(days=1)
-        await svc.send_snapshot("peer-x")
-        assert _entries(fed, "peer-x", last=True)["sp-local"]["in_area"] is False
-    finally:
-        await db.shutdown()

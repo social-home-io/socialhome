@@ -55,6 +55,7 @@ from ..domain.federation import (
     RemoteInstance,
 )
 from ..domain.federation_capabilities import OURS, FederationCapability
+from ..domain.local_community import Eligibility, parse_join_location
 from ..domain.media_constraints import (
     SPACE_COVER_BOOTSTRAP_MAX_BYTES,
     SPACE_COVER_SNAPSHOT_MAX_BYTES,
@@ -64,16 +65,25 @@ from ..domain.media_constraints import (
 from ..domain.space import (
     INVITE_VIA_GFS_LEGACY,
     INVITE_VIA_INTERNAL,
-    HomeNotSharedError,
     JoinOwner,
+    JoinRequestSentError,
     LocalAreaRateLimitedError,
+    LocationRequiredError,
     OutsideAreaError,
+    Space,
     SpaceMember,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
 )
-from ..services.local_community import LocalAreaBudget, require_local_eligibility
+from ..services.local_community import (
+    APPROVAL_HONOURED_DAYS,
+    LocalAreaBudget,
+    file_remote_join_request,
+    hosted_local_area,
+    pending_join_request_id,
+    require_local_eligibility,
+)
 from ..services.space_authority_pin import (
     owner_authority_cert_via,
     owner_statement_via,
@@ -189,31 +199,66 @@ BOOTSTRAP_DENY_CLIENT_MESSAGE: str = (
 REDEEM_DENY_REASON_TOO_LARGE: str = "space snapshot too large for the relay"
 
 #: The DENY reasons of a LOCAL COMMUNITY (a public space bound to an
-#: area): the redeeming household's home is not known to the issuer (not
-#: shared with it), lies outside the area, or the redeeming person already
-#: used today's checks on it (no verdict this time; the wire string is
-#: kept from the first revision). Sent only after the token was
-#: consumed and the ban check passed — so they tell a holder of a live link
-#: nothing about the issuer's private state, only what the paired-household
-#: directory already shows about the space — and the use is handed back.
-#: The redeemer maps them to its OWN coded errors
-#: (:class:`HomeNotSharedError` / :class:`OutsideAreaError`); the issuer's
-#: text is never rendered.
-REDEEM_DENY_REASON_HOME_NOT_SHARED: str = "home location not shared"
+#: area). A redeem into one carries the redeeming household's home rounded
+#: to ~1 km (``join_location``, inside the sealed redeem, only with the
+#: person's consent) and the issuer decides on it: none was sent (the SPA
+#: asks the person and redeems again), the home is outside the area, the
+#: person already tried too often today, or — near the edge — the redeem
+#: became a join request for the admins (the DENY then names the space and
+#: the request, so the redeemer can match the admins' answer). Sent only
+#: after the token was consumed and the ban check passed — so they tell a
+#: holder of a live link nothing about the issuer's private state — and the
+#: use is handed back. The redeemer maps them to its OWN coded errors; the
+#: issuer's text is never rendered.
+REDEEM_DENY_REASON_LOCATION_REQUIRED: str = "local area location required"
 REDEEM_DENY_REASON_OUTSIDE_AREA: str = "home outside the local area"
 REDEEM_DENY_REASON_AREA_RATE_LIMITED: str = "local area refusals rate-limited"
+REDEEM_DENY_REASON_JOIN_REQUESTED: str = "join request sent to the admins"
+
+#: Longest ``space_id`` / ``request_id`` a JOIN_REQUESTED DENY may name —
+#: both are ``uuid4().hex`` on the issuer; anything else is refused.
+_MAX_REVIEW_ID_LEN = 128
 
 
-def _local_area_deny_error(reason: str) -> SpacePermissionError | None:
+def _local_area_deny_error(
+    reason: str, body: dict | None = None
+) -> SpacePermissionError | None:
     """The redeemer-side error for a local-community DENY ``reason``, else
-    ``None``. ``whose="host"``: the joiner's own home, as the HOST sees it."""
-    if reason == REDEEM_DENY_REASON_HOME_NOT_SHARED:
-        return HomeNotSharedError(params={"whose": "host"})
+    ``None``. ``whose="host"``: the joiner's own home, as the HOST sees it.
+    A JOIN_REQUESTED carries the issuer's ``space_id`` / ``request_id`` (as
+    params, validated) so the redeemer can file its side of the request."""
+    if reason == REDEEM_DENY_REASON_LOCATION_REQUIRED:
+        return LocationRequiredError(params={"whose": "host"})
     if reason == REDEEM_DENY_REASON_OUTSIDE_AREA:
         return OutsideAreaError(params={"whose": "host"})
     if reason == REDEEM_DENY_REASON_AREA_RATE_LIMITED:
         return LocalAreaRateLimitedError(params={"whose": "host"})
+    if reason == REDEEM_DENY_REASON_JOIN_REQUESTED:
+        params: dict[str, str] = {}
+        for key in ("space_id", "request_id"):
+            value = (body or {}).get(key)
+            if isinstance(value, str) and 0 < len(value) <= _MAX_REVIEW_ID_LEN:
+                params[key] = value
+        return JoinRequestSentError(params=params)
     return None
+
+
+@dataclass(slots=True, frozen=True)
+class _Deny:
+    """A DENY that names a join request besides its reason (a local
+    community's edge review: :data:`REDEEM_DENY_REASON_JOIN_REQUESTED`)."""
+
+    reason: str
+    space_id: str
+    request_id: str
+
+
+def _split_deny(deny: str | _Deny | None) -> tuple[str, dict | None]:
+    """``(reason, extra DENY fields)`` for a denial of
+    :meth:`SpaceInviteTokenRedeemCoordinator._consume_seat_and_build_ack`."""
+    if isinstance(deny, _Deny):
+        return deny.reason, {"space_id": deny.space_id, "request_id": deny.request_id}
+    return deny or REDEEM_DENY_REASON, None
 
 
 #: What the redeemer shows for :data:`REDEEM_DENY_REASON_TOO_LARGE`.
@@ -556,8 +601,15 @@ class SpaceInviteTokenRedeemCoordinator:
         viewer_user_id: str,
         issuer_instance_id: str,
         bootstrap: InviteBootstrapHint | None = None,
+        join_location: dict[str, float] | None = None,
     ) -> dict:
         """Drive the receiver-side handshake.
+
+        ``join_location`` — this household's home rounded to ~1 km, only
+        when the person agreed to send it to a local community's host
+        (after a ``LOCATION_REQUIRED``). It rides inside the redeem — the
+        pairwise envelope, the SPACE_ROUTED seal or the §D2b sealed body —
+        so no relay ever reads it.
 
         If the issuer is a CONFIRMED direct peer, ships REDEEM via
         the regular ``send_event`` path. Otherwise tries
@@ -657,12 +709,19 @@ class SpaceInviteTokenRedeemCoordinator:
         use_bootstrap = not direct_peer and route_path is None
         if use_bootstrap:
             assert bootstrap is not None
-            result = await self._request_redeem_bootstrap(
-                token,
-                viewer_user_id=viewer_user_id,
-                user=user,
-                hint=bootstrap,
-            )
+            try:
+                result = await self._request_redeem_bootstrap(
+                    token,
+                    viewer_user_id=viewer_user_id,
+                    user=user,
+                    hint=bootstrap,
+                    join_location=join_location,
+                )
+            except JoinRequestSentError as exc:
+                await self._record_review_request(
+                    exc, viewer_user_id=viewer_user_id, issuer=issuer_instance_id
+                )
+                raise
             return await self._seat_local_after_ack(
                 result,
                 viewer_user_id=viewer_user_id,
@@ -682,6 +741,8 @@ class SpaceInviteTokenRedeemCoordinator:
             "redeemer_display_name": (user.display_name or user.username),
             "redeemer_public_key": getattr(user, "public_key", None),
         }
+        if join_location is not None:
+            payload["join_location"] = join_location
         try:
             if direct_peer:
                 await self._federation.send_event(
@@ -719,6 +780,11 @@ class SpaceInviteTokenRedeemCoordinator:
                 raise TimeoutError(
                     "issuer did not respond to invite-token redeem",
                 ) from exc
+            except JoinRequestSentError as exc:
+                await self._record_review_request(
+                    exc, viewer_user_id=viewer_user_id, issuer=issuer_instance_id
+                )
+                raise
         finally:
             self._pending.pop(nonce, None)
             self._pending_issuer.pop(nonce, None)
@@ -727,6 +793,30 @@ class SpaceInviteTokenRedeemCoordinator:
             result,
             viewer_user_id=viewer_user_id,
             issuer_instance_id=issuer_instance_id,
+        )
+
+    async def _record_review_request(
+        self, exc: JoinRequestSentError, *, viewer_user_id: str, issuer: str
+    ) -> None:
+        """The redeemer's side of a redeem the issuer turned into a join
+        request (a local community, the home near the edge): keep a pending
+        row under the issuer's request id, exactly like an "Ask to join"
+        (:meth:`SpaceService.request_join_remote`), so the admins' approval
+        (``SPACE_JOIN_REQUEST_APPROVED``) finds the person it seats."""
+        space_id = exc.params.get("space_id")
+        request_id = exc.params.get("request_id")
+        if not isinstance(space_id, str) or not isinstance(request_id, str):
+            log.warning(
+                "invite redeem: %s filed a join request without naming it",
+                issuer,
+            )
+            return
+        await self._spaces.save_join_request(
+            space_id,
+            viewer_user_id,
+            ttl_days=7,
+            remote_applicant_instance_id=issuer,
+            request_id=request_id,
         )
 
     def _seating_lock(self, space_id: str) -> asyncio.Lock:
@@ -968,6 +1058,8 @@ class SpaceInviteTokenRedeemCoordinator:
         redeemer_pk = str(redeemer_pk_raw) if redeemer_pk_raw else None
         redeemer_display_raw = p.get("redeemer_display_name")
         redeemer_display = str(redeemer_display_raw) if redeemer_display_raw else None
+        # A local community decides on it; never stored, never logged.
+        join_location = parse_join_location(p.get("join_location"))
 
         # Routed redeem: when the inbound came via SPACE_ROUTED, the
         # synthesised event carries the forward-leg ``route_id``. The
@@ -1013,13 +1105,16 @@ class SpaceInviteTokenRedeemCoordinator:
                 redeemer_display=redeemer_display,
                 over_gfs=over_gfs,
                 redeemer_may_moderate=may_moderate,
+                join_location=join_location,
             )
             if ack_payload is None:
+                reason, extra = _split_deny(deny_reason)
                 await self._send_deny(
                     event.from_instance,
                     nonce,
-                    deny_reason or REDEEM_DENY_REASON,
+                    reason,
                     routed_route_id=routed_route_id,
+                    extra=extra,
                 )
                 return
             await self._add_writer_cert(ack_payload, event.from_instance)
@@ -1100,7 +1195,8 @@ class SpaceInviteTokenRedeemCoordinator:
         bootstrap: bool = False,
         over_gfs: bool = False,
         redeemer_may_moderate: bool = False,
-    ) -> tuple[dict | None, str | None, _SeatReservation | None]:
+        join_location: tuple[float, float] | None = None,
+    ) -> tuple[dict | None, str | _Deny | None, _SeatReservation | None]:
         """Issuer-side authorization + seating for one redeem.
 
         ``redeemer_may_moderate`` is whether the redeeming household runs
@@ -1123,8 +1219,12 @@ class SpaceInviteTokenRedeemCoordinator:
         server, never seats a household through one. Read from the consumed
         row and the stored space, never from the request.
 
+        ``join_location`` — the redeeming household's home rounded to
+        ~1 km, as the redeem carried it (a local community decides on it).
+
         Returns ``(ack_body, None, reservation)`` on success or
-        ``(None, reason, None)`` on every denial. The redeem is NOT
+        ``(None, reason, None)`` on every denial (a :class:`_Deny` when the
+        DENY names more than its reason). The redeem is NOT
         committed yet: the caller hands the ACK to its transport first and
         then calls :meth:`_commit_redeem` — or :meth:`_rollback_redeem`
         when the ACK cannot be delivered, so a reply the relay refused
@@ -1196,37 +1296,23 @@ class SpaceInviteTokenRedeemCoordinator:
             await self._release_token_use(token, space_id)
             return None, REDEEM_DENY_REASON, None
 
-        # A local community: the redeeming household's shared home must be
-        # inside the area — an invite link is no override. Checked after the
-        # consume and the ban (so the specific reason reaches only a holder
-        # of a live link who is not banned) and the use is handed back: the
-        # household may share its home and redeem the same link again.
+        # A local community: decided on the ~1 km location the redeem
+        # carried — an invite link is no override. Checked after the consume
+        # and the ban (so the specific reason reaches only a holder of a live
+        # link who is not banned), and the use is handed back on every
+        # refusal: the person may agree to send the location, or be approved.
         space = await self._spaces.get(space_id)
         if space is not None:
-            try:
-                await require_local_eligibility(
-                    space,
-                    household_instance_id=redeemer_instance_id,
-                    own_instance_id=self._federation.own_instance_id,
-                    federation_repo=self._federation_repo,
-                    seeker_user_id=redeemer_user_id,
-                    budget=self._local_area_budget,
-                )
-            except HomeNotSharedError:
+            refusal = await self._local_area_refusal(
+                space,
+                redeemer_instance_id=redeemer_instance_id,
+                redeemer_user_id=redeemer_user_id,
+                redeemer_pk=redeemer_pk,
+                join_location=join_location,
+            )
+            if refusal is not None:
                 await self._release_token_use(token, space_id)
-                return None, REDEEM_DENY_REASON_HOME_NOT_SHARED, None
-            except OutsideAreaError:
-                await self._release_token_use(token, space_id)
-                return None, REDEEM_DENY_REASON_OUTSIDE_AREA, None
-            except LocalAreaRateLimitedError:
-                await self._release_token_use(token, space_id)
-                return None, REDEEM_DENY_REASON_AREA_RATE_LIMITED, None
-            except RuntimeError:
-                # No check budget wired: refused (fail closed), never seated
-                # uncounted.
-                log.exception("invite redeem: local-community check unavailable")
-                await self._release_token_use(token, space_id)
-                return None, REDEEM_DENY_REASON, None
+                return None, refusal, None
 
         # The seat the ISSUER decided at mint time (migration 0053). The
         # redeemer never gets to ask for a role, so this is read here and
@@ -1357,6 +1443,73 @@ class SpaceInviteTokenRedeemCoordinator:
             await self._rollback_redeem(reservation)
             return None, REDEEM_DENY_REASON, None
         return ack_body, None, reservation
+
+    async def _local_area_refusal(
+        self,
+        space: Space,
+        *,
+        redeemer_instance_id: str,
+        redeemer_user_id: str,
+        redeemer_pk: str | None,
+        join_location: tuple[float, float] | None,
+    ) -> str | _Deny | None:
+        """``None`` — seat (not a local community we host, clearly inside,
+        or an admin already approved this person); else the DENY.
+
+        Near the edge the redeem becomes a join request for the admins
+        (whatever the join mode), and the DENY names it so the redeemer can
+        match the answer; a person whose request is already pending gets
+        that one again, with no second check."""
+        own = self._federation.own_instance_id
+        if hosted_local_area(space, own) is None:
+            return None
+        if await self._spaces.has_approved_join_request(
+            space.id,
+            redeemer_user_id,
+            remote_applicant_instance_id=redeemer_instance_id,
+            within_days=APPROVAL_HONOURED_DAYS,
+        ):
+            # The admins approved this person: their decision, no check.
+            return None
+        pending = await pending_join_request_id(
+            self._spaces,
+            space.id,
+            redeemer_user_id,
+            household_instance_id=redeemer_instance_id,
+        )
+        if pending is not None:
+            return _Deny(REDEEM_DENY_REASON_JOIN_REQUESTED, space.id, pending)
+        try:
+            verdict = await require_local_eligibility(
+                space,
+                household_instance_id=redeemer_instance_id,
+                own_instance_id=own,
+                join_point=join_location,
+                budget=self._local_area_budget,
+                seeker_user_id=redeemer_user_id,
+            )
+        except LocationRequiredError:
+            return REDEEM_DENY_REASON_LOCATION_REQUIRED
+        except OutsideAreaError:
+            return REDEEM_DENY_REASON_OUTSIDE_AREA
+        except LocalAreaRateLimitedError:
+            return REDEEM_DENY_REASON_AREA_RATE_LIMITED
+        except SpacePermissionError, RuntimeError:
+            # No budget wired: refused (fail closed), never seated uncounted.
+            log.exception("invite redeem: local-community check unavailable")
+            return REDEEM_DENY_REASON
+        if verdict is not Eligibility.EDGE:
+            return None
+        request_id = await file_remote_join_request(
+            self._spaces,
+            self._bus,
+            space_id=space.id,
+            household_instance_id=redeemer_instance_id,
+            user_id=redeemer_user_id,
+            area_verdict=verdict,
+            applicant_pk=redeemer_pk,
+        )
+        return _Deny(REDEEM_DENY_REASON_JOIN_REQUESTED, space.id, request_id)
 
     async def _build_ack_body(
         self,
@@ -1694,7 +1847,7 @@ class SpaceInviteTokenRedeemCoordinator:
             return
         reason = str(p.get("reason") or "invite redeem denied by issuer")
         fut.set_exception(
-            _local_area_deny_error(reason) or SpacePermissionError(reason)
+            _local_area_deny_error(reason, p) or SpacePermissionError(reason)
         )
 
     def _is_addressed_issuer(self, nonce: str, event: FederationEvent) -> bool:
@@ -1730,6 +1883,7 @@ class SpaceInviteTokenRedeemCoordinator:
         viewer_user_id: str,
         user: Any,
         hint: InviteBootstrapHint,
+        join_location: dict[str, float] | None = None,
     ) -> dict:
         """Seal a redeem request to the issuer and await the sealed reply.
 
@@ -1776,6 +1930,9 @@ class SpaceInviteTokenRedeemCoordinator:
             "redeemer_display_name": (user.display_name or user.username),
             "redeemer_public_key": getattr(user, "public_key", None),
         }
+        if join_location is not None:
+            # Inside the sealed body: the relay routes it, never reads it.
+            body["join_location"] = join_location
         try:
             envelope = seal_bootstrap_envelope(
                 body=body,
@@ -1989,13 +2146,12 @@ class SpaceInviteTokenRedeemCoordinator:
                 _int_or_one(body.get("proto_version"))
                 >= FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE
             ),
+            # Sealed to us end to end; never stored, never logged.
+            join_location=parse_join_location(body.get("join_location")),
         )
         if ack_body is None:
-            await self._send_bootstrap_deny(
-                body,
-                nonce,
-                deny_reason or REDEEM_DENY_REASON,
-            )
+            reason, extra = _split_deny(deny_reason)
+            await self._send_bootstrap_deny(body, nonce, reason, extra=extra)
             return {"ok": True, "denied": True}
 
         # Space-scoped instance row — NOT a social peer. Seated once the
@@ -2154,7 +2310,7 @@ class SpaceInviteTokenRedeemCoordinator:
             too_large = str(body.get("reason") or "") == REDEEM_DENY_REASON_TOO_LARGE
             fut.set_exception(
                 # A local community's refusal maps to our own coded error.
-                _local_area_deny_error(str(body.get("reason") or ""))
+                _local_area_deny_error(str(body.get("reason") or ""), body)
                 or SpacePermissionError(
                     BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE
                     if too_large
@@ -2193,6 +2349,7 @@ class SpaceInviteTokenRedeemCoordinator:
         reason: str,
         *,
         gfs_url: str = "",
+        extra: dict | None = None,
     ) -> None:
         """Best-effort sealed DENY back to the redeemer.
 
@@ -2207,6 +2364,7 @@ class SpaceInviteTokenRedeemCoordinator:
                     "kind": KIND_REDEEM_DENY,
                     "redeem_nonce": nonce,
                     "reason": reason,
+                    **(extra or {}),
                 },
                 gfs_url=gfs_url,
             )
@@ -2383,6 +2541,7 @@ class SpaceInviteTokenRedeemCoordinator:
         reason: str,
         *,
         routed_route_id: str | None = None,
+        extra: dict | None = None,
     ) -> None:
         """Best-effort DENY ship-back. Logged but never raised — a
         failed DENY just leaves the receiver hanging until its timeout,
@@ -2397,6 +2556,7 @@ class SpaceInviteTokenRedeemCoordinator:
         deny_payload = {
             "redeem_nonce": nonce,
             "reason": reason,
+            **(extra or {}),
         }
         try:
             if routed_route_id is not None and self._routed_handler is not None:

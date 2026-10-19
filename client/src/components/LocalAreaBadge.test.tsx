@@ -3,14 +3,12 @@ import { render } from '@testing-library/preact'
 import { LocalAreaBadge, localAreaVerdictText, verdictAllowsJoin } from './LocalAreaBadge'
 
 describe('LocalAreaBadge', () => {
-  it('says where the home is, naming the host when sharing is missing', () => {
+  it('says where our home is for one of our own local communities', () => {
     expect(localAreaVerdictText('inside')).toBe('In your area')
     expect(localAreaVerdictText('outside')).toBe('Outside your area')
     expect(localAreaVerdictText('no_home')).toBe("Your home location isn't set")
-    expect(localAreaVerdictText('not_shared', 'Sara’s household'))
-      .toBe('Share your home with Sara’s household to check')
-    expect(localAreaVerdictText('not_shared', null)).toBe('Share your home with its household to check')
-    expect(localAreaVerdictText('edge')).toBe('Near the edge — ask to join and the host will check')
+    // Near the edge an admin decides — the owner's 2026-10-19 wording.
+    expect(localAreaVerdictText('edge')).toBe('Near the edge — an admin will review your request')
   })
 
   it('says nothing while the home is loading', () => {
@@ -25,13 +23,11 @@ describe('LocalAreaBadge', () => {
     expect(chip.textContent).toContain('Outside your area')
   })
 
-  it('only inside (or not yet known) offers a join', () => {
+  it('inside, near the edge (an admin reviews it) or not yet known offer a join', () => {
     expect(verdictAllowsJoin('inside')).toBe(true)
     expect(verdictAllowsJoin('unknown')).toBe(true)
-    // Near the edge the host decides on the exact distance: let them ask.
     expect(verdictAllowsJoin('edge')).toBe(true)
     expect(verdictAllowsJoin('outside')).toBe(false)
     expect(verdictAllowsJoin('no_home')).toBe(false)
-    expect(verdictAllowsJoin('not_shared')).toBe(false)
   })
 })

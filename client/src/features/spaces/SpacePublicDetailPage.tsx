@@ -29,13 +29,14 @@ import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { isOne, t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
-import { currentUser } from '@/store/auth'
 import { ensureHouseholdHome, householdHome } from '@/store/householdHome'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
+import { askLocationConsent, isApiCode, locationConsentText } from '@/components/localConsent'
 import {
-  contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, joinModeChip,
+  contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel,
+  joinCarriesLocation, joinModeChip,
   sourceOf, type DiscoverAction,
 } from './discover'
 import { addBase } from '@/baseUrl'
@@ -129,16 +130,14 @@ function scopeLabel(scope: DirectoryEntry['scope']): string {
   }
 }
 
-/** What to do about a verdict that keeps you out — one sentence under
- *  the badge. ``null`` when there is nothing to do here. */
-function areaNextStep(verdict: AreaVerdict, isLocal: boolean): string | null {
+/** What the area means for you — one sentence under the badge (our own
+ *  community) or the rule (another household's). ``null`` when there is
+ *  nothing to add. */
+function areaNextStep(verdict: AreaVerdict | null, isLocal: boolean): string | null {
   switch (verdict) {
     case 'outside': return t('local_area.about.outside_next')
     case 'edge': return t('local_area.about.edge_next')
     case 'no_home': return t('local_area.about.no_home_next')
-    case 'not_shared': return currentUser.value?.is_admin
-      ? t('local_area.about.not_shared_admin')
-      : t('local_area.about.not_shared_member')
     default: return isLocal ? null : t('local_area.about.host_checks')
   }
 }
@@ -187,6 +186,10 @@ export default function SpacePublicDetailPage() {
       setActiveModal(entry)
       return
     }
+    // A local community another household hosts: the request carries our
+    // approximate location — ask first, send nothing without a yes.
+    const carries = joinCarriesLocation(entry)
+    if (action === 'join' && carries && !await askLocationConsent(hostLabel(entry))) return
     try {
       if (action === 'follow') {
         await api.post(`/api/spaces/${entry.space_id}/subscribe`, {})
@@ -206,13 +209,20 @@ export default function SpacePublicDetailPage() {
       } else {
         await api.post(
           `/api/public_spaces/${entry.space_id}/join-request`,
-          { host_instance_id: entry.host_instance_id },
+          { host_instance_id: entry.host_instance_id, ...(carries ? { share_location: true } : {}) },
         )
         showToast(t('spaces.browse.request_sent_to', { host: hostLabel(entry) }), 'success')
         patch({ request_pending: true })
       }
     } catch (exc) {
-      showToast((exc as Error).message, 'error')
+      if (isApiCode(exc, 'JOIN_REQUEST_SENT')) {
+        // A follow near the edge of our own local community went to the
+        // admins as a request — the same answer as any request.
+        showToast(t('spaces.browse.request_sent_for', { name: entry.name }), 'success')
+        patch({ request_pending: true })
+      } else {
+        showToast((exc as Error).message, 'error')
+      }
     }
   }
 
@@ -224,7 +234,11 @@ export default function SpacePublicDetailPage() {
     } else {
       await api.post(
         `/api/public_spaces/${e.space_id}/join-request`,
-        { host_instance_id: e.host_instance_id, message },
+        {
+          host_instance_id: e.host_instance_id,
+          message,
+          ...(joinCarriesLocation(e) ? { share_location: true } : {}),
+        },
       )
     }
     showToast(t('spaces.browse.request_sent_for', { name: e.name }), 'success')
@@ -269,8 +283,9 @@ export default function SpacePublicDetailPage() {
   // A follower may still ask to become a member; Follow is never offered
   // twice.
   const way = discoverAction(entry)
-  // A local community: worked out against our own home. Outside (or a
-  // home the host can't know) offers no join the host would refuse.
+  // Our own local community: worked out against our own home with the
+  // server's rule. Outside (or no home) offers no join that would be
+  // refused. Another household's shows no verdict — its host decides.
   const verdict = entry.already_member ? null : entryAreaVerdict(entry, householdHome.value)
   const areaBlocks = verdict !== null && !verdictAllowsJoin(verdict) && way !== 'pending'
   const action: AboutAction | null = entry.already_member ? 'open'
@@ -368,23 +383,12 @@ export default function SpacePublicDetailPage() {
           </p>
           {verdict && (
             <p class="sh-space-public__local-verdict" role="status">
-              <LocalAreaBadge verdict={verdict} hostName={hostLabel(entry)} />
+              <LocalAreaBadge verdict={verdict} />
             </p>
           )}
           {ownArea && <LocalAreaMap area={ownArea} home={householdHome.value} height={200} />}
-          {verdict && areaNextStep(verdict, isLocal) && (
-            <p class="sh-muted">
-              {areaNextStep(verdict, isLocal)}
-              {verdict === 'not_shared' && currentUser.value?.is_admin && (
-                <>
-                  {' '}
-                  <a href={addBase('/connections')}
-                     onClick={(ev) => { ev.preventDefault(); loc.route('/connections') }}>
-                    {t('local_area.about.open_connections')}
-                  </a>
-                </>
-              )}
-            </p>
+          {!entry.already_member && areaNextStep(verdict, isLocal) && (
+            <p class="sh-muted" data-testid="local-area-next">{areaNextStep(verdict, isLocal)}</p>
           )}
         </section>
       )}
@@ -435,6 +439,10 @@ export default function SpacePublicDetailPage() {
           spaceName={activeModal.name}
           hostDisplayName={activeModal.host_display_name}
           hostIsPaired={activeModal.host_is_paired}
+          locationNote={joinCarriesLocation(activeModal)
+            ? locationConsentText(hostLabel(activeModal)) : null}
+          locationBlocked={joinCarriesLocation(activeModal) && householdHome.value === null
+            ? t('local_area.consent.no_home') : null}
           onSubmit={onSubmitJoinRequest}
         />
       )}

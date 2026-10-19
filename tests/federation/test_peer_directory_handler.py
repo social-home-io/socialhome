@@ -124,9 +124,9 @@ async def test_malformed_payload_ignored(repo):
 
 
 async def test_a_local_community_round_trips_revalidated(repo):
-    """v_59 — the radius and the host's verdict for us are stored, the
-    radius re-validated; a malformed entry is kept as no community — never
-    guessed."""
+    """v_59 — the radius is stored, re-validated; a verdict a sender still
+    puts in the entry is ignored (there is no column for it); a malformed
+    entry is kept as no community — never guessed."""
     handler = PeerDirectoryHandler(repo)
     await handler._on_snapshot(
         _event(
@@ -137,24 +137,10 @@ async def test_a_local_community_round_trips_revalidated(repo):
                     "name": "Quartier",
                     "local_community": True,
                     "radius_km": 2,
-                    "in_area": True,
                 },
                 {
-                    "space_id": "out",
-                    "name": "Village",
-                    "local_community": True,
-                    "radius_km": 5.0,
-                    "in_area": False,
-                },
-                {
-                    "space_id": "unknown",
-                    "name": "Street",
-                    "local_community": True,
-                    "radius_km": 1.0,
-                    "in_area": None,
-                },
-                {
-                    "space_id": "edge",
+                    # An unreleased draft's verdict fields — dropped.
+                    "space_id": "draft",
                     "name": "Rim",
                     "local_community": True,
                     "radius_km": 1.0,
@@ -162,31 +148,18 @@ async def test_a_local_community_round_trips_revalidated(repo):
                     "area_edge": True,
                 },
                 {
-                    # Ambiguous: a yes AND "unsure" — the yes is kept.
-                    "space_id": "both",
-                    "name": "Both",
-                    "local_community": True,
-                    "radius_km": 1.0,
-                    "in_area": True,
-                    "area_edge": True,
-                },
-                {
                     "space_id": "huge",
                     "name": "Region",
                     "local_community": True,
                     "radius_km": 500,
-                    "in_area": True,
                 },
                 {"space_id": "plain", "name": "Chess"},
             ],
         )
     )
     rows = {r.space_id: r for r in await repo.list_for_instance("peerA")}
-    assert rows["in"].local_community == PeerLocalCommunity(2.0, True)
-    assert rows["out"].local_community == PeerLocalCommunity(5.0, False)
-    assert rows["unknown"].local_community == PeerLocalCommunity(1.0, None)
-    assert rows["edge"].local_community == PeerLocalCommunity(1.0, None, area_edge=True)
-    assert rows["both"].local_community == PeerLocalCommunity(1.0, True)
+    assert rows["in"].local_community == PeerLocalCommunity(2.0)
+    assert rows["draft"].local_community == PeerLocalCommunity(1.0)
     assert rows["huge"].local_community is None
     assert rows["plain"].local_community is None
 

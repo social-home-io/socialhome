@@ -11,7 +11,7 @@
  */
 import { t } from '@/i18n/i18n'
 import type { DirectoryEntry, HouseholdSpaceRow } from '@/types'
-import { areaVerdict, peerAreaVerdict, type AreaVerdict, type Home } from '@/utils/localArea'
+import { areaVerdict, type AreaVerdict, type Home } from '@/utils/localArea'
 
 export type DiscoverSource = 'household' | 'paired' | 'global'
 
@@ -122,20 +122,15 @@ function hostedHere(entry: DirectoryEntry): boolean {
 
 /**
  * A local community's badge for ``entry`` seen from this household —
- * ``null`` when the space is not one. A space this household hosts is
- * checked here against our own ``home`` (we know its centre); a paired
- * household's carries only the host's verdict for our shared home
- * (``local_community.in_area``) — the centre never leaves the host. An
- * older backend's row says nothing about sharing: assume shared, the host
- * decides.
+ * ``null`` when the space is not one, or when another household hosts it:
+ * a space this household hosts is checked here against our own ``home``
+ * with the server's rule (we know its centre); a paired household's shows
+ * no verdict — its host decides on the ~1 km location a join carries.
  */
 export function entryAreaVerdict(
   entry: DirectoryEntry, home: Home | null | undefined,
 ): AreaVerdict | null {
   if (entry.local_area && hostedHere(entry)) return areaVerdict(entry.local_area, home)
-  if (entry.local_community) {
-    return peerAreaVerdict(entry.local_community, home, entry.home_shared_with_host !== false)
-  }
   return null
 }
 
@@ -145,28 +140,10 @@ export function entryRadiusKm(entry: DirectoryEntry): number | null {
   return entry.local_community?.radius_km ?? null
 }
 
-/** Where a row goes in a "near you first" list: communities your home is
- *  in, then ordinary spaces, then communities the host can't check you
- *  for, then the ones you're outside of. */
-function nearRank(v: AreaVerdict | null): number {
-  switch (v) {
-    case 'inside': return 0
-    case 'edge': return 1
-    case null: return 1
-    case 'outside': return 3
-    default: return 2
-  }
-}
-
-/** ``entries`` with in-area communities first and outside ones last;
- *  otherwise the order is kept (the server sorts by members). */
-export function sortNearFirst(
-  entries: DirectoryEntry[], home: Home | null | undefined,
-): DirectoryEntry[] {
-  return entries
-    .map((e, i) => ({ e, i, r: nearRank(entryAreaVerdict(e, home)) }))
-    .sort((a, b) => a.r - b.r || a.i - b.i)
-    .map((x) => x.e)
+/** Does a join to ``entry`` carry this household's approximate location —
+ *  a local community another household hosts? (The person is asked first.) */
+export function joinCarriesLocation(entry: DirectoryEntry): boolean {
+  return !hostedHere(entry) && entry.local_community != null
 }
 
 /** Is the entry's host reachable for a join (this household, or paired)? */

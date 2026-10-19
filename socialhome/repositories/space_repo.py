@@ -409,8 +409,17 @@ class AbstractSpaceRepo(Protocol):
         remote_applicant_pk: str | None = None,
         request_id: str | None = None,
         requested_role: str | None = None,
+        area_verdict: str | None = None,
     ) -> str: ...
     async def list_pending_join_requests(self, space_id: str) -> list[dict]: ...
+    async def has_approved_join_request(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        remote_applicant_instance_id: str,
+        within_days: int,
+    ) -> bool: ...
     async def list_pending_join_request_space_ids_for_user(
         self,
         user_id: str,
@@ -2876,12 +2885,17 @@ class SqliteSpaceRepo:
         remote_applicant_pk: str | None = None,
         request_id: str | None = None,
         requested_role: str | None = None,
+        area_verdict: str | None = None,
     ) -> str:
         """Persist a pending join request. For cross-household (§D2)
         requests pass ``remote_applicant_instance_id`` and optionally
         ``remote_applicant_pk``. The ``request_id`` arg lets the
         federation-inbound handler reuse the wire id so
         :data:`SPACE_JOIN_REQUEST_APPROVED` round-trips match.
+
+        ``area_verdict`` (``inside`` / ``edge``) — a local community's
+        verdict on the location the join carried (migration 0111), so the
+        admins see "near the edge"; the location itself is never stored.
         """
         rid = request_id or uuid.uuid4().hex
         expires = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
@@ -2890,8 +2904,8 @@ class SqliteSpaceRepo:
             INSERT INTO space_join_requests(
                 id, space_id, user_id, message, expires_at,
                 remote_applicant_instance_id, remote_applicant_pk,
-                requested_role
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                requested_role, area_verdict
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO NOTHING
             """,
             (
@@ -2903,9 +2917,41 @@ class SqliteSpaceRepo:
                 remote_applicant_instance_id,
                 remote_applicant_pk,
                 requested_role,
+                area_verdict,
             ),
         )
         return rid
+
+    async def has_approved_join_request(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        remote_applicant_instance_id: str,
+        within_days: int,
+    ) -> bool:
+        """Did an admin approve ``user_id`` of ``remote_applicant_instance_id``
+        joining ``space_id`` in the last ``within_days`` days? (A local
+        community seats such a person on their redeem without another
+        check: the approval was the decision.)"""
+        row = await self._db.fetchone(
+            """
+            SELECT 1 FROM space_join_requests
+             WHERE space_id=? AND user_id=?
+               AND remote_applicant_instance_id=?
+               AND status='approved'
+               AND requested_role IS NULL
+               AND datetime(reviewed_at) >= datetime('now', ?)
+             LIMIT 1
+            """,
+            (
+                space_id,
+                user_id,
+                remote_applicant_instance_id,
+                f"-{int(within_days)} days",
+            ),
+        )
+        return row is not None
 
     async def list_pending_join_requests(
         self,

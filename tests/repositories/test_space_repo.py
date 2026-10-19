@@ -2312,3 +2312,51 @@ async def test_unread_posts_compare_below_the_second(env):
     )
     (row,) = await env.repo.list_member_listings("uid-alice")
     assert row.unread_posts == 1
+
+
+async def test_a_join_request_keeps_a_local_communitys_verdict(env):
+    """Migration 0111: inside / edge — never the location itself."""
+    await env.repo.save(_space("sp-lc"))
+    rid = await env.repo.save_join_request("sp-lc", "uid-alice", area_verdict="edge")
+    (row,) = await env.repo.list_pending_join_requests("sp-lc")
+    assert row["id"] == rid and row["area_verdict"] == "edge"
+
+
+async def test_an_applicant_keeps_a_request_for_a_space_it_does_not_hold(env):
+    """Migration 0111 dropped the ``space_id`` foreign key: an applicant's
+    own row names the HOST's space, which it holds no row for."""
+    rid = await env.repo.save_join_request(
+        "the-hosts-space", "uid-alice", remote_applicant_instance_id="host"
+    )
+    ids = await env.repo.list_pending_join_request_space_ids_for_user("uid-alice")
+    assert ids == ["the-hosts-space"]
+    assert rid
+
+
+async def test_has_approved_join_request(env):
+    await env.repo.save(_space("sp-ap"))
+    rid = await env.repo.save_join_request(
+        "sp-ap", "uid-bob", remote_applicant_instance_id="peer"
+    )
+    kw = {"remote_applicant_instance_id": "peer", "within_days": 7}
+    assert not await env.repo.has_approved_join_request("sp-ap", "uid-bob", **kw)
+    await env.repo.update_join_request_status(rid, "approved", reviewed_by="o")
+    assert await env.repo.has_approved_join_request("sp-ap", "uid-bob", **kw)
+    # Another household or another person: no.
+    assert not await env.repo.has_approved_join_request(
+        "sp-ap", "uid-bob", remote_applicant_instance_id="other", within_days=7
+    )
+    assert not await env.repo.has_approved_join_request("sp-ap", "uid-x", **kw)
+    # An approval older than the window: no.
+    await env.db.enqueue(
+        "UPDATE space_join_requests SET reviewed_at=datetime('now', '-8 days')"
+        " WHERE id=?",
+        (rid,),
+    )
+    assert not await env.repo.has_approved_join_request("sp-ap", "uid-bob", **kw)
+    # An approved admin elevation is not a join approval.
+    elev = await env.repo.save_join_request(
+        "sp-ap", "uid-bob", remote_applicant_instance_id="peer", requested_role="admin"
+    )
+    await env.repo.update_join_request_status(elev, "approved")
+    assert not await env.repo.has_approved_join_request("sp-ap", "uid-bob", **kw)

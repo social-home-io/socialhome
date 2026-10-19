@@ -1602,7 +1602,13 @@ async def test_join_forwards_issuer_instance_id_to_service(client, monkeypatch):
     captured: dict = {}
 
     async def _fake_redeem(
-        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+        self,
+        token,
+        *,
+        user_id,
+        issuer_instance_id=None,
+        bootstrap=None,
+        share_location=False,
     ):
         captured["token"] = token
         captured["user_id"] = user_id
@@ -1631,7 +1637,13 @@ async def test_join_remote_redeem_denied_maps_to_422(client, monkeypatch):
     from socialhome.services.space_service import SpaceService
 
     async def _fake_redeem(
-        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+        self,
+        token,
+        *,
+        user_id,
+        issuer_instance_id=None,
+        bootstrap=None,
+        share_location=False,
     ):
         raise SpacePermissionError(
             "invite token invalid, expired, or exhausted",
@@ -1654,7 +1666,13 @@ async def test_join_remote_redeem_timeout_maps_to_504(client, monkeypatch):
     from socialhome.services.space_service import SpaceService
 
     async def _fake_redeem(
-        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+        self,
+        token,
+        *,
+        user_id,
+        issuer_instance_id=None,
+        bootstrap=None,
+        share_location=False,
     ):
         raise TimeoutError("issuer did not respond")
 
@@ -1677,7 +1695,13 @@ async def test_join_local_ban_still_maps_to_403(client, monkeypatch):
     from socialhome.services.space_service import SpaceService
 
     async def _fake_redeem(
-        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+        self,
+        token,
+        *,
+        user_id,
+        issuer_instance_id=None,
+        bootstrap=None,
+        share_location=False,
     ):
         raise SpacePermissionError("banned from this space", banned=True)
 
@@ -2925,7 +2949,13 @@ async def test_join_builds_a_bootstrap_hint_from_an_invite_link(client, monkeypa
     captured: dict = {}
 
     async def _fake_redeem(
-        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+        self,
+        token,
+        *,
+        user_id,
+        issuer_instance_id=None,
+        bootstrap=None,
+        share_location=False,
     ):
         captured["bootstrap"] = bootstrap
         return {"space_id": "sp-remote", "role": "member"}
@@ -2969,7 +2999,13 @@ async def test_join_without_the_key_block_sends_no_hint(client, monkeypatch):
     captured: dict = {}
 
     async def _fake_redeem(
-        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+        self,
+        token,
+        *,
+        user_id,
+        issuer_instance_id=None,
+        bootstrap=None,
+        share_location=False,
     ):
         captured["bootstrap"] = bootstrap
         return {"space_id": "sp-remote", "role": "member"}
@@ -2997,7 +3033,13 @@ async def test_join_relay_unavailable_maps_to_422(client, monkeypatch):
     from socialhome.services.space_service import SpaceService
 
     async def _fake_redeem(
-        self, token, *, user_id, issuer_instance_id=None, bootstrap=None
+        self,
+        token,
+        *,
+        user_id,
+        issuer_instance_id=None,
+        bootstrap=None,
+        share_location=False,
     ):
         raise EnvelopeRelayUnavailable(
             "this GFS can't pass on invites yet",

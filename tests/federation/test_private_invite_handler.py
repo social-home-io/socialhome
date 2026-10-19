@@ -249,82 +249,115 @@ def _local_community(owner="host-self"):
     )
 
 
-class _HomeRepo:
-    def __init__(self, home):
-        self.home = home
-
-    async def get_instance(self, iid):
-        lat, lon = self.home if self.home is not None else (None, None)
-        return SimpleNamespace(home_lat=lat, home_lon=lon)
-
-    async def get_local_identity(self):
-        return None
+NEAR = {"lat": 47.39, "lon": 8.56}
+EDGE = {"lat": 47.38, "lon": 8.61}
+BERN = {"lat": 46.95, "lon": 7.45}
 
 
-def _accept_event():
-    return _event(
-        "SPACE_PRIVATE_INVITE_ACCEPT",
-        {"invite_token": "abc", "invitee_user_id": "u1"},
-    )
+def _accept_event(location=None, **extra):
+    payload = {"invite_token": "abc", "invitee_user_id": "u1", **extra}
+    if location is not None:
+        payload["join_location"] = location
+    return _event("SPACE_PRIVATE_INVITE_ACCEPT", payload)
 
 
-@pytest.mark.parametrize("home", [(46.9481, 7.4474), None])
-async def test_accept_into_a_local_community_rechecks_the_home(handler, home):
-    """The area (or the household's sharing) may have changed since the
-    invite went out: refused → declined, and the household is told it is
-    not in the space so its stub goes away."""
+def _community_host(handler, *, approved=False, pending=()):
     handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
     handler.space_repo.get.return_value = _local_community()
+    handler.space_repo.has_approved_join_request = AsyncMock(return_value=approved)
+    handler.space_repo.list_pending_join_requests = AsyncMock(
+        return_value=list(pending)
+    )
+    handler.space_repo.save_join_request = AsyncMock(return_value="rid-1")
     handler.h._own_instance_id = "host-self"
-    handler.h._federation_repo = _HomeRepo(home)
     handler.h._local_area_budget = memory_budget()
     fed = AsyncMock()
     handler.h._federation = fed
-    await handler.h._on_accept(_accept_event())
+    return fed
+
+
+@pytest.mark.parametrize("location", [BERN, None, {"lat": "x", "lon": 8.5}])
+async def test_accept_refused_outside_or_without_a_location(handler, location):
+    """Decided on the ~1 km point the accept carries: refused → declined,
+    and the household is told it is not in the space so its stub goes
+    away."""
+    fed = _community_host(handler)
+    await handler.h._on_accept(_accept_event(location))
     handler.remote_members.add.assert_not_awaited()
     handler.space_repo.update_invitation_status.assert_awaited_with(42, "declined")
     kw = fed.send_with_mesh_fallback.await_args.kwargs
     assert kw["to_instance_id"] == "peer-1"
     assert kw["payload"] == {"space_id": "sp-a", "user_id": "u1"}
+    handler.space_repo.save_join_request.assert_not_awaited()
 
 
-async def test_accept_into_a_local_community_from_inside_seats(handler):
-    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
-    handler.space_repo.get.return_value = _local_community()
-    handler.h._own_instance_id = "host-self"
-    handler.h._federation_repo = _HomeRepo((47.392, 8.56))
-    handler.h._local_area_budget = memory_budget()
-    await handler.h._on_accept(_accept_event())
+async def test_accept_from_inside_seats(handler):
+    _community_host(handler)
+    await handler.h._on_accept(_accept_event(NEAR))
     handler.remote_members.add.assert_awaited_once()
     handler.space_repo.update_invitation_status.assert_awaited_with(42, "accepted")
 
 
+async def test_accept_near_the_edge_becomes_a_join_request_the_household_keeps(
+    handler,
+):
+    """Never decided automatically: a request for the admins (verdict only,
+    never the point), and the REMOVED names it so the joiner's household
+    keeps its side and the admins' answer finds the person."""
+    fed = _community_host(handler)
+    await handler.h._on_accept(_accept_event(EDGE, invitee_public_key="pk"))
+    handler.remote_members.add.assert_not_awaited()
+    kw = handler.space_repo.save_join_request.await_args.kwargs
+    assert kw["area_verdict"] == "edge"
+    assert kw["remote_applicant_instance_id"] == "peer-1"
+    assert kw["remote_applicant_pk"] == "pk"
+    handler.space_repo.update_invitation_status.assert_awaited_with(42, "declined")
+    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+    assert payload == {"space_id": "sp-a", "user_id": "u1", "join_request_id": "rid-1"}
+
+
+async def test_an_accept_while_a_request_waits_answers_with_that_request(handler):
+    fed = _community_host(
+        handler,
+        pending=[
+            {
+                "id": "rid-0",
+                "user_id": "u1",
+                "remote_applicant_instance_id": "peer-1",
+            }
+        ],
+    )
+    await handler.h._on_accept(_accept_event(None))
+    handler.space_repo.save_join_request.assert_not_awaited()
+    assert (
+        fed.send_with_mesh_fallback.await_args.kwargs["payload"]["join_request_id"]
+        == "rid-0"
+    )
+
+
+async def test_an_approved_person_is_seated_without_a_check(handler):
+    _community_host(handler, approved=True)
+    await handler.h._on_accept(_accept_event(None))
+    handler.remote_members.add.assert_awaited_once()
+
+
 async def test_accepting_spends_the_persons_budget(handler):
-    """An accept is a check the invited person starts: past their daily
-    budget it is declined without a verdict, even from inside."""
-    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
-    handler.space_repo.get.return_value = _local_community()
-    handler.h._own_instance_id = "host-self"
-    handler.h._federation_repo = _HomeRepo((47.392, 8.56))
-    handler.h._federation = AsyncMock()
-    handler.h._local_area_budget = budget = memory_budget()
+    _community_host(handler)
+    budget = handler.h._local_area_budget
     for _ in range(MAX_LOCAL_AREA_CHECKS_PER_PERSON):
         assert await budget.spend_seat_check(
             "sp-a", household="peer-1", user_id="u1", remote=True
         )
-    await handler.h._on_accept(_accept_event())
+    await handler.h._on_accept(_accept_event(NEAR))
     handler.remote_members.add.assert_not_awaited()
     handler.space_repo.update_invitation_status.assert_awaited_with(42, "declined")
 
 
 async def test_an_unwired_budget_declines_the_accept(handler):
     """Fail closed: without a budget nobody is seated in a local community."""
-    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
-    handler.space_repo.get.return_value = _local_community()
-    handler.h._own_instance_id = "host-self"
-    handler.h._federation_repo = _HomeRepo((47.392, 8.56))
-    handler.h._federation = AsyncMock()
-    await handler.h._on_accept(_accept_event())
+    _community_host(handler)
+    handler.h._local_area_budget = None
+    await handler.h._on_accept(_accept_event(NEAR))
     handler.remote_members.add.assert_not_awaited()
     handler.space_repo.update_invitation_status.assert_awaited_with(42, "declined")
 
@@ -892,6 +925,48 @@ async def test_member_removed_clears_local_stub_when_last_member_leaves(handler)
         "u-self",
     )
     handler.space_repo.mark_dissolved.assert_awaited_once_with("sp-remote")
+
+
+@pytest.mark.parametrize(
+    "review_id,member,kept",
+    [
+        ("rid-1", True, True),
+        (None, True, False),
+        ("x" * 200, True, False),  # not an id the host mints
+        (42, True, False),
+        ("rid-1", False, False),  # not one of our people in that space
+    ],
+)
+async def test_member_removed_naming_a_join_request_keeps_our_side(
+    handler, review_id, member, kept
+):
+    """A local community's host turned our accept into a join request for
+    its admins: we keep our side of it (like an "Ask to join") so their
+    approval finds the person."""
+    handler.space_repo.get_member = AsyncMock(
+        return_value=SimpleNamespace() if member else None
+    )
+    handler.space_repo.delete_member = AsyncMock()
+    handler.space_repo.list_members = AsyncMock(return_value=[])
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(owner_instance_id="peer-1")
+    )
+    handler.space_repo.mark_dissolved = AsyncMock()
+    handler.space_repo.save_join_request = AsyncMock()
+    payload = {"space_id": "sp-remote", "user_id": "u-self"}
+    if review_id is not None:
+        payload["join_request_id"] = review_id
+    await handler.h._on_member_removed(_event("SPACE_REMOTE_MEMBER_REMOVED", payload))
+    if kept:
+        handler.space_repo.save_join_request.assert_awaited_once_with(
+            "sp-remote",
+            "u-self",
+            ttl_days=7,
+            remote_applicant_instance_id="peer-1",
+            request_id="rid-1",
+        )
+    else:
+        handler.space_repo.save_join_request.assert_not_awaited()
 
 
 async def test_member_removed_keeps_locally_owned_space(handler):

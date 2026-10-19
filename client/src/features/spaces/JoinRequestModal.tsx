@@ -18,10 +18,17 @@ export interface JoinRequestModalProps {
   hostIsPaired: boolean
   /** Called with the message body on submit. Caller does the POST. */
   onSubmit: (message: string) => Promise<void>
+  /** A local community another household hosts: the consent sentence —
+   *  sending the request is agreeing to it (the caller then sends
+   *  ``share_location``). */
+  locationNote?: string | null
+  /** …and our household has no home to send: why, and Send is off. */
+  locationBlocked?: string | null
 }
 
 export function JoinRequestModal({
   open, onClose, spaceName, hostDisplayName, hostIsPaired, onSubmit,
+  locationNote = null, locationBlocked = null,
 }: JoinRequestModalProps) {
   const [message, setMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -60,6 +67,16 @@ export function JoinRequestModal({
           onInput={(e) => setMessage((e.target as HTMLTextAreaElement).value)}
         />
       </label>
+      {locationBlocked ? (
+        <p class="sh-local-area-consent sh-local-area-consent--blocked" role="note"
+           data-testid="join-request-location-blocked">
+          <span aria-hidden="true">📍</span> {locationBlocked}
+        </p>
+      ) : locationNote && (
+        <p class="sh-local-area-consent" role="note" data-testid="join-request-location-note">
+          <span aria-hidden="true">📍</span> {locationNote}
+        </p>
+      )}
       {error && <p class="sh-error">{error}</p>}
       <div class="sh-modal-actions">
         <Button variant="secondary" onClick={onClose} disabled={submitting}>
@@ -67,6 +84,7 @@ export function JoinRequestModal({
         </Button>
         <Button
           variant="primary" onClick={submit} loading={submitting}
+          disabled={locationBlocked != null}
         >
           {t('space.join_request.send')}
         </Button>
