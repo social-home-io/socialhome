@@ -473,3 +473,21 @@ describe('SideNav in German', () => {
     expect(container.querySelector('aside')?.getAttribute('aria-label')).toBe('Seitenleiste')
   })
 })
+
+describe('SideNav — the open space', () => {
+  it('a space without an emoji shows its initial, never a globe', async () => {
+    setUser()
+    const book = { id: 'sp-book', name: 'Book club', emoji: null }
+    const { api } = await import('@/api')
+    vi.mocked(api.get).mockResolvedValue([book])
+    const { spaces } = await import('@/store/spaces')
+    spaces.value = [book as never]
+    const { container, findByText } = renderAt('/spaces/sp-book')
+    await findByText('Book club')
+    const row = container.querySelector('.sh-sidenav-subitem--active') as HTMLElement
+    expect(row.querySelector('.sh-sidenav-subitem__emoji')?.textContent).toBe('B')
+    expect(row.textContent).not.toContain('🌐')
+    spaces.value = []
+    vi.mocked(api.get).mockReset()
+  })
+})

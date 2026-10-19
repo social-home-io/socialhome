@@ -153,13 +153,24 @@ describe('links and badges', () => {
 
   it('needs-you is a filled count rolled onto More, read as "More, 3 need you"', () => {
     layout(2000)
-    const { getByRole, container } = renderNav({ needsYou: { review: 2, reports: 0, joinRequests: 1 } })
+    const { getByRole, container } = renderNav({ needsYou: { review: 2, reports: 0, joinRequests: 1, proposals: 0 } })
     const more = getByRole('button', { name: 'More, 3 need you' })
     expect(more.querySelector('.sh-space-badge--needs')?.textContent).toBe('3')
     fireEvent.click(more)
     const mod = within(container.querySelector('.sh-space-more__popover') as HTMLElement)
       .getByRole('link', { name: /^Moderation/ })
     expect(mod.textContent).toContain('2 to review · 1 join request')
+    expect(mod.querySelector('.sh-space-badge--needs')?.textContent).toBe('3')
+  })
+
+  it('a proposal awaiting my vote counts on More, not on Moderation', () => {
+    layout(2000)
+    const { getByRole, container } = renderNav({ needsYou: { review: 2, reports: 0, joinRequests: 1, proposals: 1 } })
+    const more = getByRole('button', { name: 'More, 4 need you' })
+    expect(more.querySelector('.sh-space-badge--needs')?.textContent).toBe('4')
+    fireEvent.click(more)
+    const mod = within(container.querySelector('.sh-space-more__popover') as HTMLElement)
+      .getByRole('link', { name: /^Moderation/ })
     expect(mod.querySelector('.sh-space-badge--needs')?.textContent).toBe('3')
   })
 

@@ -25,7 +25,7 @@ import {
   SpaceProposalDialog, canVoteOn, describeProposal,
 } from '@/components/SpaceProposalDialog'
 import { SpaceVersionDetails, type SpaceCompat } from '@/components/SpaceVersionNotice'
-import type { AttentionProposal, SpaceAttention } from '@/store/spaceAttention'
+import { needsYouTotal, type AttentionProposal, type SpaceAttention } from '@/store/spaceAttention'
 import { spaceSectionPath } from './spaceTabs'
 
 interface Props {
@@ -85,17 +85,15 @@ function versionMeta(compat: SpaceCompat): string {
   return t(isOne(behind) ? 'space.needs.version_meta_one' : 'space.needs.version_meta', { count: String(behind) })
 }
 
-/** How many things wait — the heading's filled count. */
-export function needsYouCount(a: SpaceAttention | null, compat: SpaceCompat | null): number {
-  if (!a) return compat ? 1 : 0
-  return a.proposals.length + a.review + a.reports + a.joinRequests + (compat ? 1 : 0)
-}
 
 export function SpaceNeedsYou({ spaceId, attention: a, compat, canVote, isOwner, onChanged }: Props) {
   const [proposalId, setProposalId] = useState<string | null>(null)
   const [versionOpen, setVersionOpen] = useState(false)
-  const count = needsYouCount(a, compat)
-  if (count === 0) return null
+  // The same number as More's badge (``needsYouTotal``). The card still
+  // lists a proposal I made or voted on (its tally) and households on an
+  // older version, which wait for nobody's decision.
+  const count = needsYouTotal(a, spaceId, { canVote, isOwner })
+  if (count === 0 && !compat && !(a?.proposals.length)) return null
   const moderation = addBase(spaceSectionPath(spaceId, 'moderation'))
   const open = a?.proposals.find((p) => p.id === proposalId) ?? null
 
@@ -114,8 +112,12 @@ export function SpaceNeedsYou({ spaceId, attention: a, compat, canVote, isOwner,
     <section class="sh-needs-you" aria-labelledby={`needs-you-${spaceId}`}>
       <h2 class="sh-needs-you__heading" id={`needs-you-${spaceId}`}>
         {t('space.needs.title')}
-        <span class="sh-space-badge sh-space-badge--needs" aria-hidden="true">{count > 99 ? '99+' : count}</span>
-        <span class="sr-only">{', '}{t('space.needs.count', { count: String(count) })}</span>
+        {count > 0 && (
+          <>
+            <span class="sh-space-badge sh-space-badge--needs" aria-hidden="true">{count > 99 ? '99+' : count}</span>
+            <span class="sr-only">{', '}{t('space.needs.count', { count: String(count) })}</span>
+          </>
+        )}
       </h2>
       <ul class="sh-needs-you__list">
         {a?.proposals.map((p) => (

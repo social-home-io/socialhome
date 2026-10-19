@@ -19,8 +19,10 @@ vi.mock('@/ws', () => ({
 
 import { renderHook } from '@testing-library/preact'
 import {
-  attentionTotal, setSpaceAttention, spaceAttention, useSpaceAttentionFrames,
+  awaitsMyVote, needsYouTotal, setSpaceAttention, spaceAttention, useSpaceAttentionFrames,
 } from './spaceAttention'
+
+const ADMIN = { canVote: true, isOwner: false }
 
 const fire = (type: string, spaceId: string) => {
   for (const h of handlers[type] ?? []) h({ type, data: { space_id: spaceId } })
@@ -32,7 +34,7 @@ beforeEach(() => {
 })
 
 describe('setSpaceAttention', () => {
-  it('maps the wire counts; More counts held items, reports and join requests', () => {
+  it('maps the wire counts; the total adds proposals awaiting my vote', () => {
     setSpaceAttention('s1', {
       pending_review: 2, reports: 1, join_requests: 3,
       proposals: [{ id: 'p1', action: 'dissolve', status: 'pending', approvals: 1, needed: 2,
@@ -40,15 +42,36 @@ describe('setSpaceAttention', () => {
     })
     expect(spaceAttention.value).toMatchObject({ spaceId: 's1', review: 2, reports: 1, joinRequests: 3 })
     expect(spaceAttention.value?.proposals).toHaveLength(1)
-    // Proposals are voted on from the Needs-you card, not Moderation.
-    expect(attentionTotal(spaceAttention.value, 's1')).toBe(6)
-    expect(attentionTotal(spaceAttention.value, 's2')).toBe(0)
+    // A proposal awaiting my vote counts: 2 + 1 + 3 + 1.
+    expect(needsYouTotal(spaceAttention.value, 's1', ADMIN)).toBe(7)
+    expect(needsYouTotal(spaceAttention.value, 's2', ADMIN)).toBe(0)
+    // A moderator can't vote: it doesn't wait for them.
+    expect(needsYouTotal(spaceAttention.value, 's1', { canVote: false, isOwner: false })).toBe(6)
   })
 
   it('null (a member, a follower) means nothing waits', () => {
     setSpaceAttention('s1', null)
     expect(spaceAttention.value).toEqual({ spaceId: 's1', review: 0, reports: 0, joinRequests: 0, proposals: [] })
-    expect(attentionTotal(spaceAttention.value, 's1')).toBe(0)
+    expect(needsYouTotal(spaceAttention.value, 's1', ADMIN)).toBe(0)
+  })
+
+  it('a proposal I made or already voted on does not count for me', () => {
+    setSpaceAttention('s1', {
+      pending_review: 2, reports: 1, join_requests: 0,
+      proposals: [{ id: 'p1', action: 'dissolve', status: 'pending', approvals: 1, needed: 2,
+                    total_admins: 2, proposed_by_user: 'u', required: 2, voted_by_me: true }],
+    })
+    expect(needsYouTotal(spaceAttention.value, 's1', ADMIN)).toBe(3)
+  })
+})
+
+describe('awaitsMyVote', () => {
+  it('settings authority, the owner for owner-only, and not yet voted', () => {
+    expect(awaitsMyVote({}, true, false)).toBe(true)
+    expect(awaitsMyVote({}, false, true)).toBe(false)
+    expect(awaitsMyVote({ voted_by_me: true }, true, true)).toBe(false)
+    expect(awaitsMyVote({ owner_only: true }, true, false)).toBe(false)
+    expect(awaitsMyVote({ owner_only: true }, true, true)).toBe(true)
   })
 })
 

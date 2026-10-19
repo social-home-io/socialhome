@@ -26,6 +26,7 @@ import { Button } from '@/components/Button'
 import { categoryLabel, SPACE_CATEGORIES } from '@/components/spaceModeOptions'
 import { isOne, t } from '@/i18n/i18n'
 import type { DirectoryEntry } from '@/types'
+import { tierIcon } from './spaceGlyph'
 
 export type SpaceCardAction =
   | { kind: 'join' }
@@ -56,13 +57,13 @@ export interface SpaceCardProps {
 function scopeChip(scope: DirectoryEntry['scope']) {
   switch (scope) {
     case 'private':
-      return { cls: 'sh-scope-chip sh-scope-chip--private', icon: '🔐', label: t('space.visibility.private') }
+      return { cls: 'sh-scope-chip sh-scope-chip--private', icon: tierIcon('private'), label: t('space.visibility.private') }
     case 'household':
-      return { cls: 'sh-scope-chip sh-scope-chip--household', icon: '🏠', label: t('space.visibility.household') }
+      return { cls: 'sh-scope-chip sh-scope-chip--household', icon: tierIcon('household'), label: t('space.visibility.household') }
     case 'public':
-      return { cls: 'sh-scope-chip sh-scope-chip--public', icon: '🤝', label: t('space.visibility.public') }
+      return { cls: 'sh-scope-chip sh-scope-chip--public', icon: tierIcon('public'), label: t('space.visibility.public') }
     case 'global':
-      return { cls: 'sh-scope-chip sh-scope-chip--global', icon: '🌐', label: t('space.visibility.global') }
+      return { cls: 'sh-scope-chip sh-scope-chip--global', icon: tierIcon('global'), label: t('space.visibility.global') }
   }
 }
 
