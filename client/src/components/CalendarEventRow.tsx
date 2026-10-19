@@ -64,8 +64,10 @@ export interface RowDecor {
   badges?: ComponentChildren
 }
 
-/** Rail colour: timed, all-day, or several days. */
-function railKind(entry: SpanEntry): 'timed' | 'allday' | 'multi' {
+/** Rail colour: timed, all-day, or several days. An all-day or multi-day
+ *  event is the day's standing context (the wall dashboard never marks it
+ *  "now"); ``tests/fixtures/calendar_span_cases.json`` pins the rule. */
+export function railKind(entry: SpanEntry): 'timed' | 'allday' | 'multi' {
   if (entry.dayCount > 1) return 'multi'
   return entry.event.all_day ? 'allday' : 'timed'
 }

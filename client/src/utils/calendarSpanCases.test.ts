@@ -11,7 +11,8 @@ import { join } from 'node:path'
 import { t } from '@/i18n/i18n'
 import type { CalendarEvent } from '@/types'
 import { eventDaySpan } from './calendar'
-import { spanDays } from './calendarViews'
+import { spanDays, spanEntries } from './calendarViews'
+import { railKind } from '@/components/CalendarEventRow'
 
 interface SpanCase {
   name: string
@@ -23,6 +24,7 @@ interface SpanCase {
   last: string
   day_count: number
   label_en: string | null
+  standing: boolean
 }
 
 // jsdom gives import.meta.url an http: scheme; vitest still injects __dirname.
@@ -47,6 +49,8 @@ describe('calendar span cases shared with the wall dashboard', () => {
         ? `${spanDays(span.startKey, span.endKey)} · ${t('calendar.span_days', { count: String(span.dayCount) })}`
         : null
       expect(label).toBe(c.label_en)
+      // Standing context (all-day / several days) gets its own rail.
+      expect(railKind(spanEntries([event])[0]) !== 'timed').toBe(c.standing)
     })
   }
 })

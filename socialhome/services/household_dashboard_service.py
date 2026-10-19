@@ -254,17 +254,18 @@ def _located_at(raw: str | None, ctx: _Context) -> datetime | None:
 
 
 def _agenda_key(item: DashboardAgendaItem) -> tuple[int, datetime, datetime]:
-    all_day = isinstance(item, DashboardEvent) and item.all_day
-    return (0 if all_day else 1, item.start, item.end)
+    standing = isinstance(item, DashboardEvent) and item.standing
+    return (0 if standing else 1, item.start, item.end)
 
 
 def _timed(items: Iterable[DashboardAgendaItem]) -> list[DashboardAgendaItem]:
-    """Items with a real start time: timed events and lessons that take
-    place (no all-day events, breaks or cancelled lessons)."""
+    """Items that are a moment of the day: timed one-day events and
+    lessons that take place (no all-day or multi-day events — the day's
+    standing context — breaks or cancelled lessons)."""
     out: list[DashboardAgendaItem] = []
     for item in items:
         if isinstance(item, DashboardEvent):
-            if not item.all_day:
+            if not item.standing:
                 out.append(item)
         elif item.takes_place:
             out.append(item)

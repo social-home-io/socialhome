@@ -321,4 +321,4 @@ def tomorrow_list(page: PersonSnapshot) -> list[DashboardAgendaItem]:
 
 
 def _tomorrow_order(item: DashboardAgendaItem) -> tuple[int, datetime]:
-    return (0 if isinstance(item, DashboardEvent) and item.all_day else 1, item.start)
+    return (0 if isinstance(item, DashboardEvent) and item.standing else 1, item.start)

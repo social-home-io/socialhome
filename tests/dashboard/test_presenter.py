@@ -279,11 +279,22 @@ def test_fmt_when_spells_a_multi_day_event_as_its_days():
     assert f.when(MATHS) == f.span(MATHS)
 
 
-def test_fmt_until_day_names_another_day():
-    f = _fmt()
-    assert f.until_day(at(17)) == "until 17:00"
-    assert f.until_day(at(10) + timedelta(days=2)) == "until Wed 14 10:00"
-    assert f.until(at(10) + timedelta(days=2)) == "until 10:00"  # panel JSON
+def test_a_multi_day_event_is_standing_context_never_now_or_past():
+    """An all-day or multi-day event is the day's standing context: never
+    "now" (a trip with clock times runs now too — it gets no NOW tag, the
+    same as a ski week) and never "past"."""
+    f = _fmt()  # 14:32
+    trip = event(
+        "t",
+        "Trip",
+        at(9) - timedelta(days=1),
+        at(10) + timedelta(days=2),
+        "u-anna",
+        days=DaySpan(TODAY - timedelta(days=1), TODAY + timedelta(days=2)),
+    )
+    assert trip.standing and BIRTHDAY.standing and not WORK.standing
+    assert not f.is_now(trip) and not f.is_past(trip)
+    assert f.is_now(WORK)
 
 
 def test_fmt_localised():
@@ -358,6 +369,25 @@ def test_timeline_lanes():
     assert school.title == "School"
     assert school.label == "08:20–15:50 School"
     assert school.past is False
+
+
+def test_timeline_puts_a_multi_day_event_in_the_chip_row():
+    """A trip with clock times that runs over several days is standing
+    context like an all-day event: a chip, not a block from midnight."""
+    trip = event(
+        "t",
+        "Camp",
+        at(18) - timedelta(days=1),
+        at(10) + timedelta(days=1),
+        "u-anna",
+        days=DaySpan(TODAY - timedelta(days=1), TODAY + timedelta(days=1)),
+    )
+    snap = home(events_today=(trip, event("w", "Work", at(9), at(17), "u-anna")))
+    tl = build_timeline(snap, _fmt(snap))
+    assert tl is not None
+    anna = next(lane for lane in tl.lanes if lane.person.user_id == "u-anna")
+    assert anna.all_day == ("Camp",)
+    assert [b.title for b in anna.blocks] == ["Work"]
 
 
 def test_timeline_overlaps_stack_into_rows():

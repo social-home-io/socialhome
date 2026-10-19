@@ -314,19 +314,6 @@ class Fmt:
         return relative_in(self.now, then, self.t)
 
     def until(self, end: datetime) -> str:
-        """ "until 17:00" (the panel JSON's ``until``, kept as it was)."""
-        return until(end, self.t)
-
-    def until_day(self, end: datetime) -> str:
-        """ "until 17:00" — "until Sat 31 10:00" when it ends on another day
-        (a running trip), as the SPA's event meta line says it."""
-        if end.date() != self.today:
-            day = self.t(
-                "dashboard.span.day",
-                weekday=self.t(f"dashboard.date.weekday_short.{end.weekday()}"),
-                day=end.day,
-            )
-            return self.t("dashboard.rel.until", time=f"{day} {hhmm(end)}")
         return until(end, self.t)
 
     def late(self, days: int) -> str:
@@ -366,15 +353,19 @@ class Fmt:
         return item.color_hex
 
     def is_past(self, item: DashboardAgendaItem) -> bool:
-        """Over already (all-day events never are, today)."""
-        if isinstance(item, DashboardEvent) and item.all_day:
+        """Over already (an all-day or multi-day event never is: it is
+        the day's standing context)."""
+        if isinstance(item, DashboardEvent) and item.standing:
             return False
         if item.end > item.start:
             return item.end <= self.now
         return item.start < self.now  # a point in time
 
     def is_now(self, item: DashboardAgendaItem) -> bool:
-        if isinstance(item, DashboardEvent) and item.all_day:
+        """Running right now — a moment of the day. An all-day or
+        multi-day event (a ski week, a trip) is standing context: never
+        "now", whether it has clock times or not."""
+        if isinstance(item, DashboardEvent) and item.standing:
             return False
         return item.start <= self.now < item.end
 
@@ -472,7 +463,7 @@ def day_list(snapshot: HomeSnapshot) -> list[DashboardEvent | SchoolSpan]:
         )
     rows.sort(
         key=lambda r: (
-            0 if isinstance(r, DashboardEvent) and r.all_day else 1,
+            0 if isinstance(r, DashboardEvent) and r.standing else 1,
             r.start,
             r.end,
         )
@@ -599,7 +590,7 @@ def build_timeline(snapshot: HomeSnapshot, fmt: Fmt) -> Timeline | None:
             for uid in ev.person_ids:
                 if uid not in spans:
                     continue
-                if ev.all_day:
+                if ev.standing:  # all-day or several days: the chip row
                     all_day[uid].append(ev.title)
                     continue
                 s = _minute_of_day(ev.start, today)
@@ -730,7 +721,7 @@ def night_item(
     timed = [
         i
         for i in snapshot.tomorrow_items
-        if not (isinstance(i, DashboardEvent) and i.all_day)
+        if not (isinstance(i, DashboardEvent) and i.standing)
     ]
     first = timed[0] if timed else snapshot.school_tomorrow_first
     return ("tomorrow", first) if first else None

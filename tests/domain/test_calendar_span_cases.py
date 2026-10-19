@@ -12,6 +12,7 @@ import pytest
 
 from socialhome.dashboard.clock import span_label
 from socialhome.domain.calendar import event_day_span
+from socialhome.domain.household_dashboard import DashboardEvent
 from socialhome.i18n import Catalog
 
 ROOT = Path(__file__).parents[2]
@@ -38,3 +39,14 @@ def test_same_days_and_label_as_the_spa(case: dict) -> None:
     assert span.last == date.fromisoformat(case["last"])
     assert span.day_count == case["day_count"]
     assert span_label(span, _t) == case["label_en"]
+    event = DashboardEvent(
+        id="e",
+        title=case["name"],
+        start=datetime.fromisoformat(case["start"]),
+        end=datetime.fromisoformat(case["end"]),
+        all_day=case["all_day"],
+        person_ids=(),
+        color=None,
+        days=span,
+    )
+    assert event.standing is case["standing"]

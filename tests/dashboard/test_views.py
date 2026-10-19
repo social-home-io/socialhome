@@ -1855,15 +1855,14 @@ async def test_person_row_spells_a_multi_day_event_as_its_days(client, auth, sna
         days=DaySpan(TOMORROW - timedelta(days=1), TOMORROW + timedelta(days=1)),
     )
     snapshots.pages["u-anna"] = person(
-        now=at(20), now_item=trip, today_items=(trip, WORK), tomorrow_items=(trip,)
+        now=at(20), now_item=None, today_items=(trip, WORK), tomorrow_items=(trip,)
     )
     html = await (await _get(client, auth, "/p/u-anna")).text()
     times = re.findall(r'<span class="dash-row-time">([^<]*)</span>', html)
     assert times.count("Mon 12 – Wed 14 · 3 days") == 2  # today + tomorrow
     assert "18:00–10:00" not in times
-    # Running now — but "now" only in Today, never in the Tomorrow list.
-    assert html.count("dash-tag-now") == 1
-    assert "until Wed 14 10:00" in html
+    # Running now, but standing context (like an all-day event): no NOW tag.
+    assert html.count("dash-tag-now") == 0
 
 
 async def test_home_board(client, auth, snapshots):

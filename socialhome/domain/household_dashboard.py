@@ -937,6 +937,15 @@ class DashboardEvent:
     def multi_day(self) -> bool:
         return self.days is not None and self.days.day_count > 1
 
+    @property
+    def standing(self) -> bool:
+        """The day's standing context, not a moment in it: an all-day or a
+        multi-day event (the SPA paints these with their own rail —
+        ``railKind`` ``allday`` / ``multi`` — and the shared fixture pins
+        the rule). Never "now" or "past", first in a day list, the
+        timeline's chip row, the picture view's first part."""
+        return self.all_day or self.multi_day
+
 
 @dataclass(slots=True, frozen=True)
 class DashboardLesson:

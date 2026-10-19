@@ -315,7 +315,7 @@ def _time(item: DashboardAgendaItem, f: Fmt) -> str:
     """When ``item`` starts, as the reader page spells it — "All day"
     for an all-day event (never a midnight "00:00"), the days of a
     multi-day one ("Mon 26 – Sat 31 · 6 days")."""
-    if isinstance(item, DashboardEvent) and (item.all_day or item.multi_day):
+    if isinstance(item, DashboardEvent) and item.standing:
         return f.when(item)
     return f.hhmm(item.start)
 
@@ -357,11 +357,9 @@ def _parts(page: PersonSnapshot, f: Fmt) -> tuple[PicturePart, ...]:
     current = day_part(page.now)
     buckets: dict[str, list[PictureTile]] = {p.key: [] for p in DAY_PARTS}
     for item in page.today_items:
-        # All day, or begun on an earlier day (a trip): the day's
-        # standing context, first — never the part of the day it began in.
-        standing = isinstance(item, DashboardEvent) and (
-            item.all_day or item.start.date() < page.today
-        )
+        # All day or several days (a trip): the day's standing context,
+        # first — never the part of the day it began in.
+        standing = isinstance(item, DashboardEvent) and item.standing
         part = DAY_PARTS[0] if standing else day_part(item.start)
         buckets[part.key].append(_tile(item, f))
     out = []

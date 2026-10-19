@@ -52,6 +52,7 @@ from .factories import (
     MESSAGES,
     PASCAL,
     TOMORROW,
+    WORK,
     at,
     event,
     home,
@@ -297,12 +298,17 @@ def test_agenda_rows_add_the_days_of_a_multi_day_event():
     assert row["time"] == "18:00–10:00"
     plain = _person(person())["reader"]["day"]["tomorrow"]["rows"][0]
     assert plain["days"] is None and plain["day_count"] == 1
-    # Running now and going on tomorrow: "now" in today's rows only.
+    # Running now, but standing context: "now" nowhere, past nowhere.
     running = _person(
         person(now=at(20), today_items=(trip,), tomorrow_items=(trip,), next_item=None)
     )["reader"]["day"]
-    assert running["rows"][0]["now"] is True
+    assert running["rows"][0]["now"] is False
+    assert running["rows"][0]["past"] is False
     assert running["tomorrow"]["rows"][0]["now"] is False
+    # A one-day event running now still is "now" today — never tomorrow.
+    work_now = _person(person(tomorrow_items=(WORK,)))["reader"]["day"]
+    assert any(r["now"] for r in work_now["rows"])
+    assert work_now["tomorrow"]["rows"][0]["now"] is False
 
 
 def test_reader_due_label():
