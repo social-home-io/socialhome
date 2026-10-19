@@ -112,7 +112,7 @@ export function matchesTerm(
     || (description ?? '').toLocaleLowerCase().includes(q)
 }
 
-export type DiscoverAction = 'join' | 'request' | 'follow' | 'pending' | 'pair-first' | null
+export type DiscoverAction = 'join' | 'request' | 'follow' | 'pending' | null
 
 /** Is the entry's host reachable for a join (this household, or paired)? */
 function reachable(e: DirectoryEntry): boolean {
@@ -135,9 +135,10 @@ export function canFollow(e: DirectoryEntry): boolean {
 /**
  * The one row action — Join (open), Ask to join (approval), Follow (when
  * you can't join from here but may read along), "Requested" while a
- * request is out. A paired household's space whose host is no longer
- * confirmed asks for pairing first; a global space you can neither join
- * nor follow from here has no button (its row still opens the About page).
+ * request is out. Never "pair first": a household met through a GFS never
+ * talks to us directly, so a space whose host we aren't paired with offers
+ * Follow when it takes followers and nothing otherwise — members can still
+ * invite you with a link (its row opens the About page, which says so).
  */
 export function discoverAction(e: DirectoryEntry): DiscoverAction {
   if (e.request_pending) return 'pending'
@@ -146,7 +147,6 @@ export function discoverAction(e: DirectoryEntry): DiscoverAction {
     if (e.join_mode === 'request') return 'request'
   }
   if (canFollow(e)) return 'follow'
-  if (e.scope === 'public' && !e.host_is_paired) return 'pair-first'
   return null
 }
 

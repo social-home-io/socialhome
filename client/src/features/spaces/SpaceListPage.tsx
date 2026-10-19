@@ -244,7 +244,10 @@ export default function SpaceListPage() {
 
       {archived.length > 0 && (
         <details class="sh-spaces-card sh-spaces-archived">
-          <summary class="sh-spaces-archived__sum">
+          <summary
+            class="sh-spaces-archived__sum"
+            aria-label={t('spaces.list.archived_label', { n: String(archived.length) })}
+          >
             <span class="sh-spaces-archived__ic" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="4" width="18" height="5" rx="1" /><path d="M5 9v10h14V9M10 13h4" />

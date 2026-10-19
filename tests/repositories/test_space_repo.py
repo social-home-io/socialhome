@@ -2222,6 +2222,10 @@ async def test_list_member_listings_reads_role_members_and_activity(env):
         "2030-01-01 01:00:00",
     )
     assert (b.role, b.member_count) == ("subscriber", 1)
+    # The same count, one space at a time.
+    assert await env.repo.count_members("a") == 3
+    assert await env.repo.count_members("b") == 1
+    assert await env.repo.count_members("nope") == 0
     assert b.last_activity_at  # no post: the space's creation time
 
 

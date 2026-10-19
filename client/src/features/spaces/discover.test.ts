@@ -85,8 +85,9 @@ describe('discoverAction', () => {
     expect(discoverAction({ ...far, allow_subscribers: true })).toBe('follow')
     expect(discoverAction({ ...far, allow_subscribers: false })).toBeNull()
   })
-  it('a paired household no longer confirmed asks for pairing first', () => {
-    expect(discoverAction(entry({ host_is_paired: false }))).toBe('pair-first')
+  it('never suggests pairing: an unpaired host is Follow or nothing', () => {
+    expect(discoverAction(entry({ host_is_paired: false }))).toBeNull()
+    expect(discoverAction(entry({ scope: 'global', host_is_paired: false, join_mode: 'open', allow_subscribers: true }))).toBe('follow')
   })
 })
 

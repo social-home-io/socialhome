@@ -54,8 +54,10 @@ class _FakeSpaceRepo:
         assert space_type is SpaceType.PUBLIC
         return list(self._spaces)
 
-    async def list_members(self, space_id: str) -> list[str]:
-        return list(self._members.get(space_id, []))
+    async def count_members(self, space_id: str) -> int:
+        # The repo's member count (followers excluded) — the snapshot
+        # publishes it as is.
+        return len(self._members.get(space_id, []))
 
 
 class _PeerRow:

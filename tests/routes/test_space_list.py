@@ -138,3 +138,20 @@ async def test_rows_are_per_caller(seeded):  # noqa: F811
     client, hdr, sid = seeded
     assert (await _row(client, hdr["owner"], sid))["my_role"] == "owner"
     assert (await _row(client, hdr["follower"], sid))["my_role"] == "subscriber"
+
+
+async def test_one_member_count_on_every_surface(seeded):  # noqa: F811
+    """The list, the detail, the seatless landing page and the household
+    directory all say the same: four members — the follower is no member."""
+    client, hdr, sid = seeded
+    assert (await _row(client, hdr["member"], sid))["member_count"] == 4
+    r = await client.get(f"/api/spaces/{sid}", headers=hdr["follower"])
+    assert (await r.json())["member_count"] == 4
+    r = await client.get(f"/api/spaces/{sid}", headers=hdr["guest"])
+    assert r.status == 200
+    landing = await r.json()
+    assert "my_role" not in landing
+    assert landing["member_count"] == 4
+    r = await client.get("/api/household/spaces", headers=hdr["member"])
+    (listed,) = [x for x in await r.json() if x["space_id"] == sid]
+    assert listed["member_count"] == 4

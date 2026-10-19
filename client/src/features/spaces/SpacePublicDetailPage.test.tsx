@@ -116,12 +116,13 @@ describe('SpacePublicDetailPage onPrimary', () => {
         allow_subscribers: false,
       }),
     ])
-    const { getByText, getByRole } = await renderPage()
+    const { getByText, queryByRole } = await renderPage()
     await waitFor(() => getByText(/content is private/i))
     expect(getByText(/Only members can read this space/i)).toBeTruthy()
     expect(getByText(/A member has to invite you/i)).toBeTruthy()
-    // …and the only CTA is disabled, so nothing can be sent.
-    expect((getByRole('button') as HTMLButtonElement).disabled).toBe(true)
+    // …no action at all — a neutral line says how people get in.
+    expect(queryByRole('button')).toBeNull()
+    expect(getByText('Members can invite you with a link.')).toBeTruthy()
     expect(api.post).not.toHaveBeenCalled()
   })
 
@@ -196,41 +197,34 @@ describe('SpacePublicDetailPage onPrimary', () => {
   })
 })
 
-describe('SpacePublicDetailPage — unpaired host guidance follows the role', () => {
-  // Pairing is a household-admin action, so only an admin is told to go
-  // pair; a member is told to ask one.
-  const unpaired = () => entry({
+describe('SpacePublicDetailPage — a GFS-listed space whose household we never paired with', () => {
+  // Households met through a GFS never talk directly: never suggest
+  // pairing. Follow when the space takes followers, otherwise a neutral
+  // line and no action — for admins and members alike.
+  const far = (allow: boolean) => entry({
     host_instance_id:  'remote-9',
     host_display_name: 'Far Household',
     host_is_paired:    false,
     scope:             'global',
+    join_mode:         'request',
+    allow_subscribers: allow,
   })
 
-  afterEach(() => { currentUser.value = null })
-
-  function asAdmin(isAdmin: boolean) {
-    currentUser.value = {
-      user_id: 'u1', username: 'u', display_name: 'U', is_admin: isAdmin,
-      picture_url: null, bio: null, is_new_member: false,
-    } as unknown as typeof currentUser.value
-  }
-
-  it('an admin is pointed at the Connections page', async () => {
-    asAdmin(true)
-    cacheDirectoryEntries([unpaired()])
+  it('offers Follow when the space takes followers', async () => {
+    cacheDirectoryEntries([far(true)])
     const { container, getByText } = await renderPage()
-    await waitFor(() => getByText(/lives on another household/i))
-    expect(container.textContent).toContain('Connect with Far Household on the Connections page')
-    expect(container.textContent).not.toContain('Ask a household admin')
+    await waitFor(() => getByText('Follow'))
+    fireEvent.click(getByText('Follow'))
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/spaces/sp-1/subscribe', {}))
+    expect(container.textContent).not.toMatch(/Connect|Connections|pair/i)
   })
 
-  it('a member is told to ask a household admin', async () => {
-    asAdmin(false)
-    cacheDirectoryEntries([unpaired()])
-    const { container, getByText } = await renderPage()
-    await waitFor(() => getByText(/lives on another household/i))
-    expect(container.textContent).toContain('Ask a household admin to connect with Far Household')
-    expect(container.textContent).not.toContain('Connections page')
+  it('otherwise says members can invite you, with no action', async () => {
+    cacheDirectoryEntries([far(false)])
+    const { container, getByText, queryByRole } = await renderPage()
+    await waitFor(() => getByText('Members can invite you with a link.'))
+    expect(queryByRole('button')).toBeNull()
+    expect(container.textContent).not.toMatch(/Connect|Connections|pair/i)
   })
 })
 
@@ -285,23 +279,16 @@ describe('SpacePublicDetailPage cold link (no directory entry)', () => {
 })
 
 describe('SpacePublicDetailPage — a member opening their own space (cold link)', () => {
-  // ``GET /api/spaces/{id}`` answers a seated caller with the full space
-  // (no ``member_count``) and a caller without a seat with the landing
-  // fields only. The roster says which seat is the viewer's.
+  // ``GET /api/spaces/{id}`` answers a seated caller with the full space,
+  // ``my_role`` and ``member_count`` included — no roster read needed.
   function seated(spaceType: string, myRole: string, joinMode = 'invite_only') {
     api.get.mockImplementation(async (url: string) => {
       if (url === '/api/spaces/sp-1') {
         return {
           id: 'sp-1', name: 'Vizeli Family', description: 'Our family space', emoji: '🏡',
           space_type: spaceType, join_mode: joinMode, category: 'general',
-          features: { allow_subscribers: false },
+          features: { allow_subscribers: false }, my_role: myRole, member_count: 2,
         }
-      }
-      if (url === '/api/spaces/sp-1/members') {
-        return [
-          { user_id: 'u1', role: myRole },
-          { user_id: 'u2', role: 'member' },
-        ]
       }
       throw new Error(`unexpected ${url}`)
     })

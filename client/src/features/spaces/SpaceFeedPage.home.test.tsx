@@ -90,6 +90,15 @@ afterEach(async () => {
 })
 
 describe('the hero', () => {
+  it("shows the server's member count — the one the Spaces list shows", async () => {
+    // The roster preview shows four faces at most; the count is the
+    // server's (remote members included, followers never).
+    wire('member', { member_count: 12 })
+    const { tl, r } = await open()
+    const hero = await tl.waitFor(() => present<HTMLElement>(r.container, '.sh-space-hero'))
+    await tl.waitFor(() => expect(hero.querySelector('a.sh-space-hero-members')?.textContent).toContain('12 members'))
+  })
+
   it('opens the feed: name, facepile link with the member count (no followers), tier, quick links', async () => {
     wire('member')
     const { tl, r } = await open()

@@ -25,14 +25,25 @@ import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
-import { currentUser } from '@/store/auth'
 import { isOne, t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
-import { contentIsGated, GATED_CHIP, hostLabel, joinModeChip, sourceOf } from './discover'
+import {
+  contentIsGated, discoverAction, GATED_CHIP, hostLabel, joinModeChip, sourceOf, type DiscoverAction,
+} from './discover'
 import { addBase } from '@/baseUrl'
+
+type AboutAction = 'open' | Exclude<DiscoverAction, null>
+
+const ABOUT_LABEL: Record<AboutAction, () => string> = {
+  open: () => t('space.public.open'),
+  join: () => t('space.public.join'),
+  request: () => t('space.public.request_join'),
+  follow: () => t('spaces.discover.follow'),
+  pending: () => t('space.public.request_pending'),
+}
 
 /** Shown when the space's owner has NOT opted into read-only followers
  *  (``SpaceFeatures.allow_subscribers`` off): the space is listed so people
@@ -60,34 +71,15 @@ const loading = signal<boolean>(true)
 const error = signal<string | null>(null)
 
 /** ``/api/spaces/{id}`` returns the canonical Space wire shape — flatten
- *  it into the DirectoryEntry shape this page renders.
- *
- *  The answer says whether the caller holds a seat: a caller with no seat
- *  gets a discoverable space's landing fields only, ``member_count``
- *  included; a seated caller gets the full space and no count. A seated
- *  caller reads the roster (``/members``, seats only) for the count and for
- *  their own role — a ``subscriber`` seat is a follower, every other role
- *  a member. */
+ *  it into the DirectoryEntry shape this page renders. A seated caller's
+ *  answer carries ``my_role`` (a ``subscriber`` follows); a caller with no
+ *  seat gets a discoverable space's landing fields. Both carry the one
+ *  ``member_count`` (members, never followers). */
 async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
   try {
-    const space = await api.get(`/api/spaces/${spaceId}`) as Space & {
-      member_count?: number
-    }
-    const seated = space.member_count === undefined
-    let memberCount = space.member_count ?? 0
-    // Seated but the roster didn't load: still a seat, so assume a member —
-    // "Open space" is the right way in for a follower too.
-    let myRole: string | undefined
-    if (seated) {
-      try {
-        const members = await api.get(
-          `/api/spaces/${spaceId}/members`,
-        ) as Array<{ user_id: string, role?: string }>
-        memberCount = members.length
-        myRole = members.find(m => m.user_id === currentUser.value?.user_id)?.role
-      } catch { /* leave the count at 0 */ }
-    }
-    const following = seated && myRole === 'subscriber'
+    const space = await api.get(`/api/spaces/${spaceId}`) as Space
+    const seated = typeof space.my_role === 'string'
+    const following = seated && space.my_role === 'subscriber'
     return {
       space_id:           space.id,
       host_instance_id:   'local',
@@ -96,7 +88,7 @@ async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
       name:               space.name,
       description:        space.description,
       emoji:              space.emoji,
-      member_count:       memberCount,
+      member_count:       space.member_count ?? 0,
       scope:              space.space_type,
       join_mode:          space.join_mode,
       allow_subscribers:  !!space.features?.allow_subscribers,
@@ -153,47 +145,47 @@ export default function SpacePublicDetailPage() {
       .finally(() => { loading.value = false })
   }, [spaceId, directoryCache.value])
 
-  const onPrimary = async (entry: DirectoryEntry) => {
-    if (entry.already_member) {
+  const patch = (p: Partial<DirectoryEntry>) => {
+    if (detail.value) detail.value = { ...detail.value, ...p }
+  }
+
+  const onPrimary = async (entry: DirectoryEntry, action: AboutAction) => {
+    if (action === 'open') {
       loc.route(`/spaces/${entry.space_id}`)
       return
     }
-    const isLocalEntry =
-      entry.scope === 'household' || entry.host_instance_id === 'local'
-    // Remote (public peer or global GFS) — needs a paired host before
-    // either the open send or the request modal can reach it.
-    if (!isLocalEntry && !entry.host_is_paired) {
-      showToast(t('space.public.connect_first_toast', { host: hostLabel(entry) }), 'info')
+    // ``request`` (approval-required) mode — collect a message.
+    if (action === 'request') {
+      setActiveModal(entry)
       return
     }
-    // Open spaces join immediately with no message — match the browser's
-    // ``onAction`` open branch (no JoinRequestModal). The modal is only
-    // for ``request`` mode, where a message is appropriate.
-    if (entry.join_mode === 'open') {
-      try {
-        if (isLocalEntry) {
-          // Local open-to-join: the server auto-approves JoinMode.OPEN
-          // through the join-request endpoint.
-          await api.post(`/api/spaces/${entry.space_id}/join-requests`, {})
+    try {
+      if (action === 'follow') {
+        await api.post(`/api/spaces/${entry.space_id}/subscribe`, {})
+        showToast(t('spaces.browse.followed_toast', { name: entry.name }), 'success')
+        patch({ already_subscribed: true })
+      } else if (entry.scope === 'household' || entry.host_instance_id === 'local') {
+        // Open to join here: seated at once (``joined``) — or, when the
+        // space takes requests after all, the request is now pending.
+        const r = await api.post(`/api/spaces/${entry.space_id}/join-requests`, {}) as { joined?: boolean } | undefined
+        if (r?.joined === false) {
+          showToast(t('spaces.browse.request_sent_for', { name: entry.name }), 'success')
+          patch({ request_pending: true })
+        } else {
           showToast(t('spaces.browse.joined_toast', { name: entry.name }), 'success')
           loc.route(`/spaces/${entry.space_id}`)
-        } else {
-          await api.post(
-            `/api/public_spaces/${entry.space_id}/join-request`,
-            { host_instance_id: entry.host_instance_id },
-          )
-          showToast(t('spaces.browse.request_sent_to', { host: entry.host_display_name }), 'success')
-          if (detail.value) {
-            detail.value = { ...detail.value, request_pending: true }
-          }
         }
-      } catch (exc) {
-        showToast((exc as Error).message, 'error')
+      } else {
+        await api.post(
+          `/api/public_spaces/${entry.space_id}/join-request`,
+          { host_instance_id: entry.host_instance_id },
+        )
+        showToast(t('spaces.browse.request_sent_to', { host: hostLabel(entry) }), 'success')
+        patch({ request_pending: true })
       }
-      return
+    } catch (exc) {
+      showToast((exc as Error).message, 'error')
     }
-    // ``request`` (approval-required) mode — collect a message.
-    setActiveModal(entry)
   }
 
   const onSubmitJoinRequest = async (message: string) => {
@@ -242,21 +234,17 @@ export default function SpacePublicDetailPage() {
   // outside the space — a member is already in.
   const gated = !entry.already_member && contentIsGated(entry)
 
-  const primaryLabel =
-    entry.already_member ? t('space.public.open')
-      : entry.request_pending ? t('space.public.request_pending')
-      : entry.join_mode === 'invite_only'
-        ? t('space.public.invite_required')
-      : entry.scope !== 'household' && !entry.host_is_paired
-        ? t('space.public.connect_first', { host: hostLabel(entry) })
-      : entry.join_mode === 'open' ? t('space.public.join')
-      : t('space.public.request_join')
-
-  const primaryDisabled = !entry.already_member && (
-    entry.request_pending
-    || entry.join_mode === 'invite_only'
-    || (entry.scope !== 'household' && !entry.host_is_paired)
-  )
+  // The one way in from here — or none: an invite-only space, or one on a
+  // GFS whose household we never paired with (households met through a
+  // GFS never talk directly, so pairing is never suggested) and that takes
+  // no followers. Then a neutral line says how people do get in.
+  // A follower may still ask to become a member; Follow is never offered
+  // twice.
+  const way = discoverAction(entry)
+  const action: AboutAction | null = entry.already_member ? 'open'
+    : way === 'follow' && entry.already_subscribed ? null
+    : way
+  const primaryLabel = action === null ? null : ABOUT_LABEL[action]()
 
   return (
     <div class="sh-space-public">
@@ -304,11 +292,16 @@ export default function SpacePublicDetailPage() {
         )}
       </div>
 
-      <div class="sh-space-public__cta-row">
-        <Button onClick={() => void onPrimary(entry)} disabled={primaryDisabled}>
-          {primaryLabel}
-        </Button>
-      </div>
+      {action && primaryLabel && (
+        <div class="sh-space-public__cta-row">
+          <Button onClick={() => void onPrimary(entry, action)} disabled={action === 'pending'}>
+            {primaryLabel}
+          </Button>
+        </div>
+      )}
+      {!action && !entry.already_subscribed && (
+        <p class="sh-muted sh-space-public__invite-note">{t('spaces.discover.invite_link')}</p>
+      )}
 
       {entry.description && (
         <section class="sh-space-public__section">
@@ -322,18 +315,6 @@ export default function SpacePublicDetailPage() {
           <p>
             {gatedContentNote()} {howToGetIn(entry.join_mode)}
           </p>
-        </section>
-      )}
-
-      {!entry.already_member && entry.scope !== 'household' && !entry.host_is_paired && (
-        <section class="sh-space-public__section sh-muted">
-          {/* Pairing is a household-admin action — a member is pointed at
-           *  an admin rather than at settings they cannot use. */}
-          {currentUser.value?.is_admin ? (
-            <p>{t('space.public.remote_admin', { host: hostLabel(entry) })}</p>
-          ) : (
-            <p>{t('space.public.remote_member', { host: hostLabel(entry) })}</p>
-          )}
         </section>
       )}
 

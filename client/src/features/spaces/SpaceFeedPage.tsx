@@ -78,6 +78,8 @@ import { resolveAvatar } from '@/utils/avatar'
 interface SpaceDetail {
   id: string
   name: string
+  /** Members, never followers — the server's one count. */
+  member_count?: number
   /** §23.42 — gates the ``@here`` entry in the mention picker. */
   allow_here_mention?: boolean
   emoji: string | null
@@ -462,7 +464,10 @@ export default function SpaceFeedPage() {
   // A space of one has nobody to chat with: Chat appears when the second
   // member joins (an unknown count doesn't hide it, so the section never
   // falls back to the feed while the roster loads).
-  const soloSpace = memberCount.value === 1
+  // The server's member count (the one every surface shows); the roster's
+  // own count only while an older server sends none.
+  const membersShown = spaceDetail.value?.member_count ?? memberCount.value
+  const soloSpace = membersShown === 1
   const chatOn = !soloSpace && spaceChatOpenTo(features, viewerRole.value, spaceChatOf(spaceId))
   const follower = isFollower(viewerRole.value)
   const canModerateHere = roleCanModerate(viewerRole.value)
@@ -679,7 +684,9 @@ export default function SpaceFeedPage() {
         active={section}
         features={f}
         chatUnread={chatUnread}
-        members={memberSummary.value}
+        members={memberSummary.value && membersShown != null
+          ? { ...memberSummary.value, count: membersShown }
+          : memberSummary.value}
         needsYou={canModerateQueue && attention?.spaceId === spaceId
           ? {
               review: attention.review, reports: attention.reports, joinRequests: attention.joinRequests,
@@ -718,7 +725,7 @@ export default function SpaceFeedPage() {
           coverUrl={s.cover_url ?? null}
           iconUrl={s.icon_url ?? null}
           about={s.about_markdown ?? null}
-          memberCount={memberCount.value}
+          memberCount={membersShown}
           // A member's space picture, else their household one.
           members={memberPreview.value.map((m) => ({
             ...m, picture_url: resolveAvatar(spaceId, m.user_id, m.picture_url),

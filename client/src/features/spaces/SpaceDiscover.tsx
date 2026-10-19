@@ -94,7 +94,6 @@ function actionLabel(a: Exclude<DiscoverAction, null>): string {
     case 'request': return t('spaces.discover.ask')
     case 'follow': return t('spaces.discover.follow')
     case 'pending': return t('spaces.discover.requested')
-    case 'pair-first': return t('spaces.discover.connect')
   }
 }
 
@@ -155,11 +154,6 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
 
   const act = async (e: DirectoryEntry, a: DiscoverAction) => {
     if (a === 'request') { setAsking(e); return }
-    if (a === 'pair-first') {
-      if (isAdmin) loc.route('/connections')
-      else showToast(t('spaces.browse.ask_admin_connect', { host: hostLabel(e) }), 'info')
-      return
-    }
     if (a !== 'join' && a !== 'follow') return
     setBusy(e.space_id)
     try {
@@ -169,11 +163,17 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
         onChanged()
         await reload()
       } else if (isLocal(e)) {
-        // Open to join: the join-request endpoint seats you right away.
-        await api.post(`/api/spaces/${e.space_id}/join-requests`, {})
-        showToast(t('spaces.browse.joined_toast', { name: e.name }), 'success')
-        onChanged()
-        await reload()
+        // Open to join: the join-request endpoint seats you right away
+        // (``joined``); otherwise the request is pending — say so in place.
+        const r = await api.post(`/api/spaces/${e.space_id}/join-requests`, {}) as { joined?: boolean } | undefined
+        if (r?.joined === false) {
+          showToast(t('spaces.browse.request_sent_for', { name: e.name }), 'success')
+          markPending(e.space_id)
+        } else {
+          showToast(t('spaces.browse.joined_toast', { name: e.name }), 'success')
+          onChanged()
+          await reload()
+        }
       } else {
         await api.post(`/api/public_spaces/${e.space_id}/join-request`, { host_instance_id: e.host_instance_id })
         showToast(t('spaces.browse.request_sent_to', { host: hostLabel(e) }), 'success')
@@ -277,7 +277,10 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
         <ul class="sh-spaces-card sh-spaces-list" aria-label={t(CHIP_LABEL[source])}>
           {rows.map((e) => {
             const a = discoverAction(e)
-            const meta = entryMeta(e, source)
+            // No way in from here: say how people do get in.
+            const meta = a === null
+              ? `${entryMeta(e, source)} · ${t('spaces.discover.invite_link_short')}`
+              : entryMeta(e, source)
             return (
               <SpaceListRow
                 key={e.space_id}

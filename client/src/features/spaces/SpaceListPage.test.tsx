@@ -142,6 +142,13 @@ describe('SpaceListPage — sections', () => {
     expect(r.getByRole('region', { name: 'Yours' }).textContent).not.toContain('Kindergarten')
   })
 
+  it('the Archived summary has one clear name', async () => {
+    const r = await renderPage()
+    await r.findByText('Choir')
+    const sum = r.container.querySelector('summary.sh-spaces-archived__sum')!
+    expect(sum.getAttribute('aria-label')).toBe('Archived spaces, 1')
+  })
+
   it('a row is a link to the space with its members and picture', async () => {
     const r = await renderPage()
     const choir = (await r.findByText('Choir')).closest('a')!
@@ -329,5 +336,41 @@ describe('SpaceListPage — Discover', () => {
     expect(r.getByRole('button', { name: 'Follow: Global art' })).toBeTruthy()
     r.fireEvent.click(r.getByRole('button', { name: 'Follow: Global art' }))
     await r.waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/spaces/gArt/subscribe', {}))
+  })
+
+  it('asking to join shows "Requested" at once, no reload', async () => {
+    const r = await renderPage('/spaces?discover=paired')
+    await r.findByText('Müller family market')
+    r.fireEvent.click(r.getByRole('button', { name: 'Ask to join: Müller family market' }))
+    const dialog = await r.findByRole('dialog')
+    const send = [...dialog.querySelectorAll('button')].find((b) => /send/i.test(b.textContent ?? ''))!
+    r.fireEvent.click(send)
+    await r.findByRole('button', { name: 'Requested: Müller family market' })
+    expect(apiPost).toHaveBeenCalledWith('/api/public_spaces/pMarket/join-request', expect.objectContaining({ host_instance_id: 'iid-mueller' }))
+  })
+
+  it('a local Join that turns into a request shows "Requested" in place', async () => {
+    apiPost.mockResolvedValue({ request_id: 'r1', joined: false })
+    const r = await renderPage()
+    await r.findByText('Hottingen Community Choir')
+    r.fireEvent.click(r.getByRole('button', { name: 'Join: Hottingen Community Choir' }))
+    await r.findByRole('button', { name: 'Requested: Hottingen Community Choir' })
+  })
+
+  it('a global space you can neither join nor follow: no button, never "pair"', async () => {
+    wire({
+      gfs: [{ id: 'g1', status: 'active' }],
+      global: [{
+        space_id: 'gClosed', host_instance_id: 'iid-far', host_display_name: 'iid-far', host_is_paired: false,
+        name: 'Closed circle', description: null, emoji: null, member_count: 4, join_mode: 'request',
+        min_age: 0, allow_subscribers: false,
+      }],
+    })
+    const r = await renderPage('/spaces?discover=global')
+    const name = await r.findByText('Closed circle')
+    const row = name.closest('li')!
+    expect(row.querySelector('button')).toBeNull()
+    expect(row.textContent).toContain('members can invite you with a link')
+    expect(row.textContent).not.toMatch(/connect|pair/i)
   })
 })
