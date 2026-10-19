@@ -351,7 +351,16 @@ async def test_a_replayed_frame_is_refused(gfs):
     assert await _post(gfs, raw, sig) == (409, {"error": "replay"})
 
 
-@pytest.mark.parametrize("offset", [-(CLUSTER_TS_SKEW_S + 1), CLUSTER_TS_SKEW_S + 1])
+# Well past the window: ``int(time.time())`` truncates up to a second, and
+# the request takes its own time before the receiver reads its clock, so a
+# +1 margin landed on exactly 300 s (accepted) on a slow runner.
+_STALE_MARGIN_S = 30
+
+
+@pytest.mark.parametrize(
+    "offset",
+    [-(CLUSTER_TS_SKEW_S + _STALE_MARGIN_S), CLUSTER_TS_SKEW_S + _STALE_MARGIN_S],
+)
 async def test_a_stale_frame_is_refused(gfs, offset):
     sibling_seed = _own_seed(gfs)
     await _sender("node-b", sibling_seed).add_peer("node-a", _url(gfs), _own_key(gfs))
