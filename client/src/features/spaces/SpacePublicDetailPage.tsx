@@ -64,14 +64,16 @@ function gatedContentNote(): string {
 /** …paired with one sentence on how you actually get in. Independent of
  *  readability now: every join mode has its own way in, and any of them can
  *  sit alongside a private or a public content stream. */
-function howToGetIn(mode: DirectoryEntry['join_mode']): string {
+function howToGetIn(mode: DirectoryEntry['join_mode'], local: boolean): string {
+  // A local community lets in only households in the area (near the edge,
+  // an admin decides) — never "anyone".
   switch (mode) {
     case 'open':
-      return t('space.public.how_open')
+      return local ? t('space.public.how_open_local') : t('space.public.how_open')
     case 'invite_only':
-      return t('space.public.how_invite_only')
+      return local ? t('space.public.how_invite_only_local') : t('space.public.how_invite_only')
     case 'request':
-      return t('space.public.how_request')
+      return local ? t('space.public.how_request_local') : t('space.public.how_request')
   }
 }
 
@@ -270,7 +272,8 @@ export default function SpacePublicDetailPage() {
   // in; the 🔒 chip says whether there is anything to read before you do.
   // A household space has no join mode to speak of (everyone at home is a
   // member), so it shows no join-mode chip — like its browser card.
-  const jmode = entry.scope === 'household' ? null : joinModeChip(entry.join_mode)
+  const radius = entryRadiusKm(entry)
+  const jmode = entry.scope === 'household' ? null : joinModeChip(entry.join_mode, radius !== null)
   const joinModeLabel = jmode ? `${jmode.icon} ${jmode.label}` : null
   // How to get in, and that only members can read it, is for people
   // outside the space — a member is already in.
@@ -296,7 +299,6 @@ export default function SpacePublicDetailPage() {
   // A local community: its radius whoever hosts it — but the centre (and
   // so the map) only for a space this household hosts. A paired
   // household's centre never leaves it.
-  const radius = entryRadiusKm(entry)
   const ownArea = isLocal ? entry.local_area ?? null : null
   // A global space's place pin: "about 3 km away" from our home, worked
   // out here. Sorting / a hint only — joining never checks it.
@@ -427,7 +429,7 @@ export default function SpacePublicDetailPage() {
       {gated && (
         <section class="sh-space-public__section sh-muted">
           <p>
-            {gatedContentNote()} {howToGetIn(entry.join_mode)}
+            {gatedContentNote()} {howToGetIn(entry.join_mode, radius !== null)}
           </p>
         </section>
       )}

@@ -80,7 +80,7 @@ export function MembersSection({ space, isRemoteSpace, members, onUpdate }: Prop
           legend={t('space.join.legend')}
           name={`space-join-mode-${space.id}`}
           value={joinMode}
-          options={joinOptionsForVisibility(space.space_type)}
+          options={joinOptionsForVisibility(space.space_type, { local: space.local_area != null })}
           onChange={(v) => void save(
             setJoinMode, v as Space['join_mode'], joinMode, { join_mode: v },
           )}

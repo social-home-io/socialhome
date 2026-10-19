@@ -196,6 +196,9 @@ const servers = signal<GfsConnection[]>([])
  *  (``features.private_gfs``). ``null`` until the detail read lands. */
 const spaceType = signal<string | null>(null)
 const privateGfs = signal(false)
+/** The space is a local community: a link seats only households whose
+ *  home is in the area (near the edge, an admin decides). */
+const localCommunity = signal(false)
 /** Link type picked for a PRIVATE space; ``null`` everywhere else (public
  *  and global links are always connection-server links, and the POST then
  *  leaves ``via`` to the server). */
@@ -243,6 +246,7 @@ export function openSpaceInvite(
   memberNames.value = {}
   spaceType.value = null
   privateGfs.value = false
+  localCommunity.value = false
   via.value = null
   open.value = true
 }
@@ -253,9 +257,11 @@ export function openSpaceInvite(
 function applySpaceDetail(data: {
   space_type?: string
   features?: { private_gfs?: boolean } | null
+  local_area?: unknown
 }) {
   spaceType.value = data.space_type ?? null
   privateGfs.value = Boolean(data.features?.private_gfs)
+  localCommunity.value = data.local_area != null
   via.value = spaceType.value === 'private'
     ? (privateGfs.value ? 'gfs' : 'internal')
     : null
@@ -512,6 +518,11 @@ export function SpaceInviteDialog() {
             <p class="sh-muted" style={{ marginTop: 0 }}>
               {t('invite.intro')}
             </p>
+            {localCommunity.value && (
+              <p class="sh-muted" data-testid="invite-local-area">
+                {t('invite.local_area')}
+              </p>
+            )}
 
             <fieldset class="sh-invite-fieldset">
               <legend>{t('invite.role.legend')}</legend>

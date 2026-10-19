@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { setLocale } from '@/i18n/i18n'
 import {
   visibilityOptions, joinModeOptions, SPACE_CATEGORIES, categoryLabel, hasJoinModeChoice,
+  joinOptionsForVisibility,
 } from './spaceModeOptions'
 
 describe('spaceModeOptions', () => {
@@ -17,6 +18,21 @@ describe('spaceModeOptions', () => {
     expect(joinModeOptions().map(o => o.title)).toEqual([
       'Invite only', 'Request to join', 'Open',
     ])
+  })
+
+  it('a local community says who can join: households in the area, the edge to an admin', () => {
+    const local = joinModeOptions({ local: true })
+    expect(local.map(o => o.value)).toEqual(['invite_only', 'request', 'open'])
+    expect(local.map(o => o.subtitle)).toEqual([
+      'You send invites. An invited household has to live in the area.',
+      'Households in the area ask to join, and an admin says yes.',
+      'Households in the area join right away. Near the edge, an admin decides.',
+    ])
+    expect(local.map(o => o.subtitle).join(' ')).not.toMatch(/Anyone/)
+    // Not a local community: unchanged.
+    expect(joinModeOptions()[2].subtitle).toBe('Anyone can join right away.')
+    expect(joinOptionsForVisibility('public', { local: true })[2].subtitle)
+      .toBe('Households in the area join right away. Near the edge, an admin decides.')
   })
 
   it('has ten discovery categories starting with general', () => {

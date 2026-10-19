@@ -406,6 +406,36 @@ describe('SpacePublicDetailPage — local community', () => {
 
   const LC = { radius_km: 5 }
 
+  it('an OPEN local community never says "Anyone can join" — only households in the area, the edge reviewed', async () => {
+    home({ lat: 47.392, lon: 8.56 })
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_community: LC,
+      join_mode: 'open', allow_subscribers: false,
+    })])
+    const { getByText, container } = await renderPage()
+    await waitFor(() => getByText(/content is private/i))
+    expect(container.textContent).not.toMatch(/Anyone can join/i)
+    expect(getByText(/Households in the area can join this space and start posting\. Near the edge, an admin reviews the request first\./)).toBeTruthy()
+    expect(getByText(/Open to the area/)).toBeTruthy()
+    expect(container.textContent).not.toMatch(/Open to join/)
+    expect(getByText('Only households whose home is inside this area can join. Near the edge, an admin decides.')).toBeTruthy()
+  })
+
+  it('a REQUEST / INVITE-ONLY local community names the area in how you get in', async () => {
+    home({ lat: 47.392, lon: 8.56 })
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'iid-b', local_community: LC, join_mode: 'request', allow_subscribers: false,
+    })])
+    const first = await renderPage()
+    await waitFor(() => first.getByText(/Households in the area can ask to join/))
+    first.unmount()
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'iid-b', local_community: LC, join_mode: 'invite_only', allow_subscribers: false,
+    })])
+    const second = await renderPage()
+    await waitFor(() => second.getByText(/A member has to invite you, and your household's home has to be in the area\./))
+  })
+
   it('a space this household hosts: the exact area, a map and "In your area"', async () => {
     home({ lat: 47.392, lon: 8.56 })
     cacheDirectoryEntries([entry({ host_instance_id: 'local', local_area: AREA })])
