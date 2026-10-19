@@ -183,6 +183,9 @@ from ..domain.space import (
     InviteOnlyError,
     JoinMode,
     JoinOwner,
+    OwnerTransferFollowerError,
+    OwnerTransferNotLocalError,
+    OwnerTransferSelfError,
     PeersTooOldError,
     PrivateGfsLinkMembersError,
     PrivateGfsOffError,
@@ -4733,31 +4736,46 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         actor_username: str,
         to_user_id: str,
     ) -> None:
+        """Hand the space to another member of THIS household (§23.48).
+
+        Ownership is a user inside the owner household: the space
+        authority key, the owner statement and the signed GFS list belong
+        to ``owner_instance_id`` and do not move, so the new owner must be
+        a local member (a remote seat is refused, not silently 404'd).
+        The outgoing owner stays on as admin.
+        """
         space = await self._require_space(space_id)
-        await self._require_owner(space, actor_username)
+        outgoing = await self._require_owner(space, actor_username)
+        if space.owner_instance_id != self._own_instance_id:
+            # Fail closed: only the hosting household can move ownership
+            # (a stub's owner seat is never local, so this is unreachable
+            # through a well-formed roster).
+            raise SpacePermissionError("ownership moves on the hosting household")
+        if to_user_id == outgoing.user_id:
+            raise OwnerTransferSelfError()
         new_owner_member = await self._spaces.get_member(space_id, to_user_id)
         if new_owner_member is None:
+            if await self._live_remote_seat(space_id, to_user_id) is not None:
+                raise OwnerTransferNotLocalError()
             raise KeyError(f"user {to_user_id!r} is not a member")
+        if new_owner_member.role == SpaceRole.SUBSCRIBER:
+            raise OwnerTransferFollowerError()
+        new_owner_user = await self._users.get_by_user_id(to_user_id)
+        if new_owner_user is None:
+            # A seat without a local account can't sign in to own anything.
+            raise OwnerTransferNotLocalError()
         if space.space_type in PUBLIC_SPACE_TIERS and await self._is_protected(
             to_user_id
         ):
             # §CP.R: a protected account never owns a public / global space.
             raise SpacePermissionError(PROTECTED_OWNER_TRANSFER_DETAIL)
         # The outgoing owner becomes admin; the new owner becomes owner.
-        outgoing = await self._users.get(actor_username)
-        assert outgoing is not None
         await self._spaces.set_role(space_id, outgoing.user_id, SpaceRole.ADMIN)
         await self._spaces.set_role(space_id, to_user_id, SpaceRole.OWNER)
-        new_owner_user = await self._users.get_by_user_id(to_user_id)
-        updated = replace(
-            space,
-            owner_username=(
-                new_owner_user.username
-                if new_owner_user is not None
-                else space.owner_username
-            ),
-        )
-        await self._spaces.save(updated)
+        # ``save`` never rewrites the owner columns, so the owner name moves
+        # through the dedicated write — the config change below ships it to
+        # every member household.
+        await self._spaces.record_owner_change(space_id, new_owner_user.username)
         sequence = await self._spaces.increment_config_sequence(space_id)
         await self._bus.publish(
             SpaceConfigChanged(

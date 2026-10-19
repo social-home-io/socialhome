@@ -65,6 +65,7 @@ from ..domain.events import (
     RemoteSpaceInviteDeclined,
     ReportFiled,
     SpaceAdminSeedsRetiredAfterRestore,
+    SpaceConfigChanged,
     SpaceJoinApproved,
     SpaceJoinDenied,
     SpaceJoinRequested,
@@ -88,6 +89,7 @@ from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
     WRITER_ROLES,
+    SpaceConfigEventType,
     SpaceFeatureAccess,
     SpaceRole,
 )
@@ -425,6 +427,7 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(SpaceJoinRequested, self.on_space_join_requested)
         self._bus.subscribe(SpaceJoinApproved, self.on_space_join_approved)
         self._bus.subscribe(SpaceJoinDenied, self.on_space_join_denied)
+        self._bus.subscribe(SpaceConfigChanged, self.on_space_ownership_transferred)
         self._bus.subscribe(
             RemoteSpaceInviteAccepted,
             self.on_remote_invite_accepted,
@@ -1814,6 +1817,39 @@ class NotificationService(ProtectionGateMixin):
                     space_name=space.name,
                 ),
                 link_url=f"/spaces/{event.space_id}",
+            )
+        )
+
+    async def on_space_ownership_transferred(
+        self,
+        event: SpaceConfigChanged,
+    ) -> None:
+        """Tell the new owner the space is now theirs (§23.48).
+
+        Only an ``ownership_transferred`` change, and only for a LOCAL
+        recipient — on a member household the new owner lives on the
+        host, so there is nobody here to tell.
+        """
+        if event.event_type != SpaceConfigEventType.OWNERSHIP_TRANSFERRED.value:
+            return
+        new_owner = str(event.payload.get("new_owner_user_id") or "")
+        if not new_owner:
+            return
+        recipient = await self._users.get_by_user_id(new_owner)
+        space = await self._spaces.get(event.space_id)
+        if recipient is None or space is None:
+            return
+        await self._save_notif(
+            new_notification(
+                user_id=new_owner,
+                type="space_ownership_transferred",
+                title=self._t(
+                    "notification.space.ownership.transferred",
+                    locale=self._locale(recipient),
+                    fallback="You now own {space_name}",
+                    space_name=space.name,
+                ),
+                link_url=f"/spaces/{event.space_id}/settings",
             )
         )
 

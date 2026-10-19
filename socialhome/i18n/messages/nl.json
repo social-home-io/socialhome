@@ -6,6 +6,7 @@
   "notification.space.post.created": "Nieuw bericht in {space_name}",
   "notification.space.moderation.queued": "Er wacht iets op beoordeling in {space_name}",
   "notification.space.join.approved": "Je zit erin: {space_name}",
+  "notification.space.ownership.transferred": "Je bent nu eigenaar van {space_name}",
   "notification.space.join.denied": "Je deelname-aanvraag is afgewezen.",
   "notification.space.remote_invite.accepted": "Je uitnodiging is aanvaard.",
   "notification.space.remote_invite.declined": "Je uitnodiging is afgewezen.",

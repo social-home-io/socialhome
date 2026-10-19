@@ -6,6 +6,7 @@
   "notification.space.post.created": "Nouvelle publication dans {space_name}",
   "notification.space.moderation.queued": "Un contenu attend une vérification dans {space_name}",
   "notification.space.join.approved": "Vous êtes dans : {space_name}",
+  "notification.space.ownership.transferred": "Vous êtes maintenant propriétaire de {space_name}",
   "notification.space.join.denied": "Votre demande d'adhésion a été refusée.",
   "notification.space.remote_invite.accepted": "Votre invitation a été acceptée.",
   "notification.space.remote_invite.declined": "Votre invitation a été refusée.",

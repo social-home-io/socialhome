@@ -41,6 +41,7 @@ import {
   type AccessFeature,
   type BehindHousehold,
 } from '@/features/spaces/spaceAccess'
+import { SpaceOwnershipTransfer } from '@/features/spaces/SpaceOwnershipTransfer'
 
 // Post types an admin can enable/disable for the space feed (§23.49) —
 // the same set the space composer offers, in composer order, so each
@@ -1263,6 +1264,20 @@ export function SpaceSettings({
             {t('space.archive.intro')}
           </p>
           <Button variant="secondary" onClick={() => setArchived(true)}>{t('space.archive.archive')}</Button>
+        </>
+      )}
+
+      {/* The owner's own way to hand the space on — only on the hosting
+       *  household (a stub's owner lives elsewhere). */}
+      {isOwner && !isRemoteSpace && (
+        <>
+          <hr />
+          <h2 class="sh-settings-section-heading">{t('space.transfer.heading')}</h2>
+          <SpaceOwnershipTransfer
+            spaceId={space.id}
+            spaceName={space.name}
+            onTransferred={onUpdate}
+          />
         </>
       )}
 
