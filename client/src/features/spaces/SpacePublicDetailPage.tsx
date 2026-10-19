@@ -7,7 +7,7 @@
  * before the user commits to joining.
  *
  * Data sources (in priority order):
- *   1. ``directoryCache`` — populated by :class:`SpaceBrowserPage` on
+ *   1. ``directoryCache`` — populated by the Spaces page's Discover on
  *      load; covers every visible scope.
  *   2. ``GET /api/spaces/{id}`` — the landing fields for a caller with no
  *      seat in a discoverable space; the full space for a seated caller
@@ -31,7 +31,7 @@ import { useTitle } from '@/store/pageTitle'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
-import { contentIsGated, GATED_CHIP, hostLabel, joinModeChip } from './SpaceCard'
+import { contentIsGated, GATED_CHIP, hostLabel, joinModeChip, sourceOf } from './discover'
 import { addBase } from '@/baseUrl'
 
 /** Shown when the space's owner has NOT opted into read-only followers
@@ -217,9 +217,9 @@ export default function SpacePublicDetailPage() {
   if (error.value || !detail.value) {
     return (
       <div class="sh-space-public" role="alert">
-        <a class="sh-space-public__back" href={addBase('/spaces/browse')}
-           onClick={(ev) => { ev.preventDefault(); loc.route('/spaces/browse') }}>
-          ← {t('spaces.list.browse')}
+        <a class="sh-space-public__back" href={addBase('/spaces')}
+           onClick={(ev) => { ev.preventDefault(); loc.route('/spaces') }}>
+          ← {t('nav.spaces')}
         </a>
         <p class="sh-error">{error.value ?? t('space.public.not_found')}</p>
       </div>
@@ -228,6 +228,9 @@ export default function SpacePublicDetailPage() {
 
   const entry = detail.value
   const isLocal = entry.host_instance_id === 'local'
+  // Back to the list — to the Discover chip this space came from, unless
+  // the viewer is in it already.
+  const back = entry.already_member ? '/spaces' : `/spaces?discover=${sourceOf(entry)}`
   // Two independent statements, two chips — same as the browser card, so
   // both surfaces tell the same story. The join-mode chip says how you get
   // in; the 🔒 chip says whether there is anything to read before you do.
@@ -259,10 +262,10 @@ export default function SpacePublicDetailPage() {
     <div class="sh-space-public">
       <a
         class="sh-space-public__back"
-        href={addBase('/spaces/browse')}
-        onClick={(ev) => { ev.preventDefault(); loc.route('/spaces/browse') }}
+        href={addBase(back)}
+        onClick={(ev) => { ev.preventDefault(); loc.route(back) }}
       >
-        ← {t('spaces.list.browse')}
+        ← {t('nav.spaces')}
       </a>
       <div class={`sh-space-public__hero sh-space-public__hero--${entry.scope}`}>
         <span class="sh-space-public__emoji" aria-hidden="true">

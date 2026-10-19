@@ -79,7 +79,7 @@ function FromLine({ name }: { name: string }) {
   )
 }
 
-export function RemoteInviteInboxBanner() {
+export function RemoteInviteInboxBanner({ onAccepted }: { onAccepted?: () => void } = {}) {
   const [invites, setInvites] = useState<RemoteInvite[]>([])
   const [localInvites, setLocalInvites] = useState<LocalInvite[]>([])
   const [households, setHouseholds] = useState<Map<string, HouseholdRow>>(
@@ -159,6 +159,7 @@ export function RemoteInviteInboxBanner() {
         decision === 'accept' ? 'success' : 'info',
       )
       await load()
+      if (decision === 'accept') onAccepted?.()
     } catch (exc) {
       showToast((exc as Error).message, 'error')
     } finally {
@@ -183,6 +184,7 @@ export function RemoteInviteInboxBanner() {
         decision === 'accept' ? 'success' : 'info',
       )
       await load()
+      if (decision === 'accept') onAccepted?.()
     } catch (exc) {
       showToast((exc as Error).message, 'error')
     } finally {

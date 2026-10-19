@@ -1,5 +1,4 @@
 {
-  "page_title.browse": "Short top-bar title of the Browse spaces page. It shares the bar with the search box on phones, so keep it to one short word.",
   "__comment": "Translator context notes (spec §30.2). Keys mirror en.json; values are short hints shown to translators in the Weblate editor. This file is NOT rendered in the UI. When a key in en.json has no matching entry here, Weblate falls back to the English source as sole context.",
   "friends.seen": "Second line under a person who is offline. {when} is a relative time ('3h ago', 'yesterday').",
   "friends.n_more": "Button under a household with many people: shows the rest. {n} ≥ 2.",
@@ -311,9 +310,7 @@
   "modal.close": "Screen-reader label for the ✕ button of every dialog.",
   "search.bar_placeholder": "Placeholder in the top-bar search box. A 🔍 is put in front.",
   "page_title.welcome": "Top-bar title of the home page.",
-  "spaces.list.subscribed": "Section heading for spaces the user follows read-only (subscriber role). Followed by ' · ' and spaces.list.subscribed_hint.",
   "spaces.list.subscribed_pill": "Short badge on a followed space. Keep short (≤ 12 chars). A 🔔 goes in front.",
-  "spaces.list.remote_chip": "Badge on a space hosted by another household. Keep short.",
   "spaces.list.chat_unread": "Screen-reader text for the unread dot on a space in the spaces list: how many unread chat messages (honouring the viewer's mute and @-mention level).",
   "spaces.list.chat_unread_one": "Singular of spaces.list.chat_unread.",
   "time.hours_ago_short": "Compact 'hours ago' in byline rows (Pages, notifications). {n} = whole hours.",
@@ -337,8 +334,6 @@
   "settings.momentum.hop_1": "How far a moment may travel through connected households to reach you. 1 step = straight from a household you're connected to.",
   "settings.ha_notify.help": "{code} is replaced by the literal code 'notify.mobile_app_…'. 'Developer Tools → Actions' are Home Assistant menu names — use HA's own translation of them.",
   "settings.language.help": "{link} is replaced by the link text from settings.language.contribute.",
-  "space.card.hosted_by": "Followed by the host household's name in bold, e.g. 'Hosted by The Smiths'. The household that runs this space.",
-  "space.card.follow": "Button: follow a space read-only (you get its posts but can't post). Same wording as 'Following' / 'Unfollow' elsewhere.",
   "dashboard.bazaar.ending_soon": "Label under a count of listings that end within the next 24 hours. Keep very short.",
   "calendar.page.owner_you": "Small chip naming whose calendar an event is on — here, the viewer's own.",
   "bazaar.create.mode": "Label for the pricing type of a marketplace listing (fixed price, auction, …).",
@@ -374,7 +369,6 @@
   "space.public.hosted_by": "Follows the member count on the space's public page: '5 members · hosted by Miller family'. Lowercase.",
   "space.public.scope_global": "Chip for a space listed in the worldwide directory (via a GFS). Short.",
   "space.public.you_are_member": "Pill on a space's public page when the viewer already belongs to it (any role except follower). Short.",
-  "spaces.browse.from_friends": "Tab on Browse spaces: public spaces shared by households you're connected with. Short.",
   "spaces.browse.your_household": "Tab on Browse spaces and the name shown for spaces your own household hosts.",
   "space.join_landing.wrong_body": "“Join with code” must match the button on the Spaces page (spaces.list.join_code).",
   "status.clear_30m": "Chip in 'Clear after' picker. Very short.",
@@ -521,5 +515,10 @@
   "space.summary.tasks_mine": "Second half of a meta line like '5 open · 2 yours': tasks assigned to the viewer.",
   "space.summary.events": "Meta line under the Calendar row in a space's More menu: events in the next 30 days.",
   "space.leave.owner_note": "Shown in a space's More menu to its owner instead of a Leave button. 'Admin › Spaces' is the household admin page path.",
-  "space.chat.empty": "Shown inside an empty space chat thread. {space} is the space's name."
+  "space.chat.empty": "Shown inside an empty space chat thread. {space} is the space's name.",
+  "spaces.list.new": "Quiet count at the end of a space row: unread chat messages. Keep very short.",
+  "spaces.list.following_meta": "Meta line on a space the user follows (reads, cannot post).",
+  "spaces.discover.chip_paired": "Discover filter chip: public spaces of households this one is paired with.",
+  "spaces.discover.chip_global": "Discover filter chip: spaces listed on a GFS (Global Federation Server).",
+  "spaces.discover.ask": "Button on a space that needs approval to join."
 }

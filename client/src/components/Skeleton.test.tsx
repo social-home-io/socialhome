@@ -84,17 +84,17 @@ describe('Page-shaped skeletons', () => {
     ).toBe(35)
   })
 
-  it('SpaceListSkeleton defaults to 4 cards', () => {
+  it('SpaceListSkeleton defaults to 4 rows', () => {
     const { container } = render(<SpaceListSkeleton />)
     expect(
-      container.querySelectorAll('.sh-space-card--skeleton').length,
+      container.querySelectorAll('.sh-spaces-row').length,
     ).toBe(4)
   })
 
   it('SpaceListSkeleton honours the count prop', () => {
     const { container } = render(<SpaceListSkeleton count={6} />)
     expect(
-      container.querySelectorAll('.sh-space-card--skeleton').length,
+      container.querySelectorAll('.sh-spaces-row').length,
     ).toBe(6)
   })
 

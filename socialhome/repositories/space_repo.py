@@ -42,6 +42,7 @@ from ..domain.space import (
     INVITE_VIAS,
     HostedSpaceListing,
     JoinMode,
+    MemberSpaceListing,
     ModerationStatus,
     Space,
     SpaceFeatures,
@@ -159,6 +160,7 @@ class AbstractSpaceRepo(Protocol):
         tiers: frozenset[SpaceType],
     ) -> list[HostedSpaceListing]: ...
     async def list_for_user(self, user_id: str) -> list[Space]: ...
+    async def list_member_listings(self, user_id: str) -> list[MemberSpaceListing]: ...
     async def list_location_shared_spaces_for_user(
         self, user_id: str
     ) -> list[Space]: ...
@@ -1321,6 +1323,52 @@ class SqliteSpaceRepo:
             (user_id,),
         )
         return [s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s]
+
+    async def list_member_listings(self, user_id: str) -> list[MemberSpaceListing]:
+        """Every active space *user_id* holds a seat in (as
+        :meth:`list_for_user`), with the caller's role, the member count
+        (local + remote seats, never a follower; a remote seat only while
+        not tombstoned) and the newest feed post's time (else the space's
+        own ``created_at``), normalised to naive UTC by ``datetime()`` — the
+        column holds both SQLite's naive and Python's tz-aware ISO shape,
+        which don't compare as strings. One query — no per-space round-trip."""
+        rows = await self._db.fetchall(
+            """
+            SELECT s.*,
+                   m.role AS listing_caller_role,
+                   (SELECT COUNT(*) FROM space_members mm
+                     WHERE mm.space_id = s.id AND mm.role != 'subscriber')
+                   + (SELECT COUNT(*) FROM space_remote_members rm
+                       WHERE rm.space_id = s.id AND rm.tombstoned = 0
+                         AND COALESCE(rm.role, 'member') != 'subscriber')
+                       AS listing_member_count,
+                   COALESCE(
+                       (SELECT MAX(datetime(p.created_at)) FROM space_posts p
+                         WHERE p.space_id = s.id AND p.deleted = 0
+                           AND p.hidden_from_feed = 0),
+                       datetime(s.created_at)
+                   ) AS listing_last_activity_at
+              FROM spaces s
+              JOIN space_members m ON m.space_id = s.id
+             WHERE m.user_id = ? AND s.dissolved = 0
+             ORDER BY s.name
+            """,
+            (user_id,),
+        )
+        out: list[MemberSpaceListing] = []
+        for d in rows_to_dicts(rows):
+            space = _row_to_space(d)
+            if space is None:
+                continue
+            out.append(
+                MemberSpaceListing(
+                    space=space,
+                    role=d["listing_caller_role"],
+                    member_count=int(d["listing_member_count"] or 0),
+                    last_activity_at=d["listing_last_activity_at"],
+                )
+            )
+        return out
 
     async def list_location_shared_spaces_for_user(self, user_id: str) -> list[Space]:
         """Return every space where this user has opted in to location

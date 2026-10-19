@@ -1537,6 +1537,21 @@ class HostedSpaceListing:
 
 
 @dataclass(slots=True, frozen=True)
+class MemberSpaceListing:
+    """A space one local user holds a seat in, as the Spaces page lists it
+    (``GET /api/spaces``): the space, the caller's ``role`` (a follower's
+    is ``subscriber``), ``member_count`` — the members the space's people
+    list shows (local and remote seats, never followers) — and
+    ``last_activity_at`` — the newest feed post the caller may read, else
+    when the space was created here (naive UTC, SQLite's format)."""
+
+    space: Space
+    role: str
+    member_count: int
+    last_activity_at: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class JoinOwner:
     """Who a §D1b join stub is seated under (migration 0093).
 
