@@ -27,7 +27,6 @@ import { TabHeader } from '@/components/TabHeader'
 import { loadToggles, toggles } from '@/components/HouseholdToggles'
 import { showToast } from '@/components/Toast'
 import { ConversationView, type ConversationMeta } from '@/features/dms/ConversationView'
-import { MuteButton } from '@/features/dms/ConversationMute'
 import {
   householdChat,
   householdChatError,
@@ -168,9 +167,10 @@ export default function FeedPage() {
   )
 }
 
-/** The Chat tab — the household chat thread under a slim bar with who
- *  can read it and the viewer's mute / notification level. Outside the
- *  feed's PullToRefresh, so scrolling the thread never pulls. */
+/** The Chat tab — the household chat thread, full height. Who can read it
+ *  is said in the empty thread; the viewer's mute / level live in
+ *  Settings › Notifications (no bell here). Outside the feed's
+ *  PullToRefresh, so scrolling the thread never pulls. */
 function HouseholdChatTab() {
   const chat = householdChat.value
   const convId = chat?.enabled ? chat.conversation_id : null
@@ -208,18 +208,9 @@ function HouseholdChatTab() {
   const householdName = instanceConfig.value?.instance_name ?? t('nav.home')
   return (
     <>
-      <div class="sh-feed-chat-bar">
-        <span class="sh-feed-chat-audience">
-          {t('feed.chat.audience', { household: householdName })}
-        </span>
-        <MuteButton
-          convId={convId}
-          mutedUntil={mutedUntil}
-          onChange={(until) => patchHouseholdChat({ muted_until: until })}
-          level={level}
-          onLevelChange={(next) => patchHouseholdChat({ notif_level: next })}
-        />
-      </div>
+      {/* No bar and no bell of its own (like a space's chat): who can
+       *  read it is said in the empty thread, and its notifications live
+       *  in Settings › Notifications. */}
       <ConversationView
         key={convId}
         conversationId={convId}
@@ -228,6 +219,8 @@ function HouseholdChatTab() {
         showGroupInfo={false}
         allowCalls={false}
         meta={meta}
+        emptyNote={t('feed.chat.audience', { household: householdName })}
+        logLabel={t('feed.chat.log_aria', { household: householdName })}
       />
     </>
   )

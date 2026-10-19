@@ -47,6 +47,7 @@ import {
   resolveSettingsSection, settingsSectionLabel, settingsSectionPath, settingsSections,
   type SettingsSection, type SettingsViewer,
 } from './spaceSettingsSections'
+import type { ThemeDraft } from '@/components/SpaceThemeStudio'
 import { BasicsSection } from './settings/BasicsSection'
 import { DangerSection } from './settings/DangerSection'
 import { FeaturesSection } from './settings/FeaturesSection'
@@ -162,12 +163,15 @@ export default function SpaceSettingsPage() {
   const active = viewer ? resolveSettingsSection(segment, viewer) : null
 
   const form = useBasicsForm(basicsOf(space ?? FALLBACK))
-  const dirty = admin ? form.dirtyCount : 0
+  // The theme studio inside Basics reports its draft here, so one save bar
+  // covers the text and the theme.
+  const [themeDraft, setThemeDraft] = useState<ThemeDraft | null>(null)
+  const dirty = admin ? form.dirtyCount + (themeDraft?.dirty ? 1 : 0) : 0
   const dirtyRef = useRef(0)
   dirtyRef.current = dirty
-  // The guard is registered once; it reads the latest form through this.
-  const formRef = useRef(form)
-  formRef.current = form
+  // The guard is registered once; it reads the latest drafts through this.
+  const discardRef = useRef(() => {})
+  discardRef.current = () => { form.reset(); themeDraft?.discard() }
   const [saving, setSaving] = useState(false)
 
   const [notifLevel, setNotifLevel] = useSpaceNotifLevel(spaceId, viewer !== null)
@@ -199,7 +203,7 @@ export default function SpaceSettingsPage() {
         cancelLabel: t('settings.profile.leave_stay'),
         destructive: true,
       })
-      if (ok) formRef.current.reset()
+      if (ok) discardRef.current()
       return ok
     },
   }), [spaceId])
@@ -268,18 +272,28 @@ export default function SpaceSettingsPage() {
       return
     }
     setSaving(true)
-    const outcome = await patchSpace(space.id, form.changes, {
-      okToast: t('space.settings.saved'), onUpdate: refresh,
-    })
-    // Forwarded: the host applies it; the draft would only linger.
-    if (outcome === 'forwarded') form.reset()
+    let ok = true
+    if (form.dirtyCount > 0) {
+      const outcome = await patchSpace(space.id, form.changes, {
+        okToast: t('space.settings.saved'), onUpdate: refresh,
+      })
+      // Forwarded: the host applies it; the draft would only linger.
+      if (outcome === 'forwarded') form.reset()
+      ok = outcome !== 'failed'
+    }
+    if (ok && themeDraft?.dirty) {
+      if (await themeDraft.save() && form.dirtyCount === 0) {
+        showToast(t('space.settings.saved'), 'success')
+      }
+    }
     setSaving(false)
   }
 
   const body = (s: SettingsSection) => {
     switch (s) {
       case 'basics':
-        return <BasicsSection space={space} form={form} isRemoteSpace={isRemoteSpace} onUpdate={refresh} />
+        return <BasicsSection space={space} form={form} isRemoteSpace={isRemoteSpace}
+                              onUpdate={refresh} onThemeDraft={setThemeDraft} />
       case 'find':
         return <FindSection space={space} isOwner={isOwner} isRemoteSpace={isRemoteSpace}
                             adminCount={members.admins} onUpdate={refresh} />
@@ -378,7 +392,7 @@ export default function SpaceSettingsPage() {
                   : t('space.settings_page.unsaved', { n: String(dirty) })}
               </span>
               <div class="sh-savebar__actions">
-                <Button variant="secondary" onClick={form.reset} disabled={saving}>
+                <Button variant="secondary" onClick={() => discardRef.current()} disabled={saving}>
                   {t('settings.profile.discard')}
                 </Button>
                 <Button onClick={() => void save()} loading={saving}>{t('common.save')}</Button>

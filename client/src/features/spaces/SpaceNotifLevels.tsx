@@ -18,9 +18,8 @@
 import { useEffect, useId, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { showToast } from '@/components/Toast'
-import { MuteSection } from '@/features/dms/ConversationMute'
+import { ChatNotifChoices, type ChatNotif } from '@/features/dms/ChatNotifChoices'
 import { t } from '@/i18n/i18n'
-import type { ConversationNotifLevel } from '@/store/dms'
 import {
   claimSpaceChat, loadSpaceChat, patchSpaceChat, spaceChatOf,
 } from '@/store/spaceChat'
@@ -64,11 +63,14 @@ export function useSpaceNotifLevel(
 interface PickerProps {
   spaceId: string
   level: NotifLevel
+  /** A visible legend (beside the chat's); hidden "Your notifications"
+   *  otherwise. */
+  legend?: string
   /** Called with the saved level. */
   onSaved: (level: NotifLevel) => void
 }
 
-export function SpaceNotifLevelPicker({ spaceId, level, onSaved }: PickerProps) {
+export function SpaceNotifLevelPicker({ spaceId, level, onSaved, legend }: PickerProps) {
   const [saving, setSaving] = useState(false)
   const name = useId()
 
@@ -98,7 +100,9 @@ export function SpaceNotifLevelPicker({ spaceId, level, onSaved }: PickerProps) 
 
   return (
     <fieldset class="sh-space-notif-levels" disabled={saving}>
-      <legend class="sr-only">{t('space.more.notifications')}</legend>
+      {legend
+        ? <legend class="sh-space-notif-levels__legend">{legend}</legend>
+        : <legend class="sr-only">{t('space.more.notifications')}</legend>}
       {LEVELS.map((opt) => (
         <label key={opt} class="sh-space-notif-levels__option">
           <input
@@ -121,13 +125,7 @@ export function SpaceNotifLevelPicker({ spaceId, level, onSaved }: PickerProps) 
 /** The viewer's space-chat notifications, set next to the space's own
  *  level in "Your notifications" (one place — the chat has no bell of
  *  its own). */
-export interface SpaceChatNotif {
-  convId: string
-  mutedUntil: string | null
-  level: ConversationNotifLevel
-  onMute: (mutedUntil: string | null) => void
-  onLevel: (level: ConversationNotifLevel) => void
-}
+export type SpaceChatNotif = ChatNotif
 
 /** The space chat's notifications for a page that isn't the space page
  *  (settings): takes the space-chat store while mounted. ``null`` while
@@ -151,8 +149,9 @@ export function useSpaceChatNotif(spaceId: string, enabled: boolean): SpaceChatN
 }
 
 /** "Your notifications" — the space's posts level and, where the viewer
- *  has the chat, its level beside it. The ONE place both are set: the
- *  space's More panel and its settings page render this same block. */
+ *  has the chat, its level and mute beside it, in one style. The ONE place
+ *  both are set: the space's More panel and its settings page render this
+ *  same block. */
 export function SpaceNotificationChoices({ spaceId, level, onSaved, chatNotif }: {
   spaceId: string
   level: NotifLevel
@@ -161,18 +160,9 @@ export function SpaceNotificationChoices({ spaceId, level, onSaved, chatNotif }:
 }) {
   return (
     <>
-      {chatNotif && <h3 class="sh-space-more__subheading">{t('space.more.notif_posts')}</h3>}
-      <SpaceNotifLevelPicker spaceId={spaceId} level={level} onSaved={onSaved} />
-      {chatNotif && (
-        <MuteSection
-          convId={chatNotif.convId}
-          mutedUntil={chatNotif.mutedUntil}
-          onChange={chatNotif.onMute}
-          level={chatNotif.level}
-          onLevelChange={chatNotif.onLevel}
-          heading={t('space.more.notif_chat')}
-        />
-      )}
+      <SpaceNotifLevelPicker spaceId={spaceId} level={level} onSaved={onSaved}
+                             legend={chatNotif ? t('space.more.notif_posts') : undefined} />
+      {chatNotif && <ChatNotifChoices chat={chatNotif} legend={t('space.more.notif_chat')} />}
     </>
   )
 }

@@ -202,8 +202,11 @@ describe('SpaceFeedPage — the Chat section', () => {
     const row = await r.findByRole('button', { name: /^Your notifications/ })
     await r.waitFor(() => expect(row.textContent).toContain('Chat muted'))
     r.fireEvent.click(row)
-    expect(r.getByRole('heading', { name: 'Posts' })).toBeTruthy()
-    expect(r.getByRole('heading', { name: 'Chat' })).toBeTruthy()
+    // One style for both: two radio groups, Posts and Chat; muted, the
+    // chat says so with an Unmute.
+    expect(r.getByRole('group', { name: 'Posts' })).toBeTruthy()
+    expect(r.getByRole('group', { name: 'Chat' })).toBeTruthy()
+    expect(r.getByRole('button', { name: 'Unmute' })).toBeTruthy()
   })
 
   it('the old ?view=chat link moves to /spaces/s1/chat', async () => {

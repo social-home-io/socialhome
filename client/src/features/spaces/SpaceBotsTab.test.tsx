@@ -88,3 +88,27 @@ describe('SpaceBotsTab live bot frames', () => {
     expect(apiGet).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('SpaceBotsTab — bots turned off', () => {
+  it('a plain member reads one quiet line: no lists, no disabled button', async () => {
+    const { SpaceBotsTab } = await import('./SpaceBotsTab')
+    const view = render(
+      <SpaceBotsTab spaceId="sp-1" canAdmin={false} currentUserId="u2"
+                    botEnabled={false} onBotEnabledChange={() => {}} />,
+    )
+    expect(view.getByTestId('bots-off-line').textContent).toBe('An admin turned off bots for this space.')
+    expect(view.queryByRole('button')).toBeNull()
+    expect(view.queryByText(/Turn on/)).toBeNull()
+  })
+
+  it('an admin keeps the full view with the switch', async () => {
+    const { SpaceBotsTab } = await import('./SpaceBotsTab')
+    const view = render(
+      <SpaceBotsTab spaceId="sp-1" canAdmin currentUserId="u1"
+                    botEnabled={false} onBotEnabledChange={() => {}} />,
+    )
+    await view.findByText('Doorbell')
+    expect(view.queryByTestId('bots-off-line')).toBeNull()
+    expect(view.getByRole('checkbox')).toBeTruthy()
+  })
+})

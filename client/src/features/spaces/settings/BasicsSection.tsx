@@ -15,7 +15,7 @@ import { Button } from '@/components/Button'
 import { confirmDialog } from '@/components/confirm'
 import { EmojiField } from '@/components/EmojiField'
 import { MarkdownView } from '@/components/MarkdownView'
-import { SpaceThemeStudio } from '@/components/SpaceThemeStudio'
+import { SpaceThemeStudio, type ThemeDraft } from '@/components/SpaceThemeStudio'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import { cssUrl } from '@/utils/cssUrl'
@@ -35,6 +35,8 @@ interface Props {
   /** Hosted on another household: links and theme are host-local. */
   isRemoteSpace: boolean
   onUpdate: () => void
+  /** The theme studio's draft, saved with the page's save bar. */
+  onThemeDraft?: (draft: ThemeDraft | null) => void
 }
 
 type ImageKind = 'cover' | 'icon'
@@ -42,7 +44,7 @@ type ImageKind = 'cover' | 'icon'
 // t('space.about.cover_remove_confirm') t('space.about.icon_remove_confirm')
 // t('space.about.cover_removed') t('space.about.icon_removed')
 
-export function BasicsSection({ space, form, isRemoteSpace, onUpdate }: Props) {
+export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDraft }: Props) {
   const { name, description, emoji, about } = form.fields
   const [busy, setBusy] = useState<ImageKind | null>(null)
   const [preview, setPreview] = useState(false)
@@ -176,7 +178,7 @@ export function BasicsSection({ space, form, isRemoteSpace, onUpdate }: Props) {
           <SpaceLinksTab spaceId={space.id} />
           <details class="sh-ss-details">
             <summary>{t('theme.space.title')}</summary>
-            <SpaceThemeStudio spaceId={space.id} />
+            <SpaceThemeStudio spaceId={space.id} onDraft={onThemeDraft} />
           </details>
         </>
       )}
