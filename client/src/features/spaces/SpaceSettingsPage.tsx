@@ -311,7 +311,7 @@ export default function SpaceSettingsPage() {
           </div>
         )
       case 'location':
-        return <LocationSection space={space} onUpdate={refresh} />
+        return <LocationSection space={space} isRemoteSpace={isRemoteSpace} onUpdate={refresh} />
       case 'moderation':
         return <ModerationSection space={space} isRemoteSpace={isRemoteSpace} onUpdate={refresh} />
       case 'bots':

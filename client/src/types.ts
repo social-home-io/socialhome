@@ -367,7 +367,10 @@ export interface Space {
    *  *stub* mirroring a space hosted on another household. The SPA
    *  gates settings + admin gestures on this field so a remote
    *  member never tries to mutate state the host owns. */
-  owner_instance_id?: string  /** ``GET /api/spaces/{id}`` only: at least one OTHER household has a
+  owner_instance_id?: string  /** ``GET /api/spaces/{id}`` only: a public space's map pin (4 dp), for
+   *  its owner / admins on the hosting household; ``null`` otherwise. */
+  map_pin?: { lat: number; lon: number } | null
+  /** ``GET /api/spaces/{id}`` only: at least one OTHER household has a
    *  member here. */
   has_remote_households?: boolean
   /** ``GET /api/spaces/{id}`` only (v_51): this PRIVATE space has an

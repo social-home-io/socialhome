@@ -54,12 +54,14 @@ from ..domain.space import (
     INVITE_VIA_INTERNAL,
     INVITE_VIAS,
     PUBLIC_SPACE_TIERS,
+    SETTINGS_AUTHORITY_ROLES,
     WRITER_ROLES,
     MemberSpaceListing,
     Space,
     SpaceFeatures,
     SpacePermissionError,
     SpaceRole,
+    SpaceType,
 )
 from ..domain.space_proposal import ProposalAction
 from ..domain.user import SYSTEM_AUTHOR
@@ -365,6 +367,10 @@ class SpaceDetailView(BaseView):
                 # Global but listed on no GFS ("global, not listed"): the
                 # SPA shows a banner until the owner picks servers.
                 "gfs_unlisted": gfs_unlisted,
+                # The map pin of a public space hosted here,
+                # ``{lat, lon}`` (4 dp) or null — for its owner / admins
+                # only (Settings › Location); never federated.
+                "map_pin": self._map_pin(space, member),
                 # "Needs you": held items, reports, join requests and open
                 # proposals waiting for the caller — null unless they have
                 # content authority here (owner / admin / moderator).
@@ -383,6 +389,17 @@ class SpaceDetailView(BaseView):
         if signer is not None:
             sign_media_urls_in(payload, signer)
         return web.json_response(payload)
+
+    def _map_pin(self, space: Space, member) -> dict | None:
+        if (
+            member.role not in SETTINGS_AUTHORITY_ROLES
+            or space.space_type is not SpaceType.PUBLIC
+            or space.owner_instance_id != self.request.app.get(instance_id_key)
+            or space.lat is None
+            or space.lon is None
+        ):
+            return None
+        return {"lat": space.lat, "lon": space.lon}
 
     async def _gfs_listing(self, space) -> tuple[list[dict] | None, bool]:
         """Where a global space is listed — only for its members (not
@@ -413,6 +430,23 @@ class SpaceDetailView(BaseView):
         svc = self.svc(space_service_key)
         space_id = self.match("id")
         body = await self.body()
+        # The map pin (a public space hosted here) is host-local and
+        # not part of the federated config: set apart, and a body carrying
+        # nothing else touches no config at all.
+        if "lat" in body or "lon" in body:
+            pin = await svc.set_map_pin(
+                space_id,
+                actor_username=ctx.username,
+                lat=body.get("lat"),
+                lon=body.get("lon"),
+            )
+            if not set(body) - {"lat", "lon"}:
+                return web.json_response(
+                    {
+                        "id": space_id,
+                        "map_pin": ({"lat": pin[0], "lon": pin[1]} if pin else None),
+                    }
+                )
         # ``features`` arrives in the same wire shape the GET response
         # ships (``to_wire_dict``).  The previous handler silently
         # dropped this key, so the SpaceSettings UI's location toggle

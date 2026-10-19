@@ -159,6 +159,9 @@ class AbstractSpaceRepo(Protocol):
         icon_hash: str | None,
     ) -> None: ...
     async def set_tz(self, space_id: str, tz: str) -> None: ...
+    async def set_map_pin(
+        self, space_id: str, lat: float | None, lon: float | None
+    ) -> None: ...
     async def set_gfs_servers(
         self, space_id: str, servers: SignedGfsServerList | None
     ) -> None: ...
@@ -767,6 +770,16 @@ class SqliteSpaceRepo:
             (space_id,),
         )
         return bool(row is not None and row["present"])
+
+    async def set_map_pin(
+        self, space_id: str, lat: float | None, lon: float | None
+    ) -> None:
+        """Set (or, with ``None`` / ``None``, clear) the space's map pin.
+        The caller has already truncated the coordinates to 4 dp."""
+        await self._db.enqueue(
+            "UPDATE spaces SET lat=?, lon=? WHERE id=?",
+            (lat, lon, space_id),
+        )
 
     async def set_tz(self, space_id: str, tz: str) -> None:
         """Set the space's IANA timezone anchor.

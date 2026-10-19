@@ -13239,6 +13239,10 @@ a.sh-space-hero-members:focus-visible,
 }
 
 .sh-ss-zones { display: flex; flex-direction: column; gap: var(--sh-space-xs); }
+/* Settings › Location: a public space's map pin. */
+.sh-ss-pin { display: grid; gap: var(--sh-space-sm); }
+.sh-ss-pin__where { margin: 0; }
+.sh-ss-pin__actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-sm); }
 .sh-ss-zones__head {
   display: flex;
   flex-wrap: wrap;
