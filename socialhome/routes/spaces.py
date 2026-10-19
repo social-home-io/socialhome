@@ -61,7 +61,6 @@ from ..domain.space import (
     SpaceFeatures,
     SpacePermissionError,
     SpaceRole,
-    SpaceType,
 )
 from ..domain.space_proposal import ProposalAction
 from ..domain.user import SYSTEM_AUTHOR
@@ -234,9 +233,6 @@ class SpaceCollectionView(BaseView):
             space_type=body.get("space_type", "private"),
             join_mode=body.get("join_mode", "invite_only"),
             retention_days=body.get("retention_days"),
-            lat=body.get("lat"),
-            lon=body.get("lon"),
-            radius_km=body.get("radius_km"),
             category=body.get("category"),
             # A global space is listed on the GFSs its owner picks here
             # (this household's connection ids); required while any GFS is
@@ -367,7 +363,7 @@ class SpaceDetailView(BaseView):
                 # Global but listed on no GFS ("global, not listed"): the
                 # SPA shows a banner until the owner picks servers.
                 "gfs_unlisted": gfs_unlisted,
-                # The map pin of a public space hosted here,
+                # The stored map pin of a space hosted here,
                 # ``{lat, lon}`` (4 dp) or null — for its owner / admins
                 # only (Settings › Location); never federated.
                 "map_pin": self._map_pin(space, member),
@@ -393,7 +389,6 @@ class SpaceDetailView(BaseView):
     def _map_pin(self, space: Space, member) -> dict | None:
         if (
             member.role not in SETTINGS_AUTHORITY_ROLES
-            or space.space_type is not SpaceType.PUBLIC
             or space.owner_instance_id != self.request.app.get(instance_id_key)
             or space.lat is None
             or space.lon is None

@@ -51,7 +51,7 @@ async function open() {
   return r
 }
 
-describe('SpaceCreateDialog — public location', () => {
+describe('SpaceCreateDialog — no map location', () => {
   beforeEach(() => { post.mockReset(); get.mockClear(); gfsConns = []; cleanup() })
 
   it('module exports exist', () => {
@@ -59,47 +59,21 @@ describe('SpaceCreateDialog — public location', () => {
     expect(typeof openSpaceCreate).toBe('function')
   })
 
-  it('selecting Public reveals a location field but does NOT gate Create on coords', async () => {
-    const { container } = await open()
-    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Neighbourhood' } }) })
-    expect(container.querySelector('.sh-space-create-location')).toBeNull()
-
-    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
-    await waitFor(() => expect(container.querySelector('.sh-space-create-location')).not.toBeNull())
-    // Name is set; location is optional now → Create is ENABLED.
-    expect(createBtn(container).disabled).toBe(false)
-  })
-
-  it('never asks for raw coordinates: "Show on the map" takes this device\'s location, rounded to 4 dp', async () => {
+  it('a public space asks for no location and never reads the device position', async () => {
     post.mockResolvedValue({ id: 's1' })
-    const getCurrentPosition = vi.fn((ok: (p: unknown) => void) =>
-      ok({ coords: { latitude: 52.520_081_7, longitude: 13.404_954_2 } }))
+    const getCurrentPosition = vi.fn()
     Object.defineProperty(navigator, 'geolocation', { value: { getCurrentPosition }, configurable: true })
     const { container } = await open()
     await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Neighbourhood' } }) })
     await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
-    expect(container.querySelectorAll('.sh-space-create-location input[type="number"]')).toHaveLength(0)
-    const box = container.querySelector<HTMLInputElement>('.sh-space-create-location input[type="checkbox"]')!
-    expect(box.checked).toBe(false)
-    await act(async () => { fireEvent.click(box) })
-    expect(getCurrentPosition).toHaveBeenCalledTimes(1)
-    expect(container.querySelector('.sh-space-create-location')?.textContent).toContain('space.create.pinned_at')
-    await act(async () => { fireEvent.click(createBtn(container)) })
-    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
-    const [url, body] = post.mock.calls[0]
-    expect(url).toBe('/api/spaces')
-    expect(body).toMatchObject({ space_type: 'public', lat: 52.5201, lon: 13.405 })
-  })
-
-  it('a public space without "Show on the map" sends no location', async () => {
-    post.mockResolvedValue({ id: 's1' })
-    const { container } = await open()
-    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Neighbourhood' } }) })
-    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
+    expect(container.querySelector('.sh-space-create-location')).toBeNull()
+    expect(container.textContent).not.toContain('space.create.show_on_map')
     await act(async () => { fireEvent.click(createBtn(container)) })
     await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
     const body = post.mock.calls[0][1] as Record<string, unknown>
     expect('lat' in body).toBe(false)
+    expect('lon' in body).toBe(false)
+    expect(getCurrentPosition).not.toHaveBeenCalled()
   })
 
   it('does not send coords for a non-public space', async () => {

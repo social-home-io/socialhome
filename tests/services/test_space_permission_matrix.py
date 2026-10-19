@@ -346,9 +346,6 @@ async def stack(tmp_dir):
         # Readability is an explicit opt-in that defaults OFF; the subscriber
         # rows this matrix exercises can only exist once it is ON.
         features=SpaceFeatures(allow_subscribers=True),
-        lat=47.5,
-        lon=8.5,
-        radius_km=5.0,
     )
 
     class Stack:

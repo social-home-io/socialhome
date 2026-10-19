@@ -36,8 +36,8 @@ beforeEach(() => {
 describe('MapPin', () => {
   it('shows where the pin is, moves it from the picker and saves at once', async () => {
     const onUpdate = vi.fn()
-    const view = render(<MapPin spaceId="s1" pin={{ lat: 47.3769, lon: 8.5417 }} onUpdate={onUpdate} />)
-    expect(view.getByRole('status').textContent).toBe('On the map at 47.3769° N, 8.5417° E')
+    const view = render(<MapPin spaceId="s1" pin={{ lat: 47.3769, lon: 8.5417 }} canMove onUpdate={onUpdate} />)
+    expect(view.getByRole('status').textContent).toBe('Stored pin: 47.3769° N, 8.5417° E')
     fireEvent.click(view.getByRole('button', { name: 'Move the pin' }))
     const dialog = view.getByRole('dialog', { name: 'Where is the space?' })
     expect(dialog.getAttribute('data-initial')).toBe('47.3769,8.5417')
@@ -49,28 +49,36 @@ describe('MapPin', () => {
   })
 
   it('removes the pin, and puts it back when the server refuses', async () => {
-    const view = render(<MapPin spaceId="s1" pin={{ lat: 47.3769, lon: 8.5417 }} onUpdate={vi.fn()} />)
+    const view = render(<MapPin spaceId="s1" pin={{ lat: 47.3769, lon: 8.5417 }} canMove onUpdate={vi.fn()} />)
     patch.mockRejectedValueOnce(new Error('offline'))
     fireEvent.click(view.getByRole('button', { name: 'Remove from the map' }))
     await waitFor(() => expect(patch).toHaveBeenCalledWith('/api/spaces/s1', { lat: null, lon: null }))
     await waitFor(() => expect(view.getByRole('status').textContent).toContain('47.3769'))
     fireEvent.click(view.getByRole('button', { name: 'Remove from the map' }))
     await waitFor(() => expect(view.getByRole('status').textContent).toBe('Not on the map.'))
-    expect(view.getByRole('button', { name: 'Pin on the map' })).toBeTruthy()
+    // No new pin is collected: nothing offers one.
+    expect(view.queryByRole('button')).toBeNull()
   })
 })
 
 describe('LocationSection › map pin', () => {
-  it('a public space hosted here gets the pin', () => {
+  it('shows a stored pin of a space hosted here', () => {
     const view = render(<LocationSection space={space({ map_pin: { lat: 1, lon: 2 } })} onUpdate={vi.fn()} />)
     expect(view.getByTestId('settings-map-pin')).toBeTruthy()
+    expect(view.getByRole('button', { name: 'Move the pin' })).toBeTruthy()
   })
 
-  it('no pin for another tier or a space hosted elsewhere', () => {
-    const priv = render(<LocationSection space={space({ space_type: 'private' })} onUpdate={vi.fn()} />)
-    expect(priv.queryByTestId('settings-map-pin')).toBeNull()
-    priv.unmount()
-    const remote = render(<LocationSection space={space()} isRemoteSpace onUpdate={vi.fn()} />)
+  it('no card without a stored pin (none is collected), nor for a space hosted elsewhere', () => {
+    const none = render(<LocationSection space={space()} onUpdate={vi.fn()} />)
+    expect(none.queryByTestId('settings-map-pin')).toBeNull()
+    none.unmount()
+    const remote = render(<LocationSection space={space({ map_pin: { lat: 1, lon: 2 } })} isRemoteSpace onUpdate={vi.fn()} />)
     expect(remote.queryByTestId('settings-map-pin')).toBeNull()
+  })
+
+  it('a pin left on a space that is no longer public can only be removed', () => {
+    const view = render(<LocationSection space={space({ space_type: 'private', map_pin: { lat: 1, lon: 2 } })} onUpdate={vi.fn()} />)
+    expect(view.queryByRole('button', { name: 'Move the pin' })).toBeNull()
+    expect(view.getByRole('button', { name: 'Remove from the map' })).toBeTruthy()
   })
 })

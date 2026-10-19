@@ -1,12 +1,13 @@
 /**
- * Settings › Location & zones › Map pin — where a public space sits on
- * the map (set at create with "Show on the map"). Move it (your current
- * location or a spot picked on the map) or remove it; it saves at once,
- * like every control outside Basics.
+ * Settings › Location & zones › Map pin — a pin stored on a space hosted
+ * here (the create dialog used to offer "Show on the map"). Nothing shows
+ * a pin, so no new one is collected: the card appears only while a pin
+ * is stored, to move it (a public space; current location or a spot
+ * picked on the map) or remove it. Saves at once, like every control
+ * outside Basics.
  *
- * Only for a public space hosted by this household: the pin is host-local
- * (``PATCH /api/spaces/{id}`` ``{lat, lon}``, 4 dp) and never sent to
- * another household or a GFS.
+ * The pin is host-local (``PATCH /api/spaces/{id}`` ``{lat, lon}``, 4 dp)
+ * and never sent to another household or a GFS.
  */
 import { useState } from 'preact/hooks'
 import { Button } from '@/components/Button'
@@ -17,9 +18,11 @@ import { patchSpace, useServerValue } from './spacePatch'
 
 export interface MapPinValue { lat: number; lon: number }
 
-export function MapPin({ spaceId, pin: stored, onUpdate }: {
+export function MapPin({ spaceId, pin: stored, canMove, onUpdate }: {
   spaceId: string
   pin: MapPinValue | null
+  /** A public space's pin may move; any other only goes. */
+  canMove: boolean
   onUpdate: () => void
 }) {
   const [pin, setPin] = useServerValue<MapPinValue | null>(stored)
@@ -49,19 +52,21 @@ export function MapPin({ spaceId, pin: stored, onUpdate }: {
       </h3>
       <p class="sh-ss-pin__where" role="status">
         {pin
-          ? t('space.create.pinned_at', { place: coordLabel(pin.lat, pin.lon) })
+          ? t('space.settings_page.location.pin_at', { place: coordLabel(pin.lat, pin.lon) })
           : t('space.settings_page.location.pin_none')}
       </p>
-      <div class="sh-ss-pin__actions">
-        <Button variant="secondary" onClick={() => setPicking(true)} disabled={busy}>
-          {pin ? t('space.settings_page.location.pin_move') : t('space.settings_page.location.pin_add')}
-        </Button>
-        {pin && (
+      {pin && (
+        <div class="sh-ss-pin__actions">
+          {canMove && (
+            <Button variant="secondary" onClick={() => setPicking(true)} disabled={busy}>
+              {t('space.settings_page.location.pin_move')}
+            </Button>
+          )}
           <Button variant="ghost" onClick={() => void save(null)} disabled={busy}>
             {t('space.settings_page.location.pin_remove')}
           </Button>
-        )}
-      </div>
+        </div>
+      )}
       <p class="sh-ss-hint">{t('space.settings_page.location.pin_hint')}</p>
       <LocationPicker
         open={picking}
