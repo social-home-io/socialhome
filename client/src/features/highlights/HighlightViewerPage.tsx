@@ -31,6 +31,7 @@ import { openPerson } from '@/components/PersonSheet'
 import { ws } from '@/ws'
 import { openPublishMenu } from './HighlightPublishMenu'
 import { t, isOne } from '@/i18n/i18n'
+import { highlightDateLabel } from '@/utils/highlightDate'
 
 interface HighlightDetail {
   highlight: Highlight
@@ -307,7 +308,7 @@ export default function HighlightViewerPage() {
           size={32}
         />
         <strong>{householdDisplayName(highlight.author_user_id)}</strong>
-        <span class="sh-muted">{highlight.highlight_date}</span>
+        <span class="sh-muted">{highlightDateLabel(highlight.highlight_date)}</span>
         {!isAuthor && (
           <button
             type="button"

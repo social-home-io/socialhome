@@ -20,6 +20,7 @@ import { t, isOne } from '@/i18n/i18n'
 import { resolveDisplayName } from '@/utils/avatar'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers } from '@/store/spaceMembers'
+import { highlightDateLabel } from '@/utils/highlightDate'
 
 interface HighlightDetailResponse {
   highlight: Highlight
@@ -134,7 +135,7 @@ export function HighlightShareCard({ highlightId, note, spaceId = null }: Highli
       <div class="sh-highlight-share-card-body">
         <strong>{authorName}</strong>
         <span class="sh-muted">
-          {detail.highlight.highlight_date} · {t(isOne(detail.frames.length) ? 'highlight.frames_one' : 'highlight.frames', { n: String(detail.frames.length) })}
+          {highlightDateLabel(detail.highlight.highlight_date)} · {t(isOne(detail.frames.length) ? 'highlight.frames_one' : 'highlight.frames', { n: String(detail.frames.length) })}
         </span>
         {note && <p>{note}</p>}
         <span class="sh-highlight-share-card-cta">{t('highlight.share_card.cta')}</span>
