@@ -256,7 +256,7 @@ export default function HighlightArchiveTab() {
           <ul class="sh-highlight-archive-day-list">
             {selectedHighlights.map(s => {
               const author = s.highlight.author_user_id
-              const name = resolveDisplayName(null, author, author)
+              const name = resolveDisplayName(null, author)
               const first = s.frames[0]
               return (
                 <li key={s.highlight.id}>

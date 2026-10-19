@@ -119,7 +119,7 @@ function PendingRowItem({
   spaceId: string | null
 }) {
   const avatarUrl = resolveAvatar(spaceId, row.user_id, null)
-  const name = resolveDisplayName(spaceId, row.user_id, row.user_id)
+  const name = resolveDisplayName(spaceId, row.user_id)
   const requestedAgo = formatRelative(row.updated_at)
   const actionKey = `${eventId}@${row.user_id}@${row.occurrence_at}`
   const isActing = acting.value[actionKey]

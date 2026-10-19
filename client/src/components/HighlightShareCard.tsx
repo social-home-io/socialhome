@@ -17,6 +17,9 @@ import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import type { Highlight, HighlightFrame } from '@/types'
 import { t, isOne } from '@/i18n/i18n'
+import { resolveDisplayName } from '@/utils/avatar'
+import { loadHouseholdUsers } from '@/store/householdUsers'
+import { loadSpaceMembers } from '@/store/spaceMembers'
 
 interface HighlightDetailResponse {
   highlight: Highlight
@@ -28,14 +31,24 @@ export interface HighlightShareCardProps {
   highlightId: string | null
   /** ``post.content`` — the sharer's optional caption. */
   note?: string | null
+  /** The space the post lives in, so a remote author resolves through
+   *  that space's roster. ``null`` / absent on the household feed. */
+  spaceId?: string | null
 }
 
 const cache = signal<Record<string, HighlightDetailResponse | null>>({})
 const loading = signal<Record<string, boolean>>({})
 
 
-export function HighlightShareCard({ highlightId, note }: HighlightShareCardProps) {
+export function HighlightShareCard({ highlightId, note, spaceId = null }: HighlightShareCardProps) {
   const loc = useLocation()
+
+  // The highlight only carries the author's id; resolve it like a post
+  // author (space roster → household users), never print the id.
+  useEffect(() => {
+    void loadHouseholdUsers()
+    if (spaceId) void loadSpaceMembers(spaceId)
+  }, [spaceId])
 
   useEffect(() => {
     if (!highlightId) return
@@ -98,12 +111,13 @@ export function HighlightShareCard({ highlightId, note }: HighlightShareCardProp
   }
 
   const first = detail.frames[0]
+  const authorName = resolveDisplayName(spaceId, detail.highlight.author_user_id)
   return (
     <button
       type="button"
       class="sh-highlight-share-card"
       onClick={() => loc.route(`/highlights/${detail.highlight.id}`)}
-      aria-label={t('highlight.share_card.watch_aria', { name: detail.highlight.author_user_id })}
+      aria-label={t('highlight.share_card.watch_aria', { name: authorName })}
     >
       {first && first.frame_type === 'image' ? (
         <img
@@ -118,7 +132,7 @@ export function HighlightShareCard({ highlightId, note }: HighlightShareCardProp
         </span>
       )}
       <div class="sh-highlight-share-card-body">
-        <strong>{detail.highlight.author_user_id}</strong>
+        <strong>{authorName}</strong>
         <span class="sh-muted">
           {detail.highlight.highlight_date} · {t(isOne(detail.frames.length) ? 'highlight.frames_one' : 'highlight.frames', { n: String(detail.frames.length) })}
         </span>

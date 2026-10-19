@@ -8,6 +8,7 @@
  */
 import { householdUsers } from '@/store/householdUsers'
 import { spaceMembers } from '@/store/spaceMembers'
+import { t } from '@/i18n/i18n'
 
 export function resolveAvatar(
   spaceId: string | null | undefined,
@@ -24,17 +25,25 @@ export function resolveAvatar(
   return fallback
 }
 
+/**
+ * Display name for a bare user id: the member's per-space name → their
+ * display name on the space roster (a remote member's household name for
+ * them) → the household user → ``fallback`` ("Someone" when omitted).
+ * Never returns the raw id — it is not a name.
+ */
 export function resolveDisplayName(
   spaceId: string | null | undefined,
   userId: string | null | undefined,
-  fallback: string,
+  fallback?: string,
 ): string {
-  if (!userId) return fallback
+  const otherwise = fallback ?? t('person.someone')
+  if (!userId) return otherwise
   if (spaceId) {
     const m = spaceMembers.value[spaceId]?.get(userId)
     if (m?.space_display_name) return m.space_display_name
+    if (m?.display_name) return m.display_name
   }
   const household = householdUsers.value.get(userId)
   if (household?.display_name) return household.display_name
-  return fallback
+  return otherwise
 }

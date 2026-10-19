@@ -129,7 +129,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
   const avatarUrl = bot ? null : resolveAvatar(scopedSpaceId, post.author, null)
   const authorName = bot
     ? bot.name
-    : resolveDisplayName(scopedSpaceId, post.author, post.author)
+    : resolveDisplayName(scopedSpaceId, post.author)
   // Show the cross-space badge only when the caller explicitly opted
   // in by providing a name AND we're not already inside that space.
   const showCrossSpaceBadge = Boolean(
@@ -306,6 +306,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
             {post.type === 'highlight_share' && (
               <HighlightShareCard
                 highlightId={post.linked_highlight_id ?? null}
+                spaceId={scopedSpaceId}
                 note={post.content}
               />
             )}
@@ -410,7 +411,7 @@ function LatestCommentPreview({
   scopedSpaceId: string | null
   comment: NonNullable<FeedPost['latest_comment']>
 }) {
-  const authorName = resolveDisplayName(scopedSpaceId, comment.author, comment.author)
+  const authorName = resolveDisplayName(scopedSpaceId, comment.author)
   const avatarUrl = resolveAvatar(scopedSpaceId, comment.author, null)
   const body = comment.deleted
     ? t('post.comment_removed')
