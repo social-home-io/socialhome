@@ -184,6 +184,7 @@ from ..domain.space import (
     InviteOnlyError,
     JoinMode,
     JoinOwner,
+    MapPinUnavailableError,
     OwnerStillActiveError,
     OwnerTransferFollowerError,
     OwnerTransferNotLocalError,
@@ -215,6 +216,7 @@ from ..domain.space import (
     role_change_allowed,
     role_change_event_type,
     validate_space_link_url,
+    validate_zone_coord,
 )
 from ..domain.user import User
 from ..domain.writer_cert import WriterEntitlement
@@ -2154,6 +2156,44 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             for m in await self._federation_repo.list_instances_in_space(space_id)
             if m.capabilities_seen_at is not None and m.proto_version < min_version
         ]
+
+    async def set_map_pin(
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+        lat: object,
+        lon: object,
+    ) -> tuple[float, float] | None:
+        """Move (or remove, with both ``None``) a public space's map pin.
+        Owner or admin, on the household hosting the space. Only a public
+        space has one, as at creation: a global space is listed on GFSs,
+        whose directory carries no location.
+
+        Coordinates are truncated to 4 dp (about 11 m) before they are
+        stored. The pin is host-local: it is not part of the space config
+        that federates (no ``config_sequence`` bump, no
+        ``SpaceConfigChanged``) and never goes into a federation payload.
+        Returns the stored pin.
+        """
+        space = await self._require_space(space_id)
+        await self._require_admin_or_owner(space, actor_username)
+        if (
+            space.owner_instance_id != self._own_instance_id
+            or space.space_type is not SpaceType.PUBLIC
+        ):
+            raise MapPinUnavailableError()
+        if lat is None and lon is None:
+            await self._spaces.set_map_pin(space_id, None, None)
+            return None
+        if lat is None or lon is None:
+            raise ValueError("lat and lon go together")
+        pin = (
+            validate_zone_coord(lat, name="lat", limit=90),
+            validate_zone_coord(lon, name="lon", limit=180),
+        )
+        await self._spaces.set_map_pin(space_id, *pin)
+        return pin
 
     async def update_config(
         self,

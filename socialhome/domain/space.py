@@ -1781,6 +1781,20 @@ def validate_zone_radius(value: object) -> int:
     return coerced
 
 
+class MapPinUnavailableError(CodedError, ValueError):
+    """Only a public space hosted by this household has a map pin.
+
+    The pin (``spaces.lat`` / ``lon``) is host-local: it is never put in a
+    federation payload (GPS coordinates stay off the wire), so a member
+    household of a space hosted elsewhere has none to edit. A private or
+    household space is never offered to anyone nearby, and a global one is
+    listed on GFSs, whose directory carries no location."""
+
+    status = 409
+    code = "MAP_PIN_UNAVAILABLE"
+    detail = "Only a public space hosted here has a map pin."
+
+
 #: Longest quick-link URL a space admin may store.
 MAX_SPACE_LINK_URL_LENGTH: int = 2048
 

@@ -32,7 +32,8 @@ import {
   joinOptionsForVisibility,
 } from './spaceModeOptions'
 import { showToast } from './Toast'
-import { formatLocale, t } from '@/i18n/i18n'
+import { t } from '@/i18n/i18n'
+import { coordLabel } from '@/utils/coordLabel'
 import { markSetupPending } from '@/features/spaces/spaceSetup'
 
 const open = signal(false)
@@ -102,14 +103,6 @@ const isDiscoverable = () =>
  *  precision (§GPS); the server rounds again. */
 export function round4(v: number): number {
   return Math.round(v * 1e4) / 1e4
-}
-
-/** "47.3769° N, 8.5417° E" in the UI locale. */
-function placeLabel(la: number, lo: number): string {
-  const nf = new Intl.NumberFormat(formatLocale(), { minimumFractionDigits: 4, maximumFractionDigits: 4 })
-  const ns = la < 0 ? t('zones.coord.s') : t('zones.coord.n')
-  const ew = lo < 0 ? t('zones.coord.w') : t('zones.coord.e')
-  return `${nf.format(Math.abs(la))}° ${ns}, ${nf.format(Math.abs(lo))}° ${ew}`
 }
 
 function locate() {
@@ -337,7 +330,7 @@ export function SpaceCreateDialog() {
                 {locating.value
                   ? t('space.create.locating')
                   : lat.value !== null && lon.value !== null
-                    ? t('space.create.pinned_at', { place: placeLabel(lat.value, lon.value) })
+                    ? t('space.create.pinned_at', { place: coordLabel(lat.value, lon.value) })
                     : null}
               </p>
             )}

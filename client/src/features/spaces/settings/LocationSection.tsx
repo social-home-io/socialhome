@@ -5,7 +5,8 @@
  *
  * Sharing your OWN location is personal and stays on the Map section (and
  * a member's "You in this space"); this section is the space's rules.
- * Both switches save as they change.
+ * Both switches save as they change. A public space hosted here also gets
+ * its map pin (``MapPin``) — where the space itself sits.
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
@@ -13,6 +14,7 @@ import { addBase } from '@/baseUrl'
 import { RadioCardGroup } from '@/components/RadioCardGroup'
 import { t } from '@/i18n/i18n'
 import type { Space } from '@/types'
+import { MapPin } from './MapPin'
 import { patchSpace, useServerValue } from './spacePatch'
 import { SwitchRow } from './SettingsRows'
 
@@ -20,7 +22,12 @@ type Mode = 'gps' | 'zone_only'
 
 interface ZoneRow { id: string; name: string; icon: string | null }
 
-export function LocationSection({ space, onUpdate }: { space: Space; onUpdate: () => void }) {
+export function LocationSection({ space, isRemoteSpace = false, onUpdate }: {
+  space: Space
+  /** Hosted by another household: the map pin is the host's. */
+  isRemoteSpace?: boolean
+  onUpdate: () => void
+}) {
   const [on, setOn] = useServerValue(Boolean(space.features?.location))
   const [mode, setMode] = useServerValue<Mode>(space.features?.location_mode ?? 'gps')
   const [zones, setZones] = useState<ZoneRow[] | null>(null)
@@ -56,62 +63,69 @@ export function LocationSection({ space, onUpdate }: { space: Space; onUpdate: (
   const zonesHref = addBase(`/spaces/${space.id}/zones`)
 
   return (
-    <div class="sh-ss-card">
-      <SwitchRow id={`location-${space.id}`} label={t('space.location.toggle')}
-                 hint={t('space.settings_page.location.precision')}
-                 checked={on} onChange={(v) => void flip(v)} />
-      {on && (
-        <>
-          <RadioCardGroup
-            legend={t('space.location.mode_legend')}
-            name={`location-mode-${space.id}`}
-            value={mode}
-            onChange={(v) => void pick(v as Mode)}
-            options={[
-              { value: 'gps', icon: '🛰️', title: t('space.location.gps'), subtitle: t('space.location.gps_hint') },
-              {
-                value: 'zone_only', icon: '🔒',
-                title: `${t('space.location.zone')} · ${t('space.location.zone_badge')}`,
-                subtitle: t('space.location.zone_hint'),
-              },
-            ]}
-          />
-          <section class="sh-ss-zones" aria-labelledby={`zones-h-${space.id}`}
-                   data-testid="settings-zones">
-            <div class="sh-ss-zones__head">
-              <h3 class="sh-ss-subheading" id={`zones-h-${space.id}`}>
-                {t('space.settings_page.location.zones')}
-              </h3>
-              <a class="sh-btn sh-btn--secondary" href={zonesHref}>
-                {t('space.location.manage_zones')}
-              </a>
-            </div>
-            {zones !== null && zones.length === 0 && (
-              <p class="sh-ss-hint">
-                {mode === 'zone_only'
-                  ? t('space.settings_page.location.no_zones_needed')
-                  : t('space.settings_page.location.no_zones')}
-              </p>
-            )}
-            {zones !== null && zones.length > 0 && (
-              <ul class="sh-ss-zones__list">
-                {zones.map(z => (
-                  <li key={z.id}>
-                    <span aria-hidden="true">{z.icon || '📍'}</span> {z.name}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </>
+    <>
+      {space.space_type === 'public' && !isRemoteSpace && (
+        <div class="sh-ss-card">
+          <MapPin spaceId={space.id} pin={space.map_pin ?? null} onUpdate={onUpdate} />
+        </div>
       )}
-      <p class="sh-ss-hint">{t('space.location.ha_zones_note')}</p>
-      <p class="sh-ss-hint">
-        {t('space.settings_page.location.own_sharing')}
+      <div class="sh-ss-card">
+        <SwitchRow id={`location-${space.id}`} label={t('space.location.toggle')}
+                   hint={t('space.settings_page.location.precision')}
+                   checked={on} onChange={(v) => void flip(v)} />
         {on && (
-          <>{' '}<a href={addBase(`/spaces/${space.id}/map`)}>{t('space.settings_page.location.open_map')}</a></>
+          <>
+            <RadioCardGroup
+              legend={t('space.location.mode_legend')}
+              name={`location-mode-${space.id}`}
+              value={mode}
+              onChange={(v) => void pick(v as Mode)}
+              options={[
+                { value: 'gps', icon: '🛰️', title: t('space.location.gps'), subtitle: t('space.location.gps_hint') },
+                {
+                  value: 'zone_only', icon: '🔒',
+                  title: `${t('space.location.zone')} · ${t('space.location.zone_badge')}`,
+                  subtitle: t('space.location.zone_hint'),
+                },
+              ]}
+            />
+            <section class="sh-ss-zones" aria-labelledby={`zones-h-${space.id}`}
+                     data-testid="settings-zones">
+              <div class="sh-ss-zones__head">
+                <h3 class="sh-ss-subheading" id={`zones-h-${space.id}`}>
+                  {t('space.settings_page.location.zones')}
+                </h3>
+                <a class="sh-btn sh-btn--secondary" href={zonesHref}>
+                  {t('space.location.manage_zones')}
+                </a>
+              </div>
+              {zones !== null && zones.length === 0 && (
+                <p class="sh-ss-hint">
+                  {mode === 'zone_only'
+                    ? t('space.settings_page.location.no_zones_needed')
+                    : t('space.settings_page.location.no_zones')}
+                </p>
+              )}
+              {zones !== null && zones.length > 0 && (
+                <ul class="sh-ss-zones__list">
+                  {zones.map(z => (
+                    <li key={z.id}>
+                      <span aria-hidden="true">{z.icon || '📍'}</span> {z.name}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </>
         )}
-      </p>
-    </div>
+        <p class="sh-ss-hint">{t('space.location.ha_zones_note')}</p>
+        <p class="sh-ss-hint">
+          {t('space.settings_page.location.own_sharing')}
+          {on && (
+            <>{' '}<a href={addBase(`/spaces/${space.id}/map`)}>{t('space.settings_page.location.open_map')}</a></>
+          )}
+        </p>
+      </div>
+    </>
   )
 }
