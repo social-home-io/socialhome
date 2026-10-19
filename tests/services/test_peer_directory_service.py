@@ -17,7 +17,11 @@ from socialhome.domain.events import (
     SpaceConfigChanged,
     SpaceLocalAreaChanged,
 )
-from socialhome.domain.federation import FederationEventType, PairingStatus
+from socialhome.domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+)
 from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.space import (
     JoinMode,
@@ -65,9 +69,16 @@ class _FakeSpaceRepo:
 
 
 class _PeerRow:
-    def __init__(self, id: str, status: PairingStatus, home=None) -> None:
+    def __init__(
+        self,
+        id: str,
+        status: PairingStatus,
+        home=None,
+        source: InstanceSource = InstanceSource.MANUAL,
+    ) -> None:
         self.id = id
         self.status = status
+        self.source = source
         #: A home this peer shares through pairing — never read for the
         #: directory any more.
         self.home_lat = home[0] if home else None
@@ -82,10 +93,12 @@ class _FakeFedRepo:
         return next((p for p in self._peers if p.id == instance_id), None)
 
     async def list_social_instances(self):
+        # Mirrors the SQL: CONFIRMED and not a §D2b invite-link seat.
         return [
             p
             for p in self._peers
             if getattr(p.status, "value", p.status) == "confirmed"
+            and p.source is not InstanceSource.SPACE_SESSION
         ]
 
     async def list_instances(self):
@@ -329,3 +342,64 @@ async def test_reaching_v59_sends_the_community_fields():
         )
     )
     assert len(fed.sent) == 1
+
+
+# ── Only paired households get the directory ────────────────────────────
+
+
+def _stranger_env():
+    """peer-1 is paired; ``stranger`` joined one of our spaces through an
+    invite link (a §D2b ``space_session`` seat); ``mesh-member`` sits in a
+    space of ours over the mesh and has no row here at all."""
+    space_repo = _FakeSpaceRepo(public_spaces=[_space()], members={"sp-1": ["u1"]})
+    fed_repo = _FakeFedRepo(
+        [
+            _PeerRow("peer-1", PairingStatus.CONFIRMED),
+            _PeerRow(
+                "stranger", PairingStatus.CONFIRMED, source=InstanceSource.SPACE_SESSION
+            ),
+        ]
+    )
+    fed = _FakeFederationService()
+    bus = EventBus()
+    svc = PeerDirectoryService(
+        bus=bus, federation_service=fed, federation_repo=fed_repo, space_repo=space_repo
+    )
+    svc.wire()
+    return bus, fed, svc
+
+
+@pytest.mark.parametrize("who", ["stranger", "mesh-member", "peer-pending"])
+async def test_reaching_v59_sends_nothing_to_a_household_we_are_not_paired_with(who):
+    """Regression (federation-demo ``local-community``): a mesh member's
+    version claim — or an invite-link household's — raised its version and
+    the host sent it the whole public-space directory (for a mesh member
+    ``send_event`` only failed because there was no row to send on). Public
+    spaces are for paired households only."""
+    floor = FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA
+    bus, fed, _svc = _stranger_env()
+    await bus.publish(
+        PeerProtoVersionRaised(
+            instance_id=who, old_version=floor - 1, new_version=floor
+        )
+    )
+    assert fed.sent == []
+
+
+async def test_send_snapshot_only_to_a_paired_household():
+    _bus, fed, svc = _stranger_env()
+    for who in ("stranger", "mesh-member"):
+        await svc.send_snapshot(who)
+    assert fed.sent == []
+    await svc.send_snapshot("peer-1")
+    assert [r[0] for r in fed.sent] == ["peer-1"]
+
+
+async def test_a_broadcast_skips_invite_link_households():
+    bus, fed, _svc = _stranger_env()
+    await bus.publish(
+        SpaceConfigChanged(
+            space_id="sp-1", event_type="SPACE_RENAMED", payload={}, sequence=2
+        )
+    )
+    assert [r[0] for r in fed.sent] == ["peer-1"]

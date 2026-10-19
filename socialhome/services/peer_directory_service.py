@@ -32,7 +32,7 @@ from ..domain.events import (
     SpaceConfigChanged,
     SpaceLocalAreaChanged,
 )
-from ..domain.federation import FederationEventType
+from ..domain.federation import FederationEventType, InstanceSource, PairingStatus
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.local_community import local_area_of, local_community_wire
 from ..domain.space import SpaceType, normalize_category
@@ -149,5 +149,20 @@ class PeerDirectoryService:
             await self._send(peer.id)
 
     async def send_snapshot(self, to_instance_id: str) -> None:
-        """Send the current snapshot to exactly one peer."""
+        """Send the current snapshot to exactly one peer — only a paired
+        (social) household. A version raise also fires for a household we
+        only share a space with (a §D2b invite-link seat, or a mesh member
+        with no row here); our public spaces are not theirs to see."""
+        if not await self._is_social_peer(to_instance_id):
+            return
         await self._send(to_instance_id)
+
+    async def _is_social_peer(self, instance_id: str) -> bool:
+        """CONFIRMED and not a ``space_session`` seat — the rows
+        :meth:`AbstractFederationRepo.list_social_instances` lists."""
+        instance = await self._federation_repo.get_instance(instance_id)
+        return (
+            instance is not None
+            and instance.status is PairingStatus.CONFIRMED
+            and instance.source is not InstanceSource.SPACE_SESSION
+        )
