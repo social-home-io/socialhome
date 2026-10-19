@@ -145,9 +145,40 @@ class _FakeSpaceRepo:
         self.released: list[str] = []
         #: space_id → owner user_id the ACK roster named (migration 0070).
         self.owner_user_ids: dict[str, str] = {}
+        #: Join requests (a local community's edge review) and the
+        #: (space, user, household) approvals an admin gave.
+        self.join_requests: list[dict] = []
+        self.approved: set[tuple[str, str, str]] = set()
 
     async def set_owner_user_id(self, space_id, user_id):
         self.owner_user_ids[space_id] = user_id
+
+    # ── Join requests (a local community's edge review) ─────────────
+    async def save_join_request(self, space_id, user_id, **kw):
+        rows = self.join_requests
+        rid = kw.get("request_id") or f"rid-{len(rows) + 1}"
+        rows.append(
+            {
+                "id": rid,
+                "space_id": space_id,
+                "user_id": user_id,
+                "status": "pending",
+                **kw,
+            }
+        )
+        return rid
+
+    async def list_pending_join_requests(self, space_id):
+        return [
+            r
+            for r in self.join_requests
+            if r["space_id"] == space_id and r["status"] == "pending"
+        ]
+
+    async def has_approved_join_request(
+        self, space_id, user_id, *, remote_applicant_instance_id, within_days
+    ):
+        return (space_id, user_id, remote_applicant_instance_id) in self.approved
 
     async def get_live_invite_token(self, token):
         """Read-only peek — mirrors the repo's "live" predicate exactly and

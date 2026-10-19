@@ -9,6 +9,8 @@ vi.mock('preact-iso', () => ({
 }))
 vi.mock('@/api', () => ({ api: { get: vi.fn(), post: vi.fn() } }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
+const confirmMock = vi.fn()
+vi.mock('@/components/confirm', () => ({ confirmDialog: (...a: unknown[]) => confirmMock(...a) }))
 vi.mock('@/components/LocalAreaMap', () => ({ LocalAreaMap: () => <div data-testid="area-map" /> }))
 vi.mock('@/baseUrl', () => ({
   basePath: '/',
@@ -402,7 +404,7 @@ describe('SpacePublicDetailPage — local community', () => {
     currentUser.value = null
   })
 
-  const LC = (in_area: boolean | null) => ({ radius_km: 5, in_area })
+  const LC = { radius_km: 5 }
 
   it('a space this household hosts: the exact area, a map and "In your area"', async () => {
     home({ lat: 47.392, lon: 8.56 })
@@ -415,61 +417,65 @@ describe('SpacePublicDetailPage — local community', () => {
     expect(getByText('Join space')).toBeTruthy()
   })
 
-  it('a paired household\'s community: no map, no centre — the radius and the host\'s verdict', async () => {
-    home({ lat: 47.392, lon: 8.56 })
-    cacheDirectoryEntries([entry({
-      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_community: LC(true),
-      home_shared_with_host: true,
-    })])
-    const { getByText, queryByTestId, getByTestId, container } = await renderPage()
-    await waitFor(() => getByText('In your area'))
-    expect(getByTestId('local-area-where').textContent)
-      .toBe('Local community · within 5 km of the host’s chosen centre')
-    expect(queryByTestId('area-map')).toBeNull()
-    expect(container.textContent).not.toMatch(/°\s*[NSEW]/)
-    expect(getByText('Join space')).toBeTruthy()
-  })
-
-  it('near the edge: unsure, offers the join and says the host will check', async () => {
-    home({ lat: 47.392, lon: 8.56 })
-    cacheDirectoryEntries([entry({
-      host_instance_id: 'iid-b',
-      local_community: { radius_km: 5, in_area: null, area_edge: true },
-      home_shared_with_host: true,
-    })])
+  it('our own community near the edge: "an admin will review your request", the join offered', async () => {
+    // ~5 km east of the centre: its ~1 km cell straddles the rim.
+    home({ lat: 47.3769, lon: 8.6082 })
+    cacheDirectoryEntries([entry({ host_instance_id: 'local', local_area: AREA })])
     const { getByText, container } = await renderPage()
-    await waitFor(() => getByText('Near the edge — ask to join and the host will check'))
+    await waitFor(() => getByText('Near the edge — an admin will review your request'))
     expect(getByText('Join space')).toBeTruthy()
-    expect(container.textContent).toContain('near the edge of this area')
     expect(container.querySelector('.sh-local-area-badge--edge')).toBeTruthy()
   })
 
-  it('outside: says so and offers no join the host would refuse', async () => {
+  it('a paired household\'s community: no map, no centre, no verdict — the radius and how the check works', async () => {
+    home({ lat: 47.392, lon: 8.56 })
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_community: LC,
+    })])
+    const { getByText, queryByTestId, getByTestId, container } = await renderPage()
+    await waitFor(() => getByText('Join space'))
+    expect(getByTestId('local-area-where').textContent)
+      .toBe('Local community · within 5 km of the host’s chosen centre')
+    expect(queryByTestId('area-map')).toBeNull()
+    expect(queryByTestId('local-area-badge')).toBeNull()
+    expect(container.textContent).not.toMatch(/°\s*[NSEW]/)
+    expect(getByTestId('local-area-next').textContent).toContain('approximate location (about 1 km)')
+  })
+
+  it('joining it asks first, and sends the location only on a yes', async () => {
+    home({ lat: 47.392, lon: 8.56 })
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_community: LC,
+    })])
+    const { getByText } = await renderPage()
+    await waitFor(() => getByText('Join space'))
+    confirmMock.mockResolvedValueOnce(false)
+    fireEvent.click(getByText('Join space'))
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1))
+    expect(String(confirmMock.mock.calls[0][0])).toBe(
+      'To check you live in the area, your approximate location (about 1 km) is sent to '
+      + 'Keller household with this request. Keller household only uses it to decide and '
+      + "doesn't keep it.",
+    )
+    expect(api.post).not.toHaveBeenCalled()
+    confirmMock.mockResolvedValueOnce(true)
+    fireEvent.click(getByText('Join space'))
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1))
+    expect(api.post).toHaveBeenCalledWith(
+      '/api/public_spaces/sp-1/join-request',
+      { host_instance_id: 'iid-b', share_location: true },
+    )
+  })
+
+  it('outside our own community: says so and offers no join that would be refused', async () => {
     home({ lat: 46.9481, lon: 7.4474 })
-    cacheDirectoryEntries([entry({ host_instance_id: 'iid-b', local_community: LC(false), home_shared_with_host: true })])
+    cacheDirectoryEntries([entry({ host_instance_id: 'local', local_area: AREA })])
     const { getByText, queryByText, container } = await renderPage()
     await waitFor(() => getByText('Outside your area'))
     expect(queryByText('Join space')).toBeNull()
     expect(container.textContent).toContain("Your household's home is outside this area")
     // Not the "ask for an invite link" line — the area is the reason.
     expect(container.querySelector('.sh-space-public__invite-note')).toBeNull()
-  })
-
-  it('home not shared with the host: names the host and points an admin at Connections', async () => {
-    home({ lat: 47.392, lon: 8.56 })
-    currentUser.value = { user_id: 'u1', username: 'u', display_name: 'U', is_admin: true } as typeof currentUser.value
-    cacheDirectoryEntries([entry({
-      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_community: LC(null),
-      home_shared_with_host: false,
-    })])
-    const { getByText, queryByText } = await renderPage()
-    await waitFor(() => getByText('Share your home with Keller household to check'))
-    expect(queryByText('Join space')).toBeNull()
-    const link = getByText('Open Connections') as HTMLAnchorElement
-    // Ingress: the href goes through addBase (mocked to identity here).
-    expect(link.getAttribute('href')).toBe('/connections')
-    fireEvent.click(link)
-    expect(routeMock).toHaveBeenCalledWith('/connections')
   })
 
   it('no home set for this household: says so', async () => {

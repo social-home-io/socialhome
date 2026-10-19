@@ -330,7 +330,7 @@ from .services.household_zone_service import HouseholdZoneService
 from .services.household_zone_sync import HouseholdZoneSync
 from .services.legacy_album_deletes import LegacyAlbumDeletes
 from .services.link_preview_service import LinkPreviewService
-from .services.local_community import LocalAreaBudget, derive_edge_key
+from .services.local_community import LocalAreaBudget
 from .services.map_tile_service import MapTileService
 from .services.media_orphan_sweep_service import MediaOrphanSweepService
 from .services.media_transcode_service import MediaTranscodeService
@@ -1572,9 +1572,7 @@ def _wire_federation_stack(
     SpaceInviteInboundHandlers(
         bus=bus,
         space_repo=space_repo,
-        # A local community: the applicant household's shared home, and
-        # the applicant's daily check budget.
-        federation_repo=federation_repo,
+        # A local community: the applicant's daily check budget.
         local_area_budget=local_area_budget,
     ).attach_to(federation_service)
     PeerDirectoryHandler(peer_space_directory_repo).attach_to(federation_service)
@@ -1586,9 +1584,7 @@ def _wire_federation_stack(
         icon_repo=space_icon_repo,
         space_crypto_service=space_crypto,
         remote_location_repo=space_remote_location_repo,
-        # A local community: the accepting household's shared home, and
-        # the accepting person's daily check budget.
-        federation_repo=federation_repo,
+        # A local community: the accepting person's daily check budget.
         local_area_budget=local_area_budget,
     )
     private_invite_handler.attach_to(federation_service)
@@ -1941,10 +1937,6 @@ def _wire_federation_stack(
         federation_service=federation_service,
         federation_repo=federation_repo,
         space_repo=space_repo,
-        # The local-community "unsure" band's secret shift — HKDF from
-        # the identity seed, never stored or sent.
-        edge_key=derive_edge_key(identity.identity_seed),
-        budget=local_area_budget,
     )
     peer_directory_service.wire()
     app[K.peer_directory_service_key] = peer_directory_service
@@ -2577,8 +2569,8 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── Repositories ─────────────────────────────────────────────────────
     repos = _build_repos(db)
-    #: The local-community daily check budgets (SQLite, migration 0109) —
-    #: one instance shared by every seat path and the directory verdicts.
+    #: The local-community daily join budgets (SQLite, migration 0109) —
+    #: one instance shared by every seat path.
     local_area_budget = LocalAreaBudget(repos.local_area_attempt)
     # Local aliases so the rest of the wiring stays readable.
     user_repo = repos.user

@@ -21,18 +21,22 @@ from ...domain.events import (
     RemoteJoinRequestApproved,
     RemoteJoinRequestDenied,
     RemoteSpaceInviteReceived,
-    RemoteSpaceJoinRequestReceived,
 )
 from ...domain.federation import FederationEventType
+from ...domain.local_community import parse_join_location
 from ...domain.space import PUBLIC_SPACE_TIERS, JoinMode, SpacePermissionError
 from ...infrastructure.event_bus import EventBus
-from ..local_community import LocalAreaBudget, require_local_eligibility
+from ..local_community import (
+    LocalAreaBudget,
+    file_remote_join_request,
+    pending_join_request_id,
+    require_local_eligibility,
+)
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
     from ...domain.space import Space
     from ...federation.federation_service import FederationService
-    from ...repositories.federation_repo import AbstractFederationRepo
     from ...repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
@@ -43,7 +47,6 @@ class SpaceInviteInboundHandlers:
 
     __slots__ = (
         "_bus",
-        "_federation_repo",
         "_local_area_budget",
         "_own_instance_id",
         "_space_repo",
@@ -54,7 +57,6 @@ class SpaceInviteInboundHandlers:
         *,
         bus: EventBus,
         space_repo: AbstractSpaceRepo,
-        federation_repo: AbstractFederationRepo | None = None,
         local_area_budget: LocalAreaBudget | None = None,
     ) -> None:
         self._bus = bus
@@ -62,10 +64,6 @@ class SpaceInviteInboundHandlers:
         #: The local-community daily check budget an applicant spends
         #: (``None`` → a request to a local community is refused).
         self._local_area_budget = local_area_budget
-        #: Reads the applicant household's shared home for a local
-        #: community. ``None`` → every request to a local community is
-        #: refused (fail closed).
-        self._federation_repo = federation_repo
         #: Set by :meth:`attach_to`; until then no space is "ours", so a
         #: join request is refused (fail closed).
         self._own_instance_id = ""
@@ -162,29 +160,38 @@ class SpaceInviteInboundHandlers:
             )
             return
         assert space is not None
-        if await self._has_pending_request(space_id, event.from_instance, user_id):
+        if (
+            await pending_join_request_id(
+                self._space_repo,
+                space_id,
+                user_id,
+                household_instance_id=event.from_instance,
+            )
+            is not None
+        ):
             # Asked again while the first request waits (a retry): it is
             # already in front of the admins. No second row, and no second
-            # local-community check — that would be one more inside /
-            # outside answer for free.
+            # local-community check.
             log.debug(
                 "SPACE_JOIN_REQUEST from %s for %s: already pending",
                 event.from_instance,
                 space_id,
             )
             return
-        # A local community: the applicant household's shared home must be
-        # inside the area — never a request from outside (or from a
-        # household whose home we don't know) in front of the admins. The
-        # applicant's SPA already showed why; approval re-checks.
+        # A local community: decided on the applicant household's home
+        # rounded to ~1 km, which the request carries (``join_location``,
+        # sent with the person's consent; never stored — only the verdict).
+        # Never a request from outside (or one without the location) in
+        # front of the admins; inside and near the edge are filed alike, and
+        # the applicant hears nothing either way until an admin answers.
         try:
-            await require_local_eligibility(
+            verdict = await require_local_eligibility(
                 space,
                 household_instance_id=event.from_instance,
                 own_instance_id=self._own_instance_id,
-                federation_repo=self._federation_repo,
-                seeker_user_id=user_id,
+                join_point=parse_join_location(event.payload.get("join_location")),
                 budget=self._local_area_budget,
+                seeker_user_id=user_id,
             )
         except SpacePermissionError, RuntimeError:
             log.info(
@@ -197,29 +204,16 @@ class SpaceInviteInboundHandlers:
         message = event.payload.get("message")
         applicant_pk = event.payload.get("applicant_pk")
         request_id = event.payload.get("request_id")
-        await self._space_repo.save_join_request(
+        await file_remote_join_request(
+            self._space_repo,
+            self._bus,
             space_id=space_id,
+            household_instance_id=event.from_instance,
             user_id=user_id,
+            area_verdict=verdict,
+            applicant_pk=str(applicant_pk) if applicant_pk else None,
             message=str(message) if message else None,
-            remote_applicant_instance_id=event.from_instance,
-            remote_applicant_pk=(str(applicant_pk) if applicant_pk else None),
             request_id=str(request_id) if request_id else None,
-        )
-        await self._bus.publish(
-            RemoteSpaceJoinRequestReceived(
-                space_id=space_id,
-                requester_user_id=user_id,
-            )
-        )
-
-    async def _has_pending_request(
-        self, space_id: str, instance_id: str, user_id: str
-    ) -> bool:
-        """Does ``user_id`` of ``instance_id`` already wait on ``space_id``?"""
-        return any(
-            row.get("user_id") == user_id
-            and row.get("remote_applicant_instance_id") == instance_id
-            for row in await self._space_repo.list_pending_join_requests(space_id)
         )
 
     def _takes_remote_join_requests(self, space: Space | None) -> bool:

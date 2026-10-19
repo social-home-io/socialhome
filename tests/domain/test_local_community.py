@@ -3,27 +3,29 @@
 from __future__ import annotations
 
 import math
+import random
 
 import pytest
 
 from socialhome.domain.local_community import (
+    JOIN_LOCATION_PRECISION_DP,
     MAX_LOCAL_AREA_RADIUS_KM,
     MIN_LOCAL_AREA_RADIUS_KM,
     Eligibility,
     LocalArea,
     PeerLocalCommunity,
-    directory_verdict,
-    edge_band_km,
-    edge_cell,
-    edge_max_shift_km,
-    eligibility,
+    coarse_join_point,
+    join_location_wire,
+    join_verdict,
     local_area_of,
     local_area_wire,
     local_community_wire,
+    parse_join_location,
     parse_local_community_wire,
     validate_local_area,
 )
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.domain.zone_geo import haversine_m
 
 ZURICH = (47.3769, 8.5417)
 
@@ -105,202 +107,133 @@ def test_a_pin_without_a_radius_is_no_area():
     assert local_area_of(_space(lon=None)) is None
 
 
-# ── eligibility ─────────────────────────────────────────────────────────
+# ── the join's coarse point ─────────────────────────────────────────────
 
 
-def test_a_home_inside_the_radius_is_eligible():
-    area = LocalArea(ZURICH[0], ZURICH[1], 5.0)
-    # ~2.2 km north-east of the centre.
-    assert eligibility(area, (47.3920, 8.5600)) is Eligibility.INSIDE
+def test_the_join_precision_is_exactly_two_decimals():
+    """~1.1 km: a part of town, never a house or a street."""
+    assert JOIN_LOCATION_PRECISION_DP == 2
+    assert coarse_join_point(47.376_912_3, 8.541_749_9) == (47.38, 8.54)
+    assert join_location_wire((47.376_912_3, -8.546)) == {"lat": 47.38, "lon": -8.55}
 
 
-def test_the_centre_itself_and_the_rim_are_inside():
-    area = LocalArea(0.0, 0.0, 1.0)
-    assert eligibility(area, (0.0, 0.0)) is Eligibility.INSIDE
-    # 1 km along the equator is ~0.008993° of longitude.
-    assert eligibility(area, (0.0, 0.0089)) is Eligibility.INSIDE
-    assert eligibility(area, (0.0, 0.0091)) is Eligibility.OUTSIDE
+@pytest.mark.parametrize(
+    "raw,point",
+    [
+        ({"lat": 47.38, "lon": 8.54}, (47.38, 8.54)),
+        # A sender that sent more is never read more precisely.
+        ({"lat": 47.376_912_3, "lon": 8.541_749_9}, (47.38, 8.54)),
+        ({"lat": 0, "lon": -0.001}, (0.0, 0.0)),
+    ],
+)
+def test_a_received_point_is_rounded_again(raw, point):
+    assert parse_join_location(raw) == point
 
 
-def test_a_home_outside_the_radius_is_refused():
-    area = LocalArea(ZURICH[0], ZURICH[1], 5.0)
-    # Bern is ~95 km away.
-    assert eligibility(area, (46.9481, 7.4474)) is Eligibility.OUTSIDE
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "47.38,8.54",
+        [],
+        {},
+        {"lat": 47.38},
+        {"lat": "47.38", "lon": 8.54},
+        {"lat": True, "lon": 8.54},
+        {"lat": 91, "lon": 8.54},
+        {"lat": 47.38, "lon": 181},
+        {"lat": math.nan, "lon": 8.54},
+    ],
+)
+def test_a_malformed_point_is_no_point(raw):
+    assert parse_join_location(raw) is None
 
 
-def test_an_unknown_home_is_its_own_answer():
-    area = LocalArea(ZURICH[0], ZURICH[1], 5.0)
-    assert eligibility(area, None) is Eligibility.HOME_UNKNOWN
+def _east_km(km: float) -> tuple[float, float]:
+    """The point ``km`` east of ZURICH on its parallel."""
+    per_deg = 111.19492664455873 * math.cos(math.radians(ZURICH[0]))
+    return ZURICH[0], ZURICH[1] + km / per_deg
+
+
+AREA = LocalArea(ZURICH[0], ZURICH[1], 5.0)
+
+
+def test_the_centre_is_inside():
+    assert join_verdict(AREA, ZURICH) is Eligibility.INSIDE
+
+
+def test_well_inside_and_well_outside():
+    assert join_verdict(AREA, _east_km(2.0)) is Eligibility.INSIDE
+    assert join_verdict(AREA, _east_km(8.0)) is Eligibility.OUTSIDE
+    assert join_verdict(AREA, (46.9481, 7.4474)) is Eligibility.OUTSIDE  # Bern
+
+
+@pytest.mark.parametrize("km", [4.95, 5.0, 5.3])
+def test_a_cell_straddling_the_rim_is_the_edge(km):
+    assert join_verdict(AREA, _east_km(km)) is Eligibility.EDGE
+
+
+def test_the_verdict_holds_for_every_home_in_the_cell():
+    """Inside means every home that rounds to the point is inside; outside
+    means none is: the host never decides on more than the ~1 km cell."""
+    rng = random.Random(7)
+    seen = set()
+    for _ in range(3000):
+        home = (
+            ZURICH[0] + rng.uniform(-0.08, 0.08),
+            ZURICH[1] + rng.uniform(-0.12, 0.12),
+        )
+        verdict = join_verdict(AREA, coarse_join_point(*home))
+        seen.add(verdict)
+        inside = haversine_m(AREA.lat, AREA.lon, *home) <= AREA.radius_km * 1000
+        if verdict is Eligibility.INSIDE:
+            assert inside
+        elif verdict is Eligibility.OUTSIDE:
+            assert not inside
+    assert seen == set(Eligibility)
+
+
+def test_moving_a_home_within_its_cell_changes_nothing():
+    a, b = (47.3751, 8.6049), (47.3849, 8.5951)
+    assert coarse_join_point(*a) == coarse_join_point(*b)
+    assert join_verdict(AREA, a) is join_verdict(AREA, b)
+
+
+def test_the_verdict_works_across_the_antimeridian():
+    area = LocalArea(0.0, 179.99, 5.0)
+    assert join_verdict(area, (0.0, -179.99)) is not Eligibility.OUTSIDE
+    assert join_verdict(area, (0.0, 179.0)) is Eligibility.OUTSIDE
 
 
 # ── wire shapes ─────────────────────────────────────────────────────────
 
 
 def test_the_api_shape_names_the_centre():
-    """Only the hosting household's own API carries the centre."""
-    area = LocalArea(47.3769, 8.5417, 5.0)
-    assert local_area_wire(area) == {"lat": 47.3769, "lon": 8.5417, "radius_km": 5.0}
-
-
-@pytest.mark.parametrize(
-    "verdict,in_area",
-    [
-        (Eligibility.INSIDE, True),
-        (Eligibility.OUTSIDE, False),
-        (Eligibility.HOME_UNKNOWN, None),
-    ],
-)
-def test_the_directory_shape_carries_no_coordinates(verdict, in_area):
-    """A paired household learns the radius and the host's verdict for
-    ITS OWN home — never the centre."""
-    wire = local_community_wire(LocalArea(47.3769, 8.5417, 5.0), verdict)
-    assert wire == {
-        "local_community": True,
+    assert local_area_wire(AREA) == {
+        "lat": ZURICH[0],
+        "lon": ZURICH[1],
         "radius_km": 5.0,
-        "in_area": in_area,
-        "area_edge": False,
     }
-    assert not {"lat", "lon", "latitude", "longitude", "local_area"} & set(wire)
 
 
-@pytest.mark.parametrize("in_area", [True, False, None])
-def test_directory_shape_round_trip(in_area):
-    wire = {"local_community": True, "radius_km": 2.0, "in_area": in_area}
-    assert parse_local_community_wire(wire) == PeerLocalCommunity(2.0, in_area)
+def test_the_directory_shape_is_the_radius_only():
+    wire = local_community_wire(AREA)
+    assert wire == {"local_community": True, "radius_km": 5.0}
+    assert parse_local_community_wire(wire) == PeerLocalCommunity(5.0)
 
 
-def test_near_the_edge_is_unsure_on_the_wire():
-    """Near the rim the host says neither yes nor no: ``in_area: null``
-    with ``area_edge: true`` — a receiver that does not know ``area_edge``
-    reads it as unknown, never as a wrong yes or no."""
-    wire = local_community_wire(LocalArea(47.3769, 8.5417, 5.0), Eligibility.EDGE)
-    assert wire == {
-        "local_community": True,
-        "radius_km": 5.0,
-        "in_area": None,
-        "area_edge": True,
-    }
-    assert parse_local_community_wire(wire) == PeerLocalCommunity(
-        5.0, None, area_edge=True
-    )
-
-
-@pytest.mark.parametrize("in_area", [True, False])
-def test_an_edge_flag_beside_a_verdict_is_ignored(in_area):
-    """Unambiguous: ``area_edge`` only ever stands beside ``in_area:
-    null``; a sender that says both gets its yes / no read, not the flag."""
+def test_a_sent_verdict_or_centre_is_ignored_on_receipt():
     got = parse_local_community_wire(
-        {"local_community": True, "radius_km": 5, "in_area": in_area, "area_edge": True}
-    )
-    assert got == PeerLocalCommunity(5.0, in_area, area_edge=False)
-
-
-@pytest.mark.parametrize("bad", ["yes", 1, None, []])
-def test_a_non_boolean_edge_flag_is_no_edge(bad):
-    got = parse_local_community_wire(
-        {"local_community": True, "radius_km": 5, "in_area": None, "area_edge": bad}
-    )
-    assert got == PeerLocalCommunity(5.0, None, area_edge=False)
-
-
-# ── the "unsure" band of the directory verdict ──────────────────────────
-
-
-@pytest.mark.parametrize(
-    "radius,band", [(0.5, 0.25), (2.0, 0.25), (2.5, 0.25), (5.0, 0.5), (50.0, 5.0)]
-)
-def test_the_band_is_a_tenth_of_the_radius_and_at_least_250_m(radius, band):
-    assert edge_band_km(radius) == pytest.approx(band)
-
-
-#: Kilometres per degree on the haversine sphere.
-_KM_PER_DEG = 111.19492664455873
-
-
-def _east_km(km: float, north_km: float = 0.0) -> tuple[float, float]:
-    """A point ``km`` east (and ``north_km`` north) of (0, 0) on the equator."""
-    return (north_km / _KM_PER_DEG, km / _KM_PER_DEG)
-
-
-@pytest.mark.parametrize(
-    "km,verdict",
-    [
-        (0.0, Eligibility.INSIDE),
-        (4.30, Eligibility.INSIDE),
-        (4.80, Eligibility.EDGE),
-        (5.00, Eligibility.EDGE),
-        (5.20, Eligibility.EDGE),
-        (5.70, Eligibility.OUTSIDE),
-        (9.00, Eligibility.OUTSIDE),
-    ],
-)
-def test_near_the_rim_the_directory_verdict_is_unsure(km, verdict):
-    area = LocalArea(0.0, 0.0, 5.0)  # band 0.5 km: cells 0.5 km, unsure ±0.625
-    assert directory_verdict(area, _east_km(km), shift_km=0.0) is verdict
-
-
-def test_the_directory_verdict_never_says_a_wrong_yes_or_no():
-    """For any home and any shift the host may draw, "inside" is truly
-    inside and "outside" truly outside — the coarsening only ever adds
-    "unsure"."""
-    for radius in (0.5, 2.0, 5.0, 25.0):
-        area = LocalArea(0.0, 0.0, radius)
-        band = edge_band_km(radius)
-        for i in range(-80, 81):
-            for j in (-0.37, 0.0, 0.11, 0.49):
-                km = radius + i * band / 20
-                home = _east_km(km, north_km=j * band)
-                exact = eligibility(area, home)
-                for shift in (-band, -band / 2, 0.0, band / 8, band / 2, band):
-                    got = directory_verdict(area, home, shift_km=shift)
-                    if got is not Eligibility.EDGE:
-                        assert got is exact, (radius, km, j, shift)
-
-
-def test_every_home_in_a_cell_gets_the_same_answer():
-    """The verdict is the cell's, not the home's: stepping a home within a
-    cell learns nothing."""
-    area = LocalArea(0.0, 0.0, 5.0)
-    cell = edge_band_km(5.0)
-    for i in range(30):
-        start = 4.0 + i * cell
-        answers = {
-            directory_verdict(area, _east_km(start + f * cell), shift_km=0.1)
-            for f in (0.01, 0.3, 0.6, 0.99)
+        {
+            "local_community": True,
+            "radius_km": 5,
+            "in_area": True,
+            "area_edge": True,
+            "lat": 47.0,
+            "lon": 8.0,
         }
-        assert len(answers) == 1
-
-
-def test_a_shift_beyond_its_bound_is_clamped():
-    """The shift is the host's secret, but it can never slide the band so
-    far that a wrong yes or no becomes possible."""
-    area = LocalArea(0.0, 0.0, 5.0)
-    huge = directory_verdict(area, _east_km(4.6), shift_km=99)
-    capped = directory_verdict(area, _east_km(4.6), shift_km=edge_max_shift_km(5.0))
-    assert huge is capped
-
-
-def test_an_unknown_home_stays_unknown_in_the_directory():
-    area = LocalArea(0.0, 0.0, 5.0)
-    assert directory_verdict(area, None, shift_km=0.0) is Eligibility.HOME_UNKNOWN
-
-
-def test_the_seat_check_itself_keeps_the_exact_distance():
-    """``eligibility`` (what every seat path runs) has no band and no
-    grid: just inside is inside, just outside is outside."""
-    area = LocalArea(0.0, 0.0, 5.0)
-    assert eligibility(area, _east_km(4.99)) is Eligibility.INSIDE
-    assert eligibility(area, _east_km(5.01)) is Eligibility.OUTSIDE
-
-
-def test_the_grid_is_absolute_and_a_band_wide():
-    """Cells never depend on the centre (the grid would point at it)."""
-    near = LocalArea(0.0, 0.0, 5.0)
-    moved = LocalArea(0.0123, 0.0456, 5.0)
-    home = _east_km(4.80)
-    assert edge_cell(near, home) == edge_cell(moved, home)
-    assert edge_cell(near, _east_km(4.80)) == edge_cell(near, _east_km(4.81))
-    assert edge_cell(near, _east_km(4.80)) != edge_cell(near, _east_km(5.10))
+    )
+    assert got == PeerLocalCommunity(5.0)
 
 
 @pytest.mark.parametrize(
@@ -326,16 +259,6 @@ def test_a_malformed_directory_entry_is_no_local_community(raw):
     assert parse_local_community_wire(raw) is None
 
 
-@pytest.mark.parametrize("bad", ["yes", 1, 0, [], {}])
-def test_a_non_boolean_verdict_reads_as_unknown(bad):
-    """Only ``true`` / ``false`` are verdicts; anything else is "the host
-    does not know" — the host checks again on every seat anyway."""
-    got = parse_local_community_wire(
-        {"local_community": True, "radius_km": 5, "in_area": bad}
-    )
-    assert got == PeerLocalCommunity(5.0, None)
-
-
 def test_the_radius_is_rounded_again_on_receipt():
     got = parse_local_community_wire({"local_community": True, "radius_km": 2.345})
-    assert got == PeerLocalCommunity(2.3, None)
+    assert got == PeerLocalCommunity(2.3)

@@ -138,7 +138,12 @@ from ..domain.federation_capabilities import (
 )
 from ..domain.gfs_server import SignedGfsServerList
 from ..domain.link_preview import card_survives_edit
-from ..domain.local_community import LocalArea, local_area_of, validate_local_area
+from ..domain.local_community import (
+    Eligibility,
+    LocalArea,
+    local_area_of,
+    validate_local_area,
+)
 from ..domain.media_constraints import (
     SPACE_COVER_MAX_DIMENSION,
     SPACE_COVER_SNAPSHOT_MAX_BYTES,
@@ -186,9 +191,11 @@ from ..domain.space import (
     InviteOnlyError,
     JoinMode,
     JoinOwner,
+    JoinRequestSentError,
     LocalAreaDelegatedError,
     LocalAreaPublicOnlyError,
     LocalAreaUnavailableError,
+    LocationRequiredError,
     OwnerStillActiveError,
     OwnerTransferFollowerError,
     OwnerTransferNotLocalError,
@@ -246,7 +253,14 @@ from ..repositories.user_repo import AbstractUserRepo
 from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
-from .local_community import LocalAreaBudget, require_local_eligibility
+from .local_community import (
+    LocalAreaBudget,
+    hosted_local_area,
+    join_location_for,
+    own_home_point,
+    pending_join_request_id,
+    require_local_eligibility,
+)
 from .protection_gate import ProtectionGateMixin
 from .space_authority_pin import (
     apply_authority_cert,
@@ -985,7 +999,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
 
         ``lat`` / ``lon`` / ``radius_km`` make a PUBLIC space a local
         community (``domain/local_community``): a household joins only while
-        its shared home lies inside the circle. All three or none; any other
+        its home (rounded to ~1 km and carried by the join) lies inside. All three or none; any other
         tier with an area is a 422 ``LOCAL_AREA_PUBLIC_ONLY``. The centre is
         truncated to 4 dp before it is stored. The creator is seated as owner
         whatever their own home — creating is not joining.
@@ -2273,25 +2287,71 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         return pin
 
     async def require_local_seat(
-        self,
-        space: Space,
-        instance_id: str,
-        *,
-        seeker_user_id: str | None = None,
-    ) -> None:
-        """The local-community check for one seat-granting path of ours
-        (:func:`~socialhome.services.local_community.require_local_eligibility`)
-        — ``instance_id`` is the joining household (our own for a local
-        user); ``seeker_user_id`` the person who started it (their daily
-        budget is spent), ``None`` for an admin's step."""
-        await require_local_eligibility(
+        self, space: Space, *, seeker_user_id: str | None
+    ) -> Eligibility | None:
+        """The local-community check for a LOCAL user's seat
+        (:func:`~socialhome.services.local_community.require_local_eligibility`),
+        on this household's own home rounded to ~1 km. ``seeker_user_id`` —
+        the person who started it (their daily budget is spent); ``None``
+        for an admin's step (an edge home then proceeds: the admin
+        decided). ``None`` back: not a local community we host."""
+        if hosted_local_area(space, self._own_instance_id) is None:
+            return None
+        return await require_local_eligibility(
             space,
-            household_instance_id=instance_id,
+            household_instance_id=self._own_instance_id or "",
             own_instance_id=self._own_instance_id,
-            federation_repo=self._federation_repo,
-            seeker_user_id=seeker_user_id,
+            join_point=await own_home_point(self._federation_repo),
             budget=self._local_area_budget,
+            seeker_user_id=seeker_user_id,
         )
+
+    async def _seat_or_review(self, space: Space, user_id: str) -> None:
+        """A local person's step that would seat them without asking anyone
+        (a follow, an invite accept, an invite link) in a local community
+        we host. Proceeds when the home is clearly inside; near the edge it
+        becomes a join request for the admins instead
+        (:class:`JoinRequestSentError`, worded like any request) — as does
+        asking again while a request is pending (no second check)."""
+        if hosted_local_area(space, self._own_instance_id) is None:
+            return
+        pending = await pending_join_request_id(
+            self._spaces, space.id, user_id, household_instance_id=None
+        )
+        if pending is not None:
+            raise JoinRequestSentError(params={"request_id": pending})
+        verdict = await self.require_local_seat(space, seeker_user_id=user_id)
+        if verdict is Eligibility.EDGE:
+            rid = await self._file_local_join_request(
+                space.id, user_id, area_verdict=verdict
+            )
+            raise JoinRequestSentError(params={"request_id": rid})
+
+    async def _file_local_join_request(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        message: str | None = None,
+        area_verdict: Eligibility | None = None,
+    ) -> str:
+        """File a local user's pending join request (``area_verdict`` —
+        a local community's inside / edge; the location is never kept)."""
+        request_id = await self._spaces.save_join_request(
+            space_id,
+            user_id,
+            message=message,
+            area_verdict=area_verdict.value if area_verdict is not None else None,
+        )
+        await self._bus.publish(
+            SpaceJoinRequested(
+                space_id=space_id,
+                user_id=user_id,
+                request_id=request_id,
+                message=message,
+            )
+        )
+        return request_id
 
     async def update_config(
         self,
@@ -2353,8 +2413,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         ):
             await self._require_owner(space, actor_username)
             # A delegated admin's household seats people without the host's
-            # local-community check (it holds neither the area nor the
-            # joiners' shared homes), so the two never go together.
+            # local-community check (it holds no area, and joins carry their
+            # location to the host only), so the two never go together.
             if features.delegated_admin_authority and local_area_of(space):
                 raise LocalAreaDelegatedError()
         # SECURITY: so is turning public readability on or off.
@@ -3139,8 +3199,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # §CP.F1 — block underage minors when CP is wired in.
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
-        # A local community: no override for an admin's direct add either.
-        await self.require_local_seat(space, self._own_instance_id or "")
+        # A local community: no override for an admin's direct add when our
+        # home is outside; near the edge the admin's add is the decision.
+        await self.require_local_seat(space, seeker_user_id=None)
         actor = await self._users.get(actor_username)
         return await self._seat_local_member(
             space,
@@ -3308,9 +3369,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # the accept prompt for a space they couldn't actually join.
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
-        # A local community: refused up front, so nobody is invited into a
-        # space they could not accept (re-checked at acceptance).
-        await self.require_local_seat(space, self._own_instance_id or "")
+        # A local community: refused up front when our home is outside, so
+        # nobody is invited into a space they could not accept (checked
+        # again at acceptance).
+        await self.require_local_seat(space, seeker_user_id=None)
         # Idempotent re-issue: look for an existing pending row.
         existing = await self._spaces.list_pending_local_invites_for(user_id)
         for row in existing:
@@ -3427,10 +3489,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space.id, user_id)
         # A local community: the area or our home may have changed since
-        # the invite went out — the invite stays pending.
-        await self.require_local_seat(
-            space, self._own_instance_id or "", seeker_user_id=user_id
-        )
+        # the invite went out — refused, or near the edge a join request for
+        # the admins; either way the invite stays pending.
+        await self._seat_or_review(space, user_id)
         member = SpaceMember(
             space_id=space.id,
             user_id=user_id,
@@ -6232,12 +6293,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 "delegated admin authority is not enabled for this space — "
                 "owner approval required",
             )
-        # A local community: the host refuses a household outside the area,
-        # or one whose home it does not know, before any invite goes out
-        # (re-checked when the accept arrives). A delegated admin elsewhere
-        # never reaches here for such a space: the area and delegation never
-        # go together, so its invite was forwarded above.
-        await self.require_local_seat(space, invitee_instance_id)
+        # A local community: the accept carries the invitee household's home
+        # rounded to ~1 km, with the person's consent, and is decided then
+        # (``PrivateInviteHandler._local_area_admits``) — the host knows no
+        # home of theirs before. A delegated admin elsewhere never reaches
+        # here for such a space: the area and delegation never go together,
+        # so its invite was forwarded above.
         actor = await self._users.get(actor_username)
         assert actor is not None
 
@@ -6344,6 +6405,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         *,
         token: str,
         user_id: str,
+        share_location: bool = False,
     ) -> None:
         """§D1b — invitee side: accept a cross-household private-space
         invite. Sends a SPACE_PRIVATE_INVITE_ACCEPT back to the host.
@@ -6366,9 +6428,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if invite is None:
             raise InviteExpiredError()
         async with self.seating_lock(str(invite["space_id"])):
-            await self._accept_remote_invite_locked(token=token, user_id=user_id)
+            await self._accept_remote_invite_locked(
+                token=token, user_id=user_id, share_location=share_location
+            )
 
-    async def _accept_remote_invite_locked(self, *, token: str, user_id: str) -> None:
+    async def _accept_remote_invite_locked(
+        self, *, token: str, user_id: str, share_location: bool
+    ) -> None:
         assert self._federation is not None
         invite = await self._spaces.get_invitation_by_token(token)
         if invite is None:
@@ -6430,6 +6496,16 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     "This invitation's proof of the space's owner no longer "
                     "holds — ask for a new invitation."
                 )
+        # A local community: the accept carries this household's home
+        # rounded to ~1 km — only once the person agreed (the SPA asks on
+        # ``LOCATION_REQUIRED`` and accepts again), and only to the host.
+        join_location: dict[str, float] | None = None
+        if opened is not None and isinstance(opened.meta.get("local_community"), dict):
+            join_location = await join_location_for(
+                self._federation_repo, share_location=share_location
+            )
+            if join_location is None:
+                raise LocationRequiredError(params={"whose": "host"})
         # Look up the accepting user so the ACCEPT envelope can carry
         # their human-readable name to the host (``get_by_user_id`` — the
         # host's roster otherwise shows the raw ``user_id``).
@@ -6445,6 +6521,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             "invitee_public_key": user_pk,
             "invitee_display_name": display,
         }
+        if join_location is not None:
+            # Sealed with the rest of the accept (direct: the pairwise
+            # envelope; mesh: SPACE_ROUTED end to end) — relays never see it.
+            accept_payload["join_location"] = join_location
         # A host we are not paired with reaches us only over the mesh and
         # holds no ``remote_instances`` row for us: tell it our version +
         # identity key (sealed end to end, origin-signed) so it can deliver
@@ -6711,8 +6791,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         user_id: str,
         issuer_instance_id: str | None = None,
         bootstrap: InviteBootstrapHint | None = None,
+        share_location: bool = False,
     ) -> dict:
         """Consume an invite token, possibly via a cross-instance round-trip.
+
+        ``share_location`` — the person agreed to send this household's
+        home, rounded to ~1 km, with the redeem: the issuer asked for it
+        (``LOCATION_REQUIRED``, the space is a local community) and the SPA
+        asked the person. Never sent without it; a local redeem needs none
+        (our own home is checked here).
 
         When ``issuer_instance_id`` is None or matches our own instance,
         falls through to the local :meth:`accept_invite_token` and
@@ -6750,6 +6837,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             viewer_user_id=user_id,
             issuer_instance_id=issuer_instance_id,
             bootstrap=bootstrap,
+            join_location=await join_location_for(
+                self._federation_repo, share_location=share_location
+            ),
         )
 
     async def accept_invite_token(
@@ -6793,16 +6883,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise InviteExpiredError()
         space_id = row["space_id"]
         seat = SpaceRole(row.get("role") or SpaceRole.MEMBER.value)
-        # A local community: an invite link is no override. Refused AFTER the
-        # consume (a dead or banned token answers as before, no oracle) and
-        # the use is handed back — the household may share its home and try
-        # the same link again.
+        # A local community: an invite link is no override. Refused (or,
+        # near the edge, turned into a join request for the admins) AFTER
+        # the consume — a dead or banned token answers as before, no oracle —
+        # and the use is handed back.
         hosted = await self._spaces.get(space_id)
         if hosted is not None:
             try:
-                await self.require_local_seat(
-                    hosted, self._own_instance_id or "", seeker_user_id=user_id
-                )
+                await self._seat_or_review(hosted, user_id)
             except SpacePermissionError:
                 await self._spaces.release_invite_token_use(token)
                 raise
@@ -6947,40 +7035,32 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise InviteOnlyError()
         if await self._spaces.is_banned(space_id, user_id):
             raise BannedFromSpaceError()
-        if space.join_mode is not JoinMode.OPEN:
-            # Asking again while a request is pending answers that request:
-            # no second row, and no second local-community check (it would
-            # be one more inside / outside answer for free).
-            for pending in await self._spaces.list_pending_join_requests(space_id):
-                if pending.get("user_id") == user_id and not pending.get(
-                    "remote_applicant_instance_id"
-                ):
-                    return str(pending["id"])
-        # A local community this household hosts: our home must be inside,
-        # for an open join and for a request alike (re-checked on approval).
-        await self.require_local_seat(
-            space, self._own_instance_id or "", seeker_user_id=user_id
-        )
+        # Asking again while a request is pending answers that request: no
+        # second row, and no second local-community check. An open space
+        # seats as before — unless it is a local community we host, where a
+        # pending request means its check sent the person to review.
+        if space.join_mode is not JoinMode.OPEN or (
+            hosted_local_area(space, self._own_instance_id) is not None
+        ):
+            pending = await pending_join_request_id(
+                self._spaces, space_id, user_id, household_instance_id=None
+            )
+            if pending is not None:
+                return pending
+        # A local community this household hosts: our home (rounded to
+        # ~1 km) must not be outside; near the edge even an open space files
+        # a request for the admins — answered exactly like any request.
+        verdict = await self.require_local_seat(space, seeker_user_id=user_id)
         if (
             space.join_mode is JoinMode.OPEN
             and space.owner_instance_id == self._own_instance_id
+            and verdict is not Eligibility.EDGE
         ):
             await self._join_open_space(space, user_id)
             return None
-        request_id = await self._spaces.save_join_request(
-            space_id,
-            user_id,
-            message=message,
+        return await self._file_local_join_request(
+            space_id, user_id, message=message, area_verdict=verdict
         )
-        await self._bus.publish(
-            SpaceJoinRequested(
-                space_id=space_id,
-                user_id=user_id,
-                request_id=request_id,
-                message=message,
-            )
-        )
-        return request_id
 
     async def _join_open_space(self, space: Space, user_id: str) -> None:
         """Seat a local user in an ``open`` space we host — the same seat
@@ -7133,14 +7213,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 row["space_id"],
                 row["user_id"],
             )
-        # A local community: re-checked at approve time (the area, or the
-        # applicant household's shared home, may have changed since the
-        # request was filed). Refused BEFORE "approved", so the request
-        # stays pending for the admin to deny; a remote applicant is
-        # checked once more when it redeems the token minted below.
-        await self.require_local_seat(
-            space, str(remote_instance or self._own_instance_id or "")
-        )
+        # A local community: the approval IS the decision (near the edge
+        # included) — nothing is re-checked, and the location the request
+        # carried was never kept. A remote applicant's redeem of the token
+        # minted below is seated on this approval
+        # (``has_approved_join_request``).
         await self._spaces.update_join_request_status(
             request_id,
             "approved",
@@ -7162,7 +7239,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 uses=1,
                 expires_at=expires,
             )
-            await self._federation.send_event(
+            # Direct when paired, else over the mesh (sealed end to end): an
+            # applicant whose request came from a link redeem or an invite
+            # accept may not be paired with us.
+            await self._federation.send_with_mesh_fallback(
                 to_instance_id=remote_instance,
                 event_type=FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
                 payload={
@@ -7231,7 +7311,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if r is not None:
             remote_instance = r.get("remote_applicant_instance_id")
             if remote_instance and self._federation is not None:
-                await self._federation.send_event(
+                await self._federation.send_with_mesh_fallback(
                     to_instance_id=remote_instance,
                     event_type=FederationEventType.SPACE_JOIN_REQUEST_DENIED,
                     payload={
@@ -7256,18 +7336,27 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         applicant_user_id: str,
         host_instance_id: str,
         message: str | None = None,
+        share_location: bool = False,
     ) -> str:
         """§D2 — applicant side: federate a join-request to a remote
         global-space host. The host must be a CONFIRMED peer. Persists
         a local pending-request row keyed by the generated
         ``request_id`` so :meth:`on_remote_join_request_approved` can
         match the inbound approval back to this user.
+
+        ``share_location`` — the person agreed to send this household's
+        home, rounded to ~1 km, with the request (a local community's host
+        decides on it; :func:`join_location_for`). Without it nothing about
+        the home leaves this household.
         """
         if self._federation is None or self._federation_repo is None:
             raise RuntimeError("federation not attached")
         peer = await self._federation_repo.get_instance(host_instance_id)
         if peer is None or peer.status is not PairingStatus.CONFIRMED:
             raise HostNotPairedError()
+        location = await join_location_for(
+            self._federation_repo, share_location=share_location
+        )
         # Persist locally so the inbound APPROVED handler can look up
         # the applicant_user_id; there's no host-side space row locally.
         # §Audit #11: route through ``save_join_request`` rather than
@@ -7287,6 +7376,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 "space_id": space_id,
                 "user_id": applicant_user_id,
                 "message": message,
+                # Only with consent, only to the host, inside the envelope's
+                # encrypted payload (§25.8.21) — never stored here.
+                **({"join_location": location} if location is not None else {}),
             },
             space_id=space_id,
         )
@@ -8187,10 +8279,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise SubscribeNotAllowedError()
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
-        # A local community: a follower lives inside the area too.
-        await self.require_local_seat(
-            space, self._own_instance_id or "", seeker_user_id=user_id
-        )
+        # A local community: a follower lives inside the area too; near the
+        # edge the follow becomes a join request for the admins.
+        await self._seat_or_review(space, user_id)
         # ORDER MATTERS: the GFS-side subscriber registration happens only
         # AFTER every local refusal (public-tier, ban, §CP.F1 age gate) has
         # passed. A locally-refused user must never end up on the GFS's
@@ -8751,6 +8842,12 @@ async def build_space_snapshot_for_federation(
     proof = await own_inviter_proof(space_repo, space, own_instance_id)
     if proof is not None:
         meta["inviter_proof"] = proof
+    # A local community we host: the radius only — never the centre — so an
+    # invitee's household knows its accept must carry the household's home
+    # rounded to ~1 km and asks the person first.
+    area = hosted_local_area(space, own_instance_id)
+    if area is not None:
+        meta["local_community"] = {"radius_km": area.radius_km}
     local_members = await space_repo.list_members(space.id)
     local_users = await user_repo.list_by_ids({m.user_id for m in local_members})
     name_by_id = {u.user_id: u.display_name for u in local_users}

@@ -831,7 +831,8 @@ export interface TaskListEntry {
 /** One row of `GET /api/household/spaces` (Browse › Your household): a
  *  space this household hosts that the caller may find. Never private. */
 /** A local community's area: centre (4 dp) + radius in km. Households
- *  join only while the home they share with the host lies inside. */
+ *  join only while their home (rounded to ~1 km, carried by the join with
+ *  consent) lies inside. */
 export interface LocalArea {
   lat: number
   lon: number
@@ -839,15 +840,10 @@ export interface LocalArea {
 }
 
 /** What a paired household learns about another household's local
- *  community: "within X km" and the host's verdict for our shared home
- *  (`null` = the host doesn't know it). The centre stays on the host. */
+ *  community: "within X km". No centre and no verdict — the host decides
+ *  on the ~1 km location a join carries. */
 export interface PeerLocalCommunity {
   radius_km: number
-  in_area: boolean | null
-  /** Near the rim the host is unsure (``in_area`` is then ``null``): it
-   *  decides on the exact distance when someone asks to join. Absent from
-   *  an older backend. */
-  area_edge?: boolean
 }
 
 export interface HouseholdSpaceRow {
@@ -916,11 +912,9 @@ export interface DirectoryEntry {
    *  this household hosts (its own people see the centre). */
   local_area?: LocalArea | null
   /** Paired rows only: a local community hosted by that household — its
-   *  radius and the host's verdict for OUR shared home. Never a centre. */
+   *  radius only. A join to it carries our home rounded to ~1 km, with the
+   *  person's consent. Never a centre. */
   local_community?: PeerLocalCommunity | null
-  /** Paired rows only: does this household share its home location with
-   *  the host? A local community's host reads only that. */
-  home_shared_with_host?: boolean
   /** Global rows only: the space's place pin, as its GFS lists it — the
    *  distance to it is worked out in this browser, for sorting only. */
   lat?: number | null

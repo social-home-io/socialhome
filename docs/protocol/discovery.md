@@ -2739,13 +2739,12 @@ publish it; GFS is authoritative only for the spaces that explicitly
 advertised to that specific GFS.
 
 An entry for a [local community](./local-communities.md) carries
-`local_community: true`, its `radius_km` and `in_area` — the host's verdict
-for the **receiving** household's shared home (`true` / `false`, `null` when
-it shares none) — to peers at v_59+. Never the centre: the snapshot is built
-per peer, so no household sees another's verdict. Older peers get the entry
-without the fields. The receiver re-validates the radius and drops a
-malformed one. Each entry is
-`{space_id, name, description, emoji, member_count, join_mode, category[, local_community, radius_km, in_area]}`.
+`local_community: true` and its `radius_km` to peers at v_59+ — never the
+centre and no verdict: whether a home is inside is the host's decision when a
+join arrives (the join carries the joiner's home rounded to ~1 km, with
+consent). Older peers get the entry without the fields. The receiver
+re-validates the radius and drops a malformed one. Each entry is
+`{space_id, name, description, emoji, member_count, join_mode, category[, local_community, radius_km]}`.
 
 ## Place pin (global spaces)
 

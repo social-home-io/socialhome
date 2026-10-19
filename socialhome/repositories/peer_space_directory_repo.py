@@ -34,9 +34,8 @@ class PeerSpaceDirectoryEntry:
     category: str = "general"
     updated_at: str | None = None
     cached_at: str | None = None
-    #: A local community (v_59): its radius and the host's verdict for THIS
-    #: household — never a centre. ``None`` when the space is not one or the
-    #: host is older.
+    #: A local community (v_59): its radius — never a centre, never a
+    #: verdict. ``None`` when the space is not one or the host is older.
     local_community: PeerLocalCommunity | None = None
 
 
@@ -90,8 +89,6 @@ class SqlitePeerSpaceDirectoryRepo:
                 e.updated_at,
                 cached,
                 lc.radius_km if (lc := e.local_community) is not None else None,
-                _in_area_column(e.local_community),
-                1 if (lc := e.local_community) is not None and lc.area_edge else 0,
             )
             for e in entries
         ]
@@ -107,8 +104,8 @@ class SqlitePeerSpaceDirectoryRepo:
                     INSERT INTO peer_space_directory(
                         instance_id, space_id, name, description, emoji,
                         member_count, join_mode, min_age, category,
-                        updated_at, cached_at, radius_km, in_area, area_edge
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        updated_at, cached_at, radius_km
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
@@ -168,18 +165,8 @@ def _row(row: dict) -> PeerSpaceDirectoryEntry:
         updated_at=row.get("updated_at"),
         cached_at=row.get("cached_at"),
         local_community=(
-            PeerLocalCommunity(
-                radius_km=float(row["radius_km"]),
-                in_area=None if row.get("in_area") is None else bool(row["in_area"]),
-                area_edge=bool(row.get("area_edge") or 0),
-            )
+            PeerLocalCommunity(radius_km=float(row["radius_km"]))
             if row.get("radius_km") is not None
             else None
         ),
     )
-
-
-def _in_area_column(lc: PeerLocalCommunity | None) -> int | None:
-    if lc is None or lc.in_area is None:
-        return None
-    return 1 if lc.in_area else 0

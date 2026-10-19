@@ -12,7 +12,7 @@ them — and its ``radius_km`` CHECK would refuse every row the current code
 writes (a radius with no centre). Here such a database drops the three
 columns (the radius first: its CHECK names the other two, and SQLite will
 not drop a column another constraint references) and gains 0105's current
-two, so both kinds of database end with the same shape. The area values
+one, so both kinds of database end with the same shape. The area values
 are dropped with the columns: the table is a cache, refilled by the
 host's next snapshot (its next public-space change, or this household's
 next home change toward it) — development data only.
@@ -32,7 +32,7 @@ CLAUDE.md "audit before a migration":
       rebuilding the table (the three DROP COLUMNs reach the same shape
       without copying rows).
   (3) Smallest change: a no-op wherever 0105 ran in its released shape;
-      three DROP COLUMN + two ADD COLUMN otherwise.
+      the DROP COLUMNs + one ADD COLUMN otherwise.
 """
 
 from __future__ import annotations
@@ -47,10 +47,6 @@ _ADD = (
     (
         "ALTER TABLE peer_space_directory ADD COLUMN radius_km REAL\n"
         "    CHECK (radius_km IS NULL OR radius_km BETWEEN 0.5 AND 50)"
-    ),
-    (
-        "ALTER TABLE peer_space_directory ADD COLUMN in_area INTEGER\n"
-        "    CHECK (in_area IS NULL OR (radius_km IS NOT NULL AND in_area IN (0, 1)))"
     ),
 )
 

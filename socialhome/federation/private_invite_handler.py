@@ -36,6 +36,7 @@ from ..domain.events import (
     SpaceRemoteSeatLive,
 )
 from ..domain.federation import FederationEvent, FederationEventType
+from ..domain.local_community import Eligibility, parse_join_location
 from ..domain.space import (
     WRITER_ROLES,
     RemoteAdminOutcome,
@@ -47,7 +48,14 @@ from ..domain.space import (
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_remote_location_repo import SpaceRemoteLocation
-from ..services.local_community import LocalAreaBudget, require_local_eligibility
+from ..services.local_community import (
+    APPROVAL_HONOURED_DAYS,
+    LocalAreaBudget,
+    file_remote_join_request,
+    hosted_local_area,
+    pending_join_request_id,
+    require_local_eligibility,
+)
 from ..services.space_authority_pin import (
     AuthorityCertOutcome,
     apply_authority_cert,
@@ -78,6 +86,10 @@ if TYPE_CHECKING:
     from .federation_service import FederationService
 
 log = logging.getLogger(__name__)
+
+#: Longest ``join_request_id`` a host's ``SPACE_REMOTE_MEMBER_REMOVED`` may
+#: name (it is ``uuid4().hex`` on the host).
+_MAX_JOIN_REQUEST_ID_LEN = 128
 
 #: Upper bound on the entries one ``SPACE_ROSTER_SNAPSHOT`` is allowed to
 #: make us verify — a space roster is far smaller; this only caps the work
@@ -181,7 +193,6 @@ class PrivateSpaceInviteHandler:
         "_bus",
         "_cover_repo",
         "_federation",
-        "_federation_repo",
         "_icon_repo",
         "_local_area_budget",
         "_own_instance_id",
@@ -204,7 +215,6 @@ class PrivateSpaceInviteHandler:
         space_crypto_service=None,
         space_service=None,
         remote_location_repo=None,
-        federation_repo=None,
         local_area_budget: LocalAreaBudget | None = None,
     ) -> None:
         self._bus = bus
@@ -212,10 +222,6 @@ class PrivateSpaceInviteHandler:
         #: The local-community daily check budget an accepting person
         #: spends (``None`` → an accept into a local community is refused).
         self._local_area_budget = local_area_budget
-        #: Reads an accepting household's shared home for a local
-        #: community. ``None`` → an accept into a local community is
-        #: refused (fail closed).
-        self._federation_repo = federation_repo
         self._remote_members = remote_member_repo
         #: Optional — when wired, the joiner persists the host's
         #: cover bytes from ``space_meta.cover_webp_base64`` (§D1b
@@ -677,45 +683,78 @@ class PrivateSpaceInviteHandler:
         event: FederationEvent,
         invitee_user_id: str,
     ) -> bool:
-        """Re-check a local community at acceptance: the area, or the
-        household's shared home, may have changed since the invite went out
-        (``invite_remote_user`` checked it then). Refused → the invitation is
-        declined and the household is told it is not in the space
-        (``SPACE_REMOTE_MEMBER_REMOVED``), so its accepted stub goes away
-        instead of waiting for content that never comes."""
+        """A local community we host decides the accept on the ~1 km home
+        it carries (``join_location``, sent with the person's consent, sealed
+        to us; never stored). Clearly inside → seat. Refused (no location,
+        outside, too many tries today) → the invitation is declined and the
+        household is told it is not in the space
+        (``SPACE_REMOTE_MEMBER_REMOVED``), so its accepted stub goes away.
+        Near the edge → a join request for the admins instead, and the same
+        REMOVED names it (``join_request_id``) so the household keeps its
+        side of the request and the admins' answer finds the person. An
+        admin's earlier approval of this person is the decision."""
         space = await self._space_repo.get(invite["space_id"])
-        if space is None:
-            # No row here, so no area to gate on: the accept goes on as it
-            # always did.
+        if space is None or hosted_local_area(space, self._own_instance_id) is None:
+            # No area here to gate on: the accept goes on as it always did.
             return True
-        try:
-            await require_local_eligibility(
-                space,
-                household_instance_id=event.from_instance,
-                own_instance_id=self._own_instance_id,
-                federation_repo=self._federation_repo,
-                seeker_user_id=invitee_user_id,
-                budget=self._local_area_budget,
-            )
-        except (SpacePermissionError, RuntimeError) as exc:
-            log.warning(
-                "SPACE_PRIVATE_INVITE_ACCEPT for %s from %s refused: %s",
-                invite["space_id"],
-                event.from_instance,
-                getattr(exc, "code", "not eligible"),
-            )
-            await self._space_repo.update_invitation_status(invite["id"], "declined")
-            if self._federation is not None:
-                await self._federation.send_with_mesh_fallback(
-                    to_instance_id=event.from_instance,
-                    event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
-                    payload={
-                        "space_id": invite["space_id"],
-                        "user_id": invitee_user_id,
-                    },
+        if await self._space_repo.has_approved_join_request(
+            space.id,
+            invitee_user_id,
+            remote_applicant_instance_id=event.from_instance,
+            within_days=APPROVAL_HONOURED_DAYS,
+        ):
+            return True
+        join_request_id = await pending_join_request_id(
+            self._space_repo,
+            space.id,
+            invitee_user_id,
+            household_instance_id=event.from_instance,
+        )
+        if join_request_id is None:
+            try:
+                verdict = await require_local_eligibility(
+                    space,
+                    household_instance_id=event.from_instance,
+                    own_instance_id=self._own_instance_id,
+                    join_point=parse_join_location(event.payload.get("join_location")),
+                    budget=self._local_area_budget,
+                    seeker_user_id=invitee_user_id,
                 )
-            return False
-        return True
+            except (SpacePermissionError, RuntimeError) as exc:
+                log.warning(
+                    "SPACE_PRIVATE_INVITE_ACCEPT for %s from %s refused: %s",
+                    invite["space_id"],
+                    event.from_instance,
+                    getattr(exc, "code", "not eligible"),
+                )
+                verdict = None
+            else:
+                if verdict is not Eligibility.EDGE:
+                    return True
+                pk = event.payload.get("invitee_public_key")
+                join_request_id = await file_remote_join_request(
+                    self._space_repo,
+                    self._bus,
+                    space_id=space.id,
+                    household_instance_id=event.from_instance,
+                    user_id=invitee_user_id,
+                    area_verdict=verdict,
+                    applicant_pk=str(pk) if pk else None,
+                )
+        await self._space_repo.update_invitation_status(invite["id"], "declined")
+        if self._federation is not None:
+            payload: dict[str, str] = {
+                "space_id": invite["space_id"],
+                "user_id": invitee_user_id,
+            }
+            if join_request_id is not None:
+                payload["join_request_id"] = join_request_id
+            await self._federation.send_with_mesh_fallback(
+                to_instance_id=event.from_instance,
+                event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+                payload=payload,
+            )
+        return False
 
     async def _on_decline(self, event: FederationEvent) -> None:
         """The invitee turned the invitation down.
@@ -826,6 +865,9 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
         else:
+            was_member = (
+                await self._space_repo.get_member(space_id, user_id) is not None
+            )
             await self._space_repo.delete_member(space_id, user_id)
             remaining = await self._space_repo.list_members(space_id)
             if not remaining:
@@ -847,6 +889,23 @@ class PrivateSpaceInviteHandler:
                         event.from_instance,
                         notify=False,
                     )
+            # A local community's host turned our accept into a join request
+            # for its admins (the home near the edge of its area): keep our
+            # side of it, like an "Ask to join", so their answer
+            # (``SPACE_JOIN_REQUEST_APPROVED``) finds the person.
+            review_id = p.get("join_request_id")
+            if (
+                isinstance(review_id, str)
+                and 0 < len(review_id) <= _MAX_JOIN_REQUEST_ID_LEN
+                and was_member
+            ):
+                await self._space_repo.save_join_request(
+                    space_id,
+                    user_id,
+                    ttl_days=7,
+                    remote_applicant_instance_id=event.from_instance,
+                    request_id=review_id,
+                )
         await self._bus.publish(
             RemoteSpaceMemberRemoved(
                 space_id=space_id,

@@ -231,12 +231,14 @@ async def test_join_request_paired_host_federates(client, monkeypatch):
         applicant_user_id,
         host_instance_id,
         message=None,
+        share_location=False,
     ):
         captured.update(
             space_id=space_id,
             applicant_user_id=applicant_user_id,
             host_instance_id=host_instance_id,
             message=message,
+            share_location=share_location,
         )
         return "req-xyz"
 
@@ -252,6 +254,15 @@ async def test_join_request_paired_host_federates(client, monkeypatch):
     assert captured["host_instance_id"] == "remote-1"
     assert captured["applicant_user_id"] == client._uid
     assert captured["message"] == "hi"
+    # No consent in the body → nothing about the home is sent.
+    assert captured["share_location"] is False
+    r = await client.post(
+        "/api/public_spaces/sp-global/join-request",
+        json={"host_instance_id": "remote-1", "share_location": True},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 202
+    assert captured["share_location"] is True
 
 
 async def test_join_request_unpaired_host_403(client, monkeypatch):
@@ -263,7 +274,13 @@ async def test_join_request_unpaired_host_403(client, monkeypatch):
     from socialhome.services.space_service import SpaceService
 
     async def _fake(
-        self, space_id, *, applicant_user_id, host_instance_id, message=None
+        self,
+        space_id,
+        *,
+        applicant_user_id,
+        host_instance_id,
+        message=None,
+        share_location=False,
     ):
         raise SpacePermissionError(
             "host household is not a CONFIRMED peer — pair first",

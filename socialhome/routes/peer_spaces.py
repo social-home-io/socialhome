@@ -37,20 +37,15 @@ class PeerSpaceCollectionView(BaseView):
         federation_repo = self.svc(K.federation_repo_key)
         unique_instances = {e.instance_id for e in entries}
         host_info: dict[str, tuple[str, bool]] = {}
-        #: Whether this household shares its home with the host — a local
-        #: community's host reads only that (``HOME_NOT_SHARED`` otherwise).
-        shares_home: dict[str, bool] = {}
         for iid in unique_instances:
             inst = await federation_repo.get_instance(iid)
             if inst is None:
                 host_info[iid] = (iid, False)
-                shares_home[iid] = False
             else:
                 host_info[iid] = (
                     inst.display_name or iid,
                     inst.status is PairingStatus.CONFIRMED,
                 )
-                shares_home[iid] = bool(inst.share_home)
         return web.json_response(
             [
                 {
@@ -69,20 +64,14 @@ class PeerSpaceCollectionView(BaseView):
                     "join_mode": e.join_mode,
                     "min_age": e.min_age,
                     "category": normalize_category(e.category),
-                    # A local community (v_59 hosts): its radius and the
-                    # host's verdict for THIS household — never a centre.
-                    # ``area_edge``: near the rim the host is unsure
-                    # (``in_area`` then null) and checks on a join.
+                    # A local community (v_59 hosts): its radius only —
+                    # never a centre. A join to it carries this household's
+                    # home rounded to ~1 km, with the person's consent.
                     "local_community": (
-                        {
-                            "radius_km": e.local_community.radius_km,
-                            "in_area": e.local_community.in_area,
-                            "area_edge": e.local_community.area_edge,
-                        }
+                        {"radius_km": e.local_community.radius_km}
                         if e.local_community is not None
                         else None
                     ),
-                    "home_shared_with_host": shares_home.get(e.instance_id, False),
                 }
                 for e in entries
                 # A peer must be CONFIRMED — don't show orphan cache rows

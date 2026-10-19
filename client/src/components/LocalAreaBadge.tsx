@@ -1,37 +1,33 @@
 /**
- * LocalAreaBadge — "In your area" / "Outside your area" / "Share your
- * home …" for a local community, worked out in the browser against this
- * household's own home (``utils/localArea.areaVerdict``). Says nothing
- * while the home is still loading. It is a hint: the space's host decides.
+ * LocalAreaBadge — "In your area" / "Outside your area" / "Near the edge"
+ * for a local community THIS household hosts, worked out in the browser
+ * against our own home with the server's own rule
+ * (``utils/localArea.areaVerdict``). Says nothing while the home is still
+ * loading. A paired household's community has no badge: its host decides
+ * on the ~1 km location a join carries.
  */
 import { t } from '@/i18n/i18n'
 import type { AreaVerdict } from '@/utils/localArea'
 
-export function localAreaVerdictText(verdict: AreaVerdict, hostName?: string | null): string | null {
+export function localAreaVerdictText(verdict: AreaVerdict): string | null {
   switch (verdict) {
     case 'inside': return t('local_area.badge.inside')
     case 'outside': return t('local_area.badge.outside')
     case 'edge': return t('local_area.badge.edge')
     case 'no_home': return t('local_area.badge.no_home')
-    case 'not_shared': return hostName
-      ? t('local_area.badge.not_shared', { host: hostName })
-      : t('local_area.badge.not_shared_generic')
     case 'unknown': return null
   }
 }
 
 /** May the person try to join from here? From inside, and near the edge
- *  (the host decides on the exact distance) — every other answer would be
- *  refused by the host. */
+ *  (it becomes a request an admin reviews) — every other answer would be
+ *  refused. */
 export function verdictAllowsJoin(verdict: AreaVerdict): boolean {
   return verdict === 'inside' || verdict === 'edge' || verdict === 'unknown'
 }
 
-export function LocalAreaBadge({ verdict, hostName }: {
-  verdict: AreaVerdict
-  hostName?: string | null
-}) {
-  const text = localAreaVerdictText(verdict, hostName)
+export function LocalAreaBadge({ verdict }: { verdict: AreaVerdict }) {
+  const text = localAreaVerdictText(verdict)
   if (!text) return null
   const icon = verdict === 'inside' ? '✓' : verdict === 'outside' ? '✕' : verdict === 'edge' ? '◐' : '🏠'
   return (

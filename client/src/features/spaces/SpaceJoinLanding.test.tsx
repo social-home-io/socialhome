@@ -94,6 +94,28 @@ describe('SpaceJoinLanding', () => {
     })
   })
 
+  const coded = (code: string, msg: string) =>
+    Object.assign(new ApiError(403, msg), { code })
+
+  it('a local community near the edge: "request sent", never the wrong-household panel', async () => {
+    api.post.mockRejectedValueOnce(coded('JOIN_REQUEST_SENT', 'Your request was sent to the admins.'))
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="join-landing-requested"]')).not.toBeNull()
+    })
+    expect(container.textContent).toContain('Your request was sent to the admins.')
+    expect(container.querySelector('[data-testid="join-landing-wrong-instance"]')).toBeNull()
+  })
+
+  it('a local community refusing our home says why, not "wrong household"', async () => {
+    api.post.mockRejectedValueOnce(coded('OUTSIDE_AREA', 'Your home is outside its area.'))
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('.sh-error p')?.textContent).toBe('Your home is outside its area.')
+    })
+    expect(container.querySelector('[data-testid="join-landing-wrong-instance"]')).toBeNull()
+  })
+
   it('renders the bare error card for other failures (500)', async () => {
     api.post.mockRejectedValueOnce(new ApiError(500, 'boom'))
     const { container } = await renderLanding()

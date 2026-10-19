@@ -1817,7 +1817,7 @@ class LocalAreaDelegatedError(CodedError, ValueError):
     the owner" (``delegated_admin_authority``) do not go together.
 
     A delegated admin's household invites people itself, and only the
-    HOST holds the area and the joining households' shared home locations,
+    HOST holds the area and decides on the location each join carries,
     so with delegation on an invite could seat a household nobody checked.
     The owner turns one off before turning the other on."""
 
@@ -1829,18 +1829,30 @@ class LocalAreaDelegatedError(CodedError, ValueError):
     )
 
 
-class HomeNotSharedError(CodedError, SpacePermissionError):
-    """The space is a local community and the joining household's home is
-    not known to the host: not set, or not shared with the host household
-    (``share_home`` off toward it). Nobody is ever asked to send a location
-    inside a join request — the host reads only what pairing already
-    shares."""
+class HomeNotSetError(CodedError, SpacePermissionError):
+    """The space is a local community and the joining household has no home
+    location set, so there is nothing to check against its area. Set on the
+    household (Settings → Household → Home location); a join then carries
+    it, rounded to about 1 km."""
 
     status = 403
-    code = "HOME_NOT_SHARED"
+    code = "HOME_NOT_SET"
     detail = (
-        "This space is a local community. Share your home location with its "
-        "household to join."
+        "This space is a local community. Set your household's home location to join."
+    )
+
+
+class LocationRequiredError(CodedError, SpacePermissionError):
+    """The space is a local community and the join carried no approximate
+    location (the person has not agreed to send it yet). The SPA asks for
+    consent and sends the join again with it; nothing was decided or
+    counted."""
+
+    status = 403
+    code = "LOCATION_REQUIRED"
+    detail = (
+        "This space is a local community. Its host needs your approximate "
+        "location (about 1 km) with the request to check you live in the area."
     )
 
 
@@ -1853,12 +1865,22 @@ class OutsideAreaError(CodedError, SpacePermissionError):
     detail = "This space is a local community, and your home is outside its area."
 
 
+class JoinRequestSentError(CodedError, SpacePermissionError):
+    """A step that would have seated the person (a follow, an invite accept,
+    an invite link) became a join request for the space's admins instead:
+    the space is a local community and their home is near the edge of its
+    area, which only an admin decides. Worded like any other request — the
+    person learns only that it was sent."""
+
+    status = 403
+    code = "JOIN_REQUEST_SENT"
+    detail = "Your request was sent to the space's admins."
+
+
 class LocalAreaRateLimitedError(CodedError, SpacePermissionError):
     """The space is a local community and the joining person (or, for a
-    remote person, their household) already used today's checks on it —
-    successful joins count too: the host gives no verdict until the next
-    UTC day. A seat attempt is an exact yes / no, so without this limit it
-    would be a fine-grained way to find the centre."""
+    remote person, their household) already tried to join it too often
+    today — spam control: the host answers again from 00:00 UTC."""
 
     status = 429
     code = "LOCAL_AREA_RATE_LIMITED"

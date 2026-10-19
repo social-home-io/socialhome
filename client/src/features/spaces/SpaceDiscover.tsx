@@ -11,12 +11,11 @@
  *   (``GET /api/public_spaces``). With no GFS, one inline row says so
  *   ("Add a GFS" for admins, "Ask …" for everyone else).
  *
- * A paired household's local community carries only "within X km" and the
- * host's verdict for our home (never its centre): Paired lists the ones
- * your home is in first, the ones you're outside of last and dimmed, and
- * "Near you" narrows the list to the first kind. Global lists the spaces
- * pinned nearest to our home first ("about 3 km away") — worked out in
- * this browser; our home goes nowhere.
+ * A paired household's local community carries only "within X km" (never
+ * its centre, never a verdict): joining it sends our household's home
+ * rounded to ~1 km to that household with the request — after asking the
+ * person. Global lists the spaces pinned nearest to our home first ("about
+ * 3 km away") — worked out in this browser; our home goes nowhere.
  *
  * Invite-only spaces are never listed, nor a space you're already in or
  * follow. Each row opens the space's About page; its one button joins,
@@ -29,6 +28,7 @@ import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
 import { LocalAreaBadge, localAreaVerdictText, verdictAllowsJoin } from '@/components/LocalAreaBadge'
+import { askLocationConsent, isApiCode, locationConsentText } from '@/components/localConsent'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
@@ -45,7 +45,8 @@ import type { DirectoryEntry, GfsConnection, HouseholdSpaceRow } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
   buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, entryRadiusKm, hostLabel,
-  matchesTerm, sortNearFirst, withMembership, DISCOVER_SOURCES, type DiscoverAction, type DiscoverSource,
+  joinCarriesLocation, matchesTerm, withMembership, DISCOVER_SOURCES, type DiscoverAction,
+  type DiscoverSource,
 } from './discover'
 import { SpaceListRow, membersLabel } from './SpaceListRow'
 
@@ -135,8 +136,6 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
   const [loaded, setLoaded] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [asking, setAsking] = useState<DirectoryEntry | null>(null)
-  /** Paired › "Near you": only the local communities our home is in. */
-  const [nearOnly, setNearOnly] = useState(false)
   /** Global › "Near me": only the spaces whose suggested area (the owner's
    *  radius hint) our home is in — worked out here, sent nowhere. */
   const [nearMeOnly, setNearMeOnly] = useState(false)
@@ -150,7 +149,8 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
   }
 
   useEffect(() => { void reload() }, [])
-  // The local-community badge is worked out against our own home.
+  // The local-community badge (our own spaces) is worked out against our
+  // own home; a join to another household's community needs it too.
   useEffect(() => { void ensureHouseholdHome() }, [])
 
   // "Ask Dave" needs the household's admins — only for a member who
@@ -179,6 +179,10 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
   const act = async (e: DirectoryEntry, a: DiscoverAction) => {
     if (a === 'request') { setAsking(e); return }
     if (a !== 'join' && a !== 'follow') return
+    // A local community another household hosts: the request carries our
+    // approximate location — ask first, send nothing without a yes.
+    const carries = !isLocal(e) && joinCarriesLocation(e)
+    if (carries && !await askLocationConsent(hostLabel(e))) return
     setBusy(e.space_id)
     try {
       if (a === 'follow') {
@@ -199,12 +203,22 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           await reload()
         }
       } else {
-        await api.post(`/api/public_spaces/${e.space_id}/join-request`, { host_instance_id: e.host_instance_id })
+        await api.post(`/api/public_spaces/${e.space_id}/join-request`, {
+          host_instance_id: e.host_instance_id,
+          ...(carries ? { share_location: true } : {}),
+        })
         showToast(t('spaces.browse.request_sent_to', { host: hostLabel(e) }), 'success')
         markPending(e.space_id)
       }
     } catch (exc) {
-      showToast((exc as Error).message, 'error')
+      if (isApiCode(exc, 'JOIN_REQUEST_SENT')) {
+        // A follow near the edge of our own local community: it went to
+        // the admins as a request — the same answer as any request.
+        showToast(t('spaces.browse.request_sent_for', { name: e.name }), 'success')
+        markPending(e.space_id)
+      } else {
+        showToast((exc as Error).message, 'error')
+      }
     } finally {
       setBusy(null)
     }
@@ -216,27 +230,20 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
     if (isLocal(e)) {
       await api.post(`/api/spaces/${e.space_id}/join-requests`, { message })
     } else {
-      await api.post(`/api/public_spaces/${e.space_id}/join-request`, { host_instance_id: e.host_instance_id, message })
+      await api.post(`/api/public_spaces/${e.space_id}/join-request`, {
+        host_instance_id: e.host_instance_id,
+        message,
+        ...(joinCarriesLocation(e) ? { share_location: true } : {}),
+      })
     }
     showToast(t('spaces.browse.request_sent_for', { name: e.name }), 'success')
     markPending(e.space_id)
   }
 
   const home = householdHome.value
-  const paired = sortNearFirst(
-    discoverable(lists.paired, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
-    home,
-  )
-  // The toggle only means something when a paired household hosts a
-  // local community at all.
-  const hasCommunity = paired.some((e) => entryRadiusKm(e) !== null)
-  const near = nearOnly && hasCommunity
   const shown: Lists = {
     household: discoverable(lists.household, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
-    // Near the edge may be inside: the host checks when they ask.
-    paired: near
-      ? paired.filter((e) => ['inside', 'edge'].includes(entryAreaVerdict(e, home) ?? ''))
-      : paired,
+    paired: discoverable(lists.paired, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
     global: sortByDistance(
       discoverable(lists.global, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
       home,
@@ -259,9 +266,6 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           </button>
         </p>
       )
-    }
-    if (source === 'paired' && near) {
-      return <p class="sh-spaces-note">{t('local_area.discover.near_you_none')}</p>
     }
     if (searching) return <p class="sh-spaces-note">{t('spaces.discover.no_match', { term })}</p>
     if (source === 'global' && !hasGfs) {
@@ -318,19 +322,6 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           </button>
         ))}
       </div>
-      {source === 'paired' && hasCommunity && (
-        <div class="sh-spaces-filter">
-          <button
-            type="button"
-            class="sh-spaces-chip"
-            aria-pressed={near}
-            data-testid="discover-near-you"
-            onClick={() => setNearOnly(!nearOnly)}
-          >
-            <span aria-hidden="true">📍</span> {t('local_area.discover.near_you')}
-          </button>
-        </div>
-      )}
       {source === 'global' && canNearMe && (
         <div class="sh-spaces-filter">
           <button
@@ -349,9 +340,9 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           {rows.map((e) => {
             const verdict = entryAreaVerdict(e, home)
             const radius = entryRadiusKm(e)
-            // A local community you can't get into from here (outside, or
-            // your home isn't known to its host): the badge says why, and
-            // no button offers a join the host would refuse.
+            // One of our own local communities you can't get into from
+            // here (outside, or no home set): the badge says why, and no
+            // button offers a join that would be refused.
             const areaBlocks = verdict !== null && !verdictAllowsJoin(verdict)
             const way = discoverAction(e)
             const a = areaBlocks && way !== 'pending' ? null : way
@@ -362,7 +353,7 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
             // A global space's radius hint: compared with OUR home, here.
             const hint = source === 'global' ? hintVerdict(e, home) : null
             const areaText = radius !== null
-              ? [areaShortLabel(radius), verdict ? localAreaVerdictText(verdict, hostLabel(e)) : null]
+              ? [areaShortLabel(radius), verdict ? localAreaVerdictText(verdict) : null]
                 .filter(Boolean).join(' · ')
               : hint ? hintLabel(hint) : ''
             return (
@@ -376,7 +367,7 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
                 note={radius !== null ? (
                   <>
                     <span class="sh-local-area-chip">🏘️ {areaShortLabel(radius)}</span>
-                    {verdict && <LocalAreaBadge verdict={verdict} hostName={hostLabel(e)} />}
+                    {verdict && <LocalAreaBadge verdict={verdict} />}
                   </>
                 ) : hint && (
                   <span class={`sh-place-hint sh-place-hint--${hint.kind}`} data-testid="place-hint">
@@ -410,6 +401,10 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           spaceName={asking.name}
           hostDisplayName={hostLabel(asking)}
           hostIsPaired={asking.host_is_paired}
+          locationNote={joinCarriesLocation(asking) && !isLocal(asking)
+            ? locationConsentText(hostLabel(asking)) : null}
+          locationBlocked={joinCarriesLocation(asking) && !isLocal(asking) && home === null
+            ? t('local_area.consent.no_home') : null}
           onSubmit={submitAsk}
         />
       )}

@@ -1833,7 +1833,15 @@ class RemoteInviteDecisionView(BaseView):
         decision = self.match("decision")
         svc = self.svc(space_service_key)
         if decision == "accept":
-            await svc.accept_remote_invite(token=token, user_id=ctx.user_id)
+            body = await self.body() if self.request.can_read_body else {}
+            await svc.accept_remote_invite(
+                token=token,
+                user_id=ctx.user_id,
+                # A local community's host needs the household's home rounded
+                # to ~1 km with the accept; only sent once the person agreed.
+                share_location=isinstance(body, dict)
+                and body.get("share_location") is True,
+            )
         elif decision == "decline":
             await svc.decline_remote_invite(token=token, user_id=ctx.user_id)
         else:
@@ -2005,6 +2013,10 @@ class SpaceJoinView(BaseView):
                 user_id=ctx.user_id,
                 issuer_instance_id=issuer_instance_id or None,
                 bootstrap=bootstrap,
+                # The person agreed to send the household's home, rounded to
+                # ~1 km, to a local community's host (after LOCATION_REQUIRED).
+                share_location=isinstance(body, dict)
+                and body.get("share_location") is True,
             )
         except TimeoutError as exc:
             return error_response(504, "ISSUER_TIMEOUT", str(exc))
@@ -2015,8 +2027,8 @@ class SpaceJoinView(BaseView):
         # ``BaseView._iter`` already maps to 403; only catch and remap
         # here when the redeem actually went out over the wire.
         except SpacePermissionError as exc:
-            # A coded refusal (a local community's HOME_NOT_SHARED /
-            # OUTSIDE_AREA) keeps its own status and code.
+            # A coded refusal (a local community's LOCATION_REQUIRED /
+            # OUTSIDE_AREA / JOIN_REQUEST_SENT …) keeps its own status and code.
             if (
                 issuer_instance_id
                 and not exc.banned

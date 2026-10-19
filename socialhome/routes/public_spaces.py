@@ -122,6 +122,9 @@ class PublicSpaceJoinRequestView(BaseView):
             applicant_user_id=ctx.user_id,
             host_instance_id=str(host_instance_id),
             message=body.get("message"),
+            # Only when the person agreed in the SPA: a local community's
+            # host needs the household's home rounded to ~1 km.
+            share_location=body.get("share_location") is True,
         )
         return web.json_response(
             {"request_id": request_id},

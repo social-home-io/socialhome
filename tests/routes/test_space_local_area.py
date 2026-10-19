@@ -1,6 +1,8 @@
 """Local communities over HTTP — the area on create / PATCH / GET, the
-directory rows, and the seat routes refusing a household outside the area
-or with an unknown home (403 ``OUTSIDE_AREA`` / ``HOME_NOT_SHARED``).
+directory rows, and the seat routes deciding on the household's home rounded
+to ~1 km: refused outside or with no home (403 ``OUTSIDE_AREA`` /
+``HOME_NOT_SET``), near the edge a join request for the admins (answered like
+any request; ``JOIN_REQUEST_SENT`` where the route would have seated).
 
 * ``POST /api/spaces`` takes ``lat`` / ``lon`` / ``radius_km`` for a public
   space (4 dp centre; 422 on any other tier or a partial / bad area).
@@ -10,10 +12,12 @@ or with an unknown home (403 ``OUTSIDE_AREA`` / ``HOME_NOT_SHARED``).
 * ``GET /api/spaces/{id}`` (member and landing views) and
   ``GET /api/household/spaces`` carry ``local_area`` (the centre — the
   host's own people only). ``GET /api/peer_spaces`` carries
-  ``local_community`` (radius + the host's verdict for us), never a centre.
+  ``local_community`` (the radius only), never a centre or a verdict.
 """
 
 import pytest
+
+from socialhome.services.space_service import SpaceService
 
 from .test_space_read_gate import _add_user, _seat
 
@@ -24,6 +28,7 @@ _NEIGHBOUR = ("ned", "uid-ned")
 
 ZURICH = {"lat": 47.3769, "lon": 8.5417, "radius_km": 5}
 NEAR = (47.3920, 8.5600)
+EDGE = (47.3769, 8.6082)  # its ~1 km cell straddles the rim
 BERN = (46.9481, 7.4474)
 
 
@@ -236,7 +241,7 @@ async def test_area_with_other_fields_saves_both(client, space):
 
 @pytest.mark.parametrize(
     "home,code",
-    [(BERN, "OUTSIDE_AREA"), (None, "HOME_NOT_SHARED")],
+    [(BERN, "OUTSIDE_AREA"), (None, "HOME_NOT_SET")],
 )
 async def test_join_is_refused_outside_or_without_a_home(client, space, home, code):
     sid, hdr = space
@@ -256,6 +261,7 @@ async def test_join_inside_is_seated(client, space):
         f"/api/spaces/{sid}/join-requests", json={}, headers=hdr["neighbour"]
     )
     assert r.status < 300, await r.text()
+    assert (await r.json())["joined"] is True
     row = await client._db.fetchone(
         "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
         (sid, _NEIGHBOUR[1]),
@@ -263,12 +269,44 @@ async def test_join_inside_is_seated(client, space):
     assert row is not None
 
 
-async def test_the_fourth_join_of_the_day_is_429(client, space):
-    """Join → leave three times, then a fourth join: every successful join
-    spent a check, so the answer is 429 LOCAL_AREA_RATE_LIMITED — the same
-    shape #1054 shipped — and no seat."""
+async def test_an_edge_join_answers_like_any_request_and_the_admins_see_why(
+    client, space
+):
+    """Open space, home near the edge: the same 201 ``{joined: false}`` a
+    request-mode space answers; the admins' queue says "edge" — and nothing
+    about the home itself."""
     sid, hdr = space
-    for _ in range(3):
+    await _set_home(client, EDGE)
+    r = await client.post(
+        f"/api/spaces/{sid}/join-requests", json={}, headers=hdr["neighbour"]
+    )
+    assert r.status == 201, await r.text()
+    body = await r.json()
+    assert body["joined"] is False and isinstance(body["request_id"], str)
+    r = await client.get(f"/api/spaces/{sid}/join-requests", headers=hdr["owner"])
+    assert r.status == 200, await r.text()
+    (row,) = await r.json()
+    assert row["area_verdict"] == "edge"
+    assert not {"lat", "lon", "home_lat", "home_lon", "join_location"} & set(row)
+    # Approving seats the neighbour.
+    r = await client.post(
+        f"/api/spaces/{sid}/join-requests/{row['id']}/approve",
+        json={},
+        headers=hdr["owner"],
+    )
+    assert r.status < 300, await r.text()
+    seat = await client._db.fetchone(
+        "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
+        (sid, _NEIGHBOUR[1]),
+    )
+    assert seat is not None
+
+
+async def test_the_eleventh_join_of_the_day_is_429(client, space):
+    """Join → leave ten times, then once more: every successful join spent
+    a check, so the answer is 429 LOCAL_AREA_RATE_LIMITED and no seat."""
+    sid, hdr = space
+    for _ in range(10):
         r = await client.post(
             f"/api/spaces/{sid}/join-requests", json={}, headers=hdr["neighbour"]
         )
@@ -284,23 +322,22 @@ async def test_the_fourth_join_of_the_day_is_429(client, space):
     error = (await r.json())["error"]
     assert error["code"] == "LOCAL_AREA_RATE_LIMITED"
     assert error["params"] == {"whose": "own"}
-    row = await client._db.fetchone(
-        "SELECT 1 FROM space_members WHERE space_id=? AND user_id=?",
-        (sid, _NEIGHBOUR[1]),
-    )
-    assert row is None
 
 
-async def test_follow_is_refused_outside(client, space):
+async def test_follow_is_refused_outside_and_reviewed_near_the_edge(client, space):
     sid, hdr = space
     await client._db.enqueue("UPDATE spaces SET allow_subscribers=1 WHERE id=?", (sid,))
     await _set_home(client, BERN)
     r = await client.post(f"/api/spaces/{sid}/subscribe", headers=hdr["neighbour"])
     assert r.status == 403, await r.text()
     assert (await r.json())["error"]["code"] == "OUTSIDE_AREA"
+    await _set_home(client, EDGE)
+    r = await client.post(f"/api/spaces/{sid}/subscribe", headers=hdr["neighbour"])
+    assert r.status == 403, await r.text()
+    assert (await r.json())["error"]["code"] == "JOIN_REQUEST_SENT"
 
 
-async def test_invite_link_is_refused_outside(client, space):
+async def test_invite_link_is_refused_outside_and_reviewed_near_the_edge(client, space):
     sid, hdr = space
     r = await client.post(
         f"/api/spaces/{sid}/invite-tokens", json={"uses": 1}, headers=hdr["owner"]
@@ -313,6 +350,33 @@ async def test_invite_link_is_refused_outside(client, space):
     )
     assert r.status == 403, await r.text()
     assert (await r.json())["error"]["code"] == "OUTSIDE_AREA"
+    await _set_home(client, EDGE)
+    r = await client.post(
+        "/api/spaces/join", json={"token": token}, headers=hdr["neighbour"]
+    )
+    assert r.status == 403, await r.text()
+    assert (await r.json())["error"]["code"] == "JOIN_REQUEST_SENT"
+
+
+async def test_a_remote_invite_accept_forwards_consent(client, space, monkeypatch):
+    """``POST /api/remote_invites/{token}/accept`` passes the person's
+    consent through; without it nothing about the home is sent."""
+    _, hdr = space
+    seen: list[bool] = []
+
+    async def _fake(self, *, token, user_id, share_location=False):
+        seen.append(share_location)
+
+    monkeypatch.setattr(SpaceService, "accept_remote_invite", _fake)
+    r = await client.post("/api/remote_invites/tok/accept", headers=hdr["neighbour"])
+    assert r.status == 204, await r.text()
+    r = await client.post(
+        "/api/remote_invites/tok/accept",
+        json={"share_location": True},
+        headers=hdr["neighbour"],
+    )
+    assert r.status == 204, await r.text()
+    assert seen == [False, True]
 
 
 # ── directory rows ──────────────────────────────────────────────────────
@@ -329,14 +393,14 @@ async def test_household_directory_rows_carry_the_area(client, space):
     }
 
 
-async def _peer(client, iid: str, *, share_home: bool) -> None:
+async def _peer(client, iid: str) -> None:
     await client._db.enqueue(
         """
         INSERT INTO remote_instances(
             id, display_name, remote_identity_pk, key_self_to_remote,
             key_remote_to_self, remote_inbox_url, local_inbox_id, status,
-            source, share_home
-        ) VALUES(?, ?, ?, '00', '00', ?, ?, 'confirmed', 'manual', ?)
+            source
+        ) VALUES(?, ?, ?, '00', '00', ?, ?, 'confirmed', 'manual')
         """,
         (
             iid,
@@ -344,58 +408,29 @@ async def _peer(client, iid: str, *, share_home: bool) -> None:
             "ab" * 32,
             f"https://{iid}.example/inbox/x",
             f"{iid}_local",
-            int(share_home),
         ),
     )
 
 
-async def test_peer_directory_rows_carry_the_verdict_never_a_centre(client, space):
+async def test_peer_directory_rows_carry_the_radius_only(client, space):
     """``GET /api/peer_spaces``: a paired household's local community is
-    "within X km" + the host's verdict for us, and our own sharing state —
-    no coordinates anywhere in the row."""
+    "within X km" — no verdict, no sharing state, no coordinates."""
     _, hdr = space
-    await _peer(client, "berta", share_home=True)
-    await _peer(client, "carlo", share_home=False)
-    await _peer(client, "dora", share_home=True)
+    await _peer(client, "berta")
+    await _peer(client, "carlo")
     await client._db.enqueue(
         "INSERT INTO peer_space_directory(instance_id, space_id, name,"
-        " radius_km, in_area) VALUES('berta', 'sp-b', 'Nachbarn', 2.0, 1)"
-    )
-    await client._db.enqueue(
-        "INSERT INTO peer_space_directory(instance_id, space_id, name,"
-        " radius_km, in_area) VALUES('dora', 'sp-d', 'Dorf', 5.0, NULL)"
+        " radius_km) VALUES('berta', 'sp-b', 'Nachbarn', 2.0)"
     )
     await client._db.enqueue(
         "INSERT INTO peer_space_directory(instance_id, space_id, name)"
         " VALUES('carlo', 'sp-c', 'Chess')"
     )
-    await client._db.enqueue(
-        "INSERT INTO peer_space_directory(instance_id, space_id, name,"
-        " radius_km, in_area, area_edge)"
-        " VALUES('dora', 'sp-e', 'Rand', 5.0, NULL, 1)"
-    )
     r = await client.get("/api/peer_spaces", headers=hdr["neighbour"])
     assert r.status == 200
     body = await r.json()
     rows = {row["space_id"]: row for row in body}
-    assert rows["sp-b"]["local_community"] == {
-        "radius_km": 2.0,
-        "in_area": True,
-        "area_edge": False,
-    }
-    assert rows["sp-b"]["home_shared_with_host"] is True
-    assert rows["sp-d"]["local_community"] == {
-        "radius_km": 5.0,
-        "in_area": None,
-        "area_edge": False,
-    }
-    # Near the rim the host is unsure — not the same as "unknown".
-    assert rows["sp-e"]["local_community"] == {
-        "radius_km": 5.0,
-        "in_area": None,
-        "area_edge": True,
-    }
+    assert rows["sp-b"]["local_community"] == {"radius_km": 2.0}
     assert rows["sp-c"]["local_community"] is None
-    assert rows["sp-c"]["home_shared_with_host"] is False
     for row in body:
-        assert not {"lat", "lon", "local_area"} & set(row)
+        assert not {"lat", "lon", "local_area", "home_shared_with_host"} & set(row)

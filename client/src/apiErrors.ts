@@ -189,14 +189,11 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   OWNER_IS_FOLLOWER: () => t('error.owner_is_follower'),
   OWNER_IS_SELF: () => t('error.owner_is_self'),
   // Local communities: worded for the reader — ``own`` our household's
-  // home, ``peer`` the household an admin invites / approves, ``host`` our
-  // home as the space's host sees it.
-  HOME_NOT_SHARED: (_b, p) => {
-    const whose = str(p, 'whose')
-    if (whose === 'peer') return t('error.home_not_shared_peer')
-    if (whose === 'host') return t('error.home_not_shared_host')
-    return t('error.home_not_shared_own')
-  },
+  // home, ``peer`` another household's, ``host`` our home as the space's
+  // host sees it.
+  HOME_NOT_SET: () => t('error.home_not_set'),
+  LOCATION_REQUIRED: () => t('error.location_required'),
+  JOIN_REQUEST_SENT: () => t('error.join_request_sent'),
   OUTSIDE_AREA: (_b, p) => (str(p, 'whose') === 'peer'
     ? t('error.outside_area_peer') : t('error.outside_area_own')),
   LOCAL_AREA_RATE_LIMITED: (_b, p) => (str(p, 'whose') === 'peer'

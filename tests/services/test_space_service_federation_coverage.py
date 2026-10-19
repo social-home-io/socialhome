@@ -441,7 +441,7 @@ async def test_on_remote_join_request_approved_routes_cross_instance(stack):
     coordinator = MagicMock()
 
     async def _request_redeem(
-        token, *, viewer_user_id, issuer_instance_id, bootstrap=None
+        token, *, viewer_user_id, issuer_instance_id, bootstrap=None, join_location=None
     ):
         await stack.space_repo.save_member(
             SpaceMember(

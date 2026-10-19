@@ -12757,15 +12757,42 @@ a.sh-space-hero-members:focus-visible,
   background: color-mix(in srgb, var(--sh-danger) 12%, transparent);
   color: var(--sh-danger-on-soft);
 }
-/* The host is unsure near the rim: neither the yes nor the no colour. */
-.sh-local-area-badge--edge {
+/* Near the rim an admin decides: neither the yes nor the no colour. */
+.sh-local-area-badge--edge,
+.sh-join-edge-chip {
   background: color-mix(in srgb, var(--sh-warning) 16%, transparent);
   color: var(--sh-text);
 }
-.sh-local-area-badge--no_home,
-.sh-local-area-badge--not_shared {
+.sh-local-area-badge--no_home {
   background: color-mix(in srgb, var(--sh-text-muted) 16%, transparent);
   color: var(--sh-text);
+}
+/* The admins' join-request queue: "Near the edge" beside the name. */
+.sh-join-edge-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-inline-start: var(--sh-space-sm);
+  padding: 2px 8px;
+  border-radius: var(--sh-radius-full);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 500;
+  line-height: 1.4;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+/* The consent line a join to another household's local community shows
+   before it carries the household's approximate location. */
+.sh-local-area-consent {
+  display: flex; gap: var(--sh-space-sm); align-items: flex-start;
+  margin: var(--sh-space-sm) 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
+  color: var(--sh-text);
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
+.sh-local-area-consent--blocked {
+  background: color-mix(in srgb, var(--sh-warning) 14%, transparent);
 }
 /* A global space's radius hint, as seen from our home (a hint, never a
    rule — so neither the yes-green nor the no-red of a local community). */

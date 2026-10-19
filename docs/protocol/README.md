@@ -124,7 +124,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
   - [Invites](./invites.md) — cross-household invites and join requests.
   - [Sync](./sync.md) — initial bulk content sync (Tier 2/3).
   - [Discovery](./discovery.md) — GFS-brokered public-space directory.
-  - [Local communities](./local-communities.md) — a public space bound to an area; the host admits a household only while the home it shares lies inside (radius + a per-recipient `in_area` verdict in `SPACE_DIRECTORY_SYNC`, never the centre; capability v_59).
+  - [Local communities](./local-communities.md) — a public space bound to an area; every join carries the joiner's home rounded to ~1 km (with consent, sealed to the host) and the host decides — near the edge always an admin; the directory shows only the radius, never the centre (capability v_59).
 - **Content**
   - [Feeds](./feeds.md) — posts, comments, reactions.
   - [Pages](./pages.md) — space pages (wiki-style; host-sequenced — the host merges or keeps conflicting edits, v_48).

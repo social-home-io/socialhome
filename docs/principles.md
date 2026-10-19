@@ -840,7 +840,9 @@ Latitude and longitude are truncated to **4 decimal places** before
 any storage or transmission. `round(float(lat), 4)` — never store raw
 device precision, never cap-at-runtime-but-store-precise. Applied
 uniformly: presence updates, space zones, household zones, household
-location, public-space discovery rows, a local community's centre.
+location, public-space discovery rows, a local community's centre. (A
+join to a local community is coarser still: the joiner's home rounded to
+2 decimals, ~1 km.)
 
 ## People's locations are never shared by design
 
@@ -852,50 +854,51 @@ household's `share_home_default` and shown on the pairing dialog before
 anything is sent — and live presence location shared with a peer. Every
 sender honours that switch, the pairing code and the scanner's
 peer-accept included ([`protocol/pairing.md`](./protocol/pairing.md#home-sharing-is-chosen-before-the-handshake)).
-Never via a GFS, never as a side effect of joining a space. Every other
-federation payload is location-free.
+Never via a GFS, never as a side effect of joining a space. The one other
+place a household's location travels is a join to a local community, below:
+coarse (~1 km), with the person's explicit consent, to that space's host only.
+Every other federation payload is location-free.
 
 Space locations are not people's locations, and still stay minimal.
 
-### A public local community's centre stays on the host
+### A public local community: its centre stays on the host, a joiner sends ~1 km with the join
 
-A `public` space may be a *local community* — bound to a centre and a
-radius, joinable only by households whose home lies inside
-([`protocol/local-communities.md`](./protocol/local-communities.md)). The
-centre is usually somebody's street, so it never leaves the hosting
-household:
+**Owner decision (2026-10-19, signed off).** A `public` space may be a
+*local community* — bound to a centre and a radius, joinable only by
+households whose home lies inside
+([`protocol/local-communities.md`](./protocol/local-communities.md)).
 
-- **Only the host's own people see the centre** (Settings › Location and
-  the About page on the host). The create dialog never reads the device
-  position and offers the household's own home only as an explicit
-  shortcut.
-- **A paired household learns "local community, within X km" and the
-  host's verdict for *its own* home** — `in_area: true / false / null`,
-  computed by the host against the home that household already chose to
-  share with it (`remote_instances.home_lat` / `home_lon`, governed by its
-  per-peer `share_home`; `null` when it shares none). It rides the
-  encrypted `SPACE_DIRECTORY_SYNC` snapshot (v_59) to the host's social
-  peers only, built per peer: no household ever receives another
-  household's verdict, and no coordinate is on the wire. Its Discover
-  filters and highlights with the verdict; it shows no map.
-- **Eligibility is decided by the host on every seat path**, against the
-  same shared home; nobody sends coordinates inside a join request, an
-  invite redeem or an accept (`HOME_NOT_SHARED` / `OUTSIDE_AREA`).
-- **The verdict can't be used to find the centre.** Near the rim the host
-  is "unsure" (`in_area: null`, `area_edge: true`) within a band of
-  max(10 % of the radius, 250 m); the answer is computed per grid cell and
-  the band slid by a secret only the host holds, so moving the shared home
-  step by step narrows the centre only to about that band; and a peer's
-  verdicts follow at most 4 new homes a day. Seat attempts use the exact
-  distance, so refused "outside" attempts are capped (3 per community per
-  day, then `LOCAL_AREA_RATE_LIMITED`).
-- **What it concedes:** a household that shares its home with the host
-  learns, per community, inside / outside / near the edge for its own
-  home — a coarse ring, never the centre to better than about the band;
-  every move of its home is visible to the host.
-- Member households never receive the area (host-local state, outside
-  `space_meta` and `SPACE_CONFIG_CHANGED`); a public space is never on a
-  GFS.
+- **The centre never leaves the hosting household.** It is usually
+  somebody's street. Only the host's own people see it (Settings › Location,
+  the About page on the host); the create dialog never reads the device
+  position and offers the household's own home only as an explicit shortcut.
+  A paired household learns "local community, within X km" — no centre, no
+  verdict (`SPACE_DIRECTORY_SYNC`, v_59). Member households never receive the
+  area; a public space is never on a GFS.
+- **A joiner sends its household's home rounded to ~1 km with the join —
+  only with consent, only to the host.** Every join to a local community
+  (open join, request, follow, invite accept, invite-link redeem — paired,
+  over the mesh, or through a GFS relay) carries `join_location`: the home
+  rounded to **2 decimals** (about 1.1 km — a part of town, never a house or
+  a street), after the SPA asked: "To check you live in the area, your
+  approximate location (about 1 km) is sent to *host* with this request."
+  It rides inside the join's own encrypted payload (sealed end to end over a
+  mesh relay via SPACE_ROUTED, inside the §D2b sealed body over a GFS — never
+  readable by a relay or a GFS), is never forwarded, and is **not stored**:
+  the host keeps only the verdict on a pending request (inside / edge). The
+  per-pair `share_home` is not used for joining.
+- **Only coarse answers, never a distance.** The host decides for the whole
+  ~1 km cell: clearly inside → the join proceeds; clearly outside →
+  `OUTSIDE_AREA`; **near the edge → always an admin's decision** — a pending
+  request even in an open space, answered to the person exactly like any
+  request. So moving a home and asking again learns nothing finer than which
+  cells are inside. The host's admins see "Near the edge"; approving seats
+  the person.
+- **What it concedes:** the host learns a joining household's home to about
+  1 km, once per join the person agreed to; and a person can learn, per
+  ~1 km cell, inside / outside / near the edge. Joins are budgeted as spam
+  control (10 per person, 20 per remote household, per community per UTC
+  day).
 
 ### A global space may carry a place pin — for sorting only
 
