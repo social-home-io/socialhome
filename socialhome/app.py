@@ -329,6 +329,7 @@ from .services.household_zone_service import HouseholdZoneService
 from .services.household_zone_sync import HouseholdZoneSync
 from .services.legacy_album_deletes import LegacyAlbumDeletes
 from .services.link_preview_service import LinkPreviewService
+from .services.local_community import derive_edge_key
 from .services.map_tile_service import MapTileService
 from .services.media_orphan_sweep_service import MediaOrphanSweepService
 from .services.media_transcode_service import MediaTranscodeService
@@ -1933,6 +1934,9 @@ def _wire_federation_stack(
         federation_service=federation_service,
         federation_repo=federation_repo,
         space_repo=space_repo,
+        # The local-community "unsure" band's secret shift — HKDF from
+        # the identity seed, never stored or sent.
+        edge_key=derive_edge_key(identity.identity_seed),
     )
     peer_directory_service.wire()
     app[K.peer_directory_service_key] = peer_directory_service

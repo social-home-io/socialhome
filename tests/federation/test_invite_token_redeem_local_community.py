@@ -24,6 +24,7 @@ from socialhome.domain.federation import (
 from socialhome.domain.space import (
     HomeNotSharedError,
     JoinMode,
+    LocalAreaRateLimitedError,
     OutsideAreaError,
     SpaceType,
 )
@@ -31,6 +32,7 @@ from socialhome.federation.invite_token_redeem import (
     REDEEM_DENY_REASON_HOME_NOT_SHARED,
     REDEEM_DENY_REASON_OUTSIDE_AREA,
 )
+from socialhome.services.local_community import MAX_OUTSIDE_AREA_REFUSALS
 
 from .test_invite_token_redeem import (
     _a_space,
@@ -192,3 +194,21 @@ async def test_a_bootstrap_redeem_is_refused_for_want_of_a_shared_home():
         )
     assert env.issuer_members.live == {}
     assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
+
+
+async def test_redeeming_over_and_over_from_outside_is_held_off():
+    """Each redeem is an exact yes / no on the host, and a refused use is
+    handed back — so a household moving its shared home could ask over and
+    over. After three OUTSIDE_AREA refusals in a day the host answers with
+    its own reason without looking at the home, and the redeemer maps it to
+    LOCAL_AREA_RATE_LIMITED."""
+    sender, issuer_repo, members = _linked(BERN)
+    for _ in range(MAX_OUTSIDE_AREA_REFUSALS):
+        with pytest.raises(OutsideAreaError):
+            await _redeem(sender)
+    with pytest.raises(LocalAreaRateLimitedError) as exc:
+        await _redeem(sender)
+    assert exc.value.status == 429
+    assert exc.value.params == {"whose": "host"}
+    assert members.added == []
+    assert issuer_repo.tokens["good-token"]["uses_remaining"] == 1

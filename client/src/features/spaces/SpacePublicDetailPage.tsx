@@ -129,6 +129,7 @@ function scopeLabel(scope: DirectoryEntry['scope']): string {
 function areaNextStep(verdict: AreaVerdict, isLocal: boolean): string | null {
   switch (verdict) {
     case 'outside': return t('local_area.about.outside_next')
+    case 'edge': return t('local_area.about.edge_next')
     case 'no_home': return t('local_area.about.no_home_next')
     case 'not_shared': return currentUser.value?.is_admin
       ? t('local_area.about.not_shared_admin')

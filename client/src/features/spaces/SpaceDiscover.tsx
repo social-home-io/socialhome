@@ -227,7 +227,10 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
   const near = nearOnly && hasCommunity
   const shown: Lists = {
     household: discoverable(lists.household, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
-    paired: near ? paired.filter((e) => entryAreaVerdict(e, home) === 'inside') : paired,
+    // Near the edge may be inside: the host checks when they ask.
+    paired: near
+      ? paired.filter((e) => ['inside', 'edge'].includes(entryAreaVerdict(e, home) ?? ''))
+      : paired,
     global: sortByDistance(
       discoverable(lists.global, seatedIds).filter((e) => matchesTerm(term, e.name, e.description)),
       home,

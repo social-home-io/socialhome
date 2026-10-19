@@ -66,6 +66,7 @@ from ..domain.space import (
     INVITE_VIA_INTERNAL,
     HomeNotSharedError,
     JoinOwner,
+    LocalAreaRateLimitedError,
     OutsideAreaError,
     SpaceMember,
     SpacePermissionError,
@@ -187,9 +188,10 @@ BOOTSTRAP_DENY_CLIENT_MESSAGE: str = (
 #: still never rendered.
 REDEEM_DENY_REASON_TOO_LARGE: str = "space snapshot too large for the relay"
 
-#: The two DENY reasons of a LOCAL COMMUNITY (a public space bound to an
+#: The DENY reasons of a LOCAL COMMUNITY (a public space bound to an
 #: area): the redeeming household's home is not known to the issuer (not
-#: shared with it), or lies outside the area. Sent only after the token was
+#: shared with it), lies outside the area, or was refused as outside too
+#: often today (the issuer did not look at it this time). Sent only after the token was
 #: consumed and the ban check passed — so they tell a holder of a live link
 #: nothing about the issuer's private state, only what the paired-household
 #: directory already shows about the space — and the use is handed back.
@@ -198,6 +200,7 @@ REDEEM_DENY_REASON_TOO_LARGE: str = "space snapshot too large for the relay"
 #: text is never rendered.
 REDEEM_DENY_REASON_HOME_NOT_SHARED: str = "home location not shared"
 REDEEM_DENY_REASON_OUTSIDE_AREA: str = "home outside the local area"
+REDEEM_DENY_REASON_AREA_RATE_LIMITED: str = "local area refusals rate-limited"
 
 
 def _local_area_deny_error(reason: str) -> SpacePermissionError | None:
@@ -207,6 +210,8 @@ def _local_area_deny_error(reason: str) -> SpacePermissionError | None:
         return HomeNotSharedError(params={"whose": "host"})
     if reason == REDEEM_DENY_REASON_OUTSIDE_AREA:
         return OutsideAreaError(params={"whose": "host"})
+    if reason == REDEEM_DENY_REASON_AREA_RATE_LIMITED:
+        return LocalAreaRateLimitedError(params={"whose": "host"})
     return None
 
 
@@ -1204,6 +1209,9 @@ class SpaceInviteTokenRedeemCoordinator:
             except OutsideAreaError:
                 await self._release_token_use(token, space_id)
                 return None, REDEEM_DENY_REASON_OUTSIDE_AREA, None
+            except LocalAreaRateLimitedError:
+                await self._release_token_use(token, space_id)
+                return None, REDEEM_DENY_REASON_AREA_RATE_LIMITED, None
 
         # The seat the ISSUER decided at mint time (migration 0053). The
         # redeemer never gets to ask for a role, so this is read here and

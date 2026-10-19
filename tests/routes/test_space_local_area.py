@@ -341,13 +341,32 @@ async def test_peer_directory_rows_carry_the_verdict_never_a_centre(client, spac
         "INSERT INTO peer_space_directory(instance_id, space_id, name)"
         " VALUES('carlo', 'sp-c', 'Chess')"
     )
+    await client._db.enqueue(
+        "INSERT INTO peer_space_directory(instance_id, space_id, name,"
+        " radius_km, in_area, area_edge)"
+        " VALUES('dora', 'sp-e', 'Rand', 5.0, NULL, 1)"
+    )
     r = await client.get("/api/peer_spaces", headers=hdr["neighbour"])
     assert r.status == 200
     body = await r.json()
     rows = {row["space_id"]: row for row in body}
-    assert rows["sp-b"]["local_community"] == {"radius_km": 2.0, "in_area": True}
+    assert rows["sp-b"]["local_community"] == {
+        "radius_km": 2.0,
+        "in_area": True,
+        "area_edge": False,
+    }
     assert rows["sp-b"]["home_shared_with_host"] is True
-    assert rows["sp-d"]["local_community"] == {"radius_km": 5.0, "in_area": None}
+    assert rows["sp-d"]["local_community"] == {
+        "radius_km": 5.0,
+        "in_area": None,
+        "area_edge": False,
+    }
+    # Near the rim the host is unsure — not the same as "unknown".
+    assert rows["sp-e"]["local_community"] == {
+        "radius_km": 5.0,
+        "in_area": None,
+        "area_edge": True,
+    }
     assert rows["sp-c"]["local_community"] is None
     assert rows["sp-c"]["home_shared_with_host"] is False
     for row in body:

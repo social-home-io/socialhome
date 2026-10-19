@@ -881,11 +881,18 @@ household:
 - **Eligibility is decided by the host on every seat path**, against the
   same shared home; nobody sends coordinates inside a join request, an
   invite redeem or an accept (`HOME_NOT_SHARED` / `OUTSIDE_AREA`).
+- **The verdict can't be used to find the centre.** Near the rim the host
+  is "unsure" (`in_area: null`, `area_edge: true`) within a band of
+  max(10 % of the radius, 250 m); the answer is computed per grid cell and
+  the band slid by a secret only the host holds, so moving the shared home
+  step by step narrows the centre only to about that band; and a peer's
+  verdicts follow at most 4 new homes a day. Seat attempts use the exact
+  distance, so refused "outside" attempts are capped (3 per community per
+  day, then `LOCAL_AREA_RATE_LIMITED`).
 - **What it concedes:** a household that shares its home with the host
-  learns one bit per community — inside or outside the circle. Moving the
-  shared home and watching the verdict (or a seat attempt) flip is an
-  oracle on where the circle's rim lies; every such move is visible to the
-  host as that household's home changing.
+  learns, per community, inside / outside / near the edge for its own
+  home — a coarse ring, never the centre to better than about the band;
+  every move of its home is visible to the host.
 - Member households never receive the area (host-local state, outside
   `space_meta` and `SPACE_CONFIG_CHANGED`); a public space is never on a
   GFS.

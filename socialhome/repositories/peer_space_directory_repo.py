@@ -91,6 +91,7 @@ class SqlitePeerSpaceDirectoryRepo:
                 cached,
                 lc.radius_km if (lc := e.local_community) is not None else None,
                 _in_area_column(e.local_community),
+                1 if (lc := e.local_community) is not None and lc.area_edge else 0,
             )
             for e in entries
         ]
@@ -106,8 +107,8 @@ class SqlitePeerSpaceDirectoryRepo:
                     INSERT INTO peer_space_directory(
                         instance_id, space_id, name, description, emoji,
                         member_count, join_mode, min_age, category,
-                        updated_at, cached_at, radius_km, in_area
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        updated_at, cached_at, radius_km, in_area, area_edge
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
@@ -170,6 +171,7 @@ def _row(row: dict) -> PeerSpaceDirectoryEntry:
             PeerLocalCommunity(
                 radius_km=float(row["radius_km"]),
                 in_area=None if row.get("in_area") is None else bool(row["in_area"]),
+                area_edge=bool(row.get("area_edge") or 0),
             )
             if row.get("radius_km") is not None
             else None

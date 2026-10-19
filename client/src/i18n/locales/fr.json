@@ -5002,5 +5002,9 @@
   "pairing.share_home_off": "Désactivé — l'emplacement de votre domicile ne leur est pas envoyé. Vous pourrez l'activer plus tard sous Gérer.",
   "household.toggles.connections_legend": "Connexions",
   "household.toggles.share_home_default": "Partager notre domicile avec les nouvelles connexions",
-  "household.toggles.share_home_default_hint": "Préréglage de l'interrupteur lors de l'appairage avec un foyer. Chaque connexion garde son propre réglage."
+  "household.toggles.share_home_default_hint": "Préréglage de l'interrupteur lors de l'appairage avec un foyer. Chaque connexion garde son propre réglage.",
+  "local_area.badge.edge": "Près de la limite — demandez à rejoindre, le foyer vérifiera",
+  "local_area.about.edge_next": "Le domicile de votre foyer est près de la limite de cette zone. Demandez à rejoindre — son foyer vérifie l'emplacement que votre foyer partage avec lui.",
+  "error.local_area_rate_limited_own": "Le foyer de cette communauté locale a refusé votre foyer plusieurs fois aujourd'hui, car hors de sa zone. Réessayez demain.",
+  "error.local_area_rate_limited_peer": "Ce foyer a été refusé plusieurs fois aujourd'hui, car hors de cette zone. Réessayez demain."
 }

@@ -1853,6 +1853,20 @@ class OutsideAreaError(CodedError, SpacePermissionError):
     detail = "This space is a local community, and your home is outside its area."
 
 
+class LocalAreaRateLimitedError(CodedError, SpacePermissionError):
+    """The space is a local community and the joining household was refused
+    as outside its area too often today: the host does not look at its home
+    again until the window passes. A seat attempt is an exact yes / no, so
+    without this limit it would be a fine-grained way to find the centre."""
+
+    status = 429
+    code = "LOCAL_AREA_RATE_LIMITED"
+    detail = (
+        "This space is a local community, and this household was refused as "
+        "outside its area several times today. Try again tomorrow."
+    )
+
+
 #: Longest quick-link URL a space admin may store.
 MAX_SPACE_LINK_URL_LENGTH: int = 2048
 

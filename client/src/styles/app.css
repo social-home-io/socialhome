@@ -12757,6 +12757,11 @@ a.sh-space-hero-members:focus-visible,
   background: color-mix(in srgb, var(--sh-danger) 12%, transparent);
   color: var(--sh-danger-on-soft);
 }
+/* The host is unsure near the rim: neither the yes nor the no colour. */
+.sh-local-area-badge--edge {
+  background: color-mix(in srgb, var(--sh-warning) 16%, transparent);
+  color: var(--sh-text);
+}
 .sh-local-area-badge--no_home,
 .sh-local-area-badge--not_shared {
   background: color-mix(in srgb, var(--sh-text-muted) 16%, transparent);

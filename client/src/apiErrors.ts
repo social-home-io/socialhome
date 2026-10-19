@@ -199,6 +199,8 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   },
   OUTSIDE_AREA: (_b, p) => (str(p, 'whose') === 'peer'
     ? t('error.outside_area_peer') : t('error.outside_area_own')),
+  LOCAL_AREA_RATE_LIMITED: (_b, p) => (str(p, 'whose') === 'peer'
+    ? t('error.local_area_rate_limited_peer') : t('error.local_area_rate_limited_own')),
   LOCAL_AREA_PUBLIC_ONLY: () => t('error.local_area_public_only'),
   LOCAL_AREA_UNAVAILABLE: () => t('error.local_area_unavailable'),
   LOCAL_AREA_DELEGATED: () => t('error.local_area_delegated'),

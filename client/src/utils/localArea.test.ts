@@ -82,6 +82,12 @@ describe('peerAreaVerdict (a paired household\'s community — no centre)', () =
   it('no home set says so', () => {
     expect(peerAreaVerdict({ radius_km: 2, in_area: null }, null, true)).toBe('no_home')
   })
+  it('near the rim the host is unsure: "near the edge", not unknown', () => {
+    expect(peerAreaVerdict({ radius_km: 2, in_area: null, area_edge: true }, home, true)).toBe('edge')
+    // …but a home we stopped sharing, or never set, says so first.
+    expect(peerAreaVerdict({ radius_km: 2, in_area: null, area_edge: true }, home, false)).toBe('not_shared')
+    expect(peerAreaVerdict({ radius_km: 2, in_area: null, area_edge: true }, null, true)).toBe('no_home')
+  })
   it('shared but not answered yet: no badge, the host checks', () => {
     expect(peerAreaVerdict({ radius_km: 2, in_area: null }, home, true)).toBe('unknown')
     expect(peerAreaVerdict({ radius_km: 2, in_area: null }, undefined, true)).toBe('unknown')

@@ -844,6 +844,10 @@ export interface LocalArea {
 export interface PeerLocalCommunity {
   radius_km: number
   in_area: boolean | null
+  /** Near the rim the host is unsure (``in_area`` is then ``null``): it
+   *  decides on the exact distance when someone asks to join. Absent from
+   *  an older backend. */
+  area_edge?: boolean
 }
 
 export interface HouseholdSpaceRow {

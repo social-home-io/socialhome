@@ -151,6 +151,7 @@ export function entryRadiusKm(entry: DirectoryEntry): number | null {
 function nearRank(v: AreaVerdict | null): number {
   switch (v) {
     case 'inside': return 0
+    case 'edge': return 1
     case null: return 1
     case 'outside': return 3
     default: return 2

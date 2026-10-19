@@ -71,10 +71,13 @@ class PeerSpaceCollectionView(BaseView):
                     "category": normalize_category(e.category),
                     # A local community (v_59 hosts): its radius and the
                     # host's verdict for THIS household — never a centre.
+                    # ``area_edge``: near the rim the host is unsure
+                    # (``in_area`` then null) and checks on a join.
                     "local_community": (
                         {
                             "radius_km": e.local_community.radius_km,
                             "in_area": e.local_community.in_area,
+                            "area_edge": e.local_community.area_edge,
                         }
                         if e.local_community is not None
                         else None

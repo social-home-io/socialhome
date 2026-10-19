@@ -10,6 +10,7 @@ describe('LocalAreaBadge', () => {
     expect(localAreaVerdictText('not_shared', 'Sara’s household'))
       .toBe('Share your home with Sara’s household to check')
     expect(localAreaVerdictText('not_shared', null)).toBe('Share your home with its household to check')
+    expect(localAreaVerdictText('edge')).toBe('Near the edge — ask to join and the host will check')
   })
 
   it('says nothing while the home is loading', () => {
@@ -27,6 +28,8 @@ describe('LocalAreaBadge', () => {
   it('only inside (or not yet known) offers a join', () => {
     expect(verdictAllowsJoin('inside')).toBe(true)
     expect(verdictAllowsJoin('unknown')).toBe(true)
+    // Near the edge the host decides on the exact distance: let them ask.
+    expect(verdictAllowsJoin('edge')).toBe(true)
     expect(verdictAllowsJoin('outside')).toBe(false)
     expect(verdictAllowsJoin('no_home')).toBe(false)
     expect(verdictAllowsJoin('not_shared')).toBe(false)
