@@ -11,8 +11,8 @@
  * Honours ``prefers-reduced-motion``: smooth scroll on the default
  * preference, instant snap when the user has reduced motion turned on.
  *
- * Sticky action bars: a form's ``.sh-form-actions`` save row (and the
- * timetable's phone brush bar) stick to the bottom of the viewport —
+ * Sticky action bars: a form's ``.sh-form-actions`` save row, a page's
+ * unsaved-changes ``.sh-savebar`` (and the timetable's phone brush bar) stick to the bottom of the viewport —
  * right where this button sits. Whenever such a bar overlaps the
  * button's resting spot, the button lifts above it (``--sh-back-to-top-lift``)
  * so it never covers a Save button. Re-measured (once per animation
@@ -33,7 +33,7 @@ import { t } from '@/i18n/i18n'
 const SHOW_AFTER_PX = 600
 
 /** Bars that stick to the viewport bottom and hold controls. */
-export const STICKY_BAR_SELECTOR = '.sh-form-actions, .sh-timetable-brushbar'
+export const STICKY_BAR_SELECTOR = '.sh-form-actions, .sh-savebar, .sh-timetable-brushbar'
 
 /** Open modal surfaces — the button hides while any is in the DOM. */
 export const MODAL_SELECTOR = '[aria-modal="true"], dialog[open]'

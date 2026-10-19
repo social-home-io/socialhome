@@ -10,8 +10,8 @@
  * deep-links to ``…/settings/sections``. Links go through ``addBase`` so
  * they keep the HA ingress prefix.
  *
- * Save model (owner decision 8): only Basics is a form — its draft is held
- * here and saved with a page-level save bar ("1 unsaved change · Discard ·
+ * Save model (owner decision 8): only Basics is a form — its draft (text,
+ * emoji, quick links, theme) is held here and saved with a page-level save bar ("1 unsaved change · Discard ·
  * Save") that appears only while something is unsaved; leaving the page
  * with a draft asks first (``navigationGuard`` + ``beforeunload``), moving
  * between sections doesn't. Every other switch, radio and select saves the
@@ -57,6 +57,7 @@ import { MembersSection } from './settings/MembersSection'
 import { ModerationSection } from './settings/ModerationSection'
 import { patchSpace } from './settings/spacePatch'
 import { basicsOf, useBasicsForm } from './settings/useBasicsForm'
+import type { LinksDraftHandle } from './SpaceLinksTab'
 import {
   LeaveSection, UnfollowSection, YouSection, type MySeat,
 } from './settings/YouSection'
@@ -166,12 +167,17 @@ export default function SpaceSettingsPage() {
   // The theme studio inside Basics reports its draft here, so one save bar
   // covers the text and the theme.
   const [themeDraft, setThemeDraft] = useState<ThemeDraft | null>(null)
-  const dirty = admin ? form.dirtyCount + (themeDraft?.dirty ? 1 : 0) : 0
+  // …and so does the quick-links editor (each added / removed / edited
+  // link counts, a new order once).
+  const [linksDraft, setLinksDraft] = useState<LinksDraftHandle | null>(null)
+  const dirty = admin
+    ? form.dirtyCount + (themeDraft?.dirty ? 1 : 0) + (linksDraft?.count ?? 0)
+    : 0
   const dirtyRef = useRef(0)
   dirtyRef.current = dirty
   // The guard is registered once; it reads the latest drafts through this.
   const discardRef = useRef(() => {})
-  discardRef.current = () => { form.reset(); themeDraft?.discard() }
+  discardRef.current = () => { form.reset(); themeDraft?.discard(); linksDraft?.discard() }
   const [saving, setSaving] = useState(false)
 
   const [notifLevel, setNotifLevel] = useSpaceNotifLevel(spaceId, viewer !== null)
@@ -271,8 +277,14 @@ export default function SpaceSettingsPage() {
       showToast(t('space.settings_page.basics.name_required'), 'error')
       return
     }
+    if (linksDraft && linksDraft.invalid > 0) {
+      showToast(t('space.links.fix_first'), 'error')
+      return
+    }
     setSaving(true)
     let ok = true
+    // One "Saved" for the whole bar: the text's PATCH says it itself.
+    let said = form.dirtyCount > 0
     if (form.dirtyCount > 0) {
       const outcome = await patchSpace(space.id, form.changes, {
         okToast: t('space.settings.saved'), onUpdate: refresh,
@@ -282,9 +294,15 @@ export default function SpaceSettingsPage() {
       ok = outcome !== 'failed'
     }
     if (ok && themeDraft?.dirty) {
-      if (await themeDraft.save() && form.dirtyCount === 0) {
+      if (await themeDraft.save() && !said) {
         showToast(t('space.settings.saved'), 'success')
+        said = true
       }
+    }
+    // The links go last, one call at a time; a link whose call fails
+    // stays in the draft (and the bar) and the editor names it.
+    if (ok && linksDraft && linksDraft.count > 0) {
+      if (await linksDraft.save() && !said) showToast(t('space.settings.saved'), 'success')
     }
     setSaving(false)
   }
@@ -293,7 +311,8 @@ export default function SpaceSettingsPage() {
     switch (s) {
       case 'basics':
         return <BasicsSection space={space} form={form} isRemoteSpace={isRemoteSpace}
-                              onUpdate={refresh} onThemeDraft={setThemeDraft} />
+                              onUpdate={refresh} onThemeDraft={setThemeDraft}
+                              onLinksDraft={setLinksDraft} />
       case 'find':
         return <FindSection space={space} isOwner={isOwner} isRemoteSpace={isRemoteSpace}
                             adminCount={members.admins} onUpdate={refresh} />
