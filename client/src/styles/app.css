@@ -1197,7 +1197,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-text-warning { color: var(--sh-warning); }
 
 /* Tabs */
-.sh-admin-tabs, .sh-bazaar-tabs, .sh-calendar-views {
+.sh-admin-tabs, .sh-bazaar-tabs {
   display: flex;
   gap: var(--sh-space-xs);
   border-bottom: 1px solid var(--sh-border);
@@ -2180,6 +2180,10 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-skeleton-calendar-day {
   display: block;
 }
+.sh-skeleton-calendar-controls {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm);
+}
 
 .sh-bazaar--skeleton .sh-bazaar-card--skeleton {
   display: flex;
@@ -2817,9 +2821,6 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   .sh-feed-item:nth-child(4n+2) { --sh-feed-rot:  0.6deg; }
   .sh-feed-item:nth-child(4n+3) { --sh-feed-rot: -0.5deg; }
   .sh-feed-item:nth-child(4n)   { --sh-feed-rot:  0.7deg; }
-  .sh-calendar-day-group:nth-child(3n+1) { --sh-day-rot: -0.4deg; }
-  .sh-calendar-day-group:nth-child(3n+2) { --sh-day-rot:  0.3deg; }
-  .sh-calendar-day-group:nth-child(3n)   { --sh-day-rot: -0.2deg; }
 }
 .sh-post--pinned {
   background:
@@ -6133,30 +6134,6 @@ body.sh-dm-thread-open .sh-messages {
 
 /* Calendar */
 .sh-calendar { display: flex; flex-direction: column; gap: var(--sh-space-md); }
-.sh-calendar-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sh-space-sm);
-  flex-wrap: wrap;
-  padding: var(--sh-space-sm);
-  background: var(--sh-bg);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-lg);
-  box-shadow: var(--sh-shadow-xs);
-}
-.sh-calendar-nav {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-}
-.sh-calendar-heading {
-  font-weight: 700;
-  min-width: 220px;
-  text-align: center;
-  font-size: var(--sh-font-size-base);
-  font-variant-numeric: tabular-nums;
-}
 /* Multi-select calendar overlay picker — one chip per household
  * calendar. Each chip carries a deterministic ``--cal-hue`` (set
  * inline by the page) so the colored dot, border-when-on, and the
@@ -6478,208 +6455,8 @@ body.sh-dm-thread-open .sh-messages {
   color: var(--sh-primary-on-soft);
   font-weight: 600;
 }
-/* Day group — paper-card with washi tape, mirrors the marketing
- * site's ``.card`` shell so the calendar stops reading as a
- * spreadsheet and starts reading as pinned-paper notes-for-the-day.
- * Stagger rotation kicks in via ``nth-child`` below so successive
- * day groups feel hand-pinned rather than algorithmic. */
-.sh-calendar-day-group {
-  position: relative;
-  background: var(--sh-bg-tertiary);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-lg);
-  padding: clamp(var(--sh-space-md), 2vw, var(--sh-space-lg));
-  box-shadow:
-    0 1px 0 var(--sh-border),
-    0 22px 50px -32px rgba(26, 24, 20, 0.45);
-  transform: rotate(var(--sh-day-rot, 0deg));
-  transition:
-    box-shadow var(--sh-transition-fast),
-    border-color var(--sh-transition-fast),
-    transform var(--sh-transition-normal);
-}
-.sh-calendar-day-group:hover {
-  transform: rotate(0deg) translateY(-2px);
-  box-shadow:
-    0 1px 0 var(--sh-border),
-    0 28px 60px -28px rgba(26, 24, 20, 0.55);
-  border-color: var(--sh-border-strong);
-  z-index: 2;
-}
-.sh-calendar-day-group::before {
-  content: "";
-  position: absolute;
-  top: -10px;
-  inset-inline-start: 24px;
-  width: 76px;
-  height: 18px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
-  transform: rotate(-5deg);
-  pointer-events: none;
-  z-index: 1;
-}
-/* Stagger rotations + tape side so the day list reads as a stack of
- * notes pinned to the wall. Three-step cycle keeps long lists from
- * feeling mechanical. */
-.sh-calendar-day-group:nth-child(3n+1) { --sh-day-rot: -0.6deg; }
-.sh-calendar-day-group:nth-child(3n+2) { --sh-day-rot:  0.5deg; }
-.sh-calendar-day-group:nth-child(3n+2)::before {
-  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
-  inset-inline-start: auto;
-  inset-inline-end: 24px;
-  transform: rotate(6deg);
-}
-.sh-calendar-day-group:nth-child(3n)   { --sh-day-rot: -0.3deg; }
-.sh-calendar-day-group:nth-child(3n)::before {
-  background: color-mix(in srgb, var(--sh-warning) 45%, transparent);
-}
-@media (prefers-reduced-motion: reduce) {
-  .sh-calendar-day-group { transform: none; }
-  .sh-calendar-day-group:hover { transform: translateY(-2px); }
-}
-.sh-calendar-day-heading {
-  /* Friendly Fraunces serif — was an all-caps utilitarian label.
-   * Pairs with the `formatDayLabel` helper that emits e.g. "Today
-   * · Friday 8 May" instead of `5/8/2026`. */
-  font: 600 var(--sh-font-size-base) / 1.2 var(--sh-font-family-display);
-  letter-spacing: -0.005em;
-  color: var(--sh-text);
-  margin: 0 0 var(--sh-space-sm);
-  padding-bottom: var(--sh-space-xs);
-  border-bottom: 1px dashed var(--sh-border);
-}
-.sh-calendar-day-heading--today { color: var(--sh-primary-text); }
-.sh-calendar-day-heading__rel {
-  font: 500 var(--sh-font-size-xs) / 1 var(--sh-font-family-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--sh-text-muted);
-  margin-inline-start: var(--sh-space-xs);
-}
-.sh-event {
-  position: relative;
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  border-radius: var(--sh-radius-md);
-  border: 1px solid transparent;
-  transition:
-    background var(--sh-transition-fast),
-    border-color var(--sh-transition-fast),
-    box-shadow var(--sh-transition-fast),
-    transform var(--sh-transition-fast);
-}
-.sh-event::before {
-  content: '';
-  position: absolute;
-  inset-inline-start: 0; top: 8px; bottom: 8px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--cal-hue, var(--sh-primary));
-  opacity: 0.7;
-  transition: opacity var(--sh-transition-fast);
-}
-.sh-event:hover {
-  background: var(--sh-bg-secondary);
-  border-color: var(--sh-border);
-  transform: translateY(-1px);
-}
-.sh-event:hover::before { opacity: 1; }
-.sh-event:active { transform: translateY(0); }
-/* The row header is a native <button> (Enter + Space activation, focus
- * and the disclosure role for free) — so the UA chrome has to be reset
- * back to "a flex line of text". ``font: inherit`` is load-bearing: a
- * button does NOT inherit the page font, and without it the row's type
- * changes size and family. */
-.sh-event-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  padding: 0 0 0 var(--sh-space-sm);
-  margin: 0;
-  width: 100%;
-  background: none;
-  border: 0;
-  color: inherit;
-  font: inherit;
-  text-align: start;
-  cursor: pointer;
-}
-@media (pointer: coarse) {
-  /* The agenda / list row's tap-to-expand header was ~21 px tall. */
-  .sh-event-header { min-height: var(--sh-tap-target-compact); }
-}
-.sh-event-header strong {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sh-event-header time {
-  font-size: var(--sh-font-size-sm);
-  color: var(--sh-text-muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-/* Multi-day spans — the agenda repeats an event under every day it
- * covers, so each row has to say WHERE in the span it sits. Two
- * signals, never colour alone: the left rail changes shape/texture,
- * and ``.sh-event-span-badge`` spells it out in words ("Day 2 of 3").
- *
- * A true bar spanning several day cards isn't possible here — each
- * ``.sh-calendar-day-group`` carries its own ``transform: rotate()``,
- * which makes it a containing block. Instead the rail runs to the
- * card edge on the open side (square there, rounded on the closed
- * side) so consecutive days read as one thread down the stack. */
-.sh-event--continued::before {
-  /* Carried over from an earlier day: rail enters from the top edge,
-   * dashed so a glance separates "started before" from "starts here". */
-  top: 0;
-  border-start-start-radius: 0;
-  border-start-end-radius: 0;
-  background: repeating-linear-gradient(
-    to bottom,
-    var(--cal-hue, var(--sh-primary)) 0 9px,
-    transparent 9px 13px
-  );
-}
-.sh-event--continues::before {
-  /* Runs on into a later day: rail leaves through the bottom edge. */
-  bottom: 0;
-  border-end-start-radius: 0;
-  border-end-end-radius: 0;
-}
-/* Meta cluster (time · span badge · all-day · location pin). Grouped
- * so it can drop to its own line as one unit on a narrow phone
- * instead of squeezing the title to an ellipsis stub. */
-.sh-event-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-xs);
-  margin-inline-start: auto;
-}
-.sh-event-span-badge {
-  flex-shrink: 0;
-  padding: 1px 7px;
-  border-radius: var(--sh-radius-full);
-  border: 1px dashed color-mix(in srgb, var(--cal-hue, var(--sh-primary)) 45%, transparent);
-  color: var(--sh-text-muted);
-  font: 500 var(--sh-font-size-xs) / 1.4 var(--sh-font-family-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  white-space: nowrap;
-}
-/* Faint "has-location" pin on the compact row — sits next to the
- * time so the eye picks it up while scanning a day. The full
- * location + maps link lives in the expanded ``.sh-event-detail``. */
-.sh-event-row-locpin {
-  flex-shrink: 0;
-  font-size: var(--sh-font-size-sm);
-  opacity: 0.7;
-  line-height: 1;
-}
+
+
 /* Expanded-event location row + the EventPostCard variant. The link
  * inherits text colour from the surrounding card but underlines on
  * hover so it reads as tap-actionable without screaming about it. */
@@ -6698,13 +6475,13 @@ body.sh-dm-thread-open .sh-messages {
 .sh-event-card-location-link:focus-visible {
   text-decoration: underline;
 }
-/* Owner-name byline that surfaces only when 2+ calendars are
- * overlaid. Pairs with the per-event ``--cal-hue`` left edge so
+/* Owner-name byline (household calendar rows) when the event is shared
+ * or 2+ calendars are overlaid. Pairs with the row's calendar-hue rail so
  * ownership is communicated by both colour AND text — important for
  * colour-blind family members and just generally clearer at a
  * glance. Tinted by the event's calendar hue so the chip and the
  * left edge read as one identity. */
-.sh-event-header .sh-event-owner {
+.sh-event-owner {
   flex-shrink: 0;
   padding: 1px 8px;
   border-radius: var(--sh-radius-full);
@@ -6723,20 +6500,10 @@ body.sh-dm-thread-open .sh-messages {
    composer fanned out to several household members' calendars). A
    single-chip event looks the same as the legacy ``.sh-event-owner``
    render; two or more chips line up horizontally with a 4 px gap. */
-.sh-event-header .sh-event-owner-chips {
+.sh-event-owner-chips {
   display: inline-flex;
   flex-shrink: 0;
   gap: 4px;
-}
-.sh-event-detail {
-  margin-top: var(--sh-space-sm);
-  padding: var(--sh-space-sm) 0 0 var(--sh-space-sm);
-  border-top: 1px solid var(--sh-border);
-  animation: sh-event-expand 220ms var(--sh-ease-out);
-}
-@keyframes sh-event-expand {
-  from { opacity: 0; transform: translateY(-4px); }
-  to   { opacity: 1; transform: translateY(0); }
 }
 .sh-event-times {
   display: flex;
@@ -6767,19 +6534,6 @@ body.sh-dm-thread-open .sh-messages {
  * member calendars otherwise wraps to 3 ugly rows above the fold).
  * The view-mode tabs stay in their own row beneath. */
 @media (max-width: 640px) {
-  .sh-calendar-controls {
-    padding: var(--sh-space-xs) var(--sh-space-sm);
-    gap: var(--sh-space-xs);
-  }
-  .sh-calendar-nav { flex: 1 1 auto; gap: var(--sh-space-xs); }
-  .sh-calendar-heading {
-    /* Drop the desktop's 220px lower-bound so a narrow phone (e.g.
-     * iPhone SE 1st-gen at 320px) doesn't push the next nav arrow
-     * off-screen. Reflow handles the rest. */
-    min-width: 0;
-    flex: 1 1 auto;
-    font-size: var(--sh-font-size-sm);
-  }
   .sh-calendar-picker {
     /* Horizontal-scroll chip row keeps long household-member lists on
      * a single visual line — much more legible than wrapping to 3 rows
@@ -6812,34 +6566,7 @@ body.sh-dm-thread-open .sh-messages {
     padding: 12px 6px 8px;
   }
   .sh-cal-target-chip { font-size: var(--sh-font-size-xs); }
-  .sh-calendar-day-group { padding: var(--sh-space-sm); }
-  /* A multi-day row carries far more meta than a plain one (date
-   * range + "day 2 of 3" on top of the owner chip), and at 390px flex
-   * shrank the TITLE to "Gra…" rather than wrapping — the meta cluster
-   * technically still fit. So on a span row the title claims the whole
-   * first line and everything else wraps beneath it. Plain single-day
-   * rows (no continuation class) keep the compact one-line layout. */
-  .sh-event--continued .sh-event-header,
-  .sh-event--continues .sh-event-header {
-    flex-wrap: wrap;
-    row-gap: 2px;
-  }
-  .sh-event--continued .sh-event-header > strong,
-  .sh-event--continues .sh-event-header > strong {
-    flex: 1 1 100%;
-  }
-  .sh-event--continued .sh-event-meta,
-  .sh-event--continues .sh-event-meta {
-    margin-inline-start: 0;
-  }
-  .sh-event-header {
-    /* Owner chip wraps under the title on narrow viewports — keeps the
-     * title legible at glance. */
-    flex-wrap: wrap;
-    row-gap: 4px;
-  }
-  .sh-event-header strong { font-size: var(--sh-font-size-sm); }
-  .sh-event-header time { font-size: var(--sh-font-size-xs); }
+
   .sh-event-rsvp { gap: var(--sh-space-xs); }
   .sh-event-admin {
     /* Edit + Delete + ⋯ trio fits on one row on a 320-360px phone if
@@ -25341,6 +25068,10 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
 .sh-cal-row__rail { border-radius: 2px; background: var(--sh-primary); }
 .sh-cal-row--allday .sh-cal-row__rail { background: var(--sh-warning); }
 .sh-cal-row--multi .sh-cal-row__rail { background: var(--sh-success); }
+/* The household calendar paints the rail in the event's calendar colour
+ * (the date column already says timed / all day / N days). */
+.sh-cal-row--hued .sh-cal-row__rail { background: var(--sh-cal-hue); }
+.sh-cal-row__body .sh-event-owner-chips { align-self: flex-start; }
 .sh-cal-row__body { display: flex; flex-direction: column; justify-content: center; gap: 2px; min-width: 0; }
 .sh-cal-row__title { font-weight: 600; overflow-wrap: anywhere; }
 .sh-cal-row__meta { font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); overflow-wrap: anywhere; }
@@ -25397,6 +25128,7 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
 }
 .sh-cal-bar--allday { border-inline-start-color: var(--sh-warning); background: color-mix(in srgb, var(--sh-warning) 18%, var(--sh-bg)); }
 .sh-cal-bar--multi { border-inline-start-color: var(--sh-success); background: color-mix(in srgb, var(--sh-success) 18%, var(--sh-bg)); }
+.sh-cal-bar--hued { border-inline-start-color: var(--sh-cal-hue); background: color-mix(in srgb, var(--sh-cal-hue) 16%, var(--sh-bg)); }
 .sh-cal-bar.is-cont-before { margin-inline-start: 0; border-inline-start-width: 0; border-start-start-radius: 0; border-end-start-radius: 0; }
 .sh-cal-bar.is-cont-after { margin-inline-end: 0; border-start-end-radius: 0; border-end-end-radius: 0; }
 .sh-cal-grid-view--week .sh-cal-grid__week { --sh-cal-lane: 40px; grid-template-rows: 34px repeat(var(--sh-cal-lanes, 1), var(--sh-cal-lane)) 24px; }

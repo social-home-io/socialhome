@@ -15,7 +15,7 @@ import {
   groupUpcomingByWeek, upcomingWeekTitle, weekRangeLabel,
 } from '@/utils/calendarViews'
 import type { WeekStart } from '@/utils/week'
-import { CalendarEventRow } from './CalendarEventRow'
+import { CalendarEventRow, type RowDecor } from './CalendarEventRow'
 
 interface Props {
   events: CalendarEvent[]
@@ -27,9 +27,11 @@ interface Props {
   empty: ComponentChildren
   /** The end line under the list. */
   footer?: ComponentChildren
+  /** Per-event rail colour / labels (the household's calendar hues). */
+  decorate?: (event: CalendarEvent) => RowDecor | undefined
 }
 
-export function CalendarUpcoming({ events, now, weekStart, renderDetail, empty, footer }: Props) {
+export function CalendarUpcoming({ events, now, weekStart, renderDetail, empty, footer, decorate }: Props) {
   const [openId, setOpenId] = useState<string | null>(null)
   const weeks = groupUpcomingByWeek(events, now, weekStart)
   return (
@@ -54,6 +56,7 @@ export function CalendarUpcoming({ events, now, weekStart, renderDetail, empty, 
                     open={openId === id}
                     onToggle={() => setOpenId(openId === id ? null : id)}
                     detailId={`sh-cal-detail-${week.startKey}-${id.replace(/[^\w-]/g, '_')}`}
+                    decor={decorate?.(entry.event)}
                   >
                     {renderDetail(entry.event)}
                   </CalendarEventRow>

@@ -18,6 +18,15 @@ import { startOfWeek, type WeekStart } from './week'
 /** The views a space calendar offers. Week is for wide screens. */
 export type CalendarView = 'upcoming' | 'month' | 'week'
 
+/** Week needs room for seven readable columns: narrower screens get
+ *  Upcoming and Month only (a space's Calendar and the household page). */
+export const CALENDAR_WIDE_QUERY = '(min-width: 769px)'
+
+/** The view on screen: Week falls back to Month on a narrow screen. */
+export function viewOnScreen(v: CalendarView, wide: boolean): CalendarView {
+  return v === 'week' && !wide ? 'month' : v
+}
+
 /** How far Upcoming looks ahead, in weeks. */
 export const UPCOMING_WEEKS = 4
 

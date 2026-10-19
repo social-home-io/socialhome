@@ -65,53 +65,27 @@ describe('CalendarPage', () => {
     expect(typeof mod.default).toBe('function')
   })
 
-  it('renders day-group headings in chronological order regardless of creation order', async () => {
-    // Regression for the bug where three events scheduled for
-    // 2026-05-14, 2026-05-19 and 2026-05-21 surfaced as 14 → 21 →
-    // 19 in the agenda. The root cause was a locale-fragile
-    // ``new Date(toLocaleDateString())`` round-trip in the day-key
-    // sort; this test pins the rendered order at the SPA boundary.
+  it('lists Upcoming in date order regardless of creation order', async () => {
+    // Regression for the bug where three events surfaced as 14 → 21 →
+    // 19 (a locale-fragile day-key sort). Upcoming opens by default and
+    // must list them in date order whatever order the calendars answer.
+    const now = new Date()
+    const iso = (day: number, hour: number) =>
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + day, hour, 0, 0).toISOString()
+    const row = (id: string, summary: string, day: number) => ({
+      id, calendar_id: 'cal-1', summary, description: null,
+      start: iso(day, 10), end: iso(day, 11),
+      all_day: false, rrule: null, capacity: null,
+      created_by: 'u1', attendees: ['u1'],
+      rsvp_enabled: false, location: null, cover_url: null,
+    })
     const { api } = await import('@/api')
     vi.mocked(api.get).mockImplementation(async (url: string) => {
       if (url === '/api/calendars') {
-        return [{
-          id: 'cal-1',
-          name: 'Family',
-          owner_username: 'admin',
-          color: null,
-        }]
+        return [{ id: 'cal-1', name: 'Family', owner_username: 'admin', color: null }]
       }
       if (url.startsWith('/api/calendars/cal-1/events')) {
-        // Order intentionally NOT chronological to mimic the
-        // multi-calendar ``responses.flat()`` shape in the bug
-        // report. The page must surface them in event-date order
-        // anyway.
-        return [
-          {
-            id: 'e14', calendar_id: 'cal-1', summary: 'On the 14th',
-            description: null,
-            start: '2026-05-14T10:00:00Z', end: '2026-05-14T11:00:00Z',
-            all_day: false, rrule: null, capacity: null,
-            created_by: 'u1', attendees: ['u1'],
-            rsvp_enabled: false, location: null, cover_url: null,
-          },
-          {
-            id: 'e21', calendar_id: 'cal-1', summary: 'On the 21st',
-            description: null,
-            start: '2026-05-21T10:00:00Z', end: '2026-05-21T11:00:00Z',
-            all_day: false, rrule: null, capacity: null,
-            created_by: 'u1', attendees: ['u1'],
-            rsvp_enabled: false, location: null, cover_url: null,
-          },
-          {
-            id: 'e19', calendar_id: 'cal-1', summary: 'On the 19th',
-            description: null,
-            start: '2026-05-19T10:00:00Z', end: '2026-05-19T11:00:00Z',
-            all_day: false, rrule: null, capacity: null,
-            created_by: 'u1', attendees: ['u1'],
-            rsvp_enabled: false, location: null, cover_url: null,
-          },
-        ]
+        return [row('e14', 'First', 2), row('e21', 'Third', 9), row('e19', 'Second', 6)]
       }
       return []
     })
@@ -120,51 +94,35 @@ describe('CalendarPage', () => {
     const mod = await import('./CalendarPage')
     const { container } = render(<mod.default />)
 
-    // Wait for the async load to settle and all three day headings
-    // to be rendered.
     await waitFor(() => {
-      const titles = container.querySelectorAll('.sh-event strong')
-      expect(titles.length).toBe(3)
+      expect(container.querySelectorAll('.sh-cal-row__title').length).toBe(3)
     }, { timeout: 2000 })
-
-    const eventTitles = Array.from(
-      container.querySelectorAll('.sh-event strong'),
-    ).map(el => el.textContent)
-    expect(eventTitles).toEqual([
-      'On the 14th', 'On the 19th', 'On the 21st',
-    ])
-    // Day headings sit one level under the page title (the TopBar h1):
-    // an h3 there skipped a level (axe heading-order).
-    const dayHeadings = container.querySelectorAll('.sh-calendar-day-heading')
-    expect([...dayHeadings].map(h => h.tagName)).toEqual(['H2', 'H2', 'H2'])
+    const titles = Array.from(container.querySelectorAll('.sh-cal-row__title')).map(el => el.textContent)
+    expect(titles).toEqual(['First', 'Second', 'Third'])
+    // Week headings sit one level under the page title (the TopBar h1).
+    const headings = container.querySelectorAll('.sh-cal-week__heading')
+    expect(headings.length).toBeGreaterThan(0)
+    expect([...headings].every(h => h.tagName === 'H2')).toBe(true)
   })
 
-  it('spreads a multi-day event across one day card per day, expanding only the clicked row', async () => {
-    // Regression for the bug where a Fri–Sun event was filed only
-    // under Friday (invisible when you looked at Saturday). Dates are
-    // built relative to ``new Date()`` because the page fetches — and
-    // now CLAMPS the day expansion to — the month range around today;
-    // hard-coded 2026 dates would only survive because the mock
-    // ignores the query string.
+  it('shows a multi-day event as ONE row with its span, like a space calendar', async () => {
+    // The household agenda used to repeat a Fri–Sun trip as a card per
+    // day. Every calendar now shares one row anatomy: "Fri 5 – / Sun 7 /
+    // 3 days" in the date column, one row, one detail.
     const now = new Date()
     const iso = (day: number, hour: number) =>
-      new Date(now.getFullYear(), now.getMonth(), day, hour, 0, 0).toISOString()
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + day, hour, 0, 0).toISOString()
 
     const { api } = await import('@/api')
     vi.mocked(api.get).mockImplementation(async (url: string) => {
       if (url === '/api/calendars') {
-        return [{
-          id: 'cal-1',
-          name: 'Family',
-          owner_username: 'admin',
-          color: null,
-        }]
+        return [{ id: 'cal-1', name: 'Family', owner_username: 'admin', color: null }]
       }
       if (url.startsWith('/api/calendars/cal-1/events')) {
         return [{
           id: 'trip', calendar_id: 'cal-1', summary: 'Weekend trip',
           description: null,
-          start: iso(5, 16), end: iso(7, 10),
+          start: iso(2, 16), end: iso(4, 10),
           all_day: false, rrule: null, capacity: null,
           created_by: 'u1', attendees: ['u1'],
           rsvp_enabled: false, location: null, cover_url: null,
@@ -178,21 +136,15 @@ describe('CalendarPage', () => {
     const { container } = render(<mod.default />)
 
     await waitFor(() => {
-      expect(container.querySelectorAll('.sh-event strong').length).toBe(3)
+      expect(container.querySelectorAll('.sh-cal-row__title').length).toBe(1)
     }, { timeout: 2000 })
-    expect(container.querySelectorAll('.sh-calendar-day-group').length).toBe(3)
-
-    // Activating the middle day's row header expands exactly that row —
-    // the expansion is keyed by ``dayKey:eventId``, not by event id, so
-    // the same event on the other two day cards stays collapsed. (The
-    // toggle lives on the header <button>, not the wrapper div, so the
-    // detail's Edit / Delete / RSVP controls aren't nested in it.)
-    const rows = container.querySelectorAll('.sh-event')
-    fireEvent.click(rows[1].querySelector('.sh-event-header') as HTMLElement)
+    const when = container.querySelector('.sh-cal-row__when')!.textContent ?? ''
+    expect(when).toContain('–')
+    expect(when).toContain('3 days')
+    fireEvent.click(container.querySelector('.sh-cal-row__head') as HTMLElement)
     await waitFor(() => {
-      expect(container.querySelectorAll('.sh-event-detail').length).toBe(1)
+      expect(container.querySelectorAll('.sh-cal-row__detail').length).toBe(1)
     }, { timeout: 2000 })
-    expect(rows[1].querySelector('.sh-event-detail')).toBeTruthy()
   })
 
   it('exposes each agenda row header as a native keyboard-operable button', async () => {
@@ -207,7 +159,7 @@ describe('CalendarPage', () => {
     // from keydown on a button.)
     const now = new Date()
     const iso = (day: number, hour: number) =>
-      new Date(now.getFullYear(), now.getMonth(), day, hour, 0, 0).toISOString()
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + day, hour, 0, 0).toISOString()
 
     const { api } = await import('@/api')
     vi.mocked(api.get).mockImplementation(async (url: string) => {
@@ -234,10 +186,10 @@ describe('CalendarPage', () => {
     const { container } = render(<mod.default />)
 
     await waitFor(() => {
-      expect(container.querySelectorAll('.sh-event-header').length).toBe(1)
+      expect(container.querySelectorAll('.sh-cal-row__head').length).toBe(1)
     }, { timeout: 2000 })
 
-    const header = container.querySelector('.sh-event-header') as HTMLButtonElement
+    const header = container.querySelector('.sh-cal-row__head') as HTMLButtonElement
     expect(header.tagName).toBe('BUTTON')
     expect(header.type).toBe('button')
 
@@ -245,29 +197,25 @@ describe('CalendarPage', () => {
     expect(header.getAttribute('aria-expanded')).toBe('false')
     fireEvent.click(header)
     await waitFor(() => {
-      expect(container.querySelectorAll('.sh-event-detail').length).toBe(1)
+      expect(container.querySelectorAll('.sh-cal-row__detail').length).toBe(1)
     }, { timeout: 2000 })
     expect(header.getAttribute('aria-expanded')).toBe('true')
 
     // ``aria-controls`` has to point at the panel that actually appeared.
-    const detail = container.querySelector('.sh-event-detail') as HTMLElement
+    const detail = container.querySelector('.sh-cal-row__detail') as HTMLElement
     expect(detail.id).toBeTruthy()
     expect(header.getAttribute('aria-controls')).toBe(detail.id)
   })
 
   it('does not open the detail from a click on the row wrapper outside the header button', async () => {
-    // The wrapper ``.sh-event`` div must no longer own the toggle —
+    // The wrapper ``.sh-cal-row`` div must not own the toggle —
     // otherwise the detail (which holds Edit / Delete / RSVP /
     // ReminderPicker) would sit inside the click target and the
     // disclosure semantics would be a lie.
     //
-    // NOTE the distinct event id + day: ``selectedRow`` is a
-    // module-level signal and the module is imported once per file, so
-    // reusing the previous test's ``dayKey:eventId`` would start this
-    // test already expanded.
     const now = new Date()
     const iso = (day: number, hour: number) =>
-      new Date(now.getFullYear(), now.getMonth(), day, hour, 0, 0).toISOString()
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + day, hour, 0, 0).toISOString()
 
     const { api } = await import('@/api')
     vi.mocked(api.get).mockImplementation(async (url: string) => {
@@ -294,15 +242,15 @@ describe('CalendarPage', () => {
     const { container } = render(<mod.default />)
 
     await waitFor(() => {
-      expect(container.querySelectorAll('.sh-event').length).toBe(1)
+      expect(container.querySelectorAll('.sh-cal-row').length).toBe(1)
     }, { timeout: 2000 })
 
-    const row = container.querySelector('.sh-event') as HTMLElement
+    const row = container.querySelector('.sh-cal-row') as HTMLElement
     fireEvent.click(row)
     // Nothing async should have been kicked off, but give the signal a
     // microtask-flush window so a regression can't hide behind timing.
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(container.querySelectorAll('.sh-event-detail').length).toBe(0)
+    expect(container.querySelectorAll('.sh-cal-row__detail').length).toBe(0)
   })
   it('shows every owner chip for a shared event while only one calendar is visible', async () => {
     // Regression for "I tick the other members and nothing happens":
@@ -314,7 +262,7 @@ describe('CalendarPage', () => {
     // render from it even with a single calendar overlaid.
     const now = new Date()
     const iso = (day: number, hour: number) =>
-      new Date(now.getFullYear(), now.getMonth(), day, hour, 0, 0).toISOString()
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + day, hour, 0, 0).toISOString()
 
     const { api } = await import('@/api')
     vi.mocked(api.get).mockImplementation(async (url: string) => {
@@ -349,7 +297,7 @@ describe('CalendarPage', () => {
     const { container } = render(<mod.default />)
 
     await waitFor(() => {
-      expect(container.querySelectorAll('.sh-event strong').length).toBe(1)
+      expect(container.querySelectorAll('.sh-cal-row__title').length).toBe(1)
     }, { timeout: 2000 })
 
     const chips = Array.from(container.querySelectorAll('.sh-event-owner'))
@@ -364,7 +312,7 @@ describe('CalendarPage', () => {
     // same event MUST keep its byline.)
     const now = new Date()
     const iso = (day: number, hour: number) =>
-      new Date(now.getFullYear(), now.getMonth(), day, hour, 0, 0).toISOString()
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + day, hour, 0, 0).toISOString()
 
     const { api } = await import('@/api')
     vi.mocked(api.get).mockImplementation(async (url: string) => {
@@ -396,7 +344,7 @@ describe('CalendarPage', () => {
     const { container } = render(<mod.default />)
 
     await waitFor(() => {
-      expect(container.querySelectorAll('.sh-event strong').length).toBe(1)
+      expect(container.querySelectorAll('.sh-cal-row__title').length).toBe(1)
     }, { timeout: 2000 })
     expect(container.querySelectorAll('.sh-event-owner').length).toBe(0)
   })
@@ -412,7 +360,7 @@ describe('CalendarPage', () => {
     localStorage.setItem(VIS_KEY, JSON.stringify(['cal-1', 'cal-2']))
     const now = new Date()
     const iso = (day: number, hour: number) =>
-      new Date(now.getFullYear(), now.getMonth(), day, hour, 0, 0).toISOString()
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + day, hour, 0, 0).toISOString()
 
     const { api } = await import('@/api')
     vi.mocked(api.get).mockImplementation(async (url: string) => {
@@ -444,7 +392,7 @@ describe('CalendarPage', () => {
     const { container } = render(<mod.default />)
 
     await waitFor(() => {
-      expect(container.querySelectorAll('.sh-event strong').length).toBe(1)
+      expect(container.querySelectorAll('.sh-cal-row__title').length).toBe(1)
     }, { timeout: 2000 })
 
     const chips = Array.from(container.querySelectorAll('.sh-event-owner'))
@@ -458,7 +406,7 @@ describe('CalendarPage', () => {
     localStorage.setItem(VIS_KEY, JSON.stringify(['cal-1', 'cal-2']))
     const now = new Date()
     const iso = (day: number, hour: number) =>
-      new Date(now.getFullYear(), now.getMonth(), day, hour, 0, 0).toISOString()
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + day, hour, 0, 0).toISOString()
     const start = iso(6, 18)
     const end = iso(6, 20)
 
@@ -498,12 +446,41 @@ describe('CalendarPage', () => {
     const { container } = render(<mod.default />)
 
     await waitFor(() => {
-      expect(container.querySelectorAll('.sh-event strong').length).toBe(1)
+      expect(container.querySelectorAll('.sh-cal-row__title').length).toBe(1)
     }, { timeout: 2000 })
 
     const chips = Array.from(container.querySelectorAll('.sh-event-owner'))
       .map(el => el.textContent)
     expect(chips).toEqual(['You', 'emely'])
+  })
+
+  it('offers Upcoming and Month as pressed buttons (no Day); Month brings ‹ › and Today', async () => {
+    const { api } = await import('@/api')
+    vi.mocked(api.get).mockImplementation(async (url: string) => {
+      if (url === '/api/calendars') {
+        return [{ id: 'cal-1', name: 'Family', owner_username: 'admin', color: null }]
+      }
+      return []
+    })
+    const { render, fireEvent, waitFor } = await import('@testing-library/preact')
+    const mod = await import('./CalendarPage')
+    const utils = render(<mod.default />)
+    const views = await utils.findByRole('group', { name: 'Calendar view' })
+    const buttons = [...views.querySelectorAll('button')]
+    // jsdom has no wide screen: Week stays out, as on a phone.
+    expect(buttons.map(b => b.textContent)).toEqual(['Upcoming', 'Month'])
+    expect(buttons.map(b => b.getAttribute('aria-pressed'))).toEqual(['true', 'false'])
+    expect(utils.container.querySelector('.sh-calendar [role="tablist"]')).toBeNull()
+    expect(utils.queryByRole('button', { name: 'Day' })).toBeNull()
+    expect(utils.queryByRole('button', { name: 'Today' })).toBeNull()
+    // Nothing coming up: the empty state still offers New event + Import.
+    expect(await utils.findByText('Nothing planned in the next 4 weeks')).toBeTruthy()
+    fireEvent.click(buttons[1])
+    await waitFor(() => expect(utils.getByRole('button', { name: 'Today' })).toBeTruthy())
+    expect(utils.getByRole('button', { name: 'Previous month' })).toBeTruthy()
+    expect(utils.container.querySelector('.sh-cal-grid')).not.toBeNull()
+    // Back to Upcoming for the tests after this one (module-level view).
+    fireEvent.click(utils.getByRole('button', { name: 'Upcoming' }))
   })
 
   it('reveals and persists every calendar an event was created on', async () => {
@@ -643,9 +620,11 @@ describe('CalendarPage', () => {
       expect(urls.some(u => u.startsWith('/api/calendars/cal-2/events'))).toBe(true)
     })
     expect(JSON.parse(localStorage.getItem(VIS_KEY) ?? '[]')).toContain('cal-2')
-    // "Show in calendar" jumps the view to the imported event's month.
+    // "Show in calendar" opens Month at the imported event's month.
     fireEvent.click(utils.getByRole('button', { name: 'Show in calendar' }))
     await utils.findByText('October 2026')
+    expect(utils.getByRole('button', { name: 'Month' }).getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(utils.getByRole('button', { name: 'Upcoming' }))
   })
 })
 

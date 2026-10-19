@@ -90,3 +90,18 @@ describe('CalendarGrid — Week', () => {
     expect(r.container.querySelector('.sh-cal-grid__more')).toBeNull()
   })
 })
+
+describe('CalendarGrid — decor', () => {
+  it('a bar and its row take the decorated hue', () => {
+    const r = render(
+      <CalendarGrid view="month" cursor={NOW} now={NOW} weekStart={0}
+                    events={[allDay('Swim', '2026-10-19')]}
+                    decorate={() => ({ hue: '#abcdef' })}
+                    renderDetail={() => null} />,
+    )
+    const bar = r.container.querySelector<HTMLElement>('.sh-cal-bar')!
+    expect(bar.classList.contains('sh-cal-bar--hued')).toBe(true)
+    expect(bar.style.getPropertyValue('--sh-cal-hue')).toBe('#abcdef')
+    expect(r.container.querySelector('.sh-cal-day .sh-cal-row--hued')).not.toBeNull()
+  })
+})

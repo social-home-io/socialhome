@@ -52,13 +52,7 @@
   "calendar.rsvp.maybe": "RSVP status: undecided — keep short.",
   "calendar.rsvp.declined": "RSVP status: not attending.",
 
-  "event.span.starts": "Badge on the first day of a multi-day event in the day-by-day agenda. Very short (\u2264 8 chars) \u2014 it sits in a pill next to the time.",
-  "event.span.ends": "Badge on the last day of a multi-day event. Very short (\u2264 8 chars).",
-  "event.span.day_of": "Badge on the middle days of a multi-day event. {n} = this day's number, {total} = length of the whole event in days. Keep short \u2014 'D2/3' is fine where the language has no compact wording.",
-  "event.span.from": "Time hint on the first day of a multi-day event \u2014 the event starts at {time} and runs past midnight. Lowercase; it follows the date range on the same line.",
-  "event.span.until": "Time hint on the last day of a multi-day event \u2014 it ends at {time}. Lowercase; follows the date range on the same line.",
-  "event.span.all_day": "Time hint on a day a multi-day event covers from midnight to midnight. Lowercase; follows the date range on the same line.",
-  "event.span.aria": "Screen-reader-only summary of where a row sits in a multi-day event. {range} is an already-formatted date range (e.g. '1\u20133 May').",
+  "event.span.until": "Meta line under a calendar event title: when it ends, {time} (a clock, or a short day + clock for a multi-day event). Lowercase.",
 
   "presence.state.home": "Presence value: physically at home (within the configured radius).",
   "presence.state.away": "Presence value: briefly away but still 'around' (e.g. gym, shops).",

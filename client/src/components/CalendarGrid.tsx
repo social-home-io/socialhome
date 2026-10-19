@@ -26,7 +26,7 @@ import {
   entriesOnDay, gridWeeks, layoutWeekBars, spanEntries, type GridBar,
 } from '@/utils/calendarViews'
 import type { WeekStart } from '@/utils/week'
-import { CalendarEventRow } from './CalendarEventRow'
+import { CalendarEventRow, type RowDecor } from './CalendarEventRow'
 
 // For ``i18n:check``: t('calendar.grid.month_aria') t('calendar.grid.week_aria')
 // t('calendar.grid.events_one') t('calendar.grid.events')
@@ -45,6 +45,8 @@ interface Props {
   renderDetail: (event: CalendarEvent) => ComponentChildren
   /** Bars per week row in Month (Week shows them all). */
   maxLanes?: number
+  /** Per-event colour / labels (the household's calendar hues). */
+  decorate?: (event: CalendarEvent) => RowDecor | undefined
 }
 
 /** A bar's text: the title; in Week a timed event's start time first. */
@@ -58,7 +60,7 @@ function BarLabel({ bar, view }: { bar: GridBar; view: 'month' | 'week' }) {
 }
 
 export function CalendarGrid({
-  view, cursor, events, weekStart, now, renderDetail, maxLanes = MONTH_LANES,
+  view, cursor, events, weekStart, now, renderDetail, maxLanes = MONTH_LANES, decorate,
 }: Props) {
   const weeks = gridWeeks(cursor, view, weekStart)
   const allKeys = weeks.flat()
@@ -168,23 +170,28 @@ export function CalendarGrid({
                   </button>
                 )
               })}
-              {shown.map((bar) => (
-                <span
-                  key={bar.entry.event.id}
-                  aria-hidden="true"
-                  class={'sh-cal-bar'
-                    + (bar.entry.dayCount > 1 ? ' sh-cal-bar--multi'
-                      : bar.entry.event.all_day ? ' sh-cal-bar--allday' : ' sh-cal-bar--timed')
-                    + (bar.continuesBefore ? ' is-cont-before' : '')
-                    + (bar.continuesAfter ? ' is-cont-after' : '')}
-                  style={{
-                    gridColumn: `${bar.col + 1} / span ${bar.span}`,
-                    gridRow: String(bar.lane + 2),
-                  }}
-                >
-                  <BarLabel bar={bar} view={view} />
-                </span>
-              ))}
+              {shown.map((bar) => {
+                const hue = decorate?.(bar.entry.event)?.hue
+                return (
+                  <span
+                    key={bar.entry.event.id}
+                    aria-hidden="true"
+                    class={'sh-cal-bar'
+                      + (bar.entry.dayCount > 1 ? ' sh-cal-bar--multi'
+                        : bar.entry.event.all_day ? ' sh-cal-bar--allday' : ' sh-cal-bar--timed')
+                      + (hue ? ' sh-cal-bar--hued' : '')
+                      + (bar.continuesBefore ? ' is-cont-before' : '')
+                      + (bar.continuesAfter ? ' is-cont-after' : '')}
+                    style={{
+                      gridColumn: `${bar.col + 1} / span ${bar.span}`,
+                      gridRow: String(bar.lane + 2),
+                      ...(hue ? { '--sh-cal-hue': hue } : {}),
+                    }}
+                  >
+                    <BarLabel bar={bar} view={view} />
+                  </span>
+                )
+              })}
             </div>
           )
         })}
@@ -207,6 +214,7 @@ export function CalendarGrid({
                     open={openId === id}
                     onToggle={() => setOpenId(openId === id ? null : id)}
                     detailId={`sh-cal-detail-${day}-${id.replace(/[^\w-]/g, '_')}`}
+                    decor={decorate?.(entry.event)}
                   >
                     {renderDetail(entry.event)}
                   </CalendarEventRow>

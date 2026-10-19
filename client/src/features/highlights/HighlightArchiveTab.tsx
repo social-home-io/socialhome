@@ -20,7 +20,7 @@ import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
-import { CalendarSkeleton } from '@/components/Skeleton'
+import { MonthGridSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
 import { resolveDisplayName } from '@/utils/avatar'
 import { formatDayKey } from '@/utils/calendar'
@@ -128,7 +128,7 @@ export default function HighlightArchiveTab() {
     return () => { dispose.forEach(d => d()) }
   }, [])
 
-  if (loading.value) return <CalendarSkeleton />
+  if (loading.value) return <MonthGridSkeleton />
 
   // Month grid opening on the user's first day of the week (the same
   // ``week_start`` preference /calendar honours).

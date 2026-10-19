@@ -138,29 +138,49 @@ export function HighlightsRingSkeleton() {
 }
 
 
-/** Stand-in for ``CalendarPage``: header row + 5×7 day-grid placeholder
- *  shaped to match the rendered calendar so the swap is in-place. */
-export function CalendarSkeleton() {
+/** Stand-in for a month grid (the Highlights archive): a heading row
+ *  and 5×7 day cells. */
+export function MonthGridSkeleton() {
   return (
     <div class="sh-calendar sh-calendar--skeleton" aria-busy="true">
-      <div class="sh-page-header">
-        <Skeleton shape="line" width={140} height={22} />
-        <Skeleton shape="rect" width={120} height={32} />
-      </div>
-      <div class="sh-calendar-controls">
+      <div class="sh-skeleton-calendar-controls">
         <Skeleton shape="rect" width={80} height={28} />
         <Skeleton shape="line" width={160} height={18} />
         <Skeleton shape="rect" width={80} height={28} />
       </div>
       <div class="sh-skeleton-calendar-grid" aria-hidden="true">
         {Array.from({ length: 35 }).map((_, i) => (
-          <Skeleton
-            key={i}
-            shape="rect"
-            width="100%"
-            height={64}
-            class="sh-skeleton-calendar-day"
-          />
+          <Skeleton key={i} shape="rect" width="100%" height={64} class="sh-skeleton-calendar-day" />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Stand-in for ``CalendarPage``: the view switch and a few Upcoming
+ *  rows (date column · rail · title), the shape the default view takes,
+ *  so the swap is in-place. */
+export function CalendarSkeleton({ rows = 4 }: { rows?: number } = {}) {
+  return (
+    <div class="sh-calendar sh-calendar--skeleton" aria-busy="true">
+      <div class="sh-space-cal-bar">
+        <Skeleton shape="rect" width={180} height={36} />
+      </div>
+      <div class="sh-cal-list" aria-hidden="true">
+        {Array.from({ length: rows }).map((_, i) => (
+          <div key={i} class="sh-cal-row sh-skeleton-cal-row">
+            <div class="sh-cal-row__head">
+              <span class="sh-cal-row__when">
+                <Skeleton shape="line" width="70%" height={12} />
+                <Skeleton shape="line" width="50%" height={12} />
+              </span>
+              <span class="sh-cal-row__rail" />
+              <span class="sh-cal-row__body">
+                <Skeleton shape="line" width="60%" height={14} />
+                <Skeleton shape="line" width="35%" height={11} />
+              </span>
+            </div>
+          </div>
         ))}
       </div>
     </div>
