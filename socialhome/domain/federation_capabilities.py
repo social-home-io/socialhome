@@ -888,7 +888,8 @@ from __future__ import annotations
 #:   entry for a public space bound to an area carries ``local_community:
 #:   true``, its ``radius_km`` and ``in_area`` — the host's verdict for the
 #:   RECEIVING household's shared home (``true`` / ``false``, ``null`` when
-#:   it shares none). Never the centre: people's locations are not shared by
+#:   it shares none or the host is unsure — ``area_edge: true``, near the
+#:   rim, coarsened so it cannot be walked to the centre). Never the centre: people's locations are not shared by
 #:   design, so each peer's snapshot is built for it alone and no household
 #:   sees another's verdict. The host still decides every seat against the
 #:   home the joiner already shares through pairing — nothing new is asked
@@ -1380,7 +1381,8 @@ class FederationCapability:
 
     #: v_59 — a ``SPACE_DIRECTORY_SYNC`` entry marks a local community
     #: (``local_community`` + ``radius_km``) with the host's ``in_area``
-    #: verdict for the receiving household — no centre. Sender-gated: an
+    #: verdict for the receiving household (``area_edge`` when unsure near
+    #: the rim) — no centre. Sender-gated: an
     #: older peer's snapshot omits the fields. Not space-scoped.
     MIN_FOR_LOCAL_COMMUNITY_AREA = 59
 

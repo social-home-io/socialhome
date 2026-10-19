@@ -5002,5 +5002,9 @@
   "pairing.share_home_off": "Aus – euer Wohnort wird ihnen nicht geschickt. Du kannst ihn später unter Verwalten teilen.",
   "household.toggles.connections_legend": "Verbindungen",
   "household.toggles.share_home_default": "Unseren Wohnort mit neuen Verbindungen teilen",
-  "household.toggles.share_home_default_hint": "Voreinstellung für den Schalter beim Verbinden mit einem Haushalt. Jede Verbindung behält ihre eigene Einstellung."
+  "household.toggles.share_home_default_hint": "Voreinstellung für den Schalter beim Verbinden mit einem Haushalt. Jede Verbindung behält ihre eigene Einstellung.",
+  "local_area.badge.edge": "Nahe am Rand – frag an, der Haushalt prüft es",
+  "local_area.about.edge_next": "Das Zuhause eures Haushalts liegt nahe am Rand dieses Gebiets. Frag an – sein Haushalt prüft den Wohnort, den euer Haushalt mit ihm teilt.",
+  "error.local_area_rate_limited_own": "Der Haushalt dieser Nachbarschaft hat euren Haushalt heute schon mehrmals als außerhalb des Gebiets abgelehnt. Versuche es morgen wieder.",
+  "error.local_area_rate_limited_peer": "Dieser Haushalt wurde heute schon mehrmals als außerhalb des Gebiets abgelehnt. Versuche es morgen wieder."
 }

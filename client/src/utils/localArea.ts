@@ -25,8 +25,9 @@ export const MAX_RADIUS_KM = 50
 export const DEFAULT_RADIUS_KM = 2
 
 /** Where a household's home lies relative to an area — what the badge
- *  says. ``unknown`` while this household's own home is still loading. */
-export type AreaVerdict = 'inside' | 'outside' | 'no_home' | 'not_shared' | 'unknown'
+ *  says. ``unknown`` while this household's own home is still loading;
+ *  ``edge`` when a paired household's host is unsure (near the rim). */
+export type AreaVerdict = 'inside' | 'outside' | 'edge' | 'no_home' | 'not_shared' | 'unknown'
 
 export interface Home { lat: number; lon: number }
 
@@ -67,9 +68,9 @@ export function areaVerdict(
  * The badge for a paired household's local community: the host's
  * ``in_area`` verdict for our shared home. Outside wins (as in
  * {@link areaVerdict}); then a home this household no longer shares with
- * the host, or never set, says so; ``null`` while we do share it means the
- * host has not answered for our home yet — no badge, the host checks when
- * someone asks to join.
+ * the host, or never set, says so; near the rim the host is unsure
+ * (``area_edge``) — "near the edge", the host checks on a join; ``null``
+ * otherwise means the host has not answered for our home yet — no badge.
  */
 export function peerAreaVerdict(
   lc: PeerLocalCommunity,
@@ -80,6 +81,7 @@ export function peerAreaVerdict(
   if (home === null) return 'no_home'
   if (!sharedWithHost) return 'not_shared'
   if (lc.in_area === true) return 'inside'
+  if (lc.area_edge === true) return 'edge'
   return 'unknown'
 }
 

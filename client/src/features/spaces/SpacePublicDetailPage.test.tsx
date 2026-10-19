@@ -411,6 +411,20 @@ describe('SpacePublicDetailPage — local community', () => {
     expect(getByText('Join space')).toBeTruthy()
   })
 
+  it('near the edge: unsure, offers the join and says the host will check', async () => {
+    home({ lat: 47.392, lon: 8.56 })
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'iid-b',
+      local_community: { radius_km: 5, in_area: null, area_edge: true },
+      home_shared_with_host: true,
+    })])
+    const { getByText, container } = await renderPage()
+    await waitFor(() => getByText('Near the edge — ask to join and the host will check'))
+    expect(getByText('Join space')).toBeTruthy()
+    expect(container.textContent).toContain('near the edge of this area')
+    expect(container.querySelector('.sh-local-area-badge--edge')).toBeTruthy()
+  })
+
   it('outside: says so and offers no join the host would refuse', async () => {
     home({ lat: 46.9481, lon: 7.4474 })
     cacheDirectoryEntries([entry({ host_instance_id: 'iid-b', local_community: LC(false), home_shared_with_host: true })])

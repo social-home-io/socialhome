@@ -148,6 +148,9 @@ describe('entryAreaVerdict (local communities)', () => {
       .toBe('not_shared')
     expect(entryAreaVerdict(entry(lc(null)), near)).toBe('unknown')
     expect(entryAreaVerdict(entry(lc(null)), null)).toBe('no_home')
+    expect(entryAreaVerdict(
+      entry({ local_community: { radius_km: 2, in_area: null, area_edge: true } }), near,
+    )).toBe('edge')
     // A centre on a paired row (an old cache) is ignored, never computed on.
     expect(entryAreaVerdict(entry({ local_area: area }), bern)).toBeNull()
   })
@@ -165,9 +168,11 @@ describe('entryAreaVerdict (local communities)', () => {
       entry({ space_id: 'unknown', local_community: { radius_km: 2, in_area: null } }),
       entry({ space_id: 'in', local_community: { radius_km: 2, in_area: true } }),
       entry({ space_id: 'plain2' }),
+      entry({ space_id: 'edge', local_community: { radius_km: 2, in_area: null, area_edge: true } }),
     ]
+    // Near the edge sorts with the ordinary spaces: it may well be inside.
     expect(sortNearFirst(rows, near).map((e) => e.space_id))
-      .toEqual(['in', 'plain1', 'plain2', 'unknown', 'out'])
+      .toEqual(['in', 'plain1', 'plain2', 'edge', 'unknown', 'out'])
   })
 
   it('household rows carry the area', () => {

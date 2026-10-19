@@ -14,8 +14,20 @@ cached rows without tracking deltas.
 household's verdict for THAT peer's home, the one it already chose to share
 with us (``true`` / ``false``, ``null`` when it shares none) — and never the
 centre: people's locations are not shared by design (owner decision
-2026-10-19). Each peer's payload is built for it alone, so no household
-ever receives another household's verdict. Only to a peer at v_59+
+2026-10-19).
+
+The verdict cannot be used to find the centre
+(:func:`~socialhome.domain.local_community.directory_verdict`): near the rim
+it is "unsure" (``in_area: null``, ``area_edge: true``), computed per grid
+cell with a band shift only this household knows (:func:`~socialhome.
+services.local_community.edge_shift_km`); and a peer whose shared home
+keeps moving gets new answers for at most
+:data:`MAX_VERDICT_HOMES_PER_DAY` homes a day — further moves are answered
+for the last home taken, so a walk tells it nothing new. Withdrawing the
+home always takes effect at once.
+
+Each peer's payload is built for it alone, so no household ever receives
+another household's verdict. Only to a peer at v_59+
 (:attr:`~FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA`); an older peer
 gets the entry without the fields. The verdict is recomputed whenever the
 snapshot is sent: on any public-space change, on a new pairing, when the
@@ -28,7 +40,10 @@ invite link.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+import time
+from collections import deque
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Final
 
 from ..domain.events import (
     PairingConfirmed,
@@ -40,14 +55,15 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.local_community import (
+    Eligibility,
     LocalArea,
-    eligibility,
+    directory_verdict,
     local_area_of,
     local_community_wire,
 )
 from ..domain.space import SpaceType, normalize_category
 from ..infrastructure.event_bus import EventBus
-from .local_community import household_home
+from .local_community import edge_shift_km, household_home
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -56,11 +72,25 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: How many different shared homes of one peer the local-community verdicts
+#: follow per rolling :data:`_VERDICT_WINDOW_SECONDS`. A home rarely moves;
+#: one that moves over and over is a probe.
+MAX_VERDICT_HOMES_PER_DAY: Final = 4
+_VERDICT_WINDOW_SECONDS: Final = 24 * 60 * 60
+
 
 class PeerDirectoryService:
     """Outbound fan-out for :data:`FederationEventType.SPACE_DIRECTORY_SYNC`."""
 
-    __slots__ = ("_bus", "_federation", "_federation_repo", "_space_repo")
+    __slots__ = (
+        "_bus",
+        "_clock",
+        "_edge_key",
+        "_federation",
+        "_federation_repo",
+        "_space_repo",
+        "_verdict_homes",
+    )
 
     def __init__(
         self,
@@ -69,11 +99,22 @@ class PeerDirectoryService:
         federation_service: FederationService,
         federation_repo: AbstractFederationRepo,
         space_repo: AbstractSpaceRepo,
+        edge_key: bytes,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
         self._federation_repo = federation_repo
         self._space_repo = space_repo
+        #: The secret the "unsure" band's per-cell shift is drawn with
+        #: (:func:`~socialhome.services.local_community.derive_edge_key`).
+        self._edge_key = edge_key
+        self._clock = clock
+        #: Per peer: the shared home its verdicts were last computed for,
+        #: and when each newly taken home was taken. In memory only.
+        self._verdict_homes: dict[
+            str, tuple[tuple[float, float] | None, deque[float]]
+        ] = {}
 
     def wire(self) -> None:
         self._bus.subscribe(SpaceConfigChanged, self._on_config_changed)
@@ -116,6 +157,38 @@ class PeerDirectoryService:
         spaces = await self._space_repo.list_by_type(SpaceType.PUBLIC)
         return any(local_area_of(s) is not None for s in spaces)
 
+    def _verdict_home(
+        self, peer_id: str, home: tuple[float, float] | None
+    ) -> tuple[float, float] | None:
+        """The home ``peer_id``'s verdicts are computed for: its shared
+        ``home``, unless it already moved :data:`MAX_VERDICT_HOMES_PER_DAY`
+        times today — then the last home taken, or none (unknown) when it
+        withdrew that one. ``None`` (sharing withdrawn) always takes effect
+        but keeps the day's count, so turning sharing off and on again is
+        no way around it."""
+        now = self._clock()
+        last, taken = self._verdict_homes.get(peer_id, (None, deque()))
+        while taken and taken[0] <= now - _VERDICT_WINDOW_SECONDS:
+            taken.popleft()
+        if home is None:
+            if taken:
+                self._verdict_homes[peer_id] = (None, taken)
+            else:
+                self._verdict_homes.pop(peer_id, None)
+            return None
+        if last == home:
+            return home
+        if len(taken) >= MAX_VERDICT_HOMES_PER_DAY:
+            log.info(
+                "peer_directory: %s moved its shared home too often today; "
+                "local-community verdicts stay on the last home taken",
+                peer_id,
+            )
+            return last
+        taken.append(now)
+        self._verdict_homes[peer_id] = (home, taken)
+        return home
+
     async def _build_snapshot(self, peer_id: str) -> list[dict]:
         """The snapshot as ``peer_id`` receives it — with ITS verdict on
         each local community (v_59+), never anyone else's, never a centre."""
@@ -127,8 +200,11 @@ class PeerDirectoryService:
         if with_area and any(local_area_of(s) is not None for s in spaces):
             # The home THIS peer shares with us (``None`` when it shares
             # none) — read once per snapshot.
-            home = await household_home(
-                self._federation_repo, peer_id, own_instance_id=None
+            home = self._verdict_home(
+                peer_id,
+                await household_home(
+                    self._federation_repo, peer_id, own_instance_id=None
+                ),
             )
         out: list[dict] = []
         for s in spaces:
@@ -144,7 +220,16 @@ class PeerDirectoryService:
             }
             area: LocalArea | None = local_area_of(s) if with_area else None
             if area is not None:
-                entry.update(local_community_wire(area, eligibility(area, home)))
+                verdict = (
+                    directory_verdict(
+                        area,
+                        home,
+                        shift_km=edge_shift_km(self._edge_key, s.id, area, home),
+                    )
+                    if home is not None
+                    else Eligibility.HOME_UNKNOWN
+                )
+                entry.update(local_community_wire(area, verdict))
             out.append(entry)
         return out
 

@@ -26,7 +26,14 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.services.peer_directory_service import PeerDirectoryService
+from socialhome.services.local_community import derive_edge_key
+from socialhome.services.peer_directory_service import (
+    MAX_VERDICT_HOMES_PER_DAY,
+    PeerDirectoryService,
+)
+
+#: The host's secret for the "unsure" band's shift.
+EDGE_KEY = derive_edge_key(b"\x07" * 32)
 
 
 def _space(**over) -> Space:
@@ -131,6 +138,7 @@ def env():
         federation_service=fed,
         federation_repo=fed_repo,
         space_repo=space_repo,
+        edge_key=EDGE_KEY,
     )
     svc.wire()
     return bus, fed, svc
@@ -186,6 +194,7 @@ async def test_empty_public_spaces_still_broadcasts_empty_snapshot():
         federation_service=fed,
         federation_repo=fed_repo,
         space_repo=space_repo,
+        edge_key=EDGE_KEY,
     )
     svc.wire()
     await bus.publish(
@@ -210,7 +219,7 @@ NEAR = (47.3850, 8.5500)
 FAR = (46.9481, 7.4474)
 
 
-def _local_env(versions: dict[str, int] | None = None, homes=None):
+def _local_env(versions: dict[str, int] | None = None, homes=None, clock=None):
     community = _space(
         id="sp-local", name="Quartier", lat=CENTRE[0], lon=CENTRE[1], radius_km=5.0
     )
@@ -231,6 +240,8 @@ def _local_env(versions: dict[str, int] | None = None, homes=None):
         federation_service=fed,
         federation_repo=fed_repo,
         space_repo=space_repo,
+        edge_key=EDGE_KEY,
+        **({"clock": clock} if clock is not None else {}),
     )
     svc.wire()
     return bus, fed, svc, fed_repo
@@ -364,3 +375,112 @@ async def test_reaching_v59_sends_the_community_fields():
         )
     )
     assert len(fed.sent) == 1
+
+
+# ── the "unsure" band and the verdict budget ────────────────────────────
+
+#: ~5 km from CENTRE, right on the 5 km rim (east along the parallel).
+RIM = (47.3769, 8.6080)
+
+
+async def test_a_peer_near_the_rim_gets_unsure_not_yes_or_no():
+    """Near the rim the host says neither: ``in_area: null`` with
+    ``area_edge: true`` — and still no coordinate anywhere."""
+    bus, fed, _svc, _repo = _local_env(
+        homes={"peer-rim": RIM, "peer-near": NEAR, "peer-far": FAR}
+    )
+    await bus.publish(SpaceLocalAreaChanged(space_id="sp-local"))
+    rim = _entries(fed, "peer-rim")["sp-local"]
+    assert rim["in_area"] is None
+    assert rim["area_edge"] is True
+    assert _entries(fed, "peer-near")["sp-local"]["area_edge"] is False
+    assert _entries(fed, "peer-far")["sp-local"]["area_edge"] is False
+    for _to, _t, payload in fed.sent:
+        assert not _COORD_KEYS & _keys(payload)
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 5_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _steps(n: int) -> list[tuple[float, float]]:
+    """``n`` homes stepping east across the rim (inside → outside)."""
+    return [(47.3769, 8.5417 + 0.012 * i) for i in range(n)]
+
+
+async def test_a_home_moved_over_and_over_gets_no_new_answers_for_a_day():
+    """Every move of a shared home is a fresh probe: the host takes at most
+    a few new homes per peer per day into account, and answers further
+    moves with the verdict for the last home it took — no new information
+    — until the day has passed."""
+    clock = _Clock()
+    bus, fed, svc, fed_repo = _local_env(homes={"peer-x": NEAR}, clock=clock)
+    homes = _steps(12)
+    for home in homes:
+        fed_repo.homes["peer-x"] = home
+        await bus.publish(
+            PeerHomeChanged(instance_id="peer-x", latitude=home[0], longitude=home[1])
+        )
+    answers = [
+        (p["spaces"][0]["in_area"], p["spaces"][0]["area_edge"])
+        for (_to, _t, p) in fed.sent
+    ]
+    budget = MAX_VERDICT_HOMES_PER_DAY
+    # After the budget the answer is frozen at the last home taken.
+    assert len(set(answers[budget - 1 :])) == 1
+    # A day later the current home counts again: it is far outside now.
+    clock.now += 24 * 60 * 60 + 1
+    await svc.send_snapshot("peer-x")
+    assert _entries(fed, "peer-x", last=True)["sp-local"]["in_area"] is False
+
+
+async def test_withdrawing_the_home_always_takes_effect():
+    """Turning sharing off is never held back by the budget: the host
+    stops answering for a home it no longer has."""
+    clock = _Clock()
+    bus, fed, _svc, fed_repo = _local_env(homes={"peer-x": NEAR}, clock=clock)
+    for home in _steps(MAX_VERDICT_HOMES_PER_DAY + 2):
+        fed_repo.homes["peer-x"] = home
+        await bus.publish(
+            PeerHomeChanged(instance_id="peer-x", latitude=home[0], longitude=home[1])
+        )
+    fed_repo.homes["peer-x"] = None
+    await bus.publish(
+        PeerHomeChanged(instance_id="peer-x", latitude=None, longitude=None)
+    )
+    last = _entries(fed, "peer-x", last=True)["sp-local"]
+    assert last["in_area"] is None
+    assert last["area_edge"] is False
+
+
+async def test_toggling_sharing_off_and_on_does_not_refill_the_budget():
+    """Withdrawing the home takes effect, but it must not reset the day's
+    budget: off → move → on, over and over, would otherwise be a fresh
+    probe every time. Past the budget a newly shared home gets no answer
+    (unknown) until the day has passed."""
+    clock = _Clock()
+    bus, fed, _svc, fed_repo = _local_env(homes={"peer-x": NEAR}, clock=clock)
+    answers = []
+    for home in _steps(10):
+        for shared in (home, None):
+            fed_repo.homes["peer-x"] = shared
+            await bus.publish(
+                PeerHomeChanged(
+                    instance_id="peer-x",
+                    latitude=shared[0] if shared else None,
+                    longitude=shared[1] if shared else None,
+                )
+            )
+        answers.append(
+            [
+                (p["spaces"][0]["in_area"], p["spaces"][0]["area_edge"])
+                for (_to, _t, p) in fed.sent
+            ][-2]
+        )
+    budget = MAX_VERDICT_HOMES_PER_DAY
+    # Every shared home past the budget reads as unknown — nothing new.
+    assert set(answers[budget:]) == {(None, False)}

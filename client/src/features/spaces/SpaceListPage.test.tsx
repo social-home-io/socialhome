@@ -305,6 +305,7 @@ describe('SpaceListPage — Discover', () => {
       { ...PAIRED[1], space_id: 'pPlain', name: 'Chess club', local_community: null, home_shared_with_host: true },
       { ...PAIRED[1], space_id: 'pHidden', name: 'Seefeld parents', local_community: lc(null), home_shared_with_host: false },
       { ...PAIRED[1], space_id: 'pIn', name: 'Hottingen street party', local_community: lc(true), home_shared_with_host: true },
+      { ...PAIRED[1], space_id: 'pEdge', name: 'Rim garden', local_community: { radius_km: 5, in_area: null, area_edge: true }, home_shared_with_host: true },
     ]
     const base = apiGet.getMockImplementation()!
     apiGet.mockImplementation(async (url: string) => {
@@ -327,7 +328,10 @@ describe('SpaceListPage — Discover', () => {
     expect(link.getAttribute('aria-label')).toContain('Outside your area')
     // Near you first, outside last and quieter.
     const names = () => [...r.container.querySelectorAll('#discover .sh-spaces-row__t')].map((n) => n.textContent)
-    expect(names()).toEqual(['Hottingen street party', 'Chess club', 'Seefeld parents', 'Bern neighbours'])
+    expect(names()).toEqual(['Hottingen street party', 'Chess club', 'Rim garden', 'Seefeld parents', 'Bern neighbours'])
+    // Near the edge: the host is unsure — the join is offered, it checks.
+    expect(row('Rim garden').textContent).toContain('Near the edge — ask to join and the host will check')
+    expect(r.getByRole('button', { name: 'Join: Rim garden' })).toBeTruthy()
     expect(row('Bern neighbours').classList.contains('sh-spaces-row--muted')).toBe(true)
     expect(row('Hottingen street party').classList.contains('sh-spaces-row--muted')).toBe(false)
     // "Near you" narrows to the communities our home is in — and back.
@@ -335,9 +339,9 @@ describe('SpaceListPage — Discover', () => {
     expect(near.getAttribute('aria-pressed')).toBe('false')
     r.fireEvent.click(near)
     expect(near.getAttribute('aria-pressed')).toBe('true')
-    expect(names()).toEqual(['Hottingen street party'])
+    expect(names()).toEqual(['Hottingen street party', 'Rim garden'])
     r.fireEvent.click(near)
-    expect(names()).toHaveLength(4)
+    expect(names()).toHaveLength(5)
   })
 
   it('"Near you" only appears when a paired household hosts a local community', async () => {

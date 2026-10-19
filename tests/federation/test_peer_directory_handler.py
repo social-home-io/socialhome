@@ -154,6 +154,23 @@ async def test_a_local_community_round_trips_revalidated(repo):
                     "in_area": None,
                 },
                 {
+                    "space_id": "edge",
+                    "name": "Rim",
+                    "local_community": True,
+                    "radius_km": 1.0,
+                    "in_area": None,
+                    "area_edge": True,
+                },
+                {
+                    # Ambiguous: a yes AND "unsure" — the yes is kept.
+                    "space_id": "both",
+                    "name": "Both",
+                    "local_community": True,
+                    "radius_km": 1.0,
+                    "in_area": True,
+                    "area_edge": True,
+                },
+                {
                     "space_id": "huge",
                     "name": "Region",
                     "local_community": True,
@@ -168,6 +185,8 @@ async def test_a_local_community_round_trips_revalidated(repo):
     assert rows["in"].local_community == PeerLocalCommunity(2.0, True)
     assert rows["out"].local_community == PeerLocalCommunity(5.0, False)
     assert rows["unknown"].local_community == PeerLocalCommunity(1.0, None)
+    assert rows["edge"].local_community == PeerLocalCommunity(1.0, None, area_edge=True)
+    assert rows["both"].local_community == PeerLocalCommunity(1.0, True)
     assert rows["huge"].local_community is None
     assert rows["plain"].local_community is None
 
