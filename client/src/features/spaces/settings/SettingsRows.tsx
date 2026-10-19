@@ -44,7 +44,7 @@ export function LinkRow({ href, title, meta, onClick, testId }: {
         <span class="sh-ss-link__title">{title}</span>
         {meta && <span class="sh-ss-link__meta">{meta}</span>}
       </span>
-      <span class="sh-ss-link__chevron sh-flip-rtl" aria-hidden="true">›</span>
+      <span class="sh-ss-link__chevron" aria-hidden="true">›</span>
     </>
   )
   return href ? (

@@ -77,3 +77,35 @@ describe('own chat bubble meta', () => {
     expect(meta?.[1]).not.toMatch(/opacity/)
   })
 })
+
+describe('keyboard focus ring', () => {
+  // The plain hearth ring was ~3.1:1 on the hearth tints (active nav,
+  // Needs-you card, selected chips): every focus ring takes
+  // --sh-focus-ring (the text hearth, ≥ 4.5:1 on every light surface).
+  it('draws every hearth focus ring in --sh-focus-ring', () => {
+    const plain = rules().filter(([sel, body]) =>
+      /focus/.test(sel) && /outline\s*:[^;]*var\(--sh-primary\)/.test(body))
+    expect(plain.map(([sel]) => sel)).toEqual([])
+    const global = rules().find(([sel]) => sel === ':focus-visible')
+    expect(global?.[1]).toMatch(/outline\s*:\s*2px solid var\(--sh-focus-ring\)/)
+  })
+})
+
+describe('space banners and hints', () => {
+  it('lifts the muted line on the hearth-tinted archived / follower banner', () => {
+    // Light: --sh-text-muted on the 8 % hearth tint is 4.42:1 (axe).
+    const rule = rules().find(([sel]) => sel === '.sh-subscriber-banner__body .sh-muted')
+    expect(rule?.[1]).toMatch(/color\s*:\s*color-mix\(in srgb, var\(--sh-text-muted\) 75%, var\(--sh-text\)\)/)
+  })
+
+  it('lifts the muted lines on your own (hearth-tinted) member row', () => {
+    // Dark: "joined today" on the 6 % hearth tint is 4.26:1 (axe).
+    const rule = rules().find(([sel]) => sel === '.sh-member-row--me .sh-member-joined')
+    expect(rule?.[1]).toMatch(/color\s*:\s*color-mix\(in srgb, var\(--sh-text-muted\) 75%, var\(--sh-text\)\)/)
+  })
+
+  it('underlines a link inside a settings hint (link-in-text-block)', () => {
+    const rule = rules().find(([sel]) => sel === '.sh-ss-hint a')
+    expect(rule?.[1]).toMatch(/text-decoration\s*:\s*underline/)
+  })
+})

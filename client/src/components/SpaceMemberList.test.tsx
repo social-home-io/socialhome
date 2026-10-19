@@ -178,11 +178,11 @@ describe('SpaceMemberList — header count and language', () => {
     const { SpaceMemberList } = await import('./SpaceMemberList')
     serve(1)
     const one = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" />)
-    await waitFor(() => expect(one.container.querySelector('h3')?.textContent).toBe('1 member'))
+    await waitFor(() => expect(one.container.querySelector('h2')?.textContent).toBe('1 member'))
     one.unmount()
     serve(3)
     const many = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" />)
-    await waitFor(() => expect(many.container.querySelector('h3')?.textContent).toBe('3 members'))
+    await waitFor(() => expect(many.container.querySelector('h2')?.textContent).toBe('3 members'))
   })
 
   it('renders the header, ban list and chips in German', async () => {
@@ -190,8 +190,8 @@ describe('SpaceMemberList — header count and language', () => {
     const { SpaceMemberList } = await import('./SpaceMemberList')
     serve(1)
     const one = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" />)
-    await waitFor(() => expect(one.container.querySelector('h3')?.textContent).toBe('1 Mitglied'))
-    const headings = [...one.container.querySelectorAll('h3')].map(h => h.textContent)
+    await waitFor(() => expect(one.container.querySelector('h2')?.textContent).toBe('1 Mitglied'))
+    const headings = [...one.container.querySelectorAll('h2.sh-settings-section-heading')].map(h => h.textContent)
     expect(headings).toEqual(['1 Mitglied', 'Gesperrt'])
     expect(one.getByText('Entsperren')).toBeTruthy()
     expect(one.container.textContent).toContain('Nutzt dein Haushaltsprofil')
@@ -199,7 +199,7 @@ describe('SpaceMemberList — header count and language', () => {
     one.unmount()
     serve(4)
     const many = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" />)
-    await waitFor(() => expect(many.container.querySelector('h3')?.textContent).toBe('4 Mitglieder'))
+    await waitFor(() => expect(many.container.querySelector('h2')?.textContent).toBe('4 Mitglieder'))
   })
 })
 

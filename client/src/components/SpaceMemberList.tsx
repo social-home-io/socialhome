@@ -286,12 +286,13 @@ export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props
           </a>
         )}
         <div class="sh-member-list-header">
-          <h3>
+          {/* The section's heading under the page h1 (axe heading-order). */}
+          <h2 class="sh-settings-section-heading">
             {t(
               isOne(members.value.length) ? 'space.members.count_one' : 'space.members.count',
               { n: String(members.value.length) },
             )}
-          </h3>
+          </h2>
           {canManage.value && (
             <div class="sh-member-list-invite-actions">
               {/* One door: people from your household and paired ones,
@@ -412,7 +413,7 @@ export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props
         })}
         {canManage.value && bans.value.length > 0 && (
           <>
-            <h3>{t('space.members.banned_heading')}</h3>
+            <h2 class="sh-settings-section-heading">{t('space.members.banned_heading')}</h2>
             {bans.value.map(b => (
               <div key={b.user_id} class="sh-member-row sh-member-row--banned">
                 <Avatar name={b.user_id} size={32} />

@@ -66,6 +66,7 @@ import { SpaceChatView, useSpaceChatSummary } from './SpaceChatView'
 import { patchSpaceChat, spaceChatOf, spaceChatOpenTo } from '@/store/spaceChat'
 import { isMuteActive } from '@/utils/mute'
 import { resolveAvatar } from '@/utils/avatar'
+import { emptyFeedBodyKey } from './spaceFeedEmpty'
 
 interface SpaceDetail {
   id: string
@@ -744,7 +745,11 @@ export default function SpaceFeedPage() {
                 </p>
               ) : adminOnly('posts') ? null : (
                 <>
-                  <p>{t('space.feed.empty_body')}</p>
+                  <p>{t(emptyFeedBodyKey(
+                    spaceDetail.value?.space_type,
+                    membersShown,
+                    spaceDetail.value?.has_remote_households,
+                  ))}</p>
                   <p class="sh-muted">{t('space.feed.empty_hint')}</p>
                 </>
               )}

@@ -17,12 +17,19 @@ vi.mock('@/components/NotificationBell', () => ({
   startNotificationPolling: vi.fn(),
   stopNotificationPolling: vi.fn(),
 }))
+vi.mock('@/components/SideNav', () => ({
+  SideNav: () => <nav class="sh-sidenav" data-testid="sidenav"><a href="/">Feed</a></nav>,
+}))
+vi.mock('@/components/MobileNav', () => ({
+  MobileNav: () => <nav class="sh-mobile-nav" data-testid="mobilenav"><a href="/">Home</a></nav>,
+  mobileSidebarOpen: { value: false },
+}))
 vi.mock('preact-iso', async (orig) => ({
   ...(await orig<typeof import('preact-iso')>()),
   useLocation: () => ({ route: vi.fn(), url: '/', path: '/' }),
 }))
 
-import { TopBar } from './App'
+import { AppLayout, TopBar } from './App'
 import { currentUser } from '@/store/auth'
 
 describe('TopBar', () => {
@@ -49,5 +56,26 @@ describe('TopBar', () => {
     const { container } = render(<TopBar />)
     expect(container.querySelector('.sh-me-btn')).toBeNull()
     expect(container.querySelector('[data-testid="bell"]')).not.toBeNull()
+  })
+})
+
+describe('AppLayout', () => {
+  beforeEach(() => { cleanup() })
+
+  it('puts the top bar and the page before the navigation (focus order)', () => {
+    // Phones: the bottom tab bar came first in the DOM, so Tab walked it
+    // before the top bar. Desktop: ~20 sidebar stops came before a
+    // space's section row. The grid / fixed bar keep the visual layout.
+    const { container } = render(
+      <AppLayout overlays={<div data-testid="overlay" />}>
+        <a href="/x" data-testid="page-link">Page</a>
+      </AppLayout>,
+    )
+    const order = [...container.querySelectorAll(
+      'header.sh-topbar, main#main, [data-testid="sidenav"], [data-testid="mobilenav"], [data-testid="overlay"]',
+    )].map(el => el.getAttribute('data-testid') ?? el.tagName.toLowerCase())
+    expect(order).toEqual(['header', 'main', 'sidenav', 'mobilenav', 'overlay'])
+    expect(container.querySelector('main#main [data-testid="page-link"]')).not.toBeNull()
+    expect(container.querySelector('main#main')?.getAttribute('tabindex')).toBe('-1')
   })
 })

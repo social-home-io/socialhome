@@ -1,4 +1,4 @@
-import type { JSX } from 'preact'
+import type { ComponentChildren, JSX } from 'preact'
 import { Router } from 'preact-iso'
 import { IngressLocationProvider as LocationProvider } from '@/router/IngressLocationProvider'
 import { useComputed, signal } from '@preact/signals'
@@ -113,6 +113,35 @@ export function TopBar() {
       <NotificationBell />
       <MeButton />
     </header>
+  )
+}
+
+/**
+ * The signed-in shell. DOM order is the keyboard order: the top bar
+ * (page heading, search, bell, "You"), then the page — a space's
+ * section row is its first stop — and the navigation last. The grid
+ * still paints the sidebar on the inline-start side (``grid-area: nav``)
+ * and the phone tab bar is pinned to the bottom, so the visual layout
+ * is unchanged; only Tab no longer walks ~20 nav stops (or, on a phone,
+ * the bottom bar) before the top of the page. The skip link in front
+ * of this jumps straight to ``<main>``.
+ */
+export function AppLayout({ children, overlays }: {
+  children: ComponentChildren
+  overlays?: ComponentChildren
+}) {
+  return (
+    <div class="sh-layout">
+      <div class="sh-content">
+        <TopBar />
+        <main class="sh-main" id="main" role="main" tabIndex={-1}>
+          {children}
+        </main>
+      </div>
+      <SideNav />
+      <MobileNav />
+      {overlays}
+    </div>
   )
 }
 
@@ -265,25 +294,7 @@ export function App() {
         <SkipLink />
         <OfflineIndicator />
         <InstallPrompt />
-        <div class="sh-layout">
-          <SideNav />
-          <MobileNav />
-          <div class="sh-content">
-            <TopBar />
-            <main class="sh-main" id="main" role="main" tabIndex={-1}>
-              <RouteProgress />
-              <Router onLoadStart={routeLoadStart} onLoadEnd={routeLoadEnd}>
-                {Object.entries(routes).map(([path, Component]) => {
-                  // preact-iso's ``lazy()`` returns an AsyncComponent with
-                  // a ``.preload`` property; TypeScript's JSX checker
-                  // doesn't recognise it as a valid element constructor.
-                  // Cast through ``any`` only at the JSX site.
-                  const C = Component as unknown as (props: { path: string }) => JSX.Element
-                  return <C path={path} key={path} />
-                })}
-              </Router>
-            </main>
-          </div>
+        <AppLayout overlays={<>
           <QuickSwitcher />
           <KeyboardShortcutsDialog />
           <BackToTop />
@@ -307,7 +318,19 @@ export function App() {
           <AliasDialog />
           <HighlightPublishMenu />
           <StatusEditorHost />
-        </div>
+        </>}>
+          <RouteProgress />
+          <Router onLoadStart={routeLoadStart} onLoadEnd={routeLoadEnd}>
+            {Object.entries(routes).map(([path, Component]) => {
+              // preact-iso's ``lazy()`` returns an AsyncComponent with
+              // a ``.preload`` property; TypeScript's JSX checker
+              // doesn't recognise it as a valid element constructor.
+              // Cast through ``any`` only at the JSX site.
+              const C = Component as unknown as (props: { path: string }) => JSX.Element
+              return <C path={path} key={path} />
+            })}
+          </Router>
+        </AppLayout>
       </LocationProvider>
     </ErrorBoundary>
   )

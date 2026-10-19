@@ -138,6 +138,9 @@ describe('SpaceListPage — sections', () => {
     const archived = r.container.querySelector('details.sh-spaces-archived') as HTMLDetailsElement
     expect(archived.open).toBe(false)
     expect(archived.textContent).toContain('Kindergarten 2024')
+    // Read as "name, meta" like every other row — not "name Archived · …".
+    expect(archived.querySelector('a.sh-spaces-row__main')?.getAttribute('aria-label'))
+      .toBe('Kindergarten 2024, Archived · read-only')
     expect(r.getByRole('region', { name: 'Yours' }).textContent).not.toContain('Kindergarten')
   })
 
