@@ -68,6 +68,16 @@ export function parseSettingsSection(segment: unknown): SettingsSection | null {
     : null
 }
 
+/** The section an old-style settings link asks for, or ``null``. The
+ *  "Reviewed isn't available for a household" bell entry used to link to
+ *  ``/settings?household=…``; the access levels it is about live in
+ *  Members & joining. */
+export function legacySettingsSection(
+  query: Record<string, string | undefined> | undefined,
+): SettingsSection | null {
+  return query?.household ? 'members' : null
+}
+
 /** The section to show: the asked one when this viewer has it, else the
  *  viewer's first. */
 export function resolveSettingsSection(

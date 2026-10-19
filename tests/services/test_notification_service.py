@@ -46,7 +46,10 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.calendar_repo import SqliteCalendarRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
-from socialhome.repositories.notification_repo import SqliteNotificationRepo
+from socialhome.repositories.notification_repo import (
+    SqliteNotificationRepo,
+    new_notification,
+)
 from socialhome.repositories.post_repo import SqlitePostRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_remote_member_repo import (
@@ -2524,7 +2527,10 @@ async def test_first_remote_member_warns_admins_once_about_reviewed_features(sta
     assert len(notes) == 1
     title = notes[0].title
     assert "Club" in title and "Tasks" in title and "Sticky notes" in title
-    assert notes[0].link_url == f"/spaces/{space.id}/settings?household=inst-remote"
+    assert (
+        notes[0].link_url
+        == f"/spaces/{space.id}/settings/members?household=inst-remote"
+    )
 
 
 async def test_no_warning_without_a_reviewed_non_post_feature(stack):
@@ -2569,10 +2575,36 @@ async def test_unavailable_warning_pushes_once_per_household(stack):
     # In-app the rejoin shows again (a fresh unread row — the old one was
     # read); it just doesn't push.
     assert {n.link_url for n in notes} == {
-        f"/spaces/{space.id}/settings?household={inst}"
+        f"/spaces/{space.id}/settings/members?household={inst}"
         for inst in ("inst-other", "inst-remote")
     }
     assert any(n.read_at is None for n in notes if "inst-remote" in n.link_url)
+
+
+async def test_unavailable_warning_keeps_a_row_stored_with_the_old_link(stack):
+    """A bell row stored before the link pointed at Members & joining
+    (``/settings?household=…``) stays that household's key: its rejoin
+    bumps that row in-app and does not push again or add a second row."""
+    a, space, remote = await _reviewed_space_with_remote(stack)
+    spy = _PushSpy()
+    stack.notif_svc.attach_push_service(spy)
+    legacy = f"/spaces/{space.id}/settings?household=inst-remote"
+    await stack.notif_repo.save(
+        new_notification(
+            user_id=a.user_id,
+            type="moderation_unavailable",
+            title="Reviewed isn't available",
+            link_url=legacy,
+        )
+    )
+    await _seat_remote(stack, remote, space.id, "u-r1")
+    notes = [
+        n
+        for n in await stack.notif_repo.list(a.user_id, limit=50)
+        if n.type == "moderation_unavailable"
+    ]
+    assert [n.link_url for n in notes] == [legacy]
+    assert not [p for p in spy.pushed if p[1] == "moderation_unavailable"]
 
 
 class _VersionedInstances:
@@ -2603,7 +2635,7 @@ async def test_a_v43_household_joining_a_reviewed_space_warns_nobody(stack):
         if n.type == "moderation_unavailable"
     ]
     assert [n.link_url for n in notes] == [
-        f"/spaces/{space.id}/settings?household=inst-old"
+        f"/spaces/{space.id}/settings/members?household=inst-old"
     ]
 
 

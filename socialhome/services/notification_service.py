@@ -1323,18 +1323,22 @@ class NotificationService(ProtectionGateMixin):
             )
             # One push per (space, household): the link names the household,
             # so its rejoin bumps the existing bell in-app (read or not) and
-            # only a household that is new here pushes again.
-            link = f"/spaces/{event.space_id}/settings?household={event.instance_id}"
-            told = await self._notifs.find(
-                Spec(
-                    where=[
-                        ("user_id", "=", member.user_id),
-                        ("type", "=", "moderation_unavailable"),
-                        ("link_url", "=", link),
-                    ],
-                    limit=1,
-                )
+            # only a household that is new here pushes again. The link opens
+            # Settings › Members & joining, where the access levels are. A
+            # row stored before that (``/settings?household=…``, which the
+            # SPA redirects there) stays the household's key: a rejoin
+            # keeps using that link, so it does not push again and an
+            # unread row is bumped rather than doubled.
+            link = (
+                f"/spaces/{event.space_id}/settings/members"
+                f"?household={event.instance_id}"
             )
+            legacy = f"/spaces/{event.space_id}/settings?household={event.instance_id}"
+            told = await self._told(member.user_id, "moderation_unavailable", link)
+            if not told and await self._told(
+                member.user_id, "moderation_unavailable", legacy
+            ):
+                told, link = True, legacy
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -1356,6 +1360,21 @@ class NotificationService(ProtectionGateMixin):
                 dedupe_by_link=True,
                 push=not told,
             )
+
+    async def _told(self, user_id: str, kind: str, link: str) -> bool:
+        """Has ``user_id`` ever had a ``kind`` notification with ``link``?"""
+        return bool(
+            await self._notifs.find(
+                Spec(
+                    where=[
+                        ("user_id", "=", user_id),
+                        ("type", "=", kind),
+                        ("link_url", "=", link),
+                    ],
+                    limit=1,
+                )
+            )
+        )
 
     async def on_moderation_decided(
         self,
