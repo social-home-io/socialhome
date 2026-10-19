@@ -1126,6 +1126,16 @@ class OwnerTransferFollowerError(CodedError, ValueError):
     detail = "A follower can't own the space. Make them a member first."
 
 
+class OwnerStillActiveError(CodedError):
+    """A household admin can only reassign a space whose owner is gone
+    (deactivated or deleted here); an active owner hands it over
+    themselves in the space's settings."""
+
+    status = 409
+    code = "OWNER_ACTIVE"
+    detail = "The owner is still here and can hand the space over themselves."
+
+
 class OwnerTransferSelfError(CodedError, ValueError):
     """The owner picked themselves."""
 

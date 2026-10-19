@@ -2805,10 +2805,13 @@ class AdminSpaceCollectionView(BaseView):
                 status=403,
             )
         repo = self.svc(space_repo_key)
+        users = self.svc(user_repo_key)
+        own_id = self.request.app.get(instance_id_key)
         spaces = await repo.list_all()
         out = []
         for s in spaces:
             members = await repo.list_members(s.id)
+            owner = await users.get(s.owner_username)
             out.append(
                 sanitise_for_api(
                     {
@@ -2822,10 +2825,61 @@ class AdminSpaceCollectionView(BaseView):
                         "owner_instance_id": s.owner_instance_id,
                         "member_count": len(members),
                         "dissolved": bool(s.dissolved),
+                        # False once the owner's account here is
+                        # deactivated or gone (meaningful only for a space
+                        # hosted here — a stub's owner lives elsewhere).
+                        "owner_active": owner is not None and owner.is_active(),
+                        "hosted_here": s.owner_instance_id == own_id,
                     }
                 )
             )
         return web.json_response(out)
+
+
+class AdminSpaceOwnershipView(BaseView):
+    """``/api/admin/spaces/{id}/ownership`` — a household admin reassigns a
+    space whose owner has left the household (§23.48).
+
+    * ``GET`` — ``{owner_active, candidates: [{user_id, display_name,
+      role}]}``: the local full members who could own it.
+    * ``POST {to_user_id}`` — make them owner. Refused while the owner is
+      still active (409 ``OWNER_ACTIVE`` — they hand it over themselves in
+      the space's settings), for anyone but a household admin (403), and
+      for a follower / a member from another household (422), like a
+      transfer.
+    """
+
+    async def get(self) -> web.Response:
+        owner_active, rows = await self.svc(space_service_key).ownership_candidates(
+            self.match("id"), actor_username=self.user.username
+        )
+        return web.json_response(
+            {
+                "owner_active": owner_active,
+                "candidates": [
+                    {
+                        "user_id": seat.user_id,
+                        "display_name": seat.space_display_name or user.display_name,
+                        "role": seat.role,
+                    }
+                    for seat, user in rows
+                ],
+            }
+        )
+
+    async def post(self) -> web.Response:
+        body = await self.body()
+        to_user_id = str(body.get("to_user_id") or "").strip()
+        if not to_user_id:
+            return error_response(422, "UNPROCESSABLE", "to_user_id is required")
+        await self.svc(space_service_key).reassign_orphaned_ownership(
+            self.match("id"),
+            actor_username=self.user.username,
+            to_user_id=to_user_id,
+        )
+        return web.json_response(
+            {"space_id": self.match("id"), "new_owner_user_id": to_user_id}
+        )
 
 
 def _serialise_comment(comment) -> dict:

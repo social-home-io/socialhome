@@ -27,6 +27,7 @@ import { HomeNameSettings } from '@/components/HomeNameSettings'
 import { HaUsersPanel } from './HaUsersPanel'
 import { DashboardTab } from './DashboardTab'
 import { HouseholdZonesTab } from './HouseholdZonesTab'
+import { AdminReassignOwner } from './AdminReassignOwner'
 import { managesLocalUsers, usesHaUserDirectory } from '@/platform'
 import CpAdminPanel from '@/features/child-protection/CpAdminPanel'
 import type { User } from '@/types'
@@ -376,6 +377,10 @@ interface SpaceAdminRow {
   owner_instance_id: string
   member_count: number
   dissolved:    boolean
+  /** The owner's account here is still active (false: they left). */
+  owner_active?: boolean
+  /** The space is hosted by this household (not a stub). */
+  hosted_here?: boolean
 }
 
 const spaceRows = signal<SpaceAdminRow[]>([])
@@ -439,21 +444,9 @@ async function unpublishFromGfs(spaceId: string, gfsId: string) {
   }
 }
 
-async function transferSpaceOwnership(id: string, currentOwner: string) {
-  const newOwnerId = prompt(t('admin.spaces.transfer_prompt', { owner: currentOwner }))
-  if (!newOwnerId) return
-  try {
-    await api.post(`/api/spaces/${id}/ownership`, {
-      to_user_id: newOwnerId.trim(),
-    })
-    showToast(t('admin.spaces.transferred'), 'success')
-    await loadSpaces()
-  } catch (e: unknown) {
-    showToast((e as Error).message || t('admin.spaces.transfer_failed'), 'error')
-  }
-}
-
 function SpacesTab() {
+  // The space whose owner left, while its "choose a new owner" dialog is open.
+  const [reassign, setReassign] = useState<SpaceAdminRow | null>(null)
   useEffect(() => {
     void loadSpaces()
     void loadPublications()
@@ -481,17 +474,27 @@ function SpacesTab() {
             <tr key={s.id}>
               <td>{s.emoji} {s.name}</td>
               <td><span class="sh-muted">{s.space_type}</span></td>
-              <td>@{s.owner_username}</td>
+              <td>
+                @{s.owner_username}
+                {s.hosted_here && s.owner_active === false && (
+                  <span class="sh-muted"> · {t('admin.spaces.owner_gone')}</span>
+                )}
+              </td>
               <td>{s.member_count}</td>
               <td><span class="sh-muted">{s.join_mode}</span></td>
               <td>
                 <a class="sh-link" href={addBase(`/spaces/${s.id}`)}>{t('admin.spaces.open')}</a>
                 {' · '}
-                <button type="button" class="sh-link"
-                  onClick={() => void transferSpaceOwnership(s.id, s.owner_username)}>
-                  {t('admin.spaces.transfer')}
-                </button>
-                {' · '}
+                {/* Only when the owner left: an active owner hands the
+                 *  space over themselves, in its settings. */}
+                {s.hosted_here && s.owner_active === false && (
+                  <>
+                    <button type="button" class="sh-link" onClick={() => setReassign(s)}>
+                      {t('admin.spaces.reassign')}
+                    </button>
+                    {' · '}
+                  </>
+                )}
                 <button type="button" class="sh-danger-link"
                   onClick={() => void dissolveSpace(s.id)}>
                   {t('admin.spaces.dissolve')}
@@ -501,6 +504,13 @@ function SpacesTab() {
           ))}
         </tbody>
       </table>
+      <AdminReassignOwner
+        spaceId={reassign?.id ?? ''}
+        spaceName={reassign?.name ?? ''}
+        open={reassign !== null}
+        onClose={() => setReassign(null)}
+        onDone={() => void loadSpaces()}
+      />
 
       <h2>{t('admin.publications.heading')}</h2>
       <p class="sh-muted">{t('admin.publications.intro')}</p>

@@ -57,6 +57,7 @@ from socialhome.domain.space import (
     HostUnreachableError,
     HouseholdUpgradeRequiredError,
     JoinMode,
+    OwnerStillActiveError,
     OwnerTransferFollowerError,
     OwnerTransferNotLocalError,
     OwnerTransferSelfError,
@@ -1063,6 +1064,111 @@ async def test_transfer_ownership_refused_on_a_stub(stack):
             space.id, actor_username="anna", to_user_id=bob.user_id
         )
     assert (await stack.space_repo.get_member(space.id, bob.user_id)).role == "member"
+
+
+async def _orphan_setup(stack):
+    """anna (owner) and bob (member) in a space; carol is a household admin."""
+    await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    await stack.provision_user("carol", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="Family")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+    return space, bob
+
+
+async def test_reassign_refused_while_the_owner_is_active(stack):
+    space, bob = await _orphan_setup(stack)
+    with pytest.raises(OwnerStillActiveError):
+        await stack.space_svc.reassign_orphaned_ownership(
+            space.id, actor_username="carol", to_user_id=bob.user_id
+        )
+
+
+async def test_reassign_after_the_owner_left(stack):
+    """The owner's account was deactivated: a household admin hands the
+    space to a local member; the departed owner keeps a plain seat."""
+    space, bob = await _orphan_setup(stack)
+    anna = await stack.space_svc._users.get("anna")
+    await stack.user_svc.deprovision("anna")
+    owner_active, rows = await stack.space_svc.ownership_candidates(
+        space.id, actor_username="carol"
+    )
+    assert owner_active is False
+    assert [u.user_id for _, u in rows] == [bob.user_id]
+    await stack.space_svc.reassign_orphaned_ownership(
+        space.id, actor_username="carol", to_user_id=bob.user_id
+    )
+    assert (await stack.space_repo.get_member(space.id, bob.user_id)).role == "owner"
+    assert (await stack.space_repo.get_member(space.id, anna.user_id)).role == "member"
+    assert (await stack.space_repo.get(space.id)).owner_username == "bob"
+
+
+async def test_reassign_needs_a_household_admin(stack):
+    space, bob = await _orphan_setup(stack)
+    await stack.user_svc.deprovision("anna")
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.reassign_orphaned_ownership(
+            space.id, actor_username="bob", to_user_id=bob.user_id
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.ownership_candidates(space.id, actor_username="bob")
+
+
+async def test_reassign_keeps_the_transfer_rules(stack):
+    """A follower or a member from another household can't be made owner
+    this way either."""
+    await stack.provision_user("anna")
+    fan = await stack.provision_user("fan")
+    await stack.provision_user("carol", is_admin=True)
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    remote = SqliteSpaceRemoteMemberRepo(stack.db)
+    stack.space_svc._remote_members = remote
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-x",
+        user_id="ru1",
+        user_pk=None,
+        display_name="Rita",
+    )
+    await stack.user_svc.deprovision("anna")
+    with pytest.raises(OwnerTransferFollowerError):
+        await stack.space_svc.reassign_orphaned_ownership(
+            space.id, actor_username="carol", to_user_id=fan.user_id
+        )
+    with pytest.raises(OwnerTransferNotLocalError):
+        await stack.space_svc.reassign_orphaned_ownership(
+            space.id, actor_username="carol", to_user_id="ru1"
+        )
+
+
+async def test_reassign_refused_on_a_stub(stack):
+    space, bob = await _orphan_setup(stack)
+    await stack.user_svc.deprovision("anna")
+    await stack.db.enqueue(
+        "UPDATE spaces SET owner_instance_id='other-household' WHERE id=?",
+        (space.id,),
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.reassign_orphaned_ownership(
+            space.id, actor_username="carol", to_user_id=bob.user_id
+        )
+
+
+async def test_transfer_to_a_deactivated_member_is_refused(stack):
+    space, bob = await _orphan_setup(stack)
+    await stack.user_svc.deprovision("bob")
+    with pytest.raises(OwnerTransferNotLocalError):
+        await stack.space_svc.transfer_ownership(
+            space.id, actor_username="anna", to_user_id=bob.user_id
+        )
 
 
 async def test_transfer_ownership_non_owner_refused(stack):
