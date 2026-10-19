@@ -323,15 +323,18 @@ truth; the panel follows it.
 - GPS coordinates: truncate to 4 decimal places before any storage or
   transmission — `round(float(lat), 4)`, never raw device precision.
 - **People's locations are never shared by design.** A person's or a
-  household's location leaves the household only when its people chose to
-  trust a specific paired household with it (the per-pair `share_home`
-  home location, live presence location shared with a peer). No default-on
-  sharing, never via a GFS, never as a side effect of joining a space.
+  household's location leaves the household only toward a specific paired
+  household its people trust, under a per-pair switch they control (the
+  per-pair `share_home` home location — on by default for a new pair, owner
+  decision 2026-10-19 — and live presence location shared with a peer).
+  Every sender honours that switch (pairing QR / accept included); never via
+  a GFS, never as a side effect of joining a space.
 - **Space locations are not people's locations, and still stay minimal:**
   - A *public local community* (a public space bound to an area) keeps its
     centre on the host. Paired households get only "local community, within
     X km" plus the host's own in-area verdict for *them*, computed against
-    the home they already chose to share. No coordinates on the wire.
+    the home they already chose to share. No coordinates on the wire;
+    the verdict has an "unsure" band near the edge so it can't be probed.
   - A *global* space may carry an owner-chosen place pin, used only to sort
     Discover by distance on the viewer's side; joining does not check it.
     Never default it to the household's home.
