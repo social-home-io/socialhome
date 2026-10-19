@@ -365,7 +365,12 @@ export function SpaceSectionNav({
         </div>
       )}
       {leave === 'owner' && (
-        <p class="sh-space-more__footer sh-space-more__owner-note">{t('space.leave.owner_note')}</p>
+        <p class="sh-space-more__footer sh-space-more__owner-note">
+          {t('space.leave.owner_note')}
+          {settingsHref && (
+            <>{' '}<a href={settingsHref}>{t('space.leave.owner_transfer_link')}</a></>
+          )}
+        </p>
       )}
     </>
   )

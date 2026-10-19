@@ -184,6 +184,10 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   ZONE_NAME_TAKEN: () => t('error.zone_name_taken'),
   ZONE_READ_ONLY: () => t('error.zone_read_only'),
   ZONE_IS_HOME: () => t('error.zone_is_home'),
+  // Handing a space to a new owner (§23.48).
+  OWNER_NOT_LOCAL: () => t('error.owner_not_local'),
+  OWNER_IS_FOLLOWER: () => t('error.owner_is_follower'),
+  OWNER_IS_SELF: () => t('error.owner_is_self'),
 }
 
 /** The generic line for a status, or ``null`` when there is none. */

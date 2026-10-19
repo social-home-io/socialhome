@@ -24,6 +24,7 @@ from socialhome.domain.events import (
     DmMessageUpdated,
     PostEdited,
     SpaceAdminSeedsRetiredAfterRestore,
+    SpaceConfigChanged,
     SpaceJoinRequested,
     SpaceMemberJoined,
     SpacePostCreated,
@@ -2051,6 +2052,69 @@ async def test_space_join_approved_for_a_non_local_user_saves_nothing(stack):
     )
     rows = await stack.notif_repo.list("remote-user-not-local", limit=50)
     assert rows == []
+
+
+async def _transfer_space(stack):
+    """anna owns a space with bob in it, on the notification stack's bus."""
+    await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space_svc = SpaceService(
+        stack.space_repo,
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Family")
+    await space_svc.add_member(space.id, actor_username="anna", user_id=bob.user_id)
+    return space_svc, space, bob
+
+
+async def test_ownership_transfer_tells_the_new_owner(stack):
+    space_svc, space, bob = await _transfer_space(stack)
+    await space_svc.transfer_ownership(
+        space.id, actor_username="anna", to_user_id=bob.user_id
+    )
+    rows = await stack.notif_repo.list(bob.user_id, limit=50)
+    owned = [r for r in rows if r.type == "space_ownership_transferred"]
+    assert len(owned) == 1
+    assert owned[0].title == "You now own Family"
+    assert owned[0].link_url == f"/spaces/{space.id}/settings"
+
+
+async def test_ownership_transfer_notification_skips_non_local_and_other_changes(
+    stack,
+):
+    """A host's transfer seen on a member household names a user who isn't
+    local; any other config change is not about ownership at all."""
+    _svc, space, bob = await _transfer_space(stack)
+    await stack.notif_svc.on_space_ownership_transferred(
+        SpaceConfigChanged(
+            space_id=space.id,
+            event_type="ownership_transferred",
+            payload={"new_owner_user_id": "remote-user-not-local"},
+            sequence=2,
+        )
+    )
+    await stack.notif_svc.on_space_ownership_transferred(
+        SpaceConfigChanged(
+            space_id=space.id,
+            event_type="renamed",
+            payload={"new_owner_user_id": bob.user_id},
+            sequence=3,
+        )
+    )
+    await stack.notif_svc.on_space_ownership_transferred(
+        SpaceConfigChanged(
+            space_id=space.id,
+            event_type="ownership_transferred",
+            payload={},
+            sequence=4,
+        )
+    )
+    assert await stack.notif_repo.list("remote-user-not-local", limit=50) == []
+    rows = await stack.notif_repo.list(bob.user_id, limit=50)
+    assert [r for r in rows if r.type == "space_ownership_transferred"] == []
 
 
 async def test_space_mention_from_remote_author_names_them(stack):

@@ -1248,11 +1248,14 @@ class SqliteSpaceRepo:
         )
 
     async def record_owner_change(self, space_id: str, owner_username: str) -> None:
-        """A stub learns from its HOST that ownership moved: store the new
-        ``owner_username`` (``save`` never rewrites the owner columns) and
-        forget the recorded owner seat until a host roster names the new one.
+        """Ownership moved: store the new ``owner_username`` (``save`` never
+        rewrites the owner columns) and forget the recorded owner seat.
 
-        Callers MUST only pass a value from the space's authenticated host."""
+        Two callers: the HOST's own ``transfer_ownership`` (there
+        ``owner_user_id`` stays NULL — ``users`` answers it), and a stub
+        learning it from its host (a host roster names the new seat later).
+        On a stub, callers MUST only pass a value from the space's
+        authenticated host."""
         await self._db.enqueue(
             "UPDATE spaces SET owner_username=?, owner_user_id=NULL WHERE id=?",
             (owner_username, space_id),

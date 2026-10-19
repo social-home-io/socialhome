@@ -1957,7 +1957,12 @@ marks the seat `owner` in its member list and refuses a role change on it.
 After `transfer_ownership` the host's config carries the new
 `owner_username`; the stub records it and forgets the old owner seat until
 the next snapshot from the host names the new one. A signed config from a
-seed holder can't move ownership.
+seed holder can't move ownership. Ownership only ever moves to a full
+member of the HOSTING household (`OWNER_NOT_LOCAL` otherwise): the space
+authority key, the owner statement and the signed GFS list belong to
+`owner_instance_id`, which a transfer never changes — so no key handoff
+crosses households. The owner starts it from the space's settings; the old
+owner stays on as admin.
 
 ```mermaid
 sequenceDiagram

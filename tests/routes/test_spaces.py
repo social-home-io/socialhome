@@ -1957,6 +1957,108 @@ async def test_ownership_transfer_requires_to_user_id(client):
     assert r.status == 422
 
 
+async def _roles(client, sid: str) -> dict[str, str]:
+    r = await client.get(
+        f"/api/spaces/{sid}/members", headers=_auth(client._admin_token)
+    )
+    return {m["user_id"]: m["role"] for m in await r.json()}
+
+
+async def _owned_space(client, name: str) -> str:
+    r = await client.post(
+        "/api/spaces",
+        json={"name": name},
+        headers=_auth(client._admin_token),
+    )
+    return (await r.json())["id"]
+
+
+async def test_ownership_transfer_moves_owner_and_demotes_to_admin(client):
+    sid = await _owned_space(client, "Handover")
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.post(
+        f"/api/spaces/{sid}/ownership",
+        json={"to_user_id": client._bob_uid},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200
+    roles = await _roles(client, sid)
+    assert roles[client._bob_uid] == "owner"
+    assert roles[client._admin_uid] == "admin"
+
+
+async def test_ownership_transfer_by_non_owner_member_is_403(client):
+    sid = await _owned_space(client, "NotYours")
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.post(
+        f"/api/spaces/{sid}/ownership",
+        json={"to_user_id": client._bob_uid},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403
+    assert (await _roles(client, sid))[client._admin_uid] == "owner"
+
+
+async def test_ownership_transfer_by_follower_is_403(client):
+    sid = await _create_subscribable_space(client, name="Followed")
+    r = await client.post(
+        f"/api/spaces/{sid}/subscribe", headers=_auth(client._bob_token)
+    )
+    assert r.status == 200
+    r = await client.post(
+        f"/api/spaces/{sid}/ownership",
+        json={"to_user_id": client._bob_uid},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403
+
+
+async def test_ownership_transfer_to_follower_is_refused(client):
+    sid = await _create_subscribable_space(client, name="FollowerOwner")
+    r = await client.post(
+        f"/api/spaces/{sid}/subscribe", headers=_auth(client._bob_token)
+    )
+    assert r.status == 200
+    r = await client.post(
+        f"/api/spaces/{sid}/ownership",
+        json={"to_user_id": client._bob_uid},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "OWNER_IS_FOLLOWER"
+
+
+async def test_ownership_transfer_to_self_is_refused(client):
+    sid = await _owned_space(client, "Mine")
+    r = await client.post(
+        f"/api/spaces/{sid}/ownership",
+        json={"to_user_id": client._admin_uid},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "OWNER_IS_SELF"
+
+
+async def test_ownership_transfer_to_another_household_is_refused(client):
+    """The space authority key stays with the hosting household, so a
+    member seated from another household can't be made owner."""
+    sid = await _owned_space(client, "CrossHousehold")
+    await client.app[_db_key].enqueue(
+        "INSERT INTO space_remote_members"
+        "(space_id, instance_id, user_id, user_pk, display_name)"
+        " VALUES(?,?,?,?,?)",
+        (sid, "peer-instance-id", "uid-remote-rita", "fake-pk", "Rita"),
+    )
+    r = await client.post(
+        f"/api/spaces/{sid}/ownership",
+        json={"to_user_id": "uid-remote-rita"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "OWNER_NOT_LOCAL"
+    assert (await _roles(client, sid))[client._admin_uid] == "owner"
+
+
 async def test_join_request_lifecycle(client):
     r = await client.post(
         "/api/spaces",

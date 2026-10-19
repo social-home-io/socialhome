@@ -13042,6 +13042,24 @@ a.sh-space-hero-members:focus-visible,
   gap: var(--sh-space-md);
 }
 
+/* The owner hands the space on: a picker + button that wrap on phones. */
+.sh-owner-transfer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-owner-transfer__intro,
+.sh-owner-transfer__note { margin: 0; }
+.sh-owner-transfer__note { font-size: var(--sh-font-size-sm); }
+.sh-owner-transfer__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-sm);
+}
+.sh-owner-transfer__label { font-weight: 600; }
+.sh-owner-transfer__row .sh-select { min-inline-size: 12rem; flex: 1 1 12rem; }
+
 /* ───── Pairing flow (§11) ───────────────────────────────────────── */
 .sh-pairing-flow {
   display: flex;

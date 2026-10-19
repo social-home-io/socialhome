@@ -512,7 +512,7 @@
   "space.needs.proposal": "Row title in the 'Needs you' card. {action} is a lowercase infinitive phrase from space.proposal.action.* / fwd.* (e.g. 'permanently delete this space').",
   "space.summary.tasks_mine": "Second half of a meta line like '5 open · 2 yours': tasks assigned to the viewer.",
   "space.summary.events": "Meta line under the Calendar row in a space's More menu: events in the next 30 days.",
-  "space.leave.owner_note": "Shown in a space's More menu to its owner instead of a Leave button. 'Admin › Spaces' is the household admin page path.",
+  "space.leave.owner_note": "Shown in a space's More menu to its owner instead of a Leave button; followed by a 'Hand over ownership' link to the space's settings.",
   "space.chat.empty": "Shown inside an empty space chat thread. {space} is the space's name.",
   "spaces.list.new": "Quiet count at the end of a space row: unread chat messages. Keep very short.",
   "spaces.list.following_meta": "Meta line on a space the user follows (reads, cannot post).",

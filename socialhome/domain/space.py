@@ -1104,6 +1104,36 @@ class SpacePermissionError(Exception):
         self.banned = banned
 
 
+class OwnerTransferNotLocalError(CodedError, ValueError):
+    """Ownership can go only to someone in the household hosting the space.
+
+    The space authority key, the owner statement and the signed GFS list
+    are all the owner HOUSEHOLD's (``owner_instance_id``); a transfer only
+    renames the owning user inside it. Handing the space to a user of
+    another household would mean moving that key material — not supported.
+    """
+
+    status = 422
+    code = "OWNER_NOT_LOCAL"
+    detail = "Only someone in this household can own the space."
+
+
+class OwnerTransferFollowerError(CodedError, ValueError):
+    """A follower (subscriber) can't be made owner — make them a member."""
+
+    status = 422
+    code = "OWNER_IS_FOLLOWER"
+    detail = "A follower can't own the space. Make them a member first."
+
+
+class OwnerTransferSelfError(CodedError, ValueError):
+    """The owner picked themselves."""
+
+    status = 422
+    code = "OWNER_IS_SELF"
+    detail = "You already own this space."
+
+
 class AlreadyMemberError(CodedError, ValueError):
     """The caller asked to join a space they already belong to."""
 

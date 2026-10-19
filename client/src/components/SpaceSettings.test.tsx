@@ -1777,3 +1777,24 @@ describe('SpaceSettings — the Global checklist, edge states', () => {
     expect(queryByTestId('gfs-public-note')).toBeTruthy()
   })
 })
+
+describe('SpaceSettings — handing the space on', () => {
+  beforeEach(() => { apiMock.get.mockResolvedValue([]) })
+
+  it('the owner of a space hosted here gets the transfer block', () => {
+    const { queryByTestId } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} isOwner />,
+    )
+    expect(queryByTestId('owner-transfer')).not.toBeNull()
+  })
+
+  it('an admin, or the stub of a space hosted elsewhere, does not', () => {
+    const admin = render(<SpaceSettings space={makeSpace()} onUpdate={() => {}} />)
+    expect(admin.queryByTestId('owner-transfer')).toBeNull()
+    admin.unmount()
+    const stub = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} isOwner isRemoteSpace />,
+    )
+    expect(stub.queryByTestId('owner-transfer')).toBeNull()
+  })
+})

@@ -324,6 +324,9 @@ describe('Leave space', () => {
     fireEvent.click(getByRole('button', { name: /^More/ }))
     expect(queryByRole('button', { name: 'Leave space' })).toBeNull()
     expect(container.querySelector('.sh-space-more__owner-note')?.textContent).toContain('You own this space')
+    // …and where to hand it on: the owner's transfer lives in settings.
+    expect(getByRole('link', { name: 'Hand over ownership' }).getAttribute('href'))
+      .toBe('/spaces/s1/settings')
     unmount()
     const r = renderNav({ leave: null })
     fireEvent.click(r.getByRole('button', { name: /^More/ }))

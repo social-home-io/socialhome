@@ -57,6 +57,9 @@ from socialhome.domain.space import (
     HostUnreachableError,
     HouseholdUpgradeRequiredError,
     JoinMode,
+    OwnerTransferFollowerError,
+    OwnerTransferNotLocalError,
+    OwnerTransferSelfError,
     PeersTooOldError,
     PrivateGfsOffError,
     Space,
@@ -964,6 +967,120 @@ async def test_transfer_ownership(stack):
     bob_member = await stack.space_repo.get_member(space.id, bob.user_id)
     assert bob_member.role == "owner"
     assert anna_member.role == "admin"
+
+
+async def test_transfer_ownership_moves_owner_username_and_announces(stack):
+    """The space row names the new owner and one OWNERSHIP_TRANSFERRED
+    config change goes out — what member households learn it from."""
+    await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Family")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+    seen: list[SpaceConfigChanged] = []
+
+    async def _grab(ev: SpaceConfigChanged) -> None:
+        seen.append(ev)
+
+    stack.bus.subscribe(SpaceConfigChanged, _grab)
+    await stack.space_svc.transfer_ownership(
+        space.id, actor_username="anna", to_user_id=bob.user_id
+    )
+    assert (await stack.space_repo.get(space.id)).owner_username == "bob"
+    transferred = [e for e in seen if e.event_type == "ownership_transferred"]
+    assert len(transferred) == 1
+    assert transferred[0].payload == {"new_owner_user_id": bob.user_id}
+
+
+async def test_transfer_ownership_refuses_self(stack):
+    anna = await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Family")
+    with pytest.raises(OwnerTransferSelfError):
+        await stack.space_svc.transfer_ownership(
+            space.id, actor_username="anna", to_user_id=anna.user_id
+        )
+    assert (await stack.space_repo.get_member(space.id, anna.user_id)).role == "owner"
+
+
+async def test_transfer_ownership_refuses_follower(stack):
+    """A follower holds a ``subscriber`` seat — never handed ownership."""
+    anna = await stack.provision_user("anna")
+    fan = await stack.provision_user("fan")
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="P",
+        space_type=SpaceType.GLOBAL,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    with pytest.raises(OwnerTransferFollowerError):
+        await stack.space_svc.transfer_ownership(
+            space.id, actor_username="anna", to_user_id=fan.user_id
+        )
+    assert (await stack.space_repo.get_member(space.id, anna.user_id)).role == "owner"
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        "subscriber"
+    )
+
+
+async def test_transfer_ownership_refuses_member_of_another_household(stack):
+    """A remote seat can't own the space: the authority key stays with the
+    hosting household, so the refusal names the rule (not a bare 404)."""
+    anna = await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    remote = SqliteSpaceRemoteMemberRepo(stack.db)
+    stack.space_svc._remote_members = remote
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-x",
+        user_id="ru1",
+        user_pk=None,
+        display_name="Remote Rita",
+    )
+    with pytest.raises(OwnerTransferNotLocalError):
+        await stack.space_svc.transfer_ownership(
+            space.id, actor_username="anna", to_user_id="ru1"
+        )
+    assert (await stack.space_repo.get_member(space.id, anna.user_id)).role == "owner"
+
+
+async def test_transfer_ownership_refused_on_a_stub(stack):
+    """Fail closed: a space hosted on another household never moves
+    ownership here, even with a (malformed) local owner seat."""
+    await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+    await stack.db.enqueue(
+        "UPDATE spaces SET owner_instance_id='other-household' WHERE id=?",
+        (space.id,),
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.transfer_ownership(
+            space.id, actor_username="anna", to_user_id=bob.user_id
+        )
+    assert (await stack.space_repo.get_member(space.id, bob.user_id)).role == "member"
+
+
+async def test_transfer_ownership_non_owner_refused(stack):
+    """An admin who isn't the owner can't hand the space on."""
+    await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    cleo = await stack.provision_user("cleo")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    for u in (bob, cleo):
+        await stack.space_svc.add_member(
+            space.id, actor_username="anna", user_id=u.user_id
+        )
+    await stack.space_repo.set_role(space.id, bob.user_id, SpaceRole.ADMIN)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.transfer_ownership(
+            space.id, actor_username="bob", to_user_id=cleo.user_id
+        )
+    assert (await stack.space_repo.get(space.id)).owner_username == "anna"
 
 
 async def test_join_request_approve(stack):
