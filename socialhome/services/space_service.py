@@ -52,7 +52,11 @@ from ..crypto import (
     ed25519_public_key,
     generate_identity_keypair,
 )
-from ..domain.errors import WrongTypeError
+from ..domain.errors import (
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
+    WrongTypeError,
+)
 from ..federation.host_equivalence import acts_as_host
 from ..federation.invite_code import (
     build_invite_code,
@@ -403,6 +407,20 @@ def _invite_expiry_epoch(expires_at: str | None) -> int:
     except ValueError:
         return cap
     return min(when, cap)
+
+
+def _require_link_publishable(space: Space) -> None:
+    """Only a GLOBAL space's invite link can be parked on a GFS: the GFS
+    holds no other tier ("not the owner of this space"). A public space is
+    never on a GFS (:class:`TierChangeRequiredError`); a private or
+    household one never leaves its members (:class:`SpaceNotPublishableError`).
+    Its unpublished code still works — handed over, redeemed through the
+    relay."""
+    if space.space_type is SpaceType.GLOBAL:
+        return
+    if space.space_type is SpaceType.PUBLIC:
+        raise TierChangeRequiredError()
+    raise SpaceNotPublishableError()
 
 
 class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixin):
@@ -5381,6 +5399,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         actor = await self._users.get(actor_username)
         assert actor is not None
         if self._hosted_elsewhere(space):
+            if publish_to_gfs:
+                # The host decides again; refused here before anything ships.
+                _require_link_publishable(space)
             return await self._forward_invite_link(
                 space,
                 actor_user_id=actor.user_id,
@@ -5505,6 +5526,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 )
             case "private_gfs_off":
                 raise PrivateGfsOffError("this private space does not use the GFS")
+            case "not_publishable":
+                raise SpaceNotPublishableError()
             case "gfs_publish_failed":
                 status = answer.get("gfs_status")
                 raise GfsConnectionError(
@@ -5584,6 +5607,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             return {"error": "forbidden"}
         except PrivateGfsOffError:
             return {"error": "private_gfs_off"}
+        except SpaceNotPublishableError:
+            return {"error": "not_publishable"}
         except GfsConnectionError as exc:
             log.warning(
                 "forwarded %s for space %s: publish failed: %s", action, space_id, exc
@@ -5681,6 +5706,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         gfs_base: str | None = None
         if publish_to_gfs:
             gfs_base = await self._gfs_base_url(publish_to_gfs)
+            _require_link_publishable(space)
             gfs = self._gfs
             assert gfs is not None  # _gfs_base_url raises when unwired
             gfs_token, gfs_url = await gfs.publish_invite(

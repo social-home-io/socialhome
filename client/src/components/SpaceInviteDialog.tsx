@@ -423,7 +423,11 @@ export function SpaceInviteDialog() {
   const isPrivate = spaceType.value === 'private'
   // Publishing parks the link on a connection server: never for an
   // internal link.
-  const canPublish = servers.value.length > 0 && via.value !== 'internal'
+  // Only a global space is on a GFS, so only its links can be parked on
+  // one (the server refuses any other tier). Another tier's code is handed
+  // over and still redeems through the relay.
+  const canPublish = spaceType.value === 'global'
+    && servers.value.length > 0 && via.value !== 'internal'
 
   const createToken = async () => {
     loading.value = true

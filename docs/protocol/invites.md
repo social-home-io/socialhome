@@ -1273,7 +1273,12 @@ that is member removal, with its own path and its own audit trail.
 
 `POST /api/spaces/{id}/invite-tokens` with `publish_to_gfs: <gfs_id>`
 parks the link's blob on that one paired server's bulletin board and
-returns its shareable `url`. One token, one server: the blob names the
+returns its shareable `url`. Only a **global** space's link: a GFS parks
+links only for a space it lists, so any other tier is refused before
+anything is sent (`409 TIER_CHANGE_REQUIRED` for a public space,
+`SPACE_NOT_PUBLIC` for a private / household one — by the stub too, and
+again by the host on a forwarded mint). Its unpublished code still
+redeems through the relay (§D2b). One token, one server: the blob names the
 relay that serves it (`via_gfs`), so a copy on a second server would be a
 different blob and therefore a different token.
 
