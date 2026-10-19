@@ -87,6 +87,7 @@ from ..domain.space import (
     normalize_category,
     normalize_join_mode,
 )
+from ..domain.space_place import place_pin_of, place_pin_wire
 from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..gfs_proof import (
     PROOF_CAPABILITY,
@@ -363,6 +364,7 @@ class GfsConnectionService:
         "_on_repinned",
         "_own_instance_id",
         "_own_signing_key",
+        "_place_pin",
         "_possession",
         "_private_channels",
         "_proof_offered",
@@ -441,6 +443,10 @@ class GfsConnectionService:
         # Same discipline again, for the ``invite_links`` capability
         # (``POST /gfs/spaces/{id}/invite`` + the public ``/join`` page).
         self._invite_links: dict[str, bool] = {}
+        # …and for ``place_pin``: the GFS folds a global space's ``place``
+        # into the canonical bytes it verifies. An older one does not, so a
+        # body carrying the pin would 403 there — it gets the body without.
+        self._place_pin: dict[str, bool] = {}
         # Same again for ``member_publish_trusted`` (v_49): whether the GFS
         # carries the identified ``POST /gfs/member-publish`` and the
         # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
@@ -654,6 +660,7 @@ class GfsConnectionService:
             self._anon_publish,
             self._envelope_relay,
             self._invite_links,
+            self._place_pin,
             self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
@@ -2296,7 +2303,17 @@ class GfsConnectionService:
         listed_before = any(
             p.space_id == space_id for p in await self._repo.list_publications(gfs_id)
         )
-        body = await self._build_publish_body(space_id)
+        # A global space's place pin goes only to a GFS that proved it folds
+        # the field into the signed bytes (an older one would 403 the whole
+        # publish); elsewhere the space lists without it.
+        # Probed only for a pinned space, so an unpinned publish costs no
+        # extra ``/gfs/info`` round-trip.
+        with_place = await self._has_place_pin(
+            space_id
+        ) and await self._signed_capability_supported(
+            conn, "place_pin", self._place_pin
+        )
+        body = await self._build_publish_body(space_id, with_place=with_place)
         if "authority_cert" in body and not await self._signed_capability_supported(
             conn, "authority_rotation", self._authority_rotation
         ):
@@ -2305,7 +2322,9 @@ class GfsConnectionService:
             # signature and 403 the whole publish. Send it the body without
             # the cert: it keeps the old pin, and we say so.
             self._warn_no_authority_rotation(conn)
-            body = await self._build_publish_body(space_id, with_cert=False)
+            body = await self._build_publish_body(
+                space_id, with_cert=False, with_place=with_place
+            )
         client = self._client()
         publish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/publish"
         try:
@@ -2369,8 +2388,14 @@ class GfsConnectionService:
             conn.inbox_url,
         )
 
+    async def _has_place_pin(self, space_id: str) -> bool:
+        if self._space_repo is None:
+            return False
+        space = await self._space_repo.get(space_id)
+        return space is not None and place_pin_of(space) is not None
+
     async def _build_publish_body(
-        self, space_id: str, *, with_cert: bool = True
+        self, space_id: str, *, with_cert: bool = True, with_place: bool = False
     ) -> dict:
         """Compose + sign the publish body.
 
@@ -2460,6 +2485,13 @@ class GfsConnectionService:
         )
         if cert is not None:
             body["authority_cert"] = cert
+        # The owner's place pin (a global space's own listing metadata, like
+        # its name — never the household's home unless the owner chose
+        # exactly that), inside the signed body. Sorting only; omitted when
+        # unset or when this GFS cannot verify it.
+        pin = place_pin_of(space) if with_place else None
+        if pin is not None:
+            body["place"] = place_pin_wire(pin)
         canonical = json.dumps(
             body,
             separators=(",", ":"),

@@ -60,6 +60,7 @@ GATED_METHODS: frozenset[str] = frozenset(
         "unarchive_space",
         "update_config",
         "set_local_area",
+        "set_place_pin",
         "add_member",
         "invite_local_user",
         "remove_member",
@@ -383,6 +384,12 @@ async def stack(tmp_dir):
             "set_local_area",
             lambda s: s.space_svc.set_local_area(
                 s.public_space.id, actor_username="bob", lat=1.0, lon=2.0, radius_km=5
+            ),
+        ),
+        (
+            "set_place_pin",
+            lambda s: s.space_svc.set_place_pin(
+                s.public_space.id, actor_username="bob", place={"lat": 1.0, "lon": 2.0}
             ),
         ),
         (

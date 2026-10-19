@@ -3891,7 +3891,7 @@ async def _repin_svc(env, monkeypatch, *, with_cert: bool):
     session = _RecordingSession()
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
 
-    async def _body(self, space_id, *, with_cert=True):
+    async def _body(self, space_id, *, with_cert=True, with_place=False):
         return {"name": "S", **({"authority_cert": {"k": 1}} if with_cert else {})}
 
     async def _supported(self, conn, name, cache):
@@ -3909,7 +3909,7 @@ async def _repin_svc(env, monkeypatch, *, with_cert: bool):
     svc.attach_on_repinned(_hook)
     if not with_cert:
 
-        async def _plain(self, space_id, *, with_cert=True):
+        async def _plain(self, space_id, *, with_cert=True, with_place=False):
             return {"name": "S"}
 
         monkeypatch.setattr(GfsConnectionService, "_build_publish_body", _plain)

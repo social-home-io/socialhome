@@ -109,6 +109,11 @@ class GlobalSpace:
     #: send an identified member publish — and never sends one into a space
     #: listed as ``strict``.
     member_publish_mode: str = "trusted"
+    #: The owner's optional place pin for a global space (GFS migration
+    #: 0019), 4 dp, from its signed publish body — for sorting the directory
+    #: by distance on the reader's side only. Both or neither.
+    place_lat: float | None = None
+    place_lon: float | None = None
 
 
 @dataclass(slots=True, frozen=True)

@@ -126,3 +126,21 @@ describe('LocalAreaPicker', () => {
     expect(onSubmit).not.toHaveBeenCalled()
   })
 })
+
+describe('LocalAreaPicker — a global space\'s place pin (mode="pin")', () => {
+  it('a point only: no radius, no "Use our home" even when a home is known, and the public warning', async () => {
+    const onSubmit = vi.fn()
+    const view = render(
+      <LocalAreaPicker mode="pin" open initial={null} home={{ lat: 46.948, lon: 7.447 }}
+                       onClose={vi.fn()} onSubmit={onSubmit} />,
+    )
+    expect(view.getByText('Pin a place')).toBeTruthy()
+    expect(view.queryByRole('button', { name: /Use our home/ })).toBeNull()
+    expect(view.queryByText('Radius')).toBeNull()
+    expect(view.getByText('This place is shown to everyone who can find the space.')).toBeTruthy()
+    await act(async () => { map.onPick!(47.376_912_3, 8.541_749_9) })
+    expect(view.getByRole('status').textContent).toBe('Pin: 47.3769° N, 8.5417° E')
+    fireEvent.click(view.getByRole('button', { name: 'Use this place' }))
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({ lat: 47.3769, lon: 8.5417 })
+  })
+})

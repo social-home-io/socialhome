@@ -62,6 +62,7 @@ from ..domain.space import (
     SpacePermissionError,
     SpaceRole,
 )
+from ..domain.space_place import place_pin_of, place_pin_wire
 from ..domain.space_proposal import ProposalAction
 from ..domain.user import SYSTEM_AUTHOR
 from ..domain.zone_geo import match_zone
@@ -86,6 +87,9 @@ _PROFILE_PICTURE_MAX_UPLOAD_BYTES = PROFILE_PICTURE_MAX_UPLOAD_BYTES
 
 #: The PATCH keys that set or clear a local community's area.
 _AREA_KEYS: frozenset[str] = frozenset({"lat", "lon", "radius_km"})
+#: …and a global space's place pin (``{lat, lon}`` or ``null``). Like the
+#: area, host-local listing metadata, not federated config.
+_HOST_LOCAL_KEYS: frozenset[str] = _AREA_KEYS | {"place"}
 
 #: Roles the member-role PATCH routes accept (the service applies the
 #: owner / admin matrix). ``owner`` moves only by transfer; ``subscriber``
@@ -246,6 +250,9 @@ class SpaceCollectionView(BaseView):
             lat=body.get("lat"),
             lon=body.get("lon"),
             radius_km=body.get("radius_km"),
+            # A global space may be pinned to a place ``{lat, lon}`` — for
+            # sorting Discover by distance only (422 on any other tier).
+            place=body.get("place"),
         )
         # Discoverable tiers (public / global) may carry an age gate set at
         # creation time; the gate lives in ChildProtectionService, not on the
@@ -288,11 +295,19 @@ def _public_space_view(space: Space, member_count: int) -> dict:
             "features": {"allow_subscribers": space.features.allow_subscribers},
             # The seat count the peer directory publishes for it too.
             "member_count": member_count,
-            # A local community's area — shown before joining, like the
-            # paired-household directory shows it.
+            # A local community's area — shown before joining, to this
+            # household's own people only (this API is the host's).
             "local_area": _local_area_view(space),
+            # A global space's place pin — what its GFS listing shows.
+            "place": _place_view(space),
         }
     )
+
+
+def _place_view(space: Space) -> dict | None:
+    """``{lat, lon}`` of a global space's place pin, else ``None``."""
+    pin = place_pin_of(space)
+    return place_pin_wire(pin) if pin is not None else None
 
 
 def _local_area_view(space: Space) -> dict | None:
@@ -384,6 +399,9 @@ class SpaceDetailView(BaseView):
                 # centre) or null. Only the hosting household holds one; a
                 # member household's stub never has it.
                 "local_area": _local_area_view(space),
+                # A GLOBAL space's place pin ``{lat, lon}`` or null — shown
+                # with its GFS listings, for sorting by distance only.
+                "place": _place_view(space),
                 # "Needs you": held items, reports, join requests and open
                 # proposals waiting for the caller — null unless they have
                 # content authority here (owner / admin / moderator).
@@ -450,6 +468,17 @@ class SpaceDetailView(BaseView):
                         "local_area": (
                             local_area_wire(area) if area is not None else None
                         ),
+                    }
+                )
+        if "place" in body:
+            pin = await svc.set_place_pin(
+                space_id, actor_username=ctx.username, place=body.get("place")
+            )
+            if not set(body) - _HOST_LOCAL_KEYS:
+                return web.json_response(
+                    {
+                        "id": space_id,
+                        "place": place_pin_wire(pin) if pin is not None else None,
                     }
                 )
         # ``features`` arrives in the same wire shape the GET response

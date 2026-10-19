@@ -202,6 +202,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   LOCAL_AREA_PUBLIC_ONLY: () => t('error.local_area_public_only'),
   LOCAL_AREA_UNAVAILABLE: () => t('error.local_area_unavailable'),
   LOCAL_AREA_DELEGATED: () => t('error.local_area_delegated'),
+  PLACE_PIN_GLOBAL_ONLY: () => t('error.place_pin_global_only'),
 }
 
 /** The generic line for a status, or ``null`` when there is none. */

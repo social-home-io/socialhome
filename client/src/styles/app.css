@@ -12770,7 +12770,8 @@ a.sh-space-hero-members:focus-visible,
 .sh-local-area-picker__radius { display: grid; gap: var(--sh-space-xs); }
 .sh-local-area-picker__radius-label { font-weight: 600; font-size: var(--sh-font-size-sm); }
 .sh-space-create-local__area { display: grid; gap: var(--sh-space-sm); justify-items: start; }
-.sh-space-create-local__area .sh-location-map { width: 100%; }
+.sh-space-create-local__area .sh-location-map,
+.sh-space-create-local__area .sh-local-area-map { width: 100%; justify-self: stretch; }
 /* About page: the area before joining. */
 .sh-space-public__local { display: grid; gap: var(--sh-space-sm); }
 .sh-space-public__local p { margin: 0; }

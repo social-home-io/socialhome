@@ -363,6 +363,39 @@ async def test_poll_once_caches_allow_subscribers(env):
 
 
 @pytest.mark.parametrize(
+    "place,want",
+    [
+        ({"lat": 47.376_912_3, "lon": 8.541_749_9}, (47.3769, 8.5417)),
+        (None, (None, None)),
+        ({"lat": 999, "lon": 0}, (None, None)),
+        ("47,8", (None, None)),
+    ],
+)
+async def test_poll_once_caches_the_place_pin_revalidated(env, place, want):
+    """A global space's place pin (for sorting by distance in the browser)
+    is cached at 4 dp; absent or malformed lists it unpinned. Never a
+    radius — that is a public local community, never on a GFS."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    body = {
+        "spaces": [
+            {
+                "space_id": "sp-pin",
+                "instance_id": "inst-X",
+                "name": "Chess",
+                "place": place,
+            },
+        ]
+    }
+    svc = PublicSpaceDiscoveryService(
+        repo, gfs_connection_repo=gfs_repo, http_client=_StubSession(body=body)
+    )
+    assert await svc.poll_once() == 1
+    out = await repo.list_active()
+    assert (out[0].lat, out[0].lon, out[0].radius_km) == (*want, None)
+
+
+@pytest.mark.parametrize(
     "item_extra",
     [{}, {"allow_subscribers": 0}, {"allow_subscribers": "yes"}],
 )

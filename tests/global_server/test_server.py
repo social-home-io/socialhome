@@ -298,6 +298,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # Takes the optional, signed ``gfs_key`` (its own key) on household
         # requests. No ``replaces``: this server has no instance_id_aliases.
         "addressee_key": True,
+        # Verifies and lists a global space's optional place pin.
+        "place_pin": True,
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
         # address), so the GFS honestly does not offer it.

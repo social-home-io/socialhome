@@ -382,6 +382,35 @@ describe('SpaceListPage — Discover', () => {
     await r.waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/spaces/gArt/subscribe', {}))
   })
 
+  it('global spaces sort by distance from our home, worked out here; unpinned ones last', async () => {
+    const g = (space_id: string, name: string, pin?: { lat: number; lon: number }) => ({
+      space_id, host_instance_id: 'iid-far', host_display_name: 'iid-far', host_is_paired: false,
+      name, description: null, emoji: '♟', member_count: 5, join_mode: 'request' as const,
+      min_age: 0, allow_subscribers: true, lat: pin?.lat ?? null, lon: pin?.lon ?? null, radius_km: null,
+    })
+    wire({
+      gfs: [{ id: 'g1', status: 'active' }],
+      global: [
+        g('gNone', 'Chess online'),
+        g('gBern', 'Chess Bern', { lat: 46.9481, lon: 7.4474 }),
+        g('gZh', 'Chess Zürich', { lat: 47.3769, lon: 8.5417 }),
+      ],
+    })
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => (
+      url === '/api/friends' ? { instance: { home_lat: 47.37, home_lon: 8.563 } } : base(url)))
+    const r = await renderPage('/spaces?discover=global')
+    await r.findByText('Chess Bern')
+    const names = () => [...r.container.querySelectorAll('#discover .sh-spaces-row__t')].map((n) => n.textContent)
+    await r.waitFor(() => expect(names()).toEqual(['Chess Zürich', 'Chess Bern', 'Chess online']))
+    const row = (name: string) => r.getByText(name).closest('li') as HTMLElement
+    expect(row('Chess Zürich').textContent).toContain('about 2 km away')
+    expect(row('Chess Bern').textContent).toContain('about 95 km away')
+    expect(row('Chess online').textContent).not.toContain('away')
+    // Our home stays in the browser: no request carries it.
+    for (const call of apiGet.mock.calls) expect(String(call[0])).not.toMatch(/47\.37|lat=|home/)
+  })
+
   it('asking to join shows "Requested" at once, no reload', async () => {
     const r = await renderPage('/spaces?discover=paired')
     await r.findByText('Müller family market')

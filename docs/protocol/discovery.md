@@ -2747,6 +2747,22 @@ without the fields. The receiver re-validates the radius and drops a
 malformed one. Each entry is
 `{space_id, name, description, emoji, member_count, join_mode, category[, local_community, radius_km, in_area]}`.
 
+## Place pin (global spaces)
+
+A global space's owner may pin it to a place — sorting metadata, never a
+household's location. The owner's signed publish body carries
+`place: {lat, lon}` (4 dp) **only** to a GFS whose signed `/gfs/info`
+capability block says `place_pin: true` (it folds the field into the
+canonical bytes it verifies; an older GFS would 403 the whole publish, so it
+gets the body without it). The GFS stores it (`global_spaces.place_lat` /
+`place_lon`, GFS migration `0019`; malformed ⇒ none), gossips it to cluster
+peers as `place`, and serves `place: {lat, lon} | null` on `GET /gfs/spaces`
+and `GET /gfs/spaces/{id}`. A publish without the field clears it. The
+household re-validates it into `public_space_cache.lat` / `lon`, and the SPA
+sorts Discover › Global by the distance from its own home — computed in the
+browser, sent nowhere. Joining never checks it. Setting or moving it
+re-publishes to every GFS that already lists the space.
+
 ## Withdrawal
 
 The owner's signed `POST /gfs/spaces/{id}/unpublish` removes a space from a

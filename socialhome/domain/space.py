@@ -1801,6 +1801,17 @@ class LocalAreaPublicOnlyError(CodedError, ValueError):
     detail = "Only a public space can be a local community."
 
 
+class PlacePinGlobalOnlyError(CodedError, ValueError):
+    """A place pin was sent for a space that is not ``global``. Only a
+    global space carries one (for sorting Discover by distance); a public
+    space's location is its local community's area, which never leaves the
+    host."""
+
+    status = 422
+    code = "PLACE_PIN_GLOBAL_ONLY"
+    detail = "Only a global space can be pinned to a place."
+
+
 class LocalAreaDelegatedError(CodedError, ValueError):
     """A local community and "admins on other households can act without
     the owner" (``delegated_admin_authority``) do not go together.

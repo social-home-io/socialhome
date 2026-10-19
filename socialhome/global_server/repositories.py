@@ -271,9 +271,10 @@ class SqliteGfsFederationRepo:
                 allow_subscribers,
                 accent_color,
                 primary_color, status, subscriber_count, posts_per_week,
-                published_at, identity_public_key, withdrawn, authority_cert
+                published_at, identity_public_key, withdrawn, authority_cert,
+                place_lat, place_lon
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     COALESCE(?, datetime('now')), ?, ?, ?)
+                     COALESCE(?, datetime('now')), ?, ?, ?, ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -300,7 +301,9 @@ class SqliteGfsFederationRepo:
                     NULLIF(global_spaces.identity_public_key, ''),
                     NULLIF(excluded.identity_public_key, '')
                 ),
-                withdrawn = excluded.withdrawn
+                withdrawn = excluded.withdrawn,
+                place_lat = excluded.place_lat,
+                place_lon = excluded.place_lon
             """,
             (
                 space.space_id,
@@ -323,6 +326,8 @@ class SqliteGfsFederationRepo:
                 space.identity_public_key or None,
                 1 if space.withdrawn else 0,
                 _dump_cert(space.authority_cert),
+                space.place_lat if space.place_lon is not None else None,
+                space.place_lon if space.place_lat is not None else None,
             ),
         )
 
@@ -1446,6 +1451,8 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         member_publish_mode=(
             "strict" if row.get("member_publish_mode") == "strict" else "trusted"
         ),
+        place_lat=row.get("place_lat"),
+        place_lon=row.get("place_lon"),
     )
 
 
