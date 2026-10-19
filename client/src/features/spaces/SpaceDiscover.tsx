@@ -21,17 +21,20 @@ import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
+import { LocalAreaBadge, localAreaVerdictText, verdictAllowsJoin } from '@/components/LocalAreaBadge'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
+import { ensureHouseholdHome, householdHome } from '@/store/householdHome'
 import { cacheDirectoryEntries } from '@/store/spaceDirectory'
 import { askAdmins } from '@/features/connections/AdminContactNote'
 import { householdAdmins, loadHouseholdAdmins } from '@/features/connections/connectionsData'
 import { ConnIcon } from '@/features/connections/ConnIcon'
+import { areaShortLabel } from '@/utils/localArea'
 import type { DirectoryEntry, GfsConnection, HouseholdSpaceRow } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
-  buildHouseholdEntries, discoverAction, discoverable, hostLabel, matchesTerm,
+  buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, hostLabel, matchesTerm,
   withMembership, DISCOVER_SOURCES, type DiscoverAction, type DiscoverSource,
 } from './discover'
 import { SpaceListRow, membersLabel } from './SpaceListRow'
@@ -128,6 +131,8 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
   }
 
   useEffect(() => { void reload() }, [])
+  // The local-community badge is worked out against our own home.
+  useEffect(() => { void ensureHouseholdHome() }, [])
 
   // "Ask Dave" needs the household's admins — only for a member who
   // could be pointed at one.
@@ -276,11 +281,21 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
       {rows.length === 0 ? emptyLine() : (
         <ul class="sh-spaces-card sh-spaces-list" aria-label={t(CHIP_LABEL[source])}>
           {rows.map((e) => {
-            const a = discoverAction(e)
+            const verdict = entryAreaVerdict(e, householdHome.value)
+            // A local community you can't get into from here (outside, or
+            // your home isn't known to its host): the badge says why, and
+            // no button offers a join the host would refuse.
+            const areaBlocks = verdict !== null && !verdictAllowsJoin(verdict)
+            const way = discoverAction(e)
+            const a = areaBlocks && way !== 'pending' ? null : way
             // No way in from here: say how people do get in.
-            const meta = a === null
+            const meta = a === null && !areaBlocks
               ? `${entryMeta(e, source)} · ${t('spaces.discover.invite_link_short')}`
               : entryMeta(e, source)
+            const areaText = e.local_area
+              ? [areaShortLabel(e.local_area), verdict ? localAreaVerdictText(verdict, hostLabel(e)) : null]
+                .filter(Boolean).join(' · ')
+              : ''
             return (
               <SpaceListRow
                 key={e.space_id}
@@ -288,7 +303,13 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
                 emoji={e.emoji}
                 name={e.name}
                 meta={meta}
-                label={`${e.name}, ${meta}`}
+                note={e.local_area && (
+                  <>
+                    <span class="sh-local-area-chip">🏘️ {areaShortLabel(e.local_area)}</span>
+                    {verdict && <LocalAreaBadge verdict={verdict} hostName={hostLabel(e)} />}
+                  </>
+                )}
+                label={areaText ? `${e.name}, ${meta}, ${areaText}` : `${e.name}, ${meta}`}
                 action={a && (
                   <Button
                     variant="secondary"

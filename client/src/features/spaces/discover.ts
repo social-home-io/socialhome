@@ -11,6 +11,7 @@
  */
 import { t } from '@/i18n/i18n'
 import type { DirectoryEntry, HouseholdSpaceRow } from '@/types'
+import { areaVerdict, type AreaVerdict, type Home } from '@/utils/localArea'
 
 export type DiscoverSource = 'household' | 'paired' | 'global'
 
@@ -69,6 +70,7 @@ export function buildHouseholdEntries(
     already_member:     r.role !== null && r.role !== 'subscriber',
     already_subscribed: r.role === 'subscriber' || subIds.has(r.space_id),
     request_pending:    pendingIds.has(r.space_id),
+    local_area:         r.local_area ?? null,
   }))
 }
 
@@ -113,6 +115,21 @@ export function matchesTerm(
 }
 
 export type DiscoverAction = 'join' | 'request' | 'follow' | 'pending' | null
+
+/**
+ * A local community's badge for ``entry`` seen from this household's
+ * ``home`` — ``null`` when the space has no area. A space this household
+ * hosts reads its own home; a paired household's needs our home SHARED
+ * with that host too (an older backend's row says nothing: assume shared,
+ * the host decides).
+ */
+export function entryAreaVerdict(
+  entry: DirectoryEntry, home: Home | null | undefined,
+): AreaVerdict | null {
+  if (!entry.local_area) return null
+  const local = entry.host_instance_id === 'local' || entry.scope === 'household'
+  return areaVerdict(entry.local_area, home, local || entry.home_shared_with_host !== false)
+}
 
 /** Is the entry's host reachable for a join (this household, or paired)? */
 function reachable(e: DirectoryEntry): boolean {

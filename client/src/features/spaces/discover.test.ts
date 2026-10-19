@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { DirectoryEntry } from '@/types'
 import {
-  buildHouseholdEntries, canFollow, contentIsGated, discoverAction, discoverable,
+  buildHouseholdEntries, canFollow, contentIsGated, discoverAction, discoverable, entryAreaVerdict,
   hostLabel, matchesTerm, parseDiscoverSource, sourceOf, withMembership,
 } from './discover'
 
@@ -115,5 +115,45 @@ describe('matchesTerm / hostLabel / contentIsGated', () => {
     expect(contentIsGated(entry({ allow_subscribers: false }))).toBe(true)
     expect(contentIsGated(entry({ scope: 'household', allow_subscribers: false }))).toBe(false)
     expect(contentIsGated(entry())).toBe(false)
+  })
+})
+
+describe('entryAreaVerdict (local communities)', () => {
+  const area = { lat: 47.3769, lon: 8.5417, radius_km: 5 }
+  const near = { lat: 47.392, lon: 8.56 }
+  const bern = { lat: 46.9481, lon: 7.4474 }
+
+  it('a space without an area has no verdict', () => {
+    expect(entryAreaVerdict(entry(), near)).toBeNull()
+    expect(entryAreaVerdict(entry({ local_area: null }), near)).toBeNull()
+  })
+
+  it('checks our home against the area', () => {
+    expect(entryAreaVerdict(entry({ local_area: area }), near)).toBe('inside')
+    expect(entryAreaVerdict(entry({ local_area: area }), bern)).toBe('outside')
+    expect(entryAreaVerdict(entry({ local_area: area }), null)).toBe('no_home')
+    expect(entryAreaVerdict(entry({ local_area: area }), undefined)).toBe('unknown')
+  })
+
+  it('a paired host we do not share our home with can not check it', () => {
+    expect(entryAreaVerdict(entry({ local_area: area, home_shared_with_host: false }), near))
+      .toBe('not_shared')
+    // An older backend says nothing: the host decides.
+    expect(entryAreaVerdict(entry({ local_area: area }), near)).toBe('inside')
+  })
+
+  it('a space this household hosts needs no sharing', () => {
+    expect(entryAreaVerdict(
+      entry({ host_instance_id: 'local', local_area: area, home_shared_with_host: false }), near,
+    )).toBe('inside')
+  })
+
+  it('household rows carry the area', () => {
+    const [e] = buildHouseholdEntries([{
+      space_id: 'h1', name: 'Q', description: null, emoji: null, space_type: 'public',
+      join_mode: 'open', category: 'general', allow_subscribers: false, min_age: 0,
+      member_count: 1, role: null, local_area: area,
+    }], { subIds: new Set(), pendingIds: new Set() })
+    expect(e.local_area).toEqual(area)
   })
 })

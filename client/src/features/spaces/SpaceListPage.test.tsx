@@ -298,6 +298,34 @@ describe('SpaceListPage — Discover', () => {
     expect(r.getByText(/never listed on a GFS/)).toBeTruthy()
   })
 
+  it('local communities: the row shows the area and a badge; outside or unshared offers no join', async () => {
+    const area = { lat: 47.3769, lon: 8.5417, radius_km: 5 }
+    const paired = [
+      { ...PAIRED[1], space_id: 'pIn', name: 'Hottingen street party', local_area: area, home_shared_with_host: true },
+      { ...PAIRED[1], space_id: 'pOut', name: 'Bern neighbours', local_area: { ...area, lat: 46.9481, lon: 7.4474 }, home_shared_with_host: true },
+      { ...PAIRED[1], space_id: 'pHidden', name: 'Seefeld parents', local_area: area, home_shared_with_host: false },
+    ]
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/api/peer_spaces') return paired
+      if (url === '/api/friends') return { instance: { home_lat: 47.392, home_lon: 8.56 } }
+      return base(url)
+    })
+    const r = await renderPage('/spaces?discover=paired')
+    await r.findByText('Hottingen street party')
+    const row = (name: string) => r.getByText(name).closest('li') as HTMLElement
+    await r.waitFor(() => expect(row('Hottingen street party').textContent).toContain('In your area'))
+    expect(row('Hottingen street party').textContent).toContain('Within 5 km')
+    expect(r.getByRole('button', { name: 'Join: Hottingen street party' })).toBeTruthy()
+    expect(row('Bern neighbours').textContent).toContain('Outside your area')
+    expect(r.queryByRole('button', { name: 'Join: Bern neighbours' })).toBeNull()
+    expect(row('Seefeld parents').textContent).toContain('Share your home with Keller household to join')
+    expect(r.queryByRole('button', { name: 'Join: Seefeld parents' })).toBeNull()
+    // The row's link reads the area out too.
+    const link = row('Bern neighbours').querySelector('a')!
+    expect(link.getAttribute('aria-label')).toContain('Outside your area')
+  })
+
   it('?discover=global with no GFS: an admin is offered "Add a GFS"', async () => {
     const r = await renderPage('/spaces?discover=global')
     const row = await r.findByTestId('discover-no-gfs')

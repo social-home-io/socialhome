@@ -247,6 +247,8 @@ async def test_area_and_delegated_admin_authority_never_go_together(stack):
             space.id, actor_username="anna", lat=1, lon=2, radius_km=5
         )
     assert exc.value.status == 409
+    with pytest.raises(LocalAreaDelegatedError):
+        await _community(stack, features=SpaceFeatures(delegated_admin_authority=True))
     community = await _community(stack)
     with pytest.raises(LocalAreaDelegatedError):
         await stack.svc.update_config(

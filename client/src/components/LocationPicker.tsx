@@ -44,12 +44,6 @@ interface LocationPickerProps {
   /** Label of the confirm button — the DM composer says "Send
    *  location"; the feed composer keeps "Use this location". */
   submitLabel?: string
-  /** Dialog title; defaults to "Share location". */
-  title?: string
-  /** A pin to start from (moving an existing pin): the map opens on it. */
-  initial?: { lat: number; lon: number } | null
-  /** No label field (a space's map pin has none). */
-  noLabel?: boolean
 }
 
 const LABEL_MAX = 80
@@ -62,7 +56,7 @@ type GeoError = 'denied' | 'unavailable' | 'timeout' | 'unsupported'
 const round4 = (v: number): number => Math.round(v * 1e4) / 1e4
 
 export function LocationPicker({
-  open, onSubmit, onClose, submitLabel, title, initial, noLabel,
+  open, onSubmit, onClose, submitLabel,
 }: LocationPickerProps) {
   const [coords, setCoords] = useState<{ lat: number; lon: number } | null>(null)
   const [accuracy, setAccuracy] = useState<number | null>(null)
@@ -75,15 +69,13 @@ export function LocationPicker({
   // for many shares, and last time's pin must not be re-sent by accident.
   useEffect(() => {
     if (!open) return
-    setCoords(initial ? { lat: round4(initial.lat), lon: round4(initial.lon) } : null)
+    setCoords(null)
     setAccuracy(null)
     setLabel('')
     setBusy(false)
     setPicking(false)
     setError(null)
-    // ``initial`` is read on open only: a pin saved while the picker is
-    // shut must not move the one being placed.
-  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open])
 
   const useCurrentLocation = () => {
     setError(null)
@@ -153,7 +145,7 @@ export function LocationPicker({
   const showMap = coords !== null || picking
 
   return (
-    <Modal open={open} onClose={onClose} title={title ?? t('location.share_title')}>
+    <Modal open={open} onClose={onClose} title={t('location.share_title')}>
       <form class="sh-form sh-location-picker" onSubmit={submit}>
         {!showMap && (
           <div class="sh-location-picker-empty">
@@ -184,7 +176,7 @@ export function LocationPicker({
               markers={marker ? [marker] : []}
               height={220}
               onPick={onPick}
-              ariaLabel={title ?? t('location.share_title')}
+              ariaLabel={t('location.share_title')}
             />
             {coords ? (
               <p class="sh-muted sh-location-picker-coords">
@@ -208,7 +200,7 @@ export function LocationPicker({
               {busy ? t('location.locating')
                 : coords ? t('location.repin') : t('location.use_current')}
             </button>
-            {coords && !noLabel && (
+            {coords && (
               <label>
                 {t('location.label')}
                 <input

@@ -17,6 +17,22 @@ vi.mock('@/i18n/i18n', () => ({
 }))
 // EmojiField pulls in the emoji-picker; not relevant here.
 vi.mock('./EmojiField', () => ({ EmojiField: () => null }))
+vi.mock('./LocalAreaMap', () => ({ LocalAreaMap: () => <div data-testid="area-map" /> }))
+// The area picker: a dialog whose one button picks a fixed area.
+vi.mock('./LocalAreaPicker', () => ({
+  LocalAreaPicker: ({ open, onSubmit, onClose }: {
+    open: boolean
+    onSubmit: (a: { lat: number; lon: number; radius_km: number }) => void
+    onClose: () => void
+  }) => (open
+    ? (
+      <div role="dialog" data-testid="area-picker">
+        <button type="button" onClick={() => onSubmit({ lat: 47.3769, lon: 8.5417, radius_km: 5 })}>pick-area</button>
+        <button type="button" onClick={onClose}>close-picker</button>
+      </div>
+    )
+    : null),
+}))
 const route = vi.fn()
 vi.mock('preact-iso', () => ({ useLocation: () => ({ route, url: '/spaces', path: '/spaces' }) }))
 const markSetupPending = vi.fn(async (_id: string) => {})
@@ -51,7 +67,12 @@ async function open() {
   return r
 }
 
-describe('SpaceCreateDialog — no map location', () => {
+const localToggle = (c: Element) =>
+  c.querySelector('.sh-space-create-local input[type="checkbox"]') as HTMLInputElement | null
+const byText = (c: Element, text: string) =>
+  [...c.querySelectorAll('button')].find(b => b.textContent?.trim() === text) as HTMLButtonElement | undefined
+
+describe('SpaceCreateDialog — local community', () => {
   beforeEach(() => { post.mockReset(); get.mockClear(); gfsConns = []; cleanup() })
 
   it('module exports exist', () => {
@@ -59,33 +80,65 @@ describe('SpaceCreateDialog — no map location', () => {
     expect(typeof openSpaceCreate).toBe('function')
   })
 
-  it('a public space asks for no location and never reads the device position', async () => {
+  it('a public space offers "Only for households nearby", off by default, and sends no area', async () => {
     post.mockResolvedValue({ id: 's1' })
     const getCurrentPosition = vi.fn()
     Object.defineProperty(navigator, 'geolocation', { value: { getCurrentPosition }, configurable: true })
     const { container } = await open()
     await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Neighbourhood' } }) })
+    expect(localToggle(container)).toBeNull()
     await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
-    expect(container.querySelector('.sh-space-create-location')).toBeNull()
-    expect(container.textContent).not.toContain('space.create.show_on_map')
+    expect(localToggle(container)!.checked).toBe(false)
     await act(async () => { fireEvent.click(createBtn(container)) })
     await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
     const body = post.mock.calls[0][1] as Record<string, unknown>
     expect('lat' in body).toBe(false)
-    expect('lon' in body).toBe(false)
+    expect('radius_km' in body).toBe(false)
     expect(getCurrentPosition).not.toHaveBeenCalled()
   })
 
-  it('does not send coords for a non-public space', async () => {
+  it('turning it on opens the picker; Create waits for an area, then sends it', async () => {
+    post.mockResolvedValue({ id: 's1' })
+    const { container, getByTestId, queryByTestId } = await open()
+    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Quartier' } }) })
+    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
+    await act(async () => { fireEvent.click(localToggle(container)!) })
+    expect(getByTestId('area-picker')).toBeTruthy()
+    expect(createBtn(container).disabled).toBe(true)
+    await act(async () => { fireEvent.click(byText(container, 'pick-area')!) })
+    expect(queryByTestId('area-picker')).toBeNull()
+    expect(container.querySelector('.sh-space-create-local [role="status"]')?.textContent)
+      .toContain('local_area.within')
+    expect(createBtn(container).disabled).toBe(false)
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    expect(post.mock.calls[0][1]).toMatchObject({
+      space_type: 'public', lat: 47.3769, lon: 8.5417, radius_km: 5,
+    })
+  })
+
+  it('backing out of the first pick turns it off again', async () => {
+    const { container } = await open()
+    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
+    await act(async () => { fireEvent.click(localToggle(container)!) })
+    await act(async () => { fireEvent.click(byText(container, 'close-picker')!) })
+    expect(localToggle(container)!.checked).toBe(false)
+  })
+
+  it('switching to another tier drops the area from the body', async () => {
     post.mockResolvedValue({ id: 's2' })
     const { container } = await open()
     await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Family' } }) })
-    // default visibility is private
+    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
+    await act(async () => { fireEvent.click(localToggle(container)!) })
+    await act(async () => { fireEvent.click(byText(container, 'pick-area')!) })
+    await act(async () => { fireEvent.click(pickVisibility(container, 'private')) })
+    expect(localToggle(container)).toBeNull()
     await act(async () => { fireEvent.click(createBtn(container)) })
     await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
     const body = post.mock.calls[0][1] as Record<string, unknown>
     expect('lat' in body).toBe(false)
-    expect('lon' in body).toBe(false)
+    expect('radius_km' in body).toBe(false)
   })
 })
 

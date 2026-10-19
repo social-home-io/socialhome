@@ -188,6 +188,20 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   OWNER_NOT_LOCAL: () => t('error.owner_not_local'),
   OWNER_IS_FOLLOWER: () => t('error.owner_is_follower'),
   OWNER_IS_SELF: () => t('error.owner_is_self'),
+  // Local communities: worded for the reader — ``own`` our household's
+  // home, ``peer`` the household an admin invites / approves, ``host`` our
+  // home as the space's host sees it.
+  HOME_NOT_SHARED: (_b, p) => {
+    const whose = str(p, 'whose')
+    if (whose === 'peer') return t('error.home_not_shared_peer')
+    if (whose === 'host') return t('error.home_not_shared_host')
+    return t('error.home_not_shared_own')
+  },
+  OUTSIDE_AREA: (_b, p) => (str(p, 'whose') === 'peer'
+    ? t('error.outside_area_peer') : t('error.outside_area_own')),
+  LOCAL_AREA_PUBLIC_ONLY: () => t('error.local_area_public_only'),
+  LOCAL_AREA_UNAVAILABLE: () => t('error.local_area_unavailable'),
+  LOCAL_AREA_DELEGATED: () => t('error.local_area_delegated'),
 }
 
 /** The generic line for a status, or ``null`` when there is none. */

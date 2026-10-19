@@ -991,6 +991,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")
         area = _local_area_from_input(stype, lat, lon, radius_km)
+        if (
+            area is not None
+            and features is not None
+            and (features.delegated_admin_authority)
+        ):
+            # Same rule as set_local_area: a delegated admin's household
+            # would seat people without the host's area check.
+            raise LocalAreaDelegatedError()
 
         # The owner's GFS choice, checked before anything is stored.
         chosen_gfs: tuple[str, ...] = ()

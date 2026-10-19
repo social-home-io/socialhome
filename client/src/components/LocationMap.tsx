@@ -122,6 +122,11 @@ export interface LocationMapProps {
    *  with its whole radius; clearing the selection fits everyone again.
    *  Off by default (the selection only highlights). */
   zoomToSelection?: boolean
+  /** Fit with a small, even margin instead of the room people bubbles
+   *  need above their anchors — for a map that shows only an area (a
+   *  local community's circle), which would otherwise be fitted into a
+   *  sliver of a short map. Read once, on mount. */
+  areaFit?: boolean
 }
 
 function _initials(name: string): string {
@@ -192,6 +197,8 @@ const FIT_PADDING_BOTTOM_RIGHT: [number, number] = [
 ]
 /** Closest the initial fit zooms in. */
 const FIT_MAX_ZOOM = 16
+/** ``areaFit``: an even margin around a lone circle. */
+const AREA_FIT_PADDING: [number, number] = [16, 16]
 /** Street level — where a selected person is shown. */
 const STREET_ZOOM = 17
 
@@ -366,7 +373,7 @@ function _fitPadding(
 export function LocationMap({
   markers, zones, height = 320, emptyLabel,
   onPick, ariaLabel, selectedId, onSelect, readOnly = false,
-  fitInsets, zoomToSelection = false,
+  fitInsets, zoomToSelection = false, areaFit = false,
 }: LocationMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
@@ -401,6 +408,7 @@ export function LocationMap({
   insetsRef.current = fitInsets
   const zoomToSelectionRef = useRef(zoomToSelection)
   zoomToSelectionRef.current = zoomToSelection
+  const areaFitRef = useRef(areaFit)
   /** True while the view shows a selection (not everyone): clearing the
    *  selection then fits everyone again. */
   const showsSelectionRef = useRef(false)
@@ -740,7 +748,9 @@ export function LocationMap({
     const current = markersRef.current
     const zoneList = zonesRef.current ?? []
     const people = current.filter((m) => !_isPlace(m))
-    const padding = _fitPadding(still, insetsRef.current)
+    const padding = areaFitRef.current
+      ? { paddingTopLeft: AREA_FIT_PADDING, paddingBottomRight: AREA_FIT_PADDING }
+      : _fitPadding(still, insetsRef.current)
     const sel = zoomToSelectionRef.current ? selectedRef.current : null
     if (sel) {
       let target: [[number, number], [number, number]] | null = null

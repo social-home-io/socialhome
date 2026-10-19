@@ -5,10 +5,11 @@
  * toast), where its owner is asked "What is it for?" once
  * (``SpaceSetupCard``) — a new space starts with feed, chat and calendar.
  *
- * A public space can be shown on the map from here with "Show on the
- * map", which takes this device's location rounded to 4 decimals
- * (≈ 11 m). Nobody types coordinates: the app has no place search
- * (that would be a third-party fetch).
+ * A public space can be a **local community** ("Only for households
+ * nearby"): the owner picks a centre on the map — or takes the
+ * household's home — and a radius; households join only while their home
+ * lies inside. Never this device's position, and no place search (that
+ * would be a third-party fetch).
  */
 import { signal } from '@preact/signals'
 import { useRef } from 'preact/hooks'
@@ -16,6 +17,9 @@ import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { currentUser } from '@/store/auth'
+import { ensureHouseholdHome, householdHome } from '@/store/householdHome'
+import type { LocalArea } from '@/types'
+import { areaLabel } from '@/utils/localArea'
 import { loadSpaces } from '@/store/spaces'
 import { Modal } from './Modal'
 import { Button } from './Button'
@@ -32,6 +36,8 @@ import {
   joinOptionsForVisibility,
 } from './spaceModeOptions'
 import { showToast } from './Toast'
+import { LocalAreaMap } from './LocalAreaMap'
+import { LocalAreaPicker } from './LocalAreaPicker'
 import { t } from '@/i18n/i18n'
 import { markSetupPending } from '@/features/spaces/spaceSetup'
 
@@ -41,8 +47,11 @@ const description = signal('')
 const emoji = signal('')
 const spaceType = signal('private')
 const joinMode = signal('invite_only')
-// No map location: nothing shows a space's pin (no map, and GPS never
-// goes to other households or a GFS), so create doesn't ask for one.
+// A public space may be a local community: households join only while
+// their home lies inside this area (centre 4 dp + radius).
+const localOn = signal(false)
+const localArea = signal<LocalArea | null>(null)
+const pickingArea = signal(false)
 const submitting = signal(false)
 // Discovery metadata, sent only for public/global spaces (§23.50).
 const minAge = signal(0)
@@ -71,6 +80,10 @@ export function openSpaceCreate() {
   gfsChoices.value = []
   gfsSelected.value = []
   gfsError.value = null
+  localOn.value = false
+  localArea.value = null
+  pickingArea.value = false
+  void ensureHouseholdHome()
   // The Global tier is only offered when an active GFS connection exists.
   void api.get<(GfsChoice & { status: string })[]>('/api/gfs/connections')
     .then((c) => {
@@ -85,6 +98,14 @@ export function openSpaceCreate() {
 }
 
 const isGlobal = () => spaceType.value === 'global'
+const isPublic = () => spaceType.value === 'public'
+/** "Only for households nearby" is on but no area is chosen yet. */
+const areaMissing = () => isPublic() && localOn.value && localArea.value === null
+
+function toggleLocal(on: boolean) {
+  localOn.value = on
+  if (on && localArea.value === null) pickingArea.value = true
+}
 const isDiscoverable = () =>
   spaceType.value === 'public' || spaceType.value === 'global'
 
@@ -92,7 +113,7 @@ export function SpaceCreateDialog() {
   const gfsChecklistRef = useRef<HTMLFieldSetElement | null>(null)
   const loc = useLocation()
   const handleSubmit = async () => {
-    if (!name.value.trim() || submitting.value) return
+    if (!name.value.trim() || submitting.value || areaMissing()) return
     // A global space must be listed somewhere: the server refuses an empty
     // choice (GFS_SELECTION_REQUIRED), so say it beside the list instead.
     if (isGlobal() && gfsSelected.value.length === 0) {
@@ -112,6 +133,13 @@ export function SpaceCreateDialog() {
         ...(discoverable ? { category: category.value } : {}),
         ...(discoverable && minAge.value ? { min_age: minAge.value } : {}),
         ...(isGlobal() ? { gfs_ids: gfsSelected.value } : {}),
+        ...(isPublic() && localOn.value && localArea.value
+          ? {
+            lat: localArea.value.lat,
+            lon: localArea.value.lon,
+            radius_km: localArea.value.radius_km,
+          }
+          : {}),
       })
       // The owner is asked "What is it for?" on the first visit — a hint:
       // if it can't be stored, the space simply opens without the card.
@@ -233,6 +261,37 @@ export function SpaceCreateDialog() {
             onChange={(v) => joinMode.value = v}
           />
         )}
+        {isPublic() && !tierLocked && (
+          <fieldset class="sh-form-fieldset sh-space-create-local">
+            <legend>🏘️ {t('local_area.create.legend')}</legend>
+            <label class="sh-toggle-row">
+              <input type="checkbox" checked={localOn.value}
+                     onChange={(e) => toggleLocal((e.target as HTMLInputElement).checked)} />
+              <span class="sh-toggle-row__text">
+                <span>{t('local_area.create.toggle')}</span>
+                <span class="sh-toggle-row__sub">{t('local_area.create.toggle_sub')}</span>
+              </span>
+            </label>
+            {localOn.value && (
+              localArea.value ? (
+                <div class="sh-space-create-local__area">
+                  <LocalAreaMap area={localArea.value} home={householdHome.value} height={140} />
+                  <p class="sh-muted" role="status">{areaLabel(localArea.value)}</p>
+                  <Button variant="secondary" onClick={() => { pickingArea.value = true }}>
+                    {t('local_area.change')}
+                  </Button>
+                </div>
+              ) : (
+                <div class="sh-space-create-local__area">
+                  <p class="sh-muted" role="status">{t('local_area.create.choose_hint')}</p>
+                  <Button variant="secondary" onClick={() => { pickingArea.value = true }}>
+                    {t('local_area.choose')}
+                  </Button>
+                </div>
+              )
+            )}
+          </fieldset>
+        )}
         {isDiscoverable() && (
           <fieldset class="sh-form-fieldset sh-space-create-discovery">
             <legend>🧭 {t('space.create.discovery')}</legend>
@@ -271,11 +330,25 @@ export function SpaceCreateDialog() {
         <div class="sh-form-actions">
           <Button variant="secondary" onClick={() => open.value = false}>{t('common.cancel')}</Button>
           <Button onClick={handleSubmit} loading={submitting.value}
-            disabled={!name.value.trim()}>
+            disabled={!name.value.trim() || areaMissing()}>
             {t('space.create.submit')}
           </Button>
         </div>
       </div>
+      <LocalAreaPicker
+        open={pickingArea.value}
+        initial={localArea.value}
+        home={householdHome.value}
+        onClose={() => {
+          pickingArea.value = false
+          // Backed out of the first pick: nothing chosen, so it's off again.
+          if (localArea.value === null) localOn.value = false
+        }}
+        onSubmit={(area) => {
+          localArea.value = area
+          pickingArea.value = false
+        }}
+      />
     </Modal>
   )
 }

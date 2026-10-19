@@ -9,6 +9,7 @@ vi.mock('preact-iso', () => ({
 }))
 vi.mock('@/api', () => ({ api: { get: vi.fn(), post: vi.fn() } }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
+vi.mock('@/components/LocalAreaMap', () => ({ LocalAreaMap: () => <div data-testid="area-map" /> }))
 vi.mock('@/baseUrl', () => ({
   basePath: '/',
   addBase: (p: string) => p,
@@ -22,6 +23,7 @@ const { cacheDirectoryEntries, directoryCache } = await import(
   '@/store/spaceDirectory'
 )
 const { currentUser } = await import('@/store/auth')
+const { resetHouseholdHome } = await import('@/store/householdHome')
 import type { DirectoryEntry } from '@/types'
 
 function entry(over: Partial<DirectoryEntry>): DirectoryEntry {
@@ -341,5 +343,76 @@ describe('SpacePublicDetailPage — a member opening their own space (cold link)
     expect(container.textContent).not.toContain("You're a member")
     expect(container.querySelector('.sh-subscribed-pill')).not.toBeNull()
     expect(getByText('Request to join')).toBeTruthy()
+  })
+})
+
+describe('SpacePublicDetailPage — local community', () => {
+  const AREA = { lat: 47.3769, lon: 8.5417, radius_km: 5 }
+  const home = (h: { lat: number; lon: number } | null) => {
+    api.get.mockImplementation((url: string) => Promise.resolve(
+      url === '/api/friends' ? { instance: { home_lat: h?.lat ?? null, home_lon: h?.lon ?? null } } : {},
+    ))
+  }
+  beforeEach(() => {
+    resetHouseholdHome()
+    currentUser.value = null
+  })
+
+  it('shows the exact area, a map and "In your area" with the join button', async () => {
+    home({ lat: 47.392, lon: 8.56 })
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_area: AREA,
+      home_shared_with_host: true,
+    })])
+    const { getByText, getByTestId, container } = await renderPage()
+    await waitFor(() => getByText('In your area'))
+    expect(container.textContent).toContain('Within 5 km of 47.3769° N, 8.5417° E')
+    expect(getByTestId('area-map')).toBeTruthy()
+    expect(container.querySelector('.sh-local-area-chip')?.textContent).toContain('Within 5 km')
+    expect(getByText('Join space')).toBeTruthy()
+  })
+
+  it('outside: says so and offers no join the host would refuse', async () => {
+    home({ lat: 46.9481, lon: 7.4474 })
+    cacheDirectoryEntries([entry({ host_instance_id: 'iid-b', local_area: AREA, home_shared_with_host: true })])
+    const { getByText, queryByText, container } = await renderPage()
+    await waitFor(() => getByText('Outside your area'))
+    expect(queryByText('Join space')).toBeNull()
+    expect(container.textContent).toContain("Your household's home is outside this area")
+    // Not the "ask for an invite link" line — the area is the reason.
+    expect(container.querySelector('.sh-space-public__invite-note')).toBeNull()
+  })
+
+  it('home not shared with the host: names the host and points an admin at Connections', async () => {
+    home({ lat: 47.392, lon: 8.56 })
+    currentUser.value = { user_id: 'u1', username: 'u', display_name: 'U', is_admin: true } as typeof currentUser.value
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_area: AREA,
+      home_shared_with_host: false,
+    })])
+    const { getByText, queryByText } = await renderPage()
+    await waitFor(() => getByText('Share your home with Keller household to join'))
+    expect(queryByText('Join space')).toBeNull()
+    const link = getByText('Open Connections') as HTMLAnchorElement
+    // Ingress: the href goes through addBase (mocked to identity here).
+    expect(link.getAttribute('href')).toBe('/connections')
+    fireEvent.click(link)
+    expect(routeMock).toHaveBeenCalledWith('/connections')
+  })
+
+  it('no home set for this household: says so', async () => {
+    home(null)
+    cacheDirectoryEntries([entry({ host_instance_id: 'local', local_area: AREA })])
+    const { getByText, queryByText } = await renderPage()
+    await waitFor(() => getByText("Your home location isn't set"))
+    expect(queryByText('Join space')).toBeNull()
+  })
+
+  it('a seated member sees the space opens, without a verdict', async () => {
+    home(null)
+    cacheDirectoryEntries([entry({ host_instance_id: 'local', local_area: AREA, already_member: true })])
+    const { getByText, queryByTestId } = await renderPage()
+    await waitFor(() => getByText('Open space'))
+    expect(queryByTestId('local-area-badge')).toBeNull()
   })
 })
