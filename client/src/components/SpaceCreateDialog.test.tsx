@@ -13,9 +13,16 @@ vi.mock('@/store/spaces', () => ({ loadSpaces: vi.fn() }))
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 vi.mock('@/i18n/i18n', () => ({
   t: (k: string, p?: Record<string, string>) => (p ? `${k}:${JSON.stringify(p)}` : k),
+  formatLocale: () => 'en',
 }))
 // EmojiField pulls in the emoji-picker; not relevant here.
 vi.mock('./EmojiField', () => ({ EmojiField: () => null }))
+const route = vi.fn()
+vi.mock('preact-iso', () => ({ useLocation: () => ({ route, url: '/spaces', path: '/spaces' }) }))
+const markSetupPending = vi.fn(async (_id: string) => {})
+vi.mock('@/features/spaces/spaceSetup', () => ({
+  markSetupPending: (id: string) => markSetupPending(id),
+}))
 
 const { SpaceCreateDialog, openSpaceCreate } = await import('./SpaceCreateDialog')
 const { currentUser } = await import('@/store/auth')
@@ -63,21 +70,36 @@ describe('SpaceCreateDialog — public location', () => {
     expect(createBtn(container).disabled).toBe(false)
   })
 
-  it('submits lat/lon only for a public space', async () => {
+  it('never asks for raw coordinates: "Show on the map" takes this device\'s location, rounded to 4 dp', async () => {
     post.mockResolvedValue({ id: 's1' })
+    const getCurrentPosition = vi.fn((ok: (p: unknown) => void) =>
+      ok({ coords: { latitude: 52.520_081_7, longitude: 13.404_954_2 } }))
+    Object.defineProperty(navigator, 'geolocation', { value: { getCurrentPosition }, configurable: true })
     const { container } = await open()
     await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Neighbourhood' } }) })
     await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
-    const nums = container.querySelectorAll<HTMLInputElement>('.sh-space-create-location input[type="number"]')
-    await act(async () => {
-      fireEvent.input(nums[0], { target: { value: '52.52' } })
-      fireEvent.input(nums[1], { target: { value: '13.405' } })
-    })
+    expect(container.querySelectorAll('.sh-space-create-location input[type="number"]')).toHaveLength(0)
+    const box = container.querySelector<HTMLInputElement>('.sh-space-create-location input[type="checkbox"]')!
+    expect(box.checked).toBe(false)
+    await act(async () => { fireEvent.click(box) })
+    expect(getCurrentPosition).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('.sh-space-create-location')?.textContent).toContain('space.create.pinned_at')
     await act(async () => { fireEvent.click(createBtn(container)) })
     await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
     const [url, body] = post.mock.calls[0]
     expect(url).toBe('/api/spaces')
-    expect(body).toMatchObject({ space_type: 'public', lat: 52.52, lon: 13.405 })
+    expect(body).toMatchObject({ space_type: 'public', lat: 52.5201, lon: 13.405 })
+  })
+
+  it('a public space without "Show on the map" sends no location', async () => {
+    post.mockResolvedValue({ id: 's1' })
+    const { container } = await open()
+    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Neighbourhood' } }) })
+    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    const body = post.mock.calls[0][1] as Record<string, unknown>
+    expect('lat' in body).toBe(false)
   })
 
   it('does not send coords for a non-public space', async () => {
@@ -90,6 +112,32 @@ describe('SpaceCreateDialog — public location', () => {
     const body = post.mock.calls[0][1] as Record<string, unknown>
     expect('lat' in body).toBe(false)
     expect('lon' in body).toBe(false)
+  })
+})
+
+describe('SpaceCreateDialog — after create', () => {
+  beforeEach(() => { post.mockReset(); route.mockReset(); markSetupPending.mockClear(); cleanup() })
+
+  it('lands in the new space (no list + toast) and asks "What is it for?" there', async () => {
+    post.mockResolvedValue({ id: 'new-1' })
+    const { showToast } = await import('./Toast')
+    ;(showToast as ReturnType<typeof vi.fn>).mockClear()
+    const { container } = await open()
+    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Book club' } }) })
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(route).toHaveBeenCalledWith('/spaces/new-1'))
+    expect(markSetupPending).toHaveBeenCalledWith('new-1')
+    expect(showToast).not.toHaveBeenCalled()
+    expect(nameInput(container)).toBeNull()
+  })
+
+  it('still lands in the space when the setup flag cannot be stored', async () => {
+    post.mockResolvedValue({ id: 'new-2' })
+    markSetupPending.mockRejectedValueOnce(new Error('offline'))
+    const { container } = await open()
+    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'X' } }) })
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(route).toHaveBeenCalledWith('/spaces/new-2'))
   })
 })
 

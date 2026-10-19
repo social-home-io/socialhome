@@ -43,6 +43,22 @@ async def seeded(client):
     )
     assert r.status == 201, await r.text()
     sid = (await r.json())["id"]
+    # A new space starts with feed + chat + calendar (owner decision 3);
+    # the summary reads every section, so turn the rest on.
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={
+            "features": {
+                "todo": True,
+                "pages": True,
+                "gallery": True,
+                "stickies": True,
+                "bazaar": True,
+            }
+        },
+        headers=hdr["owner"],
+    )
+    assert r.status == 200, await r.text()
     await _seat(client, sid, _ADMIN[1], "admin")
     await _seat(client, sid, _MODERATOR[1], "moderator")
     await _seat(client, sid, _MEMBER[1], "member")

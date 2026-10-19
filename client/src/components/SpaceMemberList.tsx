@@ -25,7 +25,6 @@ import {
   SpaceProfileDialog,
   openSpaceProfileDialog,
 } from './SpaceProfileDialog'
-import { openSpaceInvite } from './SpaceInviteDialog'
 import { openRemoteInviteDialog } from './RemoteInviteDialog'
 import { currentUser } from '@/store/auth'
 import { resolveAvatar } from '@/utils/avatar'
@@ -295,14 +294,10 @@ export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props
           </h3>
           {canManage.value && (
             <div class="sh-member-list-invite-actions">
-              <Button onClick={() => openSpaceInvite(spaceId, null, viewerRole)}>
-                + {t('space.members.invite_by_code')}
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() => openRemoteInviteDialog(spaceId)}
-              >
-                + {t('space.members.add_person')}
+              {/* One door: people from your household and paired ones,
+               *  and an invite link for anyone else. */}
+              <Button onClick={() => openRemoteInviteDialog(spaceId, viewerRole)}>
+                + {t('space.members.invite')}
               </Button>
             </div>
           )}

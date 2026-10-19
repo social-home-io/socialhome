@@ -11,6 +11,7 @@ from socialhome.domain.space import (
     CONTENT_AUTHORITY_ROLES,
     MAX_ZONE_NAME_LENGTH,
     MIRRORABLE_REMOTE_ROLES,
+    NEW_SPACE_FEATURES,
     SETTINGS_AUTHORITY_ROLES,
     WRITER_ROLES,
     AccessAdminOnlyError,
@@ -48,6 +49,22 @@ def test_remote_admin_outcome_values():
     assert RemoteAdminOutcome.EXECUTED == "executed"
     assert RemoteAdminOutcome.NEEDS_OWNER_APPROVAL == "needs_owner_approval"
     assert RemoteAdminOutcome.DROPPED == "dropped"
+
+
+def test_new_space_features_are_feed_chat_calendar():
+    """Owner decision 3: a NEW space starts with feed + chat + calendar;
+    every other section is opt-in. The class defaults (what an absent wire
+    field means) are unchanged."""
+    f = NEW_SPACE_FEATURES
+    assert (f.chat, f.calendar) == (True, True)
+    assert not any(
+        (f.todo, f.pages, f.gallery, f.stickies, f.bazaar, f.location, f.timetable)
+    )
+    # Everything else is the factory setting (access levels, subscribers…).
+    assert NEW_SPACE_FEATURES == SpaceFeatures(
+        todo=False, pages=False, gallery=False, stickies=False, bazaar=False
+    )
+    assert SpaceFeatures().todo is True
 
 
 def test_space_features_roundtrip():

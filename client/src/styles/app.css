@@ -25376,3 +25376,64 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-primary); outl
   .sh-cal-bar { margin-inline: 1px; padding-inline: 3px; }
   .sh-cal-grid__more { font-size: 11px; }
 }
+
+/* ── "What is <name> for?" (SpaceSetupCard) + "Invite your first member" ──
+ * One selected style everywhere: primary-soft tint + primary border (the
+ * presets and the section chips alike). Logical properties only. */
+.sh-space-setup, .sh-space-invite-first {
+  margin-block-end: var(--sh-space-md);
+  padding: var(--sh-space-lg);
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  box-shadow: var(--sh-shadow-xs, var(--sh-shadow-sm));
+}
+.sh-space-setup { display: flex; flex-direction: column; gap: var(--sh-space-md); }
+.sh-space-setup__title {
+  margin: 0; font-family: var(--sh-font-family-display); font-size: var(--sh-font-size-xl);
+  overflow-wrap: break-word; hyphens: manual;
+}
+.sh-space-setup__lead { margin: calc(-1 * var(--sh-space-sm)) 0 0; color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
+.sh-space-setup__presets { margin: 0; padding: 0; border: 0; min-width: 0; }
+.sh-space-setup__presets legend, .sh-space-setup__label {
+  display: block; margin-block-end: var(--sh-space-sm); padding: 0;
+  font-weight: 600; font-size: var(--sh-font-size-sm); color: var(--sh-text);
+}
+.sh-space-setup__preset-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sh-space-sm); }
+.sh-space-setup__preset {
+  position: relative; display: flex; flex-direction: column; gap: 2px;
+  min-height: 96px; padding: 12px; padding-inline-end: 36px;
+  background: var(--sh-bg); border: 1px solid var(--sh-border); border-radius: var(--sh-radius-md);
+  cursor: pointer;
+}
+.sh-space-setup__preset:hover { border-color: var(--sh-border-strong); }
+.sh-space-setup__preset.is-on { background: var(--sh-primary-soft); border-color: var(--sh-primary); }
+.sh-space-setup__preset input {
+  position: absolute; inset-block-start: 12px; inset-inline-end: 12px;
+  width: 18px; height: 18px; margin: 0; accent-color: var(--sh-primary);
+}
+.sh-space-setup__preset:has(input:focus-visible) { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-space-setup__emoji { font-size: 26px; line-height: 1.2; }
+.sh-space-setup__name { font-weight: 600; color: var(--sh-text); }
+.sh-space-setup__hint { font-size: var(--sh-font-size-xs); color: var(--sh-text-muted); }
+.sh-space-setup__preset.is-on .sh-space-setup__hint { color: var(--sh-text); }
+.sh-space-setup__chips { display: flex; flex-wrap: wrap; gap: var(--sh-space-sm); }
+.sh-space-setup__chip {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 36px; padding: 0 14px;
+  background: var(--sh-bg); border: 1px solid var(--sh-border); border-radius: var(--sh-radius-full);
+  color: var(--sh-text); font: inherit; font-size: var(--sh-font-size-sm); cursor: pointer;
+}
+.sh-space-setup__chip:hover { border-color: var(--sh-border-strong); }
+.sh-space-setup__chip[aria-pressed='true'] {
+  background: var(--sh-primary-soft); border-color: var(--sh-primary); color: var(--sh-primary-on-soft); font-weight: 600;
+}
+.sh-space-setup__chip:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-space-setup__actions { display: flex; justify-content: flex-end; gap: var(--sh-space-sm); }
+.sh-space-invite-first { text-align: center; display: flex; flex-direction: column; align-items: center; gap: var(--sh-space-sm); }
+.sh-space-invite-first h2 { margin: 0; font-family: var(--sh-font-family-display); font-size: var(--sh-font-size-lg); }
+.sh-space-invite-first p { margin: 0; color: var(--sh-text-muted); max-width: 46ch; }
+.sh-remote-invite-link { margin: var(--sh-space-sm) 0 0; font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); }
+@media (max-width: 640px) {
+  .sh-space-setup, .sh-space-invite-first { padding: var(--sh-space-md); }
+  .sh-space-setup__preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
