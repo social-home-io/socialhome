@@ -9,7 +9,10 @@ from socialhome.domain.sticky import (
     MAX_STICKY_CONTENT_LENGTH,
     STICKY_BOARD_HEIGHT,
     STICKY_BOARD_WIDTH,
+    STICKY_NOTE_HEIGHT,
+    STICKY_NOTE_WIDTH,
     coerce_peer_sticky,
+    free_sticky_spot,
     normalize_sticky_color,
     parse_sticky_coord,
     sanitize_sticky_content,
@@ -121,3 +124,42 @@ def test_coerce_peer_sticky_truncates_long_content():
 def test_coerce_peer_sticky_non_string_content_is_empty():
     f = coerce_peer_sticky(content=5, color=None, position_x=0, position_y=0)
     assert f.content == ""
+
+
+def _overlaps(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    return (
+        abs(a[0] - b[0]) < STICKY_NOTE_WIDTH and abs(a[1] - b[1]) < STICKY_NOTE_HEIGHT
+    )
+
+
+def test_free_sticky_spot_on_an_empty_board_is_the_first_grid_cell():
+    x, y = free_sticky_spot([])
+    assert 0 <= x <= STICKY_BOARD_WIDTH - STICKY_NOTE_WIDTH
+    assert 0 <= y <= STICKY_BOARD_HEIGHT - STICKY_NOTE_HEIGHT
+
+
+def test_free_sticky_spot_never_overlaps_while_the_board_has_room():
+    taken: list[tuple[float, float]] = []
+    for _ in range(12):
+        spot = free_sticky_spot(taken)
+        assert not any(_overlaps(spot, t) for t in taken), (spot, taken)
+        assert 0 <= spot[0] <= STICKY_BOARD_WIDTH - STICKY_NOTE_WIDTH
+        assert 0 <= spot[1] <= STICKY_BOARD_HEIGHT - STICKY_NOTE_HEIGHT
+        taken.append(spot)
+
+
+def test_free_sticky_spot_skips_cells_a_hand_placed_note_covers():
+    first = free_sticky_spot([])
+    nudged = (first[0] + 30, first[1] + 10)  # a note dragged near the corner
+    spot = free_sticky_spot([nudged])
+    assert not _overlaps(spot, nudged)
+
+
+def test_free_sticky_spot_on_a_full_board_still_stays_inside_and_spreads():
+    taken = [(x, y) for x in range(0, 1000, 50) for y in range(0, 700, 50)]
+    a = free_sticky_spot(taken)
+    b = free_sticky_spot([*taken, a])
+    for spot in (a, b):
+        assert 0 <= spot[0] <= STICKY_BOARD_WIDTH - STICKY_NOTE_WIDTH
+        assert 0 <= spot[1] <= STICKY_BOARD_HEIGHT - STICKY_NOTE_HEIGHT
+    assert a != b

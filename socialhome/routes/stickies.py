@@ -52,8 +52,9 @@ def _create_kwargs(body: object) -> dict:
     return {
         "content": body.get("content", ""),
         "color": body.get("color", DEFAULT_STICKY_COLOR),
-        "position_x": body.get("position_x", 0.0),
-        "position_y": body.get("position_y", 0.0),
+        # Absent → the service picks a free spot on the board.
+        "position_x": body.get("position_x"),
+        "position_y": body.get("position_y"),
     }
 
 

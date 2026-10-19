@@ -15,6 +15,18 @@ async def test_create_sticky(client):
     assert r.status == 201
 
 
+async def test_create_sticky_without_a_position_does_not_stack(client):
+    """Two notes POSTed with no position get distinct spots on the board."""
+    spots = []
+    for text in ("one", "two"):
+        r = await client.post(
+            "/api/stickies", json={"content": text}, headers=_auth(client._tok)
+        )
+        body = await r.json()
+        spots.append((body["position_x"], body["position_y"]))
+    assert spots[0] != spots[1]
+
+
 async def test_list_stickies(client):
     """GET /api/stickies returns household stickies."""
     await client.post(

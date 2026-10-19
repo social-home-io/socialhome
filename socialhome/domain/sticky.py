@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final
 
@@ -34,6 +35,17 @@ DEFAULT_STICKY_COLOR: Final = "#FFF9B1"
 #: The SPA board's normalised coordinate space (``BOARD_W`` / ``BOARD_H``).
 STICKY_BOARD_WIDTH: Final = 1000.0
 STICKY_BOARD_HEIGHT: Final = 700.0
+
+#: A note's nominal size in board units (18 % x 20 % of the board — the
+#: SPA's ``NOTE_W`` / ``NOTE_H``).
+STICKY_NOTE_WIDTH: Final = STICKY_BOARD_WIDTH * 0.18
+STICKY_NOTE_HEIGHT: Final = STICKY_BOARD_HEIGHT * 0.2
+
+#: Free-spot grid: margin from the board edge and the gap between cells.
+_SPOT_MARGIN: Final = 20.0
+_SPOT_GAP: Final = 20.0
+#: Diagonal step when the grid is full (shows each note's top strip).
+_SPOT_CASCADE: Final = 30.0
 
 #: Content cap. The SPA editor allows 500; the extra headroom keeps a
 #: slightly different client from being refused while still bounding
@@ -70,6 +82,40 @@ def normalize_sticky_color(raw: object) -> str | None:
     if len(digits) == 3:
         digits = "".join(ch * 2 for ch in digits)
     return "#" + digits.upper()
+
+
+def free_sticky_spot(
+    taken: Iterable[tuple[float, float]],
+) -> tuple[float, float]:
+    """Where to put a new note given the top-left corners already on the
+    board: the first cell of a row-major grid of note-sized cells that no
+    existing note overlaps. A full board falls back to a cascade (each
+    step diagonally down-right, wrapping inside the board) so a run of
+    new notes still fans out instead of stacking on one spot.
+
+    Mirrors ``freeSpot`` in ``client/src/features/stickies/layout.ts``."""
+    notes = list(taken)
+    max_x = STICKY_BOARD_WIDTH - STICKY_NOTE_WIDTH
+    max_y = STICKY_BOARD_HEIGHT - STICKY_NOTE_HEIGHT
+
+    def free(x: float, y: float) -> bool:
+        return all(
+            abs(x - nx) >= STICKY_NOTE_WIDTH or abs(y - ny) >= STICKY_NOTE_HEIGHT
+            for nx, ny in notes
+        )
+
+    y = _SPOT_MARGIN
+    while y <= max_y:
+        x = _SPOT_MARGIN
+        while x <= max_x:
+            if free(x, y):
+                return (x, y)
+            x += STICKY_NOTE_WIDTH + _SPOT_GAP
+        y += STICKY_NOTE_HEIGHT + _SPOT_GAP
+    step = len(notes) * _SPOT_CASCADE
+    span_x = max_x - _SPOT_MARGIN
+    span_y = max_y - _SPOT_MARGIN
+    return (_SPOT_MARGIN + step % span_x, _SPOT_MARGIN + step % span_y)
 
 
 def parse_sticky_coord(raw: object, *, limit: float) -> float | None:

@@ -48,13 +48,10 @@ import { useLoad } from '@/utils/useLoad'
 import { OrganizeSectionHeader } from '@/features/organize/shared/OrganizeSectionHeader'
 import { useNarrow } from '@/features/timetable/useNarrow'
 import { inkClass, stickyBackground } from './ink'
+import { BOARD_H, BOARD_W, NOTE_H, NOTE_W, displayPositions, freeSpot } from './layout'
 
 /** Normalised board space (positions are stored in these units). */
-export const BOARD_W = 1000
-export const BOARD_H = 700
-/** A note's nominal size in board units (18 % × 20 %). */
-const NOTE_W = BOARD_W * 0.18
-const NOTE_H = BOARD_H * 0.2
+export { BOARD_W, BOARD_H }
 
 const STEP = 10
 const STEP_BIG = 50
@@ -191,12 +188,12 @@ export default function StickyBoardPage({ spaceId, readOnly = null }: StickyBoar
   const n = notes.length
 
   const addSticky = () => {
-    // Cycle the palette so a run of new notes isn't all yellow, and
-    // spread them over the board instead of stacking.
+    // Cycle the palette so a run of new notes isn't all yellow, and put
+    // the note on a free spot — where it's drawn, so a note drawn off a stack
+    // counts as taken.
     const color = STICKY_COLORS[n % STICKY_COLORS.length].hex
-    const position_x = Math.round(40 + Math.random() * (BOARD_W - NOTE_W - 80))
-    const position_y = Math.round(40 + Math.random() * (BOARD_H - NOTE_H - 80))
-    openCreateStickyDialog(scope, { x: position_x, y: position_y }, color)
+    const spot = freeSpot([...displayPositions(notes).values()])
+    openCreateStickyDialog(scope, { x: Math.round(spot.x), y: Math.round(spot.y) }, color)
   }
 
   const header = (
@@ -250,13 +247,23 @@ export default function StickyBoardPage({ spaceId, readOnly = null }: StickyBoar
       </div>
     )
   } else {
+    // Drawn positions: a note stored on the same spot as an older one is
+    // drawn on a free spot so it shows (stored positions are left alone).
+    const shown = displayPositions(notes)
+    const drawnAt = (s: StickyRow): StickyRow => {
+      const p = shown.get(s.id)
+      // The note under the pointer goes exactly where it is dragged.
+      return p && s.id !== dragging && (p.x !== s.position_x || p.y !== s.position_y)
+        ? { ...s, position_x: p.x, position_y: p.y }
+        : s
+    }
     body = (
       <div
         ref={boardRef}
         class="sh-sticky-canvas"
         style={{ aspectRatio: `${BOARD_W} / ${BOARD_H}` }}
       >
-        {notes.map(s => (writable ? (
+        {notes.map(drawnAt).map(s => (writable ? (
           <BoardNote
             key={s.id}
             sticky={s}
@@ -417,7 +424,9 @@ function BoardNote({
       default: return
     }
     e.preventDefault()
-    const cur = store.find(id)
+    // The drawn position (a note hidden under a stack is drawn off its
+    // stored spot), with any keyboard move in progress applied.
+    const cur = pending.current ? store.find(id) : sticky
     if (!cur || drag.current) return
     const { maxX, maxY } = bounds(noteRef.current, boardRef.current)
     // Start from where the note is DRAWN: CSS pulls a note stored past
@@ -431,7 +440,8 @@ function BoardNote({
       return
     }
     if (!pending.current) {
-      pending.current = { x: cur.position_x, y: cur.position_y }
+      const stored = store.find(id) ?? cur
+      pending.current = { x: stored.position_x, y: stored.position_y }
       store.holdPosition(id)
     }
     store.moveLocal(id, x, y)
