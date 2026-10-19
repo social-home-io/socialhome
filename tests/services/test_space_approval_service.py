@@ -1256,3 +1256,97 @@ async def test_the_proposal_mirror_skips_follower_only_households(stack):
     )
     call = stack.fed.broadcast_to_space_members.await_args
     assert call.kwargs["only_instances"] == frozenset({"house-member"})
+
+
+# ── voted_by_me: the list never asks a voter to vote twice (bug 9) ──
+
+
+async def _four_admin_proposal(stack):
+    """alice (owner) proposes; bob, carol and dave are admins too, so the
+    majority (3 of 4) stays out of reach after one more approval."""
+    space = await _space(stack)
+    others = [await _add_admin(stack, space.id, n) for n in ("bob", "carol", "dave")]
+    view = await stack.approvals.propose(
+        space.id, actor_username="alice", action=ProposalAction.DISSOLVE
+    )
+    return space, others, view
+
+
+async def _voted(stack, space_id, user_id) -> bool:
+    (row,) = await stack.approvals.list_for_space(space_id, viewer_user_id=user_id)
+    return row["voted_by_me"]
+
+
+async def test_the_proposer_has_voted(stack):
+    space, (bob, carol, _), _ = await _four_admin_proposal(stack)
+    alice = await stack.user_svc.get("alice")
+    assert await _voted(stack, space.id, alice.user_id) is True
+    assert await _voted(stack, space.id, bob.user_id) is False
+    assert await _voted(stack, space.id, carol.user_id) is False
+
+
+async def test_a_voter_has_voted_after_approving(stack):
+    space, (bob, carol, _), view = await _four_admin_proposal(stack)
+    out = await stack.approvals.vote(
+        space.id, view["id"], actor_username="bob", approve=True
+    )
+    assert out["status"] == ProposalStatus.PENDING.value
+    assert await _voted(stack, space.id, bob.user_id) is True
+    assert await _voted(stack, space.id, carol.user_id) is False
+
+
+async def test_voted_by_me_is_per_reader_never_broadcast(stack):
+    """``voted_by_me`` describes the reader: the bus / federation view of a
+    proposal never carries it."""
+    published: list = []
+
+    async def _keep(event):
+        published.append(event)
+
+    stack.bus.subscribe(SpaceProposalUpdated, _keep)
+    await _four_admin_proposal(stack)
+    assert published
+    for event in published:
+        assert "voted_by_me" not in event.view
+
+
+async def test_mirror_marks_only_the_local_proposer(stack):
+    """On a member household the host's view is mirrored; the local
+    proposer has voted, a proposal from elsewhere still waits."""
+    stub = await _remote_stub(stack)
+    admin = await stack.user_svc.get("localadmin")
+    base = {
+        "space_id": stub.id,
+        "params": {},
+        "status": "pending",
+        "approvals": 1,
+        "total_admins": 2,
+        "needed": 2,
+        "created_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
+    }
+    await stack.approvals.apply_mirror_update(
+        stub.id,
+        {
+            **base,
+            "id": "prop-mine",
+            "action": "dissolve",
+            "proposed_by_instance": stack.iid,
+            "proposed_by_user": admin.user_id,
+        },
+    )
+    await stack.approvals.apply_mirror_update(
+        stub.id,
+        {
+            **base,
+            "id": "prop-theirs",
+            "action": "set_public_tier",
+            "proposed_by_instance": "host-instance",
+            "proposed_by_user": admin.user_id,
+        },
+    )
+    rows = await stack.approvals.list_for_space(stub.id, viewer_user_id=admin.user_id)
+    assert {r["id"]: r["voted_by_me"] for r in rows} == {
+        "prop-mine": True,
+        "prop-theirs": False,
+    }

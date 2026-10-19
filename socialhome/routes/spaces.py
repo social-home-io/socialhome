@@ -25,6 +25,7 @@ from ..app_keys import (
     presence_service_key,
     profile_picture_repo_key,
     rate_limiter_key,
+    report_service_key,
     space_approval_service_key,
     space_bot_repo_key,
     space_chat_service_key,
@@ -35,6 +36,7 @@ from ..app_keys import (
     space_remote_member_repo_key,
     space_repo_key,
     space_service_key,
+    space_summary_service_key,
     space_sync_scheduler_key,
     space_zone_repo_key,
     user_repo_key,
@@ -65,6 +67,7 @@ from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..rate_limiter import client_bucket
 from ..security import error_response, sanitise_for_api
 from ..services.gfs_connection_service import GfsConnectionError
+from ..services.space_attention import space_attention
 from ..services.space_member_guard import require_member_seat
 from ..services.space_service import (
     _UNSET_MEMBER_PROFILE,
@@ -320,6 +323,18 @@ class SpaceDetailView(BaseView):
                 # Global but listed on no GFS ("global, not listed"): the
                 # SPA shows a banner until the owner picks servers.
                 "gfs_unlisted": gfs_unlisted,
+                # "Needs you": held items, reports, join requests and open
+                # proposals waiting for the caller — null unless they have
+                # content authority here (owner / admin / moderator).
+                "attention": await space_attention(
+                    space.id,
+                    seat=member,
+                    username=self.user.username,
+                    space_service=svc,
+                    approvals=self.svc(space_approval_service_key),
+                    reports=self.svc(report_service_key),
+                    moderation=self.request.app.get(space_moderation_service_key),
+                ),
             }
         )
         signer = self.request.app.get(media_signer_key)
@@ -425,6 +440,20 @@ class SpaceDetailView(BaseView):
             action=ProposalAction.DISSOLVE,
         )
         return web.json_response({"ok": True, "proposal": view})
+
+
+class SpaceSummaryView(BaseView):
+    """``GET /api/spaces/{id}/summary`` — what each section holds (open
+    tasks and the caller's, pages, albums and photos, stickies, active
+    bazaar listings, upcoming events) for the meta line of More's section
+    rows. Any seat, a follower's included; a section that is off is
+    ``null``."""
+
+    async def get(self) -> web.Response:
+        out = await self.svc(space_summary_service_key).summary(
+            self.match("id"), user_id=self.user.user_id
+        )
+        return web.json_response(out)
 
 
 class SpaceProposalsView(BaseView):

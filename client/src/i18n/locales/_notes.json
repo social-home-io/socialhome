@@ -516,5 +516,10 @@
   "space.sections.unread": "Screen-reader text after a section link's grey count, read as 'Chat, 4 unread'. Lower case; the comma is added by the app.",
   "space.sections.needs_you": "Screen-reader text after the More button's filled count of items waiting for the viewer (posts to review, join requests, reports), read as 'More, 3 need you'.",
   "space.more.current": "Screen-reader text on the More button when the open section is one of its rows, read as 'More, showing Gallery'.",
-  "space.more.button": "The button at the end of a space's section bar that opens the sections that didn't fit. Keep it one short word."
+  "space.more.button": "The button at the end of a space's section bar that opens the sections that didn't fit. Keep it one short word.",
+  "space.needs.title": "Heading of the card under a space's header listing what waits for an admin or moderator's decision (proposals, posts held for review, join requests). Keep it short.",
+  "space.needs.proposal": "Row title in the 'Needs you' card. {action} is a lowercase infinitive phrase from space.proposal.action.* / fwd.* (e.g. 'permanently delete this space').",
+  "space.summary.tasks_mine": "Second half of a meta line like '5 open · 2 yours': tasks assigned to the viewer.",
+  "space.summary.events": "Meta line under the Calendar row in a space's More menu: events in the next 30 days.",
+  "space.leave.owner_note": "Shown in a space's More menu to its owner instead of a Leave button. 'Admin › Spaces' is the household admin page path."
 }

@@ -29,6 +29,8 @@ import { openSpaceInvite } from './SpaceInviteDialog'
 import { openRemoteInviteDialog } from './RemoteInviteDialog'
 import { currentUser } from '@/store/auth'
 import { resolveAvatar } from '@/utils/avatar'
+import { addBase } from '@/baseUrl'
+import { spaceSectionPath } from '@/features/spaces/spaceTabs'
 
 /** Friendly relative duration for "joined …" — drops the
  *  utilitarian ``5/8/2026`` for "joined today" / "joined 3 days ago"
@@ -108,9 +110,12 @@ interface Props {
    *  render for that role, nor for a ``'moderator'`` (content authority
    *  only — member management is settings authority). */
   viewerRole?: SpaceRole
+  /** Pending join requests (owners / admins): a "N join requests ·
+   *  Review" row leads to Moderation, where they are decided. */
+  joinRequests?: number
 }
 
-export function SpaceMemberList({ spaceId, viewerRole }: Props) {
+export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props) {
   const follower = isFollower(viewerRole)
   const reload = () => {
     loading.value = true
@@ -273,6 +278,13 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
               {t('common.edit')}
             </Button>
           </div>
+        )}
+        {canManage.value && joinRequests > 0 && (
+          <a class="sh-member-join-requests" href={addBase(spaceSectionPath(spaceId, 'moderation'))}>
+            <span>{t(isOne(joinRequests) ? 'space.more.join_one' : 'space.more.join',
+                     { count: String(joinRequests) })}</span>
+            <span class="sh-member-join-requests__cta">{t('space.members.review_requests')}</span>
+          </a>
         )}
         <div class="sh-member-list-header">
           <h3>

@@ -1,4 +1,4 @@
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { useLocation, useRoute } from 'preact-iso'
 import { api } from '@/api'
@@ -61,16 +61,19 @@ import StickyBoardPage from '@/features/stickies/StickyBoardPage'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
 import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
 import { CalendarEventDialog, openSpaceEventDialog } from '@/components/CalendarEventDialog'
-import { SpaceLinksStrip } from './SpaceLinksStrip'
-import { SpaceProposalsBanner } from '@/components/SpaceProposalsBanner'
-import { SpaceVersionBanner } from '@/components/SpaceVersionBanner'
-import { SpaceHero } from '@/components/SpaceHero'
+import { useSpaceLinks } from './useSpaceLinks'
+import { useSpaceCompat } from '@/components/SpaceVersionNotice'
+import { SpaceHero, type HeroMember } from '@/components/SpaceHero'
+import { SpaceNeedsYou } from './SpaceNeedsYou'
 import { useSpaceNotifLevel } from './SpaceNotifLevels'
-import { useSpaceAttention, spaceAttention, loadSpaceAttention } from '@/store/spaceAttention'
+import {
+  setSpaceAttention, spaceAttention, useSpaceAttentionFrames, type WireAttention,
+} from '@/store/spaceAttention'
 import { confirmDialog } from '@/components/confirm'
 import { SpaceChatView, useSpaceChatSummary } from './SpaceChatView'
 import { spaceChatOf, spaceChatOpenTo } from '@/store/spaceChat'
 import { isMuteActive } from '@/utils/mute'
+import { resolveAvatar } from '@/utils/avatar'
 
 interface SpaceDetail {
   id: string
@@ -118,6 +121,20 @@ interface SpaceDetail {
    *  lists the members only), so this — not the roster — says who the
    *  viewer is. */
   my_role?: string
+  /** The tier: private / household / public / global. */
+  space_type?: string
+  /** "Needs you" (owners / admins / moderators); ``null`` otherwise. */
+  attention?: WireAttention | null
+}
+
+/** A ``/members`` row, as far as this page reads it. */
+interface MemberRow {
+  user_id: string
+  role?: string
+  display_name?: string | null
+  space_display_name?: string | null
+  personal_alias?: string | null
+  picture_url?: string | null
 }
 
 /** Reason-aware copy for the read-only archive banner + empty-state.
@@ -173,6 +190,12 @@ const roleKnown = signal(false)
 const memberCount = signal<number | null>(null)
 /** Members and admins (owner + admin) — the Members row of More. */
 const memberSummary = signal<SpaceMemberSummary | null>(null)
+/** The hero's facepile: the first four members. */
+const memberPreview = signal<HeroMember[]>([])
+/** The space detail could not be read (and nothing is on screen). */
+const detailFailed = signal(false)
+/** The feed could not be read for another reason than "no seat". */
+const feedFailed = signal(false)
 
 /** The space header + the viewer's role: ``GET /api/spaces/{id}`` (name,
  *  emoji, cover, features → tabs, archive state, ``my_role`` → admin-only
@@ -186,17 +209,32 @@ async function loadSpaceHeader(spaceId: string) {
     api.get(`/api/spaces/${spaceId}`).then((d) => {
       const detail = d as SpaceDetail
       spaceDetail.value = detail
+      detailFailed.value = false
       setSpaceHereAllowed(spaceId, detail.allow_here_mention === true)
       viewerRole.value = parseSpaceRole(detail.my_role)
+      setSpaceAttention(spaceId, detail.attention)
       roleKnown.value = true
-    }).catch(() => { roleKnown.value = true /* keep the last role */ }),
+    }).catch(() => {
+      roleKnown.value = true /* keep the last role */
+      // Nothing on screen yet: say so with Retry. A failed refetch keeps
+      // what's there.
+      if (!spaceDetail.value) detailFailed.value = true
+    }),
     api.get(`/api/spaces/${spaceId}/members`)
-      .then((members: { role?: string }[]) => {
+      .then((rows: MemberRow[]) => {
+        // Members only: followers aren't members (a follower's roster
+        // lists the members alone anyway).
+        const members = rows.filter((m) => m.role !== 'subscriber')
         memberCount.value = members.length
         memberSummary.value = {
           count: members.length,
           admins: members.filter((m) => m.role === 'owner' || m.role === 'admin').length,
         }
+        memberPreview.value = members.slice(0, 4).map((m) => ({
+          user_id: m.user_id,
+          name: m.space_display_name || m.personal_alias || m.display_name || m.user_id,
+          picture_url: m.picture_url ?? null,
+        }))
       })
       .catch(() => { /* keep the last count */ }),
   ])
@@ -322,6 +360,10 @@ export default function SpaceFeedPage() {
     spaceDetail.value = null
     memberCount.value = null
     memberSummary.value = null
+    memberPreview.value = []
+    detailFailed.value = false
+    feedFailed.value = false
+    spaceAttention.value = null
     spaceCalEvents.value = []
     spaceCalLoadFailed.value = false
     spaceCalCursor.value = new Date()
@@ -337,7 +379,11 @@ export default function SpaceFeedPage() {
         // space isn't public — never an empty feed with a composer.
         if ((err as { status?: unknown })?.status === 403) {
           loc?.route(`/spaces/${spaceId}/about`, true)
+          return
         }
+        // Anything else (offline, a server error): an error with Retry,
+        // not the "no posts yet" empty state.
+        feedFailed.value = true
       })
       .finally(() => { loading.value = false })
     void loadSpaceHeader(spaceId)
@@ -439,17 +485,21 @@ export default function SpaceFeedPage() {
     if (section === 'calendar' && calendarOn) void loadSpaceCalendar(spaceId)
   }, [spaceId, section, calendarOn])
 
-  // "Needs you": held items + reports (content authority), join requests
-  // (settings authority) — the filled badge on More.
+  // "Needs you" comes with the space detail (``attention``): re-read it
+  // on the frames that change it. Leaving Moderation re-reads it too (a
+  // report dismissed there sends no frame).
   const settingsAuthority = hasSettingsAuthority(viewerRole.value)
-  useSpaceAttention(spaceId, canModerateHere, settingsAuthority)
-  // Leaving Moderation re-reads the counts (a report dismissed there
-  // sends no frame).
+  useSpaceAttentionFrames(spaceId, canModerateHere, () => { void loadSpaceHeader(spaceId) })
+  const prevSection = useRef(section)
   useEffect(() => {
-    if (section !== 'moderation' && canModerateHere) {
-      void loadSpaceAttention(spaceId, canModerateHere, settingsAuthority)
+    if (prevSection.current === 'moderation' && section !== 'moderation' && canModerateHere) {
+      void loadSpaceHeader(spaceId)
     }
+    prevSection.current = section
   }, [section]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Member households behind on the protocol — a Needs-you row for admins.
+  const compat = useSpaceCompat(spaceId, roleKnown.value && settingsAuthority)
+  const quickLinks = useSpaceLinks(spaceId)
 
   const [notifLevel, setNotifLevel] = useSpaceNotifLevel(
     spaceId, roleKnown.value && viewerRole.value !== undefined,
@@ -531,6 +581,43 @@ export default function SpaceFeedPage() {
 
   if (loading.value) return <Spinner />
 
+  // Neither the space nor its feed could be read: an error with Retry —
+  // never an empty feed (which would say "no posts yet").
+  const retry = () => {
+    loading.value = true
+    feedFailed.value = false
+    detailFailed.value = false
+    void loadSpaceHeader(spaceId)
+    loadSpaceFeed(spaceId)
+      .catch(() => { feedFailed.value = true })
+      .finally(() => { loading.value = false })
+  }
+  if (detailFailed.value && !spaceDetail.value) {
+    return (
+      <div class="sh-space-feed sh-space-scope">
+        <LoadErrorState headingLevel={2} message={t('space.load_failed')} onRetry={retry} />
+      </div>
+    )
+  }
+
+  // Leave the space (a member who isn't the owner): confirm, then drop
+  // the seat and go to the spaces list.
+  const leaveSpace = async () => {
+    const name = spaceDetail.value?.name ?? t('spaces.space_title')
+    const ok = await confirmDialog(t('space.leave.confirm', { name }), {
+      destructive: true, confirmLabel: t('space.leave.confirm_action'),
+    })
+    const me = currentUser.value?.user_id
+    if (!ok || !me) return
+    try {
+      await api.delete(`/api/spaces/${spaceId}/members/${me}`)
+      showToast(t('space.leave.left', { name }), 'info')
+      loc?.route('/spaces', true)
+    } catch (err) {
+      showToast(t('space.leave.failed', { error: String((err as Error)?.message ?? err) }), 'error')
+    }
+  }
+
   // Content authority (owner / admin / moderator, v_41): acting on other
   // people's posts, and the moderation queue — on the host and on every
   // household holding a moderator / admin seat alike, since items are
@@ -601,47 +688,41 @@ export default function SpaceFeedPage() {
         // Followers (read-only) don't.
         settingsHref={isWriterRole(viewerRole.value) ? addBase(`/spaces/${spaceId}/settings`) : null}
         canEditSections={hasSettingsAuthority(viewerRole.value)}
+        // Members leave from More; the owner hands ownership on first;
+        // a follower unfollows from the feed instead.
+        leave={viewerRole.value === 'owner' ? 'owner'
+          : isWriterRole(viewerRole.value) ? 'member' : null}
+        onLeave={() => { void leaveSpace() }}
       />
-      {/* Proposals are the members' business — a follower never sees them
-       *  (``GET …/proposals`` refuses them). */}
-      {s && isWriterRole(viewerRole.value) && (
-        <SpaceProposalsBanner
-          spaceId={spaceId}
-          canVote={hasSettingsAuthority(viewerRole.value)}
-          isOwner={viewerRole.value === 'owner'}
+      {/* The hero and "Needs you" open the Feed only: the other sections
+       *  are tools, and the top bar already names the space. */}
+      {s && section === 'feed' && (
+        <SpaceHero
+          name={s.name}
+          emoji={s.emoji ?? null}
+          coverUrl={s.cover_url ?? null}
+          iconUrl={s.icon_url ?? null}
+          about={s.about_markdown ?? null}
+          memberCount={memberCount.value}
+          // A member's space picture, else their household one.
+          members={memberPreview.value.map((m) => ({
+            ...m, picture_url: resolveAvatar(spaceId, m.user_id, m.picture_url),
+          }))}
+          membersHref={addBase(spaceSectionPath(spaceId, 'members'))}
+          tier={s.space_type ?? null}
+          links={quickLinks}
         />
       )}
-      {s && hasSettingsAuthority(viewerRole.value) && (
-          <SpaceVersionBanner spaceId={spaceId} />
-        )}
-      {s && <SpaceLinksStrip spaceId={spaceId} />}
-
-      {/* Branded header (Space → Settings → About + Theme). On the feed
-       *  tab: the full hero (cover + avatar + name + members + About) when
-       *  the admin set a cover, icon or About. On other tabs: a slim
-       *  variant (short banner + avatar + name) when there's a visual brand
-       *  (cover or icon), so the space stays branded without eating the
-       *  vertical space a tool tab needs. */}
-      {s && (() => {
-        // The open chat is a tool view: the slim header, so the thread
-        // keeps the height.
-        const isFeed = section === 'feed'
-        const branded = !!(s.cover_url || s.icon_url)
-        const show = isFeed ? branded || !!s.about_markdown : branded
-        if (!show) return null
-        return (
-          <SpaceHero
-            name={s.name}
-            emoji={s.emoji ?? null}
-            coverUrl={s.cover_url ?? null}
-            iconUrl={s.icon_url ?? null}
-            about={s.about_markdown ?? null}
-            memberCount={memberCount.value}
-            membersHref={addBase(spaceSectionPath(spaceId, 'members'))}
-            slim={!isFeed}
-          />
-        )
-      })()}
+      {s && section === 'feed' && canModerateQueue && (
+        <SpaceNeedsYou
+          spaceId={spaceId}
+          attention={attention?.spaceId === spaceId ? attention : null}
+          compat={compat}
+          canVote={settingsAuthority}
+          isOwner={viewerRole.value === 'owner'}
+          onChanged={() => { void loadSpaceHeader(spaceId) }}
+        />
+      )}
 
       {chatOpen && (
         <SpaceChatView spaceId={spaceId} spaceName={s?.name ?? t('spaces.space_title')}
@@ -727,7 +808,10 @@ export default function SpaceFeedPage() {
               bazaarEnabled={spaceDetail.value?.features?.bazaar ?? true} />
           )}
           <PendingReviewStrip spaceId={spaceId} feature="posts" />
-          {posts.value.length === 0 && (
+          {feedFailed.value && (
+            <LoadErrorState headingLevel={2} message={t('space.feed.load_failed')} onRetry={retry} />
+          )}
+          {!feedFailed.value && posts.value.length === 0 && (
             <div class="sh-empty-state">
               <div aria-hidden="true">{spaceDetail.value?.archived ? '🗄️' : '💬'}</div>
               <h2>{t('spaces.no_posts')}</h2>
@@ -771,7 +855,8 @@ export default function SpaceFeedPage() {
       )}
 
       {section === 'members' && (
-        <SpaceMemberList spaceId={spaceId} viewerRole={viewerRole.value} />
+        <SpaceMemberList spaceId={spaceId} viewerRole={viewerRole.value}
+                         joinRequests={attention?.spaceId === spaceId ? attention.joinRequests : 0} />
       )}
 
       {section === 'pages' && (

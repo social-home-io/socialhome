@@ -12599,43 +12599,6 @@ a.sh-welcome-card:hover {
   .sh-space-tabs-overflow__item { min-height: 44px; }
 }
 
-/* Quick-links strip shown under the hero. */
-.sh-space-links-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sh-space-xs);
-  margin: var(--sh-space-sm) 0;
-}
-.sh-space-links-strip__link {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  background: var(--sh-bg);
-  color: var(--sh-text);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1
-        ui-monospace, Menlo, Consolas, monospace;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  text-decoration: none;
-  transition: background var(--sh-transition-fast),
-              border-color var(--sh-transition-fast);
-}
-.sh-space-links-strip__link::before {
-  content: '↗';
-  font-size: 0.9em;
-  opacity: 0.65;
-  text-transform: none;
-}
-.sh-space-links-strip__link:hover {
-  background: var(--sh-bg-tertiary);
-  border-color: var(--sh-primary);
-  color: var(--sh-primary-text);
-  text-decoration: none;
-}
-
 /* Admin Quick-links editor in SpaceSettingsPage. */
 .sh-space-links-tab h2 {
   margin: 0 0 var(--sh-space-xs) 0;
@@ -12713,106 +12676,236 @@ a.sh-welcome-card:hover {
   color: var(--sh-text);
 }
 
-/* Branded profile-style header: cover banner + overlapping space avatar
-   + name/members + About (Twitter / Facebook cover pattern). */
+/* The space hero (Feed only): an optional cover, the identity row (icon
+   + a name that wraps, never truncated), one line with the facepile link
+   and the tier, About clamped to two lines, quick links as chips in one
+   scrolling row. Logical properties only, so it mirrors under RTL. */
 .sh-space-hero {
-  display: flex;
-  flex-direction: column;
-  margin-bottom: var(--sh-space-md);
-}
-.sh-space-hero-banner {
-  position: relative;
-  aspect-ratio: 16 / 5;
-  min-height: 140px;
-  max-height: 320px;
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
+  box-shadow: var(--sh-shadow-xs, var(--sh-shadow-sm));
   overflow: hidden;
-  box-shadow: var(--sh-shadow-sm);
 }
-.sh-space-hero-banner--gradient {
-  background: linear-gradient(
-    135deg,
-    var(--sh-primary),
-    var(--sh-accent, var(--sh-primary))
-  );
-}
+.sh-space-hero-banner { height: 132px; }
 .sh-space-hero-image {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  display: block;
 }
-/* Identity row sits below the banner with the avatar pulled up to
-   overlap it, like a profile header. */
+.sh-space-hero-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: var(--sh-space-md) var(--sh-space-lg);
+}
 .sh-space-hero-identity {
   display: flex;
-  align-items: flex-end;
-  gap: var(--sh-space-md);
-  padding: 0 var(--sh-space-md);
-  margin-top: calc(-1 * var(--sh-space-xl));
+  align-items: flex-start;
+  gap: 14px;
 }
 .sh-space-hero-avatar {
-  flex-shrink: 0;
-  width: 72px;
-  height: 72px;
-  border-radius: 50%;
+  flex: none;
   display: grid;
   place-items: center;
-  font-size: 2.2rem;
-  line-height: 1;
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
   background: var(--sh-bg-secondary);
-  border: 3px solid var(--sh-bg);
-  box-shadow: var(--sh-shadow-sm);
   color: var(--sh-primary-text);
+  font-size: 34px;
+  line-height: 1;
   overflow: hidden;
+  box-shadow: var(--sh-shadow-sm);
 }
-.sh-space-hero-avatar-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border-radius: 50%;
+/* With a cover the icon is pulled up onto it; the name stays below the
+   cover, in the card — never on (or under) the picture. */
+.sh-space-hero--cover .sh-space-hero-body { padding-block-start: 0; }
+.sh-space-hero--cover .sh-space-hero-avatar {
+  margin-block-start: -30px;
+  border: 3px solid var(--sh-bg-tertiary);
 }
-/* Slim variant for non-feed tabs: shorter banner, smaller avatar pulled up
-   less, no About. */
-.sh-space-hero--slim {
-  margin-bottom: var(--sh-space-sm);
-}
-.sh-space-hero--slim .sh-space-hero-banner {
-  aspect-ratio: auto;
-  min-height: 0;
-  height: 84px;
-}
-.sh-space-hero--slim .sh-space-hero-identity {
-  margin-top: calc(-1 * var(--sh-space-lg));
-}
-.sh-space-hero--slim .sh-space-hero-avatar {
-  width: 52px;
-  height: 52px;
-  font-size: 1.6rem;
-}
-.sh-space-hero--slim .sh-space-hero-name {
-  font-size: clamp(1.1rem, 3vw, 1.4rem);
-}
-.sh-space-hero-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding-bottom: 4px;
-  min-width: 0;
-}
+.sh-space-hero--cover .sh-space-hero-meta { padding-block-start: 8px; }
+.sh-space-hero-avatar-img { width: 100%; height: 100%; object-fit: cover; }
+.sh-space-hero-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .sh-space-hero-name {
   margin: 0;
-  font-size: clamp(1.25rem, 3.5vw, 1.9rem);
-  font-weight: 800;
-  line-height: 1.1;
+  font: 600 1.5rem/1.15 var(--sh-font-family-display, var(--sh-font-family));
+  font-variation-settings: var(--sh-display-axes, normal);
+  overflow-wrap: break-word;
+  hyphens: manual;
+  min-width: 0;
+}
+.sh-space-hero-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 6px;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
 }
 .sh-space-hero-members {
-  font-size: var(--sh-font-size-sm);
-  color: var(--sh-text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  color: var(--sh-text);
+  font-weight: 500;
+  white-space: nowrap;
 }
+a.sh-space-hero-members {
+  padding-inline: 4px 8px;
+  margin-inline-start: -4px;
+  border-radius: var(--sh-radius-full);
+  text-decoration: none;
+}
+a.sh-space-hero-members:hover { background: var(--sh-bg-secondary); color: var(--sh-text); text-decoration: none; }
+.sh-space-hero-faces { display: inline-flex; }
+.sh-space-hero-faces .sh-avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 9px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--sh-bg-tertiary);
+  object-fit: cover;
+}
+.sh-space-hero-faces > * + * { margin-inline-start: -8px; }
+.sh-space-hero-scope { white-space: nowrap; }
 .sh-space-hero-about {
-  padding: var(--sh-space-sm) var(--sh-space-md) 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  color: var(--sh-text);
+  line-height: var(--sh-line-height-base, 1.5);
 }
+/* The clamp counts lines of the rendered markdown: the About reads as
+   running text here (headings at body size, no block margins or rules);
+   the "Read more" dialog shows it fully formatted. */
+.sh-space-hero-about .sh-markdown { line-height: var(--sh-line-height-base, 1.5); }
+.sh-space-hero .sh-space-hero-about :is(p, h1, h2, h3, h4, h5, h6, ul, ol, li, blockquote, pre) {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font: inherit;
+}
+.sh-space-hero .sh-space-hero-about :is(h1, h2, h3, h4, h5, h6) { font-weight: 600; }
+.sh-space-hero .sh-space-hero-about :is(hr, img, table) { display: none; }
+.sh-space-hero .sh-space-hero-about :is(p, h1, h2, h3, h4, h5, h6, li, blockquote) + :is(p, h1, h2, h3, h4, h5, h6, ul, ol, li, blockquote)::before { content: ' '; }
+.sh-space-hero-more {
+  align-self: flex-start;
+  min-height: 36px;
+  margin-block-start: -6px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--sh-primary-text);
+  font: 600 var(--sh-font-size-sm) var(--sh-font-family);
+  cursor: pointer;
+}
+.sh-space-hero-links ul {
+  display: flex;
+  gap: 6px;
+  margin: 0 calc(-1 * var(--sh-space-lg));
+  padding: 0 var(--sh-space-lg);
+  list-style: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.sh-space-hero-links ul::-webkit-scrollbar { display: none; }
+.sh-space-hero-links li { flex: none; }
+.sh-space-hero-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font: 500 var(--sh-font-size-sm) var(--sh-font-family);
+  white-space: nowrap;
+  text-decoration: none;
+}
+.sh-space-hero-link:hover { border-color: var(--sh-primary); color: var(--sh-text); text-decoration: none; }
+.sh-space-hero-link__icon { color: var(--sh-text-muted); flex: none; }
+.sh-space-hero-more:focus-visible,
+a.sh-space-hero-members:focus-visible,
+.sh-space-hero-link:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 4px var(--sh-bg-tertiary);
+}
+.sh-space-about-dialog__body { overflow-wrap: break-word; }
+@media (max-width: 768px) {
+  .sh-space-hero-banner { height: 96px; }
+  .sh-space-hero-body { padding-inline: var(--sh-space-md); padding-block-end: var(--sh-space-sm); }
+  .sh-space-hero-avatar { width: 56px; height: 56px; font-size: 30px; }
+  .sh-space-hero-name { font-size: 1.3rem; }
+  .sh-space-hero-links ul { margin-inline: calc(-1 * var(--sh-space-md)); padding-inline: var(--sh-space-md); }
+}
+
+/* "Needs you" (owners / admins / moderators), under the hero: one card,
+   a 3 px primary start border, neutral icons, rows with chevrons. */
+.sh-needs-you {
+  padding: 4px;
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-inline-start: 3px solid var(--sh-primary);
+  border-radius: var(--sh-radius-lg);
+}
+.sh-needs-you__heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 12px 2px;
+  font: 600 var(--sh-font-size-sm) / 1.3 var(--sh-font-family);
+  color: var(--sh-text);
+}
+.sh-needs-you__list { margin: 0; padding: 0; list-style: none; }
+.sh-needs-you__list > li + li { border-block-start: 1px solid var(--sh-border); }
+.sh-needs-you__row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 10px;
+  background: none;
+  border: 0;
+  border-radius: var(--sh-radius-md);
+  color: var(--sh-text);
+  font: inherit;
+  text-align: start;
+  text-decoration: none;
+  cursor: pointer;
+}
+.sh-needs-you__row:hover { background: var(--sh-bg-secondary); color: var(--sh-text); text-decoration: none; }
+.sh-needs-you__row:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 4px var(--sh-bg);
+}
+.sh-needs-you__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text);
+}
+.sh-needs-you__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sh-needs-you__title { font-weight: 600; overflow-wrap: anywhere; }
+.sh-needs-you__meta { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); overflow-wrap: anywhere; }
+.sh-needs-you__chevron { display: inline-flex; color: var(--sh-text-muted); }
 
 /* About editor */
 .sh-about-editor {
@@ -17750,81 +17843,27 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   font-size: var(--sh-font-size-xs);
 }
 
-/* Pending multi-admin approval proposals (v_16). Attention-tinted so a
-   pending dissolve / publication change is obvious, but not alarming. */
-.sh-space-proposals {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-sm);
-  margin-bottom: var(--sh-space-md);
-}
-.sh-proposal-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-md);
-  border-radius: var(--sh-radius-md);
-  background: color-mix(in srgb, var(--sh-warning) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--sh-warning) 38%, transparent);
-}
-.sh-proposal-banner__body {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sh-space-sm);
-  flex: 1 1 16rem;
-  min-width: 0;
-}
-.sh-proposal-banner__icon {
-  font-size: 1.4em;
-  line-height: 1;
-  padding-top: 2px;
-}
-.sh-proposal-banner__text {
-  min-width: 0;
-}
-/* Only the heading (direct child) is a block; inline <strong> inside the
-   body paragraphs — feature names, vote tallies — must stay inline. */
-.sh-proposal-banner__text > strong {
-  display: block;
-  margin-bottom: 2px;
-}
-.sh-proposal-banner__text p {
-  margin: 0;
-  font-size: var(--sh-font-size-xs);
-}
+/* A multi-admin approval proposal (v_16) in its dialog, opened from the
+   space's "Needs you" card; the version notice's details share the text
+   styles. */
+.sh-proposal-banner__text { min-width: 0; }
+.sh-proposal-banner__text p { margin: 0 0 var(--sh-space-sm); }
 .sh-proposal-banner__actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: var(--sh-space-sm);
-  flex-shrink: 0;
+  margin-block-start: var(--sh-space-md);
 }
 .sh-proposal-banner__note {
-  margin: 0;
-  font-size: var(--sh-font-size-xs);
-  flex-shrink: 0;
+  margin: var(--sh-space-sm) 0 0;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
 }
-/* "Requested by …" line on a forwarded-admin-action (owner-approval) row. */
-.sh-proposal-banner__requester {
-  margin: var(--sh-space-xs) 0 0;
-  font-size: var(--sh-font-size-xs);
-}
-/* On a narrow phone the actions wrap under the text and stretch full-width
-   so the tap targets stay ≥ 36 px and reachable. */
+.sh-proposal-banner__requester { font-size: var(--sh-font-size-sm); }
+/* On a narrow phone the buttons share the row, each a full tap target. */
 @media (max-width: 480px) {
-  .sh-proposal-banner__actions {
-    flex: 1 1 100%;
-  }
-  .sh-proposal-banner__actions > * {
-    flex: 1;
-  }
-}
-
-/* Version-compat advisory (issue #319 ¶5). Same shape as a proposal banner
-   but an informational primary tint — it's advice, not a pending decision. */
-.sh-version-banner {
-  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
-  border-color: color-mix(in srgb, var(--sh-primary) 30%, transparent);
+  .sh-proposal-banner__actions > * { flex: 1; }
 }
 
 /* Protected account (§CP.R) — stands in for an entry point the server
@@ -25047,9 +25086,48 @@ button.sh-page-editor-status {
 .sh-space-notif-levels__text { display: flex; flex-direction: column; gap: 2px; }
 .sh-space-notif-levels__title { font-weight: 500; }
 .sh-space-notif-levels__meta { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
-.sh-space-hero-members--link { color: var(--sh-text-muted); text-decoration: underline; text-underline-offset: 3px; }
-.sh-space-hero-members--link:hover { color: var(--sh-text); }
+/* More's footer: "Leave space" for a member, a note for the owner. */
+.sh-space-more__leave-row { padding: 6px 4px 2px; border-block-start: 1px solid var(--sh-border); }
+.sh-space-more__leave {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 8px;
+  background: none;
+  border: 0;
+  border-radius: var(--sh-radius-sm);
+  color: var(--sh-danger);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.sh-space-more__leave:hover { background: var(--sh-bg-secondary); }
+.sh-space-more__leave:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: -2px; }
+/* Members: "N join requests · Review" for admins → Moderation. */
+.sh-member-join-requests {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+  min-height: 48px;
+  margin-block-end: var(--sh-space-sm);
+  padding: 6px 12px;
+  border: 1px solid var(--sh-border);
+  border-inline-start: 3px solid var(--sh-primary);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font-weight: 500;
+  text-decoration: none;
+}
+.sh-member-join-requests:hover { background: var(--sh-bg-secondary); color: var(--sh-text); text-decoration: none; }
+.sh-member-join-requests__cta { color: var(--sh-primary-text); font-weight: 600; }
 [dir='rtl'] .sh-flip-rtl { transform: scaleX(-1); }
+@media (max-width: 768px) {
+  /* Phones: the section row starts right under the top bar — the page's
+     top padding would leave a dead strip above it (r3: 61 + 48). */
+  .sh-space-subheader--sections { margin-block-start: calc(-1 * var(--sh-space-md)); }
+}
 @media (max-width: 640px) {
   .sh-space-section { padding: 0 8px; font-size: var(--sh-font-size-base); }
   .sh-space-section--active::after { inset-inline: 8px; }

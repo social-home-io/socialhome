@@ -277,8 +277,23 @@ class SpaceApprovalService(ProtectionGateMixin):
                     await self._proposals.set_status(p.id, ProposalStatus.EXPIRED)
                     await self._emit(p, ProposalStatus.EXPIRED)
                 continue
-            out.append(await self._view(p))
+            view = await self._view(p)
+            # Per reader, so never part of ``_view`` (which is broadcast).
+            view["voted_by_me"] = await self._has_voted(p, viewer_user_id)
+            out.append(view)
         return out
+
+    async def _has_voted(self, proposal: SpaceAdminProposal, user_id: str) -> bool:
+        """Has ``user_id`` (a local user) already voted on ``proposal``?
+        Proposing counts as approving. On the host the vote rows answer;
+        a member household's mirror holds no vote rows (a forwarded vote
+        is recorded on the host only), so there only the proposer is
+        known to have voted."""
+        me = (self._own_instance_id or "", user_id)
+        if (proposal.proposed_by_instance, proposal.proposed_by_user) == me:
+            return True
+        votes = await self._proposals.list_votes(proposal.id)
+        return any((v.voter_instance, v.voter_user) == me for v in votes)
 
     async def expire_due(self) -> int:
         """Mark every lapsed pending proposal EXPIRED + emit. Returns the

@@ -1,15 +1,13 @@
 /**
- * "Needs you" counts: read from the endpoints the Moderation section
- * already uses, only for the roles that act on them, and kept live on
- * the moderation / join-request frames of THIS space.
+ * "Needs you": the space detail's ``attention`` becomes the store, the
+ * More badge counts what Moderation leads to, and the page re-reads on
+ * the frames of THIS space only.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { apiGet, handlers } = vi.hoisted(() => ({
-  apiGet: vi.fn(),
+const { handlers } = vi.hoisted(() => ({
   handlers: {} as Record<string, Array<(e: { type: string; data: unknown }) => void>>,
 }))
-vi.mock('@/api', () => ({ api: { get: apiGet } }))
 vi.mock('@/ws', () => ({
   ws: {
     on: (type: string, h: (e: { type: string; data: unknown }) => void) => {
@@ -19,55 +17,56 @@ vi.mock('@/ws', () => ({
   },
 }))
 
-import { renderHook, waitFor } from '@testing-library/preact'
-import { attentionTotal, loadSpaceAttention, spaceAttention, useSpaceAttention } from './spaceAttention'
+import { renderHook } from '@testing-library/preact'
+import {
+  attentionTotal, setSpaceAttention, spaceAttention, useSpaceAttentionFrames,
+} from './spaceAttention'
+
+const fire = (type: string, spaceId: string) => {
+  for (const h of handlers[type] ?? []) h({ type, data: { space_id: spaceId } })
+}
 
 beforeEach(() => {
-  apiGet.mockReset()
   spaceAttention.value = null
   for (const k of Object.keys(handlers)) delete handlers[k]
-  apiGet.mockImplementation(async (url: string) => {
-    if (url.endsWith('/moderation')) return [{}, {}]
-    if (url.endsWith('/reports')) return [{}]
-    if (url.endsWith('/join-requests')) return [{}, {}, {}]
-    return []
-  })
 })
 
-describe('loadSpaceAttention', () => {
-  it('an admin counts held items, reports and join requests', async () => {
-    await loadSpaceAttention('s1', true, true)
-    expect(spaceAttention.value).toEqual({ spaceId: 's1', review: 2, reports: 1, joinRequests: 3 })
+describe('setSpaceAttention', () => {
+  it('maps the wire counts; More counts held items, reports and join requests', () => {
+    setSpaceAttention('s1', {
+      pending_review: 2, reports: 1, join_requests: 3,
+      proposals: [{ id: 'p1', action: 'dissolve', status: 'pending', approvals: 1, needed: 2,
+                    total_admins: 2, proposed_by_user: 'u', required: 2, voted_by_me: false }],
+    })
+    expect(spaceAttention.value).toMatchObject({ spaceId: 's1', review: 2, reports: 1, joinRequests: 3 })
+    expect(spaceAttention.value?.proposals).toHaveLength(1)
+    // Proposals are voted on from the Needs-you card, not Moderation.
     expect(attentionTotal(spaceAttention.value, 's1')).toBe(6)
     expect(attentionTotal(spaceAttention.value, 's2')).toBe(0)
   })
 
-  it('a moderator never asks for join requests', async () => {
-    await loadSpaceAttention('s1', true, false)
-    expect(spaceAttention.value?.joinRequests).toBe(0)
-    expect(apiGet).not.toHaveBeenCalledWith('/api/spaces/s1/join-requests')
-  })
-
-  it('a member asks for nothing', async () => {
-    await loadSpaceAttention('s1', false, false)
-    expect(apiGet).not.toHaveBeenCalled()
-    expect(attentionTotal(spaceAttention.value, 's1')).toBe(0)
-  })
-
-  it('a failed read counts as zero', async () => {
-    apiGet.mockRejectedValue(new Error('offline'))
-    await loadSpaceAttention('s1', true, true)
+  it('null (a member, a follower) means nothing waits', () => {
+    setSpaceAttention('s1', null)
+    expect(spaceAttention.value).toEqual({ spaceId: 's1', review: 0, reports: 0, joinRequests: 0, proposals: [] })
     expect(attentionTotal(spaceAttention.value, 's1')).toBe(0)
   })
 })
 
-describe('useSpaceAttention', () => {
-  it('re-reads on a frame for this space only', async () => {
-    renderHook(() => useSpaceAttention('s1', true, true))
-    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(3))
-    for (const h of handlers['space.moderation.queued'] ?? []) h({ type: 'space.moderation.queued', data: { space_id: 's2' } })
-    expect(apiGet).toHaveBeenCalledTimes(3)
-    for (const h of handlers['space.join.requested'] ?? []) h({ type: 'space.join.requested', data: { space_id: 's1' } })
-    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(6))
+describe('useSpaceAttentionFrames', () => {
+  it('re-reads on a frame for this space only — proposals included', () => {
+    const reload = vi.fn()
+    renderHook(() => useSpaceAttentionFrames('s1', true, reload))
+    fire('space.moderation.queued', 's2')
+    expect(reload).not.toHaveBeenCalled()
+    fire('space.join.requested', 's1')
+    fire('space.proposal.updated', 's1')
+    expect(reload).toHaveBeenCalledTimes(2)
+  })
+
+  it('listens to nothing for a viewer with nothing to decide', () => {
+    const reload = vi.fn()
+    renderHook(() => useSpaceAttentionFrames('s1', false, reload))
+    fire('space.moderation.queued', 's1')
+    expect(reload).not.toHaveBeenCalled()
   })
 })

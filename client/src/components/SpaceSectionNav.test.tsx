@@ -6,9 +6,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, waitFor, cleanup, within } from '@testing-library/preact'
 
-const { mockPut } = vi.hoisted(() => ({ mockPut: vi.fn() }))
+const { mockPut, mockGet } = vi.hoisted(() => ({ mockPut: vi.fn(), mockGet: vi.fn() }))
 vi.mock('@/api', () => ({
-  api: { get: vi.fn(), put: mockPut, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+  api: { get: mockGet, put: mockPut, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 
@@ -67,6 +67,11 @@ beforeEach(() => {
   }
   phone(false)
   mockPut.mockReset()
+  mockGet.mockReset()
+  mockGet.mockResolvedValue({
+    tasks: { open: 5, mine: 2 }, pages: { count: 3 }, gallery: { albums: 2, items: 5 },
+    stickies: { count: 0 }, bazaar: null, calendar: { upcoming: 1, days: 30 },
+  })
 })
 
 afterEach(() => {
@@ -261,5 +266,57 @@ describe('Your notifications', () => {
     const { getByRole, queryByRole } = renderNav({ notifLevel: null })
     fireEvent.click(getByRole('button', { name: /^More/ }))
     expect(queryByRole('button', { name: /^Your notifications/ })).toBeNull()
+  })
+})
+
+describe('what the hidden sections hold', () => {
+  it('reads /summary when More opens and shows it under each hidden section', async () => {
+    layout(360)
+    const { getByRole } = renderNav()
+    expect(mockGet).not.toHaveBeenCalled()
+    fireEvent.click(getByRole('button', { name: /^More/ }))
+    expect(mockGet).toHaveBeenCalledWith('/api/spaces/s1/summary')
+    await waitFor(() =>
+      expect(getByRole('link', { name: /^Pages/ }).textContent).toContain('3 pages'))
+    expect(getByRole('link', { name: /^Gallery/ }).textContent).toContain('2 albums · 5 photos')
+    expect(getByRole('link', { name: /^Stickies/ }).textContent).toContain('No notes yet')
+    // Bazaar is off on the server side of the summary: no line.
+    expect(getByRole('link', { name: /^Bazaar/ }).querySelector('.sh-space-more__meta')).toBeNull()
+  })
+
+  it('a failed read leaves the rows label-only', async () => {
+    layout(360)
+    mockGet.mockRejectedValue(new Error('offline'))
+    const { getByRole } = renderNav()
+    fireEvent.click(getByRole('button', { name: /^More/ }))
+    await waitFor(() => expect(mockGet).toHaveBeenCalled())
+    expect(getByRole('link', { name: /^Pages/ }).querySelector('.sh-space-more__meta')).toBeNull()
+  })
+})
+
+describe('Leave space', () => {
+  it('a member gets "Leave space" in the footer; it closes More and asks the page', () => {
+    layout(2000)
+    const onLeave = vi.fn()
+    const { getByRole, queryByRole } = renderNav({ leave: 'member', onLeave })
+    const more = getByRole('button', { name: /^More/ })
+    fireEvent.click(more)
+    fireEvent.click(getByRole('button', { name: 'Leave space' }))
+    expect(onLeave).toHaveBeenCalled()
+    expect(queryByRole('button', { name: 'Leave space' })).toBeNull()
+    expect(document.activeElement).toBe(more)
+  })
+
+  it('the owner reads why they cannot leave yet; a follower sees neither', () => {
+    layout(2000)
+    const { getByRole, queryByRole, container, unmount } = renderNav({ leave: 'owner', onLeave: vi.fn() })
+    fireEvent.click(getByRole('button', { name: /^More/ }))
+    expect(queryByRole('button', { name: 'Leave space' })).toBeNull()
+    expect(container.querySelector('.sh-space-more__owner-note')?.textContent).toContain('You own this space')
+    unmount()
+    const r = renderNav({ leave: null })
+    fireEvent.click(r.getByRole('button', { name: /^More/ }))
+    expect(r.queryByRole('button', { name: 'Leave space' })).toBeNull()
+    expect(r.container.querySelector('.sh-space-more__owner-note')).toBeNull()
   })
 })

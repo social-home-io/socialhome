@@ -385,6 +385,7 @@ from .spaces import (
     SpaceRemoteInviteView,
     SpaceRemoteMemberRoleView,
     SpaceSubscribeView,
+    SpaceSummaryView,
     SpaceSyncTriggerView,
     SpaceUnbanView,
 )
@@ -600,6 +601,7 @@ def setup_routes(app: web.Application) -> None:
     )
     app.router.add_view("/api/spaces/{id}/archive", SpaceArchiveView)
     app.router.add_view("/api/spaces/{id}/compat", SpaceCompatView)
+    app.router.add_view("/api/spaces/{id}/summary", SpaceSummaryView)
     app.router.add_view("/api/spaces/{id}/members", SpaceMembersView)
     app.router.add_view(
         "/api/spaces/{id}/members/me",

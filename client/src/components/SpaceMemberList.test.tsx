@@ -48,6 +48,26 @@ vi.mock('@/components/PersonSheet', () => ({
 }))
 
 describe('SpaceMemberList', () => {
+  it('an admin sees "N join requests · Review", leading to Moderation', async () => {
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" joinRequests={2} />)
+    await waitFor(() => expect(r.container.querySelector('.sh-member-join-requests')).toBeTruthy())
+    const row = r.container.querySelector('.sh-member-join-requests') as HTMLAnchorElement
+    expect(row.getAttribute('href')).toBe('/spaces/sp-1/moderation')
+    expect(row.textContent).toBe('2 join requestsReview')
+  })
+
+  it('no join-requests row with none waiting, nor for a moderator', async () => {
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const a = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" joinRequests={0} />)
+    await waitFor(() => expect(a.container.textContent).toContain('Olivia'))
+    expect(a.container.querySelector('.sh-member-join-requests')).toBeNull()
+    a.unmount()
+    const m = render(<SpaceMemberList spaceId="sp-1" viewerRole="moderator" joinRequests={3} />)
+    await waitFor(() => expect(m.container.textContent).toContain('Olivia'))
+    expect(m.container.querySelector('.sh-member-join-requests')).toBeNull()
+  })
+
   it('module exports exist', async () => {
     const mod = await import('./SpaceMemberList')
     expect(mod).toBeTruthy()
