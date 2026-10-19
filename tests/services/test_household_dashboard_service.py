@@ -1059,6 +1059,67 @@ async def test_zero_length_event_is_a_point_in_time():
     assert snap.tomorrow_first is not None and snap.tomorrow_first.title == "Edge"
 
 
+async def test_a_multi_day_event_carries_its_days_like_every_calendar():
+    """A trip from Monday 18:00 to Wednesday 10:00 is on Monday and on
+    Tuesday, and knows it covers Mon–Wed (3 days) — the same rule the SPA
+    calendars place it by (``event_day_span``)."""
+    h = Harness()
+    h.calendar.events = [
+        event("trip", "c-anna", "Trip", at(MONDAY, 18), at(MONDAY + timedelta(2), 10)),
+    ]
+    snap = await h.home(at(MONDAY, 8))
+    (trip,) = snap.events_today
+    assert trip.days is not None
+    assert (trip.days.first, trip.days.last, trip.days.day_count) == (
+        MONDAY,
+        MONDAY + timedelta(2),
+        3,
+    )
+    assert trip.multi_day
+    page = await h.person("u-anna", at(MONDAY, 8))
+    assert page is not None
+    assert titles(page.tomorrow_items) == ["Trip"]
+
+
+async def test_tomorrow_first_is_what_tomorrow_starts_with():
+    """A trip that begins tonight and runs into tomorrow is today's, never
+    "tomorrow's first" (with tonight's start time)."""
+    h = Harness()
+    h.calendar.events = [
+        event("trip", "c-anna", "Trip", at(MONDAY, 21), at(TUESDAY, 10)),
+        event("gym", "c-anna", "Gym", at(TUESDAY, 7), at(TUESDAY, 8)),
+    ]
+    snap = await h.home(at(MONDAY, 20))
+    assert snap.tomorrow_first is not None
+    assert snap.tomorrow_first.title == "Gym"
+
+
+async def test_an_all_day_event_without_a_zone_reads_in_utc_like_the_spa():
+    """An all-day row with no ``tz`` is read in UTC (the server default and
+    the zone legacy rows were stored in), as the SPA reads it — not in the
+    household's zone."""
+    h = Harness()
+    h.calendar.events = [
+        event(
+            "utc-day",
+            "c-anna",
+            "UTC day",
+            datetime(2026, 10, 12, 0, 0, tzinfo=UTC),
+            datetime(2026, 10, 12, 23, 59, tzinfo=UTC),
+            all_day=True,
+            tz=None,
+        ),
+    ]
+    # In Berlin those instants run into Tuesday 01:59 — read in UTC it is
+    # Monday alone, one day.
+    snap = await h.home(at(MONDAY, 12))
+    (day,) = snap.events_today
+    assert day.days is not None and day.days.day_count == 1
+    page = await h.person("u-anna", at(MONDAY, 12))
+    assert page is not None
+    assert titles(page.tomorrow_items) == []
+
+
 async def test_school_day_with_every_lesson_cancelled():
     h = Harness()
     tt = ben_timetable()

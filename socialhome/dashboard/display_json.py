@@ -40,6 +40,7 @@ from ..domain.household_dashboard import (
     SECTION_TASKS,
     SECTION_TIMETABLE,
     DashboardAgendaItem,
+    DashboardEvent,
     DashboardLesson,
     DashboardPerson,
     DashboardSettings,
@@ -296,9 +297,12 @@ def _night(base: BoardBase, clock: Json, *, with_people: bool) -> Json:
 # ─── Rows ────────────────────────────────────────────────────────────────
 
 
-def _agenda_row(item: DashboardAgendaItem, f: Fmt, *, with_people: bool) -> Json:
+def _agenda_row(
+    item: DashboardAgendaItem, f: Fmt, *, with_people: bool, today: bool = True
+) -> Json:
     """One line of a day list (``agenda_row``): time, (icon) title,
-    timetable state, room / teacher."""
+    timetable state, room / teacher. ``today=False`` (tomorrow's list):
+    never ``now`` or ``past``."""
     status: str | None = None
     is_break = False
     if isinstance(item, DashboardLesson):
@@ -308,12 +312,19 @@ def _agenda_row(item: DashboardAgendaItem, f: Fmt, *, with_people: bool) -> Json
         "kind": item.item_type,
         "is_break": is_break,
         "time": f.span(item),
+        # Additive (v1 stays compatible): a multi-day event's days as one
+        # line — "Mon 26 – Sat 31 · 6 days" — and how many; null / 1
+        # otherwise. ``time`` keeps the clock span it always carried.
+        "days": f.days_label(item),
+        "day_count": item.days.day_count
+        if isinstance(item, DashboardEvent) and item.days
+        else 1,
         "title": f.title(item),
         "icon": emoji(f.icon(item)),
         "status": status,
         "status_label": t_status(f.t, status),
-        "now": f.is_now(item),
-        "past": f.is_past(item),
+        "now": today and f.is_now(item),
+        "past": today and f.is_past(item),
         "meta": f.lesson_meta(item) or None,
         "color": _color(f.item_color(item)),
         "people": _ids(f.people(item)) if with_people else [],
@@ -330,6 +341,8 @@ def _school_row(span: SchoolSpan, f: Fmt) -> Json:
         "kind": "school",
         "is_break": False,
         "time": f"{f.hhmm(span.start)}–{f.hhmm(span.end)}",
+        "days": None,
+        "day_count": 1,
         "title": f.t("dashboard.school"),
         "icon": emoji(SCHOOL_ICON),
         "status": None,
@@ -883,6 +896,8 @@ def _tomorrow_row(item: DashboardAgendaItem, f: Fmt) -> Json:
             "kind": "school",
             "is_break": False,
             "time": f.hhmm(item.start),
+            "days": None,
+            "day_count": 1,
             "title": f.t("dashboard.person.first_lesson"),
             "icon": emoji(SCHOOL_ICON),
             "status": None,
@@ -893,7 +908,7 @@ def _tomorrow_row(item: DashboardAgendaItem, f: Fmt) -> Json:
             "color": _color(item.color_hex),
             "people": [],
         }
-    return _agenda_row(item, f, with_people=False)
+    return _agenda_row(item, f, with_people=False, today=False)
 
 
 def _tile(tile: PictureTile, f: Fmt) -> Json:

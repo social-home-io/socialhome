@@ -41,7 +41,7 @@ from ..domain.household_dashboard import (
     PersonSnapshot,
     leading_emoji,
 )
-from .clock import days_late, due_label, hhmm, relative_in, until
+from .clock import days_late, due_label, hhmm, relative_in, span_label, until
 from .contrast import (
     BLACK,
     BUBBLE_DARK,
@@ -288,17 +288,45 @@ class Fmt:
         return hhmm(value)
 
     def span(self, item: DashboardAgendaItem) -> str:
-        """``"09:00–17:00"``, ``"09:00"`` (a point in time) or "All day"."""
+        """``"09:00–17:00"``, ``"09:00"`` (a point in time) or "All day" —
+        the clock span the ESPHome panel's ``time`` field has always
+        carried (kept as it was; :meth:`when` is what the pages show)."""
         if isinstance(item, DashboardEvent) and item.all_day:
             return self.t("dashboard.all_day")
         if item.end <= item.start:
             return hhmm(item.start)
         return f"{hhmm(item.start)}–{hhmm(item.end)}"
 
+    def days_label(self, item: DashboardAgendaItem) -> str | None:
+        """A multi-day event as one line — "Mon 26 – Sat 31 · 6 days", as
+        every calendar in the app says it; ``None`` for anything else."""
+        if isinstance(item, DashboardEvent) and item.multi_day and item.days:
+            return span_label(item.days, self.t)
+        return None
+
+    def when(self, item: DashboardAgendaItem) -> str:
+        """The time column of a day list: a multi-day event's days
+        ("Mon 26 – Sat 31 · 6 days" — never a clock span that runs from
+        one day into another), else :meth:`span`."""
+        return self.days_label(item) or self.span(item)
+
     def rel(self, then: datetime) -> str:
         return relative_in(self.now, then, self.t)
 
     def until(self, end: datetime) -> str:
+        """ "until 17:00" (the panel JSON's ``until``, kept as it was)."""
+        return until(end, self.t)
+
+    def until_day(self, end: datetime) -> str:
+        """ "until 17:00" — "until Sat 31 10:00" when it ends on another day
+        (a running trip), as the SPA's event meta line says it."""
+        if end.date() != self.today:
+            day = self.t(
+                "dashboard.span.day",
+                weekday=self.t(f"dashboard.date.weekday_short.{end.weekday()}"),
+                day=end.day,
+            )
+            return self.t("dashboard.rel.until", time=f"{day} {hhmm(end)}")
         return until(end, self.t)
 
     def late(self, days: int) -> str:

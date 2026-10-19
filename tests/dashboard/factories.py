@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from PIL import Image
 
+from socialhome.domain.calendar import DaySpan
 from socialhome.domain.household_dashboard import (
     MENTION_HERE,
     MENTION_PERSON,
@@ -95,6 +96,7 @@ def event(
     *people: str,
     all_day: bool = False,
     color: str | None = "#357BBB",
+    days: DaySpan | None = None,
 ) -> DashboardEvent:
     return DashboardEvent(
         id=eid,
@@ -105,6 +107,7 @@ def event(
         person_ids=tuple(people),
         color=color,
         location="Secret Street 1",
+        days=days,
     )
 
 

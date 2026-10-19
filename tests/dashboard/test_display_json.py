@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC
+from datetime import UTC, timedelta
 from pathlib import Path
 from string import Formatter
 from zoneinfo import ZoneInfo
@@ -35,6 +35,7 @@ from socialhome.dashboard.display_json import (
 from socialhome.dashboard.presenter import home_colors, person_colors
 from socialhome.dashboard.render import STATIC_DIR, DashboardRenderer
 from socialhome.dashboard.tabs import TAB_MAP, TAB_MESSAGES, TAB_NOTES
+from socialhome.domain.calendar import DaySpan
 from socialhome.domain.household_dashboard import (
     SUPPORTED_DASHBOARD_LOCALES,
     DashboardSettings,
@@ -275,6 +276,33 @@ def test_reader_page():
     assert r["next"]["rel"].startswith("in ")
     assert r["day"]["tomorrow"]["rows"][0]["time"] == "All day"
     assert r["chores"]["label"] == "Chores"
+
+
+def test_agenda_rows_add_the_days_of_a_multi_day_event():
+    """Additive for the panel (v1 stays compatible): ``days`` spells a
+    multi-day event as one line and ``day_count`` says how many; ``time``
+    keeps the clock span it always carried."""
+    trip = event(
+        "t",
+        "Camp",
+        at(18),
+        at(10, day=TOMORROW + timedelta(days=1)),
+        "u-anna",
+        days=DaySpan(TOMORROW - timedelta(days=1), TOMORROW + timedelta(days=1)),
+    )
+    r = _person(person(today_items=(trip,), now_item=None, next_item=None))["reader"]
+    row = r["day"]["rows"][0]
+    assert row["days"] == "Mon 12 – Wed 14 · 3 days"
+    assert row["day_count"] == 3
+    assert row["time"] == "18:00–10:00"
+    plain = _person(person())["reader"]["day"]["tomorrow"]["rows"][0]
+    assert plain["days"] is None and plain["day_count"] == 1
+    # Running now and going on tomorrow: "now" in today's rows only.
+    running = _person(
+        person(now=at(20), today_items=(trip,), tomorrow_items=(trip,), next_item=None)
+    )["reader"]["day"]
+    assert running["rows"][0]["now"] is True
+    assert running["tomorrow"]["rows"][0]["now"] is False
 
 
 def test_reader_due_label():

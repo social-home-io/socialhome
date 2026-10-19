@@ -75,7 +75,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
 from ..domain import timetable as td
-from ..domain.calendar import Calendar, CalendarEvent, all_day_covers
+from ..domain.calendar import Calendar, CalendarEvent, event_day_span
 from ..domain.conversation import ConversationMessage, MentionGlance
 from ..domain.household_dashboard import (
     CHAT_MAX_AGE,
@@ -278,6 +278,11 @@ def _next_after(
     return min(upcoming, key=_agenda_key, default=None)
 
 
+def _starts_on(event: DashboardEvent, day: date) -> bool:
+    """``event`` begins on ``day`` (not earlier)."""
+    return event.days is None or event.days.first >= day
+
+
 def _running_at(
     now: datetime, items: Iterable[DashboardAgendaItem]
 ) -> DashboardAgendaItem | None:
@@ -416,8 +421,14 @@ class HouseholdDashboardService:
             stickies=stickies,
             stickies_total=stickies_total,
             school=school_today,
+            # What tomorrow STARTS with: an event already running (a
+            # trip that began tonight) is today's, not tomorrow's first.
             tomorrow_first=_next_after(
-                ctx.now, [*events.get(tomorrow, []), *school_tomorrow]
+                ctx.now,
+                [
+                    *(e for e in events.get(tomorrow, []) if _starts_on(e, tomorrow)),
+                    *school_tomorrow,
+                ],
             ),
             messages=messages,
             mentions=mentions,
@@ -766,6 +777,9 @@ class HouseholdDashboardService:
                 ev = copies[0].event
                 event_id = "event-" + hashlib.sha256(key.encode()).hexdigest()[:16]
                 color = colors[person_ids[0]]
+            span = event_day_span(
+                ev.start, ev.end, all_day=ev.all_day, event_tz=ev.tz, viewer_tz=ctx.tz
+            )
             item = DashboardEvent(
                 id=event_id,
                 title=ev.summary,
@@ -775,22 +789,14 @@ class HouseholdDashboardService:
                 person_ids=person_ids,
                 color=color,
                 location=ev.location,
+                days=span,
             )
             for day in days:
-                if self._on_day(ctx, ev, day):
+                if span.covers(day):
                     out.setdefault(day, []).append(item)
         for items in out.values():
             items.sort(key=lambda e: (*_agenda_key(e), e.title))
         return out
-
-    @staticmethod
-    def _on_day(ctx: _Context, ev: CalendarEvent, day: date) -> bool:
-        if ev.all_day:
-            return all_day_covers(ev, day, ctx.tz)
-        lo, hi = local_day_bounds(day, ctx.tz)
-        if ev.end <= ev.start:  # zero-length: a point in time
-            return lo <= ev.start < hi
-        return ev.start < hi and ev.end > lo
 
     # ── Tasks ────────────────────────────────────────────────────────────
 

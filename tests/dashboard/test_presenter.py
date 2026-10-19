@@ -41,6 +41,7 @@ from socialhome.dashboard.presenter import (
     view_key,
 )
 from socialhome.dashboard.render import STATIC_DIR
+from socialhome.domain.calendar import DaySpan
 from socialhome.i18n import Catalog
 
 from .factories import (
@@ -254,10 +255,50 @@ def test_fmt_phrases():
     assert f.avatar(ANNA) == "/avatar/u-anna?v=pic1"
 
 
+def test_fmt_when_spells_a_multi_day_event_as_its_days():
+    """A day list's time column: a trip over several days says its days
+    ("Mon 12 – Wed 14 · 3 days", as every calendar in the app) instead of
+    a clock span from one day into another; anything else keeps
+    :meth:`Fmt.span` (which the panel's ``time`` field still carries)."""
+    f = _fmt()
+    trip = event(
+        "t",
+        "Trip",
+        at(18),
+        at(10) + timedelta(days=2),
+        "u-anna",
+        days=DaySpan(TODAY, TODAY + timedelta(days=2)),
+    )
+    assert f.when(trip) == "Mon 12 – Wed 14 · 3 days"
+    assert f.days_label(trip) == "Mon 12 – Wed 14 · 3 days"
+    assert f.span(trip) == "18:00–10:00"  # the panel's unchanged ``time``
+    one_day = event("w", "Work", at(9), at(17), "u-anna", days=DaySpan(TODAY, TODAY))
+    assert f.when(one_day) == "09:00–17:00"
+    assert f.days_label(one_day) is None
+    assert f.when(BIRTHDAY) == "All day"
+    assert f.when(MATHS) == f.span(MATHS)
+
+
+def test_fmt_until_day_names_another_day():
+    f = _fmt()
+    assert f.until_day(at(17)) == "until 17:00"
+    assert f.until_day(at(10) + timedelta(days=2)) == "until Wed 14 10:00"
+    assert f.until(at(10) + timedelta(days=2)) == "until 10:00"  # panel JSON
+
+
 def test_fmt_localised():
     f = _fmt(locale="de")
     assert f.rel(at(15)) == "in 28 Min."
     assert f.span(BIRTHDAY) == "Ganztägig"
+    trip = event(
+        "t",
+        "Reise",
+        at(18),
+        at(10) + timedelta(days=2),
+        "u-anna",
+        days=DaySpan(TODAY, TODAY + timedelta(days=2)),
+    )
+    assert f.when(trip) == "Mo 12 – Mi 14 · 3 Tage"
 
 
 # ─── Who's home / school ─────────────────────────────────────────────────

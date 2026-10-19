@@ -142,6 +142,8 @@
       "rows": [
         {
           "color": "#c44d72",
+          "day_count": 1,
+          "days": null,
           "icon": null,
           "is_break": false,
           "kind": "event",
@@ -156,6 +158,8 @@
         },
         {
           "color": "#c44d72",
+          "day_count": 1,
+          "days": null,
           "icon": null,
           "is_break": false,
           "kind": "event",
@@ -174,6 +178,8 @@
         "rows": [
           {
             "color": "#c44d72",
+            "day_count": 1,
+            "days": null,
             "icon": null,
             "is_break": false,
             "kind": "event",

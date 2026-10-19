@@ -18,8 +18,10 @@ from socialhome.dashboard.clock import (
     household_clock,
     relative_in,
     resolve_zone,
+    span_label,
     until,
 )
+from socialhome.domain.calendar import DaySpan
 from socialhome.i18n import Catalog
 
 CATALOG = Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
@@ -196,3 +198,20 @@ def test_due_label():
     assert due_label(date(2026, 10, 30), today, t) == "October 30"
     assert due_label(None, today, t) is None
     assert due_label(today + timedelta(days=3), today, _t("de")) == "Donnerstag"
+
+
+def test_span_label_one_line_for_several_days_none_for_one():
+    t = _t("en")
+    assert span_label(DaySpan(date(2026, 10, 26), date(2026, 10, 31)), t) == (
+        "Mon 26 – Sat 31 · 6 days"
+    )
+    assert span_label(DaySpan(date(2026, 10, 30), date(2026, 11, 2)), t) == (
+        "Fri 30 Oct – Mon 2 Nov · 4 days"
+    )
+    assert span_label(DaySpan(date(2026, 10, 26), date(2026, 10, 26)), t) is None
+
+
+def test_span_label_localised():
+    span = DaySpan(date(2026, 10, 26), date(2026, 10, 31))
+    assert span_label(span, _t("de")) == "Mo 26 – Sa 31 · 6 Tage"
+    assert span_label(span, _t("fr")) == "lun. 26 – sam. 31 · 6 jours"

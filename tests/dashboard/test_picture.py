@@ -27,6 +27,7 @@ from socialhome.dashboard.picture import (
 )
 from socialhome.dashboard.presenter import Fmt, person_colors
 from socialhome.dashboard.render import DashboardRenderer
+from socialhome.domain.calendar import DaySpan
 from socialhome.domain.household_dashboard import DashboardTask
 from socialhome.i18n import Catalog
 
@@ -279,6 +280,26 @@ def test_my_day_groups_by_day_part_with_past_current_and_cancelled():
     assert parts["night"].tiles == ()
     assert maths.label == "08:20–09:05 Maths"
     assert not v.empty
+
+
+def test_a_trip_begun_on_an_earlier_day_is_the_days_standing_context():
+    """A trip that began yesterday evening isn't "this evening": it sits
+    first (with the all-day things) and says its days, like every
+    calendar in the app — never yesterday's start time."""
+    trip = event(
+        "trip",
+        "Camp",
+        at(18, day=TODAY - timedelta(days=1)),
+        at(10, day=TOMORROW),
+        "u-mia",
+        days=DaySpan(TODAY - timedelta(days=1), TOMORROW),
+    )
+    page = replace(mia_page(now=at(10, 30)), today_items=(trip, MATHS))
+    parts = {p.key: p for p in _view(page).parts}
+    first = parts["morning"].tiles[0]
+    assert first.caption == "Camp"
+    assert first.label == "Sun 11 – Tue 13 · 3 days Camp"
+    assert parts["evening"].tiles == ()
 
 
 def test_the_running_item_is_framed():

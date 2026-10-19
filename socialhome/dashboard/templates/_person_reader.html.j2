@@ -31,7 +31,7 @@
     <div class="dash-nn dash-nn-now {{ f.kc(f.item_color(it)) }}" data-live>
       <h2 class="dash-label">{{ t("dashboard.person.now") }}</h2>
       <p class="dash-nn-title">{% if f.icon(it) %}<span aria-hidden="true">{{ f.icon(it) }}</span> {% endif %}{{ f.title(it) }}{% if f.lesson_meta(it) %} <span class="dash-nn-meta">· {{ f.lesson_meta(it) }}</span>{% endif %}</p>
-      <p class="dash-nn-when">{{ f.until(it.end) }}</p>
+      <p class="dash-nn-when">{{ f.until_day(it.end) }}</p>
     </div>
     {% endif %}
     {% if page.next_item %}
@@ -76,7 +76,7 @@
           <span class="dash-row-main"><span class="dash-row-title"><span aria-hidden="true">🎒</span> {{ t("dashboard.person.first_lesson") }}</span></span>
         </li>
         {% else %}
-        {{ agenda_row(item) }}
+        {{ agenda_row(item, today=False) }}
         {% endif %}
         {% endfor %}
       </ol>

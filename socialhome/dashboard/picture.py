@@ -313,9 +313,10 @@ def _is_cancelled(item: DashboardAgendaItem) -> bool:
 
 def _time(item: DashboardAgendaItem, f: Fmt) -> str:
     """When ``item`` starts, as the reader page spells it — "All day"
-    for an all-day event (never a midnight "00:00")."""
-    if isinstance(item, DashboardEvent) and item.all_day:
-        return f.span(item)
+    for an all-day event (never a midnight "00:00"), the days of a
+    multi-day one ("Mon 26 – Sat 31 · 6 days")."""
+    if isinstance(item, DashboardEvent) and (item.all_day or item.multi_day):
+        return f.when(item)
     return f.hhmm(item.start)
 
 
@@ -332,7 +333,7 @@ def _tile(item: DashboardAgendaItem, f: Fmt, *, today: bool = True) -> PictureTi
     key = "dashboard.picture.cancelled" if cancelled else "dashboard.picture.item"
     return PictureTile(
         icon=item_icon(item),
-        label=f.t(key, when=f.span(item), title=f.title(item)),
+        label=f.t(key, when=f.when(item), title=f.title(item)),
         caption=f.title(item),
         color=f.kc(f.item_color(item)),
         past=today and f.is_past(item),
@@ -356,8 +357,12 @@ def _parts(page: PersonSnapshot, f: Fmt) -> tuple[PicturePart, ...]:
     current = day_part(page.now)
     buckets: dict[str, list[PictureTile]] = {p.key: [] for p in DAY_PARTS}
     for item in page.today_items:
-        all_day = isinstance(item, DashboardEvent) and item.all_day
-        part = DAY_PARTS[0] if all_day else day_part(item.start)
+        # All day, or begun on an earlier day (a trip): the day's
+        # standing context, first — never the part of the day it began in.
+        standing = isinstance(item, DashboardEvent) and (
+            item.all_day or item.start.date() < page.today
+        )
+        part = DAY_PARTS[0] if standing else day_part(item.start)
         buckets[part.key].append(_tile(item, f))
     out = []
     for p in DAY_PARTS:
