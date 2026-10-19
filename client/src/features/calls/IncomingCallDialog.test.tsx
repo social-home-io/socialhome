@@ -21,6 +21,8 @@ import IncomingCallDialog from './IncomingCallDialog'
 import { CallEmbedBlockedDialog } from './CallEmbedBlockedDialog'
 import { CallEmbedBlockedError } from './embedPolicy'
 import { incoming, type IncomingCall } from '@/store/calls'
+import { householdUsers } from '@/store/householdUsers'
+import { setConversationMembers } from '@/store/conversationMembers'
 
 const RINGING: IncomingCall = {
   call_id: 'c1', from_user: 'alice', call_type: 'video',
@@ -31,10 +33,27 @@ const RINGING: IncomingCall = {
 describe('IncomingCallDialog', () => {
   beforeEach(() => {
     incoming.value = null
+    // The callers are people of this household.
+    householdUsers.value = new Map([
+      ['alice', { user_id: 'alice', username: 'alice', display_name: 'alice' }],
+      ['bob', { user_id: 'bob', username: 'bob', display_name: 'bob' }],
+    ] as never)
     acceptCall.mockReset()
     apiPost.mockClear()
     showToast.mockReset()
     route.mockReset()
+  })
+
+  it('a caller from another household is named by the conversation, else "Someone"', () => {
+    setConversationMembers('conv-remote', [{ user_id: 'remote-sara', display_name: 'Sara' }])
+    incoming.value = { ...RINGING, from_user: 'remote-sara', conversation_id: 'conv-remote' }
+    const view = render(<IncomingCallDialog />)
+    expect(view.getByText(/Sara is calling/)).toBeTruthy()
+    view.unmount()
+    incoming.value = { ...RINGING, call_id: 'c9', from_user: 'tvnxzlljlae437w5fmwriqqvakgfynks', conversation_id: 'conv-x' }
+    const other = render(<IncomingCallDialog />)
+    expect(other.container.textContent).not.toContain('tvnxzlljlae437w5fmwriqqvakgfynks')
+    expect(other.getByText(/Someone is calling/)).toBeTruthy()
   })
 
   it('renders nothing when no incoming call is set', () => {

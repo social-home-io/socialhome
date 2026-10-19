@@ -21,10 +21,9 @@ import { incoming, type IncomingCall } from '@/store/calls'
 import { acceptCall } from './callSession'
 import { showCallError } from './CallEmbedBlockedDialog'
 import { CallEmbedBlockedError } from './embedPolicy'
-import {
-  householdDisplayName,
-  loadHouseholdUsers,
-} from '@/store/householdUsers'
+import { loadHouseholdUsers } from '@/store/householdUsers'
+import { loadConversationMembers } from '@/store/conversationMembers'
+import { callerName } from './callerName'
 import { t } from '@/i18n/i18n'
 import { restoreFocus } from '@/utils/focus'
 
@@ -137,6 +136,8 @@ function IncomingCallCard({ call }: { call: IncomingCall }) {
 
   useEffect(() => {
     void loadHouseholdUsers()  // resolve "from" line + missed-call toast
+    // A caller from another household is named by the conversation's roster.
+    if (call.conversation_id) void loadConversationMembers(call.conversation_id)
     // This card's own ring. Not a module-level slot: Preact 11 runs a
     // replaced card's cleanup after paint, possibly after the next call's
     // card started ringing, and must not silence that one.
@@ -154,7 +155,7 @@ function IncomingCallCard({ call }: { call: IncomingCall }) {
 
     const timer = setTimeout(() => {
       if (incoming.value?.call_id === call.call_id) {
-        const fromName = householdDisplayName(call.from_user)
+        const fromName = callerName(call.from_user, call.conversation_id)
         showToast(t('calls.missed_from', { name: fromName }), 'info')
         incoming.value = null
       }
@@ -191,7 +192,7 @@ function IncomingCallCard({ call }: { call: IncomingCall }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const fromName = householdDisplayName(call.from_user)
+  const fromName = callerName(call.from_user, call.conversation_id)
 
   return (
     <div
