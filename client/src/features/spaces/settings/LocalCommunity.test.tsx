@@ -77,6 +77,15 @@ describe('LocalCommunity', () => {
     expect(toast).toHaveBeenLastCalledWith('No longer a local community', 'success')
   })
 
+  it('keyboard focus stays on the card after a save (Remove swaps the buttons)', async () => {
+    const view = render(<LocalCommunity space={space({ local_area: AREA })} onUpdate={vi.fn()} />)
+    const remove = view.getByRole('button', { name: 'Stop being a local community' })
+    remove.focus()
+    fireEvent.click(remove)
+    await waitFor(() => expect(view.getByRole('status').textContent).toContain('Not a local community'))
+    await waitFor(() => expect(document.activeElement?.textContent).toBe('Make it a local community'))
+  })
+
   it('with "Let admins act for me" on, explains instead of offering the area', () => {
     const view = render(
       <LocalCommunity space={space({ features: { delegated_admin_authority: true } } as Partial<Space>)}

@@ -8,7 +8,7 @@
  * someone joins. Paired households see the centre and radius before
  * joining (``PATCH /api/spaces/{id}`` ``{lat, lon, radius_km}``, 4 dp).
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { Button } from '@/components/Button'
 import { LocalAreaMap } from '@/components/LocalAreaMap'
 import { LocalAreaPicker } from '@/components/LocalAreaPicker'
@@ -25,12 +25,23 @@ export function LocalCommunity({ space, onUpdate }: {
   const [area, setArea] = useServerValue<LocalArea | null>(space.local_area ?? null)
   const [picking, setPicking] = useState(false)
   const [busy, setBusy] = useState(false)
+  const sectionRef = useRef<HTMLElement | null>(null)
   useEffect(() => { void ensureHouseholdHome() }, [])
   // A delegated admin's household would seat people without this
   // household's check — the server refuses the area while that is on.
   const delegated = space.features?.delegated_admin_authority === true
 
+  /** After a save the button that had focus may be gone (Remove swaps the
+   *  buttons): put keyboard focus back on the card's first action rather
+   *  than leaving it on the page body. */
+  const keepFocus = () => requestAnimationFrame(() => {
+    const active = document.activeElement
+    if (active && active !== document.body && active.isConnected) return
+    sectionRef.current?.querySelector<HTMLElement>('.sh-ss-local-area__actions button')?.focus()
+  })
+
   const save = async (next: LocalArea | null) => {
+    if (busy) return
     const before = area
     setArea(next)
     setBusy(true)
@@ -46,11 +57,13 @@ export function LocalCommunity({ space, onUpdate }: {
     )
     setBusy(false)
     if (outcome === 'failed') setArea(before)
+    keepFocus()
   }
 
   const headingId = `local-area-h-${space.id}`
   return (
-    <section class="sh-ss-local-area" aria-labelledby={headingId} data-testid="settings-local-area">
+    <section ref={sectionRef} class="sh-ss-local-area" aria-labelledby={headingId}
+             aria-busy={busy ? 'true' : undefined} data-testid="settings-local-area">
       <h3 class="sh-ss-subheading" id={headingId}>🏘️ {t('local_area.settings.title')}</h3>
       <p class="sh-ss-local-area__where" role="status">
         {area ? areaLabel(area) : t('local_area.settings.none')}
@@ -59,15 +72,15 @@ export function LocalCommunity({ space, onUpdate }: {
       <div class="sh-ss-local-area__actions">
         {area ? (
           <>
-            <Button variant="secondary" onClick={() => setPicking(true)} disabled={busy || delegated}>
+            <Button variant="secondary" onClick={() => { if (!busy) setPicking(true) }} disabled={delegated}>
               {t('local_area.change')}
             </Button>
-            <Button variant="ghost" onClick={() => void save(null)} disabled={busy}>
+            <Button variant="ghost" onClick={() => void save(null)}>
               {t('local_area.settings.remove')}
             </Button>
           </>
         ) : (
-          <Button variant="secondary" onClick={() => setPicking(true)} disabled={busy || delegated}>
+          <Button variant="secondary" onClick={() => { if (!busy) setPicking(true) }} disabled={delegated}>
             {t('local_area.settings.make')}
           </Button>
         )}

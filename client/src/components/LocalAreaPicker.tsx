@@ -2,8 +2,9 @@
  * LocalAreaPicker — choose a local community's area: a centre and a
  * radius. Households join the space only while their home lies inside.
  *
- * The centre is tapped on the map, or "Use our home" takes the
- * HOUSEHOLD's home location (never this device's position — the space is
+ * The centre is tapped on the map, typed as latitude / longitude (the
+ * keyboard way in — there is no place search, which would be a third-party
+ * fetch), or "Use our home" takes the HOUSEHOLD's home location (never this device's position — the space is
  * about where people live, not where the phone happens to be). The radius
  * is one of a few presets. Coordinates are rounded to 4 dp here so the
  * preview matches what the server stores (it truncates again).
@@ -20,6 +21,18 @@ import { ChipRadioGroup } from './ChipRadioGroup'
 import { LocalAreaMap } from './LocalAreaMap'
 import { Modal } from './Modal'
 
+/** A typed coordinate: a number (``,`` or ``.`` decimal) within ±limit,
+ *  rounded to 4 dp — else ``null``. */
+export function parseCoord(raw: string, limit: number): number | null {
+  const text = raw.trim().replace(',', '.')
+  if (!/^-?\d+(\.\d+)?$/.test(text)) return null
+  const v = Number(text)
+  if (!Number.isFinite(v) || Math.abs(v) > limit) return null
+  return round4(v) + 0
+}
+
+const fmt4 = (v: number): string => v.toFixed(4)
+
 export function LocalAreaPicker({
   open, initial, home, onClose, onSubmit,
 }: {
@@ -33,11 +46,31 @@ export function LocalAreaPicker({
 }) {
   const [centre, setCentre] = useState<Home | null>(null)
   const [radius, setRadius] = useState<number>(DEFAULT_RADIUS_KM)
+  // The typed fields mirror the centre; a map tap or "Use our home"
+  // rewrites them, typing a valid pair moves the centre.
+  const [latText, setLatText] = useState('')
+  const [lonText, setLonText] = useState('')
+
+  const place = (next: Home | null) => {
+    setCentre(next)
+    setLatText(next ? fmt4(next.lat) : '')
+    setLonText(next ? fmt4(next.lon) : '')
+  }
+
+  const typed = (nextLat: string, nextLon: string) => {
+    setLatText(nextLat)
+    setLonText(nextLon)
+    const lat = parseCoord(nextLat, 90)
+    const lon = parseCoord(nextLon, 180)
+    if (lat !== null && lon !== null) setCentre({ lat, lon })
+  }
+  const latBad = latText.trim() !== '' && parseCoord(latText, 90) === null
+  const lonBad = lonText.trim() !== '' && parseCoord(lonText, 180) === null
 
   // Every open starts from the stored area (or nothing).
   useEffect(() => {
     if (!open) return
-    setCentre(initial ? { lat: initial.lat, lon: initial.lon } : null)
+    place(initial ? { lat: initial.lat, lon: initial.lon } : null)
     setRadius(initial && RADIUS_PRESETS_KM.includes(initial.radius_km)
       ? initial.radius_km
       : initial?.radius_km ?? DEFAULT_RADIUS_KM)
@@ -61,7 +94,7 @@ export function LocalAreaPicker({
           area={area}
           home={home}
           height={240}
-          onPick={(lat, lon) => setCentre({ lat: round4(lat), lon: round4(lon) })}
+          onPick={(lat, lon) => place({ lat: round4(lat), lon: round4(lon) })}
           ariaLabel={t('local_area.picker.map_label')}
         />
         <p class="sh-muted sh-local-area-picker__where" role="status">
@@ -71,10 +104,31 @@ export function LocalAreaPicker({
         </p>
         {home && (
           <button type="button" class="sh-link sh-local-area-picker__home"
-                  onClick={() => setCentre({ lat: round4(home.lat), lon: round4(home.lon) })}>
+                  onClick={() => place({ lat: round4(home.lat), lon: round4(home.lon) })}>
             🏠 {t('local_area.picker.use_home')}
           </button>
         )}
+        <fieldset class="sh-local-area-picker__coords">
+          <legend>{t('local_area.picker.coords_legend')}</legend>
+          <label>
+            {t('local_area.picker.lat')}
+            <input type="text" inputMode="decimal" autoComplete="off" spellcheck={false}
+                   name="local-area-lat" value={latText} placeholder="47.3769"
+                   aria-invalid={latBad ? 'true' : undefined}
+                   aria-describedby={latBad ? 'local-area-lat-err' : undefined}
+                   onInput={(e) => typed((e.target as HTMLInputElement).value, lonText)} />
+            {latBad && <span id="local-area-lat-err" class="sh-form-error">{t('local_area.picker.lat_invalid')}</span>}
+          </label>
+          <label>
+            {t('local_area.picker.lon')}
+            <input type="text" inputMode="decimal" autoComplete="off" spellcheck={false}
+                   name="local-area-lon" value={lonText} placeholder="8.5417"
+                   aria-invalid={lonBad ? 'true' : undefined}
+                   aria-describedby={lonBad ? 'local-area-lon-err' : undefined}
+                   onInput={(e) => typed(latText, (e.target as HTMLInputElement).value)} />
+            {lonBad && <span id="local-area-lon-err" class="sh-form-error">{t('local_area.picker.lon_invalid')}</span>}
+          </label>
+        </fieldset>
         <div class="sh-local-area-picker__radius">
           <span id="local-area-radius-label" class="sh-local-area-picker__radius-label">
             {t('local_area.picker.radius')}
@@ -91,7 +145,7 @@ export function LocalAreaPicker({
           <Button type="button" variant="secondary" onClick={onClose}>
             {t('common.cancel')}
           </Button>
-          <Button type="submit" disabled={!area}>
+          <Button type="submit" disabled={!area || latBad || lonBad}>
             {t('local_area.picker.submit')}
           </Button>
         </div>
