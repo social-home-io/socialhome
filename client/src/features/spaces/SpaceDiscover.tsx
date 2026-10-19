@@ -28,7 +28,7 @@ import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
 import { LocalAreaBadge, localAreaVerdictText, verdictAllowsJoin } from '@/components/LocalAreaBadge'
-import { askLocationConsent, isApiCode, locationConsentText } from '@/components/localConsent'
+import { askLocationConsent, isApiCode, locationConsentText, noHomeText } from '@/components/localConsent'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
@@ -404,7 +404,7 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           locationNote={joinCarriesLocation(asking) && !isLocal(asking)
             ? locationConsentText(hostLabel(asking)) : null}
           locationBlocked={joinCarriesLocation(asking) && !isLocal(asking) && home === null
-            ? t('local_area.consent.no_home') : null}
+            ? noHomeText() : null}
           onSubmit={submitAsk}
         />
       )}

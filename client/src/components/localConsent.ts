@@ -11,7 +11,14 @@
  */
 import { confirmDialog } from './confirm'
 import { t } from '@/i18n/i18n'
+import { homeLocationFromPlatform } from '@/platform'
 import { ensureHouseholdHome, householdHome } from '@/store/householdHome'
+
+/** "Your household has no home location yet" — and where it is set: in
+ *  Home Assistant when the platform owns it, else Admin › Settings. */
+export function noHomeText(): string {
+  return homeLocationFromPlatform() ? t('local_area.consent.no_home') : t('local_area.consent.no_home_local')
+}
 
 /** The consent sentence, as shown in a dialog or beside a request —
  *  ``host`` ``null`` when the household's name is not known here (an
@@ -29,7 +36,7 @@ export function locationConsentText(host: string | null): string {
 export async function askLocationConsent(host: string | null): Promise<boolean> {
   await ensureHouseholdHome()
   if (householdHome.value == null) {
-    await confirmDialog(t('local_area.consent.no_home'), {
+    await confirmDialog(noHomeText(), {
       title: t('local_area.consent.title'),
       confirmLabel: t('common.ok'),
     })

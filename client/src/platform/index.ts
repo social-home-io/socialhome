@@ -43,6 +43,10 @@ export const usesHaUserDirectory = (): boolean =>
 /** The platform has zones of its own (Home Assistant's `zone.*`) that
  *  Admin › Zones can sync into the household's zones. */
 export const supportsZoneSync = (): boolean => hasCapability('zone_sync')
+/** The household's home location comes from the platform (Home
+ *  Assistant's own location) — shown read-only, changed there; without it
+ *  an admin sets it in Admin › Settings. */
+export const homeLocationFromPlatform = (): boolean => hasCapability('home_location_sync')
 
 // ── Mode-shaped accessors (intent over raw string compares) ──────────────
 

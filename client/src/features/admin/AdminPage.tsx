@@ -24,6 +24,7 @@ import { FormError } from '@/components/FormError'
 import { showToast } from '@/components/Toast'
 import { HouseholdToggles, loadToggles } from '@/components/HouseholdToggles'
 import { HomeNameSettings } from '@/components/HomeNameSettings'
+import { HomeLocationSettings } from '@/components/HomeLocationSettings'
 import { HaUsersPanel } from './HaUsersPanel'
 import { DashboardTab } from './DashboardTab'
 import { HouseholdZonesTab } from './HouseholdZonesTab'
@@ -765,6 +766,7 @@ function SettingsTab() {
     <section class="sh-admin-section">
       <h2>{t('admin.settings.heading')}</h2>
       <HomeNameSettings />
+      <HomeLocationSettings />
       <HouseholdToggles />
     </section>
   )

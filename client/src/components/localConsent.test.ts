@@ -8,6 +8,11 @@ vi.mock('@/store/householdHome', () => ({
   householdHome: home,
 }))
 
+const caps = vi.hoisted(() => ({ value: [] as string[] }))
+vi.mock('@/platform', () => ({
+  homeLocationFromPlatform: () => caps.value.includes('home_location_sync'),
+}))
+
 const { askLocationConsent, isApiCode, locationConsentText } = await import('./localConsent')
 
 beforeEach(() => { confirmMock.mockReset() })
@@ -32,11 +37,21 @@ describe('askLocationConsent', () => {
     expect(confirmMock.mock.calls[0][0]).toContain("the space's household")
   })
 
-  it('no household home: explains where it comes from and never says yes', async () => {
+  it('no household home, Home Assistant owns it: points at HA and never says yes', async () => {
     home.value = null
+    caps.value = ['home_location_sync']
     confirmMock.mockResolvedValueOnce(true)
     expect(await askLocationConsent('Keller household')).toBe(false)
     expect(confirmMock.mock.calls[0][0]).toContain('Settings → System → General')
+  })
+
+  it('no household home, set here (standalone): points at Admin › Settings', async () => {
+    home.value = null
+    caps.value = []
+    confirmMock.mockResolvedValueOnce(true)
+    expect(await askLocationConsent('Keller household')).toBe(false)
+    expect(confirmMock.mock.calls[0][0]).toContain('Admin → Settings → Our home location')
+    expect(confirmMock.mock.calls[0][0]).not.toContain('Home Assistant')
   })
 })
 

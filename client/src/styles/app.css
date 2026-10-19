@@ -19277,6 +19277,25 @@ a.sh-btn--ghost:hover {
   font: 600 var(--sh-font-size-lg) / 1.2 var(--sh-font-family-display);
   letter-spacing: -0.005em;
 }
+/* Admin › Settings › Our home location: where it is, a small map, the
+ * actions, and the three "where it goes" lines as a quiet list. */
+.sh-home-location__where {
+  margin: var(--sh-space-sm) 0;
+  font-weight: 600;
+}
+.sh-home-location .sh-local-area-map {
+  margin-bottom: var(--sh-space-sm);
+}
+.sh-home-location__privacy {
+  margin: var(--sh-space-sm) 0 0;
+  padding-left: 1.2em;
+}
+.sh-home-location__privacy li + li {
+  margin-top: var(--sh-space-xs);
+}
+.sh-home-location__error p {
+  margin: var(--sh-space-sm) 0;
+}
 /* Settings › Privacy people lists (Blocked, Following) — the Friends
  * person-row anatomy: one quiet card, 40 px avatar, name over a muted
  * meta line ("Grandma Ruth · Vizeli · since Oct 15"), one action. */

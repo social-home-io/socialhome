@@ -5,11 +5,13 @@ import { act, fireEvent, render } from '@testing-library/preact'
 const map = vi.hoisted(() => ({
   onPick: null as ((lat: number, lon: number) => void) | null,
   area: null as unknown,
+  props: null as Record<string, unknown> | null,
 }))
 vi.mock('./LocalAreaMap', () => ({
   LocalAreaMap: (p: { area: unknown; onPick?: (lat: number, lon: number) => void }) => {
     map.onPick = p.onPick ?? null
     map.area = p.area
+    map.props = p as unknown as Record<string, unknown>
     return <div data-testid="area-map" />
   },
 }))
@@ -172,5 +174,43 @@ describe('LocalAreaPicker — the place pin\'s radius hint', () => {
     fireEvent.click(view.getByRole('radio', { name: 'No radius' }))
     fireEvent.click(view.getByRole('button', { name: 'Use this place' }))
     expect(onSubmit.mock.calls[0][1]).toBeNull()
+  })
+})
+
+describe('LocalAreaPicker — the household\'s own home (mode="home")', () => {
+  it('a point only: no radius, no hint, no shortcut; a 🏠 on the map; typed or tapped', async () => {
+    const getCurrentPosition = vi.fn()
+    Object.defineProperty(navigator, 'geolocation', {
+      value: { getCurrentPosition }, configurable: true,
+    })
+    const onSubmit = vi.fn()
+    const view = render(
+      <LocalAreaPicker mode="home" open initial={null} home={{ lat: 46.948, lon: 7.447 }}
+                       onClose={vi.fn()} onSubmit={onSubmit} />,
+    )
+    expect(view.getByText('Our home location')).toBeTruthy()
+    expect(view.queryByRole('button', { name: /Use our home/ })).toBeNull()
+    expect(view.queryByText('Radius')).toBeNull()
+    expect(view.queryByText('Best for people within')).toBeNull()
+    expect(view.getByRole('status').textContent).toBe('Tap your home on the map, or type it below.')
+    const save = view.getByRole('button', { name: 'Save home' }) as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    await act(async () => { map.onPick!(47.376_912_3, 8.541_749_9) })
+    expect(view.getByRole('status').textContent).toBe('Home: 47.3769° N, 8.5417° E')
+    expect(map.props?.zoneIcon).toBe('🏠')
+    const lat = view.container.querySelector('input[name="local-area-lat"]') as HTMLInputElement
+    expect(lat.value).toBe('47.3769')
+    fireEvent.input(lat, { target: { value: '46,9481' } })
+    fireEvent.click(save)
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({ lat: 46.9481, lon: 8.5417 })
+    expect(getCurrentPosition).not.toHaveBeenCalled()
+  })
+
+  it('opens on the stored home', () => {
+    const view = render(
+      <LocalAreaPicker mode="home" open initial={{ lat: 47.3769, lon: 8.5417, radius_km: 0.15 }}
+                       home={null} onClose={vi.fn()} onSubmit={vi.fn()} />,
+    )
+    expect(view.getByRole('status').textContent).toBe('Home: 47.3769° N, 8.5417° E')
   })
 })

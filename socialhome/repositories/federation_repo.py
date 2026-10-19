@@ -121,6 +121,9 @@ class AbstractFederationRepo(Protocol):
     # Local instance identity (display_name + household coords) ----------
     async def get_local_identity(self) -> dict | None: ...
     async def set_instance_display_name(self, name: str) -> None: ...
+    async def set_local_home_location(
+        self, latitude: float | None, longitude: float | None
+    ) -> None: ...
     async def get_last_proto_version(self) -> int | None: ...
     async def set_last_proto_version(self, version: int) -> None: ...
 
@@ -749,6 +752,19 @@ class SqliteFederationRepo:
         await self._db.enqueue(
             "UPDATE instance_identity SET display_name=? WHERE id='self'",
             (name,),
+        )
+
+    async def set_local_home_location(
+        self, latitude: float | None, longitude: float | None
+    ) -> None:
+        """Persist this household's home (``None, None`` clears it), kept to
+        4 dp (§2 GPS rule) whatever the caller passed."""
+        await self._db.enqueue(
+            "UPDATE instance_identity SET home_lat=?, home_lon=? WHERE id='self'",
+            (
+                round(float(latitude), 4) if latitude is not None else None,
+                round(float(longitude), 4) if longitude is not None else None,
+            ),
         )
 
     async def get_last_proto_version(self) -> int | None:

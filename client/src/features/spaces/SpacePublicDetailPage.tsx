@@ -33,7 +33,7 @@ import { ensureHouseholdHome, householdHome } from '@/store/householdHome'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
-import { askLocationConsent, isApiCode, locationConsentText } from '@/components/localConsent'
+import { askLocationConsent, isApiCode, locationConsentText, noHomeText } from '@/components/localConsent'
 import {
   contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel,
   joinCarriesLocation, joinModeChip,
@@ -442,7 +442,7 @@ export default function SpacePublicDetailPage() {
           locationNote={joinCarriesLocation(activeModal)
             ? locationConsentText(hostLabel(activeModal)) : null}
           locationBlocked={joinCarriesLocation(activeModal) && householdHome.value === null
-            ? t('local_area.consent.no_home') : null}
+            ? noHomeText() : null}
           onSubmit={onSubmitJoinRequest}
         />
       )}

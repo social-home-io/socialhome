@@ -28,7 +28,7 @@ from ..adapter import (
     PlatformAdapter,
 )
 from ..federation_base import manual_federation_base
-from ..ha_home_location import persist_home_location_from_ha
+from ..ha_home_location import HaHomeLocationSource, persist_home_location_from_ha
 from ..local_credentials import (
     LocalCredentialStore,
 )
@@ -89,6 +89,7 @@ class HaAdapter(PlatformAdapter):
         "auth",
         "displays",
         "events",
+        "home_location",
         "push",
         "stt",
         "users",
@@ -123,6 +124,8 @@ class HaAdapter(PlatformAdapter):
         self.events = HaEventSink(self)
         # HA ``zone.*`` entities → the household-zone sync.
         self.zones = HaZoneSource(self)
+        # HA's core-config location → the household's home (read-only here).
+        self.home_location = HaHomeLocationSource(self)
         # ESPHome wall panels in HA's device registry → Admin › Dashboard.
         self.displays = HaDisplayDirectory(self)
 
@@ -133,6 +136,7 @@ class HaAdapter(PlatformAdapter):
             Capability.AI,
             Capability.HA_PERSON_DIRECTORY,
             Capability.ZONE_SYNC,  # ``self.zones`` reads HA's zones
+            Capability.HOME_LOCATION_SYNC,  # ``self.home_location`` reads HA's home
             Capability.HA_DISPLAY_DISCOVERY,  # ``self.displays`` lists HA's panels
             # Local password auth — the wizard sets a password for the
             # picked HA owner so the user can log in via /api/auth/token

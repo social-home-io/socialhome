@@ -134,6 +134,24 @@ it off removes the synced zones once and the loop idles. The app starts
 it after the adapter's `on_startup` and stops it before `on_cleanup`,
 for whichever adapter has a zone source — no mode branching.
 
+The household's own **home location** (`instance_identity.home_lat` /
+`home_lon`, 4 dp) comes from the platform when it has one, through the
+optional `HomeLocationSource` Provider (`adapter.home_location`; `None` on
+standalone). Adapters that wire one advertise
+`Capability.HOME_LOCATION_SYNC` (`home_location_sync`), and Admin ›
+Settings › Our home location shows it read-only ("change it in Home
+Assistant"). In `ha` / `haos` mode `platform/ha_home_location.py:
+HaHomeLocationSource` reads `latitude` / `longitude` of HA Core's
+`GET /api/config` (`0, 0` = none set); the adapters also persist it at
+startup. Without a source (standalone) the admin sets it there — a map pick
+or typed latitude / longitude. `services/home_location_service.py:
+HomeLocationService` (`/api/admin/home-location`) holds the rules: it asks
+the source again on every read, stores a changed home and publishes
+`LocalHomeLocationUpdated` (peers with `share_home` on, the household's own
+tabs), and refuses to set one the platform owns. The home stays in the
+household otherwise — a local-community join sends a ~1 km version only
+with the person's consent ([local communities](protocol/local-communities.md)).
+
 ## Identity (§4.1)
 
 Every identity in Social Home — instance and user — is bound to an

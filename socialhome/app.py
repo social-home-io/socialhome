@@ -324,6 +324,7 @@ from .services.highlight_federation_outbound import HighlightFederationOutbound
 from .services.highlight_publication_service import HighlightPublicationService
 from .services.highlight_service import HighlightService
 from .services.highlight_signaling_handler import HighlightSignalingHandler
+from .services.home_location_service import HomeLocationService
 from .services.household_chat_service import HouseholdChatService
 from .services.household_dashboard_service import HouseholdDashboardService
 from .services.household_zone_service import HouseholdZoneService
@@ -2121,6 +2122,17 @@ def _build_friends(
     )
 
 
+def _build_home_location(
+    repos: SimpleNamespace, bus: EventBus, platform_adapter: PlatformAdapter
+) -> HomeLocationService:
+    """Admin › Settings › Our home location. The home is the platform's
+    when it has one (Home Assistant) — asked through
+    ``adapter.home_location``, never ``config.mode``."""
+    return HomeLocationService(
+        repos.federation, bus=bus, source=platform_adapter.home_location
+    )
+
+
 def _build_space_timetables(
     repos: SimpleNamespace, bus: EventBus
 ) -> SpaceTimetableService:
@@ -3499,6 +3511,9 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.household_zone_service_key] = household_zone_service
     app[K.household_zone_repo_key] = repos.household_zone
     app[K.household_zone_sync_key] = household_zone_sync
+    app[K.home_location_service_key] = _build_home_location(
+        repos, bus, platform_adapter
+    )
     app[K.poll_service_key] = poll_service
     app[K.space_poll_service_key] = space_poll_service
     app[K.bazaar_service_key] = bazaar_service

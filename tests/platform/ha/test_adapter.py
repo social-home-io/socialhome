@@ -259,6 +259,23 @@ async def test_zone_source_wired_with_zone_sync_capability():
     assert Capability.ZONE_SYNC in adapter.capabilities
 
 
+async def test_home_location_source_wired_with_its_capability():
+    """HA's core config (``/api/config`` latitude / longitude) is the
+    household's home; Admin › Settings shows it read-only."""
+    from socialhome.platform.adapter import Capability
+    from socialhome.platform.ha_home_location import HaHomeLocationSource
+
+    adapter = _build_adapter(
+        client=_FakeHaClient(
+            config_response={"latitude": 47.37691, "longitude": 8.54169}
+        )
+    )
+    assert isinstance(adapter.home_location, HaHomeLocationSource)
+    assert Capability.HOME_LOCATION_SYNC in adapter.capabilities
+    # The source reads HA through the adapter's own client.
+    assert await adapter.home_location.get_home_location() == (47.3769, 8.5417)
+
+
 async def test_display_directory_wired_with_its_capability():
     """HA's device registry lists the ESPHome wall panels."""
     adapter = _build_adapter(client=_FakeHaClient())
