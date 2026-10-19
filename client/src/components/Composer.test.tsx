@@ -258,3 +258,15 @@ describe('Composer — poll attachments', () => {
     }))
   })
 })
+
+describe('Composer — audience chip mark', () => {
+  it('marks the real tier, never a globe for a private space', async () => {
+    const { contextIcon } = await import('./Composer')
+    expect(contextIcon('Space', 'private')).toBe('🔐')
+    expect(contextIcon('Space', 'household')).toBe('🏠')
+    expect(contextIcon('Space', 'public')).toBe('🤝')
+    expect(contextIcon('Space', 'global')).toBe('🌐')
+    expect(contextIcon('Space', null)).toBe('👥')
+    expect(contextIcon('Household')).toBe('🏠')
+  })
+})

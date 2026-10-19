@@ -21,6 +21,7 @@ import { isRestricted } from './ProtectedNotice'
 import { t } from '@/i18n/i18n'
 import { parseSpaceRole } from '@/features/spaces/spaceRoles'
 import { showToast } from './Toast'
+import { awaitsMyVote } from '@/store/spaceAttention'
 
 export interface SpaceProposal {
   id: string
@@ -109,7 +110,7 @@ export function describeProposal(p: SpaceProposal): string {
 export function canVoteOn(
   p: SpaceProposal & { voted_by_me?: boolean }, canVote: boolean, isOwner: boolean,
 ): boolean {
-  return canVote && (!p.owner_only || isOwner) && !p.voted_by_me
+  return awaitsMyVote(p, canVote, isOwner)
 }
 
 export function SpaceProposalDialog({ spaceId, proposal: p, canVote, isOwner, onClose, onVoted }: Props) {

@@ -29,6 +29,7 @@ import { SideNavIcon, type SideNavIconName } from '@/components/SideNavIcon'
 import { openShortcutsHelp } from '@/lib/shortcuts'
 import { t } from '@/i18n/i18n'
 import { addBase } from '@/baseUrl'
+import { spaceGlyph } from '@/features/spaces/spaceGlyph'
 
 interface SideNavItem {
   key: string
@@ -300,7 +301,7 @@ export function SideNav() {
                   aria-current="page"
                 >
                   <span class="sh-sidenav-subitem__emoji" aria-hidden="true">
-                    {activeSpace.emoji || '🌐'}
+                    {spaceGlyph(activeSpace.emoji, activeSpace.name)}
                   </span>
                   <span class="sh-sidenav-link-label">
                     {activeSpace.name}

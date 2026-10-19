@@ -36,6 +36,7 @@ import { confirmDialog } from '@/components/confirm'
 import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
 import { t } from '@/i18n/i18n'
 import { cssUrl } from '@/utils/cssUrl'
+import { spaceGlyph } from './spaceGlyph'
 
 type SettingsTab = 'general' | 'about' | 'theme' | 'links' | 'age' | 'bots'
 
@@ -390,7 +391,7 @@ function AboutTab({
             class="sh-about-icon-preview"
             style={iconUrl ? { backgroundImage: cssUrl(iconUrl) } : {}}
           >
-            {!iconUrl && (space.emoji || '🏠')}
+            {!iconUrl && spaceGlyph(space.emoji, space.name)}
           </span>
           <label class="sh-btn sh-btn--secondary">
             {iconUrl ? t('space.about.icon_change') : t('space.about.icon_upload')}

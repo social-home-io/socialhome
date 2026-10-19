@@ -55,10 +55,25 @@ export function setSpaceAttention(spaceId: string, wire: WireAttention | null | 
   }
 }
 
-/** The filled badge on More: what the Moderation row leads to. */
-export function attentionTotal(a: SpaceAttention | null, spaceId: string): number {
+/** Does ``p`` wait for this viewer's vote? Settings authority, the
+ *  owner for an owner-only proposal (a forwarded admin action), and not
+ *  already voted — proposing counts as voting. */
+export function awaitsMyVote(
+  p: { owner_only?: boolean; voted_by_me?: boolean }, canVote: boolean, isOwner: boolean,
+): boolean {
+  return canVote && (!p.owner_only || isOwner) && !p.voted_by_me
+}
+
+/** What waits for the viewer here — defined once, so the filled badge on
+ *  More and the Needs-you card's count always agree: items held for
+ *  review + reports + join requests + open proposals awaiting MY vote (a
+ *  proposal I made or already voted on doesn't count for me). */
+export function needsYouTotal(
+  a: SpaceAttention | null, spaceId: string, voter: { canVote: boolean; isOwner: boolean },
+): number {
   if (!a || a.spaceId !== spaceId) return 0
-  return a.review + a.reports + a.joinRequests
+  const proposals = a.proposals.filter((p) => awaitsMyVote(p, voter.canVote, voter.isOwner)).length
+  return a.review + a.reports + a.joinRequests + proposals
 }
 
 /** WS frames after which the counts may have changed. */

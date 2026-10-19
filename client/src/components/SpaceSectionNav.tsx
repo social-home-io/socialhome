@@ -76,6 +76,9 @@ export interface SpaceNeedsYou {
   review: number
   reports: number
   joinRequests: number
+  /** Open proposals awaiting the viewer's vote (decided in the feed's
+   *  Needs-you card, so they count on More but not on Moderation). */
+  proposals: number
 }
 
 interface Props {
@@ -175,8 +178,15 @@ function NeedsYouBadge({ count }: { count: number }) {
   )
 }
 
+/** More's filled badge — the same total as the Needs-you card
+ *  (``store/spaceAttention.needsYouTotal``). */
 function needsYouTotal(n: SpaceNeedsYou | null): number {
-  return n ? n.review + n.reports + n.joinRequests : 0
+  return n ? n.review + n.reports + n.joinRequests + n.proposals : 0
+}
+
+/** The Moderation row's own badge: what that section holds. */
+function moderationTotal(n: SpaceNeedsYou): number {
+  return n.review + n.reports + n.joinRequests
 }
 
 /** "2 posts to review · 1 join request · 1 report" — or "Nothing waiting". */
@@ -330,7 +340,7 @@ export function SpaceSectionNav({
         {overflow.map((s) => row(s, <SectionIcon section={s} />, label(s), sectionMeta(s, summary), 0,
           spaceSectionPath(spaceId, s), active === s))}
         {needsYou && row('moderation', <SectionIcon section="moderation" />, label('moderation'),
-          needsYouMeta(needsYou), needs, spaceSectionPath(spaceId, 'moderation'),
+          needsYouMeta(needsYou), moderationTotal(needsYou), spaceSectionPath(spaceId, 'moderation'),
           active === 'moderation')}
         {notifLevel && row('notifications', <span class="sh-sidenav-icon">{EXTRA_ICONS.bell}</span>,
           t('space.more.notifications'),

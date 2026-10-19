@@ -42,6 +42,7 @@ import { describeUploadError } from '@/utils/uploadErrors'
 import { currentUser } from '@/store/auth'
 import { useLinkPreview } from '@/hooks/useLinkPreview'
 import { isOne, t } from '@/i18n/i18n'
+import { tierIcon } from '@/features/spaces/spaceGlyph'
 
 const MAX_LENGTH = 5000
 const MAX_IMAGES = 5
@@ -81,6 +82,10 @@ interface ComposerProps {
     extras?: ComposerExtras,
   ) => Promise<string | void>
   context?: string
+  /** A space composer: the space's tier (private / household / public /
+   *  global) — the audience chip carries its mark, never a globe for a
+   *  private space. */
+  tier?: string | null
   placeholder?: string
   /** Set when the composer lives inside a space feed — the schedule
    * poll attaches as a space-scoped poll so finalize → space calendar
@@ -188,6 +193,14 @@ function inferTypeFromFile(file: File): 'image' | 'video' | 'file' {
 
 /** Display label for the ``context`` badge. ``context`` doubles as the
  *  draft key, so the prop stays English and only the badge is translated. */
+/** The audience chip's mark: the household's house, a space's real tier
+ *  (🔐 private, 🏠 household, 🤝 public, 🌐 global), and a neutral "people"
+ *  mark while a space's tier is unknown. */
+export function contextIcon(context: string, tier?: string | null): string {
+  if (context === 'Household') return '🏠'
+  return tierIcon(tier) ?? '👥'
+}
+
 function contextLabel(context: string): string {
   switch (context) {
     case 'Space': return t('composer.context.space')
@@ -196,7 +209,7 @@ function contextLabel(context: string): string {
   }
 }
 
-export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes, bazaarEnabled }: ComposerProps) {
+export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowedTypes, bazaarEnabled }: ComposerProps) {
   const user = currentUser.value
   const TYPE_ICONS = spaceId ? TYPE_ICONS_SPACE : TYPE_ICONS_HOUSEHOLD
   // Restrict the picker to the space's allowed post types when supplied.
@@ -751,7 +764,11 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
         </div>
       )}
       <div class="sh-composer-footer">
-        {context && <span class="sh-context-badge">🌐 {contextLabel(context)}</span>}
+        {context && (
+          <span class="sh-context-badge">
+            <span aria-hidden="true">{contextIcon(context, tier)}</span> {contextLabel(context)}
+          </span>
+        )}
         {!typeHidesTextarea(postType.value) && (
           <EmojiPickButton
             openKey="composer"

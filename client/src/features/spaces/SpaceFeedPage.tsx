@@ -67,7 +67,7 @@ import { SpaceHero, type HeroMember } from '@/components/SpaceHero'
 import { SpaceNeedsYou } from './SpaceNeedsYou'
 import { useSpaceNotifLevel } from './SpaceNotifLevels'
 import {
-  setSpaceAttention, spaceAttention, useSpaceAttentionFrames, type WireAttention,
+  awaitsMyVote, setSpaceAttention, spaceAttention, useSpaceAttentionFrames, type WireAttention,
 } from '@/store/spaceAttention'
 import { confirmDialog } from '@/components/confirm'
 import { SpaceChatView, useSpaceChatSummary } from './SpaceChatView'
@@ -681,7 +681,11 @@ export default function SpaceFeedPage() {
         chatUnread={chatUnread}
         members={memberSummary.value}
         needsYou={canModerateQueue && attention?.spaceId === spaceId
-          ? { review: attention.review, reports: attention.reports, joinRequests: attention.joinRequests }
+          ? {
+              review: attention.review, reports: attention.reports, joinRequests: attention.joinRequests,
+              proposals: attention.proposals
+                .filter((p) => awaitsMyVote(p, settingsAuthority, viewerRole.value === 'owner')).length,
+            }
           : null}
         notifLevel={notifLevel}
         onNotifLevel={setNotifLevel}
@@ -814,7 +818,7 @@ export default function SpaceFeedPage() {
           ) : adminOnly('posts') ? (
             <AccessNote feature="posts" />
           ) : (
-            <Composer onSubmit={handleSubmit} context="Space" spaceId={spaceId}
+            <Composer onSubmit={handleSubmit} context="Space" tier={s?.space_type ?? null} spaceId={spaceId}
               allowedTypes={spaceDetail.value?.features?.allowed_post_types}
               bazaarEnabled={spaceDetail.value?.features?.bazaar ?? true} />
           )}

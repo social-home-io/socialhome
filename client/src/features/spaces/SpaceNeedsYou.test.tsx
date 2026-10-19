@@ -5,7 +5,7 @@ const { apiPost } = vi.hoisted(() => ({ apiPost: vi.fn() }))
 vi.mock('@/api', () => ({ api: { post: apiPost } }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 
-import { SpaceNeedsYou, needsYouCount, proposalMeta } from './SpaceNeedsYou'
+import { SpaceNeedsYou, proposalMeta } from './SpaceNeedsYou'
 import type { AttentionProposal, SpaceAttention } from '@/store/spaceAttention'
 import type { SpaceCompat } from '@/components/SpaceVersionNotice'
 
@@ -53,7 +53,9 @@ describe('SpaceNeedsYou', () => {
     }), { c: compat })
     const heading = container.querySelector('h2.sh-needs-you__heading') as HTMLElement
     expect(heading.textContent).toContain('Needs you')
-    expect(heading.querySelector('.sh-space-badge--needs')?.textContent).toBe('8')
+    // Same total as More: 1 proposal awaiting my vote + 2 + 1 + 3 (the
+    // version row waits for nobody's decision).
+    expect(heading.querySelector('.sh-space-badge--needs')?.textContent).toBe('7')
     expect(rows(container).map((r) => r.getAttribute('data-row')))
       .toEqual(['proposal', 'review', 'reports', 'join', 'version'])
     expect(container.textContent).toContain('2 waiting for review')
@@ -108,10 +110,16 @@ describe('proposalMeta', () => {
   })
 })
 
-describe('needsYouCount', () => {
-  it('counts every waiting thing; a lagging version counts once', () => {
-    expect(needsYouCount(null, null)).toBe(0)
-    expect(needsYouCount(null, compat)).toBe(1)
-    expect(needsYouCount(attention({ review: 2, proposals: [proposal()] }), null)).toBe(3)
+describe('the heading count', () => {
+  it('a proposal I already voted on is listed but not counted', () => {
+    const { container } = show(attention({ review: 1, proposals: [proposal({ voted_by_me: true })] }))
+    expect(rows(container).map((r) => r.getAttribute('data-row'))).toEqual(['proposal', 'review'])
+    expect(container.querySelector('.sh-needs-you__heading .sh-space-badge--needs')?.textContent).toBe('1')
+  })
+
+  it('only my own voted proposal: the card shows it, without a count', () => {
+    const { container } = show(attention({ proposals: [proposal({ voted_by_me: true })] }))
+    expect(rows(container)).toHaveLength(1)
+    expect(container.querySelector('.sh-needs-you__heading .sh-space-badge--needs')).toBeNull()
   })
 })

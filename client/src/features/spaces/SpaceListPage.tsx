@@ -17,6 +17,7 @@ import { openSpaceJoinByCode } from './SpaceJoinByCodeDialog'
 import { isOne, t } from '@/i18n/i18n'
 import { connectionState, ws } from '@/ws'
 import { currentUser } from '@/store/auth'
+import { spaceGlyph } from './spaceGlyph'
 import {
   applySpaceChatUnreadFrame,
   loadSpaceChatUnread,
@@ -93,7 +94,7 @@ function SpaceRow({
       href={addBase(`/spaces/${space.id}`)}
       class={`sh-space-card sh-space-card--${space.space_type}`}
     >
-      <span class="sh-space-emoji">{space.emoji || '🏠'}</span>
+      <span class="sh-space-emoji">{spaceGlyph(space.emoji, space.name)}</span>
       <div class="sh-space-card__body">
         <div class="sh-space-card__title">
           <strong>{space.name}</strong>
