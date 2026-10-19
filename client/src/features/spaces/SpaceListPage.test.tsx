@@ -30,6 +30,10 @@ vi.mock('@/ws', async () => {
   }
 })
 
+function emit(type: string, data: Record<string, unknown>): void {
+  for (const h of wsHandlers[type] ?? []) h({ type, data })
+}
+
 const user = vi.hoisted(() => ({ is_admin: true }))
 vi.mock('@/store/auth', () => ({
   currentUser: {
@@ -183,6 +187,25 @@ describe('SpaceListPage — one number per row', () => {
     expect(choir.querySelector('.sh-spaces-new')!.textContent).toBe('2 new')
     expect(choir.getAttribute('aria-label')).toContain('2 new posts')
     expect(choir.querySelector('.sh-spaces-attn')).toBeNull()
+  })
+
+  it('a new post by someone else bumps it live; my own post does not', async () => {
+    const r = await renderPage()
+    const choir = (await r.findByText('Choir')).closest('a')!
+    emit('space.post.created', { space_id: 'sA', post: { author: 'u1', created_at: '2030-01-01T00:00:00+00:00' } })
+    expect(choir.querySelector('.sh-spaces-new')).toBeNull()
+    emit('space.post.created', { space_id: 'sA', post: { author: 'u2', created_at: '2030-01-01T00:00:01+00:00' } })
+    emit('space.post.created', { space_id: 'sA', post: { author: 'u3', created_at: '2030-01-01T00:00:02+00:00' } })
+    await r.waitFor(() => expect(r.getByText('Choir').closest('a')!.querySelector('.sh-spaces-new')?.textContent).toBe('2 new'))
+  })
+
+  it('a WS reconnect re-reads the list (frames missed while down)', async () => {
+    const r = await renderPage()
+    await r.findByText('Choir')
+    wire({ spaces: SPACES.map((x) => (x.id === 'sA' ? { ...x, unread_posts: 4 } : x)) })
+    conn.state!.value = 'reconnecting'
+    conn.state!.value = 'open'
+    await r.findByText('4 new')
   })
 
   it('chat messages are not counted here — Chat keeps its own count', async () => {

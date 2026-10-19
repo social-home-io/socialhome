@@ -31,12 +31,34 @@ import { RemoteInviteInboxBanner } from '@/components/RemoteInviteInboxBanner'
 import { ConnIcon } from '@/features/connections/ConnIcon'
 import { openSpaceJoinByCode } from './SpaceJoinByCodeDialog'
 import { isOne, t } from '@/i18n/i18n'
+import { connectionState, ws } from '@/ws'
+import { currentUser } from '@/store/auth'
 import { matchesTerm, parseDiscoverSource } from './discover'
 import { SpaceDiscover } from './SpaceDiscover'
 import { SpaceListRow, activityMeta } from './SpaceListRow'
 
 const loading = signal(true)
 const failed = signal(false)
+
+/** A post landed in a space on the list: someone else's counts as new
+ *  (the list is never the Feed, so nobody is reading it here), and the
+ *  space was active just now. Exported for tests. */
+export function applyPostCreated(data: unknown, me: string | undefined): void {
+  const d = data as { space_id?: string; post?: { author?: string; created_at?: string } } | undefined
+  if (!d?.space_id) return
+  let hit = false
+  const next = spaces.value.map((s) => {
+    if (s.id !== d.space_id) return s
+    hit = true
+    const mine = !!me && d.post?.author === me
+    return {
+      ...s,
+      unread_posts: (s.unread_posts ?? 0) + (mine ? 0 : 1),
+      last_activity_at: d.post?.created_at ?? s.last_activity_at,
+    }
+  })
+  if (hit) spaces.value = next
+}
 
 async function loadAll(): Promise<void> {
   loading.value = spaces.value.length === 0
@@ -110,6 +132,20 @@ export default function SpaceListPage() {
   const scrolled = useRef(false)
 
   useEffect(() => { void loadAll() }, [])
+
+  // Live: a new post bumps its space's "N new"; a reconnect re-reads the
+  // list (frames were missed while the socket was down).
+  useEffect(() => {
+    const off = ws.on('space.post.created', (e) => {
+      applyPostCreated(e.data, currentUser.value?.user_id)
+    })
+    let prev = connectionState.value
+    const offConn = connectionState.subscribe((next) => {
+      if (prev === 'reconnecting' && next === 'open') void loadSpaces()
+      prev = next
+    })
+    return () => { off(); offConn() }
+  }, [])
 
   // Opened as ``/spaces?discover=…`` (the retired /spaces/browse, a shared
   // link): bring Discover into view once, after the first load.
