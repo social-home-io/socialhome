@@ -510,7 +510,7 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
         />
       )}
       <div class="sh-composer-header">
-        <Avatar name={user?.display_name || '?'} src={user?.picture_url} size={32} />
+        <Avatar name={user?.display_name || '?'} src={user?.picture_url} size={40} />
         <div class="sh-composer-type-picker">
           {typeEntries.map(([type, icon]) => {
             const label = TYPE_LABELS[type]?.() ?? type

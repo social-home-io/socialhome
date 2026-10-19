@@ -31,7 +31,10 @@ export function Avatar({ src, name, size = 40, onClick, online }: AvatarProps) {
   useEffect(() => { setErrored(false) }, [src])
 
   const initials = name.slice(0, 2).toUpperCase()
-  const sizeStyle = { width: `${size}px`, height: `${size}px`, fontSize: `${size * 0.4}px` }
+  // Inline, for the photo too: ``.sh-avatar`` is 40 px in CSS and a
+  // stylesheet width beats the <img> width/height attributes.
+  const boxStyle = { width: `${size}px`, height: `${size}px` }
+  const sizeStyle = { ...boxStyle, fontSize: `${size * 0.4}px` }
   const showImage = src && !errored
   const inner = showImage ? (
     <img
@@ -40,6 +43,7 @@ export function Avatar({ src, name, size = 40, onClick, online }: AvatarProps) {
       class={`sh-avatar ${onClick ? 'sh-avatar--clickable' : ''}`}
       width={size}
       height={size}
+      style={boxStyle}
       onClick={onClick}
       onError={() => setErrored(true)}
     />

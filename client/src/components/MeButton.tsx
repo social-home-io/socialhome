@@ -107,7 +107,7 @@ export function MeButton() {
       wrapClass="sh-me"
       menuClass="sh-me-menu"
     >
-      <Avatar src={user.picture_url} name={name} size={28} />
+      <Avatar src={user.picture_url} name={name} size={40} />
       {/* A text-only status still gets a cue: a small dot. */}
       {status && (
         <span

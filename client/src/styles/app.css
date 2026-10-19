@@ -2462,7 +2462,6 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
 }
 .sh-person-sheet__close { align-self: start; margin: -8px -8px 0 0; }
 .sh-person-sheet__photo { position: relative; display: inline-flex; flex: none; }
-.sh-person-sheet__photo .sh-avatar { width: 72px; height: 72px; }
 .sh-person-sheet__photo .sh-avatar-status-dot {
   width: 16px; height: 16px; border-width: 3px; right: 2px; bottom: 2px;
   border-color: var(--sh-bg-tertiary);
@@ -6061,9 +6060,6 @@ body.sh-dm-thread-open .sh-messages {
 }
 .sh-cal-person:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 2px; }
 .sh-cal-person__avatar { display: inline-flex; line-height: 0; }
-/* .sh-avatar is 40px by default; a photo (an <img>) would ignore the size
- * prop and make its chip taller than an initials one. */
-.sh-cal-person__avatar .sh-avatar { width: 28px; height: 28px; }
 .sh-cal-person__name {
   max-width: 12em;
   white-space: nowrap;
@@ -9995,11 +9991,7 @@ hr {
   transition: transform var(--sh-transition-fast);
 }
 .sh-profile-avatar-slot:hover { transform: scale(1.02); }
-.sh-profile-avatar-slot .sh-avatar {
-  display: block;
-  width: 112px;
-  height: 112px;
-}
+.sh-profile-avatar-slot .sh-avatar { display: block; }
 /* Persistent camera badge in the bottom-right corner of the avatar.
  * The previous treatment was a hover-only dark overlay; on touch
  * devices the affordance was effectively invisible — users had no way
@@ -17424,7 +17416,6 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   border-radius: 50%;
   cursor: pointer;
 }
-.sh-profile-glance__photo-btn .sh-avatar { width: 72px; height: 72px; }
 .sh-profile-glance__cam {
   position: absolute;
   right: -4px;
