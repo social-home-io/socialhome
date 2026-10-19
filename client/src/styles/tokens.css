@@ -57,6 +57,14 @@
      ~4.2:1 on a 12% tint over --sh-bg-secondary. ≥ 4.5:1 on tints up
      to 15% over every surface. tokens.test.ts enforces the pairing. */
   --sh-primary-on-soft: color-mix(in srgb, var(--sh-primary-text) 92%, #000);
+  /* Keyboard focus ring. The plain hearth is only ~3.1:1 on the hearth
+     tints (active nav, selected chips, the Needs-you card) — a ring that
+     barely clears WCAG 1.4.11 and drops below it under a lighter space
+     theme. The text hearth keeps ≥ 4.5:1 on every light surface and
+     tint; dark mode lifts it to the hearth tint (≥ 9:1 on the ember
+     surfaces). tokens.test.ts pins the values, contrast.test.ts that
+     every hearth ring uses this token. */
+  --sh-focus-ring: var(--sh-primary-text);
   /* Hearth as a FILLED SURFACE THAT CARRIES TEXT (primary buttons,
      selected chips, count badges): paper text on the plain hearth is
      only 3.55:1, so the fill is deepened 14% toward ink → #B54824,
@@ -275,6 +283,7 @@
   /* Hearth lifted toward the cream ink: ≥ 6:1 on --sh-primary-soft and
      on the dark surfaces (the plain dark hearth is ~4.2:1 on its tint). */
   --sh-primary-on-soft: color-mix(in srgb, var(--sh-primary) 55%, var(--sh-text));
+  --sh-focus-ring: #F1D9CA;  /* hearth-tint — high luminance on dark paper */
   /* Dark text (--sh-bg) on the lifted hearth is already 5.65:1. The
      old darker hover (--sh-primary-hover, #C04E22) fell to 3.73:1
      under that ink, so the filled hover LIFTS instead (6.7:1). */
@@ -323,8 +332,10 @@
   --sh-sticky-tape-hover: rgba(255, 255, 255, 0.7);
   --sh-swatch-ring: rgba(255, 255, 255, 0.3);
 }
+/* Rings drawn in another colour (a white ring on a hearth banner, …)
+ * still take the dark-mode ring. */
 .sh-theme-dark :focus-visible {
-  outline-color: #F1D9CA;    /* hearth-tint — high luminance on dark paper */
+  outline-color: var(--sh-focus-ring);
 }
 
 /* Responsive breakpoints (§23.113) */
@@ -380,18 +391,20 @@
 .sh-skip-link {
   position: absolute;
   top: -9999px;
-  left: 0;
+  inset-inline-start: 0;
   background: var(--sh-primary-fill);
   color: #fff;
   padding: var(--sh-space-sm) var(--sh-space-md);
   text-decoration: none;
   font-weight: 600;
   z-index: 10000;
-  border-radius: 0 0 var(--sh-radius-sm) 0;
+  border-end-end-radius: var(--sh-radius-sm);
 }
 .sh-skip-link:focus {
   top: 0;
-  outline: 2px solid #fff;
+  /* Outside the hearth pill, on the page surface: a white ring there
+     was 1.3:1 against the paper. */
+  outline: 2px solid var(--sh-focus-ring);
   outline-offset: 2px;
 }
 

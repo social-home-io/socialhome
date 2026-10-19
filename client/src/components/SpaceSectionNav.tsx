@@ -371,7 +371,7 @@ export function SpaceSectionNav({
   const notifView = notifLevel && (
     <div class="sh-space-more__notif">
       <button type="button" class="sh-space-more__back" onClick={() => setView('rows')}>
-        <span aria-hidden="true" class="sh-flip-rtl">‹</span> {t('space.more.back')}
+        <span aria-hidden="true">‹</span> {t('space.more.back')}
       </button>
       {!sheet && <h2 class="sh-space-more__heading">{t('space.more.notifications')}</h2>}
       <SpaceNotificationChoices

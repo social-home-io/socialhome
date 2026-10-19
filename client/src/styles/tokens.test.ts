@@ -154,6 +154,14 @@ describe('design tokens', () => {
     for (const value of fills) expect(value).toContain('var(--sh-primary)')
   })
 
+  it('the focus ring follows the text hearth in light, the hearth tint in dark', () => {
+    // The plain hearth ring is ~3.1:1 on the hearth tints; the text hearth
+    // (≥ 4.5:1 on every light surface) still follows a space's primary.
+    const rings = [...sheets['tokens.css'].matchAll(/--sh-focus-ring\s*:\s*([^;]+);/g)]
+      .map(m => m[1].trim())
+    expect(rings).toEqual(['var(--sh-primary-text)', '#F1D9CA'])
+  })
+
   it('text on a filled primary uses --sh-on-primary-fill', () => {
     // A rule that paints a primary fill (solid or gradient) and sets a
     // text colour must take the adaptive ink: #fff / --sh-bg there is

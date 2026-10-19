@@ -344,7 +344,7 @@ export default function SpaceSettingsPage() {
     <div class="sh-space-settings-page">
       <header class="sh-ss-head">
         <a class="sh-ss-head__back" href={addBase(`/spaces/${spaceId}`)}>
-          <span aria-hidden="true" class="sh-flip-rtl">‹</span> {space.name}
+          <span aria-hidden="true">‹</span> {space.name}
         </a>
         <h1 class="sh-ss-head__title">{t('nav.settings')}</h1>
       </header>

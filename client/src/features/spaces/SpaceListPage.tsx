@@ -280,6 +280,7 @@ export default function SpaceListPage() {
                 emoji={s.emoji}
                 name={s.name}
                 meta={t('spaces.list.archived_meta')}
+                label={rowLabel(s, t('spaces.list.archived_meta'), 0, 0)}
                 muted
               />
             ))}
