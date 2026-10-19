@@ -63,8 +63,11 @@ def _wire(**over) -> dict:
 
 
 def test_round_trip_keeps_every_field():
-    req = MemberPublishRequest.from_wire(_wire())
-    assert req.to_wire() == _wire()
+    # One wire body: each ``_wire()`` signs a fresh cert stamped with the
+    # current second, so two calls straddling a second boundary differ.
+    wire = _wire()
+    req = MemberPublishRequest.from_wire(wire)
+    assert req.to_wire() == wire
     assert set(req.to_wire()) == MEMBER_PUBLISH_REQUEST_KEYS
 
 
