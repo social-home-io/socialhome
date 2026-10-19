@@ -1348,13 +1348,12 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-justify-end { display: flex; justify-content: flex-end; gap: var(--sh-space-sm); }
 .sh-justify-center { display: flex; justify-content: center; }
 
-/* Empty-state card — pinned-paper aesthetic so an empty surface
- * still feels like part of the household, not like a blank dialog.
- * Matches the marketing site's `.card` shell: cream paper, slim
- * border, washi-tape strip on the upper-left, pinned-wall lift
- * shadow. The illustration glyph (emoji or inline SVG passed as
- * children) gets generous breathing room. Generous padding +
- * Fraunces heading carry the editorial gravitas. */
+/* Empty-state card — the same flat card anatomy as the lists and post
+ * cards (paper surface, 1 px border, no tape, no rotation), so an empty
+ * surface still feels like part of the household, not like a blank
+ * dialog. The illustration glyph (emoji or inline SVG passed as
+ * children) gets generous breathing room. Generous padding + Fraunces
+ * heading carry the editorial gravitas. */
 .sh-empty-state {
   position: relative;
   text-align: center;
@@ -1363,28 +1362,8 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   color: var(--sh-text-muted);
   background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-xl);
-  box-shadow:
-    0 1px 0 var(--sh-border),
-    0 26px 60px -34px rgba(26, 24, 20, 0.45);
-  overflow: visible;
-}
-/* Washi-tape strip — soft hearth-tinted rectangle pinned to the
- * upper-left, slight rotation. Mirrors the website's
- * ``.card__tape``. ``::before`` keeps the JSX clean — no extra DOM
- * required. */
-.sh-empty-state::before {
-  content: "";
-  position: absolute;
-  top: -9px;
-  left: 28px;
-  width: 72px;
-  height: 16px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--sh-primary) 32%, transparent);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  transform: rotate(-5deg);
-  pointer-events: none;
+  border-radius: var(--sh-radius-lg);
+  box-shadow: var(--sh-shadow-xs);
 }
 .sh-empty-state h2,
 .sh-empty-state h3 {
@@ -1578,7 +1557,8 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 @keyframes sh-fade-in { from { opacity: 0 } to { opacity: 1 } }
 
 .sh-comment-overlay {
-  /* Desktop card: centred paper, washi-tape accent, pinned-wall lift. */
+  /* Desktop card: centred flat paper with a pinned-wall lift (it floats
+   * over the page as a dialog). */
   width: min(640px, 100%);
   max-height: 82vh;
   background: var(--sh-bg);
@@ -1595,21 +1575,6 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 @keyframes sh-card-rise {
   from { opacity: 0; transform: translateY(12px) scale(0.98); }
   to   { opacity: 1; transform: translateY(0)    scale(1); }
-}
-.sh-comment-overlay::before {
-  /* Decorative tape strip — same washi-tape language the feed cards
-   * use, so the overlay reads as a continuation of the wall. */
-  content: '';
-  position: absolute;
-  top: -8px;
-  left: 50%;
-  transform: translateX(-50%) rotate(-1.5deg);
-  width: 96px;
-  height: 18px;
-  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
-  border-radius: 2px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
-  pointer-events: none;
 }
 
 .sh-comment-overlay-handle {
@@ -1737,7 +1702,6 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
     border-top-right-radius: var(--sh-radius-lg);
     animation: sh-sheet-up 220ms var(--sh-ease-spring);
   }
-  .sh-comment-overlay::before { display: none; }
   .sh-comment-overlay-handle { display: block; }
 }
 @keyframes sh-sheet-up {
@@ -2200,15 +2164,6 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 
 /* ───── 7. Feature surfaces ──────────────────────────────────────────── */
 
-/* Feed + posts + comments
- *
- * Feed posts borrow the "taped to the wall" look from the marketing
- * site's ``FamilyWall`` collage — paper-tinted background, washi-tape
- * accent at the top, and a small per-card rotation stagger so the
- * feed reads as hand-curated rather than spreadsheet-rigid. The
- * effect is feed-scoped (``.sh-feed-item``) — PostCard usage outside
- * the household feed (search results, space feeds) keeps the flat
- * ``.sh-post`` chrome below. */
 /* ───── Friends ("your people") ───────────────────────────────────────
  *
  * Built on the Connections anatomy: the page is a ``.sh-conn`` column, the
@@ -2641,11 +2596,18 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   }
 }
 
+/* Feed + posts + comments
+ *
+ * Post cards are flat everywhere — household feed, space feeds, search:
+ * the same anatomy as the Connections / Friends / Spaces lists (paper
+ * surface, 1 px border, ``--sh-radius-lg``, no rotation, no tape). The
+ * taped-paper look is kept only where paper *is* the content — the
+ * Stickies board (``.sh-sticky*``). */
 .sh-feed {
   display: flex;
   flex-direction: column;
-  gap: var(--sh-space-lg);
-  padding-top: 12px;  /* room for the tape strip on the first item */
+  gap: var(--sh-space-md);
+  padding-top: var(--sh-space-sm);
 }
 .sh-post, .sh-post-card {
   position: relative;
@@ -2661,21 +2623,15 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   border-color: var(--sh-border-strong);
 }
 
-/* Feed-scoped: each post (with its expanded comment thread) sits on
- * a slightly more saturated paper tone with a pinned-to-the-wall
- * shadow, a tiny rotation, and a washi-tape strip at the top. The
- * whole ``.sh-feed-item`` rotates as one unit so an expanded comment
- * thread reads as the bottom half of the same physical card. The
- * composer keeps the paper tone but skips the tape — it's the always-
- * visible input, not a wall artefact. */
+/* The composer at the top of a feed sits on the same paper as the
+ * cards below it. */
 .sh-feed > .sh-composer {
   background: var(--sh-bg-tertiary);
-  box-shadow: var(--sh-shadow-pinned);
-  transition:
-    box-shadow var(--sh-transition-fast),
-    border-color var(--sh-transition-fast);
+  box-shadow: var(--sh-shadow-xs);
 }
 
+/* Feed-scoped wrapper: one flat card per post (its latest-comment
+ * preview included). */
 .sh-feed-item {
   position: relative;
   display: flex;
@@ -2683,144 +2639,24 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
-  box-shadow: var(--sh-shadow-pinned);
-  transform: rotate(var(--sh-feed-rot, 0deg));
-  transition:
-    box-shadow var(--sh-transition-fast),
-    border-color var(--sh-transition-fast),
-    transform var(--sh-transition-normal);
+  box-shadow: var(--sh-shadow-xs);
+  transition: border-color var(--sh-transition-fast);
 }
-.sh-feed-item::before {
-  content: "";
-  position: absolute;
-  top: -10px;
-  left: 24px;
-  width: 76px;
-  height: 18px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--sh-warning) 55%, transparent);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
-  transform: rotate(-6deg);
-  pointer-events: none;
-  z-index: 1;
-}
-.sh-feed-item:hover {
-  transform: rotate(0deg) translateY(-3px);
-  z-index: 2;
-  box-shadow:
-    0 1px 0 var(--sh-border),
-    0 32px 70px -28px rgba(26, 24, 20, 0.55);
-}
-/* The ``.sh-post`` inside a feed item now uses the wrapper's chrome
- * (background, border, shadow, radius) — strip its own so post +
- * comments share one physical card. */
-.sh-feed-item > .sh-post {
+.sh-feed-item:hover { border-color: var(--sh-border-strong); }
+/* The ``.sh-post`` inside a feed item uses the wrapper's chrome
+ * (background, border, shadow, radius) — strip its own so the post
+ * and its comment preview read as one card. */
+.sh-feed-item > .sh-post,
+.sh-feed-item > .sh-post:hover {
   background: transparent;
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  /* When comments are expanded, the post becomes the top half of the
-   * card. The bottom edge is provided by the comment block; nothing
-   * to do here aside from keeping the shared padding consistent. */
 }
-.sh-feed-item > .sh-post:hover {
-  /* Hover lift moved to ``.sh-feed-item:hover`` so post + comments
-   * lift together. Override the legacy ``.sh-post:hover`` border
-   * tint that no longer applies. */
-  box-shadow: none;
-  border-color: transparent;
-}
-/* Comment thread inside a feed item — visually attached as the
- * bottom segment of the post card. Lighter paper tone (the post
- * already sits on ``--sh-bg-tertiary``; the comments drop one notch
- * to ``--sh-bg-secondary`` so the eye reads "same card, different
- * section"), separated by a single hairline rather than its own
- * border + radius. */
-.sh-feed-item > .sh-comments {
-  background: var(--sh-bg-secondary);
-  border-top: 1px solid var(--sh-border);
-  border-bottom-left-radius: var(--sh-radius-lg);
-  border-bottom-right-radius: var(--sh-radius-lg);
-  margin-top: 0;
-  padding: var(--sh-space-md);
-}
-/* When the comments wrapper provides the recessed paper feel, the
- * empty-state bubble has nothing to differentiate against — drop its
- * own background so it doesn't read as a card-on-same-card. */
-.sh-feed-item > .sh-comments .sh-comment-empty {
-  background: transparent;
-  padding: var(--sh-space-sm) 0;
-}
-
-/* Stagger rotations so the feed reads as taped rather than tilted in
- * a single direction. Four-step cycle keeps the pattern from feeling
- * mechanical even in a long scroll. Amplitudes match the marketing
- * site's ``FamilyWall`` cards (-1.6deg / 1.2deg / -0.8deg / 1deg)
- * — the previous 0.3-0.6° was so subtle the cards still read as
- * a flat column. */
-.sh-feed-item:nth-child(4n+1) { --sh-feed-rot: -1.4deg; }
-.sh-feed-item:nth-child(4n+2) { --sh-feed-rot:  1.2deg; }
-.sh-feed-item:nth-child(4n+3) { --sh-feed-rot: -0.8deg; }
-.sh-feed-item:nth-child(4n)   { --sh-feed-rot:  1deg; }
-/* Settle-in animation borrowed from the marketing site so the feed
- * "lands" on first paint rather than appearing flat-out. The stagger
- * delay reads as the cards being pinned one after another. */
-.sh-feed-item {
-  animation: sh-card-settle 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-.sh-feed-item:nth-child(1) { animation-delay: 60ms; }
-.sh-feed-item:nth-child(2) { animation-delay: 130ms; }
-.sh-feed-item:nth-child(3) { animation-delay: 200ms; }
-.sh-feed-item:nth-child(4) { animation-delay: 270ms; }
-.sh-feed-item:nth-child(5) { animation-delay: 320ms; }
-.sh-feed-item:nth-child(n+6) { animation-delay: 360ms; }
-@keyframes sh-card-settle {
-  from {
-    opacity: 0;
-    transform: rotate(0deg) translateY(8px) scale(0.985);
-  }
-  to {
-    opacity: 1;
-    transform: rotate(var(--sh-feed-rot, 0deg)) translateY(0) scale(1);
-  }
-}
-
-/* Tape strip alternates terracotta / moss to feel hand-placed.
- * Positioning matches ``.sh-onboard-tape`` and ``FamilyWall.card__tape``
- * so the brand language is consistent across surfaces. */
-.sh-feed-item:nth-child(odd)::before {
-  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
-  left: auto;
-  right: 18px;
-  transform: rotate(8deg);
-}
-.sh-feed-item:nth-child(even)::before {
-  background: color-mix(in srgb, var(--sh-success) 45%, transparent);
-}
-/* Pinned post — full-strength terracotta tape so the at-a-glance
- * "this is anchored" cue still wins against the alternating strip. */
-.sh-feed-item:has(.sh-post--pinned)::before {
-  background: color-mix(in srgb, var(--sh-primary) 70%, transparent);
-  left: 18px;
-  right: auto;
-  transform: rotate(-6deg);
-}
-@media (prefers-reduced-motion: reduce) {
-  .sh-feed-item {
-    transform: none;
-  }
-}
-/* Mobile cap — at narrow widths a 1.4° rotation makes the card's
- * rotated bounding-box overflow the viewport's right edge, which the
- * browser materialises as a page-level horizontal scroll bar. Cut the
- * amplitude in half on mobile so the tilt still reads but the layout
- * stays inside the column. The page-level overflow-x: clip below is
- * the belt-and-braces safety net for any other rotated element. */
-@media (max-width: 640px) {
-  .sh-feed-item:nth-child(4n+1) { --sh-feed-rot: -0.8deg; }
-  .sh-feed-item:nth-child(4n+2) { --sh-feed-rot:  0.6deg; }
-  .sh-feed-item:nth-child(4n+3) { --sh-feed-rot: -0.5deg; }
-  .sh-feed-item:nth-child(4n)   { --sh-feed-rot:  0.7deg; }
+/* A pinned post keeps its at-a-glance cue (the badge carries the word)
+ * as a honey-tinted edge on the card. */
+.sh-feed-item:has(.sh-post--pinned) {
+  border-color: color-mix(in srgb, var(--sh-warning) 35%, var(--sh-border));
 }
 .sh-post--pinned {
   background:
@@ -9635,12 +9471,6 @@ hr {
  * Wave 2 — remaining feature surfaces
  * ═════════════════════════════════════════════════════════════════════*/
 
-/* Spaces — match the household pinned-card aesthetic from .sh-feed-item.
- * Cream paper, washi-tape ::before, soft rotation stagger, untilt on
- * hover. Scope-typed left edge (private = terracotta, household =
- * moss, public/global = honey) reads as the website's tile__edge. */
-.sh-spaces { display: flex; flex-direction: column; gap: var(--sh-space-lg); padding-top: 12px; }
-
 .sh-space-cover {
   width: 96px;
   aspect-ratio: 1;
@@ -12628,8 +12458,8 @@ a.sh-space-hero-members:focus-visible,
 /* Space post layouts (§23.123). ``useSpaceTheme`` sets
  * ``data-post-layout`` on <html> for a non-default id; the theme studio's
  * preview carries the same attribute so the admin sees the result before
- * saving. ``card`` (the default) is the feed's own pinned-paper look.
- *   compact  — flat, tight cards: no tilt or tape, small gaps + padding.
+ * saving. ``card`` (the default) is the feed's own flat card.
+ *   compact  — tight cards: small gaps + padding.
  *   magazine — roomy cards with larger body text, made for reading. */
 :root[data-post-layout="compact"] .sh-space-feed-content,
 .sh-theme-studio-preview[data-post-layout="compact"] {
@@ -12637,15 +12467,6 @@ a.sh-space-hero-members:focus-visible,
 }
 :root[data-post-layout="compact"] .sh-space-feed-content {
   padding-top: 0;
-}
-/* Zero the tilt via its variable — the settle-in animation (fill-mode
- * both) owns ``transform``, so overriding ``transform`` itself loses. */
-:root[data-post-layout="compact"] .sh-space-feed-content > .sh-feed-item {
-  --sh-feed-rot: 0deg;
-  box-shadow: var(--sh-shadow-xs);
-}
-:root[data-post-layout="compact"] .sh-space-feed-content > .sh-feed-item::before {
-  display: none;
 }
 :root[data-post-layout="compact"] .sh-space-feed-content .sh-post,
 .sh-theme-studio-preview[data-post-layout="compact"] .sh-theme-preview-card {
