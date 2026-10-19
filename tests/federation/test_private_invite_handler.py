@@ -25,7 +25,15 @@ from socialhome.domain.events import (
     RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
 )
-from socialhome.domain.space import RemoteAdminOutcome, SpacePermissionError, SpaceRole
+from socialhome.domain.space import (
+    JoinMode,
+    RemoteAdminOutcome,
+    Space,
+    SpaceFeatures,
+    SpacePermissionError,
+    SpaceRole,
+    SpaceType,
+)
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
@@ -220,6 +228,71 @@ async def test_accept_happy_path(handler):
     handler.remote_members.add.assert_awaited_once()
     handler.space_repo.update_invitation_status.assert_awaited_with(42, "accepted")
     assert any(isinstance(e, RemoteSpaceInviteAccepted) for e in handler.bus.events)
+
+
+def _local_community(owner="host-self"):
+    return Space(
+        id="sp-a",
+        name="Quartier",
+        owner_instance_id=owner,
+        owner_username="anna",
+        identity_public_key="ab" * 32,
+        config_sequence=1,
+        features=SpaceFeatures(),
+        space_type=SpaceType.PUBLIC,
+        join_mode=JoinMode.REQUEST,
+        lat=47.3769,
+        lon=8.5417,
+        radius_km=5.0,
+    )
+
+
+class _HomeRepo:
+    def __init__(self, home):
+        self.home = home
+
+    async def get_instance(self, iid):
+        lat, lon = self.home if self.home is not None else (None, None)
+        return SimpleNamespace(home_lat=lat, home_lon=lon)
+
+    async def get_local_identity(self):
+        return None
+
+
+def _accept_event():
+    return _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": "u1"},
+    )
+
+
+@pytest.mark.parametrize("home", [(46.9481, 7.4474), None])
+async def test_accept_into_a_local_community_rechecks_the_home(handler, home):
+    """The area (or the household's sharing) may have changed since the
+    invite went out: refused → declined, and the household is told it is
+    not in the space so its stub goes away."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
+    handler.space_repo.get.return_value = _local_community()
+    handler.h._own_instance_id = "host-self"
+    handler.h._federation_repo = _HomeRepo(home)
+    fed = AsyncMock()
+    handler.h._federation = fed
+    await handler.h._on_accept(_accept_event())
+    handler.remote_members.add.assert_not_awaited()
+    handler.space_repo.update_invitation_status.assert_awaited_with(42, "declined")
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["to_instance_id"] == "peer-1"
+    assert kw["payload"] == {"space_id": "sp-a", "user_id": "u1"}
+
+
+async def test_accept_into_a_local_community_from_inside_seats(handler):
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
+    handler.space_repo.get.return_value = _local_community()
+    handler.h._own_instance_id = "host-self"
+    handler.h._federation_repo = _HomeRepo((47.392, 8.56))
+    await handler.h._on_accept(_accept_event())
+    handler.remote_members.add.assert_awaited_once()
+    handler.space_repo.update_invitation_status.assert_awaited_with(42, "accepted")
 
 
 async def test_accept_broadcasts_member_joined_gossip(handler):

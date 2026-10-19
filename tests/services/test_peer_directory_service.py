@@ -13,8 +13,10 @@ import pytest
 from socialhome.domain.events import (
     PairingConfirmed,
     SpaceConfigChanged,
+    SpaceLocalAreaChanged,
 )
 from socialhome.domain.federation import FederationEventType, PairingStatus
+from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -82,11 +84,16 @@ class _FakeFedRepo:
 
 
 class _FakeFederationService:
-    def __init__(self) -> None:
+    def __init__(self, versions: dict[str, int] | None = None) -> None:
         self.sent: list[tuple[str, FederationEventType, dict]] = []
+        #: Advertised ``proto_version`` per peer; unknown peers are current.
+        self.versions = versions or {}
 
     async def send_event(self, *, to_instance_id, event_type, payload):
         self.sent.append((to_instance_id, event_type, payload))
+
+    async def peer_supports(self, instance_id, *, min_version):
+        return self.versions.get(instance_id, OURS) >= min_version
 
 
 @pytest.fixture
@@ -179,3 +186,64 @@ async def test_empty_public_spaces_still_broadcasts_empty_snapshot():
     assert fed.sent == [
         ("peer-1", FederationEventType.SPACE_DIRECTORY_SYNC, {"spaces": []}),
     ]
+
+
+# ── v_59: a local community's area ──────────────────────────────────────
+
+
+def _local_env(versions: dict[str, int]):
+    community = _space(
+        id="sp-local", name="Quartier", lat=47.3769, lon=8.5417, radius_km=5.0
+    )
+    pinned = _space(id="sp-pin", name="Old pin", lat=1.0, lon=2.0)
+    space_repo = _FakeSpaceRepo(public_spaces=[community, pinned], members={})
+    fed_repo = _FakeFedRepo(
+        [
+            _PeerRow("peer-new", PairingStatus.CONFIRMED),
+            _PeerRow("peer-old", PairingStatus.CONFIRMED),
+        ]
+    )
+    fed = _FakeFederationService(versions)
+    bus = EventBus()
+    svc = PeerDirectoryService(
+        bus=bus,
+        federation_service=fed,
+        federation_repo=fed_repo,
+        space_repo=space_repo,
+    )
+    svc.wire()
+    return bus, fed, svc
+
+
+def _entries(fed, to):
+    payload = next(p for (peer, _t, p) in fed.sent if peer == to)
+    return {s["space_id"]: s for s in payload["spaces"]}
+
+
+async def test_a_local_community_carries_its_area_to_a_v59_peer_only():
+    """Coordinates never reach a peer that cannot use them: below v_59 the
+    entry is listed without ``local_area``."""
+    old = FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA - 1
+    bus, fed, _svc = _local_env({"peer-old": old})
+    await bus.publish(SpaceLocalAreaChanged(space_id="sp-local"))
+    new = _entries(fed, "peer-new")
+    assert new["sp-local"]["local_area"] == {
+        "lat": 47.3769,
+        "lon": 8.5417,
+        "radius_km": 5.0,
+    }
+    # A pin without a radius is no area — never sent.
+    assert "local_area" not in new["sp-pin"]
+    old_entries = _entries(fed, "peer-old")
+    assert set(old_entries) == {"sp-local", "sp-pin"}
+    assert all("local_area" not in e for e in old_entries.values())
+
+
+async def test_a_new_pairing_gets_the_area_gated_too():
+    _bus, fed, svc = _local_env(
+        {"peer-old": FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA - 1}
+    )
+    await svc.send_snapshot("peer-old")
+    await svc.send_snapshot("peer-new")
+    assert "local_area" not in _entries(fed, "peer-old")["sp-local"]
+    assert "local_area" in _entries(fed, "peer-new")["sp-local"]

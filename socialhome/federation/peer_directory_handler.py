@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..domain.federation import FederationEventType
+from ..domain.local_community import parse_local_area_wire
 from ..domain.space import normalize_category
 from ..repositories.peer_space_directory_repo import (
     AbstractPeerSpaceDirectoryRepo,
@@ -65,6 +66,9 @@ class PeerDirectoryHandler:
                         min_age=int(item.get("min_age") or 0),
                         category=normalize_category(item.get("category")),
                         updated_at=item.get("updated_at"),
+                        # v_59 — re-validated (4 dp, bounds); a malformed
+                        # area is dropped, never guessed.
+                        local_area=parse_local_area_wire(item.get("local_area")),
                     )
                 )
             except KeyError, TypeError, ValueError:

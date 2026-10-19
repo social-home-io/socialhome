@@ -884,7 +884,18 @@ from __future__ import annotations
 #:   trusted with a reset — the stale picture stays until the member's next
 #:   live ``SPACE_MEMBER_PROFILE_UPDATED``, as before. Not space-scoped;
 #:   labelled "Removed profile pictures in space catch-up".
-OURS: int = 58
+#: * **v_59** (2026-10-19) — local communities: a ``SPACE_DIRECTORY_SYNC``
+#:   entry for a public space bound to an area carries ``local_area:
+#:   {lat, lon, radius_km}`` (centre truncated to 4 dp), so a paired
+#:   household can show the area and check it against its own home before
+#:   asking to join. The host still decides every seat against the home the
+#:   joiner already shares through pairing — nothing new is asked of the
+#:   joiner. No new event type. **Gated**: a peer below v_59 gets the entry
+#:   WITHOUT ``local_area`` (no coordinates for a peer that cannot use
+#:   them); it lists the space as before, and its request is refused by the
+#:   host (``OUTSIDE_AREA`` / ``HOME_NOT_SHARED``) like anyone's. Not
+#:   space-scoped; labelled "Local communities".
+OURS: int = 59
 
 
 class FederationCapability:
@@ -1365,6 +1376,11 @@ class FederationCapability:
     #: be the pre-#910 roster-upsert wipe). Not space-scoped.
     MIN_FOR_MEMBER_PICTURE_RESET_SYNC = 58
 
+    #: v_59 — a ``SPACE_DIRECTORY_SYNC`` entry carries a local community's
+    #: ``local_area`` (centre 4 dp + radius). Sender-gated: an older peer's
+    #: snapshot omits it. Not space-scoped.
+    MIN_FOR_LOCAL_COMMUNITY_AREA = 59
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1585,6 +1601,7 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC,
         "Removed profile pictures in space catch-up",
     ),
+    (FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA, "Local communities"),
 ]
 
 
@@ -1654,6 +1671,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SYNC_SERIES_ROWS: "synced_recurring_events",
     FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH: "multi_gfs_posting",
     FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC: "synced_picture_resets",
+    FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA: "local_communities",
 }
 
 

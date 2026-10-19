@@ -64,12 +64,15 @@ from ..domain.media_constraints import (
 from ..domain.space import (
     INVITE_VIA_GFS_LEGACY,
     INVITE_VIA_INTERNAL,
+    HomeNotSharedError,
     JoinOwner,
+    OutsideAreaError,
     SpaceMember,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
 )
+from ..services.local_community import require_local_eligibility
 from ..services.space_authority_pin import (
     owner_authority_cert_via,
     owner_statement_via,
@@ -183,6 +186,29 @@ BOOTSTRAP_DENY_CLIENT_MESSAGE: str = (
 #: (:data:`BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE`) — the issuer's text is
 #: still never rendered.
 REDEEM_DENY_REASON_TOO_LARGE: str = "space snapshot too large for the relay"
+
+#: The two DENY reasons of a LOCAL COMMUNITY (a public space bound to an
+#: area): the redeeming household's home is not known to the issuer (not
+#: shared with it), or lies outside the area. Sent only after the token was
+#: consumed and the ban check passed — so they tell a holder of a live link
+#: nothing about the issuer's private state, only what the paired-household
+#: directory already shows about the space — and the use is handed back.
+#: The redeemer maps them to its OWN coded errors
+#: (:class:`HomeNotSharedError` / :class:`OutsideAreaError`); the issuer's
+#: text is never rendered.
+REDEEM_DENY_REASON_HOME_NOT_SHARED: str = "home location not shared"
+REDEEM_DENY_REASON_OUTSIDE_AREA: str = "home outside the local area"
+
+
+def _local_area_deny_error(reason: str) -> SpacePermissionError | None:
+    """The redeemer-side error for a local-community DENY ``reason``, else
+    ``None``. ``whose="host"``: the joiner's own home, as the HOST sees it."""
+    if reason == REDEEM_DENY_REASON_HOME_NOT_SHARED:
+        return HomeNotSharedError(params={"whose": "host"})
+    if reason == REDEEM_DENY_REASON_OUTSIDE_AREA:
+        return OutsideAreaError(params={"whose": "host"})
+    return None
+
 
 #: What the redeemer shows for :data:`REDEEM_DENY_REASON_TOO_LARGE`.
 BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE: str = (
@@ -1158,6 +1184,27 @@ class SpaceInviteTokenRedeemCoordinator:
             await self._release_token_use(token, space_id)
             return None, REDEEM_DENY_REASON, None
 
+        # A local community: the redeeming household's shared home must be
+        # inside the area — an invite link is no override. Checked after the
+        # consume and the ban (so the specific reason reaches only a holder
+        # of a live link who is not banned) and the use is handed back: the
+        # household may share its home and redeem the same link again.
+        space = await self._spaces.get(space_id)
+        if space is not None:
+            try:
+                await require_local_eligibility(
+                    space,
+                    household_instance_id=redeemer_instance_id,
+                    own_instance_id=self._federation.own_instance_id,
+                    federation_repo=self._federation_repo,
+                )
+            except HomeNotSharedError:
+                await self._release_token_use(token, space_id)
+                return None, REDEEM_DENY_REASON_HOME_NOT_SHARED, None
+            except OutsideAreaError:
+                await self._release_token_use(token, space_id)
+                return None, REDEEM_DENY_REASON_OUTSIDE_AREA, None
+
         # The seat the ISSUER decided at mint time (migration 0053). The
         # redeemer never gets to ask for a role, so this is read here and
         # nowhere else.
@@ -1623,7 +1670,9 @@ class SpaceInviteTokenRedeemCoordinator:
         if not self._is_addressed_issuer(nonce, event):
             return
         reason = str(p.get("reason") or "invite redeem denied by issuer")
-        fut.set_exception(SpacePermissionError(reason))
+        fut.set_exception(
+            _local_area_deny_error(reason) or SpacePermissionError(reason)
+        )
 
     def _is_addressed_issuer(self, nonce: str, event: FederationEvent) -> bool:
         """True when ``event`` answers the household we sent ``nonce`` to.
@@ -2081,7 +2130,9 @@ class SpaceInviteTokenRedeemCoordinator:
             # a fresh link would not fix either.
             too_large = str(body.get("reason") or "") == REDEEM_DENY_REASON_TOO_LARGE
             fut.set_exception(
-                SpacePermissionError(
+                # A local community's refusal maps to our own coded error.
+                _local_area_deny_error(str(body.get("reason") or ""))
+                or SpacePermissionError(
                     BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE
                     if too_large
                     else BOOTSTRAP_DENY_CLIENT_MESSAGE,

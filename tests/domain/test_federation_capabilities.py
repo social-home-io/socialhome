@@ -8,7 +8,21 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 58
+    assert fc.OURS == 59
+
+
+def test_local_community_area_capability_threshold():
+    """v_59 — the paired-household directory carries a local community's
+    area. Sender-gated (a peer below gets no coordinates at all), not
+    space-scoped, labelled."""
+    assert fc.FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA == 59
+    assert fc.FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(58) == ["Local communities"]
+    assert fc.features_missing_below(59) == []
+    assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
 
 
 def test_member_picture_reset_sync_capability_threshold():
@@ -22,9 +36,10 @@ def test_member_picture_reset_sync_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(57) == [
-        "Removed profile pictures in space catch-up"
+        "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
-    assert fc.features_missing_below(58) == []
+    assert fc.features_missing_below(58) == ["Local communities"]
     assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
 
 
@@ -40,6 +55,7 @@ def test_multi_gfs_publish_capability_threshold():
     assert fc.features_missing_below(56) == [
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
     assert "Posting to every GFS a space is listed on" not in (
         fc.features_missing_below(57)
@@ -60,6 +76,7 @@ def test_sync_series_rows_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
 
@@ -75,11 +92,13 @@ def test_space_chat_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
     assert fc.space_features_missing_below(54) == ["Chat in spaces"]
     assert fc.space_feature_keys_missing_below(54) == ["space_chat"]
@@ -100,12 +119,14 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
 
 
@@ -124,6 +145,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
@@ -131,6 +153,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
 
 
@@ -148,6 +171,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
 
 
@@ -183,6 +207,7 @@ def test_space_authority_rotation_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -197,6 +222,7 @@ def test_space_authority_rotation_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
 
 
@@ -228,6 +254,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
 
 
@@ -738,6 +765,7 @@ def test_forwarded_role_change_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
 
 
@@ -764,6 +792,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
 
 
@@ -785,6 +814,7 @@ def test_member_gfs_publish_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
 
 
@@ -805,6 +835,7 @@ def test_strict_member_publish_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
 
 
@@ -825,6 +856,7 @@ def test_private_channels_capability_threshold():
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
         "Removed profile pictures in space catch-up",
+        "Local communities",
     ]
 
 
@@ -888,6 +920,7 @@ _PINNED_FEATURE_KEYS = {
     56: "synced_recurring_events",
     57: "multi_gfs_posting",
     58: "synced_picture_resets",
+    59: "local_communities",
 }
 
 

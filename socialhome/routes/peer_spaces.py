@@ -11,6 +11,7 @@ from aiohttp import web
 
 from .. import app_keys as K
 from ..domain.federation import PairingStatus
+from ..domain.local_community import local_area_wire
 from ..domain.space import normalize_category
 from .base import BaseView
 
@@ -37,15 +38,20 @@ class PeerSpaceCollectionView(BaseView):
         federation_repo = self.svc(K.federation_repo_key)
         unique_instances = {e.instance_id for e in entries}
         host_info: dict[str, tuple[str, bool]] = {}
+        #: Whether this household shares its home with the host — a local
+        #: community's host reads only that (``HOME_NOT_SHARED`` otherwise).
+        shares_home: dict[str, bool] = {}
         for iid in unique_instances:
             inst = await federation_repo.get_instance(iid)
             if inst is None:
                 host_info[iid] = (iid, False)
+                shares_home[iid] = False
             else:
                 host_info[iid] = (
                     inst.display_name or iid,
                     inst.status is PairingStatus.CONFIRMED,
                 )
+                shares_home[iid] = bool(inst.share_home)
         return web.json_response(
             [
                 {
@@ -64,6 +70,13 @@ class PeerSpaceCollectionView(BaseView):
                     "join_mode": e.join_mode,
                     "min_age": e.min_age,
                     "category": normalize_category(e.category),
+                    # A local community's area (v_59 hosts), else null.
+                    "local_area": (
+                        local_area_wire(e.local_area)
+                        if e.local_area is not None
+                        else None
+                    ),
+                    "home_shared_with_host": shares_home.get(e.instance_id, False),
                 }
                 for e in entries
                 # A peer must be CONFIRMED — don't show orphan cache rows

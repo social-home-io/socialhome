@@ -39,6 +39,7 @@ from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.space import (
     WRITER_ROLES,
     RemoteAdminOutcome,
+    SpacePermissionError,
     SpaceRole,
     cap_remote_role,
     mirrorable_remote_role,
@@ -46,6 +47,7 @@ from ..domain.space import (
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_remote_location_repo import SpaceRemoteLocation
+from ..services.local_community import require_local_eligibility
 from ..services.space_authority_pin import (
     AuthorityCertOutcome,
     apply_authority_cert,
@@ -179,6 +181,7 @@ class PrivateSpaceInviteHandler:
         "_bus",
         "_cover_repo",
         "_federation",
+        "_federation_repo",
         "_icon_repo",
         "_own_instance_id",
         "_remote_locations",
@@ -200,9 +203,14 @@ class PrivateSpaceInviteHandler:
         space_crypto_service=None,
         space_service=None,
         remote_location_repo=None,
+        federation_repo=None,
     ) -> None:
         self._bus = bus
         self._space_repo = space_repo
+        #: Reads an accepting household's shared home for a local
+        #: community. ``None`` → an accept into a local community is
+        #: refused (fail closed).
+        self._federation_repo = federation_repo
         self._remote_members = remote_member_repo
         #: Optional — when wired, the joiner persists the host's
         #: cover bytes from ``space_meta.cover_webp_base64`` (§D1b
@@ -596,6 +604,8 @@ class PrivateSpaceInviteHandler:
                 live_seat.role,
             )
             return
+        if not await self._local_area_admits(invite, event, invitee_user_id):
+            return
         invitee_pk = p.get("invitee_public_key")
         invitee_display = p.get("invitee_display_name")
         await self._remote_members.add(
@@ -655,6 +665,50 @@ class PrivateSpaceInviteHandler:
                 invitee_user_id=invitee_user_id,
             )
         )
+
+    async def _local_area_admits(
+        self,
+        invite: dict,
+        event: FederationEvent,
+        invitee_user_id: str,
+    ) -> bool:
+        """Re-check a local community at acceptance: the area, or the
+        household's shared home, may have changed since the invite went out
+        (``invite_remote_user`` checked it then). Refused → the invitation is
+        declined and the household is told it is not in the space
+        (``SPACE_REMOTE_MEMBER_REMOVED``), so its accepted stub goes away
+        instead of waiting for content that never comes."""
+        space = await self._space_repo.get(invite["space_id"])
+        if space is None:
+            # No row here, so no area to gate on: the accept goes on as it
+            # always did.
+            return True
+        try:
+            await require_local_eligibility(
+                space,
+                household_instance_id=event.from_instance,
+                own_instance_id=self._own_instance_id,
+                federation_repo=self._federation_repo,
+            )
+        except SpacePermissionError as exc:
+            log.warning(
+                "SPACE_PRIVATE_INVITE_ACCEPT for %s from %s refused: %s",
+                invite["space_id"],
+                event.from_instance,
+                getattr(exc, "code", "not eligible"),
+            )
+            await self._space_repo.update_invitation_status(invite["id"], "declined")
+            if self._federation is not None:
+                await self._federation.send_with_mesh_fallback(
+                    to_instance_id=event.from_instance,
+                    event_type=FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+                    payload={
+                        "space_id": invite["space_id"],
+                        "user_id": invitee_user_id,
+                    },
+                )
+            return False
+        return True
 
     async def _on_decline(self, event: FederationEvent) -> None:
         """The invitee turned the invitation down.

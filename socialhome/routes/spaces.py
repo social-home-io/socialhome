@@ -43,10 +43,11 @@ from ..app_keys import (
 )
 from ..csp import MEDIA_CSP
 from ..domain.child_protection import name_only
-from ..domain.errors import ImageTooLargeError
+from ..domain.errors import CodedError, ImageTooLargeError
 from ..domain.federation import PairingStatus
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.link_preview import link_preview_to_dict
+from ..domain.local_community import local_area_of, local_area_wire
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..domain.post import LocationData, PostType
 from ..domain.space import (
@@ -54,7 +55,6 @@ from ..domain.space import (
     INVITE_VIA_INTERNAL,
     INVITE_VIAS,
     PUBLIC_SPACE_TIERS,
-    SETTINGS_AUTHORITY_ROLES,
     WRITER_ROLES,
     MemberSpaceListing,
     Space,
@@ -83,6 +83,9 @@ from .base import BaseView
 from .media_status import READY, media_filename, video_poster_path
 
 _PROFILE_PICTURE_MAX_UPLOAD_BYTES = PROFILE_PICTURE_MAX_UPLOAD_BYTES
+
+#: The PATCH keys that set or clear a local community's area.
+_AREA_KEYS: frozenset[str] = frozenset({"lat", "lon", "radius_km"})
 
 #: Roles the member-role PATCH routes accept (the service applies the
 #: owner / admin matrix). ``owner`` moves only by transfer; ``subscriber``
@@ -238,6 +241,11 @@ class SpaceCollectionView(BaseView):
             # (this household's connection ids); required while any GFS is
             # connected. Other tiers take none.
             gfs_ids=body.get("gfs_ids"),
+            # A public space may be a local community: centre (4 dp) +
+            # radius, all three or none (422 on any other tier).
+            lat=body.get("lat"),
+            lon=body.get("lon"),
+            radius_km=body.get("radius_km"),
         )
         # Discoverable tiers (public / global) may carry an age gate set at
         # creation time; the gate lives in ChildProtectionService, not on the
@@ -280,8 +288,17 @@ def _public_space_view(space: Space, member_count: int) -> dict:
             "features": {"allow_subscribers": space.features.allow_subscribers},
             # The seat count the peer directory publishes for it too.
             "member_count": member_count,
+            # A local community's area — shown before joining, like the
+            # paired-household directory shows it.
+            "local_area": _local_area_view(space),
         }
     )
+
+
+def _local_area_view(space: Space) -> dict | None:
+    """``{lat, lon, radius_km}`` of a local community, else ``None``."""
+    area = local_area_of(space)
+    return local_area_wire(area) if area is not None else None
 
 
 class SpaceDetailView(BaseView):
@@ -363,10 +380,10 @@ class SpaceDetailView(BaseView):
                 # Global but listed on no GFS ("global, not listed"): the
                 # SPA shows a banner until the owner picks servers.
                 "gfs_unlisted": gfs_unlisted,
-                # The stored map pin of a space hosted here,
-                # ``{lat, lon}`` (4 dp) or null — for its owner / admins
-                # only (Settings › Location); never federated.
-                "map_pin": self._map_pin(space, member),
+                # A local community's area ``{lat, lon, radius_km}`` (4 dp
+                # centre) or null. Only the hosting household holds one; a
+                # member household's stub never has it.
+                "local_area": _local_area_view(space),
                 # "Needs you": held items, reports, join requests and open
                 # proposals waiting for the caller — null unless they have
                 # content authority here (owner / admin / moderator).
@@ -385,16 +402,6 @@ class SpaceDetailView(BaseView):
         if signer is not None:
             sign_media_urls_in(payload, signer)
         return web.json_response(payload)
-
-    def _map_pin(self, space: Space, member) -> dict | None:
-        if (
-            member.role not in SETTINGS_AUTHORITY_ROLES
-            or space.owner_instance_id != self.request.app.get(instance_id_key)
-            or space.lat is None
-            or space.lon is None
-        ):
-            return None
-        return {"lat": space.lat, "lon": space.lon}
 
     async def _gfs_listing(self, space) -> tuple[list[dict] | None, bool]:
         """Where a global space is listed — only for its members (not
@@ -425,21 +432,24 @@ class SpaceDetailView(BaseView):
         svc = self.svc(space_service_key)
         space_id = self.match("id")
         body = await self.body()
-        # The map pin (a public space hosted here) is host-local and
-        # not part of the federated config: set apart, and a body carrying
-        # nothing else touches no config at all.
-        if "lat" in body or "lon" in body:
-            pin = await svc.set_map_pin(
+        # A local community's area (a public space hosted here) is
+        # host-local and not part of the federated config: set apart, and a
+        # body carrying nothing else touches no config at all.
+        if _AREA_KEYS & set(body):
+            area = await svc.set_local_area(
                 space_id,
                 actor_username=ctx.username,
                 lat=body.get("lat"),
                 lon=body.get("lon"),
+                radius_km=body.get("radius_km"),
             )
-            if not set(body) - {"lat", "lon"}:
+            if not set(body) - _AREA_KEYS:
                 return web.json_response(
                     {
                         "id": space_id,
-                        "map_pin": ({"lat": pin[0], "lon": pin[1]} if pin else None),
+                        "local_area": (
+                            local_area_wire(area) if area is not None else None
+                        ),
                     }
                 )
         # ``features`` arrives in the same wire shape the GET response
@@ -1976,7 +1986,13 @@ class SpaceJoinView(BaseView):
         # ``BaseView._iter`` already maps to 403; only catch and remap
         # here when the redeem actually went out over the wire.
         except SpacePermissionError as exc:
-            if issuer_instance_id and not exc.banned:
+            # A coded refusal (a local community's HOME_NOT_SHARED /
+            # OUTSIDE_AREA) keeps its own status and code.
+            if (
+                issuer_instance_id
+                and not exc.banned
+                and not isinstance(exc, CodedError)
+            ):
                 return error_response(422, "REDEEM_DENIED", str(exc))
             raise
         return web.json_response(result)

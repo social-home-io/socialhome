@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db.database import AsyncDatabase
+from ..domain.local_community import LocalArea
 from .base import rows_to_dicts
 
 
@@ -33,6 +34,9 @@ class PeerSpaceDirectoryEntry:
     category: str = "general"
     updated_at: str | None = None
     cached_at: str | None = None
+    #: A local community's area (v_59), validated on receipt; ``None`` when
+    #: the space has none or the host is older.
+    local_area: LocalArea | None = None
 
 
 @runtime_checkable
@@ -84,6 +88,9 @@ class SqlitePeerSpaceDirectoryRepo:
                 e.category or "general",
                 e.updated_at,
                 cached,
+                e.local_area.lat if e.local_area is not None else None,
+                e.local_area.lon if e.local_area is not None else None,
+                e.local_area.radius_km if e.local_area is not None else None,
             )
             for e in entries
         ]
@@ -99,8 +106,8 @@ class SqlitePeerSpaceDirectoryRepo:
                     INSERT INTO peer_space_directory(
                         instance_id, space_id, name, description, emoji,
                         member_count, join_mode, min_age, category,
-                        updated_at, cached_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        updated_at, cached_at, lat, lon, radius_km
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
@@ -159,4 +166,13 @@ def _row(row: dict) -> PeerSpaceDirectoryEntry:
         category=row.get("category") or "general",
         updated_at=row.get("updated_at"),
         cached_at=row.get("cached_at"),
+        local_area=(
+            LocalArea(
+                lat=float(row["lat"]),
+                lon=float(row["lon"]),
+                radius_km=float(row["radius_km"]),
+            )
+            if row.get("radius_km") is not None
+            else None
+        ),
     )

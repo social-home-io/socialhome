@@ -2738,6 +2738,13 @@ about. The peer directory is authoritative for the households that
 publish it; GFS is authoritative only for the spaces that explicitly
 advertised to that specific GFS.
 
+An entry for a [local community](./local-communities.md) carries
+`local_area: {lat, lon, radius_km}` (centre at 4 dp) to peers at v_59+, so
+they can show the area and check it against their own home before asking
+to join. Older peers get the entry without it. The receiver re-validates
+the area and drops a malformed one. Each entry is
+`{space_id, name, description, emoji, member_count, join_mode, category[, local_area]}`.
+
 ## Withdrawal
 
 The owner's signed `POST /gfs/spaces/{id}/unpublish` removes a space from a

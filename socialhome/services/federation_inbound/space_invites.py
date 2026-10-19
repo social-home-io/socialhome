@@ -24,13 +24,15 @@ from ...domain.events import (
     RemoteSpaceJoinRequestReceived,
 )
 from ...domain.federation import FederationEventType
-from ...domain.space import PUBLIC_SPACE_TIERS, JoinMode
+from ...domain.space import PUBLIC_SPACE_TIERS, JoinMode, SpacePermissionError
 from ...infrastructure.event_bus import EventBus
+from ..local_community import require_local_eligibility
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
     from ...domain.space import Space
     from ...federation.federation_service import FederationService
+    from ...repositories.federation_repo import AbstractFederationRepo
     from ...repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
@@ -39,16 +41,21 @@ log = logging.getLogger(__name__)
 class SpaceInviteInboundHandlers:
     """Register invitation + join-request inbound handlers."""
 
-    __slots__ = ("_bus", "_own_instance_id", "_space_repo")
+    __slots__ = ("_bus", "_federation_repo", "_own_instance_id", "_space_repo")
 
     def __init__(
         self,
         *,
         bus: EventBus,
         space_repo: AbstractSpaceRepo,
+        federation_repo: AbstractFederationRepo | None = None,
     ) -> None:
         self._bus = bus
         self._space_repo = space_repo
+        #: Reads the applicant household's shared home for a local
+        #: community. ``None`` → every request to a local community is
+        #: refused (fail closed).
+        self._federation_repo = federation_repo
         #: Set by :meth:`attach_to`; until then no space is "ours", so a
         #: join request is refused (fail closed).
         self._own_instance_id = ""
@@ -140,6 +147,26 @@ class SpaceInviteInboundHandlers:
         if await self._space_repo.is_banned(space_id, user_id):
             log.info(
                 "SPACE_JOIN_REQUEST from %s refused: applicant banned from %s",
+                event.from_instance,
+                space_id,
+            )
+            return
+        # A local community: the applicant household's shared home must be
+        # inside the area — never a request from outside (or from a
+        # household whose home we don't know) in front of the admins. The
+        # applicant's SPA already showed why; approval re-checks.
+        assert space is not None
+        try:
+            await require_local_eligibility(
+                space,
+                household_instance_id=event.from_instance,
+                own_instance_id=self._own_instance_id,
+                federation_repo=self._federation_repo,
+            )
+        except SpacePermissionError:
+            log.info(
+                "SPACE_JOIN_REQUEST from %s refused: not eligible for the "
+                "local community %s",
                 event.from_instance,
                 space_id,
             )

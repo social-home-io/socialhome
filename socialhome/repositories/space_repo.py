@@ -37,6 +37,7 @@ from ..domain.gfs_server import (
     signed_gfs_server_list_from_column,
     signed_gfs_server_list_to_column,
 )
+from ..domain.local_community import LocalArea
 from ..domain.space import (
     INVITE_VIA_GFS,
     INVITE_VIAS,
@@ -159,9 +160,7 @@ class AbstractSpaceRepo(Protocol):
         icon_hash: str | None,
     ) -> None: ...
     async def set_tz(self, space_id: str, tz: str) -> None: ...
-    async def set_map_pin(
-        self, space_id: str, lat: float | None, lon: float | None
-    ) -> None: ...
+    async def set_local_area(self, space_id: str, area: LocalArea | None) -> None: ...
     async def set_gfs_servers(
         self, space_id: str, servers: SignedGfsServerList | None
     ) -> None: ...
@@ -771,14 +770,18 @@ class SqliteSpaceRepo:
         )
         return bool(row is not None and row["present"])
 
-    async def set_map_pin(
-        self, space_id: str, lat: float | None, lon: float | None
-    ) -> None:
-        """Set (or, with ``None`` / ``None``, clear) the space's map pin.
-        The caller has already truncated the coordinates to 4 dp."""
+    async def set_local_area(self, space_id: str, area: LocalArea | None) -> None:
+        """Set (or, with ``None``, clear) a space's local-community area —
+        ``spaces.lat`` / ``lon`` / ``radius_km`` together. The caller has
+        already validated it (4 dp centre, radius bounds)."""
         await self._db.enqueue(
-            "UPDATE spaces SET lat=?, lon=? WHERE id=?",
-            (lat, lon, space_id),
+            "UPDATE spaces SET lat=?, lon=?, radius_km=? WHERE id=?",
+            (
+                area.lat if area is not None else None,
+                area.lon if area is not None else None,
+                area.radius_km if area is not None else None,
+                space_id,
+            ),
         )
 
     async def set_tz(self, space_id: str, tz: str) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -351,3 +352,69 @@ async def test_join_request_status_missing_id_is_noop(repo, handlers):
         )
     )
     assert repo.join_status == []
+
+
+# ── local communities ───────────────────────────────────────────────────
+
+
+class _Peer:
+    def __init__(self, lat, lon):
+        self.home_lat, self.home_lon = lat, lon
+
+
+class _FedRepo:
+    def __init__(self, peers):
+        self.peers = peers
+
+    async def get_instance(self, iid):
+        return self.peers.get(iid)
+
+    async def get_local_identity(self):
+        return None
+
+
+def _local_handlers(bus, repo, fed_repo):
+    repo.spaces["sp-1"] = replace(_space(), lat=47.3769, lon=8.5417, radius_km=5.0)
+    h = SpaceInviteInboundHandlers(bus=bus, space_repo=repo, federation_repo=fed_repo)
+    h.attach_to(_FakeFederationService())
+    return h
+
+
+async def _request(h, from_instance):
+    await h._on_join_request(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST,
+            {"user_id": "u-1"},
+            from_instance=from_instance,
+            space_id="sp-1",
+        )
+    )
+
+
+async def test_a_local_community_files_a_request_from_inside(bus, repo):
+    h = _local_handlers(bus, repo, _FedRepo({"near": _Peer(47.392, 8.56)}))
+    await _request(h, "near")
+    assert [r[3] for r in repo.join_requests] == ["near"]
+
+
+@pytest.mark.parametrize(
+    "peers,sender",
+    [
+        ({"bern": _Peer(46.9481, 7.4474)}, "bern"),  # outside
+        ({"hidden": _Peer(None, None)}, "hidden"),  # share_home off
+        ({}, "stranger"),  # no pairing row (mesh / link-joined)
+    ],
+)
+async def test_a_local_community_drops_a_request_from_outside_or_unknown(
+    bus, repo, peers, sender
+):
+    """Never in front of the admins — and nothing to approve later."""
+    h = _local_handlers(bus, repo, _FedRepo(peers))
+    await _request(h, sender)
+    assert repo.join_requests == []
+
+
+async def test_a_local_community_fails_closed_without_a_federation_repo(bus, repo):
+    h = _local_handlers(bus, repo, None)
+    await _request(h, "near")
+    assert repo.join_requests == []

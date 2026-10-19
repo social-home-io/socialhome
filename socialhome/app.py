@@ -1566,6 +1566,8 @@ def _wire_federation_stack(
     SpaceInviteInboundHandlers(
         bus=bus,
         space_repo=space_repo,
+        # A local community: the applicant household's shared home.
+        federation_repo=federation_repo,
     ).attach_to(federation_service)
     PeerDirectoryHandler(peer_space_directory_repo).attach_to(federation_service)
     private_invite_handler = PrivateSpaceInviteHandler(
@@ -1576,6 +1578,8 @@ def _wire_federation_stack(
         icon_repo=space_icon_repo,
         space_crypto_service=space_crypto,
         remote_location_repo=space_remote_location_repo,
+        # A local community: the accepting household's shared home.
+        federation_repo=federation_repo,
     )
     private_invite_handler.attach_to(federation_service)
     app[K.private_invite_handler_key] = private_invite_handler

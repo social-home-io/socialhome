@@ -595,7 +595,14 @@ Every denial ships the existing DENY shape with **one opaque
 banned and an issuer storage fault at any stage are byte-identical on the
 wire: the differences are all facts about the issuer's private state, and
 reporting them separately let anybody holding a public link enumerate
-them. The detail stays in the issuer's own `log.exception`. On the
+them. The detail stays in the issuer's own `log.exception`. The one
+exception is a [local community](./local-communities.md): once the token
+was consumed and the ban check passed, a redeemer whose shared home is
+unknown to the host or outside the area gets `"home location not shared"`
+or `"home outside the local area"`. The use is handed back. Both reasons
+say only what the paired-household directory already shows about the
+space, and the redeemer maps them to its own `HOME_NOT_SHARED` /
+`OUTSIDE_AREA` errors. On the
 redeemer side the issuer's string is logged and then **replaced** with a
 fixed local message before it reaches the SPA — on this leg the issuer is
 a household we met through a public link, and rendering its text verbatim
