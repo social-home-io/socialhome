@@ -30,6 +30,11 @@ but draws it itself from JSON. It talks to the **dashboard port** (default
   `pin_forgot` are the lock screen's last-try warning and forgotten-PIN
   hint). The panel keeps English
   built-ins for the setup screens it shows before it has a server.
+- **A multi-day event is one row.** An agenda row carries `days` — the
+  event's days as one line, "Mon 26 – Sat 31 · 6 days", the way every
+  calendar in the app spells it — and `day_count`; show `days` in place
+  of `time` when it is set. `time` keeps the clock span it always had, so
+  older firmware keeps working (both fields are additive in v1).
 - **People once, then ids.** Each board lists the shown `people` (name,
   initials, colour + ink, avatar path, where they are — never coordinates
   — and a mention badge); items reference them by id.

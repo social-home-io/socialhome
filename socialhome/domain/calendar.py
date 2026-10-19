@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from ..utils.timezones import is_valid_tz, local_date
+from ..utils.timezones import is_valid_tz, local_date, zone_of
 from .errors import CodedError
 
 #: Joins a recurring event's id and an occurrence's start in the id of a
@@ -295,6 +295,59 @@ class EventReminder:
     minutes_before: int
     fire_at: str
     sent_at: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class DaySpan:
+    """The calendar days an event covers (both inclusive)."""
+
+    first: date
+    last: date
+
+    @property
+    def day_count(self) -> int:
+        return (self.last - self.first).days + 1
+
+    def covers(self, day: date) -> bool:
+        return self.first <= day <= self.last
+
+
+def event_day_span(
+    start: datetime,
+    end: datetime | None,
+    *,
+    all_day: bool,
+    event_tz: str | None,
+    viewer_tz: str,
+) -> DaySpan:
+    """The days an event covers — the same rules every SPA calendar view
+    places events by (``eventDaySpan`` in ``client/src/utils/calendar.ts``;
+    ``tests/fixtures/calendar_span_cases.json`` holds the cases both
+    sides are tested against):
+
+    * **All-day → the event's own tz, timed → the viewer's.** An all-day
+      row is read in ``event_tz`` — ``UTC`` when it has none or an unknown
+      one (the server default, and the zone legacy rows were stored in).
+      A timed event is a wall-clock event for whoever looks: ``viewer_tz``
+      (the household's, on the dashboard).
+    * **A midnight end is exclusive** — ``22:00 → 00:00`` is one evening;
+      an ICS-style ``00:00`` end of an all-day event ends the day before.
+    * **Degenerate ends fail soft** — a missing or not-later ``end`` is a
+      one-day event on the start day.
+    """
+    if all_day:
+        zone = event_tz if event_tz and is_valid_tz(event_tz) else "UTC"
+    else:
+        zone = viewer_tz
+    first = local_date(start, zone)
+    last = first
+    if end is not None and end > start:
+        local_end = end.astimezone(zone_of(zone))
+        candidate = local_end.date()
+        if (local_end.hour, local_end.minute) == (0, 0):
+            candidate -= timedelta(days=1)
+        last = max(first, candidate)
+    return DaySpan(first=first, last=last)
 
 
 def all_day_covers(event: CalendarEvent, day: date, fallback_tz: str) -> bool:

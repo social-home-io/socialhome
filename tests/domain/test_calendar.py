@@ -13,6 +13,7 @@ from socialhome.domain.calendar import (
     CalendarEventCreate,
     CalendarEventUpdate,
     CalendarRSVP,
+    DaySpan,
     RSVPStatus,
     all_day_covers,
     is_occurrence_id,
@@ -235,3 +236,11 @@ def test_is_occurrence_id_matches_only_the_expanded_shape():
     assert not is_occurrence_id(f"abc@{start}", "2026-10-15T09:20:24+00:00")
     assert not is_occurrence_id(f"@{start}", start)
     assert not is_occurrence_id("abc@", "")
+
+
+def test_day_span_counts_and_covers_whole_days():
+    span = DaySpan(date(2026, 10, 26), date(2026, 10, 31))
+    assert span.day_count == 6
+    assert span.covers(date(2026, 10, 26)) and span.covers(date(2026, 10, 31))
+    assert not span.covers(date(2026, 11, 1))
+    assert DaySpan(date(2026, 10, 26), date(2026, 10, 26)).day_count == 1

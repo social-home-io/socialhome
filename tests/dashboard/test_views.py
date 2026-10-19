@@ -42,6 +42,7 @@ from socialhome.dashboard.views import (
     pin_tries_note,
     safe_next,
 )
+from socialhome.domain.calendar import DaySpan
 from socialhome.domain.household_dashboard import DashboardSticky
 from socialhome.domain.theme import HouseholdTheme
 from socialhome.i18n import Catalog
@@ -1839,6 +1840,29 @@ async def test_person_past_rows_fade_only_their_strip(client, auth, snapshots):
     assert re.search(
         rf"\.{k}\{{--kc:#[0-9a-f]{{6}};[^}}]*--kp:#[0-9a-f]{{6}}", _board_style(html)[0]
     )
+
+
+async def test_person_row_spells_a_multi_day_event_as_its_days(client, auth, snapshots):
+    """One row, its days in the time column — "Mon 12 – Wed 14 · 3 days",
+    as every calendar in the app — never a clock span that runs from one
+    day into another ("18:00–10:00")."""
+    trip = event(
+        "trip",
+        "Camp",
+        at(18),
+        at(10, day=TOMORROW + timedelta(days=1)),
+        "u-anna",
+        days=DaySpan(TOMORROW - timedelta(days=1), TOMORROW + timedelta(days=1)),
+    )
+    snapshots.pages["u-anna"] = person(
+        now=at(20), now_item=None, today_items=(trip, WORK), tomorrow_items=(trip,)
+    )
+    html = await (await _get(client, auth, "/p/u-anna")).text()
+    times = re.findall(r'<span class="dash-row-time">([^<]*)</span>', html)
+    assert times.count("Mon 12 – Wed 14 · 3 days") == 2  # today + tomorrow
+    assert "18:00–10:00" not in times
+    # Running now, but standing context (like an all-day event): no NOW tag.
+    assert html.count("dash-tag-now") == 0
 
 
 async def test_home_board(client, auth, snapshots):

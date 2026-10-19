@@ -139,6 +139,8 @@
       "rows": [
         {
           "color": "#3f7d57",
+          "day_count": 1,
+          "days": null,
           "icon": null,
           "is_break": false,
           "kind": "event",
@@ -157,6 +159,8 @@
         "rows": [
           {
             "color": "#5462c4",
+            "day_count": 1,
+            "days": null,
             "icon": {
               "code": "1f392",
               "text": "🎒"
@@ -203,6 +207,8 @@
       "rows": [
         {
           "color": "#5462c4",
+          "day_count": 1,
+          "days": null,
           "icon": {
             "code": "1f4d0",
             "text": "📐"
@@ -220,6 +226,8 @@
         },
         {
           "color": "#5462c4",
+          "day_count": 1,
+          "days": null,
           "icon": null,
           "is_break": true,
           "kind": "lesson",
@@ -234,6 +242,8 @@
         },
         {
           "color": "#5462c4",
+          "day_count": 1,
+          "days": null,
           "icon": {
             "code": "26bd",
             "text": "⚽"
@@ -251,6 +261,8 @@
         },
         {
           "color": "#5462c4",
+          "day_count": 1,
+          "days": null,
           "icon": {
             "code": "1f3a8",
             "text": "🎨"
@@ -268,6 +280,8 @@
         },
         {
           "color": "#5462c4",
+          "day_count": 1,
+          "days": null,
           "icon": {
             "code": "1f1ec-1f1e7",
             "text": "🇬🇧"

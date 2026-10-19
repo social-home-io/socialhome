@@ -463,6 +463,8 @@
       "additionalProperties": false,
       "required": [
         "color",
+        "day_count",
+        "days",
         "icon",
         "is_break",
         "kind",
@@ -488,6 +490,18 @@
         },
         "time": {
           "type": "string"
+        },
+        "days": {
+          "description": "A multi-day event's days as one line (\"Mon 26 – Sat 31 · 6 days\") — show it instead of time when set; null for everything else.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "day_count": {
+          "description": "How many calendar days the item covers (1 unless it is a multi-day event).",
+          "type": "integer",
+          "minimum": 1
         },
         "title": {
           "type": "string"

@@ -41,6 +41,7 @@ from socialhome.dashboard.presenter import (
     view_key,
 )
 from socialhome.dashboard.render import STATIC_DIR
+from socialhome.domain.calendar import DaySpan
 from socialhome.i18n import Catalog
 
 from .factories import (
@@ -254,10 +255,61 @@ def test_fmt_phrases():
     assert f.avatar(ANNA) == "/avatar/u-anna?v=pic1"
 
 
+def test_fmt_when_spells_a_multi_day_event_as_its_days():
+    """A day list's time column: a trip over several days says its days
+    ("Mon 12 – Wed 14 · 3 days", as every calendar in the app) instead of
+    a clock span from one day into another; anything else keeps
+    :meth:`Fmt.span` (which the panel's ``time`` field still carries)."""
+    f = _fmt()
+    trip = event(
+        "t",
+        "Trip",
+        at(18),
+        at(10) + timedelta(days=2),
+        "u-anna",
+        days=DaySpan(TODAY, TODAY + timedelta(days=2)),
+    )
+    assert f.when(trip) == "Mon 12 – Wed 14 · 3 days"
+    assert f.days_label(trip) == "Mon 12 – Wed 14 · 3 days"
+    assert f.span(trip) == "18:00–10:00"  # the panel's unchanged ``time``
+    one_day = event("w", "Work", at(9), at(17), "u-anna", days=DaySpan(TODAY, TODAY))
+    assert f.when(one_day) == "09:00–17:00"
+    assert f.days_label(one_day) is None
+    assert f.when(BIRTHDAY) == "All day"
+    assert f.when(MATHS) == f.span(MATHS)
+
+
+def test_a_multi_day_event_is_standing_context_never_now_or_past():
+    """An all-day or multi-day event is the day's standing context: never
+    "now" (a trip with clock times runs now too — it gets no NOW tag, the
+    same as a ski week) and never "past"."""
+    f = _fmt()  # 14:32
+    trip = event(
+        "t",
+        "Trip",
+        at(9) - timedelta(days=1),
+        at(10) + timedelta(days=2),
+        "u-anna",
+        days=DaySpan(TODAY - timedelta(days=1), TODAY + timedelta(days=2)),
+    )
+    assert trip.standing and BIRTHDAY.standing and not WORK.standing
+    assert not f.is_now(trip) and not f.is_past(trip)
+    assert f.is_now(WORK)
+
+
 def test_fmt_localised():
     f = _fmt(locale="de")
     assert f.rel(at(15)) == "in 28 Min."
     assert f.span(BIRTHDAY) == "Ganztägig"
+    trip = event(
+        "t",
+        "Reise",
+        at(18),
+        at(10) + timedelta(days=2),
+        "u-anna",
+        days=DaySpan(TODAY, TODAY + timedelta(days=2)),
+    )
+    assert f.when(trip) == "Mo 12 – Mi 14 · 3 Tage"
 
 
 # ─── Who's home / school ─────────────────────────────────────────────────
@@ -317,6 +369,25 @@ def test_timeline_lanes():
     assert school.title == "School"
     assert school.label == "08:20–15:50 School"
     assert school.past is False
+
+
+def test_timeline_puts_a_multi_day_event_in_the_chip_row():
+    """A trip with clock times that runs over several days is standing
+    context like an all-day event: a chip, not a block from midnight."""
+    trip = event(
+        "t",
+        "Camp",
+        at(18) - timedelta(days=1),
+        at(10) + timedelta(days=1),
+        "u-anna",
+        days=DaySpan(TODAY - timedelta(days=1), TODAY + timedelta(days=1)),
+    )
+    snap = home(events_today=(trip, event("w", "Work", at(9), at(17), "u-anna")))
+    tl = build_timeline(snap, _fmt(snap))
+    assert tl is not None
+    anna = next(lane for lane in tl.lanes if lane.person.user_id == "u-anna")
+    assert anna.all_day == ("Camp",)
+    assert [b.title for b in anna.blocks] == ["Work"]
 
 
 def test_timeline_overlaps_stack_into_rows():

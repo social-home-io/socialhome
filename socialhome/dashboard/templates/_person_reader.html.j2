@@ -76,7 +76,7 @@
           <span class="dash-row-main"><span class="dash-row-title"><span aria-hidden="true">🎒</span> {{ t("dashboard.person.first_lesson") }}</span></span>
         </li>
         {% else %}
-        {{ agenda_row(item) }}
+        {{ agenda_row(item, today=False) }}
         {% endif %}
         {% endfor %}
       </ol>

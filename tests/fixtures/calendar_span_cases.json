@@ -1,0 +1,83 @@
+{
+  "__comment": "Which days a calendar event covers and how a multi-day one is spelled — the ONE set of cases both sides are tested against: the SPA (client/src/utils/calendar.ts eventDaySpan + calendarViews.ts spanDays, test client/src/utils/calendarSpanCases.test.ts) and the household dashboard (socialhome/domain/calendar.py event_day_span + socialhome/dashboard/clock.py span_label, test tests/domain/test_calendar_span_cases.py). Timed events are read in the viewer's zone, which is UTC for every case here (the vitest run and viewer_tz). label_en is null for a one-day event. standing: an all-day or multi-day event is the day's standing context, not a moment in it — the SPA paints it with its own rail (CalendarEventRow railKind allday / multi), the dashboard never marks it now or past and files it first.",
+  "cases": [
+    {
+      "name": "timed three days",
+      "start": "2026-05-01T14:00:00Z", "end": "2026-05-03T10:00:00Z", "all_day": false, "tz": null,
+      "first": "2026-05-01", "last": "2026-05-03", "day_count": 3, "standing": true,
+      "label_en": "Fri 1 – Sun 3 · 3 days"
+    },
+    {
+      "name": "all-day week of holidays (UTC)",
+      "start": "2026-10-26T00:00:00Z", "end": "2026-10-31T23:59:00Z", "all_day": true, "tz": "UTC",
+      "first": "2026-10-26", "last": "2026-10-31", "day_count": 6, "standing": true,
+      "label_en": "Mon 26 – Sat 31 · 6 days"
+    },
+    {
+      "name": "span across a month names both months",
+      "start": "2026-10-30T00:00:00Z", "end": "2026-11-02T23:59:00Z", "all_day": true, "tz": "UTC",
+      "first": "2026-10-30", "last": "2026-11-02", "day_count": 4, "standing": true,
+      "label_en": "Fri 30 Oct – Mon 2 Nov · 4 days"
+    },
+    {
+      "name": "ICS-style exclusive midnight end of an all-day span",
+      "start": "2026-10-26T00:00:00Z", "end": "2026-10-28T00:00:00Z", "all_day": true, "tz": "UTC",
+      "first": "2026-10-26", "last": "2026-10-27", "day_count": 2, "standing": true,
+      "label_en": "Mon 26 – Tue 27 · 2 days"
+    },
+    {
+      "name": "all-day in Zurich is its own single day",
+      "start": "2026-04-30T22:00:00Z", "end": "2026-05-01T21:59:00Z", "all_day": true, "tz": "Europe/Zurich",
+      "first": "2026-05-01", "last": "2026-05-01", "day_count": 1, "standing": true,
+      "label_en": null
+    },
+    {
+      "name": "all-day in Zurich over three days",
+      "start": "2026-04-30T22:00:00Z", "end": "2026-05-03T21:59:00Z", "all_day": true, "tz": "Europe/Zurich",
+      "first": "2026-05-01", "last": "2026-05-03", "day_count": 3, "standing": true,
+      "label_en": "Fri 1 – Sun 3 · 3 days"
+    },
+    {
+      "name": "all-day west of UTC",
+      "start": "2026-05-01T07:00:00Z", "end": "2026-05-02T06:59:00Z", "all_day": true, "tz": "America/Los_Angeles",
+      "first": "2026-05-01", "last": "2026-05-01", "day_count": 1, "standing": true,
+      "label_en": null
+    },
+    {
+      "name": "all-day without a zone reads as UTC",
+      "start": "2026-05-01T00:00:00Z", "end": "2026-05-01T23:59:00Z", "all_day": true, "tz": null,
+      "first": "2026-05-01", "last": "2026-05-01", "day_count": 1, "standing": true,
+      "label_en": null
+    },
+    {
+      "name": "all-day with an unknown zone reads as UTC",
+      "start": "2026-05-01T00:00:00Z", "end": "2026-05-03T23:59:00Z", "all_day": true, "tz": "Foo/Bar",
+      "first": "2026-05-01", "last": "2026-05-03", "day_count": 3, "standing": true,
+      "label_en": "Fri 1 – Sun 3 · 3 days"
+    },
+    {
+      "name": "a midnight end is exclusive (22:00 → 00:00 is one evening)",
+      "start": "2026-05-01T22:00:00Z", "end": "2026-05-02T00:00:00Z", "all_day": false, "tz": null,
+      "first": "2026-05-01", "last": "2026-05-01", "day_count": 1, "standing": false,
+      "label_en": null
+    },
+    {
+      "name": "overnight timed event covers two days",
+      "start": "2026-05-01T23:00:00Z", "end": "2026-05-02T01:00:00Z", "all_day": false, "tz": null,
+      "first": "2026-05-01", "last": "2026-05-02", "day_count": 2, "standing": true,
+      "label_en": "Fri 1 – Sat 2 · 2 days"
+    },
+    {
+      "name": "an end before the start is a one-day event",
+      "start": "2026-05-10T10:00:00Z", "end": "2026-05-08T10:00:00Z", "all_day": false, "tz": null,
+      "first": "2026-05-10", "last": "2026-05-10", "day_count": 1, "standing": false,
+      "label_en": null
+    },
+    {
+      "name": "a point in time (end = start) is one day",
+      "start": "2026-05-10T10:00:00Z", "end": "2026-05-10T10:00:00Z", "all_day": false, "tz": null,
+      "first": "2026-05-10", "last": "2026-05-10", "day_count": 1, "standing": false,
+      "label_en": null
+    }
+  ]
+}

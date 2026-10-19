@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, ClassVar, Final
 
+from .calendar import DaySpan
 from .errors import CodedError
 from .timetable import EntryKind
 
@@ -914,6 +915,10 @@ class DashboardEvent:
     ``id`` is for de-duplication only: an event known solely from a hidden
     member's copy gets a hashed ``event-…`` id that matches no stored row,
     so views must never link to or look up an event by ``id``.
+
+    ``days`` — the calendar days it covers, by the rules every calendar in
+    the app shares (:func:`~socialhome.domain.calendar.event_day_span`);
+    a multi-day event is one row spelled "Mon 26 – Sat 31 · 6 days".
     """
 
     item_type: ClassVar[str] = "event"
@@ -926,6 +931,20 @@ class DashboardEvent:
     person_ids: tuple[str, ...]
     color: str | None  # hex, the calendar's colour
     location: str | None = None
+    days: DaySpan | None = None
+
+    @property
+    def multi_day(self) -> bool:
+        return self.days is not None and self.days.day_count > 1
+
+    @property
+    def standing(self) -> bool:
+        """The day's standing context, not a moment in it: an all-day or a
+        multi-day event (the SPA paints these with their own rail —
+        ``railKind`` ``allday`` / ``multi`` — and the shared fixture pins
+        the rule). Never "now" or "past", first in a day list, the
+        timeline's chip row, the picture view's first part."""
+        return self.all_day or self.multi_day
 
 
 @dataclass(slots=True, frozen=True)

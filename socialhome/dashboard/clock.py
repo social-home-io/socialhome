@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ..domain.calendar import DaySpan
+
 log = logging.getLogger(__name__)
 
 __all__ = [
@@ -29,6 +31,7 @@ __all__ = [
     "household_clock",
     "relative_in",
     "resolve_zone",
+    "span_label",
     "until",
 ]
 
@@ -155,4 +158,38 @@ def due_label(due: date | None, today: date, t: Callable[..., str]) -> str | Non
         "dashboard.date.short",
         month=t(f"dashboard.date.month.{due.month}"),
         day=due.day,
+    )
+
+
+def _span_end(d: date, t: Callable[..., str], *, month: bool) -> str:
+    weekday = t(f"dashboard.date.weekday_short.{d.weekday()}")
+    if month:
+        return t(
+            "dashboard.span.day_month",
+            weekday=weekday,
+            day=d.day,
+            month=t(f"dashboard.date.month_short.{d.month}"),
+        )
+    return t("dashboard.span.day", weekday=weekday, day=d.day)
+
+
+def span_label(span: DaySpan, t: Callable[..., str]) -> str | None:
+    """A multi-day event as one line, the way every calendar in the app
+    says it: "Mon 26 – Sat 31 · 6 days" (months named only when the span
+    crosses one: "Fri 30 Oct – Mon 2 Nov · 4 days"). ``None`` for a
+    one-day event. The SPA's twin is ``spanDays`` + ``calendar.span_days``
+    (``client/src/utils/calendarViews.ts``); both are tested against
+    ``tests/fixtures/calendar_span_cases.json``."""
+    if span.day_count < 2:
+        return None
+    month = (span.first.year, span.first.month) != (span.last.year, span.last.month)
+    rng = t(
+        "dashboard.span.range",
+        first=_span_end(span.first, t, month=month),
+        last=_span_end(span.last, t, month=month),
+    )
+    return t(
+        "dashboard.span.label",
+        range=rng,
+        days=t("dashboard.span.days", n=span.day_count),
     )
