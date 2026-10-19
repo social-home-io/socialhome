@@ -38,6 +38,11 @@ vi.mock('@/store/auth', () => ({ currentUser: h.currentUser }))
 vi.mock('@/store/pageTitle', () => ({ useTitle: () => {} }))
 vi.mock('@/components/Toast', () => ({ showToast: () => {} }))
 vi.mock('@/baseUrl', () => ({ addBase: (p: string) => p, basePath: '/' }))
+const nav = vi.hoisted(() => ({ route: vi.fn() }))
+vi.mock('preact-iso', async (orig) => ({
+  ...(await orig<object>()),
+  useLocation: () => ({ route: nav.route, path: '/apps', url: '/apps', query: {} }),
+}))
 
 // Stub TabHeader (its ResizeObserver overflow logic is covered by its own
 // test) — render plain tab buttons + the actions slot so AppsPage's
@@ -171,6 +176,12 @@ describe('AppCard admin overflow menu', () => {
     expect(getByRole('menuitem', { name: 'Disable app' })).toBeTruthy()
     expect(getByRole('menuitem', { name: 'Uninstall…' })).toBeTruthy()
     expect(queryByRole('menuitemradio')).toBeNull()
+  })
+
+  it('Open goes to the app in the SPA, never with a page load', () => {
+    const { getByRole } = render(<AppsPage />)
+    fireEvent.click(getByRole('button', { name: 'Open' }))
+    expect(nav.route).toHaveBeenCalledWith('/apps/chess')
   })
 
   it('a disabled app shows a Disabled chip and no Open button', () => {

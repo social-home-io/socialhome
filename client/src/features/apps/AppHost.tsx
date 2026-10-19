@@ -15,7 +15,7 @@
  * Supervisor ingress (where the document base is not /).
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { useRoute } from 'preact-iso'
+import { useLocation, useRoute } from 'preact-iso'
 import { getRuntime, type AppRuntime } from '@/store/apps'
 import { mountBridge } from '@/features/apps/bridge'
 import { addBase } from '@/baseUrl'
@@ -36,6 +36,7 @@ export function AppHostInner({ appId }: { appId: string }) {
   const [error, setError]             = useState<string | null>(null)
   const [ageRestricted, setAgeRestricted] = useState(false)
   const iframeRef                     = useRef<HTMLIFrameElement | null>(null)
+  const { route }                     = useLocation()
 
   // Fetch the signed runtime descriptor on mount / appId change.
   useEffect(() => {
@@ -68,11 +69,13 @@ export function AppHostInner({ appId }: { appId: string }) {
     return cleanup
   }, [runtime]) // iframeRef.current is stable once rendered; runtime changes re-mount
 
+  // Router navigation (it keeps the HA ingress prefix), not a page load:
+  // leaving unmounts this component, which removes the sandboxed iframe —
+  // the browser discards its browsing context with it — and the bridge
+  // effect's cleanup drops the message listener and the WS relay. A page
+  // reload adds nothing to that teardown (AppHost.test.tsx pins it).
   function handleBack() {
-    // addBase() prepends the ingress prefix (no-op for standalone) so
-    // hard-navigate stays inside the SPA shell rather than bouncing
-    // the iframe to HA Core's frontend.
-    window.location.href = addBase('/apps')
+    route('/apps')
   }
 
   return (
@@ -95,7 +98,7 @@ export function AppHostInner({ appId }: { appId: string }) {
       {ageRestricted && (
         <div class="sh-app-host__status sh-app-host__status--age-restricted" role="alert">
           <p>{t('apps.host.age_restricted')}</p>
-          <Button onClick={() => { window.location.href = addBase('/apps') }}>
+          <Button onClick={handleBack}>
             {t('apps.host.back_to_apps')}
           </Button>
         </div>
@@ -104,7 +107,7 @@ export function AppHostInner({ appId }: { appId: string }) {
       {error && (
         <div class="sh-app-host__status sh-app-host__status--error" role="alert">
           <p>{error}</p>
-          <Button onClick={() => { window.location.href = addBase('/apps') }}>
+          <Button onClick={handleBack}>
             {t('apps.host.back_to_apps')}
           </Button>
         </div>
