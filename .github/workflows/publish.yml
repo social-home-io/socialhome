@@ -170,7 +170,7 @@ jobs:
       # collapse the 4th segment correctly.)
       - name: Generate image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/social-home-io/socialhome
           tags: |
@@ -217,7 +217,7 @@ jobs:
       # the 4-part ``.N`` same-day pinned tag).
       - name: Generate image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/social-home-io/gfs
           tags: |
