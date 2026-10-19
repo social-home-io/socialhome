@@ -1479,6 +1479,92 @@ token-free 404, and e's link-admin seat still without a signing seed.
 ``verify``'s capability block additionally asserts **v_29** round-trips
 on the one wire that cannot fall back to a peer row — see below.
 
+### ``local-community`` — who gets into a local community, and what the join carries (#1057)
+
+Opt-in (it needs the GFS for its last case). Prereqs: ``up`` + ``pair`` +
+``relay-pair`` (a ↔ d) + ``gfs-up`` + ``gfs-pair`` (d and e on the GFS);
+``traffic`` + ``calendar`` only so ``verify`` has what it checks. Run as its
+own chain (``verify`` after the whole ``all`` also sees the offline steps'
+connection-refused noise in its log audit):
+
+```bash
+python .claude/skills/federation-demo/harness.py up
+python .claude/skills/federation-demo/harness.py pair
+python .claude/skills/federation-demo/harness.py relay-pair
+python .claude/skills/federation-demo/harness.py traffic
+python .claude/skills/federation-demo/harness.py calendar
+python .claude/skills/federation-demo/harness.py gfs-up
+python .claude/skills/federation-demo/harness.py gfs-pair
+python .claude/skills/federation-demo/harness.py local-community
+python .claude/skills/federation-demo/harness.py verify   # 13h, log audit clean
+```
+
+**d** hosts a public, open local community centred on its home with a
+5 km radius. The step gives each household a home for the run (written
+into ``instance_identity`` like the ``_SEED_COORDS`` seed, then put back;
+no broadcast, so peers' rows keep the seed coordinates) and first checks
+every home's ~1 km cell gets the verdict it needs (``join_verdict``):
+
+| Household | Path to d | Home | Verdict |
+|---|---|---|---|
+| b | paired | 48.1512, 11.5803 | inside |
+| c | **mesh only** (not paired with d, on no GFS) | 48.1288, 11.5583 | inside |
+| a | paired | Berlin (seed), then 48.1814, 11.5751 | outside, then edge |
+| e | **GFS only** (paired with nobody) | 48.1405, 11.6012 | inside |
+
+Each 4 dp home is picked so its 2 dp join point is a different number, so
+a 2 dp value found in a DB can only be the join point.
+
+1. **Paired, inside.** b asks (``POST /api/public_spaces/{id}/join-request``).
+   Without ``share_location`` d drops it (no point → no decision, nothing
+   filed). With it, d files the request as ``inside`` (a paired
+   household's ask is always reviewed). d approves, and b is seated **on
+   both sides**: in d's ``space_remote_members`` and in b's own
+   ``space_members`` + ``spaces``.
+2. **Mesh, inside.** c redeems d's link (``POST /api/spaces/join``):
+   ``403 LOCATION_REQUIRED`` without consent (the use is handed back), then
+   seated with ``share_location``. The possible relays (a, b) never
+   dispatched the inner ``SPACE_INVITE_TOKEN_REDEEM``, never logged
+   ``join_location`` or the point, and hold neither in any DB table
+   (``_db_mentions``).
+3. **Outside.** a (Berlin) redeems a link: ``403 OUTSIDE_AREA``, not
+   seated, nothing filed.
+4. **Edge.** a moves ~4.8 km north and redeems the same link:
+   ``403 JOIN_REQUEST_SENT``. d holds one pending request with
+   ``area_verdict='edge'``, and its admin queue
+   (``GET /api/spaces/{id}/join-requests``) shows that verdict and no
+   coordinates. d approves, and a is seated on both sides with no second
+   check.
+5. **GFS (§D2b).** e redeems a code d minted. A local community is public,
+   and public is never on a GFS, so the code is handed over rather than
+   parked on a ``/join`` page. e gets ``403 LOCATION_REQUIRED`` and is then
+   seated through the sealed bootstrap (``space_session`` seat, GFS
+   ``gfs.envelope:`` lines). The GFS log and ``gfs.db`` hold no join
+   location and no point.
+6. **The host keeps no point.** d's DB holds none of the five points, only
+   the verdicts on its requests.
+
+``verify`` **13h** (when the step ran) re-asserts every seat on both
+sides, that d's requests carry only ``inside`` / ``edge``, and that no
+household's DB holds a ``join_location``.
+
+The chain found three product bugs, each fixed on its own:
+
+- an approved request from a **paired** household seated it on the host
+  but never on its own side: the approval's redeem waited for the host's
+  ACK inside the inbound pipeline that had to read that ACK, and timed out
+  (#1061);
+- a mesh member's version claim sent it the host's whole public-space
+  directory (#1062);
+- "publishing" a public space's link always failed at the GFS with advice
+  that could never help (#1063).
+
+**Every space the harness creates gets every section** (``_ALL_SECTIONS``:
+Bazaar, tasks, pages, gallery, stickies). Since #1025 a new space starts
+with feed, chat and calendar only, which broke ``traffic`` (its Bazaar
+listing answered 403) and with it ``all``. ``_request`` follows every
+``POST /api/spaces`` 201 with one ``PATCH {features}``.
+
 ### Bazaar / public moment over GFS (TODO)
 
 Still to wire end-to-end:

@@ -22,6 +22,7 @@ Usage::
     python .claude/skills/federation-demo/harness.py verify  # assertions across all 3
     python .claude/skills/federation-demo/harness.py unpair  # a unpairs c; both drop it; re-pair
     python .claude/skills/federation-demo/harness.py unpair-offline  # same with c down; c drops a on restart
+    python .claude/skills/federation-demo/harness.py local-community  # opt-in, after gfs-pair
     python .claude/skills/federation-demo/harness.py down    # stop + wipe data dirs
     python .claude/skills/federation-demo/harness.py all     # everything in order
 
@@ -117,7 +118,55 @@ def _save(state: dict) -> None:
 # ─── HTTP helpers ──────────────────────────────────────────────────────────
 
 
+#: Every section a space can have. Since #1025 a new space starts with feed,
+#: chat and calendar only (``NEW_SPACE_FEATURES``); the harness exercises
+#: the Bazaar, tasks, pages, the gallery and stickies too, so every space it
+#: creates turns them on straight away (:func:`_request`).
+_ALL_SECTIONS = {
+    "bazaar": True,
+    "todo": True,
+    "pages": True,
+    "gallery": True,
+    "stickies": True,
+}
+
+
 def _request(
+    url: str,
+    *,
+    token: str | None = None,
+    method: str = "GET",
+    body: dict | list | None = None,
+    timeout: float = 15.0,
+) -> tuple[int, Any]:
+    status, resp = _raw_request(
+        url, token=token, method=method, body=body, timeout=timeout
+    )
+    if (
+        method == "POST"
+        and url.endswith("/api/spaces")
+        and status == 201
+        and isinstance(resp, dict)
+        and resp.get("id")
+    ):
+        # A household space has no sections to choose; everything else
+        # gets them all (see ``_ALL_SECTIONS``).
+        st, patched = _raw_request(
+            f"{url}/{resp['id']}",
+            token=token,
+            method="PATCH",
+            body={"features": _ALL_SECTIONS},
+            timeout=timeout,
+        )
+        if st not in (200, 202):
+            raise SystemExit(
+                f"turning every section on for space {resp['id']} failed: "
+                f"HTTP {st} {patched!r}"
+            )
+    return status, resp
+
+
+def _raw_request(
     url: str,
     *,
     token: str | None = None,
@@ -9162,6 +9211,39 @@ def cmd_verify() -> None:
             "'gfs-invite-link-content' to exercise"
         )
 
+    # 13h. Local community (``local-community``, #1057): everyone the step
+    #    seated — paired (b), mesh (c), edge-after-review (a), GFS (e) —
+    #    still holds a seat on the host, the host's queue keeps verdicts
+    #    only, and no household's DB grew a join point since. Gated: the
+    #    step needs the opt-in GFS chain.
+    lc = state.get("local_community")
+    if lc:
+        lc_space = lc["space_id"]
+        for who, uid in lc["seated"].items():
+            if not _lc_seated("d", lc_space, uid):
+                failures.append(f"d: local community lost {who}'s seat")
+            if not _lc_member_here(who, lc_space, uid):
+                failures.append(f"{who}: no longer holds the local community")
+        verdicts = {
+            r[0]
+            for r in _rows(
+                "d",
+                "SELECT area_verdict FROM space_join_requests WHERE space_id=?",
+                (lc_space,),
+            )
+        }
+        if not verdicts <= {"inside", "edge"}:
+            failures.append(f"d: local-community join requests hold {verdicts!r}")
+        for holder in ("a", "b", "c", "d", "e"):
+            hits = _db_mentions(
+                _instance_dir(holder) / "socialhome.db", ["join_location"], []
+            )
+            if hits:
+                failures.append(f"{holder}: stored a join location: {hits}")
+        print("  local community: seats held, verdicts only, no join point stored ✓")
+    else:
+        print("  local community skipped — run 'local-community' to exercise")
+
     # 13b. admin-promote-kick durability — dave's promotion on d must
     #    still read 'admin' after everything that ran since (app-session,
     #    remote-invite-decline, replay's c restart). Gated because ``all``
@@ -15259,6 +15341,485 @@ def cmd_page_concurrent_edit() -> None:
     state["page_concurrent_edit_space_id"] = space_id
     _save(state)
     print("page-concurrent-edit: ok")
+
+
+# ─── Step: local-community ─────────────────────────────────────────────────
+#
+# A public space bound to an area (#1057): every join carries the joiner's
+# household home rounded to 2 dp (~1 km), only with consent, sealed to the
+# host, never stored. Host d. The homes below are the step's own and are put
+# back afterwards (the documented home-coordinate seed exception — written
+# straight into ``instance_identity``; no broadcast, so peers' rows keep the
+# ``_SEED_COORDS`` the rest of the run asserts on). Each 4 dp home is chosen
+# so its 2 dp join point differs from it: a match on the 2 dp value in a
+# relay's or the host's DB is then the join point and nothing else.
+
+#: The community: centred on d's home, 5 km.
+_LC_CENTRE = (48.1371, 11.5754)
+_LC_RADIUS_KM = 5.0
+#: label → (home, the verdict its ~1 km cell must get). ``a`` moves from
+#: outside (its seed, Berlin) to the edge between two asks.
+_LC_HOMES: dict[str, tuple[tuple[float, float], str]] = {
+    "b": ((48.1512, 11.5803), "inside"),  # paired with d
+    "c": ((48.1288, 11.5583), "inside"),  # mesh-only: c ↔ (a|b) ↔ d
+    "e": ((48.1405, 11.6012), "inside"),  # GFS only (§D2b)
+}
+_LC_EDGE_A = ((48.1814, 11.5751), "edge")  # ~4.8 km north: the cell straddles the rim
+
+
+def _set_home(label: str, home: tuple[float, float] | None) -> None:
+    """The household's own home, written the way ``_seed_home_coords`` does."""
+    con = sqlite3.connect(str(_instance_dir(label) / "socialhome.db"), timeout=10)
+    try:
+        con.execute(
+            "UPDATE instance_identity SET home_lat = ?, home_lon = ? WHERE id = 'self'",
+            (home[0], home[1]) if home else (None, None),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _home_of(label: str) -> tuple[float, float] | None:
+    row = _rows(
+        label, "SELECT home_lat, home_lon FROM instance_identity WHERE id='self'"
+    )
+    if not row or row[0][0] is None:
+        return None
+    return (row[0][0], row[0][1])
+
+
+def _db_mentions(
+    path: Path, needles: list[str], points: list[tuple[float, float]]
+) -> list[str]:
+    """Every place a SQLite DB holds one of ``needles`` (in any text value)
+    or one of ``points`` (a lat and a lon REAL in the same row). Read-only.
+    Used to prove a join point was never stored — on the host, on a relay,
+    on the GFS."""
+    hits: list[str] = []
+    con = sqlite3.connect(str(path), timeout=10)
+    try:
+        tables = [
+            r[0]
+            for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+        for table in tables:
+            # Table names come from sqlite_master, never from input.
+            for row in con.execute(f'SELECT * FROM "{table}"'):
+                texts = [v for v in row if isinstance(v, str)]
+                for needle in needles:
+                    if any(needle in v for v in texts):
+                        hits.append(f"{table}: text holds {needle!r}")
+                reals = {v for v in row if isinstance(v, float)}
+                for lat, lon in points:
+                    if lat in reals and lon in reals:
+                        hits.append(f"{table}: a row holds the point {lat}, {lon}")
+    finally:
+        con.close()
+    return sorted(set(hits))
+
+
+def _point_needles(point: tuple[float, float]) -> list[str]:
+    """How a 2 dp point reads as JSON text (``"lat": 48.13``)."""
+    return [f'{point[0]}, "lon": {point[1]}', f'{point[0]},"lon":{point[1]}']
+
+
+def _lc_err(body: Any) -> str | None:
+    err = body.get("error") if isinstance(body, dict) else None
+    return err.get("code") if isinstance(err, dict) else None
+
+
+def _lc_join(state: dict, label: str, body: dict) -> tuple[int, Any]:
+    return _as(state, label, "POST", "/api/spaces/join", body)
+
+
+def _lc_seated(host: str, space_id: str, user_id: str) -> bool:
+    return bool(
+        _rows(
+            host,
+            "SELECT 1 FROM space_remote_members WHERE space_id=? AND user_id=?",
+            (space_id, user_id),
+        )
+    )
+
+
+def _lc_member_here(label: str, space_id: str, user_id: str) -> bool:
+    """The joiner's own side of a seat: its household holds the space and
+    the person as a member — what makes the space show up for them."""
+    return bool(
+        _rows(
+            label,
+            "SELECT 1 FROM space_members m JOIN spaces s ON s.id = m.space_id"
+            " WHERE m.space_id=? AND m.user_id=?",
+            (space_id, user_id),
+        )
+    )
+
+
+def _lc_both_sides(state: dict, label: str, space_id: str, *, timeout: float) -> None:
+    """Wait until ``label``'s person is seated on the host d AND in the
+    space on ``label``'s own household."""
+    uid = state["instances"][label]["user_id"]
+    _poll(
+        f"{label} to be seated on d",
+        lambda: _lc_seated("d", space_id, uid),
+        timeout=timeout,
+    )
+    _poll(
+        f"{label}'s own household to hold the space",
+        lambda: _lc_member_here(label, space_id, uid),
+        timeout=timeout,
+    )
+
+
+def _lc_pending(host: str, space_id: str, user_id: str) -> list[tuple]:
+    return _rows(
+        host,
+        "SELECT id, area_verdict FROM space_join_requests"
+        " WHERE space_id=? AND user_id=? AND status='pending'",
+        (space_id, user_id),
+    )
+
+
+def cmd_local_community() -> None:
+    """A local community on the real wire (#1057): who gets in, and that the
+    ~1 km point a join carries is sealed end to end and never stored.
+
+    Prereqs: ``up`` + ``pair`` + ``relay-pair`` (a ↔ d) + ``gfs-up`` +
+    ``gfs-pair`` (d and e on the GFS). Host d; the community is public,
+    open, centred on d's home with a 5 km radius.
+
+    a. **Paired, inside** — b asks to join (``/api/public_spaces/{id}/
+       join-request``). Without consent the host drops it (nothing filed);
+       with ``share_location`` d files it as ``inside`` (a paired
+       household's ask is always reviewed), d approves, b is seated.
+    b. **Mesh, inside** — c (not paired with d) redeems d's link over the
+       mesh: ``LOCATION_REQUIRED`` without consent, seated with it. Neither
+       possible relay (a, b) dispatched the inner redeem, logged a join
+       location, or stored the point.
+    c. **Outside** — a (Berlin) redeems a link: ``OUTSIDE_AREA``, nothing
+       filed, not seated.
+    d. **Edge** — a moves to ~4.8 km north and redeems again:
+       ``JOIN_REQUEST_SENT``; d holds a pending ``edge`` request ("Near the
+       edge"); d approves; a is seated with no second check.
+    e. **GFS** — e (paired with nobody) redeems a GFS-published link through
+       the §D2b sealed bootstrap: ``LOCATION_REQUIRED``, then seated; the
+       GFS log and DB hold no join location and not the point.
+
+    Throughout: d (the host) stores none of the points — only the verdict
+    on a pending request.
+    """
+    from socialhome.domain.local_community import (
+        LocalArea,
+        coarse_join_point,
+        join_verdict,
+    )
+
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit(
+            "run 'up' + 'pair' + 'relay-pair' + 'gfs-up' + 'gfs-pair' first"
+        )
+    inst = state["instances"]
+    d = inst["d"]
+    d_iid = d["instance_id"]
+    gfs_conn = ((state.get("gfs") or {}).get("pairings") or {}).get("d", {}).get("id")
+    if not gfs_conn:
+        raise SystemExit("run 'gfs-pair' first (d is not a client of the GFS)")
+    for label, want_paired in (("a", True), ("b", True), ("c", False), ("e", False)):
+        row = _instance_row(label, d_iid)
+        # A §D2b seat (``space_session``, an earlier run's) is not a pair.
+        paired = (
+            row is not None
+            and row.get("status") == "confirmed"
+            and row.get("source") != "space_session"
+        )
+        if paired != want_paired:
+            raise SystemExit(
+                f"local-community: {label} {'is' if paired else 'is not'} paired with d — "
+                "the step needs b and a paired, c mesh-only and e GFS-only"
+            )
+    # c is on no GFS, so its only way to d is the mesh; e is paired with
+    # nobody, so its only way is the GFS relay.
+    if _rows("c", "SELECT 1 FROM gfs_connections"):
+        raise SystemExit(
+            "local-community: c is a GFS client — its redeem could skip the mesh"
+        )
+    if _rows(
+        "e",
+        "SELECT 1 FROM remote_instances WHERE status='confirmed' AND source != 'space_session'",
+    ):
+        raise SystemExit(
+            "local-community: e has a paired household — it is no longer GFS-only"
+        )
+
+    area = LocalArea(lat=_LC_CENTRE[0], lon=_LC_CENTRE[1], radius_km=_LC_RADIUS_KM)
+    points: dict[str, tuple[float, float]] = {}
+    for label, (home, want) in {**_LC_HOMES, "a": _LC_EDGE_A}.items():
+        point = coarse_join_point(*home)
+        got = str(join_verdict(area, point))
+        if got != want:
+            raise SystemExit(
+                f"local-community: {label}'s home {home} → cell {point} is {got!r}, "
+                f"the step needs {want!r} (fix _LC_HOMES)"
+            )
+        points[label] = point
+    berlin = coarse_join_point(*_SEED_COORDS["a"])
+    if str(join_verdict(area, berlin)) != "outside":
+        raise SystemExit("local-community: a's seed home is not outside the area?")
+    points["a_outside"] = berlin
+    saved = {label: _home_of(label) for label in ("a", "b", "c", "d", "e")}
+    every_point = list(points.values())
+    every_needle = ["join_location"] + [
+        n for p in every_point for n in _point_needles(p)
+    ]
+
+    try:
+        _set_home("d", _LC_CENTRE)
+        for label, (home, _want) in _LC_HOMES.items():
+            _set_home(label, home)
+        _set_home("a", _SEED_COORDS["a"])
+
+        st, space = _as(
+            state,
+            "d",
+            "POST",
+            "/api/spaces",
+            {
+                "name": "Delta Neighbourhood",
+                "space_type": "public",
+                "join_mode": "open",
+                "emoji": "🏘",
+                "lat": _LC_CENTRE[0],
+                "lon": _LC_CENTRE[1],
+                "radius_km": _LC_RADIUS_KM,
+            },
+        )
+        space = _must("local-community: d creates the community", st, space, ok=(201,))
+        space_id = space["id"]
+        print(
+            f"  d hosts local community {space_id} ({_LC_RADIUS_KM:g} km around d's home)"
+        )
+
+        # ── a. paired, inside ─────────────────────────────────────────────
+        b = inst["b"]
+        jr = f"/api/public_spaces/{space_id}/join-request"
+        st, body = _as(state, "b", "POST", jr, {"host_instance_id": d_iid})
+        _must("local-community: b asks without consent", st, body, ok=(202,))
+        time.sleep(6.0)
+        if _lc_pending("d", space_id, b["user_id"]):
+            raise SystemExit(
+                "local-community: d filed b's request although it carried no "
+                "location — the host must drop a join with no point (LOCATION_REQUIRED)"
+            )
+        print("  b without consent: d dropped the request (no point → no decision) ✓")
+        st, body = _as(
+            state, "b", "POST", jr, {"host_instance_id": d_iid, "share_location": True}
+        )
+        _must("local-community: b asks with consent", st, body, ok=(202,))
+        pending = _poll(
+            "d to file b's request",
+            lambda: _lc_pending("d", space_id, b["user_id"]),
+            timeout=60.0,
+        )
+        rid, verdict = pending[0]
+        if verdict != "inside":
+            raise SystemExit(
+                f"local-community: b's request is {verdict!r}, expected 'inside'"
+            )
+        print("  b with consent: d filed it as 'inside' ✓")
+        st, body = _as(
+            state, "d", "POST", f"/api/spaces/{space_id}/join-requests/{rid}/approve"
+        )
+        _must("local-community: d approves b", st, body)
+        _lc_both_sides(state, "b", space_id, timeout=90.0)
+        print("  d approved: b seated — on d and on b ✓")
+
+        # ── b. mesh, inside ───────────────────────────────────────────────
+        st, link = _as(
+            state, "d", "POST", f"/api/spaces/{space_id}/invite-tokens", {"uses": 1}
+        )
+        link = _must("local-community: d mints a link for c", st, link, ok=(201,))
+        offs = {r: _log_size(r) for r in ("a", "b")}
+        redeem = {"token": link["token"], "issuer_instance_id": d_iid}
+        st, body = _lc_join(state, "c", redeem)
+        if st != 403 or _lc_err(body) != "LOCATION_REQUIRED":
+            raise SystemExit(
+                f"local-community: c's redeem without consent answered {st} {body!r}, "
+                "expected 403 LOCATION_REQUIRED"
+            )
+        print(
+            "  c (mesh) without consent: 403 LOCATION_REQUIRED, the use handed back ✓"
+        )
+        st, body = _lc_join(state, "c", {**redeem, "share_location": True})
+        _must(
+            "local-community: c redeems over the mesh with consent",
+            st,
+            body,
+            ok=(200, 201),
+        )
+        _lc_both_sides(state, "c", space_id, timeout=10.0)
+        print("  c (mesh) with consent: seated — on d and on c ✓")
+        relayed = []
+        for relay, off in offs.items():
+            if _log_contains(relay, "SPACE_INVITE_TOKEN_REDEEM", offset=off):
+                raise SystemExit(
+                    f"local-community: relay {relay} dispatched the inner redeem — the "
+                    "join (and its point) must ride sealed inside SPACE_ROUTED"
+                )
+            for needle in every_needle:
+                if _log_contains(relay, needle, offset=off):
+                    raise SystemExit(
+                        f"local-community: relay {relay}'s log shows {needle!r}"
+                    )
+            hits = _db_mentions(
+                _instance_dir(relay) / "socialhome.db", every_needle, every_point
+            )
+            if hits:
+                raise SystemExit(
+                    f"local-community: relay {relay} stored the point: {hits}"
+                )
+            if _log_contains(relay, "SPACE_ROUTED", offset=off):
+                relayed.append(relay)
+        print(
+            f"  relays {sorted(offs)} never unsealed it, logged or stored a point ✓"
+            + (f" (SPACE_ROUTED seen on {relayed})" if relayed else "")
+        )
+
+        # ── c. outside ────────────────────────────────────────────────────
+        a = inst["a"]
+        st, link = _as(
+            state, "d", "POST", f"/api/spaces/{space_id}/invite-tokens", {"uses": 1}
+        )
+        link = _must("local-community: d mints a link for a", st, link, ok=(201,))
+        a_redeem = {
+            "token": link["token"],
+            "issuer_instance_id": d_iid,
+            "share_location": True,
+        }
+        st, body = _lc_join(state, "a", a_redeem)
+        if st != 403 or _lc_err(body) != "OUTSIDE_AREA":
+            raise SystemExit(
+                f"local-community: a (Berlin) answered {st} {body!r}, expected 403 OUTSIDE_AREA"
+            )
+        if _lc_seated("d", space_id, a["user_id"]) or _lc_pending(
+            "d", space_id, a["user_id"]
+        ):
+            raise SystemExit(
+                "local-community: an outside household was seated or filed"
+            )
+        print("  a outside: 403 OUTSIDE_AREA, nothing filed ✓")
+
+        # ── d. edge → admin review ────────────────────────────────────────
+        _set_home("a", _LC_EDGE_A[0])
+        st, body = _lc_join(state, "a", a_redeem)
+        if st != 403 or _lc_err(body) != "JOIN_REQUEST_SENT":
+            raise SystemExit(
+                f"local-community: a near the edge answered {st} {body!r}, "
+                "expected 403 JOIN_REQUEST_SENT"
+            )
+        pending = _lc_pending("d", space_id, a["user_id"])
+        if not pending or pending[0][1] != "edge":
+            raise SystemExit(
+                f"local-community: d holds {pending!r} for a, expected one 'edge' request"
+            )
+        st, listed = _as(state, "d", "GET", f"/api/spaces/{space_id}/join-requests")
+        listed = _must("local-community: d lists its join requests", st, listed)
+        mine = [r for r in listed if r.get("id") == pending[0][0]]
+        if not mine or mine[0].get("area_verdict") != "edge":
+            raise SystemExit(f"local-community: d's admin queue shows {listed!r}")
+        leaked = [k for k in ("lat", "lon", "join_location") if k in mine[0]]
+        if leaked:
+            raise SystemExit(f"local-community: the admin queue carries {leaked}")
+        print(
+            "  a near the edge: 403 JOIN_REQUEST_SENT, an 'edge' request in d's queue ✓"
+        )
+        st, body = _as(
+            state,
+            "d",
+            "POST",
+            f"/api/spaces/{space_id}/join-requests/{pending[0][0]}/approve",
+        )
+        _must("local-community: d approves a", st, body)
+        _lc_both_sides(state, "a", space_id, timeout=90.0)
+        print("  d approved: a seated — on d and on a, no second check ✓")
+
+        # ── e. GFS (§D2b) ─────────────────────────────────────────────────
+        e = inst["e"]
+        # A local community is public, and public is never on a GFS: its link
+        # is not parked on a GFS /join page — the code is handed over (chat,
+        # mail) and the redeem still travels sealed through the GFS relay.
+        st, link = _as(
+            state,
+            "d",
+            "POST",
+            f"/api/spaces/{space_id}/invite-tokens",
+            {"role": "member", "uses": 1},
+        )
+        link = _must("local-community: d mints a link for e", st, link, ok=(201,))
+        code = link.get("code")
+        if not code:
+            raise SystemExit(f"local-community: the link carries no code: {link!r}")
+        e_body = _join_body_from_blob(_decode_invite_blob(code))
+        if "issuer_keywrap_pk" not in e_body:
+            raise SystemExit(
+                f"local-community: the code carries no §D2b bootstrap block: {e_body!r}"
+            )
+        # Both ends of the relay must be on their GFS socket: an envelope for
+        # a household that isn't is queued, and the redeem gives up first.
+        _wait_for_gfs_ws(d_iid)
+        _wait_for_gfs_ws(e["instance_id"])
+        gfs_off = _gfs_log_size()
+        st, body = _lc_join(state, "e", e_body)
+        if st != 403 or _lc_err(body) != "LOCATION_REQUIRED":
+            raise SystemExit(
+                f"local-community: e's redeem without consent answered {st} {body!r}, "
+                "expected 403 LOCATION_REQUIRED"
+            )
+        print("  e (GFS) without consent: 403 LOCATION_REQUIRED ✓")
+        st, body = _lc_join(state, "e", {**e_body, "share_location": True})
+        _must(
+            "local-community: e redeems via the GFS with consent",
+            st,
+            body,
+            ok=(200, 201),
+        )
+        _lc_both_sides(state, "e", space_id, timeout=10.0)
+        seat = _instance_row("e", d_iid) or {}
+        if seat.get("source") != "space_session":
+            raise SystemExit(
+                f"local-community: e's row for d is {seat!r}, not a §D2b seat"
+            )
+        if not _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off):
+            raise SystemExit(
+                "local-community: the GFS relayed no envelope for e's redeem"
+            )
+        for needle in every_needle:
+            if _gfs_log_lines_matching(needle, offset=gfs_off):
+                raise SystemExit(f"local-community: the GFS log shows {needle!r}")
+        hits = _db_mentions(GFS_DIR / "gfs.db", every_needle, every_point)
+        if hits:
+            raise SystemExit(f"local-community: the GFS stored the point: {hits}")
+        print("  e (GFS) with consent: seated; the GFS saw no join location ✓")
+
+        # ── the host keeps no point ───────────────────────────────────────
+        joiners = [points[k] for k in ("a", "b", "c", "e")] + [berlin]
+        hits = _db_mentions(_instance_dir("d") / "socialhome.db", every_needle, joiners)
+        if hits:
+            raise SystemExit(f"local-community: d stored a join point: {hits}")
+        print("  d kept no join point — only the verdicts ✓")
+    finally:
+        for label, home in saved.items():
+            _set_home(label, home)
+
+    state["local_community"] = {
+        "space_id": space_id,
+        "seated": {k: inst[k]["user_id"] for k in ("a", "b", "c", "e")},
+    }
+    _save(state)
+    print("local-community: ok")
 
 
 def main() -> None:
