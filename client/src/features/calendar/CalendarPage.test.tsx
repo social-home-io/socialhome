@@ -628,7 +628,7 @@ describe('CalendarPage', () => {
   })
 })
 
-describe('CalendarPage — Calendar | Timetable tabs', () => {
+describe('CalendarPage — Calendar ⇄ Timetable links', () => {
   const ON = {
     feat_feed: true, feat_pages: true, feat_tasks: true, feat_stickies: true,
     feat_calendar: true, feat_presence: true, feat_gallery: true, feat_timetable: true, feat_household_chat: true,
@@ -652,42 +652,54 @@ describe('CalendarPage — Calendar | Timetable tabs', () => {
     vi.mocked(api.get).mockResolvedValue([])
   })
 
-  it('shows both tabs, the calendar by default (no query param)', async () => {
-    const { getByRole, queryByTestId } = await renderAt('/calendar', ON)
-    expect(getByRole('tab', { name: 'Calendar' }).getAttribute('aria-selected')).toBe('true')
-    expect(getByRole('tab', { name: 'Timetable' }).getAttribute('aria-selected')).toBe('false')
-    expect(queryByTestId('timetable-page')).toBeNull()
+  const link = (utils: { queryByRole: (r: string, o: object) => HTMLElement | null }, name: string) =>
+    utils.queryByRole('link', { name }) as HTMLAnchorElement | null
+
+  it('links to the Timetable from the control row — a real link, no tab strip', async () => {
+    const utils = await renderAt('/calendar', ON)
+    const tt = await utils.findByRole('link', { name: 'Timetable' }) as HTMLAnchorElement
+    expect(tt?.getAttribute('href')).toBe('/calendar?tab=timetable')
+    // It sits in the one control row with the view switch and actions.
+    const row = tt.closest('.sh-cal-controls')!
+    expect(row.querySelector('[role="group"][aria-label="Calendar view"]')).toBeTruthy()
+    expect([...row.children].map(el => el.textContent))
+      .toEqual(['UpcomingMonth', 'Timetable', 'Import+ New event'])
+    expect(utils.queryByRole('tablist')).toBeNull()
+    expect(utils.queryByRole('tab')).toBeNull()
+    expect(link(utils, 'Calendar')).toBeNull()
+    expect(utils.queryByTestId('timetable-page')).toBeNull()
   })
 
-  it('?tab=timetable opens the Timetable tab; the Calendar tab drops the param', async () => {
+  it('?tab=timetable opens the Timetable, which links back to the Calendar', async () => {
     const { fireEvent, waitFor } = await import('@testing-library/preact')
-    const { getByRole, getByTestId, queryByTestId } = await renderAt('/calendar?tab=timetable', ON)
-    expect(getByRole('tab', { name: 'Timetable' }).getAttribute('aria-selected')).toBe('true')
-    expect(getByTestId('timetable-page')).toBeTruthy()
-    fireEvent.click(getByRole('tab', { name: 'Calendar' }))
-    await waitFor(() => expect(queryByTestId('timetable-page')).toBeNull())
+    const utils = await renderAt('/calendar?tab=timetable', ON)
+    expect(utils.getByTestId('timetable-page')).toBeTruthy()
+    expect(link(utils, 'Timetable')).toBeNull()
+    const cal = link(utils, 'Calendar')!
+    expect(cal.getAttribute('href')).toBe('/calendar')
+    fireEvent.click(cal)
+    await waitFor(() => expect(utils.queryByTestId('timetable-page')).toBeNull())
     expect(window.location.search).toBe('')
-    fireEvent.click(getByRole('tab', { name: 'Timetable' }))
-    await waitFor(() => expect(getByTestId('timetable-page')).toBeTruthy())
+    fireEvent.click(await utils.findByRole('link', { name: 'Timetable' }))
+    await waitFor(() => expect(utils.getByTestId('timetable-page')).toBeTruthy())
     expect(window.location.search).toBe('?tab=timetable')
   })
 
   it('treats not-yet-loaded toggles as all on', async () => {
-    const { getByRole } = await renderAt('/calendar', null)
-    expect(getByRole('tab', { name: 'Timetable' })).toBeTruthy()
+    const utils = await renderAt('/calendar', null)
+    expect(await utils.findByRole('link', { name: 'Timetable' })).toBeTruthy()
   })
 
-  it('feat_timetable off: no tab strip, and ?tab=timetable falls back to the calendar', async () => {
-    const { queryByRole, queryByTestId } = await renderAt('/calendar?tab=timetable',
-      { feat_timetable: false })
-    expect(queryByRole('tablist', { name: 'Calendar sections' })).toBeNull()
-    expect(queryByTestId('timetable-page')).toBeNull()
+  it('feat_timetable off: no Timetable link, and ?tab=timetable falls back to the calendar', async () => {
+    const utils = await renderAt('/calendar?tab=timetable', { feat_timetable: false })
+    await utils.findByRole('group', { name: 'Calendar view' })
+    expect(link(utils, 'Timetable')).toBeNull()
+    expect(utils.queryByTestId('timetable-page')).toBeNull()
   })
 
-  it('feat_calendar off + feat_timetable on: only the Timetable tab', async () => {
-    const { getAllByRole, getByTestId } = await renderAt('/calendar', { feat_calendar: false })
-    const tabs = getAllByRole('tab').filter(el => el.closest('[aria-label="Calendar sections"]'))
-    expect(tabs.map(el => el.textContent)).toEqual(['Timetable'])
-    expect(getByTestId('timetable-page')).toBeTruthy()
+  it('feat_calendar off + feat_timetable on: the Timetable alone, no Calendar link', async () => {
+    const utils = await renderAt('/calendar', { feat_calendar: false })
+    expect(utils.getByTestId('timetable-page')).toBeTruthy()
+    expect(link(utils, 'Calendar')).toBeNull()
   })
 })

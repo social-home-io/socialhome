@@ -1,23 +1,17 @@
 /**
- * CalendarFilterStrip — pinned-to-the-wall row of household-member
- * calendars shown above the calendar header.
+ * CalendarFilterStrip — whose calendars the household calendar shows.
  *
- * Uses the feed's "taped to the wall" look so the calendar reads as
- * the same surface family: each member's calendar is a polaroid-style
- * card carrying their avatar, name, a one-line "Calendar" /
- * "{N} calendars" label, and a washi-tape strip coloured by the
- * calendar's hue. Click → toggles visibility of that
- * member's events in the calendar view.
+ * One flat avatar chip per household member, after two presets
+ * ("Everyone", "Just me"). A chip is a toggle (``aria-pressed``) with
+ * one selected style for every person — the primary tint the people
+ * pickers use — so "showing" never depends on a person's colour. The
+ * small dot is that person's calendar hue: the same colour as the rail
+ * on their events below, a legend rather than a state.
  *
- * A member with more than one calendar collapses into one card that
- * toggles the whole batch; that keeps the strip glance-able even when
- * a household has dozens of calendars between them.
- *
- * The card visually exposes its on/off state:
- *   ON  → coloured washi tape + filled name + un-faded avatar
- *   OFF → muted tape + faded avatar (the card is still clickable)
+ * A member with more than one calendar is one chip that toggles the
+ * whole batch (``aria-pressed="mixed"`` while only some show). The
+ * presets read as pressed when they describe what is showing.
  */
-import type { ComponentChildren } from 'preact'
 import { Avatar } from './Avatar'
 import { householdUsers } from '@/store/householdUsers'
 import { currentUser } from '@/store/auth'
@@ -94,16 +88,10 @@ interface CalendarFilterStripProps {
   /** Called with the calendar ids that should be visible after the
    *  click. Caller persists + re-fetches. */
   onChange: (next: Set<string>) => void
-  /** "Show all" affordance — kept on this component so the strip
-   *  carries every overlay control. */
+  /** "Everyone" — every household calendar. */
   onShowAll: () => void
-  /** "Just me" — collapses overlays to the caller's own calendar(s). */
+  /** "Just me" — the caller's own calendar(s) only. */
   onShowOnlyMine: () => void
-  /** Optional primary action rendered alongside the quick-filter row
-   *  below the strip — typically the page's "+ New event" button so
-   *  it sits in a meaningful neighbourhood rather than floating
-   *  alone. */
-  primaryAction?: ComponentChildren
 }
 
 export function CalendarFilterStrip({
@@ -112,45 +100,24 @@ export function CalendarFilterStrip({
   onChange,
   onShowAll,
   onShowOnlyMine,
-  primaryAction,
 }: CalendarFilterStripProps) {
-  if (calendars.length === 0) {
-    // Even with no calendars to filter we still want to surface the
-    // primary action — without it the page would have no "+ New event"
-    // button at all. Render the action by itself in that case.
-    if (primaryAction) {
-      return (
-        <div class="sh-cal-strip-wrap sh-cal-strip-wrap--actions-only">
-          <div class="sh-cal-strip-actions">{primaryAction}</div>
-        </div>
-      )
-    }
-    return null
-  }
   const cards = groupCalendarsByOwner(calendars)
-  // Lone-calendar case: skip the polaroid strip (nothing to filter)
-  // but keep the action row so the page still owns its "+ New event".
-  if (cards.length < 2) {
-    if (primaryAction) {
-      return (
-        <div class="sh-cal-strip-wrap sh-cal-strip-wrap--actions-only">
-          <div class="sh-cal-strip-actions">{primaryAction}</div>
-        </div>
-      )
-    }
-    return null
-  }
+  // One person: nothing to filter.
+  if (cards.length < 2) return null
+
+  const shows = (ids: string[]) => ids.every(id => visibleCalendarIds.has(id))
+  const mine = cards.filter(c => c.isMine).flatMap(c => c.calendarIds)
+  const everyone = shows(calendars.map(c => c.id))
+  const justMe = mine.length > 0 && !everyone
+    && visibleCalendarIds.size === mine.length && shows(mine)
 
   const toggle = (card: MemberCard) => {
     const next = new Set(visibleCalendarIds)
-    const allOn = card.calendarIds.every(id => next.has(id))
-    if (allOn) {
-      // Never let the user hide every calendar — that would leave an
-      // empty view with no way back besides "Show all".
-      const remaining = new Set(next)
-      for (const id of card.calendarIds) remaining.delete(id)
-      if (remaining.size === 0) return
+    if (shows(card.calendarIds)) {
+      // Never hide every calendar — an empty view with no way back
+      // besides "Everyone".
       for (const id of card.calendarIds) next.delete(id)
+      if (next.size === 0) return
     } else {
       for (const id of card.calendarIds) next.add(id)
     }
@@ -158,83 +125,42 @@ export function CalendarFilterStrip({
   }
 
   return (
-    <div class="sh-cal-strip-wrap">
-      <nav
-        class="sh-cal-strip"
-        aria-label={t('calendar.strip.aria')}
-      >
-        <div class="sh-cal-strip-inner">
-          {cards.map((card, i) => {
-            const on = card.calendarIds.every(id =>
-              visibleCalendarIds.has(id),
-            )
-            const partial = !on && card.calendarIds.some(id =>
-              visibleCalendarIds.has(id),
-            )
-            // Pin state is conveyed visually by the ``--on`` / ``--partial``
-            // modifier classes (colour saturation + tape hue + opacity).
-            // The aria-label keeps a screen-reader-friendly text version of
-            // the same state.
-            const stateLabel = on
-              ? t('calendar.strip.state_on')
-              : partial ? t('calendar.strip.state_partial') : t('calendar.strip.state_off')
-            return (
-              <button
-                key={card.ownerKey}
-                type="button"
-                class={
-                  'sh-cal-strip-pin'
-                  + (on ? ' sh-cal-strip-pin--on' : '')
-                  + (partial ? ' sh-cal-strip-pin--partial' : '')
-                }
-                style={{
-                  '--cal-hue': card.hue,
-                  '--sh-pin-rot': `${PIN_ROTATIONS[i % PIN_ROTATIONS.length]}deg`,
-                } as Record<string, string>}
-                aria-pressed={on}
-                aria-label={t('calendar.strip.pin_aria', { name: card.displayName, state: stateLabel })}
-                onClick={() => toggle(card)}
-              >
-                <span class="sh-cal-strip-tape" aria-hidden="true" />
-                <Avatar
-                  name={card.displayName}
-                  src={card.pictureUrl}
-                  size={44}
-                />
-                <span class="sh-cal-strip-name">
-                  {card.isMine ? t('calendar.page.owner_you') : card.displayName}
-                </span>
-              </button>
-            )
-          })}
-        </div>
-      </nav>
-      <div class="sh-cal-strip-actions">
-        <div class="sh-cal-strip-quick" role="group" aria-label={t('calendar.strip.filters_aria')}>
+    <div class="sh-cal-people" role="group" aria-label={t('calendar.strip.aria')}>
+      <button type="button"
+              class={`sh-cal-person sh-cal-person--preset${everyone ? ' is-on' : ''}`}
+              aria-pressed={everyone} onClick={onShowAll}>
+        {t('calendar.strip.everyone')}
+      </button>
+      {mine.length > 0 && (
+        <button type="button"
+                class={`sh-cal-person sh-cal-person--preset${justMe ? ' is-on' : ''}`}
+                aria-pressed={justMe} onClick={onShowOnlyMine}>
+          {t('calendar.strip.just_me')}
+        </button>
+      )}
+      <span class="sh-cal-people__sep" aria-hidden="true" />
+      {cards.map(card => {
+        const on = shows(card.calendarIds)
+        const partial = !on && card.calendarIds.some(id => visibleCalendarIds.has(id))
+        return (
           <button
+            key={card.ownerKey}
             type="button"
-            class="sh-cal-strip-quick__btn"
-            onClick={onShowOnlyMine}
+            class={`sh-cal-person${on ? ' is-on' : ''}`}
+            style={{ '--cal-hue': card.hue } as Record<string, string>}
+            aria-pressed={on ? 'true' : partial ? 'mixed' : 'false'}
+            onClick={() => toggle(card)}
           >
-            {t('calendar.strip.just_me')}
+            <span class="sh-cal-person__avatar" aria-hidden="true">
+              <Avatar name={card.displayName} src={card.pictureUrl} size={28} />
+            </span>
+            <span class="sh-cal-person__name">
+              {card.isMine ? t('calendar.page.owner_you') : card.displayName}
+            </span>
+            <span class="sh-cal-person__hue" aria-hidden="true" />
           </button>
-          <button
-            type="button"
-            class="sh-cal-strip-quick__btn"
-            onClick={onShowAll}
-          >
-            {t('calendar.strip.everyone')}
-          </button>
-        </div>
-        {primaryAction && (
-          <div class="sh-cal-strip-actions__primary">{primaryAction}</div>
-        )}
-      </div>
+        )
+      })}
     </div>
   )
 }
-
-/** Tiny rotation stagger — adjacent pins tilt the opposite way so the
- *  row reads as hand-pinned rather than algorithmic. Matches the
- *  presence strip's vocabulary. */
-const PIN_ROTATIONS = [-1.5, 1, -2, 1.5, -1, 2] as const
