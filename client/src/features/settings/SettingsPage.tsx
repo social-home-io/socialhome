@@ -36,6 +36,10 @@ import {
 import { UsernameEditor } from './UsernameEditor'
 import { ProfileTab, resetProfileDraft, useProfileLeaveGuard } from './ProfileTab'
 import { SecuritySettings } from '@/components/SecuritySettings'
+import { ChatNotifChoices } from '@/features/dms/ChatNotifChoices'
+import {
+  householdChat, loadHouseholdChat, patchHouseholdChat,
+} from '@/store/householdChat'
 import {
   useScrollActiveTabIntoView, useTabStripOverflow,
 } from '@/components/TabStripOverflow'
@@ -724,7 +728,32 @@ function NotificationsTab() {
             : t('settings.notifications.unsupported')}
       </p>
       {isHomeAssistant() && <HaNotifyServiceRow />}
+      <HouseholdChatNotifs />
     </section>
+  )
+}
+
+/** The household chat's notifications. The chat on the Feed has no bell
+ *  of its own (like a space's chat), so its level and mute live here. */
+function HouseholdChatNotifs() {
+  useEffect(() => { if (householdChat.value === null) void loadHouseholdChat() }, [])
+  const chat = householdChat.value
+  if (!chat?.enabled || !chat.conversation_id) return null
+  return (
+    <div class="sh-settings-household-chat" data-testid="household-chat-notifs">
+      <h3>{t('settings.notifications.household_chat')}</h3>
+      <p class="sh-muted">{t('settings.notifications.household_chat_hint')}</p>
+      <ChatNotifChoices
+        legend={t('settings.notifications.household_chat_legend')}
+        chat={{
+          convId: chat.conversation_id,
+          mutedUntil: chat.muted_until,
+          level: chat.notif_level ?? 'all',
+          onMute: (until) => patchHouseholdChat({ muted_until: until }),
+          onLevel: (next) => patchHouseholdChat({ notif_level: next }),
+        }}
+      />
+    </div>
   )
 }
 

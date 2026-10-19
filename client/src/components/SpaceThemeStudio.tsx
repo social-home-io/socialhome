@@ -59,12 +59,38 @@ function asMode(v: string | null | undefined): ModeChoice {
   return v === 'light' || v === 'dark' ? v : 'inherit'
 }
 
+/** The studio's unsaved state, for a page that saves it with its own
+ *  save bar (Settings › Basics) instead of the studio's Save button. */
+export interface ThemeDraft {
+  dirty: boolean
+  /** ``PUT`` the theme; ``true`` when the server took it. */
+  save: () => Promise<boolean>
+  discard: () => void
+}
+
 interface Props {
   spaceId: string
   onSaved?: () => void
+  /** Given, the studio has no Save button of its own: it reports its
+   *  draft here on every change (``null`` when it unmounts). */
+  onDraft?: (draft: ThemeDraft | null) => void
 }
 
-export function SpaceThemeStudio({ spaceId, onSaved }: Props) {
+interface ThemeValues {
+  primary: string
+  accent: string
+  tint: string
+  mode: ModeChoice
+  font: FontId
+  layout: LayoutId
+}
+
+const DEFAULTS: ThemeValues = {
+  primary: BRAND_PRIMARY, accent: BRAND_ACCENT, tint: '', mode: 'inherit',
+  font: 'system', layout: DEFAULT_LAYOUT,
+}
+
+export function SpaceThemeStudio({ spaceId, onSaved, onDraft }: Props) {
   const [primary, setPrimary] = useState(BRAND_PRIMARY)
   const [accent, setAccent] = useState(BRAND_ACCENT)
   const [tint, setTint] = useState<string>('')          // '' means unset
@@ -73,6 +99,14 @@ export function SpaceThemeStudio({ spaceId, onSaved }: Props) {
   const [layout, setLayout] = useState<LayoutId>(DEFAULT_LAYOUT)
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [saving, setSaving] = useState(false)
+  // The stored theme, to tell an unsaved change from the saved one.
+  const [base, setBase] = useState<ThemeValues>(DEFAULTS)
+  const values: ThemeValues = { primary, accent, tint, mode, font, layout }
+  const dirty = status === 'ready' && JSON.stringify(values) !== JSON.stringify(base)
+  const setAll = (v: ThemeValues) => {
+    setPrimary(v.primary); setAccent(v.accent); setTint(v.tint)
+    setMode(v.mode); setFont(v.font); setLayout(v.layout)
+  }
 
   // Stale-response guard (the ``stopped`` pattern of useSpaceTheme): a
   // newer load — another space, a retry — or unmount stops the older
@@ -87,28 +121,23 @@ export function SpaceThemeStudio({ spaceId, onSaved }: Props) {
     try {
       const th = await api.get(`/api/spaces/${spaceId}/theme`) as SpaceThemeResponse
       if (mine.stopped) return
-      if (th.is_default) {
-        // No space theme yet — the GET fell back to the HOUSEHOLD row.
-        // Start from the brand defaults (= "no override" everywhere)
-        // so saving doesn't pin the household's current colours / font
-        // onto this space as if they were its own.
-        setPrimary(BRAND_PRIMARY)
-        setAccent(BRAND_ACCENT)
-        setTint('')
-        setMode('inherit')
-        setFont('system')
-        setLayout(DEFAULT_LAYOUT)
-      } else {
-        setPrimary(th.primary_color || BRAND_PRIMARY)
-        setAccent(th.accent_color || BRAND_ACCENT)
-        setTint(th.background_tint ?? '')
-        setMode(asMode(th.mode_override))
-        // The schema CHECK keeps stored values inside the id sets; anything
-        // else starts from the space defaults instead of being echoed back
-        // into a save the server would refuse.
-        setFont(isFontId(th.font_family) ? th.font_family : 'system')
-        setLayout(isLayoutId(th.post_layout) ? th.post_layout : DEFAULT_LAYOUT)
+      // No space theme yet (``is_default``) — the GET fell back to the
+      // HOUSEHOLD row. Start from the brand defaults (= "no override"
+      // everywhere) so saving doesn't pin the household's current colours
+      // / font onto this space as if they were its own. Otherwise the
+      // schema CHECK keeps stored values inside the id sets; anything else
+      // starts from the space defaults instead of being echoed back into a
+      // save the server would refuse.
+      const loaded: ThemeValues = th.is_default ? DEFAULTS : {
+        primary: th.primary_color || BRAND_PRIMARY,
+        accent: th.accent_color || BRAND_ACCENT,
+        tint: th.background_tint ?? '',
+        mode: asMode(th.mode_override),
+        font: isFontId(th.font_family) ? th.font_family : 'system',
+        layout: isLayoutId(th.post_layout) ? th.post_layout : DEFAULT_LAYOUT,
       }
+      setAll(loaded)
+      setBase(loaded)
       setStatus('ready')
     } catch {
       if (mine.stopped) return
@@ -129,7 +158,7 @@ export function SpaceThemeStudio({ spaceId, onSaved }: Props) {
     setTint(p.surface ?? '')
   }
 
-  const save = async () => {
+  const save = async (): Promise<boolean> => {
     setSaving(true)
     try {
       await api.put(`/api/spaces/${spaceId}/theme`, {
@@ -140,17 +169,28 @@ export function SpaceThemeStudio({ spaceId, onSaved }: Props) {
         font_family:     font,
         post_layout:     layout,
       })
-      showToast(t('theme.saved'), 'success')
+      setBase(values)
+      // Saved with a page's save bar, the page says "Saved" once.
+      if (!onDraft) showToast(t('theme.saved'), 'success')
       onSaved?.()
+      return true
     } catch (err: unknown) {
       showToast(
         t('theme.save_failed', { error: String((err as Error)?.message ?? err) }),
         'error',
       )
+      return false
     } finally {
       setSaving(false)
     }
   }
+
+  // Report the draft to a page that saves it (fresh closures each change).
+  const key = JSON.stringify(values)
+  useEffect(() => {
+    onDraft?.({ dirty, save, discard: () => setAll(base) })
+  }, [key, dirty, JSON.stringify(base)])
+  useEffect(() => () => onDraft?.(null), [])
 
   return (
     <div class="sh-theme-studio sh-space-theme-studio">
@@ -247,9 +287,11 @@ export function SpaceThemeStudio({ spaceId, onSaved }: Props) {
             ))}
           </div>
 
-          <div class="sh-form-actions">
-            <Button onClick={save} loading={saving}>{t('theme.save')}</Button>
-          </div>
+          {!onDraft && (
+            <div class="sh-form-actions">
+              <Button onClick={() => void save()} loading={saving}>{t('theme.save')}</Button>
+            </div>
+          )}
         </>
       )}
     </div>

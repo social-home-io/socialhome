@@ -219,6 +219,37 @@ describe('SpaceSettingsPage — save model', () => {
     await waitFor(() => expect(shouldConfirmLeave('/spaces/sp-1')).toBe(false))
   })
 
+  it('a theme change joins the Basics save bar and saves with it', async () => {
+    const put = (await import('@/api')).api.put as ReturnType<typeof vi.fn>
+    put.mockReset()
+    put.mockResolvedValue({})
+    const view = await mount()
+    await waitFor(() => expect(view.container.querySelector('#settings-basics input[type="color"]')).not.toBeNull())
+    expect(view.queryByRole('button', { name: 'Save theme' })).toBeNull()
+    const color = view.container.querySelector('#settings-basics input[type="color"]') as HTMLInputElement
+    fireEvent.input(color, { target: { value: '#00aa00' } })
+    fireEvent.input(view.getByLabelText('Name'), { target: { value: 'Allotment' } })
+    expect((await view.findByRole('region', { name: 'Unsaved changes' })).textContent)
+      .toContain('2 unsaved changes')
+    fireEvent.click(view.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(put).toHaveBeenCalledWith(
+      '/api/spaces/sp-1/theme', expect.objectContaining({ primary_color: '#00aa00' }),
+    ))
+    expect(apiPatch).toHaveBeenCalledWith('/api/spaces/sp-1', { name: 'Allotment' })
+  })
+
+  it('Discard puts the theme back too', async () => {
+    const view = await mount()
+    await waitFor(() => expect(view.container.querySelector('#settings-basics input[type="color"]')).not.toBeNull())
+    const color = view.container.querySelector('#settings-basics input[type="color"]') as HTMLInputElement
+    const before = color.value
+    fireEvent.input(color, { target: { value: '#00aa00' } })
+    await view.findByRole('region', { name: 'Unsaved changes' })
+    fireEvent.click(view.getByRole('button', { name: 'Discard' }))
+    await waitFor(() => expect(view.queryByRole('region', { name: 'Unsaved changes' })).toBeNull())
+    expect(color.value).toBe(before)
+  })
+
   it('agreeing to leave discards the draft; staying keeps it', async () => {
     const view = await mount()
     fireEvent.input(view.getByLabelText('Name'), { target: { value: 'X' } })

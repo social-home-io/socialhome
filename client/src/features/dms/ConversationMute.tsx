@@ -53,7 +53,7 @@ function levelLabel(level: ConversationNotifLevel): string {
   return t(level === 'all' ? 'dms.notif.all' : 'dms.notif.mentions')
 }
 
-async function applyLevel(
+export async function applyLevel(
   convId: string,
   level: ConversationNotifLevel,
   onLevelChange: (level: ConversationNotifLevel) => void,
@@ -71,7 +71,7 @@ async function applyLevel(
   }
 }
 
-async function apply(
+export async function applyMute(
   convId: string,
   duration: MuteDuration | null,
   onChange: (until: string | null) => void,
@@ -114,7 +114,7 @@ export function MuteButton({ convId, mutedUntil, onChange, level, onLevelChange 
   const run = async (duration: MuteDuration | null) => {
     if (saving) return
     setSaving(true)
-    if (await apply(convId, duration, onChange)) setOpen(false)
+    if (await applyMute(convId, duration, onChange)) setOpen(false)
     setSaving(false)
   }
   const pickLevel = async (next: ConversationNotifLevel) => {
@@ -213,7 +213,7 @@ export function MuteSection({ convId, mutedUntil, onChange, level, onLevelChange
   const run = async (duration: MuteDuration | null) => {
     if (saving) return
     setSaving(true)
-    await apply(convId, duration, onChange)
+    await applyMute(convId, duration, onChange)
     setSaving(false)
   }
   const pickLevel = async (next: ConversationNotifLevel) => {

@@ -168,6 +168,12 @@ describe('FeedPage — Feed | Chat tabs', () => {
     expect(apiGet.mock.calls.map(c => c[0])).not.toContain('/api/conversations/hc-1')
     // The chat sits outside the feed's pull-to-refresh.
     expect(document.querySelector('.sh-ptr [data-testid="conversation-view"]')).toBeNull()
+    // No bar or bell of its own: the audience is the empty thread's note,
+    // the level and mute live in Settings › Notifications.
+    expect(document.querySelector('.sh-feed-chat-bar')).toBeNull()
+    expect(document.querySelector('.sh-mute-btn, [aria-label*="Mute"]')).toBeNull()
+    expect(props.emptyNote).toBe('Everyone in Home can read this chat.')
+    expect(props.logLabel).toBe('Chat in Home')
   })
 
   it('/?tab=chat (the notification link) lands on the chat via LandingDispatch', async () => {

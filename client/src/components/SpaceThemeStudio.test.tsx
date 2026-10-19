@@ -174,3 +174,29 @@ describe('SpaceThemeStudio', () => {
     await waitFor(() => expect(getByText('Save theme')).toBeTruthy())
   })
 })
+
+describe('SpaceThemeStudio — saved by a page (Settings › Basics)', () => {
+  it('has no Save of its own and reports its draft; discard and save', async () => {
+    get.mockResolvedValue(STORED)
+    const drafts: Array<{ dirty: boolean; save: () => Promise<boolean>; discard: () => void } | null> = []
+    const view = render(<SpaceThemeStudio spaceId="sp-1" onDraft={(d) => drafts.push(d)} />)
+    await waitFor(() => expect(view.container.querySelector('input[type="color"]')).not.toBeNull())
+    expect(view.queryByText('Save theme')).toBeNull()
+    expect(drafts.at(-1)?.dirty).toBe(false)
+    const primary = view.container.querySelector('input[type="color"]') as HTMLInputElement
+    fireEvent.input(primary, { target: { value: '#00aa00' } })
+    await waitFor(() => expect(drafts.at(-1)?.dirty).toBe(true))
+    drafts.at(-1)!.discard()
+    await waitFor(() => expect(drafts.at(-1)?.dirty).toBe(false))
+    expect(primary.value).toBe('#3366ff')
+    fireEvent.input(primary, { target: { value: '#00aa00' } })
+    await waitFor(() => expect(drafts.at(-1)?.dirty).toBe(true))
+    expect(await drafts.at(-1)!.save()).toBe(true)
+    expect(put).toHaveBeenCalledWith('/api/spaces/sp-1/theme', expect.objectContaining({ primary_color: '#00aa00' }))
+    await waitFor(() => expect(drafts.at(-1)?.dirty).toBe(false))
+    // The page toasts once; the studio stays quiet.
+    expect(showToast).not.toHaveBeenCalled()
+    view.unmount()
+    await waitFor(() => expect(drafts.at(-1)).toBeNull())
+  })
+})

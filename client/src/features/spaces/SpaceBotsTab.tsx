@@ -89,6 +89,16 @@ export function SpaceBotsTab({
   const canManage = (bot: SpaceBot): boolean =>
     canAdmin || (bot.scope === 'member' && bot.created_by === currentUserId)
 
+  // Bots off and the viewer can't turn them on: nothing here is actionable,
+  // so one quiet line instead of empty lists and a disabled button.
+  if (!canAdmin && !botEnabled) {
+    return (
+      <p class="sh-muted sh-bots-off-line" data-testid="bots-off-line">
+        {t('space.bots.off_line')}
+      </p>
+    )
+  }
+
   return (
     <div class="sh-bots-tab">
       {/* Explainer + opt-in toggle. The toggle controls the space-wide
@@ -117,11 +127,7 @@ export function SpaceBotsTab({
             />
             <span>{t('space.bots.allow')}</span>
           </label>
-        ) : !botEnabled && (
-          <div class="sh-bots-disabled-banner">
-            {t('space.bots.disabled_banner')}
-          </div>
-        )}
+        ) : null}
       </section>
 
       {/* Reveal panel — shown immediately after create / rotate. Tokens

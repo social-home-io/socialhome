@@ -699,3 +699,32 @@ describe('BlockedAccountsPanel', () => {
     expect(await findByText(/stops one-to-one messages, calls and app games/)).toBeTruthy()
   })
 })
+
+describe('SettingsPage — household chat notifications', () => {
+  it('the household chat level and mute live here (the Feed chat has no bell)', async () => {
+    const { householdChat } = await import('@/store/householdChat')
+    householdChat.value = null
+    mockGet.mockImplementation((path: string) => Promise.resolve(
+      path === '/api/household/chat'
+        ? { enabled: true, conversation_id: 'hc-1', unread: 0, notif_level: 'mentions', muted_until: null }
+        : { spaces: [] },
+    ))
+    const { findByTestId, getByRole } = await renderNotificationsTab()
+    const block = await findByTestId('household-chat-notifs')
+    expect(block.textContent).toContain('Household chat')
+    expect((getByRole('radio', { name: /Only @mentions/ }) as HTMLInputElement).checked).toBe(true)
+    expect(getByRole('group', { name: 'Mute the chat for…' })).toBeTruthy()
+  })
+
+  it('shows nothing when the household chat is off', async () => {
+    const { householdChat } = await import('@/store/householdChat')
+    householdChat.value = null
+    mockGet.mockImplementation((path: string) => Promise.resolve(
+      path === '/api/household/chat' ? { enabled: false } : { spaces: [] },
+    ))
+    const { queryByTestId } = await renderNotificationsTab()
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith('/api/household/chat'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(queryByTestId('household-chat-notifs')).toBeNull()
+  })
+})
