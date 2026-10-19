@@ -11,8 +11,11 @@
  * Per-space feature toggles (set by an admin in SpaceSettings) hide
  * their section when off. Defaults track the backend ``SpaceFeatures``
  * dataclass: every section on, except the opt-ins — location (privacy
- * contract, §23.8.6) and the timetable. The Calendar section holds the
- * events and/or the space timetable, so it shows when either is on.
+ * contract, §23.8.6) and the timetable. The space timetable is its own
+ * section (``/spaces/:id/timetable``), last in the order so it usually
+ * sits in More; it used to be a switch inside Calendar, so an old
+ * Calendar link in a space with only a timetable goes there
+ * (``redirectedSection``).
  *
  * The section bar shows the sections in ONE fixed order
  * (``SECTION_ORDER``) and moves whatever doesn't fit into More — it
@@ -32,12 +35,13 @@ export type SpaceSection =
   | 'stickies'
   | 'bazaar'
   | 'map'
+  | 'timetable'
   | 'members'
   | 'moderation'
 
 /** The section bar's order. What doesn't fit goes to More, from the end. */
 export const SECTION_ORDER: readonly SpaceSection[] = [
-  'feed', 'chat', 'calendar', 'tasks', 'pages', 'gallery', 'stickies', 'bazaar', 'map',
+  'feed', 'chat', 'calendar', 'tasks', 'pages', 'gallery', 'stickies', 'bazaar', 'map', 'timetable',
 ]
 
 /** Sections that live in More, never in the bar. */
@@ -66,9 +70,6 @@ export interface SectionViewer {
   follower: boolean
 }
 
-/** What the Calendar section shows. */
-export type CalendarMode = 'events' | 'timetable'
-
 /** The bar's sections for this space and viewer, in ``SECTION_ORDER``. */
 export function visibleSpaceSections(
   f: SpaceTabFeatures | undefined, viewer: SectionViewer,
@@ -76,13 +77,14 @@ export function visibleSpaceSections(
   const on: Record<string, boolean> = {
     feed: true,
     chat: viewer.chat,
-    calendar: calendarModes(f).length > 0,
+    calendar: f?.calendar ?? true,
     tasks: f?.todo ?? true,
     pages: f?.pages ?? true,
     gallery: f?.gallery ?? true,
     stickies: f?.stickies ?? true,
     bazaar: f?.bazaar ?? true,
     map: !!f?.location && !viewer.follower,
+    timetable: !!f?.timetable,
   }
   return SECTION_ORDER.filter((s) => on[s])
 }
@@ -99,34 +101,30 @@ export function sectionAllowed(
   return visibleSpaceSections(f, viewer).includes(section)
 }
 
-/** The Calendar section's contents, in switch order. Both → the
- *  Events | Timetable switch; one → that one alone; none → no section. */
-export function calendarModes(f: SpaceTabFeatures | undefined): CalendarMode[] {
-  return [
-    ...((f?.calendar ?? true) ? (['events'] as const) : []),
-    ...(f?.timetable ? (['timetable'] as const) : []),
-  ]
-}
-
-/** "Calendar" — or "Timetable" when the section holds nothing else. */
-export function calendarTabLabel(f: SpaceTabFeatures | undefined): string {
-  const modes = calendarModes(f)
-  return modes.length === 1 && modes[0] === 'timetable' ? t('nav.timetable') : t('nav.calendar')
+/** Where a link to ``section`` should go instead, or ``null``. The
+ *  timetable lived inside Calendar until it became its own section: a
+ *  Calendar link in a space that keeps only a timetable means it. */
+export function redirectedSection(
+  section: SpaceSection, f: SpaceTabFeatures | undefined,
+): SpaceSection | null {
+  if (section === 'calendar' && f?.calendar === false && f?.timetable) return 'timetable'
+  return null
 }
 
 /** The section's name in the UI language. Reuses the nav labels where
  *  the section is the space's own copy of a household one. */
-export function sectionLabel(section: SpaceSection, f?: SpaceTabFeatures): string {
+export function sectionLabel(section: SpaceSection): string {
   switch (section) {
     case 'feed':       return t('nav.feed')
     case 'chat':       return t('space.chat.view_chat')
-    case 'calendar':   return calendarTabLabel(f)
+    case 'calendar':   return t('nav.calendar')
     case 'tasks':      return t('nav.tasks')
     case 'pages':      return t('nav.pages')
     case 'gallery':    return t('nav.gallery')
     case 'stickies':   return t('nav.stickies')
     case 'bazaar':     return t('nav.bazaar')
     case 'map':        return t('space.tab.map')
+    case 'timetable':  return t('nav.timetable')
     case 'members':    return t('spaces.members')
     case 'moderation': return t('space.tab.moderation')
   }

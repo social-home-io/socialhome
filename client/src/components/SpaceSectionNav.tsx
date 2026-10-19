@@ -37,7 +37,7 @@ import { SideNavIcon, type SideNavIconName } from './SideNavIcon'
 import { usePriorityPlus } from './priorityPlus'
 import {
   sectionLabel, spaceSectionPath,
-  type SpaceSection, type SpaceTabFeatures,
+  type SpaceSection,
 } from '@/features/spaces/spaceTabs'
 import { sectionMeta, useSpaceSummary } from '@/features/spaces/spaceSummary'
 import { isMuteActive } from '@/utils/mute'
@@ -77,7 +77,6 @@ interface Props {
   sections: readonly SpaceSection[]
   /** The open section (may be one that lives in More). */
   active: SpaceSection
-  features?: SpaceTabFeatures
   /** Unread space-chat messages (quiet badge on Chat); 0 → none. */
   chatUnread: number
   members: SpaceMemberSummary | null
@@ -119,9 +118,12 @@ const SVG = {
   'aria-hidden': 'true', focusable: 'false',
 } as const
 
-const EXTRA_ICONS: Record<'map' | 'moderation' | 'bell' | 'gear' | 'chevron' | 'down', JSX.Element> = {
+const EXTRA_ICONS: Record<'map' | 'timetable' | 'moderation' | 'bell' | 'gear' | 'chevron' | 'down', JSX.Element> = {
   map: (
     <svg {...SVG}><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z" /><path d="M9 4v14M15 6v14" /></svg>
+  ),
+  timetable: (
+    <svg {...SVG}><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M9 4v16M15 4v16M3 14.5h18" /></svg>
   ),
   moderation: (
     <svg {...SVG}><path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z" /></svg>
@@ -142,7 +144,9 @@ const EXTRA_ICONS: Record<'map' | 'moderation' | 'bell' | 'gear' | 'chevron' | '
 function SectionIcon({ section }: { section: SpaceSection }) {
   const name = SECTION_ICON[section]
   if (name) return <SideNavIcon name={name} />
-  return <span class="sh-sidenav-icon">{section === 'map' ? EXTRA_ICONS.map : EXTRA_ICONS.moderation}</span>
+  const extra = section === 'map' ? EXTRA_ICONS.map
+    : section === 'timetable' ? EXTRA_ICONS.timetable : EXTRA_ICONS.moderation
+  return <span class="sh-sidenav-icon">{extra}</span>
 }
 
 /** Quiet grey "unread" count — visible number, spoken as ", N unread". */
@@ -195,7 +199,7 @@ export function membersMeta(m: SpaceMemberSummary): string {
 }
 
 export function SpaceSectionNav({
-  spaceId, spaceName, sections, active, features, chatUnread,
+  spaceId, spaceName, sections, active, chatUnread,
   members, needsYou, notifLevel, onNotifLevel, chatNotif = null,
   settingsHref, canEditSections, leave = null, onLeave,
 }: Props) {
@@ -212,7 +216,7 @@ export function SpaceSectionNav({
   // What the hidden sections hold — read each time More opens.
   const summary = useSpaceSummary(spaceId, open)
 
-  const label = (s: SpaceSection) => sectionLabel(s, features)
+  const label = (s: SpaceSection) => sectionLabel(s)
   const badgeOf = (s: SpaceSection) => (s === 'chat' && active !== 'chat' ? chatUnread : 0)
   const needs = needsYouTotal(needsYou)
   const fitKey = [

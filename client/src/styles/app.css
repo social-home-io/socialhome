@@ -19397,16 +19397,6 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
 .sh-subscribe-steps li {
   margin-bottom: 0.3em;
 }
-/* Space Calendar tab header: "Subscribe" + "+ New event" trail right,
- * primary last — same placement as the household Calendar page. The
- * doubled class out-ranks the mobile ``.sh-page-header`` column rule so
- * the pair stays on one row on a phone. */
-.sh-page-header.sh-space-cal-header {
-  flex-direction: row;
-  justify-content: flex-end;
-  align-items: center;
-  gap: var(--sh-space-sm);
-}
 
 /* SecretReveal — a just-minted token / feed link, shown once. */
 .sh-secret-reveal {
@@ -22919,16 +22909,9 @@ a.sh-btn--ghost:hover {
   height: 1rem;
 }
 
-/* ── Space timetables (SpaceCalendarHost / SpaceTimetableTab) ───────── */
+/* ── Space timetables (SpaceTimetableTab) ───────── */
 .sh-toggle-row__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .sh-toggle-row__sub { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }
-.sh-space-calendar-host { display: flex; flex-direction: column; gap: var(--sh-space-md); }
-.sh-space-calendar-host__switch { align-self: flex-start; }
-.sh-space-calendar-host__switch .sh-timetable-seg__btn {
-  min-height: 36px;
-  padding: 4px 18px;
-  font-size: var(--sh-font-size-sm);
-}
 .sh-space-timetable__pin:disabled { opacity: 0.7; cursor: progress; }
 /* The pin keeps its 🏠 at every width (the other toggles drop their icon
  * below 400 px and show a short label instead — the pin shows both). */
@@ -22963,10 +22946,6 @@ a.sh-btn--ghost:hover {
 }
 .sh-timetable-info__row dt { color: var(--sh-text-muted); font-weight: 600; }
 .sh-timetable-info__row dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-@media (max-width: 640px) {
-  .sh-space-calendar-host__switch { align-self: stretch; }
-  .sh-space-calendar-host__switch .sh-timetable-seg__btn { flex: 1; min-height: 40px; }
-}
 
 /* ─── Organize primitives (Shopping · Tasks · Stickies) ──────────────
  * Shared controls so the three tabs read as one family: the done tick,
@@ -25276,4 +25255,124 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-primary); outl
   .sh-spaces-find { flex-basis: 100%; }
   .sh-spaces-row__main { padding: 8px 6px; gap: 10px; }
   .sh-spaces-empty { padding: var(--sh-space-xl) var(--sh-space-md); }
+}
+
+/* ── Calendar views: Upcoming list, Month / Week grid (space Calendar) ──
+ * One control row: the view switch and "New event" (never wraps — the
+ * switch shrinks first). Rows share one anatomy: date column · rail ·
+ * title + meta; a multi-day event is one row and one bar. Logical
+ * properties only, so RTL mirrors. */
+.sh-space-cal-bar { display: flex; align-items: center; gap: var(--sh-space-sm); }
+.sh-space-cal-bar__views { min-width: 0; }
+.sh-space-cal-bar__views .sh-timetable-seg__btn { min-height: 36px; padding: 4px 14px; font-size: var(--sh-font-size-sm); }
+.sh-space-cal-bar > .sh-btn { margin-inline-start: auto; white-space: nowrap; }
+.sh-space-cal-nav { display: flex; align-items: center; gap: var(--sh-space-xs); }
+.sh-space-cal-nav__heading {
+  flex: 1; min-width: 0; margin: 0; text-align: center;
+  font-family: var(--sh-font-family-display); font-size: var(--sh-font-size-lg); font-weight: 600;
+}
+.sh-cal-upcoming { display: flex; flex-direction: column; gap: var(--sh-space-md); }
+.sh-cal-week__heading {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sh-space-sm);
+  margin: 0 4px 6px; font-family: inherit; font-size: var(--sh-font-size-sm); font-weight: 600;
+  color: var(--sh-text-muted);
+}
+.sh-cal-week__title { color: var(--sh-text); }
+.sh-cal-list {
+  display: flex; flex-direction: column; padding: 2px;
+  background: var(--sh-bg); border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg); box-shadow: var(--sh-shadow-xs);
+}
+.sh-cal-row + .sh-cal-row { border-block-start: 1px solid color-mix(in srgb, var(--sh-border) 70%, transparent); }
+.sh-cal-row__head {
+  display: grid; grid-template-columns: 5.75rem 4px minmax(0, 1fr); gap: 12px;
+  width: 100%; min-height: 56px; margin: 0; padding: 8px 12px;
+  background: none; border: 0; border-radius: calc(var(--sh-radius-lg) - 2px);
+  color: inherit; font: inherit; text-align: start; cursor: pointer;
+}
+.sh-cal-row__head:hover { background: var(--sh-bg-secondary); }
+.sh-cal-row__head:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: -2px; }
+.sh-cal-row__when {
+  display: flex; flex-direction: column; justify-content: center; gap: 2px;
+  font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.sh-cal-row__rail { border-radius: 2px; background: var(--sh-primary); }
+.sh-cal-row--allday .sh-cal-row__rail { background: var(--sh-warning); }
+.sh-cal-row--multi .sh-cal-row__rail { background: var(--sh-success); }
+.sh-cal-row__body { display: flex; flex-direction: column; justify-content: center; gap: 2px; min-width: 0; }
+.sh-cal-row__title { font-weight: 600; overflow-wrap: anywhere; }
+.sh-cal-row__meta { font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); overflow-wrap: anywhere; }
+.sh-cal-row__detail {
+  display: flex; flex-direction: column; gap: var(--sh-space-sm);
+  padding-block: 0 12px; padding-inline: calc(12px + 5.75rem + 4px + 24px) 12px;
+}
+.sh-cal-row__desc { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sh-cal-upcoming__end { margin: 0; text-align: center; font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); }
+.sh-cal-upcoming__end .sh-link-button { font-size: inherit; }
+
+.sh-cal-grid-view { display: flex; flex-direction: column; gap: var(--sh-space-md); }
+.sh-cal-grid {
+  background: var(--sh-bg); border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg); overflow: hidden; box-shadow: var(--sh-shadow-xs);
+}
+.sh-cal-grid__dow {
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr));
+  padding-block: 6px; border-block-end: 1px solid var(--sh-border);
+  font-size: var(--sh-font-size-xs); font-weight: 600; color: var(--sh-text-muted); text-align: center;
+}
+.sh-cal-grid__week {
+  --sh-cal-lane: 20px;
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-rows: 30px repeat(var(--sh-cal-lanes, 3), var(--sh-cal-lane)) 18px;
+  row-gap: 2px;
+}
+.sh-cal-grid__week + .sh-cal-grid__week { border-block-start: 1px solid var(--sh-border); }
+.sh-cal-grid__day {
+  grid-row: 1 / -1; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-start;
+  min-width: 0; margin: 0; padding: 4px 6px; background: none; border: 0;
+  border-inline-end: 1px solid color-mix(in srgb, var(--sh-border) 70%, transparent);
+  color: var(--sh-text); font: inherit; font-size: var(--sh-font-size-sm); cursor: pointer;
+}
+.sh-cal-grid__day:nth-child(7) { border-inline-end: 0; }
+.sh-cal-grid__day:hover { background: var(--sh-bg-secondary); }
+.sh-cal-grid__day.is-outside { color: var(--sh-text-muted); }
+.sh-cal-grid__day[aria-pressed='true'] { background: var(--sh-primary-soft); box-shadow: inset 0 0 0 2px var(--sh-primary); }
+.sh-cal-grid__day:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: -4px; }
+.sh-cal-grid__num {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 24px; height: 24px; padding-inline: 4px; border-radius: var(--sh-radius-full);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.sh-cal-grid__day.is-today .sh-cal-grid__num { background: var(--sh-primary-fill); color: var(--sh-on-primary-fill); font-weight: 700; }
+.sh-cal-grid__more { font-size: var(--sh-font-size-xs); line-height: 1; color: var(--sh-text-muted); white-space: nowrap; }
+.sh-cal-bar {
+  position: relative; pointer-events: none; min-width: 0;
+  margin-inline: 3px; padding-inline: 5px;
+  border-inline-start: 3px solid var(--sh-primary); border-radius: 4px;
+  background: color-mix(in srgb, var(--sh-primary) 14%, var(--sh-bg));
+  color: var(--sh-text); font-size: var(--sh-font-size-xs); line-height: var(--sh-cal-lane);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sh-cal-bar--allday { border-inline-start-color: var(--sh-warning); background: color-mix(in srgb, var(--sh-warning) 18%, var(--sh-bg)); }
+.sh-cal-bar--multi { border-inline-start-color: var(--sh-success); background: color-mix(in srgb, var(--sh-success) 18%, var(--sh-bg)); }
+.sh-cal-bar.is-cont-before { margin-inline-start: 0; border-inline-start-width: 0; border-start-start-radius: 0; border-end-start-radius: 0; }
+.sh-cal-bar.is-cont-after { margin-inline-end: 0; border-start-end-radius: 0; border-end-end-radius: 0; }
+.sh-cal-grid-view--week .sh-cal-grid__week { --sh-cal-lane: 40px; grid-template-rows: 34px repeat(var(--sh-cal-lanes, 1), var(--sh-cal-lane)) 24px; }
+/* Week has room for two lines: the start time, then the title. */
+.sh-cal-grid-view--week .sh-cal-bar {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  padding-block: 3px; line-height: 1.25; white-space: normal; overflow-wrap: anywhere;
+}
+.sh-cal-bar__time { font-weight: 600; font-variant-numeric: tabular-nums; }
+.sh-cal-day { display: flex; flex-direction: column; }
+.sh-cal-day__empty { margin: 0; padding: var(--sh-space-sm) 4px; color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
+@media (max-width: 640px) {
+  .sh-space-cal-bar__views .sh-timetable-seg__btn { padding-inline: 12px; }
+  .sh-cal-row__head { grid-template-columns: 5.25rem 4px minmax(0, 1fr); padding-inline: 10px; gap: 10px; }
+  .sh-cal-row__detail { padding-inline: 12px; }
+  .sh-cal-grid__week { --sh-cal-lane: 18px; grid-template-rows: 28px repeat(var(--sh-cal-lanes, 2), var(--sh-cal-lane)) 16px; }
+  .sh-cal-grid__day { padding: 3px; }
+  .sh-cal-bar { margin-inline: 1px; padding-inline: 3px; }
+  .sh-cal-grid__more { font-size: 11px; }
 }

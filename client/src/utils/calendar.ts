@@ -199,6 +199,58 @@ export interface DayEventEntry {
   isLast: boolean
 }
 
+/** The calendar days an event covers: its first and last day key and
+ *  how many days that is. ``null`` when ``start`` is unparseable.
+ *
+ *  The day rules every calendar view shares (see
+ *  :func:`groupEventsByDay` for the reasoning):
+ *
+ *  * **All-day → the event's own tz, timed → the viewer's.**
+ *  * **A midnight end is exclusive** — ``22:00 → 00:00`` is one evening.
+ *  * **Degenerate ends fail soft** — a missing, unparseable or backwards
+ *    ``end`` makes it a single-day event on the start day. */
+export function eventDaySpan(
+  e: CalendarEvent,
+): { startKey: string; endKey: string; dayCount: number } | null {
+  const allDay = e.all_day === true
+  const tz = allDay ? safeTimeZone(e.tz) : ''
+  const partsOf = (iso: string): DayParts | null =>
+    allDay ? zonedParts(iso, tz) : viewerParts(iso)
+
+  const startParts = partsOf(e.start)
+  if (!startParts) return null
+  const startKey = startParts.key
+
+  // Last covered day. Anything degenerate (absent, unparseable, or not
+  // after the start) collapses to the start day.
+  let endKey = startKey
+  const endParts = e.end ? partsOf(e.end) : null
+  if (endParts
+    && new Date(e.end as string).getTime() > new Date(e.start).getTime()) {
+    // A midnight end belongs to the previous day (exclusive bound).
+    const candidate = endParts.time === '00:00'
+      ? keyFromOrdinal(keyOrdinal(endParts.key) - 1)
+      : endParts.key
+    if (candidate > endKey) endKey = candidate
+  }
+  return { startKey, endKey, dayCount: keyOrdinal(endKey) - keyOrdinal(startKey) + 1 }
+}
+
+/** ``key`` moved by ``days`` whole calendar days (``YYYY-MM-DD``). */
+export function addDaysToKey(key: string, days: number): string {
+  return keyFromOrdinal(keyOrdinal(key) + days)
+}
+
+/** Whole days from ``a`` to ``b`` (both ``YYYY-MM-DD``). */
+export function daysBetweenKeys(a: string, b: string): number {
+  return keyOrdinal(b) - keyOrdinal(a)
+}
+
+/** ``YYYY-MM-DD`` of ``d``'s local calendar day. */
+export function dayKeyOf(d: Date): string {
+  return localDateKey(d)
+}
+
 /** Group events into ``{ "YYYY-MM-DD" → day entries }`` buckets. The
  *  key is built from date components rather than
  *  ``toLocaleDateString()`` because the previous shape (``5/14/2026`` /
@@ -271,31 +323,11 @@ export function groupEventsByDay(
   const viewerLo = visibleRange ? viewerParts(visibleRange.start)?.key : undefined
   const viewerHi = visibleRange ? viewerParts(visibleRange.end)?.key : undefined
   for (const e of evts) {
-    const allDay = e.all_day === true
-    const tz = allDay ? safeTimeZone(e.tz) : ''
-    const partsOf = (iso: string): DayParts | null =>
-      allDay ? zonedParts(iso, tz) : viewerParts(iso)
-
-    const startParts = partsOf(e.start)
-    if (!startParts) continue
-    const startKey = startParts.key
-
-    // Last covered day. Anything degenerate (absent, unparseable, or
-    // not after the start) collapses to the start day.
-    let endKey = startKey
-    const endParts = e.end ? partsOf(e.end) : null
-    if (endParts
-      && new Date(e.end as string).getTime() > new Date(e.start).getTime()) {
-      // A midnight end belongs to the previous day (exclusive bound).
-      const candidate = endParts.time === '00:00'
-        ? keyFromOrdinal(keyOrdinal(endParts.key) - 1)
-        : endParts.key
-      if (candidate > endKey) endKey = candidate
-    }
-
+    const span = eventDaySpan(e)
+    if (!span) continue
+    const { startKey, endKey, dayCount } = span
     const startOrdinal = keyOrdinal(startKey)
     const endOrdinal = keyOrdinal(endKey)
-    const dayCount = endOrdinal - startOrdinal + 1
 
     // Clamp to the visible range in the VIEWER's calendar days —
     // whichever convention produced the key. The bucket keyspace is

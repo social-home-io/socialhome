@@ -247,7 +247,7 @@ describe('space event delete after leaving the space', () => {
 
 describe('seriesEventId', () => {
   it('maps an expanded occurrence id to its stored series', async () => {
-    const { seriesEventId } = await import('./SpaceFeedPage')
+    const { seriesEventId } = await import('./SpaceCalendarSection')
     expect(seriesEventId('abc@2026-01-01T10:00:00+00:00')).toBe('abc')
     expect(seriesEventId('abc')).toBe('abc')
   })

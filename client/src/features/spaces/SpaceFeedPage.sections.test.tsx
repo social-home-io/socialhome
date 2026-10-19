@@ -37,6 +37,12 @@ vi.mock('preact-iso', () => ({
   useLocation: () => ({ route: route.go, url: '/spaces/s1', path: '/spaces/s1', query: route.query }),
 }))
 
+vi.mock('./SpaceTimetableTab', () => ({
+  SpaceTimetableTab: (p: { spaceId: string; canEdit: boolean }) => (
+    <div data-testid="timetable-tab">{`${p.spaceId}:${p.canEdit}`}</div>
+  ),
+}))
+
 vi.mock('./SpaceTasksTab', () => ({
   SpaceTasksTab: (p: { spaceId: string; writable: boolean; archived?: boolean }) => (
     <div data-testid="tasks-tab">{`${p.spaceId}:${p.writable}:${!!p.archived}`}</div>
@@ -237,8 +243,52 @@ describe('SpaceFeedPage /spaces/:id/:section', () => {
   }, 20000)
 })
 
+describe('the Timetable section', () => {
+  it('/spaces/s1/timetable opens the space timetable (admins edit)', async () => {
+    wire({ timetable: true }, 'admin')
+    const { tl, r } = await open('timetable')
+    await tl.waitFor(() => expect(r.getByTestId('timetable-tab').textContent).toBe('s1:true'))
+    expect(route.go).not.toHaveBeenCalled()
+    // Calendar holds only events now: no Events | Timetable switch.
+    expect(r.queryByRole('group', { name: 'Calendar view' })).toBeNull()
+  }, 20000)
+
+  it('without the timetable feature it falls back to the feed', async () => {
+    wire({ timetable: false }, 'member')
+    const { tl } = await open('timetable')
+    await tl.waitFor(() => expect(route.go).toHaveBeenCalledWith('/spaces/s1', true))
+  }, 20000)
+
+  it('an old Calendar link in a space with only a timetable opens the Timetable', async () => {
+    wire({ calendar: false, timetable: true }, 'member')
+    const { tl } = await open('calendar')
+    await tl.waitFor(() => expect(route.go).toHaveBeenCalledWith('/spaces/s1/timetable', true))
+  }, 20000)
+
+  it('keeps the HA ingress prefix on the Timetable link', async () => {
+    const PREFIX = '/api/hassio_ingress/tok'
+    vi.doMock('@/baseUrl', () => ({
+      basePath: `${PREFIX}/`,
+      addBase: (p: string) => PREFIX + (p.startsWith('/') ? p : `/${p}`),
+      stripBase: (p: string) => (p.startsWith(PREFIX) ? p.slice(PREFIX.length) || '/' : p),
+    }))
+    try {
+      wire({ timetable: true }, 'member')
+      const { tl, r } = await open('timetable')
+      await tl.waitFor(() => expect(r.getByTestId('timetable-tab')).toBeTruthy())
+      const more = r.getByRole('button', { name: /^More/ })
+      tl.fireEvent.click(more)
+      const link = await tl.waitFor(() => r.getAllByRole('link', { name: /^Timetable/ })[0])
+      expect(link.getAttribute('href')).toBe('/api/hassio_ingress/tok/spaces/s1/timetable')
+    } finally {
+      vi.doUnmock('@/baseUrl')
+    }
+  }, 20000)
+})
+
 describe('links from before sections had paths', () => {
   it.each([
+    [{ tab: 'timetable' }, '', '/spaces/s1/timetable'],
     [{ tab: 'tasks' }, '', '/spaces/s1/tasks'],
     [{ tab: 'moderation' }, '', '/spaces/s1/moderation'],
     [{ view: 'chat' }, '', '/spaces/s1/chat'],
@@ -246,7 +296,7 @@ describe('links from before sections had paths', () => {
   ])('%o %s → %s, replacing the history entry', async (query, hash, target) => {
     route.query = query as Record<string, string>
     window.location.hash = hash
-    wire({ todo: true }, 'admin')
+    wire({ todo: true, timetable: true }, 'admin')
     const { tl } = await open()
     await tl.waitFor(() => expect(route.go).toHaveBeenCalledWith(target, true))
   }, 20000)
