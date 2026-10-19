@@ -21,6 +21,7 @@ from socialhome.crypto import (
     generate_space_keypair,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import RemoteJoinRequestApproved
 from socialhome.domain.federation import (
     DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
@@ -138,6 +139,7 @@ async def stack(tmp_dir):
     s.fed_repo = fed_repo
     s.space_repo = space_repo
     s.user_svc = user_svc
+    s.bus = bus
     yield s
     await db.shutdown()
 
@@ -535,6 +537,98 @@ async def test_on_remote_join_request_approved_failure_is_logged(stack, caplog):
     assert (await stack.space_repo.get_member(space.id, bob.user_id)) is None
     # Surfaced at WARNING, not swallowed.
     assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+async def test_join_approval_never_blocks_the_inbound_pipeline(stack):
+    """Regression (federation-demo ``local-community``): the APPROVED
+    envelope is handled inside the inbound pipeline, which reads one
+    peer's DataChannel frames one at a time. The redeem it starts waits for
+    the host's ACK — on that same channel. Awaited inline, the ACK could
+    only be read once the handler gave up: the redeem timed out ("issuer
+    did not respond") while the host had already seated the household,
+    which never seated itself. The bus handler hands the redeem off and
+    returns; the seat lands when the ACK does.
+    """
+    await _user(stack, "alicehost")
+    bob = await _user(stack, "bobapp")
+    space = await stack.svc.create_space(
+        owner_username="alicehost",
+        name="S",
+        space_type=SpaceType.PUBLIC,
+    )
+    rid = await stack.svc.request_join_remote(
+        space.id,
+        applicant_user_id=bob.user_id,
+        host_instance_id="peer",
+    )
+    started = asyncio.Event()
+    ack = asyncio.Event()
+
+    async def _request_redeem(
+        token, *, viewer_user_id, issuer_instance_id, bootstrap=None, join_location=None
+    ):
+        started.set()
+        # The ACK arrives only once the inbound pipeline is free again.
+        await ack.wait()
+        await stack.space_repo.save_member(
+            SpaceMember(
+                space_id=space.id,
+                user_id=viewer_user_id,
+                role=SpaceRole.MEMBER,
+                joined_at="2026-01-01T00:00:00+00:00",
+            )
+        )
+        return {"space_id": space.id, "role": SpaceRole.MEMBER}
+
+    coordinator = MagicMock()
+    coordinator.request_redeem = AsyncMock(side_effect=_request_redeem)
+    stack.svc.attach_redeem_coordinator(coordinator)
+
+    # What the inbound SPACE_JOIN_REQUEST_APPROVED handler does: publish and
+    # return — it must not wait for the redeem's answer.
+    await asyncio.wait_for(
+        stack.bus.publish(
+            RemoteJoinRequestApproved(
+                request_id=rid, space_id=space.id, invite_token="host-minted-token"
+            )
+        ),
+        timeout=1.0,
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert (await stack.space_repo.get_member(space.id, bob.user_id)) is None
+    # The pipeline moves on, the ACK is read, the redeem finishes: seated.
+    ack.set()
+    await asyncio.wait_for(stack.svc.wait_join_approvals(), timeout=1.0)
+    member = await stack.space_repo.get_member(space.id, bob.user_id)
+    assert member is not None and member.role == SpaceRole.MEMBER
+
+
+async def test_join_approval_redeem_failure_is_still_logged(stack, caplog):
+    """Handed off, a failed redeem is still surfaced at WARNING."""
+    await _user(stack, "alicehost")
+    bob = await _user(stack, "bobapp")
+    space = await stack.svc.create_space(
+        owner_username="alicehost",
+        name="S",
+        space_type=SpaceType.PUBLIC,
+    )
+    rid = await stack.svc.request_join_remote(
+        space.id,
+        applicant_user_id=bob.user_id,
+        host_instance_id="peer",
+    )
+    coordinator = MagicMock()
+    coordinator.request_redeem = AsyncMock(side_effect=TimeoutError("host down"))
+    stack.svc.attach_redeem_coordinator(coordinator)
+    with caplog.at_level("WARNING"):
+        await stack.bus.publish(
+            RemoteJoinRequestApproved(
+                request_id=rid, space_id=space.id, invite_token="host-minted-token"
+            )
+        )
+        await stack.svc.wait_join_approvals()
+    assert (await stack.space_repo.get_member(space.id, bob.user_id)) is None
+    assert any("approval failed to seat" in r.getMessage() for r in caplog.records)
 
 
 # ── approve_join_request / deny_join_request ──────────────────────

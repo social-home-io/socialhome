@@ -167,6 +167,8 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "unsubscribe_from_space",  # own subscription only
         # Federation inbound hooks — validated by the §24.11 inbound pipeline.
         "on_remote_join_request_approved",
+        # Waits for the approval redeems that hook starts; mutates nothing.
+        "wait_join_approvals",
         # §D2b space-session teardown. No actor to gate: both are driven by
         # the *absence* of any shared space (a state the caller cannot
         # assert, only observe), and the inbound half re-derives that answer

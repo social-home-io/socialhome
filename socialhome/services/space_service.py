@@ -425,6 +425,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_invite_forwarder",
         "_invite_keywrap_pk",
         "_invite_keywrap_sig",
+        "_join_approvals",
         "_link_previews",
         "_local_area_budget",
         "_media_dir",
@@ -490,6 +491,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         #: The local-community daily check budget
         #: (:meth:`attach_local_area_budget`).
         self._local_area_budget: LocalAreaBudget | None = None
+        #: Redeems started by a SPACE_JOIN_REQUEST_APPROVED, running off the
+        #: inbound pipeline (:meth:`_on_remote_join_request_approved_bus`).
+        self._join_approvals: set[asyncio.Task] = set()
         self._federation = None
         self._remote_members = None
         self._redeem_coordinator = None
@@ -761,10 +765,30 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self,
         event: RemoteJoinRequestApproved,
     ) -> None:
-        await self.on_remote_join_request_approved(
-            event.request_id,
-            invite_token=event.invite_token,
+        """Start the approval's redeem and return at once.
+
+        This runs inside the inbound pipeline handling the host's
+        SPACE_JOIN_REQUEST_APPROVED, which reads a peer's DataChannel frames
+        one at a time — and the redeem waits for the host's ACK on that same
+        channel. Awaited here, the ACK could only be read after the redeem
+        had timed out: the host seated the household, which never seated
+        itself. So the redeem runs as its own task (failures are logged by
+        :meth:`on_remote_join_request_approved`).
+        """
+        task = asyncio.create_task(
+            self.on_remote_join_request_approved(
+                event.request_id,
+                invite_token=event.invite_token,
+            ),
+            name=f"join-approval-{event.request_id}",
         )
+        self._join_approvals.add(task)
+        task.add_done_callback(self._join_approvals.discard)
+
+    async def wait_join_approvals(self) -> None:
+        """Wait for approval redeems still running (tests, shutdown)."""
+        while self._join_approvals:
+            await asyncio.gather(*list(self._join_approvals), return_exceptions=True)
 
     async def on_tier_change(
         self,
