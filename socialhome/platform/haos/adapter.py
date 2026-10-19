@@ -48,7 +48,7 @@ from ..ha.providers import (
     HaUserDirectory,
 )
 from ..ha.zones import HaZoneSource
-from ..ha_home_location import persist_home_location_from_ha
+from ..ha_home_location import HaHomeLocationSource, persist_home_location_from_ha
 from .bootstrap import HaBootstrap
 from .supervisor import SupervisorClient, primary_lan_ipv4
 
@@ -133,6 +133,7 @@ class HaosAdapter(PlatformAdapter):
         "auth",
         "displays",
         "events",
+        "home_location",
         "push",
         "stt",
         "users",
@@ -172,6 +173,8 @@ class HaosAdapter(PlatformAdapter):
         self.events = HaEventSink(self)
         # HA ``zone.*`` entities → the household-zone sync.
         self.zones = HaZoneSource(self)
+        # HA's core-config location → the household's home (read-only here).
+        self.home_location = HaHomeLocationSource(self)
         # ESPHome wall panels in HA's device registry → Admin › Dashboard.
         self.displays = HaDisplayDirectory(self)
 
@@ -182,6 +185,7 @@ class HaosAdapter(PlatformAdapter):
             Capability.AI,
             Capability.HA_PERSON_DIRECTORY,
             Capability.ZONE_SYNC,  # ``self.zones`` reads HA's zones
+            Capability.HOME_LOCATION_SYNC,  # ``self.home_location`` reads HA's home
             Capability.HA_DISPLAY_DISCOVERY,  # ``self.displays`` lists HA's panels
             Capability.INGRESS,  # always — that's the haos invariant
             # No MDNS_ADVERTISE: the App container sits on the Supervisor's

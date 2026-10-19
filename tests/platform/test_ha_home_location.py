@@ -1,4 +1,5 @@
-"""Tests for the shared HA-home-location persistence helper."""
+"""Tests for the shared HA home location: the startup persistence helper
+and the :class:`HaHomeLocationSource`."""
 
 from __future__ import annotations
 
@@ -8,7 +9,9 @@ from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import LocalHomeLocationUpdated
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.platform.adapter import HomeLocationSource
 from socialhome.platform.ha_home_location import (
+    HaHomeLocationSource,
     persist_home_location_from_ha,
 )
 
@@ -130,3 +133,65 @@ async def test_persist_skips_zero_zero(env):
     assert row["home_lat"] is None
     assert row["home_lon"] is None
     assert received == []
+
+
+# ── HaHomeLocationSource (the HA HomeLocationSource) ─────────────────────
+
+
+class _Client:
+    """``HaClient.get_config`` stand-in: the ``/api/config`` body, or
+    ``None`` (the client's answer when HA didn't respond — it logs the
+    WARNING itself)."""
+
+    def __init__(self, config):
+        self.config = config
+
+    async def get_config(self):
+        return self.config
+
+
+class _Adapter:
+    def __init__(self, client):
+        self._c = client
+
+    @property
+    def _client(self):
+        if self._c is None:
+            raise RuntimeError("HaAdapter used before on_startup — no HaClient wired")
+        return self._c
+
+
+async def test_source_reads_latitude_longitude_from_api_config():
+    """``GET /api/config`` answers ``latitude`` / ``longitude`` (HA REST API,
+    developers.home-assistant.io/docs/api/rest) — rounded to 4 dp."""
+    client = _Client(
+        {"location_name": "Home", "latitude": 47.376912, "longitude": 8.541694}
+    )
+    source = HaHomeLocationSource(_Adapter(client))
+    assert isinstance(source, HomeLocationSource)
+    assert await source.get_home_location() == (47.3769, 8.5417)
+
+
+async def test_source_zero_zero_means_ha_has_none():
+    source = HaHomeLocationSource(_Adapter(_Client({"latitude": 0, "longitude": 0})))
+    assert await source.get_home_location() is None
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        None,  # HA didn't answer
+        {},  # no location keys
+        {"latitude": "47.3", "longitude": 8.5},
+        {"latitude": 95.0, "longitude": 8.5},
+        {"latitude": True, "longitude": 8.5},
+    ],
+)
+async def test_source_unusable_answer_is_none(config):
+    source = HaHomeLocationSource(_Adapter(_Client(config)))
+    assert await source.get_home_location() is None
+
+
+async def test_source_before_startup_is_none():
+    """No client yet (``on_startup`` hasn't run) — nothing to report."""
+    assert await HaHomeLocationSource(_Adapter(None)).get_home_location() is None

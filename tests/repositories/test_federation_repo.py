@@ -594,6 +594,25 @@ async def test_update_instance_home_unknown_id_is_noop(env):
     assert await env.fed_repo.get_instance("never-paired") is None
 
 
+# ─── Our own home (instance_identity.home_lat / home_lon) ────────────
+
+
+async def test_set_local_home_location_writes_and_clears(env):
+    await env.fed_repo.set_local_home_location(47.3769, 8.5417)
+    identity = await env.fed_repo.get_local_identity()
+    assert (identity["home_lat"], identity["home_lon"]) == (47.3769, 8.5417)
+    await env.fed_repo.set_local_home_location(None, None)
+    identity = await env.fed_repo.get_local_identity()
+    assert (identity["home_lat"], identity["home_lon"]) == (None, None)
+
+
+async def test_set_local_home_location_keeps_4dp(env):
+    """The §2 GPS rule holds at the repo too: never more than 4 dp."""
+    await env.fed_repo.set_local_home_location(47.376912345, 8.541698765)
+    identity = await env.fed_repo.get_local_identity()
+    assert (identity["home_lat"], identity["home_lon"]) == (47.3769, 8.5417)
+
+
 # ─── share_home (per-pair home-location sharing toggle) ──────────────
 
 

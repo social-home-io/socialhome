@@ -29,6 +29,8 @@ slices of behaviour that vary across modes:
 * :class:`ExternalEventSink` — fire-and-forget event publication.
 * :class:`ZoneSource` — the platform's named places (Home Assistant's
   ``zone.*`` entities), mirrored into the household's zones.
+* :class:`HomeLocationSource` — the platform's own home location (Home
+  Assistant's core config), mirrored read-only as the household's home.
 * :class:`DisplayDirectory` — wall panels the platform knows (Home
   Assistant's ESPHome devices running the Social Home dashboard
   firmware), and a way to send one a connect request.
@@ -169,6 +171,11 @@ class Capability(StrEnum):
     #: Home Assistant show under Admin › Dashboard › Wall panels with a
     #: Connect button (ha + haos; standalone has no platform to ask).
     HA_DISPLAY_DISCOVERY = "ha_display_discovery"
+    #: Adapter has a :class:`HomeLocationSource` — the household's home
+    #: location comes from the platform (Home Assistant's core config) and
+    #: Admin › Settings shows it read-only; without it the household sets
+    #: its home itself (standalone).
+    HOME_LOCATION_SYNC = "home_location_sync"
 
 
 # ── Provider Protocols ───────────────────────────────────────────────────────
@@ -326,6 +333,24 @@ class ZoneSource(Protocol):
 
 
 @runtime_checkable
+class HomeLocationSource(Protocol):
+    """The platform's own home location — the household's home when the
+    platform has one.
+
+    HA / HAOS: ``latitude`` / ``longitude`` of HA Core's ``GET /api/config``
+    (the same point ``zone.home`` is drawn around). Standalone: none
+    (``PlatformAdapter.home_location`` is ``None``) — the household sets
+    its home in Admin › Settings.
+    """
+
+    async def get_home_location(self) -> tuple[float, float] | None:
+        """``(lat, lon)`` at 4 dp, or ``None`` when the platform has no
+        usable home right now (none set, or it couldn't be read — the
+        caller then keeps the home it has)."""
+        ...
+
+
+@runtime_checkable
 class DisplayDirectory(Protocol):
     """Wall panels the platform knows about, and how to reach them.
 
@@ -395,6 +420,9 @@ class PlatformAdapter(abc.ABC):
     #: Platform zones for the household-zone sync; ``None`` = the platform
     #: has none (adapters that set it also declare ``Capability.ZONE_SYNC``).
     zones: ZoneSource | None = None
+    #: The platform's home location; ``None`` = the household sets its own
+    #: (adapters that set it also declare ``Capability.HOME_LOCATION_SYNC``).
+    home_location: HomeLocationSource | None = None
     #: Wall panels the platform knows; ``None`` = it knows none (adapters
     #: that set it also declare ``Capability.HA_DISPLAY_DISCOVERY``).
     displays: DisplayDirectory | None = None

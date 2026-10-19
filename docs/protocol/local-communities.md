@@ -67,7 +67,10 @@ shared by design; "the joiner sends ~1 km with the join").
   `403 LOCATION_REQUIRED` (a link redeem: the SPA asks the person and redeems
   again; an inbound `SPACE_JOIN_REQUEST`: dropped). A household with no home
   set cannot send one (`403 HOME_NOT_SET` on the joiner's side; for the
-  host's own people, on the host). Neither spends a check.
+  host's own people, on the host). Neither spends a check. The home comes
+  from Home Assistant in `ha` / `haos` mode and is set by an admin in
+  Admin › Settings › Our home location on a standalone household
+  (`/api/admin/home-location`, [architecture](../architecture.md)).
 - **Admins decide.** Approving a request — inside or near the edge — seats
   the person: nothing is re-checked (the point was never kept). An admin's own
   steps (a direct add, a local invite) use this household's home: refused

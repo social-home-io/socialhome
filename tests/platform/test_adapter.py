@@ -10,6 +10,7 @@ from socialhome.platform.adapter import (
     DashboardHostPort,
     DisplayDirectory,
     ExternalUser,
+    HomeLocationSource,
     InstanceConfig,
     PlatformAdapter,
     ZoneSource,
@@ -187,6 +188,9 @@ async def test_build_platform_adapter_standalone(tmp_path):
         # Standalone has no platform zones to sync.
         assert adapter.zones is None
         assert Capability.ZONE_SYNC not in adapter.capabilities
+        # …no platform home either: the household sets it (Admin › Settings).
+        assert adapter.home_location is None
+        assert Capability.HOME_LOCATION_SYNC not in adapter.capabilities
         # …and no Home Assistant to find wall panels in.
         assert adapter.displays is None
         assert Capability.HA_DISPLAY_DISCOVERY not in adapter.capabilities
@@ -355,6 +359,31 @@ async def test_zone_source_protocol_is_runtime_checkable():
 
     assert isinstance(_Source(), ZoneSource)
     assert not isinstance(object(), ZoneSource)
+
+
+# ── home_location (HomeLocationSource, ABC default) ────────────────────────
+
+
+def test_home_location_defaults_to_none():
+    """A platform that says nothing has no home of its own — the household
+    sets it in Admin › Settings."""
+    adapter = _MinimalAdapter()
+    assert adapter.home_location is None
+    assert Capability.HOME_LOCATION_SYNC not in adapter.capabilities
+
+
+def test_home_location_sync_is_a_spa_capability():
+    """Admin › Settings shows the home read-only off this flag."""
+    assert Capability.HOME_LOCATION_SYNC.value == "home_location_sync"
+
+
+async def test_home_location_source_protocol_is_runtime_checkable():
+    class _Source:
+        async def get_home_location(self):
+            return None
+
+    assert isinstance(_Source(), HomeLocationSource)
+    assert not isinstance(object(), HomeLocationSource)
 
 
 # ── displays (DisplayDirectory, ABC default) ────────────────────────────────

@@ -1832,8 +1832,8 @@ class LocalAreaDelegatedError(CodedError, ValueError):
 class HomeNotSetError(CodedError, SpacePermissionError):
     """The space is a local community and the joining household has no home
     location set, so there is nothing to check against its area. Set on the
-    household (Settings → Household → Home location); a join then carries
-    it, rounded to about 1 km."""
+    household (Admin › Settings › Our home location, or in Home Assistant);
+    a join then carries it, rounded to about 1 km."""
 
     status = 403
     code = "HOME_NOT_SET"

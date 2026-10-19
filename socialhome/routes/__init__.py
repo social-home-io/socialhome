@@ -30,6 +30,7 @@ from .admin_federation import (
     AdminFederationIceServersView,
     AdminFederationResyncView,
 )
+from .admin_home_location import AdminHomeLocationView
 from .admin_instance import AdminInstanceView
 from .admin_instance_bans import (
     InstanceBanCollectionView,
@@ -532,6 +533,7 @@ def setup_routes(app: web.Application) -> None:
     )
     app.router.add_view("/api/admin/diagnostics", AdminDiagnosticsView)
     app.router.add_view("/api/admin/instance", AdminInstanceView)
+    app.router.add_view("/api/admin/home-location", AdminHomeLocationView)
     app.router.add_view("/api/admin/dashboard", AdminDashboardView)
     app.router.add_view("/api/admin/dashboard/password", AdminDashboardPasswordView)
     app.router.add_view("/api/admin/dashboard/setup-link", AdminDashboardSetupLinkView)

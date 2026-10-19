@@ -109,6 +109,8 @@ space_zone_repo_key: AppKey = AppKey("space_zone_repo")
 household_zone_service_key: AppKey = AppKey("household_zone_service")
 household_zone_repo_key: AppKey = AppKey("household_zone_repo")
 household_zone_sync_key: AppKey = AppKey("household_zone_sync")
+#: Admin › Settings › Our home location (set here, or mirrored from HA).
+home_location_service_key: AppKey = AppKey("home_location_service")
 poll_service_key: AppKey = AppKey("poll_service")
 space_poll_service_key: AppKey = AppKey("space_poll_service")
 bazaar_service_key: AppKey = AppKey("bazaar_service")

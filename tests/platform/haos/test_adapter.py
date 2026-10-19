@@ -8,6 +8,7 @@ from socialhome.domain.household_dashboard import DEFAULT_DASHBOARD_PORT
 from socialhome.platform.adapter import Capability, DashboardHostPort
 from socialhome.platform.ha.displays import HaDisplayDirectory
 from socialhome.platform.ha.zones import HaZoneSource
+from socialhome.platform.ha_home_location import HaHomeLocationSource
 from socialhome.platform.haos.adapter import HaosAdapter
 from socialhome.platform.haos.supervisor import AddonInfo
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
@@ -155,6 +156,13 @@ async def test_zone_source_wired_with_zone_sync_capability():
     adapter = _build_haos_adapter()
     assert isinstance(adapter.zones, HaZoneSource)
     assert Capability.ZONE_SYNC in adapter.capabilities
+
+
+async def test_home_location_source_wired_with_its_capability():
+    """Same HA home as ha mode — the admin setting shows it read-only."""
+    adapter = _build_haos_adapter()
+    assert isinstance(adapter.home_location, HaHomeLocationSource)
+    assert Capability.HOME_LOCATION_SYNC in adapter.capabilities
 
 
 async def test_capabilities_add_stt_when_entity_configured():
