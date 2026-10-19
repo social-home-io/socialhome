@@ -17,7 +17,13 @@ async def _make_space(client, **extra) -> str:
         "/api/spaces", json={"name": "Market", "emoji": "🛍", **extra}, headers=h
     )
     assert r.status == 201
-    return (await r.json())["id"]
+    sid = (await r.json())["id"]
+    # A new space starts without the Bazaar (owner decision 3): turn it on.
+    r = await client.patch(
+        f"/api/spaces/{sid}", json={"features": {"bazaar": True}}, headers=h
+    )
+    assert r.status == 200, await r.text()
+    return sid
 
 
 async def _make_listing(client, sid: str, **extra) -> dict:

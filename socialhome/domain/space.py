@@ -435,11 +435,13 @@ def _publish_mode(
 class SpaceFeatures:
     """Per-space feature toggles and access levels."""
 
-    # Every per-space feature defaults to ON so a fresh space mirrors
-    # the SPA's historical "every tab is visible" behaviour. Admins
-    # opt OUT of tabs they don't want. The sole exception is
-    # ``location`` — it carries an opt-in privacy contract (§23.8.6),
-    # so the admin has to flip it on deliberately.
+    # Every per-space feature defaults to ON: these defaults are what an
+    # ABSENT column or wire field means for an existing space (older rows
+    # and older peers read "every tab visible"). A NEW space does not
+    # start from them — it starts from ``NEW_SPACE_FEATURES`` (feed, chat,
+    # calendar; owner decision 3). The exception is ``location`` — it
+    # carries an opt-in privacy contract (§23.8.6), so the admin has to
+    # flip it on deliberately.
     calendar: bool = True
     todo: bool = True
     location: bool = False
@@ -831,6 +833,21 @@ class SpaceFeatures:
             private_gfs=bool(raw.get("private_gfs", defaults.private_gfs)),
             allowed_post_types=allowed,
         )
+
+
+#: What a NEW space starts with (owner decision 3): the feed, chat and the
+#: calendar. Every other section is opt-in — the SPA's "What is it for?"
+#: card after create, or Settings › Sections. Applies only at creation
+#: (``SpaceService.create_space`` without explicit features); the class
+#: defaults above stay all-on because they are also what an ABSENT wire
+#: field or column means for an existing space, which must not change.
+NEW_SPACE_FEATURES: SpaceFeatures = SpaceFeatures(
+    todo=False,
+    pages=False,
+    gallery=False,
+    stickies=False,
+    bazaar=False,
+)
 
 
 # ─── Household features ───────────────────────────────────────────────────

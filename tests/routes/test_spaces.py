@@ -113,6 +113,35 @@ async def test_create_space(client):
     assert "id" in body
 
 
+async def test_created_space_has_feed_chat_and_calendar_only(client):
+    """Owner decision 3: an API-created space starts with feed + chat +
+    calendar; an owner turns the rest on with a features PATCH."""
+    h = _auth(client._admin_token)
+    r = await client.post("/api/spaces", json={"name": "Book club"}, headers=h)
+    sid = (await r.json())["id"]
+    feats = (await (await client.get(f"/api/spaces/{sid}", headers=h)).json())[
+        "features"
+    ]
+    assert (feats["chat"], feats["calendar"]) == (True, True)
+    off = ("todo", "pages", "gallery", "stickies", "bazaar", "location", "timetable")
+    assert [feats[k] for k in off] == [False] * len(off)
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"todo": True, "gallery": True}},
+        headers=h,
+    )
+    assert r.status == 200, await r.text()
+    feats = (await (await client.get(f"/api/spaces/{sid}", headers=h)).json())[
+        "features"
+    ]
+    assert (feats["todo"], feats["gallery"], feats["pages"], feats["chat"]) == (
+        True,
+        True,
+        False,
+        True,
+    )
+
+
 async def test_get_space(client):
     """GET /api/spaces/{id} returns the space details."""
     r = await client.post(

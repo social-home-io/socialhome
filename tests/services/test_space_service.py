@@ -211,6 +211,28 @@ async def test_create_and_dissolve(stack):
         await stack.space_svc.list_feed(space.id, viewer_user_id=_a.user_id)
 
 
+async def test_create_space_starts_with_feed_chat_calendar(stack):
+    """Owner decision 3: a new space has feed + chat + calendar; the rest is
+    opt-in (the SPA's "What is it for?" card or Settings adds them)."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Book club")
+    stored = await stack.space_repo.get(space.id)
+    for f in (space.features, stored.features):
+        assert (f.chat, f.calendar) == (True, True)
+        assert not any(
+            (f.todo, f.pages, f.gallery, f.stickies, f.bazaar, f.location, f.timetable)
+        )
+
+
+async def test_create_space_keeps_explicit_features(stack):
+    """A caller that names the features gets exactly those."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="All on", features=SpaceFeatures()
+    )
+    assert space.features == SpaceFeatures()
+
+
 async def test_member_management(stack):
     """add_member and remove_member adjust the member count correctly."""
     await stack.provision_user("anna")

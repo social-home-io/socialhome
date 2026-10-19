@@ -94,6 +94,13 @@ async def hh(aiohttp_client, tmp_dir):
     r = await tc.post("/api/spaces", json={"name": "Den"}, headers=_h("kid-tok"))
     assert r.status == 201, await r.text()
     tc._den = (await r.json())["id"]
+    # A new space starts without the Bazaar (owner decision 3): turn it on.
+    r = await tc.patch(
+        f"/api/spaces/{tc._den}",
+        json={"features": {"bazaar": True}},
+        headers=_h("kid-tok"),
+    )
+    assert r.status == 200, await r.text()
     for name in ("bob", "carol"):
         await db.enqueue(
             "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'admin')",
