@@ -185,6 +185,32 @@ describe('StickyBoardPage', () => {
     expect(t.container.querySelector('[aria-live="polite"]')!.textContent).toBe('Move cancelled')
   })
 
+  // "3 notes" over a board showing one sticky: notes stored on the same
+  // spot were drawn exactly on top of each other.
+  it('notes stored on the same spot are drawn apart, without touching what is stored', async () => {
+    const t = await setup({
+      '/api/stickies': [
+        sticky('a', { position_x: 0, position_y: 0 }),
+        sticky('b', { position_x: 0.4, position_y: 0.1 }),
+        sticky('c', { position_x: 0.2, position_y: 0.5 }),
+      ],
+    })
+    await t.findByText('3 notes')
+    // Drawn top-left corners, in % of the board.
+    const at = ['a', 'b', 'c'].map(id => {
+      const st = (t.container.querySelector(`[data-sticky-id="${id}"]`) as HTMLElement).style
+      return [parseFloat(st.getPropertyValue('--sh-sticky-x')), parseFloat(st.getPropertyValue('--sh-sticky-y'))]
+    })
+    // Each pair is at least a grip's width apart (24 units = 2.4 % across).
+    for (let i = 0; i < at.length; i++) {
+      for (let j = 0; j < i; j++) {
+        expect(Math.max(Math.abs(at[i][0] - at[j][0]) / 2.4, Math.abs(at[i][1] - at[j][1]) / (2.4 * 10 / 7)))
+          .toBeGreaterThanOrEqual(1)
+      }
+    }
+    expect(apiPatch).not.toHaveBeenCalled()
+  })
+
   it('keyboard moves stay on the board', async () => {
     const t = await setup({ '/api/stickies': [sticky('a', { position_x: 0, position_y: 0 })] })
     const grip = await t.findByRole('button', { name: 'Move note: Note a' })

@@ -52,6 +52,7 @@ from ..domain.sticky import (
     STICKY_BOARD_HEIGHT,
     STICKY_BOARD_WIDTH,
     Sticky,
+    free_sticky_spot,
     normalize_sticky_color,
     parse_sticky_coord,
     sanitize_sticky_content,
@@ -163,18 +164,34 @@ class StickyService(BusPublisherMixin, ContentAccessMixin):
         content: Any,
         space_id: str | None,
         color: Any = DEFAULT_STICKY_COLOR,
-        position_x: Any = 0.0,
-        position_y: Any = 0.0,
+        position_x: Any = None,
+        position_y: Any = None,
         sticky_id: str | None = None,
         approved_by: str | None = None,
     ) -> Sticky:
         """Add a note. ``approved_by`` (the moderation queue's replay) gates
         the write as that approver instead of the author; ``sticky_id`` is
-        the id the queued item minted."""
+        the id the queued item minted.
+
+        A note sent without any position (an API caller, a bot) goes to a
+        free spot on its board (:func:`free_sticky_spot`) instead of the
+        top-left corner, where every such note used to stack into one."""
         clean_content = _content(content)
         clean_color = _color(color)
-        x = _coord(position_x, "position_x", STICKY_BOARD_WIDTH)
-        y = _coord(position_y, "position_y", STICKY_BOARD_HEIGHT)
+        if position_x is None and position_y is None:
+            board = await self._repo.list(space_id=space_id)
+            x, y = free_sticky_spot((n.position_x, n.position_y) for n in board)
+        else:
+            x = _coord(
+                0.0 if position_x is None else position_x,
+                "position_x",
+                STICKY_BOARD_WIDTH,
+            )
+            y = _coord(
+                0.0 if position_y is None else position_y,
+                "position_y",
+                STICKY_BOARD_HEIGHT,
+            )
         if space_id is not None:
             decision = await self._gate(
                 space_id,

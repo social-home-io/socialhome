@@ -280,3 +280,22 @@ async def test_space_sticky_events_name_their_actor(env):
     await env.svc.update(s.id, space_id="sp-a", actor_user_id="alice", content="b")
     await env.svc.delete(s.id, space_id="sp-a", actor_user_id="alice")
     assert [e.actor_user_id for e in env.events] == ["mem", "alice", "alice"]
+
+
+async def test_create_without_a_position_lands_on_a_free_spot(env):
+    """A note created with no position (an API caller, a bot) used to land
+    at (0, 0) — three such notes stacked into one visible note."""
+    made = [
+        await env.svc.create(author="alice", content=f"n{i}", space_id="sp-a")
+        for i in range(3)
+    ]
+    spots = {(s.position_x, s.position_y) for s in made}
+    assert len(spots) == 3
+
+
+async def test_create_with_a_position_keeps_it(env):
+    await env.svc.create(author="alice", content="a", space_id=None)
+    s = await env.svc.create(
+        author="alice", content="b", space_id=None, position_x=0, position_y=0
+    )
+    assert (s.position_x, s.position_y) == (0.0, 0.0)

@@ -743,6 +743,14 @@ while the space is **archived** (reads keep working); an `{sid}` that
 does not belong to the path space `{id}` — another space's note or a
 household note — is 404.
 
+A sticky `POST` (either board) takes `{content, color?, position_x?,
+position_y?}`; positions are in the board's 1000 × 700 space and clamped
+into it. A note sent with **neither** position goes to the first free
+note-sized spot on that board (a cascade once the board is full) instead
+of the top-left corner; sending only one of the two keeps the old
+behaviour (the missing one is `0`). The SPA draws notes stored on the
+same spot fanned out, without rewriting their stored positions.
+
 Sticky fields (both boards; `socialhome/domain/sticky.py`), else 422 and
 nothing is written: the body must be a JSON object; `color` must be a
 hex colour `#RGB` / `#RRGGBB` (case-insensitive) and is stored and
