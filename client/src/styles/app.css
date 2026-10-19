@@ -12770,7 +12770,8 @@ a.sh-space-hero-members:focus-visible,
 /* The admins' join-request queue: "Near the edge" beside the name. */
 .sh-join-edge-chip {
   display: inline-flex; align-items: center; gap: 4px;
-  margin-inline-start: var(--sh-space-sm);
+  /* The info column is a flex column: don't stretch to its width. */
+  align-self: flex-start;
   padding: 2px 8px;
   border-radius: var(--sh-radius-full);
   font-size: var(--sh-font-size-xs);
