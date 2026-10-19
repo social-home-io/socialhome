@@ -24,7 +24,11 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.errors import InvalidMediaRefError
+from socialhome.domain.errors import (
+    InvalidMediaRefError,
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
+)
 from socialhome.domain.events import (
     PeerProtoVersionRaised,
     SpaceAdminAuthorityRevoked,
@@ -7321,7 +7325,7 @@ async def test_publishing_a_link_records_the_server_and_returns_its_url(stack):
     stack.space_svc.attach_gfs_connection_service(gfs)
     await stack.provision_user("anna", is_admin=True)
     space = await stack.space_svc.create_space(
-        owner_username="anna", name="Public", space_type=SpaceType.PUBLIC
+        owner_username="anna", name="Public", space_type=SpaceType.GLOBAL
     )
     link = await stack.space_svc.create_invite_link(
         space.id,
@@ -7355,7 +7359,7 @@ async def test_revoking_a_published_link_takes_the_blob_down(stack):
     stack.space_svc.attach_gfs_connection_service(gfs)
     await stack.provision_user("anna", is_admin=True)
     space = await stack.space_svc.create_space(
-        owner_username="anna", name="Public2", space_type=SpaceType.PUBLIC
+        owner_username="anna", name="Public2", space_type=SpaceType.GLOBAL
     )
     link = await stack.space_svc.create_invite_link(
         space.id,
@@ -7375,7 +7379,7 @@ async def test_a_gfs_outage_still_revokes_locally_with_one_warning(stack, caplog
     stack.space_svc.attach_gfs_connection_service(gfs)
     await stack.provision_user("anna", is_admin=True)
     space = await stack.space_svc.create_space(
-        owner_username="anna", name="Public3", space_type=SpaceType.PUBLIC
+        owner_username="anna", name="Public3", space_type=SpaceType.GLOBAL
     )
     link = await stack.space_svc.create_invite_link(
         space.id,
@@ -7406,7 +7410,7 @@ async def test_a_server_without_invite_links_creates_no_local_row(stack):
     stack.space_svc.attach_gfs_connection_service(gfs)
     await stack.provision_user("anna", is_admin=True)
     space = await stack.space_svc.create_space(
-        owner_username="anna", name="Old", space_type=SpaceType.PUBLIC
+        owner_username="anna", name="Old", space_type=SpaceType.GLOBAL
     )
     with pytest.raises(GfsConnectionError):
         await stack.space_svc.create_invite_link(
@@ -7414,6 +7418,70 @@ async def test_a_server_without_invite_links_creates_no_local_row(stack):
             actor_username="anna",
             publish_to_gfs="gfs-1",
         )
+    assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+
+
+@pytest.mark.parametrize(
+    ("tier", "error", "code"),
+    [
+        (SpaceType.PUBLIC, TierChangeRequiredError, "TIER_CHANGE_REQUIRED"),
+        (SpaceType.PRIVATE, SpaceNotPublishableError, "SPACE_NOT_PUBLIC"),
+    ],
+)
+async def test_only_a_global_spaces_link_is_published(stack, tier, error, code):
+    """Regression (federation-demo ``local-community``): a public local
+    community's link was "published" — the GFS refused it (it never holds a
+    public or private space: "not the owner of this space") and the owner
+    was told to re-publish the space, which could never help. Refused here,
+    before anything reaches the GFS or the token table."""
+    gfs = _FakeGfs()
+    stack.space_svc.attach_gfs_connection_service(gfs)
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name=f"Not global {tier.value}", space_type=tier
+    )
+    with pytest.raises(error) as exc:
+        await stack.space_svc.create_invite_link(
+            space.id, actor_username="anna", publish_to_gfs="gfs-1"
+        )
+    assert exc.value.code == code
+    assert gfs.published == []
+    assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+    # The same link, not published, is fine — its code is handed over.
+    link = await stack.space_svc.create_invite_link(space.id, actor_username="anna")
+    assert link["gfs"] is None and link["code"]
+
+
+async def test_a_stub_refuses_to_forward_a_publish_for_a_non_global_space(stack):
+    space, _u, _remote = await _hosted_with_remote_seat(stack, "admin")
+    await stack.db.enqueue(
+        "UPDATE spaces SET space_type='public' WHERE id=?", (space.id,)
+    )
+    stack.space_svc.attach_gfs_connection_service(_FakeGfs())
+    fed = await _as_stub(stack, space)
+    with pytest.raises(TierChangeRequiredError):
+        await stack.space_svc.create_invite_link(
+            space.id, actor_username="anna", publish_to_gfs="gfs-1"
+        )
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+async def test_the_host_refuses_a_forwarded_publish_for_a_non_global_space(stack):
+    space, _u, _remote = await _hosted_with_remote_seat(stack, "admin")
+    await stack.db.enqueue(
+        "UPDATE spaces SET space_type='public' WHERE id=?", (space.id,)
+    )
+    gfs = _FakeGfs()
+    stack.space_svc.attach_gfs_connection_service(gfs)
+    answer = await stack.space_svc.handle_forwarded_invite_action(
+        space.id,
+        action="create_invite_link",
+        actor_instance_id="peer-h",
+        actor_user_id="ru-1",
+        params={"publish_gfs_url": "https://relay.example.org"},
+    )
+    assert answer == {"error": "not_publishable"}
+    assert gfs.published == []
     assert await stack.space_repo.list_live_invite_tokens(space.id) == []
 
 

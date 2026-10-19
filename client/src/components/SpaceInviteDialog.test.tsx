@@ -80,7 +80,8 @@ function mockReads(
     }
     if (url === '/api/gfs/connections') return Promise.resolve(servers)
     if (url.endsWith('/members')) return Promise.resolve(members)
-    return Promise.resolve({ name: 'Fetched space name', ...space })
+    // A global space by default: the one tier whose links can be published.
+    return Promise.resolve({ name: 'Fetched space name', space_type: 'global', ...space })
   })
 }
 
@@ -275,6 +276,23 @@ describe('SpaceInviteDialog — publishing to a GFS', () => {
       expect.objectContaining({ publish_to_gfs: 'gfs-1' }),
     )
   })
+
+  it.each(['public', 'private'])(
+    'offers no publish toggle for a %s space — only a global space is on a GFS',
+    async (tier) => {
+      mockReads({
+        servers: [{ id: 'gfs-1', display_name: 'Relay One', status: 'active' }],
+        space: { space_type: tier, features: { private_gfs: true } },
+      })
+      const result = await openDialog()
+      await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/gfs/connections'))
+      await act(async () => { await Promise.resolve() })
+      expect(result.container.querySelector('[data-testid="invite-publish-toggle"]'))
+        .toBeNull()
+      // The link itself is still made — its code is handed over.
+      expect(result.getByText('Create invite link')).toBeTruthy()
+    },
+  )
 
   it('skips servers that are not active', async () => {
     mockReads({
@@ -772,21 +790,18 @@ describe('SpaceInviteDialog — link type on a private space', () => {
     expect(api.post.mock.calls[0][1]).toMatchObject({ via: 'internal' })
   })
 
-  it('hides publishing for an internal link and never sends publish_to_gfs', async () => {
+  it('a private space\'s link is never published, whichever link type', async () => {
+    // A private space is never listed on a GFS, and a GFS parks only a
+    // listed space's links — so there is no publish toggle to offer.
     mockReads({
       space: privateSpace(true),
       servers: [{ id: 'g1', display_name: 'Relay One', status: 'active', inbox_url: 'https://g1' }],
     })
     const result = await openDialog({ role: 'owner' })
-    const toggle = await waitFor(() => result.getByTestId('invite-publish-toggle'))
-    await act(async () => { fireEvent.click(toggle) })
+    await waitFor(() => expect(radio(result.container, 'gfs')?.checked).toBe(true))
+    expect(result.queryByTestId('invite-publish-toggle')).toBeNull()
     await act(async () => { fireEvent.click(radio(result.container, 'internal')) })
     expect(result.queryByTestId('invite-publish-toggle')).toBeNull()
-    // Back to a connection server link: the toggle returns, switched off.
-    await act(async () => { fireEvent.click(radio(result.container, 'gfs')) })
-    expect((result.getByTestId('invite-publish-toggle') as HTMLInputElement).checked)
-      .toBe(false)
-    await act(async () => { fireEvent.click(radio(result.container, 'internal')) })
     await generate(result, makeRow({ via: 'internal' }))
     expect(api.post.mock.calls[0][1]).not.toHaveProperty('publish_to_gfs')
     expect(api.post.mock.calls[0][1]).toMatchObject({ via: 'internal' })
