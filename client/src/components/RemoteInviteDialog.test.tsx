@@ -10,6 +10,8 @@ vi.mock('@/store/auth', () => ({
   currentUser: { value: { user_id: 'uid-pascal', display_name: 'Pascal' } },
 }))
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
+const openSpaceInvite = vi.fn()
+vi.mock('./SpaceInviteDialog', () => ({ openSpaceInvite: (...a: unknown[]) => openSpaceInvite(...a) }))
 
 const { api } = await import('@/api') as unknown as {
   api: { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn> }
@@ -104,6 +106,29 @@ async function renderAndOpen() {
   })
   return result
 }
+
+describe('RemoteInviteDialog — the one Invite door', () => {
+  it('"Share an invite link" hands over to the link dialog with the opener\'s role', async () => {
+    openSpaceInvite.mockReset()
+    api.get.mockResolvedValueOnce(FRIENDS_PAYLOAD)
+    const r = render(<RemoteInviteDialog />)
+    await act(async () => { openRemoteInviteDialog('space-uuid-1', 'admin') })
+    const link = await waitFor(() => r.getByRole('button', { name: 'Share an invite link' }))
+    expect(r.getByText(/Not on the list\?/)).toBeTruthy()
+    fireEvent.click(link)
+    expect(openSpaceInvite).toHaveBeenCalledWith('space-uuid-1', null, 'admin')
+    expect(r.queryByRole('button', { name: 'Share an invite link' })).toBeNull()
+  })
+
+  it('with nobody to pick, the link is the main action', async () => {
+    openSpaceInvite.mockReset()
+    api.get.mockResolvedValueOnce({ instance: { instance_id: 'i', display_name: 'H', members: [] }, households: [] })
+    const r = render(<RemoteInviteDialog />)
+    await act(async () => { openRemoteInviteDialog('space-uuid-1', 'owner') })
+    fireEvent.click(await waitFor(() => r.getByRole('button', { name: 'Share an invite link' })))
+    expect(openSpaceInvite).toHaveBeenCalledWith('space-uuid-1', null, 'owner')
+  })
+})
 
 describe('RemoteInviteDialog', () => {
   it('flattens both local + remote members, viewer themselves filtered', async () => {

@@ -19,6 +19,10 @@
  * (Bug repro: prior versions only flattened ``data.households[]`` and
  * silently dropped ``data.instance``, so a household admin literally
  * could not pick their spouse who lived on the same instance.)
+ *
+ * It is the space's ONE "Invite" door: someone who isn't on the list (a
+ * household you aren't paired with) gets an invite link — "Share an
+ * invite link instead" hands over to ``SpaceInviteDialog``.
  */
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -27,6 +31,8 @@ import { currentUser } from '@/store/auth'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
+import { openSpaceInvite } from './SpaceInviteDialog'
+import type { SpaceRole } from '@/features/spaces/spaceRoles'
 import { t } from '@/i18n/i18n'
 
 interface FriendsHouseholdMember {
@@ -66,8 +72,11 @@ interface PickRow {
 }
 
 const open = signal<string | null>(null) // holds the space_id being invited to
+/** The opener's role — decides which roles an invite link may hand out. */
+const openerRole = signal<SpaceRole | undefined>(undefined)
 
-export function openRemoteInviteDialog(spaceId: string) {
+export function openRemoteInviteDialog(spaceId: string, role?: SpaceRole) {
+  openerRole.value = role
   open.value = spaceId
 }
 
@@ -154,6 +163,19 @@ export function RemoteInviteDialog() {
     setQuery(''); setPickedId(null); setError(null)
   }
 
+  const shareLink = () => {
+    close()
+    openSpaceInvite(spaceId, null, openerRole.value)
+  }
+  const linkRow = (
+    <p class="sh-remote-invite-link">
+      {t('remote_invite.not_listed')}{' '}
+      <button type="button" class="sh-link-button" onClick={shareLink}>
+        {t('remote_invite.share_link')}
+      </button>
+    </p>
+  )
+
   const submit = async () => {
     const picked = rows.find((r) => rowKey(r) === pickedId)
     if (!picked) {
@@ -187,7 +209,13 @@ export function RemoteInviteDialog() {
       {loading ? (
         <p class="sh-muted">{t('remote_invite.loading')}</p>
       ) : rows.length === 0 ? (
-        <p class="sh-muted">{t('remote_invite.empty')}</p>
+        <>
+          <p class="sh-muted">{t('remote_invite.empty')}</p>
+          <div class="sh-modal-actions">
+            <Button variant="secondary" onClick={close}>{t('common.cancel')}</Button>
+            <Button onClick={shareLink}>{t('remote_invite.share_link')}</Button>
+          </div>
+        </>
       ) : (
         <>
           <label class="sh-form-field">
@@ -236,6 +264,7 @@ export function RemoteInviteDialog() {
             )}
           </div>
           {error && <p class="sh-error">{error}</p>}
+          {linkRow}
           <div class="sh-modal-actions">
             <Button variant="secondary" onClick={close} disabled={submitting}>
               {t('common.cancel')}

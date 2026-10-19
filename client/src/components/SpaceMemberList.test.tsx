@@ -18,6 +18,9 @@ function emit(type: string, data: Record<string, unknown>) {
   for (const h of wsHandlers.get(type) ?? []) h({ data })
 }
 
+const openInvite = vi.fn()
+vi.mock('./RemoteInviteDialog', () => ({ openRemoteInviteDialog: (...a: unknown[]) => openInvite(...a) }))
+
 const apiGet = vi.fn()
 vi.mock('@/api', () => ({
   api: {
@@ -74,6 +77,15 @@ describe('SpaceMemberList', () => {
     expect(Object.keys(mod).length).toBeGreaterThan(0)
   })
 
+  it('an admin gets ONE Invite button: people or an invite link, in one dialog', async () => {
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" />)
+    const btn = await waitFor(() => r.getByRole('button', { name: '+ Invite' }))
+    expect(r.container.querySelectorAll('.sh-member-list-invite-actions button')).toHaveLength(1)
+    fireEvent.click(btn)
+    expect(openInvite).toHaveBeenCalledWith('sp-1', 'admin')
+  })
+
   it('badges owner, admin and moderator; a moderator manages nobody', async () => {
     const { SpaceMemberList } = await import('./SpaceMemberList')
     const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="moderator" />)
@@ -84,7 +96,7 @@ describe('SpaceMemberList', () => {
     // Content authority only — no member-management kebab, no invites.
     expect(r.container.querySelector('.sh-post-overflow')).toBeNull()
     expect(r.container.querySelector('.sh-member-list-invite-actions')).toBeNull()
-    expect(r.container.textContent).not.toContain('Invite by code')
+    expect(r.container.textContent).not.toContain('+ Invite')
   })
 
   it('a follower sees who, never when: no presence dot, no join date', async () => {

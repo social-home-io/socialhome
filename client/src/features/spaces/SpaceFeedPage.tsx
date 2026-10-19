@@ -54,6 +54,9 @@ import { useSpaceLinks } from './useSpaceLinks'
 import { useSpaceCompat } from '@/components/SpaceVersionNotice'
 import { SpaceHero, type HeroMember } from '@/components/SpaceHero'
 import { SpaceNeedsYou } from './SpaceNeedsYou'
+import { SpaceSetupCard } from './SpaceSetupCard'
+import { SpaceInviteFirst } from './SpaceInviteFirst'
+import { isSetupPending } from './spaceSetup'
 import { useSpaceNotifLevel } from './SpaceNotifLevels'
 import {
   awaitsMyVote, setSpaceAttention, spaceAttention, useSpaceAttentionFrames, type WireAttention,
@@ -114,6 +117,8 @@ interface SpaceDetail {
   my_role?: string
   /** The tier: private / household / public / global. */
   space_type?: string
+  /** Discovery category (``'general'`` / absent = none). */
+  category?: string | null
   /** "Needs you" (owners / admins / moderators); ``null`` otherwise. */
   attention?: WireAttention | null
 }
@@ -623,6 +628,20 @@ export default function SpaceFeedPage() {
           isOwner={viewerRole.value === 'owner'}
           onChanged={() => { void loadSpaceHeader(spaceId) }}
         />
+      )}
+      {/* A new space asks its owner once what it's for (owner decision 3). */}
+      {s && section === 'feed' && viewerRole.value === 'owner' && !s.archived
+        && isSetupPending(spaceId) && (
+        <SpaceSetupCard
+          spaceId={spaceId}
+          name={s.name}
+          category={s.category ?? null}
+          features={s.features as Record<string, unknown> | undefined}
+          onDone={() => { void loadSpaceHeader(spaceId) }}
+        />
+      )}
+      {s && section === 'feed' && settingsAuthority && !s.archived && membersShown === 1 && (
+        <SpaceInviteFirst spaceId={spaceId} role={viewerRole.value} />
       )}
 
       {chatOpen && (
