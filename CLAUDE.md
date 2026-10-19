@@ -328,13 +328,20 @@ truth; the panel follows it.
   per-pair `share_home` home location — on by default for a new pair, owner
   decision 2026-10-19 — and live presence location shared with a peer).
   Every sender honours that switch (pairing QR / accept included); never via
-  a GFS, never as a side effect of joining a space.
+  a GFS, never as a side effect of joining a space — the one exception is
+  the consented ~1 km point a local-community join sends to that space's
+  host (below).
 - **Space locations are not people's locations, and still stay minimal:**
   - A *public local community* (a public space bound to an area) keeps its
-    centre on the host. Paired households get only "local community, within
-    X km" plus the host's own in-area verdict for *them*, computed against
-    the home they already chose to share. No coordinates on the wire;
-    the verdict has an "unsure" band near the edge so it can't be probed.
+    centre on the host; other households see only "local community, within
+    X km". Every join to one (paired, mesh, invite link or GFS relay) carries
+    the joiner's household home rounded to 2 dp (~1 km,
+    `JOIN_LOCATION_PRECISION_DP`) — only after the person consents in the
+    SPA, inside the join's sealed payload, to the host only, never stored
+    (a pending request keeps only `inside` / `edge`). The host decides on the
+    ~1 km cell: inside → proceed, outside → `OUTSIDE_AREA`, near the edge →
+    always an admin-reviewed join request (even in open mode). Pairing's
+    `share_home` is not used for joining.
   - A *global* space may carry an owner-chosen place pin, used only to sort
     Discover by distance on the viewer's side; joining does not check it.
     Never default it to the household's home.
