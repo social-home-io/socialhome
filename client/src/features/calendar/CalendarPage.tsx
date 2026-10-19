@@ -38,7 +38,7 @@ import { currentWeekStart } from '@/utils/week'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { t } from '@/i18n/i18n'
 import { confirmDialog } from '@/components/confirm'
-import { TabHeader } from '@/components/TabHeader'
+import { addBase } from '@/baseUrl'
 import { toggles } from '@/components/HouseholdToggles'
 import TimetablePage from '@/features/timetable/TimetablePage'
 
@@ -201,44 +201,53 @@ function tabFromUrl(url: string | undefined): CalendarTab {
   return new URLSearchParams(q).get('tab') === 'timetable' ? 'timetable' : 'calendar'
 }
 
+const PAGE_PATH: Record<CalendarTab, string> = {
+  calendar: '/calendar',
+  timetable: '/calendar?tab=timetable',
+}
+
+/** A real link to the sibling page (Calendar ⇄ Timetable). */
+function PageLink({ to }: { to: CalendarTab }) {
+  return (
+    <a class="sh-btn sh-btn--secondary sh-cal-pagelink" href={addBase(PAGE_PATH[to])}>
+      {to === 'calendar' ? t('nav.calendar') : t('nav.timetable')}
+    </a>
+  )
+}
+
 /**
  * CalendarPage — hosts the household calendar and, when the
- * ``feat_timetable`` toggle is on, the school Timetable as a second
- * tab (``?tab=timetable``; the default Calendar tab carries no query).
- * The tab strip only appears when the Timetable tab does, so a
- * household without timetables sees the calendar exactly as before.
+ * ``feat_timetable`` toggle is on, the school Timetable
+ * (``?tab=timetable``; the calendar carries no query). Each page links
+ * to the other from its control row — a plain link, not a tab strip —
+ * so a household without timetables sees no switch at all.
  */
 export default function CalendarPage() {
   const loc = useLocation()
   const tabs = visibleCalendarTabs(toggles.value)
   const wanted = tabFromUrl(loc.url)
   const active = tabs.includes(wanted) ? wanted : tabs[0]
-  const onSelectTab = (tab: CalendarTab) => {
-    const next = tab === 'calendar' ? '/calendar' : '/calendar?tab=timetable'
-    if (loc.url !== next) loc.route?.(next, true)
-  }
-  const labels: Record<CalendarTab, string> = {
-    calendar: t('nav.calendar'),
-    timetable: t('nav.timetable'),
-  }
   return (
     <div class="sh-calendar-host">
-      {tabs.includes('timetable') && (
-        <TabHeader<CalendarTab>
-          activeTab={active}
-          visibleTabs={tabs}
-          labels={labels}
-          ariaLabel={t('timetable.tabs_aria')}
-          onSelectTab={onSelectTab}
-        />
-      )}
-      {active === 'calendar' ? <CalendarAgenda /> : <TimetablePage />}
+      {active === 'calendar'
+        ? <CalendarAgenda timetable={tabs.includes('timetable')} />
+        : (
+          <>
+            {tabs.includes('calendar') && (
+              <div class="sh-space-cal-bar sh-cal-controls sh-cal-controls--end">
+                <PageLink to="calendar" />
+              </div>
+            )}
+            <TimetablePage />
+          </>
+        )}
     </div>
   )
 }
 
-/** The calendar tab — household agenda, filters, event dialog. */
-function CalendarAgenda() {
+/** The calendar page — household agenda, filters, event dialog.
+ *  *timetable*: link to the Timetable from the control row. */
+function CalendarAgenda({ timetable }: { timetable: boolean }) {
   useTitle(t('nav.calendar'))
   const wide = useMediaQuery(CALENDAR_WIDE_QUERY)
   // Week on a phone (a rotated tablet, a narrowed window) shows Month.
@@ -611,17 +620,9 @@ function CalendarAgenda() {
         onChange={setVisible}
         onShowAll={showAllCalendars}
         onShowOnlyMine={showOnlyMine}
-        primaryAction={
-          <div class="sh-cal-strip-actions__buttons">
-            <Button variant="secondary" onClick={openCalendarImport}>
-              {t('calendar.page.import')}
-            </Button>
-            <Button onClick={handleNewEvent}>+ {t('calendar.new_event')}</Button>
-          </div>
-        }
       />
 
-      <div class="sh-space-cal-bar">
+      <div class="sh-space-cal-bar sh-cal-controls">
         <SegmentedSwitch<CalendarView>
           class="sh-space-cal-bar__views"
           options={views}
@@ -634,6 +635,15 @@ function CalendarAgenda() {
           ariaLabel={t('calendar.views_aria')}
           onChange={(v) => { viewMode.value = v }}
         />
+        {/* The Timetable is the calendar's sibling page: it sits by the
+            views, so a phone keeps both on one line. */}
+        {timetable && <PageLink to="timetable" />}
+        <div class="sh-cal-controls__actions">
+          <Button variant="secondary" onClick={openCalendarImport}>
+            {t('calendar.page.import')}
+          </Button>
+          <Button onClick={handleNewEvent}>+ {t('calendar.new_event')}</Button>
+        </div>
       </div>
 
       {current !== 'upcoming' && (

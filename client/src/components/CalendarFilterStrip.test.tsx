@@ -55,6 +55,18 @@ describe('CalendarFilterStrip', () => {
     }
   })
 
+  const strip = (visible: string[], onChange = vi.fn(), extra = {}) => render(
+    <CalendarFilterStrip
+      calendars={[mkCal('c1', 'me'), mkCal('c2', 'pa'), mkCal('c3', 'ma')]}
+      visibleCalendarIds={new Set(visible)}
+      onChange={onChange}
+      onShowAll={() => {}}
+      onShowOnlyMine={() => {}}
+      {...extra}
+    />,
+  )
+  const pressed = (el: HTMLElement) => el.closest('button')!.getAttribute('aria-pressed')
+
   it('renders nothing when there is a single owner', () => {
     const { container } = render(
       <CalendarFilterStrip
@@ -65,79 +77,96 @@ describe('CalendarFilterStrip', () => {
         onShowOnlyMine={() => {}}
       />,
     )
-    expect(container.querySelector('.sh-cal-strip')).toBeNull()
+    expect(container.querySelector('.sh-cal-people')).toBeNull()
   })
 
-  it('renders one pin per owner and exposes both quick actions', () => {
-    const { container, getByText } = render(
+  it('renders the presets, then one flat chip per owner, you first', () => {
+    const { container, getByRole } = strip(['c1'])
+    expect(getByRole('group', { name: 'Household calendars' })).toBeTruthy()
+    const names = Array.from(container.querySelectorAll('button')).map(b => (b.querySelector('.sh-cal-person__name') ?? b).textContent)
+    expect(names).toEqual(['Everyone', 'Just me', 'You', 'Maria', 'Pascal'])
+    // Flat chips: no taped polaroid, no per-pin tilt.
+    expect(container.querySelector('.sh-cal-strip-tape')).toBeNull()
+    expect(container.querySelectorAll('.sh-cal-person[style*="--sh-pin-rot"]').length).toBe(0)
+  })
+
+  it('every chip is a toggle with one selected style', () => {
+    const { getByText } = strip(['c1', 'c2'])
+    expect(pressed(getByText('You'))).toBe('true')
+    expect(pressed(getByText('Pascal'))).toBe('true')
+    expect(pressed(getByText('Maria'))).toBe('false')
+    for (const name of ['You', 'Pascal']) {
+      expect(getByText(name).closest('button')!.className).toBe('sh-cal-person is-on')
+    }
+    expect(getByText('Maria').closest('button')!.className).toBe('sh-cal-person')
+  })
+
+  it('a preset reads as pressed when it describes what shows', () => {
+    let r = strip(['c1'])
+    expect(pressed(r.getByText('Just me'))).toBe('true')
+    expect(pressed(r.getByText('Everyone'))).toBe('false')
+    r.unmount()
+    r = strip(['c1', 'c2', 'c3'])
+    expect(pressed(r.getByText('Everyone'))).toBe('true')
+    expect(pressed(r.getByText('Just me'))).toBe('false')
+    r.unmount()
+    r = strip(['c2'])
+    expect(pressed(r.getByText('Everyone'))).toBe('false')
+    expect(pressed(r.getByText('Just me'))).toBe('false')
+  })
+
+  it('the presets call their handlers', () => {
+    const onShowAll = vi.fn()
+    const onShowOnlyMine = vi.fn()
+    const { getByText } = strip(['c2'], vi.fn(), { onShowAll, onShowOnlyMine })
+    fireEvent.click(getByText('Everyone'))
+    fireEvent.click(getByText('Just me'))
+    expect(onShowAll).toHaveBeenCalledTimes(1)
+    expect(onShowOnlyMine).toHaveBeenCalledTimes(1)
+  })
+
+  it('hides "Just me" when you have no calendar of your own', () => {
+    const { queryByText } = render(
       <CalendarFilterStrip
-        calendars={[
-          mkCal('c1', 'me'),
-          mkCal('c2', 'pa'),
-          mkCal('c3', 'ma'),
-        ]}
-        visibleCalendarIds={new Set(['c1'])}
+        calendars={[mkCal('c2', 'pa'), mkCal('c3', 'ma')]}
+        visibleCalendarIds={new Set(['c2'])}
         onChange={() => {}}
         onShowAll={() => {}}
         onShowOnlyMine={() => {}}
       />,
     )
-    const pins = container.querySelectorAll('.sh-cal-strip-pin')
-    expect(pins.length).toBe(3)
-    expect(getByText('You')).toBeTruthy()
-    expect(getByText('Pascal')).toBeTruthy()
-    expect(getByText('Maria')).toBeTruthy()
-    expect(getByText('Just me')).toBeTruthy()
-    expect(getByText('Everyone')).toBeTruthy()
+    expect(queryByText('Just me')).toBeNull()
   })
 
-  it('toggling an off pin adds its owner calendars to the visible set', () => {
+  it('toggling an off chip adds its owner calendars to the visible set', () => {
     const onChange = vi.fn()
-    const { getByText } = render(
-      <CalendarFilterStrip
-        calendars={[mkCal('c1', 'me'), mkCal('c2', 'pa')]}
-        visibleCalendarIds={new Set(['c1'])}
-        onChange={onChange}
-        onShowAll={() => {}}
-        onShowOnlyMine={() => {}}
-      />,
-    )
+    const { getByText } = strip(['c1'], onChange)
     fireEvent.click(getByText('Pascal'))
     expect(onChange).toHaveBeenCalledTimes(1)
-    const next = onChange.mock.calls[0][0] as Set<string>
-    expect(next.has('c1')).toBe(true)
-    expect(next.has('c2')).toBe(true)
+    expect([...(onChange.mock.calls[0][0] as Set<string>)].sort()).toEqual(['c1', 'c2'])
   })
 
   it('refuses to hide the last visible owner', () => {
     const onChange = vi.fn()
-    const { getByText } = render(
+    const { getByText } = strip(['c1'], onChange)
+    fireEvent.click(getByText('You'))
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('a member with several calendars is one chip, mixed while some show', () => {
+    const onChange = vi.fn()
+    const { getAllByText, getByText } = render(
       <CalendarFilterStrip
-        calendars={[mkCal('c1', 'me'), mkCal('c2', 'pa')]}
-        visibleCalendarIds={new Set(['c1'])}
+        calendars={[mkCal('c1', 'me'), mkCal('c2', 'pa'), mkCal('c4', 'pa', 'Work')]}
+        visibleCalendarIds={new Set(['c1', 'c2'])}
         onChange={onChange}
         onShowAll={() => {}}
         onShowOnlyMine={() => {}}
       />,
     )
-    // Click own pin (the only ON pin) — should be a no-op.
-    fireEvent.click(getByText('You'))
-    expect(onChange).not.toHaveBeenCalled()
-  })
-
-  it('aria-label carries the state so screen readers know which pins are showing', () => {
-    const { container } = render(
-      <CalendarFilterStrip
-        calendars={[mkCal('c1', 'me'), mkCal('c2', 'pa')]}
-        visibleCalendarIds={new Set(['c1'])}
-        onChange={() => {}}
-        onShowAll={() => {}}
-        onShowOnlyMine={() => {}}
-      />,
-    )
-    const pins = container.querySelectorAll('.sh-cal-strip-pin')
-    const labels = Array.from(pins).map(p => p.getAttribute('aria-label'))
-    expect(labels.some(l => l?.startsWith('Me') && l.includes('showing'))).toBe(true)
-    expect(labels.some(l => l?.startsWith('Pascal') && l.includes('hidden'))).toBe(true)
+    expect(getAllByText('Pascal')).toHaveLength(1)
+    expect(pressed(getByText('Pascal'))).toBe('mixed')
+    fireEvent.click(getByText('Pascal'))
+    expect([...(onChange.mock.calls[0][0] as Set<string>)].sort()).toEqual(['c1', 'c2', 'c4'])
   })
 })

@@ -17,33 +17,22 @@ function rules(): Array<[string, string]> {
   return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(m => [m[1].trim(), m[2]])
 }
 
-describe('calendar filter strip pins', () => {
-  // A hidden calendar's pin used to fade as a whole (opacity 0.55), which
-  // took the name to ~2.6:1. The pin is a live toggle, not a disabled
-  // control, so its label must stay ≥ 4.5:1: only the tape + avatar fade.
-  const pinRules = rules().filter(([sel]) =>
-    sel.split(',').some(s => /\.sh-cal-strip-pin(?:--[\w-]+|:[\w-]+)*$/.test(s.trim())))
+describe('calendar person chips', () => {
+  // The old polaroid pin faded a hidden person's name below 4.5:1. A
+  // chip is a live toggle: an off chip keeps the full ink, and no chip
+  // state fades (the selected tint is the only state difference).
+  const chipRules = rules().filter(([sel]) =>
+    sel.split(',').some(s => /\.sh-cal-person(?:--[\w-]+|\.is-on|:[\w-]+)*$/.test(s.trim())))
 
-  it('never fades the whole pin (that would fade its name)', () => {
-    expect(pinRules.length).toBeGreaterThan(0)
-    const faded = pinRules.filter(([, body]) => /(?:^|[\s;])opacity\s*:/.test(body))
+  it('never fades a chip', () => {
+    expect(chipRules.length).toBeGreaterThan(0)
+    const faded = chipRules.filter(([, body]) => /(?:^|[\s;])opacity\s*:/.test(body))
     expect(faded.map(([sel]) => sel)).toEqual([])
   })
 
-  it('fades only the tape and greys the avatar, never fading text', () => {
-    // Opacity is for the tape alone; the avatar may carry initials
-    // (text), so it is greyed (luminance-preserving), not faded.
-    const tape = rules().find(([sel]) => sel === '.sh-cal-strip-pin > .sh-cal-strip-tape')
-    expect(tape?.[1]).toMatch(/opacity\s*:\s*var\(--sh-pin-dim\)/)
-    const rest = rules().find(([sel]) => sel === '.sh-cal-strip-pin > :not(.sh-cal-strip-tape, .sh-cal-strip-name)')
-    expect(rest?.[1]).toMatch(/filter\s*:\s*grayscale\(/)
-    expect(rest?.[1]).not.toMatch(/(?:^|[\s;])opacity\s*:/)
-    const nameRules = rules().filter(([sel]) => /\.sh-cal-strip-name$/.test(sel.split(',').pop()!.trim()))
-    for (const [, body] of nameRules) {
-      expect(body).not.toMatch(/(?:^|[\s;])opacity\s*:/)
-      const color = /(?:^|[\s;])color\s*:\s*([^;]+)/.exec(body)?.[1]?.trim()
-      if (color) expect(['var(--sh-text)', 'var(--sh-text-muted)']).toContain(color)
-    }
+  it('labels an off chip in the full ink', () => {
+    const base = chipRules.find(([sel]) => sel === '.sh-cal-person')
+    expect(/(?:^|[\s;])color\s*:\s*([^;]+)/.exec(base?.[1] ?? '')?.[1]?.trim()).toBe('var(--sh-text)')
   })
 })
 

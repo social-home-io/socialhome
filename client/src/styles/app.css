@@ -6187,166 +6187,84 @@ body.sh-dm-thread-open .sh-messages {
   opacity: 0.4;
 }
 
-/* Calendar filter strip — polaroid pins, one per household member.
- * Each pin owns every calendar that member created; clicking toggles
- * the whole batch on / off. Shares the feed's "taped to the wall"
- * vocabulary (paper card, washi tape, slight tilt) so the calendar reads
- * as the same surface family.
- *
- * The card carries the calendar's hue via the inline ``--cal-hue``
- * custom property: washi tape, status dot and (when ON) the outline all
- * pick that hue up so colour identity stays consistent with the event
- * left-edge in the day-group rows. */
-.sh-cal-strip-wrap {
+/* Household calendar header. Whose calendars show: flat avatar chips
+ * (the people pickers' pill) after the "Everyone" / "Just me" presets,
+ * one selected style for everyone — the primary tint, never a person's
+ * colour. The dot is the person's calendar hue (the rail on their
+ * events), a legend only. Wraps on a wide screen, scrolls on a phone. */
+.sh-cal-people {
   display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-xs);
-}
-.sh-cal-strip {
-  margin: 0;
-  padding: 4px 4px 8px;
-  overflow-x: auto;
-  overflow-y: visible;
-  scrollbar-width: thin;
-}
-.sh-cal-strip-inner {
-  display: flex;
-  gap: var(--sh-space-md);
-  padding: 14px 4px 6px;
-  width: max-content;
-}
-.sh-cal-strip-pin {
-  position: relative;
-  width: 108px;
-  display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 2px;
-  padding: 14px 10px 10px;
-  background: var(--sh-bg-tertiary);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  box-shadow: var(--sh-shadow-pinned);
-  cursor: pointer;
+  gap: 6px;
+}
+.sh-cal-person {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-height: 40px;
+  padding: 4px 12px 4px 4px;
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-full);
+  color: var(--sh-text);
   font: inherit;
-  color: inherit;
-  text-align: center;
-  transform: rotate(var(--sh-pin-rot, 0deg));
-  /* A hidden calendar reads as "off" by fading its tape and greying its
-   * avatar, never by fading the whole button: faded text (the name, or
-   * an avatar's initials) drops below 4.5:1, and the pin is still a
-   * live toggle (WCAG 1.4.3 exempts only disabled controls). Grayscale
-   * keeps luminance, so the initials keep their contrast. The name
-   * takes the muted ink instead (≥ 4.6:1 in both themes). */
-  --sh-pin-dim: 0.55;
-  transition:
-    transform var(--sh-transition-normal),
-    box-shadow var(--sh-transition-fast),
-    border-color var(--sh-transition-fast);
-}
-.sh-cal-strip-pin > .sh-cal-strip-tape {
-  opacity: var(--sh-pin-dim);
-  transition: opacity var(--sh-transition-fast);
-}
-.sh-cal-strip-pin > :not(.sh-cal-strip-tape, .sh-cal-strip-name) {
-  filter: grayscale(calc((1 - var(--sh-pin-dim)) * 2));
-  transition: filter var(--sh-transition-fast);
-}
-.sh-cal-strip-pin:hover,
-.sh-cal-strip-pin:focus-visible {
-  transform: rotate(0deg) translateY(-2px);
-  z-index: 2;
-  --sh-pin-dim: 1;
-}
-.sh-cal-strip-pin:focus-visible {
-  outline: 2px solid var(--sh-focus-ring);
-  outline-offset: 3px;
-}
-.sh-cal-strip-pin--on {
-  --sh-pin-dim: 1;
-  border-color: var(--cal-hue);
-  box-shadow:
-    var(--sh-shadow-pinned),
-    inset 0 -3px 0 0 color-mix(in srgb, var(--cal-hue) 65%, transparent);
-  background: color-mix(in srgb, var(--cal-hue) 6%, var(--sh-bg-tertiary));
-}
-.sh-cal-strip-pin--partial {
-  --sh-pin-dim: 0.85;
-  border-color: color-mix(in srgb, var(--cal-hue) 55%, var(--sh-border));
-}
-.sh-cal-strip-tape {
-  position: absolute;
-  top: -8px;
-  left: 50%;
-  width: 56px;
-  height: 14px;
-  border-radius: 2px;
-  transform: translateX(-50%) rotate(-3deg);
-  background: color-mix(in srgb, var(--cal-hue, var(--sh-warning)) 28%, transparent);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  pointer-events: none;
-}
-.sh-cal-strip-pin--on .sh-cal-strip-tape {
-  background: color-mix(in srgb, var(--cal-hue) 65%, transparent);
-}
-.sh-cal-strip-name {
-  font-weight: 600;
   font-size: var(--sh-font-size-sm);
-  color: var(--sh-text-muted);
+  cursor: pointer;
+  transition: background var(--sh-transition-fast),
+              border-color var(--sh-transition-fast);
+}
+.sh-cal-person--preset { padding-inline: 14px; }
+.sh-cal-person:hover { background: var(--sh-bg-tertiary); border-color: var(--sh-primary); }
+.sh-cal-person.is-on {
+  background: color-mix(in srgb, var(--sh-primary) 14%, var(--sh-bg));
+  border-color: var(--sh-primary);
+  color: var(--sh-primary-on-soft);
+  font-weight: 600;
+}
+.sh-cal-person:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 2px; }
+.sh-cal-person__avatar { display: inline-flex; line-height: 0; }
+/* .sh-avatar is 40px by default; a photo (an <img>) would ignore the size
+ * prop and make its chip taller than an initials one. */
+.sh-cal-person__avatar .sh-avatar { width: 28px; height: 28px; }
+.sh-cal-person__name {
+  max-width: 12em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 100%;
-  margin-top: 4px;
 }
-.sh-cal-strip-pin--on .sh-cal-strip-name,
-.sh-cal-strip-pin--partial .sh-cal-strip-name,
-.sh-cal-strip-pin:hover .sh-cal-strip-name,
-.sh-cal-strip-pin:focus-visible .sh-cal-strip-name {
-  color: var(--sh-text);
+.sh-cal-person__hue {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--cal-hue);
 }
-.sh-cal-strip-actions {
+.sh-cal-people__sep {
+  align-self: stretch;
+  flex-shrink: 0;
+  width: 1px;
+  margin: 6px 2px;
+  background: var(--sh-border);
+}
+/* The one control row: views and the Timetable link at the start, the
+ * page's actions (Import, New event) at the end. A phone wraps the
+ * actions onto a second line as one group. */
+.sh-cal-controls { flex-wrap: wrap; row-gap: var(--sh-space-sm); }
+.sh-cal-controls--end { justify-content: flex-end; margin-bottom: var(--sh-space-md); }
+.sh-cal-controls__actions {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sh-space-sm);
-  padding: 0 4px;
   flex-wrap: wrap;
-}
-.sh-cal-strip-actions__primary {
+  align-items: center;
+  gap: var(--sh-space-sm);
   margin-inline-start: auto;
 }
-.sh-cal-strip-wrap--actions-only .sh-cal-strip-actions {
-  justify-content: flex-end;
-}
-.sh-cal-strip-quick {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sh-space-xs);
-}
-.sh-cal-strip-quick__btn {
-  appearance: none;
-  background: transparent;
-  border: 1px solid transparent;
-  padding: 4px 10px;
-  font: inherit;
-  font-size: var(--sh-font-size-xs);
-  font-weight: 600;
-  color: var(--sh-text-muted);
-  border-radius: var(--sh-radius-full);
-  cursor: pointer;
-  transition: color var(--sh-transition-fast),
-              background var(--sh-transition-fast),
-              border-color var(--sh-transition-fast);
-}
-.sh-cal-strip-quick__btn:hover {
-  color: var(--sh-text);
-  background: var(--sh-bg-secondary);
-  border-color: var(--sh-border);
-}
-@media (pointer: coarse) {
-  .sh-cal-strip-quick__btn { min-height: var(--sh-tap-target-compact); }
-}
+.sh-cal-pagelink { text-decoration: none; }
+/* The bar pushes a lone button to its end; the Timetable link stays by
+ * the views (the Timetable page's lone Calendar link ends up at the end
+ * through ``--end`` anyway). */
+.sh-space-cal-bar.sh-cal-controls > .sh-cal-pagelink { margin-inline-start: 0; }
 
 /* Target-calendar picker in the event dialog — multi-select avatar
  * chip row carrying the same identity language as the filter strip
@@ -6552,19 +6470,20 @@ body.sh-dm-thread-open .sh-messages {
   }
   .sh-calendar-picker::-webkit-scrollbar { display: none; }
   .sh-calendar-picker__chip { flex-shrink: 0; }
-  /* Filter strip — keep pins compact on phones so 4–5 family
-   * members fit on screen at once without horizontal scroll. */
-  .sh-cal-strip {
-    /* Mirror the calendar-picker fade-edge trick so a long member list
-     * doesn't bleed under the chrome on narrow screens. */
-    -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%);
-            mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%);
+  /* Many people: one scrolling row, not three wrapped ones. */
+  .sh-cal-people {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-block: 2px;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent 100%);
+            mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent 100%);
   }
-  .sh-cal-strip-inner { gap: var(--sh-space-sm); }
-  .sh-cal-strip-pin {
-    width: 88px;
-    padding: 12px 6px 8px;
+  :root[dir="rtl"] .sh-cal-people {
+    -webkit-mask-image: linear-gradient(270deg, #000 calc(100% - 16px), transparent 100%);
+            mask-image: linear-gradient(270deg, #000 calc(100% - 16px), transparent 100%);
   }
+  .sh-cal-people::-webkit-scrollbar { display: none; }
   .sh-cal-target-chip { font-size: var(--sh-font-size-xs); }
 
   .sh-event-rsvp { gap: var(--sh-space-xs); }
@@ -19210,12 +19129,6 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
 .sh-secret-reveal__actions { display: flex; justify-content: flex-end; }
 
 /* Calendar import dialog. */
-.sh-cal-strip-actions__buttons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sh-space-sm);
-  justify-content: flex-end;
-}
 .sh-cal-import-sources {
   display: flex;
   flex-wrap: wrap;
