@@ -16,7 +16,7 @@
 import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { ws, type WsEvent } from '@/ws'
-import type { SpaceProposal } from '@/components/SpaceProposalDialog'
+import type { SpaceProposal } from '@/features/spaces/spaceProposal'
 
 /** An open proposal as ``attention`` lists it: the proposal view plus
  *  ``required`` (approvals it needs) and the per-reader ``voted_by_me``. */
