@@ -2331,8 +2331,6 @@
   "spaces.list.empty_body": "Ein Raum ist eine gemeinsame Ecke für eine Gruppe – deine Familie, ein Verein, das Haus. Beiträge, Kalender und Aufgaben, nur für die Mitglieder.",
   "spaces.list.yours": "Deine",
   "spaces.list.subscribed_pill": "Gefolgt",
-  "spaces.list.chat_unread": "{n} ungelesene im Chat",
-  "spaces.list.chat_unread_one": "{n} ungelesene im Chat",
   "time.hours_ago_short": "vor {n} Std.",
   "time.yesterday": "gestern",
   "time.days_ago_long": "vor {n} Tagen",
@@ -4843,5 +4841,8 @@
   "spaces.discover.paired_note": "Öffentliche Räume verbundener Haushalte. Sie stehen nie auf einem GFS.",
   "spaces.list.archived_label": "Archivierte Räume, {n}",
   "spaces.discover.invite_link": "Mitglieder können dich mit einem Link einladen.",
-  "spaces.discover.invite_link_short": "Mitglieder können dich per Link einladen"
+  "spaces.discover.invite_link_short": "Mitglieder können dich per Link einladen",
+  "spaces.list.posts_new": "{n} neue Beiträge",
+  "spaces.list.posts_new_one": "{n} neuer Beitrag",
+  "spaces.discover.connect": "Erst verbinden"
 }

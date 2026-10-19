@@ -7665,6 +7665,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         await self._require_space(space_id)
         return member
 
+    async def mark_feed_read(self, space_id: str, user_id: str) -> None:
+        """The caller viewed the space's Feed: posts before now are no
+        longer "new" for them on the Spaces list. Any seat (a follower
+        reads the feed too); anyone else gets the read gate's 403."""
+        await self.require_reader(space_id, user_id)
+        await self._spaces.mark_feed_read(space_id, user_id)
+
     async def read_space(
         self, space_id: str, user_id: str
     ) -> tuple[Space, SpaceMember | None]:

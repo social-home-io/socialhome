@@ -11,7 +11,8 @@
  *
  * A row's end slot carries ONE number: the filled "needs you" count for
  * an owner / admin / moderator when something waits for them, else the
- * quiet "N new" of the space's chat — never both. With no space at all
+ * quiet "N new" — posts by others since the caller last viewed the space's
+ * Feed (the chat keeps its own count in the space's Chat section). With no space at all
  * the page shows one empty card (and the header drops its buttons, so the
  * CTAs aren't duplicated); a failed read shows the load error with Retry,
  * never "No spaces yet".
@@ -30,14 +31,6 @@ import { RemoteInviteInboxBanner } from '@/components/RemoteInviteInboxBanner'
 import { ConnIcon } from '@/features/connections/ConnIcon'
 import { openSpaceJoinByCode } from './SpaceJoinByCodeDialog'
 import { isOne, t } from '@/i18n/i18n'
-import { connectionState, ws } from '@/ws'
-import { currentUser } from '@/store/auth'
-import {
-  applySpaceChatUnreadFrame,
-  loadSpaceChatUnread,
-  spaceChatDeleteNeedsReload,
-  spaceChatUnreadOf,
-} from '@/store/spaceChat'
 import { matchesTerm, parseDiscoverSource } from './discover'
 import { SpaceDiscover } from './SpaceDiscover'
 import { SpaceListRow, activityMeta } from './SpaceListRow'
@@ -47,16 +40,15 @@ const failed = signal(false)
 
 async function loadAll(): Promise<void> {
   loading.value = spaces.value.length === 0
-  const [ok] = await Promise.all([loadSpaces(), loadSpaceChatUnread()])
-  failed.value = !ok
+  failed.value = !(await loadSpaces())
   loading.value = false
 }
 
 /** The row's end slot: a filled needs-you count (it wins), else the
- *  quiet count of unread chat messages. */
+ *  quiet count of new posts. */
 export function rowEnd(s: Space): { needs: number; unread: number } {
   const needs = s.needs_you ?? 0
-  return { needs, unread: needs > 0 ? 0 : spaceChatUnreadOf(s.id) }
+  return { needs, unread: needs > 0 ? 0 : (s.unread_posts ?? 0) }
 }
 
 function SpaceRowEnd({ needs, unread }: { needs: number; unread: number }) {
@@ -71,7 +63,7 @@ function SpaceRowEnd({ needs, unread }: { needs: number; unread: number }) {
 function rowLabel(s: Space, meta: string, needs: number, unread: number): string {
   const parts = [s.name, meta]
   if (needs > 0) parts.push(t(isOne(needs) ? 'spaces.list.needs_you_one' : 'spaces.list.needs_you', { n: String(needs) }))
-  else if (unread > 0) parts.push(t(isOne(unread) ? 'spaces.list.chat_unread_one' : 'spaces.list.chat_unread', { n: String(unread) }))
+  else if (unread > 0) parts.push(t(isOne(unread) ? 'spaces.list.posts_new_one' : 'spaces.list.posts_new', { n: String(unread) }))
   return parts.filter(Boolean).join(', ')
 }
 
@@ -129,25 +121,6 @@ export default function SpaceListPage() {
     scrolled.current = true
     document.getElementById('discover')?.scrollIntoView?.({ block: 'start' })
   }, [isLoading, wantsDiscover])
-
-  // Live chat activity: bump a space's count by the same rules as its
-  // chat; a chat the list has no row for yet re-reads the counts, as do a
-  // deleted message in a chat that shows a count and a WS reconnect.
-  useEffect(() => {
-    const offMsg = ws.on('dm.message', (e) => {
-      const res = applySpaceChatUnreadFrame(e.data, currentUser.value?.user_id)
-      if (res === 'unknown') void loadSpaceChatUnread()
-    })
-    const offDel = ws.on('dm.message_deleted', (e) => {
-      if (spaceChatDeleteNeedsReload(e.data)) void loadSpaceChatUnread()
-    })
-    let prevConn = connectionState.value
-    const offConn = connectionState.subscribe((next) => {
-      if (prevConn === 'reconnecting' && next === 'open') void loadSpaceChatUnread()
-      prevConn = next
-    })
-    return () => { offMsg(); offDel(); offConn() }
-  }, [])
 
   if (loading.value) return <SpaceListSkeleton />
   if (failed.value) {

@@ -2326,8 +2326,6 @@
   "spaces.list.empty_body": "Een ruimte is een gedeelde plek voor één groep — je gezin, een club, het gebouw. Berichten, een agenda en taken, alleen voor de leden.",
   "spaces.list.yours": "Van jou",
   "spaces.list.subscribed_pill": "Gevolgd",
-  "spaces.list.chat_unread": "{n} ongelezen in de chat",
-  "spaces.list.chat_unread_one": "{n} ongelezen in de chat",
   "time.hours_ago_short": "{n} u geleden",
   "time.yesterday": "gisteren",
   "time.days_ago_long": "{n} dagen geleden",
@@ -4843,5 +4841,8 @@
   "spaces.discover.paired_note": "Openbare ruimtes van gekoppelde huishoudens. Ze staan nooit op een GFS.",
   "spaces.list.archived_label": "Gearchiveerde ruimtes, {n}",
   "spaces.discover.invite_link": "Leden kunnen je uitnodigen met een link.",
-  "spaces.discover.invite_link_short": "leden kunnen je uitnodigen met een link"
+  "spaces.discover.invite_link_short": "leden kunnen je uitnodigen met een link",
+  "spaces.list.posts_new": "{n} nieuwe berichten",
+  "spaces.list.posts_new_one": "{n} nieuw bericht",
+  "spaces.discover.connect": "Eerst koppelen"
 }

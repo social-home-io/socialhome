@@ -174,6 +174,7 @@ class AbstractSpaceRepo(Protocol):
     async def list_for_user(self, user_id: str) -> list[Space]: ...
     async def list_member_listings(self, user_id: str) -> list[MemberSpaceListing]: ...
     async def count_members(self, space_id: str) -> int: ...
+    async def mark_feed_read(self, space_id: str, user_id: str) -> None: ...
     async def list_location_shared_spaces_for_user(
         self, user_id: str
     ) -> list[Space]: ...
@@ -1336,6 +1337,18 @@ class SqliteSpaceRepo:
         )
         return [s for s in (_row_to_space(d) for d in rows_to_dicts(rows)) if s]
 
+    async def mark_feed_read(self, space_id: str, user_id: str) -> None:
+        """The user viewed the space's Feed now (migration 0103's marker
+        on their own seat; no seat, no write)."""
+        await self._db.enqueue(
+            # Milliseconds: a post landing in the same second as the visit
+            # is still compared right (``julianday`` reads both shapes).
+            "UPDATE space_members"
+            " SET feed_read_at = strftime('%Y-%m-%d %H:%M:%f', 'now')"
+            " WHERE space_id = ? AND user_id = ?",
+            (space_id, user_id),
+        )
+
     async def count_members(self, space_id: str) -> int:
         """The space's member count (:data:`MEMBER_COUNT_SQL`); ``0`` for an
         unknown id."""
@@ -1363,7 +1376,13 @@ class SqliteSpaceRepo:
                          WHERE p.space_id = s.id AND p.deleted = 0
                            AND p.hidden_from_feed = 0),
                        datetime(s.created_at)
-                   ) AS listing_last_activity_at
+                   ) AS listing_last_activity_at,
+                   CASE WHEN m.feed_read_at IS NULL THEN 0 ELSE
+                     (SELECT COUNT(*) FROM space_posts p
+                       WHERE p.space_id = s.id AND p.deleted = 0
+                         AND p.hidden_from_feed = 0 AND p.author != m.user_id
+                         AND julianday(p.created_at) > julianday(m.feed_read_at))
+                   END AS listing_unread_posts
               FROM spaces s
               JOIN space_members m ON m.space_id = s.id
              WHERE m.user_id = ? AND s.dissolved = 0
@@ -1382,6 +1401,7 @@ class SqliteSpaceRepo:
                     role=d["listing_caller_role"],
                     member_count=int(d["listing_member_count"] or 0),
                     last_activity_at=d["listing_last_activity_at"],
+                    unread_posts=int(d["listing_unread_posts"] or 0),
                 )
             )
         return out

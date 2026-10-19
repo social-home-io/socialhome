@@ -1543,12 +1543,16 @@ class MemberSpaceListing:
     is ``subscriber``), ``member_count`` — the members the space's people
     list shows (local and remote seats, never followers) — and
     ``last_activity_at`` — the newest feed post the caller may read, else
-    when the space was created here (naive UTC, SQLite's format)."""
+    when the space was created here (naive UTC, SQLite's format) — and
+    ``unread_posts``: posts by others since the caller last viewed the
+    space's Feed (``space_members.feed_read_at``; ``0`` before the first
+    visit)."""
 
     space: Space
     role: str
     member_count: int
     last_activity_at: str | None = None
+    unread_posts: int = 0
 
 
 @dataclass(slots=True, frozen=True)

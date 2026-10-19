@@ -2267,3 +2267,48 @@ async def _seed_space_for_ban(env) -> str:
         )
     )
     return "sp-ban"
+
+
+async def test_mark_feed_read_starts_the_unread_count(env):
+    """Migration 0103: nothing is new before the first visit; after it,
+    posts by others since the marker count. No seat, no write."""
+    await env.repo.save(_space("a", "Alpha"))
+    await env.repo.save_member(_member("a", "uid-alice", "owner"))
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, created_at)"
+        " VALUES('p0', 'a', 'uid-bob', 'text', 'x', '2000-01-01 00:00:00')"
+    )
+    (row,) = await env.repo.list_member_listings("uid-alice")
+    assert row.unread_posts == 0
+    await env.repo.mark_feed_read("a", "uid-alice")
+    await env.repo.mark_feed_read("a", "uid-nobody")
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, created_at)"
+        " VALUES('p1', 'a', 'uid-bob', 'text', 'x', '2999-01-01 00:00:00'),"
+        " ('p2', 'a', 'uid-alice', 'text', 'x', '2999-01-01 00:00:00')"
+    )
+    (row,) = await env.repo.list_member_listings("uid-alice")
+    assert row.unread_posts == 1
+    assert (
+        await env.db.fetchone(
+            "SELECT 1 FROM space_members WHERE user_id = 'uid-nobody'"
+        )
+        is None
+    )
+
+
+async def test_unread_posts_compare_below_the_second(env):
+    """A post in the same second as the visit still counts when it is
+    later — milliseconds and both timestamp shapes compare as times."""
+    await env.repo.save(_space("a", "Alpha"))
+    await env.repo.save_member(_member("a", "uid-alice", "owner"))
+    await env.db.enqueue(
+        "UPDATE space_members SET feed_read_at = '2030-01-01 00:00:00.100'"
+    )
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, created_at)"
+        " VALUES('p1', 'a', 'uid-bob', 'text', 'x', '2030-01-01T00:00:00.500+00:00'),"
+        " ('p2', 'a', 'uid-bob', 'text', 'x', '2030-01-01 00:00:00.050')"
+    )
+    (row,) = await env.repo.list_member_listings("uid-alice")
+    assert row.unread_posts == 1

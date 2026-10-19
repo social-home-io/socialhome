@@ -16,7 +16,7 @@ Only the caller's own seats are listed, and nothing about another user.
 
 import pytest
 
-from .test_space_home import _OWNER, seeded  # noqa: F401 — the fixture
+from .test_space_home import _MEMBER, _OWNER, seeded  # noqa: F401 — the fixture
 
 _ROW_KEYS = {
     "id",
@@ -32,6 +32,7 @@ _ROW_KEYS = {
     "my_role",
     "member_count",
     "last_activity_at",
+    "unread_posts",
     "icon_url",
     "needs_you",
 }
@@ -155,3 +156,45 @@ async def test_one_member_count_on_every_surface(seeded):  # noqa: F811
     r = await client.get("/api/household/spaces", headers=hdr["member"])
     (listed,) = [x for x in await r.json() if x["space_id"] == sid]
     assert listed["member_count"] == 4
+
+
+async def _post_at(client, sid, pid, author, at, **extra):
+    cols = ", ".join(
+        ["id", "space_id", "author", "type", "content", "created_at", *extra]
+    )
+    vals = ", ".join(["?"] * (6 + len(extra)))
+    await client._db.enqueue(
+        f"INSERT INTO space_posts({cols}) VALUES({vals})",
+        (pid, sid, author, "text", "x", at, *extra.values()),
+    )
+
+
+async def test_unread_posts_count_from_the_last_feed_visit(seeded):  # noqa: F811
+    """Nothing is new before the first visit; after it, posts by others
+    count — never the caller's own, never a deleted or hidden one."""
+    client, hdr, sid = seeded
+    await _post_at(client, sid, "p-old", _OWNER[1], "2000-01-01 00:00:00")
+    assert (await _row(client, hdr["member"], sid))["unread_posts"] == 0
+    r = await client.post(f"/api/spaces/{sid}/feed/read", headers=hdr["member"])
+    assert r.status == 204
+    assert (await _row(client, hdr["member"], sid))["unread_posts"] == 0
+    await _post_at(client, sid, "p-new", _OWNER[1], "2999-01-01 00:00:00")
+    await _post_at(client, sid, "p-new2", _OWNER[1], "2999-01-02T00:00:00+00:00")
+    await _post_at(client, sid, "p-mine", _MEMBER[1], "2999-01-01 00:00:00")
+    await _post_at(client, sid, "p-del", _OWNER[1], "2999-01-01 00:00:00", deleted=1)
+    await _post_at(
+        client, sid, "p-hid", _OWNER[1], "2999-01-01 00:00:00", hidden_from_feed=1
+    )
+    assert (await _row(client, hdr["member"], sid))["unread_posts"] == 2
+    # Another member's marker is their own.
+    assert (await _row(client, hdr["admin"], sid))["unread_posts"] == 0
+
+
+async def test_a_follower_marks_too_and_an_outsider_cannot(seeded):  # noqa: F811
+    client, hdr, sid = seeded
+    r = await client.post(f"/api/spaces/{sid}/feed/read", headers=hdr["follower"])
+    assert r.status == 204
+    r = await client.post(f"/api/spaces/{sid}/feed/read", headers=hdr["guest"])
+    assert r.status == 403
+    r = await client.post("/api/spaces/nope/feed/read", headers=hdr["guest"])
+    assert r.status == 403

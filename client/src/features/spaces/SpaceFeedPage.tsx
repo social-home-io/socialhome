@@ -494,6 +494,19 @@ export default function SpaceFeedPage() {
     if (section === 'calendar' && calendarOn) void loadSpaceCalendar(spaceId)
   }, [spaceId, section, calendarOn])
 
+  // Viewing the Feed reads it: the Spaces list's "N new" starts again from
+  // now — on opening the section, and again when posts arrive while it's
+  // on screen. Any seat (a follower reads too); a hint, so a failure is
+  // silent.
+  const seated = roleKnown.value && viewerRole.value !== undefined
+  const postCount = posts.value.length
+  useEffect(() => {
+    if (section !== 'feed' || !seated) return
+    void (async () => {
+      try { await api.post(`/api/spaces/${spaceId}/feed/read`, {}) } catch { /* a hint */ }
+    })()
+  }, [spaceId, section, seated, postCount])
+
   // "Needs you" comes with the space detail (``attention``): re-read it
   // on the frames that change it. Leaving Moderation re-reads it too (a
   // report dismissed there sends no frame).

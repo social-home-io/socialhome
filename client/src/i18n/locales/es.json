@@ -2353,8 +2353,6 @@
   "spaces.list.empty_body": "Un espacio es un rincón compartido para un grupo: tu familia, un club, el edificio. Publicaciones, calendario y tareas, solo para sus miembros.",
   "spaces.list.yours": "Tuyos",
   "spaces.list.subscribed_pill": "Siguiendo",
-  "spaces.list.chat_unread": "{n} sin leer en el chat",
-  "spaces.list.chat_unread_one": "{n} sin leer en el chat",
   "time.hours_ago_short": "hace {n} h",
   "time.yesterday": "ayer",
   "time.days_ago_long": "hace {n} días",
@@ -4870,5 +4868,8 @@
   "spaces.discover.paired_note": "Espacios públicos de hogares vinculados. Nunca se listan en un GFS.",
   "spaces.list.archived_label": "Espacios archivados, {n}",
   "spaces.discover.invite_link": "Los miembros pueden invitarte con un enlace.",
-  "spaces.discover.invite_link_short": "los miembros pueden invitarte con un enlace"
+  "spaces.discover.invite_link_short": "los miembros pueden invitarte con un enlace",
+  "spaces.list.posts_new": "{n} publicaciones nuevas",
+  "spaces.list.posts_new_one": "{n} publicación nueva",
+  "spaces.discover.connect": "Vincular primero"
 }

@@ -388,6 +388,9 @@ export interface Space {
   /** ``GET /api/spaces`` rows: newest feed post, else when the space was
    *  created here (naive UTC). */
   last_activity_at?: string | null
+  /** ``GET /api/spaces`` rows: posts by others since the caller last
+   *  viewed the Feed (0 before the first visit). */
+  unread_posts?: number
   /** ``GET /api/spaces`` rows: what waits for the caller (the More badge's
    *  total) — ``null`` unless they are owner / admin / moderator. */
   needs_you?: number | null
