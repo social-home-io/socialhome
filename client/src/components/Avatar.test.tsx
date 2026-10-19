@@ -21,6 +21,23 @@ describe('Avatar', () => {
     expect(el.style.width).toContain('64')
   })
 
+  // ``.sh-avatar`` is 40 px in CSS, and a stylesheet width beats the
+  // <img> width/height attributes — so a photo has to carry the size
+  // inline exactly like the initials tile, or a 24 px photo chip renders
+  // at 40 px next to 24 px initials chips (PeoplePicker, calendar strip).
+  it('a photo honours the size prop the same way the initials tile does', () => {
+    const { container } = render(<Avatar name="A" src="/pic.jpg" size={24} />)
+    const img = container.querySelector('img') as HTMLImageElement
+    expect(img.style.width).toBe('24px')
+    expect(img.style.height).toBe('24px')
+  })
+
+  it('a photo defaults to 40 px like the initials tile', () => {
+    const { container } = render(<Avatar name="A" src="/pic.jpg" />)
+    const img = container.querySelector('img') as HTMLImageElement
+    expect(img.style.width).toBe('40px')
+  })
+
   it('renders no online dot when online prop is omitted', () => {
     const { container } = render(<Avatar name="A" />)
     expect(container.querySelector('.sh-avatar-status-dot')).toBeNull()

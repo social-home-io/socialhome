@@ -137,7 +137,7 @@ export function SpaceProfileDialog() {
             <Avatar
               name={displayName || inheritedName || '?'}
               src={localPictureUrl || householdPictureUrl}
-              size={96} />
+              size={112} />
             <span class="sh-profile-avatar-hint" aria-hidden="true">
               📷 {t('space_profile.upload')}
             </span>
