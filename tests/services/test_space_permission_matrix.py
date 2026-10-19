@@ -92,6 +92,7 @@ GATED_METHODS: frozenset[str] = frozenset(
         "space_version_compat",  # admin/owner read — _require_admin_or_owner
         # The read gate: a seat (any role, followers included) or 403.
         "require_reader",
+        "mark_feed_read",
         "list_feed",
         "list_comments",
         # A non-member reads only a public/global space's landing fields.
@@ -423,6 +424,10 @@ async def stack(tmp_dir):
         (
             "require_reader",
             lambda s: s.space_svc.require_reader(s.space.id, s.bob.user_id),
+        ),
+        (
+            "mark_feed_read",
+            lambda s: s.space_svc.mark_feed_read(s.space.id, s.bob.user_id),
         ),
         (
             "set_my_location_sharing",

@@ -189,6 +189,9 @@ class SpaceCollectionView(BaseView):
                 "my_role": listing.role,
                 "member_count": listing.member_count,
                 "last_activity_at": listing.last_activity_at,
+                # Posts by others since the caller last viewed the Feed
+                # (0 before the first visit) — the list's quiet "N new".
+                "unread_posts": listing.unread_posts,
                 # The uploaded icon (signed below), else the SPA draws the
                 # emoji or the name's initial.
                 "icon_url": (
@@ -2107,6 +2110,17 @@ class SpaceSyncTriggerView(BaseView):
             },
             status=202,
         )
+
+
+class SpaceFeedReadView(BaseView):
+    """``POST /api/spaces/{id}/feed/read`` — the caller viewed the space's
+    Feed; the Spaces list's "N new" starts again from now. Any seat."""
+
+    async def post(self) -> web.Response:
+        await self.svc(space_service_key).mark_feed_read(
+            self.match("id"), self.user.user_id
+        )
+        return web.Response(status=204)
 
 
 class SpaceFeedView(BaseView):

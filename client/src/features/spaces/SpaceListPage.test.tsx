@@ -29,6 +29,7 @@ vi.mock('@/ws', async () => {
     },
   }
 })
+
 function emit(type: string, data: Record<string, unknown>): void {
   for (const h of wsHandlers[type] ?? []) h({ type, data })
 }
@@ -95,8 +96,6 @@ function wire({ spaces = SPACES, unread = {}, gfs = [], global = [] }: Wire = {}
     return []
   })
 }
-
-const unreadCalls = () => apiGet.mock.calls.filter(c => c[0] === '/api/spaces/chat-unread').length
 
 const START = location.pathname
 
@@ -170,8 +169,10 @@ describe('SpaceListPage — sections', () => {
 })
 
 describe('SpaceListPage — one number per row', () => {
-  it('needs-you wins over the chat count; never both', async () => {
-    wire({ unread: { sG: { unread: 5, notif_level: 'all', muted_until: null } } })
+  const withNew = (id: string, n: number) => SPACES.map((x) => (x.id === id ? { ...x, unread_posts: n } : x))
+
+  it('needs-you wins over new posts; never both', async () => {
+    wire({ spaces: withNew('sG', 5) })
     const r = await renderPage()
     const garden = (await r.findByText('Garden')).closest('a')!
     expect(garden.querySelector('.sh-spaces-attn')!.textContent).toBe('3')
@@ -179,53 +180,40 @@ describe('SpaceListPage — one number per row', () => {
     expect(garden.getAttribute('aria-label')).toContain('3 things need you')
   })
 
-  it('a member sees the quiet chat count, named for screen readers', async () => {
-    wire({ unread: { sA: { unread: 2, notif_level: 'all', muted_until: null } } })
+  it('a member sees the quiet count of new posts, named for screen readers', async () => {
+    wire({ spaces: withNew('sA', 2) })
     const r = await renderPage()
     const choir = (await r.findByText('Choir')).closest('a')!
     expect(choir.querySelector('.sh-spaces-new')!.textContent).toBe('2 new')
-    expect(choir.getAttribute('aria-label')).toContain('2 unread in chat')
+    expect(choir.getAttribute('aria-label')).toContain('2 new posts')
     expect(choir.querySelector('.sh-spaces-attn')).toBeNull()
   })
-})
 
-describe('SpaceListPage — chat counts stay current', () => {
-  it('live messages bump it by level; own messages do not', async () => {
-    wire({
-      unread: {
-        sA: { unread: 0, notif_level: 'mentions', muted_until: null },
-        sB: { unread: 0, notif_level: 'all', muted_until: null },
-      },
-    })
+  it('a new post by someone else bumps it live; my own post does not', async () => {
     const r = await renderPage()
-    await r.findByText('Choir')
-    const msg = (space: string, extra: Record<string, unknown> = {}) => ({
-      system_scope: 'space', space_id: space, message: { sender_user_id: 'u2' }, ...extra,
-    })
-    emit('dm.message', msg('sA'))
-    emit('dm.message', msg('sB', { message: { sender_user_id: 'u1' } }))
-    expect(r.container.querySelectorAll('.sh-spaces-new')).toHaveLength(0)
-    emit('dm.message', msg('sA', { mentions_you: true }))
-    emit('dm.message', msg('sB'))
-    await r.waitFor(() => expect(r.getAllByText('1 new')).toHaveLength(2))
+    const choir = (await r.findByText('Choir')).closest('a')!
+    emit('space.post.created', { space_id: 'sA', post: { author: 'u1', created_at: '2030-01-01T00:00:00+00:00' } })
+    expect(choir.querySelector('.sh-spaces-new')).toBeNull()
+    emit('space.post.created', { space_id: 'sA', post: { author: 'u2', created_at: '2030-01-01T00:00:01+00:00' } })
+    emit('space.post.created', { space_id: 'sA', post: { author: 'u3', created_at: '2030-01-01T00:00:02+00:00' } })
+    await r.waitFor(() => expect(r.getByText('Choir').closest('a')!.querySelector('.sh-spaces-new')?.textContent).toBe('2 new'))
   })
 
-  it('a message for an unknown chat, a counted delete and a reconnect re-read', async () => {
-    wire()
+  it('a WS reconnect re-reads the list (frames missed while down)', async () => {
     const r = await renderPage()
     await r.findByText('Choir')
-    expect(unreadCalls()).toBe(1)
-    wire({ unread: { sA: { unread: 1, notif_level: 'all', muted_until: null } } })
-    emit('dm.message', { system_scope: 'space', space_id: 'sA', message: { sender_user_id: 'u2' } })
-    await r.waitFor(() => expect(r.getByText('1 new')).toBeTruthy())
-    expect(unreadCalls()).toBe(2)
-    wire({ unread: { sA: { unread: 0, notif_level: 'all', muted_until: null } } })
-    emit('dm.message_deleted', { conversation_id: 'c', system_scope: 'space', space_id: 'sA', message_id: 'm' })
-    await r.waitFor(() => expect(r.queryByText('1 new')).toBeNull())
-    wire({ unread: { sA: { unread: 4, notif_level: 'all', muted_until: null } } })
+    wire({ spaces: SPACES.map((x) => (x.id === 'sA' ? { ...x, unread_posts: 4 } : x)) })
     conn.state!.value = 'reconnecting'
     conn.state!.value = 'open'
-    await r.waitFor(() => expect(r.getByText('4 new')).toBeTruthy())
+    await r.findByText('4 new')
+  })
+
+  it('chat messages are not counted here — Chat keeps its own count', async () => {
+    wire({ unread: { sA: { unread: 4, notif_level: 'all', muted_until: null } } })
+    const r = await renderPage()
+    const choir = (await r.findByText('Choir')).closest('a')!
+    expect(choir.querySelector('.sh-spaces-new')).toBeNull()
+    expect(apiGet.mock.calls.some((c) => c[0] === '/api/spaces/chat-unread')).toBe(false)
   })
 })
 

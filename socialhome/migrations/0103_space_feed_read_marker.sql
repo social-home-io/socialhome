@@ -1,0 +1,49 @@
+-- 0103 — where each local user last read a space's feed.
+-- Follows 0102 (follower whereabouts).
+--
+-- The Spaces page shows a quiet "N new" per space: posts by others in the
+-- space's feed since the caller last looked at it. Nothing records that
+-- today, so this adds one nullable column on the caller's own seat:
+--
+--   space_members.feed_read_at — naive UTC with milliseconds (SQLite
+--   ``strftime('%Y-%m-%d %H:%M:%f', 'now')``; compared with ``julianday``),
+--   set when the user views the space's Feed section
+--   (``POST /api/spaces/{id}/feed/read``). NULL = never looked since this
+--   column exists: the list counts nothing new for it (no backfill — the
+--   first visit starts the count), so an upgrade never shows everyone
+--   "47 new" for posts they long read.
+--
+-- Local-only state: never federated, never sent to a GFS; a seat that goes
+-- (leave, removal, ban, dissolve) takes its marker with it.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path touching seats and read state: ``space_repo.
+--       save_member`` (an upsert that names its columns — a re-seat, a role
+--       change or the §25.6 ``members`` catch-up keeps the marker),
+--       ``delete_member`` / ban / dissolve (the row and its marker go
+--       together), ``backup_service`` (whole-row dump/restore — an older
+--       backup restores NULL), ``list_member_listings`` (the reader), the
+--       space feed routes (``GET …/feed`` reads nothing per user today).
+--   (2) Non-migration homes considered and rejected:
+--       * ``feed_read_positions`` — keyed by ``user_id`` alone: the
+--         household feed's one position; per-space positions would need a
+--         new key anyway.
+--       * notification read state — space-post bells exist only for
+--         members at notification level ``all`` (none when muted or
+--         "mentions only"), are capped per user and pruned after 90 days,
+--         and nothing marks them read when the space is opened: they can't
+--         say "posts since you looked".
+--       * the space chat's ``conversation_members.last_read_at`` — the
+--         chat's own marker; reusing it would make reading the chat clear
+--         the feed's count (and the reverse).
+--       * ``users.preferences_json`` — a per-user blob written by the
+--         settings page: a hot per-visit write there races real preference
+--         saves (read-modify-write of the whole blob), never goes away with
+--         the seat, and can't be joined in the list query.
+--       * computing at read time — there is no per-user signal of "seen"
+--         to compute from.
+--   (3) Smallest change: one ADD COLUMN, NULL default, no backfill, no
+--       index (the list reads it through the caller's seat row, which the
+--       primary key already finds).
+
+ALTER TABLE space_members ADD COLUMN feed_read_at TEXT;

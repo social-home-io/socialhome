@@ -2326,8 +2326,6 @@
   "spaces.list.empty_body": "Un espace est un coin partagé pour un groupe — votre famille, un club, l'immeuble. Publications, agenda et tâches, rien que pour ses membres.",
   "spaces.list.yours": "Les vôtres",
   "spaces.list.subscribed_pill": "Suivi",
-  "spaces.list.chat_unread": "{n} messages non lus dans la discussion",
-  "spaces.list.chat_unread_one": "{n} message non lu dans la discussion",
   "time.hours_ago_short": "il y a {n} h",
   "time.yesterday": "hier",
   "time.days_ago_long": "il y a {n} jours",
@@ -4843,5 +4841,8 @@
   "spaces.discover.paired_note": "Espaces publics des foyers associés. Ils ne sont jamais listés sur un GFS.",
   "spaces.list.archived_label": "Espaces archivés, {n}",
   "spaces.discover.invite_link": "Les membres peuvent vous inviter avec un lien.",
-  "spaces.discover.invite_link_short": "les membres peuvent vous inviter par lien"
+  "spaces.discover.invite_link_short": "les membres peuvent vous inviter par lien",
+  "spaces.list.posts_new": "{n} nouvelles publications",
+  "spaces.list.posts_new_one": "{n} nouvelle publication",
+  "spaces.discover.connect": "Associer d'abord"
 }

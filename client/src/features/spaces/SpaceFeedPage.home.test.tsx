@@ -6,15 +6,16 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-const { apiGet, apiDelete, confirm } = vi.hoisted(() => ({
+const { apiGet, apiPost, apiDelete, confirm } = vi.hoisted(() => ({
   apiGet: vi.fn(),
+  apiPost: vi.fn(),
   apiDelete: vi.fn(),
   confirm: vi.fn(),
 }))
 vi.mock('@/api', () => ({
   api: {
     get: (...a: unknown[]) => apiGet(...a),
-    post: vi.fn().mockResolvedValue({}),
+    post: (...a: unknown[]) => apiPost(...a),
     patch: vi.fn().mockResolvedValue({}),
     put: vi.fn().mockResolvedValue({}),
     delete: (...a: unknown[]) => apiDelete(...a),
@@ -78,6 +79,8 @@ async function open(section?: string) {
 beforeEach(() => {
   vi.resetModules()
   apiGet.mockReset()
+  apiPost.mockReset()
+  apiPost.mockResolvedValue({})
   apiDelete.mockReset()
   confirm.mockReset()
   route.go.mockReset()
@@ -226,4 +229,26 @@ describe('Leave space', () => {
     expect(r.queryByRole('button', { name: 'Leave space' })).toBeNull()
     expect(r.container.textContent).toContain('You own this space')
   }, 20000)
+})
+
+describe('the feed read marker', () => {
+  const marks = () => apiPost.mock.calls.filter((c) => c[0] === '/api/spaces/s1/feed/read').length
+
+  it('viewing the Feed marks it read (the Spaces list counts new posts from here)', async () => {
+    wire('member')
+    const { tl } = await open()
+    await tl.waitFor(() => expect(marks()).toBeGreaterThan(0))
+  })
+
+  it('a follower marks it too; another section does not', async () => {
+    wire('subscriber')
+    const f = await open()
+    await f.tl.waitFor(() => expect(marks()).toBeGreaterThan(0))
+    f.tl.cleanup()
+    apiPost.mockClear()
+    wire('member')
+    const c = await open('calendar')
+    await c.tl.waitFor(() => expect(c.r.container.querySelector('.sh-space-hero, .sh-space-feed')).toBeTruthy())
+    expect(marks()).toBe(0)
+  })
 })

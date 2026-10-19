@@ -311,8 +311,6 @@
   "search.bar_placeholder": "Placeholder in the top-bar search box. A 🔍 is put in front.",
   "page_title.welcome": "Top-bar title of the home page.",
   "spaces.list.subscribed_pill": "Short badge on a followed space. Keep short (≤ 12 chars). A 🔔 goes in front.",
-  "spaces.list.chat_unread": "Screen-reader text for the unread dot on a space in the spaces list: how many unread chat messages (honouring the viewer's mute and @-mention level).",
-  "spaces.list.chat_unread_one": "Singular of spaces.list.chat_unread.",
   "time.hours_ago_short": "Compact 'hours ago' in byline rows (Pages, notifications). {n} = whole hours.",
   "time.yesterday": "Lowercase; stands alone in a byline row.",
   "time.days_ago_long": "Plural; time.days_ago_long_one is the singular (French also uses it for 0).",

@@ -2637,8 +2637,6 @@
   "spaces.list.empty_body": "A space is a shared corner for one group — your family, a club, the building. Posts, a calendar and tasks, just for its members.",
   "spaces.list.yours": "Yours",
   "spaces.list.subscribed_pill": "Following",
-  "spaces.list.chat_unread": "{n} unread in chat",
-  "spaces.list.chat_unread_one": "{n} unread in chat",
   "time.hours_ago_short": "{n}h ago",
   "time.yesterday": "yesterday",
   "time.days_ago_long": "{n} days ago",
@@ -4879,5 +4877,8 @@
   "spaces.discover.paired_note": "Public spaces from households you're paired with. They're never listed on a GFS.",
   "spaces.list.archived_label": "Archived spaces, {n}",
   "spaces.discover.invite_link": "Members can invite you with a link.",
-  "spaces.discover.invite_link_short": "members can invite you with a link"
+  "spaces.discover.invite_link_short": "members can invite you with a link",
+  "spaces.list.posts_new": "{n} new posts",
+  "spaces.list.posts_new_one": "{n} new post",
+  "spaces.discover.connect": "Connect first"
 }
