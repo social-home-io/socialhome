@@ -94,6 +94,28 @@ describe('BackToTop over a sticky save bar', () => {
   })
 })
 
+describe('BackToTop and the unsaved-changes bar', () => {
+  const rect = (top: number, bottom: number, left: number, right: number) =>
+    ({ top, bottom, left, right, width: right - left, height: bottom - top, x: left, y: top, toJSON: () => ({}) }) as DOMRect
+  it('lifts above a .sh-savebar too (it covered Save on a phone)', () => {
+    Object.defineProperty(window, 'scrollY', { value: 0, writable: true, configurable: true })
+    const bar = document.createElement('div')
+    bar.className = 'sh-savebar sh-ss-savebar'
+    document.body.appendChild(bar)
+    vi.spyOn(bar, 'getBoundingClientRect').mockReturnValue(rect(680, 772, 0, 390))
+    vi.spyOn(HTMLButtonElement.prototype, 'getBoundingClientRect')
+      .mockReturnValue(rect(728, 772, 330, 374))
+    const { container } = render(<BackToTop />)
+    act(() => {
+      Object.defineProperty(window, 'scrollY', { value: 900, writable: true, configurable: true })
+      window.dispatchEvent(new Event('scroll'))
+    })
+    const btn = container.querySelector<HTMLButtonElement>('.sh-back-to-top')!
+    expect(btn.style.getPropertyValue('--sh-back-to-top-lift')).toBe(`${772 - 680 + 8}px`)
+    bar.remove()
+  })
+})
+
 describe('BackToTop re-measures when a sticky bar mounts', () => {
   it('touchesStickyBar: only add/remove of a bar (or a subtree with one) counts', () => {
     const bar = document.createElement('div'); bar.className = 'sh-form-actions'

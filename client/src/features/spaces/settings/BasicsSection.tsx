@@ -2,9 +2,10 @@
  * Settings › Basics — what the space looks like: cover, picture or emoji,
  * name, short description, About, quick links and theme.
  *
- * The text fields and the emoji are a draft (``useBasicsForm``) saved by
- * the page's save bar. Pictures, quick links and the theme save on their
- * own as soon as they're added — the section says so.
+ * The text fields and the emoji (``useBasicsForm``), the quick links
+ * (``SpaceLinksTab``) and the theme are one draft, saved or discarded by
+ * the page's save bar. Pictures save on their own as soon as they're
+ * picked — the section says so.
  *
  * The picture preview shows the uploaded icon when there is one (that is
  * what the space shows everywhere), the emoji otherwise.
@@ -19,7 +20,7 @@ import { SpaceThemeStudio, type ThemeDraft } from '@/components/SpaceThemeStudio
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import { cssUrl } from '@/utils/cssUrl'
-import { SpaceLinksTab } from '@/features/spaces/SpaceLinksTab'
+import { SpaceLinksTab, type LinksDraftHandle } from '@/features/spaces/SpaceLinksTab'
 import { spaceGlyph } from '@/features/spaces/spaceGlyph'
 import type { BasicsForm } from './useBasicsForm'
 
@@ -37,6 +38,8 @@ interface Props {
   onUpdate: () => void
   /** The theme studio's draft, saved with the page's save bar. */
   onThemeDraft?: (draft: ThemeDraft | null) => void
+  /** The quick links' draft, saved with the page's save bar. */
+  onLinksDraft?: (draft: LinksDraftHandle | null) => void
 }
 
 type ImageKind = 'cover' | 'icon'
@@ -44,7 +47,7 @@ type ImageKind = 'cover' | 'icon'
 // t('space.about.cover_remove_confirm') t('space.about.icon_remove_confirm')
 // t('space.about.cover_removed') t('space.about.icon_removed')
 
-export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDraft }: Props) {
+export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDraft, onLinksDraft }: Props) {
   const { name, description, emoji, about } = form.fields
   const [busy, setBusy] = useState<ImageKind | null>(null)
   const [preview, setPreview] = useState(false)
@@ -175,7 +178,7 @@ export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDra
 
       {!isRemoteSpace && (
         <>
-          <SpaceLinksTab spaceId={space.id} />
+          <SpaceLinksTab spaceId={space.id} onDraft={onLinksDraft} />
           <details class="sh-ss-details">
             <summary>{t('theme.space.title')}</summary>
             <SpaceThemeStudio spaceId={space.id} onDraft={onThemeDraft} />

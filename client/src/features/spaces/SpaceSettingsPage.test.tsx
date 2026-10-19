@@ -262,6 +262,103 @@ describe('SpaceSettingsPage — save model', () => {
     await waitFor(() => expect((view.getByLabelText('Name') as HTMLInputElement).value).toBe('Garden'))
   })
 
+  describe('quick links in the Basics draft', () => {
+    const LINKS = [
+      { id: 'l1', label: 'School', url: 'https://school.example', position: 0 },
+      { id: 'l2', label: 'Wiki', url: 'https://wiki.example', position: 1 },
+    ]
+    let calls: string[]
+    beforeEach(async () => {
+      calls = []
+      const { api } = await import('@/api')
+      const post = api.post as ReturnType<typeof vi.fn>
+      const del = api.delete as ReturnType<typeof vi.fn>
+      post.mockReset()
+      del.mockReset()
+      let links = [...LINKS]
+      const base = apiGet.getMockImplementation()!
+      apiGet.mockImplementation(async (url: string) => (
+        url === '/api/spaces/sp-1/links' ? { links } : base(url)))
+      del.mockImplementation(async (url: string) => {
+        calls.push(`DELETE ${url}`)
+        links = links.filter(l => !url.endsWith(l.id))
+      })
+      post.mockImplementation(async (url: string, body: { label: string; url: string; position: number }) => {
+        calls.push(`POST ${url} ${body.label}`)
+        if (body.label === 'Broken') throw new Error('500')
+        const row = { id: `n-${body.label}`, ...body }
+        links = [...links, row]
+        return row
+      })
+    })
+
+    const addLink = (view: Awaited<ReturnType<typeof mount>>, label: string, url: string) => {
+      const form = view.container.querySelector('.sh-space-links-editor__create') as HTMLFormElement
+      const [l, u] = [...form.querySelectorAll('input')]
+      fireEvent.input(l, { target: { value: label } })
+      fireEvent.input(u, { target: { value: url } })
+      fireEvent.submit(form)
+    }
+
+    it('adding and removing only change the draft until Save', async () => {
+      const view = await mount()
+      fireEvent.click(await view.findByRole('button', { name: 'Remove Wiki' }))
+      addLink(view, 'Pool', 'https://pool.example')
+      expect((await view.findByRole('region', { name: 'Unsaved changes' })).textContent)
+        .toContain('2 unsaved changes')
+      expect(calls).toEqual([])
+      fireEvent.click(view.getByRole('button', { name: 'Save' }))
+      await waitFor(() => expect(view.queryByRole('region', { name: 'Unsaved changes' })).toBeNull())
+      expect(calls).toEqual([
+        'DELETE /api/spaces/sp-1/links/l2',
+        'POST /api/spaces/sp-1/links Pool',
+      ])
+      expect(toast).toHaveBeenCalledWith('Space saved', 'success')
+    })
+
+    it('Discard puts the links back', async () => {
+      const view = await mount()
+      fireEvent.click(await view.findByRole('button', { name: 'Remove Wiki' }))
+      fireEvent.click(view.getByRole('button', { name: 'Move School down' }))
+      await view.findByRole('region', { name: 'Unsaved changes' })
+      fireEvent.click(view.getByRole('button', { name: 'Discard' }))
+      await waitFor(() => expect(view.queryByRole('region', { name: 'Unsaved changes' })).toBeNull())
+      const labels = [...view.container.querySelectorAll('.sh-space-links-editor__label')]
+        .map(i => (i as HTMLInputElement).value)
+      expect(labels).toEqual(['School', 'Wiki'])
+      expect(calls).toEqual([])
+    })
+
+    it('a link whose call fails stays unsaved and is named; the rest is saved', async () => {
+      const view = await mount()
+      await view.findByRole('button', { name: 'Remove Wiki' })
+      addLink(view, 'Broken', 'https://broken.example')
+      addLink(view, 'Pool', 'https://pool.example')
+      fireEvent.click(await view.findByRole('button', { name: 'Save' }))
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(
+        "Couldn't save these quick links: Broken. Everything else is saved.", 'error'))
+      expect(calls).toEqual([
+        'POST /api/spaces/sp-1/links Broken',
+        'POST /api/spaces/sp-1/links Pool',
+      ])
+      await waitFor(() => expect(view.getByRole('region', { name: 'Unsaved changes' }).textContent)
+        .toContain('1 unsaved change'))
+      expect(view.getByText('Not saved yet. Save again to retry.')).toBeTruthy()
+      expect(toast).not.toHaveBeenCalledWith('Space saved', 'success')
+    })
+
+    it('refuses to save a link without a web address', async () => {
+      const view = await mount()
+      const url = (await view.findAllByLabelText('Link address'))[0] as HTMLInputElement
+      fireEvent.input(url, { target: { value: 'school' } })
+      expect(await view.findByText('Use a full web address, starting with https://')).toBeTruthy()
+      fireEvent.click(await view.findByRole('button', { name: 'Save' }))
+      expect(toast).toHaveBeenCalledWith(
+        'A quick link needs a name and a full web address before you can save.', 'error')
+      expect(apiPatch).not.toHaveBeenCalled()
+    })
+  })
+
   it('a forwarded save (space hosted elsewhere) drops the draft', async () => {
     apiPatch.mockResolvedValue({ forwarded: true })
     const view = await mount()

@@ -12572,7 +12572,7 @@ a.sh-welcome-card:hover {
   border: 1px dashed var(--sh-border);
   border-radius: var(--sh-radius-md);
 }
-.sh-space-links-editor__create h3 {
+.sh-space-links-editor__create h4 {
   margin: 0;
   font-size: var(--sh-font-size-sm);
   font-weight: 600;
@@ -12585,6 +12585,21 @@ a.sh-welcome-card:hover {
   background: var(--sh-bg);
   color: var(--sh-text);
 }
+/* The links are part of the Basics draft: a link added since the last
+ * save is dashed; a field Save can't send, or a link whose save failed,
+ * says so under the row. */
+.sh-space-links-editor__row[data-new] { border-style: dashed; }
+.sh-space-links-editor__row input[aria-invalid='true'],
+.sh-space-links-editor__create input[aria-invalid='true'] { border-color: var(--sh-danger); }
+.sh-space-links-editor__msg {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--sh-danger);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-space-links-editor__create .sh-btn { justify-self: start; }
+.sh-space-links-editor__error { display: grid; gap: var(--sh-space-xs); justify-items: start; }
+.sh-space-links-editor__error p { margin: 0; }
 
 /* The space hero (Feed only): an optional cover, the identity row (icon
    + a name that wraps, never truncated), one line with the facepile link
