@@ -254,7 +254,7 @@ describe('RemoteInviteDialog in German', () => {
     await setLocale('de')
     try {
       const { container, baseElement } = await renderAndOpen()
-      expect(baseElement.textContent).toContain('Jemanden zu diesem Raum hinzufügen')
+      expect(baseElement.textContent).toContain('Jemanden zu diesem Space hinzufügen')
       expect(container.querySelector('[data-testid="remote-invite-search"]')
         ?.getAttribute('placeholder')).toBe('Name oder Haushalt eingeben …')
       const bobMeta = container

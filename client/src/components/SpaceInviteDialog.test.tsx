@@ -955,7 +955,7 @@ describe('SpaceInviteDialog — moderator links', () => {
       members: [{ user_id: 'pascal', display_name: 'Pascal' }],
     })
     const result = await openDialog({ role: 'owner' })
-    expect(result.container.textContent).toContain('In den Raum einladen')
+    expect(result.container.textContent).toContain('In den Space einladen')
     expect(result.container.textContent).toContain('Beitreten als')
     await waitFor(() => {
       expect(result.container.querySelector('[data-testid="invite-link-row-tg"]'))

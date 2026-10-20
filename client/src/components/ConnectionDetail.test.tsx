@@ -397,7 +397,7 @@ describe('Federation compatibility row + re-check', () => {
       expect(await screen.findByText('Fehlende Funktionen')).toBeTruthy()
       // A slug this build doesn't know yet keeps the server's English label.
       expect(screen.getByText(
-        'Abgleich, wenn die direkte Verbindung ausfällt, Moderatoren in Räumen, A feature from a newer server',
+        'Abgleich, wenn die direkte Verbindung ausfällt, Moderatoren in Spaces, A feature from a newer server',
       )).toBeTruthy()
     })
   })
