@@ -67,6 +67,15 @@ AUTHORITY_EVENT_SPACE_POST_PUBLIC: str = "space_post_public"
 AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF: str = "space_subscriber_key_handoff"
 
 
+#: Authority event-type for the v_61 new-follower author-profile bundle: a
+#: seed-holder seals its cached, author-signed ``author_profile`` items to ONE
+#: new subscriber's key-wrap pubkey (like the key handoff) and relays it
+#: TARGETED (``POST /gfs/publish`` with ``to``) so the GFS hands it to that
+#: subscriber only. Target-only: a GFS refuses it without ``to``
+#: (:data:`AUTHORITY_TARGET_ONLY_EVENT_TYPES`), so it is never fanned out.
+AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE: str = "space_author_profiles_bundle"
+
+
 #: Authority event-type for the Phase-5b-c subscriber-list RECONCILE query: a
 #: seed-holder proves it holds the space seed by signing ``{space_id, ts}`` with
 #: it, so the GFS will release the space's subscriber list (instance ids + their
@@ -98,7 +107,14 @@ AUTHORITY_RELAY_EVENT_TYPES: frozenset[str] = frozenset(
     {
         AUTHORITY_EVENT_SPACE_POST_PUBLIC,
         AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
+        AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
     }
+)
+
+#: Relay event types the GFS accepts ONLY with a routing target (``to``, a
+#: subscriber of the space): meant for one subscriber, never fanned out.
+AUTHORITY_TARGET_ONLY_EVENT_TYPES: frozenset[str] = frozenset(
+    {AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE}
 )
 
 

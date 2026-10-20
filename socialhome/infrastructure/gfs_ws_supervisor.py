@@ -70,7 +70,7 @@ class GfsWebSocketSupervisor:
         on_moment_signal: Callable[..., Awaitable[None]] | None = None,
         on_moment_public: Callable[..., Awaitable[None]] | None = None,
         on_follow_changed: Callable[[dict], Awaitable[None]] | None = None,
-        on_new_subscriber: Callable[[dict], Awaitable[None]] | None = None,
+        on_new_subscriber: Callable[..., Awaitable[None]] | None = None,
         on_envelope: Callable[..., Awaitable[None]] | None = None,
         on_connected: Callable[[str], Awaitable[None]] | None = None,
         reconcile_interval_seconds: float = DEFAULT_RECONCILE_INTERVAL_SECONDS,
@@ -134,14 +134,14 @@ class GfsWebSocketSupervisor:
 
     def attach_new_subscriber_handler(
         self,
-        handler: Callable[[dict], Awaitable[None]],
+        handler: Callable[..., Awaitable[None]],
     ) -> None:
         """Late-bound — attaches the Phase-5b subscriber key-handoff producer
         to every running client and to clients started later by the
-        reconciler."""
+        reconciler, each told the connection it serves (``gfs_id``)."""
         self._on_new_subscriber = handler
-        for client in list(self._clients.values()):
-            client.attach_new_subscriber_handler(handler)
+        for conn_id, client in list(self._clients.items()):
+            client.attach_new_subscriber_handler(_bind_gfs_id(handler, conn_id))
 
     def attach_envelope_handler(
         self,
@@ -289,7 +289,13 @@ class GfsWebSocketSupervisor:
             ),
             on_moment_public=wrapped_moment_public,
             on_follow_changed=self._on_follow_changed,
-            on_new_subscriber=self._on_new_subscriber,
+            # The subscriber lives on THIS connection: a targeted handoff and
+            # the profiles bundle (v_61) go back through it.
+            on_new_subscriber=(
+                _bind_gfs_id(self._on_new_subscriber, conn.id)
+                if self._on_new_subscriber is not None
+                else None
+            ),
             on_envelope=(
                 _bind_gfs_url(self._on_envelope, conn.inbox_url)
                 if self._on_envelope is not None

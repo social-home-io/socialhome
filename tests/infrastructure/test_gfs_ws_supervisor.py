@@ -624,3 +624,58 @@ async def test_supervisor_binds_moment_signal_handler_per_connection(http_sessio
             assert seen == [("a", "g1"), ("b", "g2")]
         finally:
             await supervisor.stop()
+
+
+async def test_supervisor_tells_new_subscriber_which_connection(http_session):
+    """v_61: the subscriber lives on the connection its ``new_subscriber``
+    arrived on — the targeted handoff and the profiles bundle go back there.
+    Bound at start and on a late attach alike."""
+    repo = _FakeRepo(
+        [_make_conn("g1", "http://gfs1.test"), _make_conn("g2", "http://gfs2.test")]
+    )
+    seen: list[tuple[str, str]] = []
+
+    async def on_new_subscriber(frame: dict, *, gfs_id: str | None = None) -> None:
+        seen.append((frame["space_id"], gfs_id or ""))
+
+    captured: dict[str, object] = {}
+
+    class _StubClient:
+        def __init__(self, *, gfs_url, on_new_subscriber=None, **_kwargs):
+            self.url = gfs_url
+            captured[gfs_url] = on_new_subscriber
+
+        def attach_new_subscriber_handler(self, handler):
+            captured[self.url] = handler
+
+        def is_alive(self) -> bool:
+            return True
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return None
+
+    with patch(
+        "socialhome.infrastructure.gfs_ws_supervisor.GfsWebSocketClient",
+        _StubClient,
+    ):
+        supervisor = GfsWebSocketSupervisor(
+            repo=repo,
+            instance_id="sh-1",
+            signing_key=b"\x00" * 32,
+            session_factory=lambda: http_session,
+            on_relay=AsyncMock(),
+            on_new_subscriber=on_new_subscriber,
+            reconcile_interval_seconds=0.05,
+        )
+        await supervisor.start()
+        try:
+            await captured["http://gfs1.test"]({"space_id": "a"})
+            await captured["http://gfs2.test"]({"space_id": "b"})
+            supervisor.attach_new_subscriber_handler(on_new_subscriber)
+            await captured["http://gfs2.test"]({"space_id": "c"})
+            assert seen == [("a", "g1"), ("b", "g2"), ("c", "g2")]
+        finally:
+            await supervisor.stop()

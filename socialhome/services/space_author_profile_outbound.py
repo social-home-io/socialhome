@@ -8,10 +8,11 @@ the generic ``author_profile`` item (:mod:`socialhome.domain.space_author_profil
 key and sent over the existing member-publish path
 (:meth:`GfsMemberPublishService.schedule_item`). The GFS sees ciphertext only.
 
-* **When:** once per author per space per content-key epoch, again when the
-  profile changes (``UserProfileUpdated`` / ``SpaceMemberProfileUpdated``)
-  and again on the author's next post a day later, so a follower that
-  subscribed mid-epoch learns the name soon. Never inlined in each post.
+* **When:** once per author per space per content-key epoch, and again when
+  the profile changes (``UserProfileUpdated`` / ``SpaceMemberProfileUpdated``)
+  — every follower gets each change once. Never inlined in each post, and
+  never re-sent just because time passed (v_61): a follower who subscribed
+  mid-epoch gets the names from the host's targeted bundle instead.
 * **What:** the per-space name, else the household name; the household bio;
   the per-space picture, else the household one, re-encoded to at most
   256 px and 24 KB (``None`` when it can't fit). A **protected** account
@@ -23,13 +24,12 @@ key and sent over the existing member-publish path
   :data:`~socialhome.domain.federation_capabilities.FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE`.
 * **Where:** only a public / global space that admits followers — a
   private space's channel readers are all members and hold the roster.
-* **A new follower (v_61):** the host, notified by the GFS
-  (``new_subscriber``, right after it sealed the content key to them),
-  republishes its own authors' profiles and sends ``SPACE_FOLLOWER_JOINED``
-  to its member households (v_61+); each republishes its authors' profiles.
-  At most once per space per :data:`FOLLOWER_REPUBLISH_COOLDOWN`. The nudge
-  carries no content and never names the follower; the GFS learns nothing
-  it does not already: the items are the usual ciphertext ``space_item`` s.
+* **A new follower (v_61)** is NOT answered here: the space's host sends
+  them one sealed bundle of the cached, author-signed profiles, to that
+  follower only (:class:`~socialhome.services.space_subscriber_key_outbound.SpaceSubscriberKeyOutbound`).
+  Every item this service sends is therefore also kept in the
+  author-profile cache (:meth:`attach_profile_cache`), so a host's bundle
+  names its own authors.
 
 In-memory bookkeeping: a restart sends each author's profile once more on
 their next post.
@@ -37,9 +37,8 @@ their next post.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -47,12 +46,13 @@ from ..domain.events import (
     SpacePostCreated,
     UserProfileUpdated,
 )
-from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.picture_hash import compute_picture_hash
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_author_profile import (
     PROFILE_BIO_MAX_LENGTH,
     PROFILE_NAME_MAX_LENGTH,
+    SpaceAuthorProfile,
     encode_profile_content,
 )
 from ..domain.space_item import ITEM_TYPE_AUTHOR_PROFILE
@@ -60,29 +60,21 @@ from ..infrastructure.event_bus import EventBus
 from ..media.profile_picture import public_profile_picture
 from .protection_gate import ProtectionGateMixin
 from .space_item_author import build_signed_item_inner
+from .space_writer_cert_service import WRITER_CERT_FIELD
 
 if TYPE_CHECKING:
-    from ..domain.federation import FederationEvent
-    from ..federation.federation_service import FederationService
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
-    from ..repositories.space_post_repo import AbstractSpacePostRepo
+    from ..repositories.space_author_profile_repo import (
+        AbstractSpaceAuthorProfileRepo,
+    )
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .gfs_member_publish_service import GfsMemberPublishService
     from .space_crypto_service import SpaceContentEncryption
+    from .space_writer_cert_service import SpaceWriterCertService
 
 log = logging.getLogger(__name__)
-
-#: A profile already sent this epoch goes out again on the author's next
-#: post once this old, so followers who subscribed since get it too.
-PROFILE_RESEND_AFTER: timedelta = timedelta(hours=24)
-
-#: One follower-driven republish per space at most this often — a burst of
-#: subscribes (or a hostile host) cannot make a household spam the GFS. A
-#: follower inside the window is not dropped: one trailing republish runs
-#: when it ends, covering everyone who subscribed meanwhile.
-FOLLOWER_REPUBLISH_COOLDOWN: timedelta = timedelta(seconds=30)
 
 
 class SpaceAuthorProfileOutbound(ProtectionGateMixin):
@@ -92,19 +84,17 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         "_bus",
         "_child_protection",
         "_crypto",
-        "_federation",
         "_federation_repo",
         "_member_gfs",
         "_own_instance_id",
         "_own_instance_pk",
         "_own_seed",
-        "_pending",
         "_pictures",
-        "_posts",
-        "_republished",
+        "_profile_cache",
         "_sent",
         "_spaces",
         "_users",
+        "_writer_certs",
     )
 
     def __init__(
@@ -134,28 +124,23 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         self._child_protection = None
         #: ``(space_id, user_id)`` → ``(epoch, profile_rev, sent_at)``.
         self._sent: dict[tuple[str, str], tuple[int | None, str, datetime]] = {}
-        #: ``space_id`` → when its authors were last republished for a new
-        #: follower (v_61).
-        self._republished: dict[str, datetime] = {}
-        #: The one trailing republish per space waiting out the cooldown.
-        self._pending: dict[str, asyncio.Task[None]] = {}
-        self._federation: FederationService | None = None
-        self._posts: AbstractSpacePostRepo | None = None
+        self._profile_cache: AbstractSpaceAuthorProfileRepo | None = None
+        self._writer_certs: SpaceWriterCertService | None = None
 
-    def attach_follower_republish(
+    def attach_profile_cache(
         self,
+        repo: AbstractSpaceAuthorProfileRepo,
         *,
-        federation_service: FederationService,
-        space_post_repo: AbstractSpacePostRepo,
+        writer_certs: SpaceWriterCertService,
     ) -> None:
-        """Wire the v_61 new-follower republish: who has posted in a space,
-        and the federation the host nudges its members over (and receives
-        the host's nudge on)."""
-        self._federation = federation_service
-        self._posts = space_post_repo
-        federation_service._event_registry.register(
-            FederationEventType.SPACE_FOLLOWER_JOINED, self._on_follower_joined
-        )
+        """Keep every profile item we send in the author-profile cache too,
+        signed item and epoch included (0114): the host's new-follower
+        bundle is built from it, and a household never receives its own
+        items back. The item is kept as a follower receives it — with our
+        writer cert for its epoch (*writer_certs*), which the member-publish
+        path adds when it seals."""
+        self._profile_cache = repo
+        self._writer_certs = writer_certs
 
     def wire(self) -> None:
         self._bus.subscribe(SpacePostCreated, self._on_post)
@@ -180,93 +165,6 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             return
         if (event.space_id, event.user_id) in self._sent:
             await self.publish(event.space_id, event.user_id, changed=True)
-
-    # ── A new follower (v_61) ─────────────────────────────────────────
-
-    async def on_new_follower(self, space_id: str) -> None:
-        """The host was told a follower subscribed (and sealed the content
-        key to them): republish our authors and nudge the member
-        households. Never raises."""
-        try:
-            await self.republish_space(space_id, nudge=True)
-        except Exception:
-            log.exception(
-                "space_author_profile: new-follower republish failed for %s",
-                space_id,
-            )
-
-    async def _nudge_members(self, space_id: str) -> None:
-        if self._federation is None:
-            return
-        await self._federation.broadcast_to_space_members(
-            space_id,
-            FederationEventType.SPACE_FOLLOWER_JOINED,
-            {"space_id": space_id},
-            min_proto_version=FederationCapability.MIN_FOR_FOLLOWER_JOINED,
-        )
-
-    async def _on_follower_joined(self, event: FederationEvent) -> None:
-        """The host's nudge: republish our authors in that space. Only the
-        space's host may send it (anyone else is ignored at WARNING)."""
-        space_id = str(event.space_id or event.payload.get("space_id") or "")
-        space = await self._spaces.get(space_id) if space_id else None
-        if space is None or event.from_instance != space.owner_instance_id:
-            log.warning(
-                "space_author_profile: SPACE_FOLLOWER_JOINED from %s is not "
-                "from the host of space %s — ignored",
-                event.from_instance,
-                space_id,
-            )
-            return
-        await self.republish_space(space_id)
-
-    async def republish_space(self, space_id: str, *, nudge: bool = False) -> bool:
-        """Publish the profile of every local user with a post in
-        *space_id*, whatever was sent before — at most once per
-        :data:`FOLLOWER_REPUBLISH_COOLDOWN`. Inside the window one trailing
-        republish is scheduled for its end instead (never dropped). With
-        *nudge* (the host) each run also tells the member households.
-        ``True`` when it ran now."""
-        now = datetime.now(UTC)
-        last = self._republished.get(space_id)
-        if last is not None and now - last < FOLLOWER_REPUBLISH_COOLDOWN:
-            if space_id not in self._pending:
-                wait = (last + FOLLOWER_REPUBLISH_COOLDOWN - now).total_seconds()
-                self._pending[space_id] = asyncio.create_task(
-                    self._trailing(space_id, wait, nudge=nudge),
-                    name=f"author-profile-republish-{space_id}",
-                )
-            return False
-        self._republished[space_id] = now
-        authors: set[str] = {u for (s, u) in self._sent if s == space_id}
-        if self._posts is not None:
-            authors |= await self._posts.list_author_ids(space_id)
-        for user_id in sorted(authors):
-            self._sent.pop((space_id, user_id), None)
-            await self.publish(space_id, user_id)
-        if nudge:
-            await self._nudge_members(space_id)
-        return True
-
-    async def _trailing(self, space_id: str, wait: float, *, nudge: bool) -> None:
-        try:
-            await asyncio.sleep(max(wait, 0.0))
-        finally:
-            self._pending.pop(space_id, None)
-        try:
-            await self.republish_space(space_id, nudge=nudge)
-        except Exception:
-            log.exception(
-                "space_author_profile: trailing republish failed for %s", space_id
-            )
-
-    async def stop(self) -> None:
-        """Cancel the trailing republishes (graceful shutdown)."""
-        tasks = list(self._pending.values())
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self._pending.clear()
 
     # ── Publishing ────────────────────────────────────────────────────
 
@@ -318,12 +216,7 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         epoch = await self._crypto.get_current_epoch(space_id)
         now = datetime.now(UTC)
         held = self._sent.get((space_id, user_id))
-        if (
-            held is not None
-            and held[0] == epoch
-            and held[1] == rev
-            and now - held[2] < PROFILE_RESEND_AFTER
-        ):
+        if held is not None and held[0] == epoch and held[1] == rev:
             return False
         if changed and held is not None and held[1] == rev:
             return False
@@ -346,6 +239,34 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         ):
             return False
         self._sent[(space_id, user_id)] = (epoch, rev, now)
+        if self._profile_cache is not None:
+            # As a follower receives it: with our writer cert for the epoch.
+            # Without one there is nothing a follower could verify, so only
+            # the decoded profile is kept.
+            cert = (
+                await self._writer_certs.own_cert(space_id, epoch)
+                if self._writer_certs is not None and epoch is not None
+                else None
+            )
+            await self._profile_cache.upsert_if_newer(
+                SpaceAuthorProfile(
+                    space_id=space_id,
+                    author_user_id=user_id,
+                    author_pk=self._own_instance_pk.hex(),
+                    display_name=name,
+                    bio=bio,
+                    picture_hash=compute_picture_hash(picture) if picture else None,
+                    profile_rev=rev,
+                    ts=now.isoformat(timespec="microseconds"),
+                ),
+                picture_webp=picture,
+                signed_item=(
+                    {**inner, WRITER_CERT_FIELD: cert.to_wire()}
+                    if cert is not None
+                    else None
+                ),
+                item_epoch=epoch if cert is not None else None,
+            )
         return True
 
     async def _members_understand(self, space_id: str) -> bool:

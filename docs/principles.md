@@ -140,9 +140,11 @@ and push, but cannot read or forge content.
 
 **Strengthened:** the GFS no longer learns *which household relayed* a
 public/global space event either. `POST /gfs/publish` carries exactly
-`{space_id, event_type, payload}` and is authorized purely by the
-space-authority signature sealed inside the opaque payload; the fan-out
-frame to subscribers is identity-free too. The relaying household's
+`{space_id, event_type, payload}` — plus, for an event meant for one new
+follower (v_61), the routing `to`: the subscriber the GFS itself named in
+its `new_subscriber` notify, never the relaying household — and is
+authorized purely by the space-authority signature sealed inside the
+opaque payload; the fan-out frame to subscribers is identity-free too. The relaying household's
 identity is not **required, stored, logged or forwarded**.
 
 There is **no identified fallback on the relay**: a household never sends

@@ -1041,13 +1041,13 @@ def test_space_author_profile_capability_threshold():
     assert fc.CAPABILITY_FEATURE_KEYS[60] == "follower_author_names"
 
 
-def test_follower_joined_capability_threshold():
-    """v_61 — ``SPACE_FOLLOWER_JOINED``: the host's nudge to republish author
-    profiles for a new follower. Gated per member household with a degraded
-    fallback (profiles on the next post), labelled, not space-scoped."""
-    assert fc.FederationCapability.MIN_FOR_FOLLOWER_JOINED == 61
-    assert fc.FederationCapability.MIN_FOR_FOLLOWER_JOINED <= fc.OURS
-    assert fc.FederationCapability.MIN_FOR_FOLLOWER_JOINED not in (
+def test_follower_profile_bundle_capability_threshold():
+    """v_61 — a new GFS follower's targeted author-profile bundle (host →
+    follower through the GFS, no household-to-household event). Labelled,
+    not space-scoped."""
+    assert fc.FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE == 61
+    assert fc.FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(60) == ["Names for new followers right away"]

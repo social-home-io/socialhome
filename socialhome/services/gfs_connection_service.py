@@ -378,6 +378,7 @@ class GfsConnectionService:
         "_rotation_warned",
         "_space_repo",
         "_target_warned",
+        "_targeted_publish",
         "_theme_repo",
     )
 
@@ -447,6 +448,11 @@ class GfsConnectionService:
         # into the canonical bytes it verifies. An older one does not, so a
         # body carrying the pin would 403 there — it gets the body without.
         self._place_pin: dict[str, bool] = {}
+        # …and for ``targeted_publish`` (v_61): ``POST /gfs/publish`` takes a
+        # ``to`` and delivers to that one subscriber. An older GFS would fan
+        # a targeted item out to every subscriber, so nothing targeted is
+        # sent to it.
+        self._targeted_publish: dict[str, bool] = {}
         # Same again for ``member_publish_trusted`` (v_49): whether the GFS
         # carries the identified ``POST /gfs/member-publish`` and the
         # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
@@ -661,6 +667,7 @@ class GfsConnectionService:
             self._envelope_relay,
             self._invite_links,
             self._place_pin,
+            self._targeted_publish,
             self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
@@ -3067,6 +3074,47 @@ class GfsConnectionService:
             elif outcome.kind == "transient":
                 self._queue_publish_retry(conn, item, outcome.retry_after_s)
         return delivered
+
+    async def publish_space_event_to(
+        self,
+        gfs_id: str,
+        *,
+        space_id: str,
+        event_type: str,
+        payload: dict,
+        to_instance_id: str,
+    ) -> bool | None:
+        """Relay one event to ONE subscriber of *space_id* on the GFS
+        *gfs_id* (``targeted_publish``, v_61) — the subscriber that GFS
+        itself named in its ``new_subscriber`` notify.
+
+        ``None`` when that server has not proved ``targeted_publish`` (and
+        ``anonymous_publish``) under a valid signature: nothing was sent, and
+        the caller falls back (or skips). Otherwise ``True`` when the GFS
+        accepted it. No retry queue: the subscriber's next connect asks for
+        it again (``new_subscriber`` is re-sent on reconnect). The body is
+        ``{space_id, event_type, payload, to}`` — still no household
+        identity.
+        """
+        if self._publish_client is None or not to_instance_id:
+            return None
+        conn = await self._repo.get(gfs_id)
+        if conn is None or conn.status != "active" or not conn.inbox_url:
+            return None
+        if not await self._anonymous_publish_supported(conn):
+            return None
+        if not await self._signed_capability_supported(
+            conn, "targeted_publish", self._targeted_publish
+        ):
+            return None
+        body = {
+            **GfsPublish(
+                space_id=space_id, event_type=event_type, payload=payload
+            ).body(),
+            "to": to_instance_id,
+        }
+        outcome = await self._post_publish(conn, body, space_id=space_id)
+        return outcome.kind == "delivered"
 
     async def _relay_targets(self, space_id: str) -> list[GfsConnection]:
         """Where a relay of *space_id* goes: every server on the owner's

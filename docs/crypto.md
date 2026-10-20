@@ -215,6 +215,15 @@ it; everyone else drops it quietly at DEBUG. Receivers still accept the
 legacy `target_instance_id`-bearing shape from an older seed-holder (the
 explicit gate then applies), so nobody is stranded.
 
+From v_61 a GFS that proves `targeted_publish` is given the handoff with a
+routing `to` (outside the payload — the subscriber it named itself in
+`new_subscriber`) and hands it to that subscriber alone; the payload is
+unchanged. The new follower's `space_author_profiles_bundle` uses the same
+sealing (`seal_to_keywrap`, KEM suite on the wire, unknown suites refused)
+and the same authority signature under its own event type, is only ever
+sent targeted, and carries the authors' own signed items, which the
+follower verifies one by one — no new suite.
+
 The residual limits, stated plainly: the GFS still sees `space_id`,
 `event_type`, payload size and timing; it can correlate a publish with a
 household's own authenticated WebSocket session by IP/timing; and a

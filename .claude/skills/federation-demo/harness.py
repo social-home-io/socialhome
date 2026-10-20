@@ -2700,19 +2700,25 @@ def cmd_gfs_space_author_profile() -> None:
 
 
 def cmd_gfs_space_follower_names() -> None:
-    """A NEW follower names a global space's authors within seconds (v_61).
+    """A NEW follower names a global space's authors within seconds (v_61),
+    and nobody else gets anything for it.
 
     Prereqs: ``gfs-space-author-profile`` (Erin's profile, with a bio, is
-    out). Runs LAST in its chain: it subscribes **e** to a's global space as
-    a follower, which the ``gfs-invite-link*`` steps (e as a link-joined
-    member of that space) must not find.
+    out; d already follows the space). Runs LAST in its chain: it subscribes
+    **e** to a's global space as a follower, which the ``gfs-invite-link*``
+    steps (e as a link-joined member of that space) must not find.
 
     e refreshes its directory and subscribes. The GFS tells a
-    (``new_subscriber``); a seals the content key to e, republishes its
-    authors' profiles and nudges its member households
-    (``SPACE_FOLLOWER_JOINED``). Asserts e names Erin, with her bio, within
-    30 s — without Erin posting again. The GFS log from the subscribe on
-    carries neither her name nor her bio.
+    (``new_subscriber``); a seals the content key to e and then ONE bundle
+    of the cached, author-signed profiles — both TARGETED to e
+    (``POST /gfs/publish`` with ``to``). Asserts:
+
+    * e names Erin, with her bio, within 30 s — without Erin posting again;
+    * from the subscribe on, every ``POST /gfs/publish`` the GFS took was
+      targeted (its "relayed targeted … (1 reached)" line, one per publish),
+      and no member published anything (no ``/gfs/member-publish*``) — so the
+      other follower, d, was sent nothing for e's subscribe;
+    * the GFS log carries neither her name nor her bio.
     """
     state = _load()
     gsap = (state or {}).get("gfs_space_author_profile")
@@ -2741,7 +2747,7 @@ def cmd_gfs_space_follower_names() -> None:
     )
     _must("e: POST /api/spaces/{id}/subscribe", s, sub, ok=(200,))
     got: dict | None = None
-    while time.monotonic() - t0 < 60:
+    while time.monotonic() - t0 < 30:
         s, rows = _request(f"{e_url}/api/spaces/{space_id}/authors", token=e["token"])
         if s == 200:
             got = next((r for r in rows if r.get("user_id") == erin), None)
@@ -2750,13 +2756,40 @@ def cmd_gfs_space_follower_names() -> None:
         time.sleep(2)
     else:
         raise SystemExit(
-            f"gfs-space-follower-names: e did not name Erin within 60 s ({got!r})"
+            f"gfs-space-follower-names: e did not name Erin within 30 s ({got!r})"
         )
     if got["display_name"] != "Erin":
         raise SystemExit(f"gfs-space-follower-names: e names Erin {got!r}")
     print(
         f"  e (new follower) names Erin with her bio after "
         f"{time.monotonic() - t0:.0f} s, no new post ✓"
+    )
+    # Let a late publish land before counting.
+    time.sleep(3)
+    publishes = _gfs_log_lines_matching("POST /gfs/publish ", offset=gfs_off)
+    targeted = _gfs_log_lines_matching("relayed targeted", offset=gfs_off)
+    member = _gfs_log_lines_matching("POST /gfs/member-publish", offset=gfs_off)
+    kinds = sorted(
+        "bundle" if "space_author_profiles_bundle" in line else "handoff"
+        for line in targeted
+    )
+    if member:
+        raise SystemExit(
+            f"gfs-space-follower-names: members republished for e's subscribe "
+            f"(fanned out to every follower): {member[:2]}"
+        )
+    if (
+        len(targeted) != len(publishes)
+        or "bundle" not in kinds
+        or not all("(1 reached)" in line for line in targeted)
+    ):
+        raise SystemExit(
+            "gfs-space-follower-names: not every publish for e was targeted at e "
+            f"({len(targeted)} targeted of {len(publishes)}: {targeted[:3]})"
+        )
+    print(
+        f"  every GFS publish for e's subscribe was targeted at e alone "
+        f"({', '.join(kinds)}); no member republished — d was sent nothing ✓"
     )
     leaks = [
         line
@@ -2767,7 +2800,10 @@ def cmd_gfs_space_follower_names() -> None:
         raise SystemExit(f"gfs-space-follower-names: GFS log names her: {leaks[:2]}")
     state["gfs_space_follower_names"] = {"space_id": space_id, "user_id": erin}
     _save(state)
-    print("gfs-space-follower-names: ok (a new follower is named at once)")
+    print(
+        "gfs-space-follower-names: ok (a new follower is named at once, "
+        "by one targeted bundle)"
+    )
 
 
 def cmd_gfs_space_rotate() -> None:

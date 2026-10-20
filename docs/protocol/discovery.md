@@ -28,9 +28,21 @@ ride on the same `_VIA` relay pattern.
 
 GFS fan-out event types (connection-server wire, not
 `FederationEventType`): `space_post_public` and
-`space_subscriber_key_handoff` (authority-relayed via `/gfs/publish`), and
-`space_item` (v_49, a member-published item via `/gfs/member-publish` — the
-real item type is inside the ciphertext).
+`space_subscriber_key_handoff` (authority-relayed via `/gfs/publish`),
+`space_author_profiles_bundle` (v_61, authority-relayed via `/gfs/publish`
+and **only** with a `to` target — never fanned out), and `space_item` (v_49,
+a member-published item via `/gfs/member-publish` — the real item type is
+inside the ciphertext).
+
+**Targeted delivery (v_61, `targeted_publish`).** `POST /gfs/publish` takes
+an optional `to`: a subscriber of the space, by the instance id the GFS
+itself named in its `new_subscriber` notify. The GFS delivers the event to
+that one subscriber's socket (a `to` that is not a subscriber reaches
+nobody) and refuses `space_author_profiles_bundle` without one. It learns
+nothing new: it chose the subscriber, and the payload stays opaque. A
+household sends `to` only to a server whose signed capability block proves
+`targeted_publish`; an older server gets the fan-out it always got (the key
+handoff) or nothing (the profiles bundle).
 
 ## Transport (SH ↔ GFS)
 
@@ -1522,22 +1534,11 @@ relay as every other item:
   account (§CP.R) sends its name only: `bio` and `picture` are `null`.
 - **The GFS sees ciphertext only** — the generic `space_item`, padded to a
   size bucket like any item (`tests/protocol/test_gfs_member_publish_blind.py`).
-- **When.** Once per author per space per content-key epoch, after a
-  profile change, and on the author's next post a day after the last one.
-  Never inlined in a post. Only for a public / global space with
+- **When.** Once per author per space per content-key epoch, and once per
+  profile change. Never inlined in a post, and never re-sent just because
+  time passed: a follower who subscribes later gets the names from the
+  host's bundle (below). Only for a public / global space with
   `allow_subscribers` on.
-- **A new follower (v_61).** When the GFS tells the host a follower
-  subscribed (`new_subscriber`), the host first seals the content key to
-  them, then republishes its own authors' profiles and sends
-  `SPACE_FOLLOWER_JOINED` (the routing `space_id` only) to its member
-  households at v_61+; each republishes the profile of every local user with
-  a post in the space. A household takes the nudge only from the space's
-  host, and republishes a space at most once per 30 s (a follower inside that window
-  is covered by one trailing republish when it ends). The new
-  follower names the authors within seconds. The GFS learns nothing new:
-  it already notified the host of the subscribe, and what follows are the
-  usual ciphertext `space_item`s (identified by household in trusted mode
-  exactly as every member item is, anonymous in strict mode).
 - **Receiver.** Every check of a generic item (decrypt, author signature +
   self-cert, origin, writer cert with the v2 binding naming the author,
   epoch), then: the item must be about its own author; the content must
@@ -1569,7 +1570,7 @@ sequenceDiagram
   participant F as Follower household (no roster)
 
   A->>A: local post in a global space (allow_subscribers on)
-  A->>A: profile due? (new epoch / changed / > 24 h) — all known members ≥ v_60?
+  A->>A: profile due? (new epoch / changed) — all known members ≥ v_60?
   A->>A: build generic inner item_type=author_profile, content={name, bio, picture…}, author_sig
   A->>A: encrypt under the space content key (padded)
   A->>G: POST /gfs/member-publish {space_item, epoch, writer_cert, payload=ciphertext}
@@ -1577,16 +1578,74 @@ sequenceDiagram
   F->>F: decrypt → author_sig + self-cert → writer cert binds author → about itself?
   F->>F: decode + cap content → keep in space_author_profiles if ts newer
   F->>F: GET /api/spaces/{id}/authors → post cards show name, picture, bio
+```
 
-  Note over F,A: A new follower (v_61)
+### A new follower's author names (v_61)
+
+Every member household that holds a follower seat keeps the verified
+profiles in `space_author_profiles` — the host included, which also keeps
+its own authors' items there as it sends them (a household never receives
+its own items back). From v_61 the row keeps the **author-signed item
+itself** with its writer cert and epoch (`signed_item`, `item_epoch`,
+migration 0114), so the host can forward it unchanged:
+
+- **One bundle, one follower.** When the GFS tells the host a follower
+  subscribed (`new_subscriber`, carrying the follower's GFS-registered
+  identity + key-wrap key), the host seals the content key to them and then
+  sends ONE `space_author_profiles_bundle`: the cached items of the current
+  epoch, the most recently stamped first, sealed to the follower's
+  key-wrap key exactly like the handoff (`seal_to_keywrap`, KEM-suite
+  tagged) and authority-signed. Both go out **targeted** — `POST
+  /gfs/publish` with `to` = that follower — so no other subscriber receives
+  a byte for it.
+- **Bounded.** At most 50 authors and 1 MB of items, split into parts of at
+  most 160 KB (each sealed part fits the GFS's 256 KB publish cap). At most
+  one bundle per `(space, follower)` an hour: the GFS re-sends
+  `new_subscriber` on each of the follower's reconnects; the key is re-sealed
+  every time, the bundle is not. And at most 30 bundles per space a minute,
+  whoever is named: a GFS can name any registered household in
+  `new_subscriber`, so a hostile one cannot make the host upload a bundle
+  per name (it could never read one — each is sealed to the named
+  household's verified key-wrap key).
+- **The host cannot vouch.** The follower authority-verifies the envelope,
+  opens it, and runs **every** check of a relayed item on each bundled item
+  (author signature + self-cert, author-bound type, origin is the author's
+  household, writer cert binding the author at the bundle's epoch, which
+  must be open here); anything but an `author_profile` is refused. The
+  host picks which items to forward, never what they say.
+- **The GFS learns nothing new.** It named the subscriber itself; the
+  bundle is opaque ciphertext under the follower's key-wrap key; the body
+  still carries no household identity.
+- **Older peers.** An older GFS (no signed `targeted_publish`) gets the
+  fanned-out handoff as before and **no** bundle — names then arrive with
+  each author's next profile change or epoch. An older follower ignores the
+  unknown relay type.
+
+Traffic for one new follower of a space with *A* authors and *N* followers
+(profiles ≈ 25 KB with a picture): before, every member household
+republished to every follower, ≈ *A* × 25 KB × *N* (200 authors × 10 000
+followers ≈ 50 GB), and the key handoff went to all *N*; now ≤ 1 MB plus
+one handoff, to one connection.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant F as New follower
+  participant G as GFS
   participant H as Host household
-  F->>G: subscribe
-  G->>H: new_subscriber
-  H->>G: sealed content-key handoff (to F only)
-  H->>G: its authors' author_profile items (ciphertext)
-  H->>A: SPACE_FOLLOWER_JOINED {space_id} (members at v_61+)
-  A->>G: its authors' author_profile items (ciphertext)
-  G->>F: relay → F names every author at once
+  participant O as Other followers
+
+  F->>G: subscribe (signed)
+  G->>H: WS new_subscriber {subscriber: instance_id, identity + key-wrap key}
+  H->>H: verify key-wrap binding (anti-substitution)
+  H->>G: POST /gfs/publish {space_key_handoff (sealed to F), to: F}
+  G->>F: relay (F only)
+  H->>H: cached signed author_profile items @ current epoch (≤ 50, ≤ 1 MB)
+  H->>G: POST /gfs/publish {space_author_profiles_bundle (sealed to F), to: F}
+  G->>F: relay (F only)
+  F->>F: authority sig → open → per item: author sig, writer cert @ epoch
+  F->>F: keep in space_author_profiles → names every author at once
+  Note over G,O: nothing is sent to the other followers
 ```
 
 ### Comments, reactions and own edits / deletes (v_49)

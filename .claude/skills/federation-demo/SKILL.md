@@ -861,11 +861,14 @@ Needs ``gfs-space-author-profile``; run it **last in its own chain**
 gfs-space-subscribe → gfs-space-post → gfs-space-author-profile →
 gfs-space-follower-names → verify``) — it makes **e** a follower of a's
 global space, which the ``gfs-invite-link*`` steps must not find. e
-subscribes; the GFS notifies a, which seals the content key to e,
-republishes its authors' profiles and sends ``SPACE_FOLLOWER_JOINED`` to its
-member households. e must name Erin, with her bio, within 60 s without a
-new post; the GFS log from the subscribe on never carries her name or bio.
-``verify`` (13x) re-checks.
+subscribes; the GFS notifies a, which seals the content key to e and then
+ONE bundle of its cached, author-signed profiles — both targeted at e alone
+(``POST /gfs/publish`` with ``to``, the GFS's ``targeted_publish``). e must
+name Erin, with her bio, within 30 s without a new post. From the subscribe
+on, every ``/gfs/publish`` the GFS took must be targeted with exactly one
+subscriber reached and no member may publish (no ``/gfs/member-publish*``):
+the other follower, d, is sent nothing for e's subscribe. The GFS log never
+carries her name or bio. ``verify`` (13x) re-checks.
 
 ### ``gfs-member-publish`` — a member posts with the host offline (v_49)
 

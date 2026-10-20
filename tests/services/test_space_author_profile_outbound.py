@@ -3,7 +3,6 @@ followers (v_60)."""
 
 from __future__ import annotations
 
-import asyncio
 import io
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -21,7 +20,6 @@ from socialhome.domain.events import (
     SpacePostCreated,
     UserProfileUpdated,
 )
-from socialhome.domain.federation import FederationEventType
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.space import SpaceType
 from socialhome.domain.space_author_profile import (
@@ -190,7 +188,10 @@ async def test_a_protected_account_sends_its_name_only():
     assert (p.display_name, p.bio, p.picture_webp) == ("Noor Haddad", None, None)
 
 
-async def test_once_per_epoch_then_again_on_a_new_epoch_or_a_day_later(monkeypatch):
+async def test_once_per_epoch_then_only_on_a_new_epoch(monkeypatch):
+    """v_61: never re-sent just because time passed — that fanned every
+    author's profile out to every follower once a day. A new follower gets
+    the names from the host's targeted bundle."""
     crypto = _Crypto()
     svc, gfs = _svc(crypto=crypto)
     assert await svc.publish("sp", NOOR)
@@ -198,7 +199,7 @@ async def test_once_per_epoch_then_again_on_a_new_epoch_or_a_day_later(monkeypat
     crypto.epoch = 4
     assert await svc.publish("sp", NOOR)
     assert not await svc.publish("sp", NOOR)
-    later = datetime.now(UTC) + timedelta(hours=25)
+    later = datetime.now(UTC) + timedelta(days=30)
 
     class _Later(datetime):
         @classmethod
@@ -206,8 +207,8 @@ async def test_once_per_epoch_then_again_on_a_new_epoch_or_a_day_later(monkeypat
             return later
 
     monkeypatch.setattr(mod, "datetime", _Later)
-    assert await svc.publish("sp", NOOR)
-    assert len(gfs.items) == 3
+    assert not await svc.publish("sp", NOOR)
+    assert len(gfs.items) == 2
 
 
 async def test_a_profile_change_republishes_only_where_sent_and_only_if_changed():
@@ -314,108 +315,67 @@ async def test_an_unknown_author_publishes_nothing():
     assert gfs.items == []
 
 
-# ── A new follower (v_61) ─────────────────────────────────────────────
+# ── The host's cache for a new follower's bundle (v_61) ──────────────
 
 
-class _Posts:
-    def __init__(self, authors) -> None:
-        self.authors = set(authors)
-
-    async def list_author_ids(self, space_id):
-        return set(self.authors)
-
-
-class _Registry:
+class _Cache:
     def __init__(self) -> None:
-        self.handlers: dict = {}
+        self.rows: list[tuple] = []
 
-    def register(self, event_type, handler):
-        self.handlers[event_type] = handler
-
-
-class _Fed:
-    def __init__(self) -> None:
-        self._event_registry = _Registry()
-        self.broadcasts: list[tuple] = []
-
-    async def broadcast_to_space_members(self, space_id, event_type, payload, **kw):
-        self.broadcasts.append((space_id, event_type, payload, kw))
+    async def upsert_if_newer(self, profile, *, picture_webp, signed_item, item_epoch):
+        self.rows.append((profile, picture_webp, signed_item, item_epoch))
+        return True
 
 
-def _with_followers(svc, authors=(NOOR,)):
-    fed = _Fed()
-    svc.attach_follower_republish(
-        federation_service=fed,  # type: ignore[arg-type]
-        space_post_repo=_Posts(authors),  # type: ignore[arg-type]
-    )
-    return fed
+class _Certs:
+    def __init__(self, cert=None) -> None:
+        self.cert = cert
+        self.asked: list[tuple] = []
+
+    async def own_cert(self, space_id, epoch):
+        self.asked.append((space_id, epoch))
+        return self.cert
 
 
-async def test_a_new_follower_gets_every_author_at_once_and_members_are_nudged():
+class _Cert:
+    def to_wire(self):
+        return {"cert_suite": "ed25519", "scope": "write"}
+
+
+async def test_every_profile_we_send_is_kept_signed_for_the_hosts_bundle():
+    """A household never receives its own items back, so what it sends is
+    cached here — author-signed, with our writer cert and its epoch, as a
+    follower receives it — for a new follower's bundle."""
     svc, gfs = _svc()
-    fed = _with_followers(svc)
-    assert await svc.publish("sp", NOOR)  # sent already this epoch
-    await svc.on_new_follower("sp")
-    assert len(gfs.items) == 2  # republished regardless
-    [(space_id, event_type, payload, kw)] = fed.broadcasts
-    assert (space_id, event_type, payload) == (
-        "sp",
-        FederationEventType.SPACE_FOLLOWER_JOINED,
-        {"space_id": "sp"},
-    )
-    assert kw["min_proto_version"] == 61
+    cache = _Cache()
+    certs = _Certs(_Cert())
+    svc.attach_profile_cache(cache, writer_certs=certs)  # type: ignore[arg-type]
+    assert await svc.publish("sp", NOOR)
+    [(profile, picture, signed, epoch)] = cache.rows
+    sent = gfs.items[-1][3]
+    assert signed == {**sent, "writer_cert": _Cert().to_wire()}
+    assert verify_signed_item_inner(signed)  # the cert is outside the signature
+    assert epoch == 3 and certs.asked == [("sp", 3)]
+    assert (profile.space_id, profile.author_user_id) == ("sp", NOOR)
+    assert (profile.display_name, profile.bio) == ("Noor Haddad", "Beekeeper.")
+    assert profile.author_pk == KP.public_key.hex()
+    assert picture is not None and profile.picture_hash
 
 
-async def test_a_burst_of_followers_republishes_once_more_when_it_ends(monkeypatch):
-    """A follower inside the cooldown is not dropped: one trailing run (with
-    its member nudge) covers the whole burst."""
-    monkeypatch.setattr(
-        "socialhome.services.space_author_profile_outbound.FOLLOWER_REPUBLISH_COOLDOWN",
-        timedelta(milliseconds=50),
-    )
-    svc, gfs = _svc()
-    fed = _with_followers(svc)
-    await svc.on_new_follower("sp")
-    await svc.on_new_follower("sp")
-    await svc.on_new_follower("sp")
-    assert len(gfs.items) == 1 and len(fed.broadcasts) == 1
-    await asyncio.wait_for(asyncio.gather(*svc._pending.values()), 2)
-    assert len(gfs.items) == 2 and len(fed.broadcasts) == 2
+async def test_without_a_writer_cert_only_the_profile_is_cached():
+    svc, _gfs = _svc()
+    cache = _Cache()
+    svc.attach_profile_cache(cache, writer_certs=_Certs(None))  # type: ignore[arg-type]
+    assert await svc.publish("sp", NOOR)
+    [(profile, _picture, signed, epoch)] = cache.rows
+    assert profile.display_name == "Noor Haddad"
+    assert (signed, epoch) == (None, None)
 
 
-async def test_stop_cancels_a_trailing_republish():
-    svc, gfs = _svc()
-    _with_followers(svc)
-    await svc.on_new_follower("sp")
-    await svc.on_new_follower("sp")
-    assert svc._pending
-    await svc.stop()
-    assert not svc._pending and len(gfs.items) == 1
-
-
-async def test_only_the_host_may_nudge():
-    spaces = _Spaces()
-    spaces.owner = "host-inst"  # type: ignore[attr-defined]
-
-    async def _get(space_id):
-        return SimpleNamespace(
-            id=space_id,
-            space_type=SpaceType.GLOBAL,
-            owner_instance_id="host-inst",
-            features=SimpleNamespace(allow_subscribers=True),
-        )
-
-    spaces.get = _get  # type: ignore[method-assign]
-    svc, gfs = _svc(spaces=spaces)
-    fed = _with_followers(svc)
-    handler = fed._event_registry.handlers[FederationEventType.SPACE_FOLLOWER_JOINED]
-
-    def _ev(sender):
-        return SimpleNamespace(
-            from_instance=sender, space_id="sp", payload={"space_id": "sp"}
-        )
-
-    await handler(_ev("someone-else"))
-    assert gfs.items == []
-    await handler(_ev("host-inst"))
-    assert len(gfs.items) == 1
+async def test_nothing_is_cached_when_nothing_was_sent():
+    svc, _gfs = _svc()
+    cache = _Cache()
+    svc.attach_profile_cache(cache, writer_certs=_Certs(_Cert()))  # type: ignore[arg-type]
+    assert await svc.publish("sp", NOOR)
+    assert not await svc.publish("sp", NOOR)  # already sent this epoch
+    assert len(cache.rows) == 1

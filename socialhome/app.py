@@ -41,6 +41,7 @@ from .auth import (
     SignedMediaStrategy,
     require_auth,
 )
+from .authority_sig import AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE
 from .config import Config
 from .crypto import REPLAY_CACHE_WINDOW
 from .dashboard.advertiser import DisplayAdvertiser
@@ -1092,7 +1093,11 @@ async def dispatch_gfs_relay_frame(
     # Phase 5b-b subscriber content-key handoff: the subscriber unseals +
     # imports the relayed content key so it can decrypt the relay.
     elif (
-        frame.get("event_type") == AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF
+        frame.get("event_type")
+        in (
+            AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
+            AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
+        )
         and space_subscriber_key_inbound is not None
     ):
         await space_subscriber_key_inbound.handle(frame)
@@ -3202,7 +3207,6 @@ def create_app(config: Config | None = None) -> web.Application:
     # the identity seed + KEK are available at startup.
     space_public_outbound: SpacePublicOutbound | None = None
     gfs_member_publish: GfsMemberPublishService | None = None
-    author_profiles: SpaceAuthorProfileOutbound | None = None
     gfs_channels: GfsChannelService | None = None
     space_public_inbound: SpacePublicInbound | None = None
     space_authority_rotation: SpaceAuthorityRotationService | None = None
@@ -3560,7 +3564,6 @@ def create_app(config: Config | None = None) -> web.Application:
 
     async def _on_startup(app: web.Application) -> None:
         nonlocal key_manager, federation_service, outbox_processor
-        nonlocal author_profiles
         log.info("socialhome: starting up (mode=%s)", config.mode)
         await db.startup()
 
@@ -3951,6 +3954,10 @@ def create_app(config: Config | None = None) -> web.Application:
             keywrap_private_key=identity.keywrap_private_key,
         )
         space_subscriber_key_inbound.attach_pin_refresher(gfs_space_mirror)
+        # v_61 — a new follower's profiles bundle: built by the host from the
+        # author-profile cache, verified item by item on the follower.
+        space_subscriber_key_outbound.attach_author_profiles(repos.space_author_profile)
+        space_subscriber_key_inbound.attach_profiles_sink(space_public_inbound)
 
         # 5. Federation stack — FederationService + sync manager + typing/dm/
         #    presence attach + inbound bridge + pairing-relay queue.
@@ -4317,7 +4324,7 @@ def create_app(config: Config | None = None) -> web.Application:
         if gfs_member_publish is not None:
             space_post_outbound.attach_member_gfs(gfs_member_publish)
             # v_60 — our authors' public profiles for a space's GFS followers.
-            author_profiles = SpaceAuthorProfileOutbound(
+            author_profiles: SpaceAuthorProfileOutbound = SpaceAuthorProfileOutbound(
                 bus=bus,
                 space_repo=space_repo,
                 user_repo=user_repo,
@@ -4330,15 +4337,12 @@ def create_app(config: Config | None = None) -> web.Application:
                 own_identity_seed=identity_seed,
             )
             author_profiles.attach_child_protection(child_protection_service)
+            # v_61 — our own authors' signed items go into the cache too,
+            # so the host's new-follower bundle names them.
+            author_profiles.attach_profile_cache(
+                repos.space_author_profile, writer_certs=writer_certs
+            )
             author_profiles.wire()
-            # v_61 — a new follower learns the authors' names at once.
-            author_profiles.attach_follower_republish(
-                federation_service=federation_service,
-                space_post_repo=space_post_repo,
-            )
-            space_subscriber_key_outbound.attach_follower_hook(
-                author_profiles.on_new_follower
-            )
         # Federate per-edit config changes (rename, emoji, feature
         # toggles, location_mode flips, retention bumps) to remote
         # member stubs in realtime. Before this, SPACE_CONFIG_CHANGED
@@ -5083,9 +5087,6 @@ def create_app(config: Config | None = None) -> web.Application:
         await gfs_connection_service.stop()
         # Background seat releases ride the HTTP session too.
         await gfs_space_mirror.stop()
-        # Trailing follower republishes ride the member-publish client.
-        if author_profiles is not None:
-            await author_profiles.stop()
         if gfs_member_publish is not None:
             await gfs_member_publish.stop()
         if gfs_channels is not None:

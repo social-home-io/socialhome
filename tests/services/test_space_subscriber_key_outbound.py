@@ -26,6 +26,7 @@ import json
 import pytest
 
 from socialhome.authority_sig import (
+    AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
     AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
     strip_authority_sig_fields,
@@ -55,6 +56,27 @@ from socialhome.services.space_subscriber_key_outbound import (
 class _CaptureGfs:
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        #: ``publish_space_event_to`` calls (v_61 targeted delivery).
+        self.targeted: list[dict] = []
+        #: What a targeted publish answers: ``None`` = the server never
+        #: proved ``targeted_publish`` (an older GFS).
+        self.targeted_answer: bool | None = None
+
+    async def publish_space_event_to(
+        self, gfs_id, *, space_id, event_type, payload, to_instance_id
+    ) -> bool | None:
+        if self.targeted_answer is None:
+            return None
+        self.targeted.append(
+            {
+                "gfs_id": gfs_id,
+                "space_id": space_id,
+                "event_type": event_type,
+                "payload": payload,
+                "to": to_instance_id,
+            }
+        )
+        return self.targeted_answer
 
     async def publish_space_event(self, *, space_id, event_type, payload) -> int:
         self.calls.append(
@@ -783,27 +805,208 @@ async def test_reconcile_space_everywhere_skips_space_without_subscribers(recon_
     assert recon_env["gfs"].calls == []
 
 
-async def test_the_follower_hook_runs_after_the_key_went_out(env):
-    """v_61: author profiles are republished only once the new follower
-    holds the content key to open them — after the handoff relay."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+class _Profiles:
+    """The host's author-profile cache (only what the bundle reads)."""
+
+    def __init__(self, items) -> None:
+        self.items = items
+        self.asked: list[tuple] = []
+
+    async def list_signed_items(self, space_id, *, epoch, limit):
+        self.asked.append((space_id, epoch, limit))
+        return list(self.items)
+
+
+def _signed_profile(name: str) -> dict:
+    # Opaque to the host: it forwards the author-signed item unchanged.
+    return {
+        "item_type": "author_profile",
+        "author_user_id": f"uid-{name}",
+        "content": json.dumps({"display_name": name, "bio": f"{name}'s bio"}),
+        "author_sig": "sig-" + name,
+    }
+
+
+async def _subscribe(env, space_id="sp-pub", *, gfs_id="gfs-1"):
     id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
-    order: list[str] = []
-    real_publish = env["gfs"].publish_space_event
-
-    async def _publish(*a, **kw):
-        order.append("handoff")
-        return await real_publish(*a, **kw)
-
-    env["gfs"].publish_space_event = _publish
-
-    async def _hook(space_id):
-        order.append(f"follower:{space_id}")
-
-    env["svc"].attach_follower_hook(_hook)
     await env["svc"].handle(
         _new_subscriber_frame(
-            "sp-pub", sub_iid, id_kp.public_key, kw_kp.public_key, keywrap_sig
+            space_id, sub_iid, id_kp.public_key, kw_kp.public_key, keywrap_sig
+        ),
+        gfs_id=gfs_id,
+    )
+    return kw_kp, sub_iid
+
+
+async def test_a_target_capable_gfs_gets_the_handoff_for_that_follower_only(env):
+    """v_61: the handoff goes to the one subscriber the GFS named — no
+    fan-out to every other subscriber of the space."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    kw_kp, sub_iid = await _subscribe(env)
+    assert env["gfs"].calls == []  # nothing fanned out
+    [handoff] = env["gfs"].targeted
+    assert handoff["event_type"] == AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF
+    assert (handoff["gfs_id"], handoff["to"]) == ("gfs-1", sub_iid)
+    # Still identity-free inside: the routing target is outside the payload.
+    assert sub_iid not in json.dumps(handoff["payload"])
+    assert json.loads(
+        open_keywrap(
+            sealed=handoff["payload"]["sealed"],
+            recipient_keywrap_priv=kw_kp.private_key,
+        )
+    )["space_content_key"]
+
+
+async def test_a_new_follower_gets_one_sealed_bundle_of_the_cached_profiles(env):
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    profiles = _Profiles([_signed_profile("Erin"), _signed_profile("Noor")])
+    env["svc"].attach_author_profiles(profiles)  # type: ignore[arg-type]
+    kw_kp, sub_iid = await _subscribe(env)
+    _handoff, bundle = env["gfs"].targeted
+    assert bundle["event_type"] == AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE
+    assert bundle["to"] == sub_iid and bundle["gfs_id"] == "gfs-1"
+    envelope = bundle["payload"]
+    # Content-blind on the wire: no name, no bio, no item, no target.
+    wire = json.dumps(envelope)
+    for clear in ("Erin", "Noor", "bio", "author_sig", sub_iid):
+        assert clear not in wire
+    assert verify_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
+        space_id="sp-pub",
+        payload=strip_authority_sig_fields(envelope),
+        authority_sig=envelope["authority_sig"],
+        authority_sig_suite=envelope["authority_sig_suite"],
+        space_public_key=skp.public_key,
+    )
+    opened = json.loads(
+        open_keywrap(
+            sealed=envelope["sealed"], recipient_keywrap_priv=kw_kp.private_key
         )
     )
-    assert order == ["handoff", "follower:sp-pub"]
+    epoch, _key = await env["crypto"].export_current_key("sp-pub")
+    assert opened["epoch"] == epoch and opened["space_id"] == "sp-pub"
+    assert opened["items"] == profiles.items  # forwarded author-signed, unchanged
+    # Only items of the epoch whose key was just handed over.
+    assert profiles.asked == [("sp-pub", epoch, 50)]
+
+
+async def test_an_older_gfs_gets_the_fanned_out_handoff_and_no_bundle(env):
+    """Without a proven ``targeted_publish`` a bundle would reach every
+    subscriber — so none is sent; names follow each author's next post."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    profiles = _Profiles([_signed_profile("Erin")])
+    env["svc"].attach_author_profiles(profiles)  # type: ignore[arg-type]
+    await _subscribe(env)
+    [call] = env["gfs"].calls
+    assert call["event_type"] == AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF
+    assert env["gfs"].targeted == [] and profiles.asked == []
+
+
+async def test_a_reconnecting_follower_is_not_sent_the_bundle_again_at_once(env):
+    """The GFS re-sends ``new_subscriber`` on every reconnect of the
+    follower: the key is re-sealed, the bundle is not (for an hour)."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    env["svc"].attach_author_profiles(_Profiles([_signed_profile("Erin")]))  # type: ignore[arg-type]
+    id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
+    frame = _new_subscriber_frame(
+        "sp-pub", sub_iid, id_kp.public_key, kw_kp.public_key, keywrap_sig
+    )
+    await env["svc"].handle(frame, gfs_id="gfs-1")
+    await env["svc"].handle(frame, gfs_id="gfs-1")
+    kinds = [c["event_type"] for c in env["gfs"].targeted]
+    assert kinds == [
+        AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
+        AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
+        AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
+    ]
+
+
+async def test_a_refused_targeted_handoff_sends_no_bundle(env):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = False
+    profiles = _Profiles([_signed_profile("Erin")])
+    env["svc"].attach_author_profiles(profiles)  # type: ignore[arg-type]
+    await _subscribe(env)
+    assert [c["event_type"] for c in env["gfs"].targeted] == [
+        AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF
+    ]
+    assert env["gfs"].calls == [] and profiles.asked == []
+
+
+async def test_an_empty_cache_sends_no_bundle(env):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    env["svc"].attach_author_profiles(_Profiles([]))  # type: ignore[arg-type]
+    await _subscribe(env)
+    assert [c["event_type"] for c in env["gfs"].targeted] == [
+        AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF
+    ]
+
+
+async def test_a_large_cast_is_split_into_targeted_parts(env, monkeypatch):
+    monkeypatch.setattr(
+        "socialhome.domain.space_author_profile_bundle.BUNDLE_PART_MAX_BYTES", 400
+    )
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    items = [_signed_profile(f"Author{i}") for i in range(5)]
+    env["svc"].attach_author_profiles(_Profiles(items))  # type: ignore[arg-type]
+    kw_kp, sub_iid = await _subscribe(env)
+    bundles = [
+        c
+        for c in env["gfs"].targeted
+        if c["event_type"] == AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE
+    ]
+    assert len(bundles) > 1 and all(b["to"] == sub_iid for b in bundles)
+    got = []
+    for b in bundles:
+        part = json.loads(
+            open_keywrap(
+                sealed=b["payload"]["sealed"], recipient_keywrap_priv=kw_kp.private_key
+            )
+        )
+        assert part["parts"] == len(bundles)
+        got.extend(part["items"])
+    assert got == items
+
+
+async def test_a_flood_of_new_subscribers_is_capped_per_space(env, monkeypatch):
+    """A hostile GFS can name any registered household in ``new_subscriber``:
+    the host uploads at most so many bundles per space a minute."""
+    monkeypatch.setattr(
+        "socialhome.services.space_subscriber_key_outbound."
+        "MAX_BUNDLES_PER_SPACE_PER_MINUTE",
+        2,
+    )
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    env["svc"].attach_author_profiles(_Profiles([_signed_profile("Erin")]))  # type: ignore[arg-type]
+    for _ in range(4):
+        await _subscribe(env)
+    bundles = [
+        c
+        for c in env["gfs"].targeted
+        if c["event_type"] == AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE
+    ]
+    handoffs = [
+        c
+        for c in env["gfs"].targeted
+        if c["event_type"] == AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF
+    ]
+    assert len(bundles) == 2 and len(handoffs) == 4
+
+
+async def test_the_remembered_followers_are_pruned(env, monkeypatch):
+    monkeypatch.setattr(
+        "socialhome.services.space_subscriber_key_outbound._BUNDLED_AT_PRUNE_ABOVE",
+        1,
+    )
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    env["svc"].attach_author_profiles(_Profiles([_signed_profile("Erin")]))  # type: ignore[arg-type]
+    env["svc"]._bundled_at = {("sp-old", "x"): -1e9, ("sp-old", "y"): -1e9}
+    await _subscribe(env)
+    assert all(space == "sp-pub" for space, _t in env["svc"]._bundled_at)

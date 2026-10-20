@@ -48,6 +48,16 @@ Pipeline (fail-closed at every step):
    ``open_keywrap`` it drops it quietly. (Receivers still accept the legacy
    ``target_instance_id``-bearing shape from an older seed-holder.)
 
+**Targeted (v_61).** When the GFS that announced the subscriber proved
+``targeted_publish``, the handoff goes to that subscriber only
+(``POST /gfs/publish`` with ``to`` — the instance id the GFS itself named),
+not to every subscriber of the space; an older GFS still gets the fan-out.
+On a ``new_subscriber`` notify the host then sends the follower ONE sealed
+bundle of the space's author profiles (:meth:`_send_profiles_bundle`,
+:mod:`socialhome.domain.space_author_profile_bundle`) — the authors' own
+signed ``author_profile`` items, the follower verifying each. An older GFS
+gets no bundle: the follower learns names on each author's next post.
+
 Phase 5b-c adds the owner-offline RECONCILE (:meth:`reconcile`): on each GFS-WS
 (re)connect, a seed-holder pulls the GFS subscriber list for every local
 PUBLIC/GLOBAL space it holds the seed of + has published to that GFS, and runs
@@ -62,41 +72,64 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from collections.abc import Awaitable, Callable
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
 from ..authority_sig import (
+    AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
     AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
     sign_authority_event,
     strip_authority_sig_fields,
 )
 from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.space_author_profile_bundle import (
+    MAX_BUNDLE_AUTHORS,
+    bundle_plaintext,
+    split_bundle,
+)
 from ..federation.keywrap_seal import seal_to_keywrap, verify_keywrap_binding
 from ..services.space_crypto_service import KEY_SUITE_AESGCM_256
 
 if TYPE_CHECKING:
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
+    from ..repositories.space_author_profile_repo import (
+        AbstractSpaceAuthorProfileRepo,
+    )
     from ..repositories.space_repo import AbstractSpaceRepo
     from .gfs_connection_service import GfsConnectionService
     from .space_crypto_service import SpaceContentEncryption
 
 log = logging.getLogger(__name__)
 
+#: One profiles bundle per (space, follower) at most this often — the GFS
+#: re-sends ``new_subscriber`` on each of the follower's reconnects.
+BUNDLE_RESEND_AFTER_S: float = 3600.0
+
+#: At most this many profiles bundles per space per minute, whoever asks:
+#: a GFS can name any registered household in ``new_subscriber``, so a
+#: hostile one could otherwise make the host upload a bundle per name.
+MAX_BUNDLES_PER_SPACE_PER_MINUTE: int = 30
+
+#: Past this many remembered ``(space, follower)`` pairs, the ones older
+#: than :data:`BUNDLE_RESEND_AFTER_S` are forgotten.
+_BUNDLED_AT_PRUNE_ABOVE: int = 10_000
+
 
 class SpaceSubscriberKeyOutbound:
     """``new_subscriber`` GFS frame → sealed content-key handoff producer."""
 
     __slots__ = (
+        "_bundled_at",
         "_crypto",
         "_gfs",
         "_gfs_conn_repo",
         "_http_session",
-        "_on_follower",
         "_own_instance_id",
+        "_profiles",
         "_spaces",
     )
 
@@ -116,14 +149,16 @@ class SpaceSubscriberKeyOutbound:
         # Until attached, :meth:`reconcile` no-ops.
         self._gfs_conn_repo: AbstractGfsConnectionRepo | None = None
         self._http_session: aiohttp.ClientSession | None = None
-        #: Told about a new follower once their key is sealed (v_61 author
-        #: profile republish).
-        self._on_follower: Callable[[str], Awaitable[None]] | None = None
+        #: The cached author profiles a new follower's bundle is built from
+        #: (v_61). Until attached, no bundle is sent.
+        self._profiles: AbstractSpaceAuthorProfileRepo | None = None
+        #: ``(space_id, subscriber)`` → monotonic time of its last bundle.
+        self._bundled_at: dict[tuple[str, str], float] = {}
 
-    def attach_follower_hook(self, hook: Callable[[str], Awaitable[None]]) -> None:
-        """Called with the space id after a follower's content key was
-        sealed and relayed (``SpaceAuthorProfileOutbound.on_new_follower``)."""
-        self._on_follower = hook
+    def attach_author_profiles(self, repo: AbstractSpaceAuthorProfileRepo) -> None:
+        """Wire the author-profile cache the v_61 new-follower bundle is
+        built from."""
+        self._profiles = repo
 
     def attach_identity(self, *, own_instance_id: str) -> None:
         self._own_instance_id = own_instance_id
@@ -140,8 +175,12 @@ class SpaceSubscriberKeyOutbound:
         self._gfs_conn_repo = gfs_conn_repo
         self._http_session = http_session
 
-    async def handle(self, frame: dict[str, Any]) -> None:
-        """Handle one GFS ``new_subscriber`` frame. Never raises."""
+    async def handle(self, frame: dict[str, Any], *, gfs_id: str | None = None) -> None:
+        """Handle one GFS ``new_subscriber`` frame. Never raises.
+
+        *gfs_id* is the local connection the frame arrived on (bound per WS
+        client): the subscriber lives there, so a targeted handoff and the
+        profiles bundle go there."""
         if frame.get("type") != "new_subscriber":
             return
         space_id = str(frame.get("space_id") or "")
@@ -177,17 +216,123 @@ class SpaceSubscriberKeyOutbound:
             )
             return
 
-        await self._seal_and_relay(
+        target = str(sub.get("instance_id") or "")
+        sealed_to = await self._seal_and_relay(
             space_id=space_id,
             seed=seed,
-            target_instance_id=str(sub.get("instance_id") or ""),
+            target_instance_id=target,
             identity_pub_hex=str(sub.get("identity_public_key") or ""),
             keywrap_pub_hex=str(sub.get("keywrap_public_key") or ""),
             keywrap_sig=str(sub.get("keywrap_sig") or ""),
+            gfs_id=gfs_id,
         )
-        # After the key went out: the follower can open the profiles now.
-        if self._on_follower is not None:
-            await self._on_follower(space_id)
+        # The key reached that follower alone, so its server routes by
+        # target: now the authors' names, to the same follower only.
+        if sealed_to is not None and gfs_id is not None:
+            try:
+                await self._send_profiles_bundle(
+                    gfs_id=gfs_id,
+                    space_id=space_id,
+                    seed=seed,
+                    target_instance_id=target,
+                    keywrap_pub=sealed_to[0],
+                    epoch=sealed_to[1],
+                )
+            except Exception:
+                log.exception(
+                    "space_subscriber_key.outbound: profiles bundle failed for "
+                    "space %s",
+                    space_id,
+                )
+
+    async def _send_profiles_bundle(
+        self,
+        *,
+        gfs_id: str,
+        space_id: str,
+        seed: bytes,
+        target_instance_id: str,
+        keywrap_pub: bytes,
+        epoch: int,
+    ) -> int:
+        """Seal the space's cached, author-signed profile items to ONE new
+        follower and relay them to it alone (v_61). Returns the parts sent.
+
+        Only items of ``epoch`` (the key just handed over): the follower
+        checks each author's writer cert against it. At most one bundle per
+        ``(space, follower)`` per :data:`BUNDLE_RESEND_AFTER_S`."""
+        if self._profiles is None:
+            return 0
+        key = (space_id, target_instance_id)
+        now = time.monotonic()
+        last = self._bundled_at.get(key)
+        if last is not None and now - last < BUNDLE_RESEND_AFTER_S:
+            return 0
+        recent = sum(
+            1
+            for (space, _target), at in self._bundled_at.items()
+            if space == space_id and now - at < 60.0
+        )
+        if recent >= MAX_BUNDLES_PER_SPACE_PER_MINUTE:
+            log.warning(
+                "space_subscriber_key.outbound: %d profiles bundles for space %s "
+                "in the last minute — this follower learns names on the next "
+                "profile change instead",
+                recent,
+                space_id,
+            )
+            return 0
+        if len(self._bundled_at) > _BUNDLED_AT_PRUNE_ABOVE:
+            self._bundled_at = {
+                k: at
+                for k, at in self._bundled_at.items()
+                if now - at < BUNDLE_RESEND_AFTER_S
+            }
+        items = await self._profiles.list_signed_items(
+            space_id, epoch=epoch, limit=MAX_BUNDLE_AUTHORS
+        )
+        parts = split_bundle(items)
+        if not parts:
+            return 0
+        self._bundled_at[key] = now
+        sent = 0
+        for index, part in enumerate(parts):
+            sealed = seal_to_keywrap(
+                recipient_keywrap_pub=keywrap_pub,
+                plaintext=bundle_plaintext(
+                    space_id=space_id,
+                    epoch=epoch,
+                    part=index,
+                    parts=len(parts),
+                    items=part,
+                ),
+            )
+            envelope: dict = {"space_id": space_id, "sealed": sealed}
+            envelope.update(
+                sign_authority_event(
+                    event_type=AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
+                    space_id=space_id,
+                    payload=strip_authority_sig_fields(envelope),
+                    space_seed=seed,
+                )
+            )
+            if await self._gfs.publish_space_event_to(
+                gfs_id,
+                space_id=space_id,
+                event_type=AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
+                payload=envelope,
+                to_instance_id=target_instance_id,
+            ):
+                sent += 1
+        log.info(
+            "space_subscriber_key.outbound: sent a new follower of space %s "
+            "%d author profile(s) in %d of %d targeted part(s)",
+            space_id,
+            sum(len(p) for p in parts),
+            sent,
+            len(parts),
+        )
+        return sent
 
     async def _seal_and_relay(
         self,
@@ -198,9 +343,16 @@ class SpaceSubscriberKeyOutbound:
         identity_pub_hex: str,
         keywrap_pub_hex: str,
         keywrap_sig: str,
-    ) -> None:
+        gfs_id: str | None = None,
+    ) -> tuple[bytes, int] | None:
         """Verify the subscriber's key-wrap binding, seal the current content
         key to it, authority-sign, and relay one ``space_subscriber_key_handoff``.
+
+        With *gfs_id* (the connection the subscriber was named on) the
+        handoff goes to that subscriber alone when that server proved
+        ``targeted_publish``; then ``(keywrap_pub, epoch)`` is returned, for
+        the profiles bundle. Otherwise — no *gfs_id*, an older server — it
+        is fanned out as before and ``None`` is returned.
 
         Shared by the notify-driven :meth:`handle` and the Phase-5b-c
         :meth:`reconcile` so both run the identical anti-substitution gate +
@@ -208,7 +360,7 @@ class SpaceSubscriberKeyOutbound:
         PUBLIC/GLOBAL space and ``self._own_instance_id`` is set. Never raises —
         a per-subscriber failure is logged and swallowed."""
         if not target_instance_id or not identity_pub_hex:
-            return
+            return None
         # A subscriber that published no key-wrap key (older HFS) can't be
         # sealed-to — skip gracefully (no relay).
         if not keywrap_pub_hex or not keywrap_sig:
@@ -218,7 +370,7 @@ class SpaceSubscriberKeyOutbound:
                 target_instance_id,
                 space_id,
             )
-            return
+            return None
         try:
             identity_pub = bytes.fromhex(identity_pub_hex)
             keywrap_pub = bytes.fromhex(keywrap_pub_hex)
@@ -229,7 +381,7 @@ class SpaceSubscriberKeyOutbound:
                 target_instance_id,
                 space_id,
             )
-            return
+            return None
         # ANTI-SUBSTITUTION GATE: verify the GFS-served key-wrap pubkey is
         # genuinely bound to the subscriber identity (derive_instance_id +
         # self-sig + 32-byte) BEFORE sealing. A swapped key (e.g. a malicious
@@ -247,7 +399,7 @@ class SpaceSubscriberKeyOutbound:
                 target_instance_id,
                 space_id,
             )
-            return
+            return None
 
         exported = await self._crypto.export_current_key(space_id)
         if exported is None:
@@ -257,7 +409,7 @@ class SpaceSubscriberKeyOutbound:
                 space_id,
                 target_instance_id,
             )
-            return
+            return None
         epoch, raw_key = exported
         # Mirror the meta apply_space_content_key_from_metadata consumes (and
         # the §D1b / rekey distribution shape).
@@ -292,6 +444,18 @@ class SpaceSubscriberKeyOutbound:
         )
         envelope.update(sig)
         try:
+            if gfs_id is not None:
+                targeted = await self._gfs.publish_space_event_to(
+                    gfs_id,
+                    space_id=space_id,
+                    event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
+                    payload=envelope,
+                    to_instance_id=target_instance_id,
+                )
+                if targeted is not None:
+                    return (keywrap_pub, epoch) if targeted else None
+            # No target-capable server: every subscriber gets it (the seal
+            # is the gate), as before v_61.
             await self._gfs.publish_space_event(
                 space_id=space_id,
                 event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
@@ -303,6 +467,7 @@ class SpaceSubscriberKeyOutbound:
                 space_id,
                 target_instance_id,
             )
+        return None
 
     async def reconcile(self, gfs_id: str) -> None:
         """Owner-offline RECONCILE (Phase-5b-c). Never raises.
@@ -341,7 +506,7 @@ class SpaceSubscriberKeyOutbound:
             return
         for pub in publications:
             try:
-                await self._reconcile_space(conn.inbox_url, pub.space_id)
+                await self._reconcile_space(conn.inbox_url, pub.space_id, gfs_id)
             except Exception:
                 log.exception(
                     "space_subscriber_key.reconcile: space %s on gfs %s failed",
@@ -374,7 +539,7 @@ class SpaceSubscriberKeyOutbound:
             publications = await self._gfs_conn_repo.list_publications(gfs_id)
             if not any(pub.space_id == space_id for pub in publications):
                 return
-            await self._reconcile_space(conn.inbox_url, space_id)
+            await self._reconcile_space(conn.inbox_url, space_id, gfs_id)
         except Exception:
             log.exception(
                 "space_subscriber_key.reconcile: space %s on gfs %s failed",
@@ -405,7 +570,9 @@ class SpaceSubscriberKeyOutbound:
         for pub in publications:
             await self.reconcile_space(pub.gfs_connection_id, space_id)
 
-    async def _reconcile_space(self, gfs_base_url: str, space_id: str) -> None:
+    async def _reconcile_space(
+        self, gfs_base_url: str, space_id: str, gfs_id: str | None = None
+    ) -> None:
         """Pull + re-seal for one published space. Skips a space this household
         doesn't hold the seed for, or a non-PUBLIC/GLOBAL space (its key must
         never leave via the GFS). Only reached after :meth:`reconcile` has
@@ -470,4 +637,5 @@ class SpaceSubscriberKeyOutbound:
                 identity_pub_hex=str(sub.get("identity_public_key") or ""),
                 keywrap_pub_hex=str(sub.get("keywrap_public_key") or ""),
                 keywrap_sig=str(sub.get("keywrap_sig") or ""),
+                gfs_id=gfs_id,
             )
