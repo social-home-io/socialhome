@@ -327,7 +327,31 @@ class SyncRtcSession:
         if not candidate:
             raise ValueError("Empty ICE candidate")
         self._ice_candidates.append(candidate)
-        await self._pc.add_remote_candidate(candidate, sdp_mid)
+        # A candidate can trail the connection it was gathered for: the
+        # session already closed (requester gone, ICE timed out) and the
+        # native ICE transport with it. Adding it then is pointless, and
+        # libdatachannel answers with an ERROR line plus an RTCError that
+        # used to escape the SPACE_SYNC_ICE handler as a traceback — the
+        # same late candidate the federation PeerConnection drops at debug.
+        if (
+            self._closed
+            or self._pc.closed
+            or self._pc.state is rtc.RTCState.CLOSED
+            or self._pc.ice_state is rtc.ICEState.CLOSED
+        ):
+            log.debug(
+                "SyncRtcSession[%s]: late ICE candidate dropped — connection closed",
+                self.sync_id,
+            )
+            return
+        try:
+            await self._pc.add_remote_candidate(candidate, sdp_mid)
+        except rtc.RTCError as exc:
+            log.debug(
+                "SyncRtcSession[%s]: add_remote_candidate failed: %s",
+                self.sync_id,
+                exc,
+            )
 
     async def wait_ready(self, timeout: float = ICE_TIMEOUT_SECONDS) -> bool:
         """Block until the DataChannel is open, or *timeout* seconds elapse.

@@ -388,6 +388,18 @@ class SpaceSyncScheduler:
         """
 
         async def _task() -> None:
+            # The queue may run this well after it was enqueued: a household
+            # unpaired in between (its row purged) has no direct path left —
+            # ``send_event`` could only drop the BEGIN as an unknown
+            # instance. A member still reachable over the mesh is the mesh
+            # catch-up's to sync (``_tick_mesh_catchup``).
+            if await self._federation_repo.get_instance(peer_instance_id) is None:
+                log.debug(
+                    "space sync %s → %s skipped: no longer a paired household",
+                    space_id,
+                    peer_instance_id,
+                )
+                return
             # Debug knob — when set, the scheduler always asks for
             # HTTPS-mode (Part C) so the federation-demo harness can
             # exercise the fallback path without staging a real ICE

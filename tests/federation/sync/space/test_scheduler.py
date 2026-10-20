@@ -102,6 +102,14 @@ class _FakeFederation:
 class _FakeFedRepo:
     def __init__(self, instances):
         self._instances = instances
+        #: Ids whose row is gone (unpaired + purged) — ``get_instance``
+        #: answers ``None`` for them; any other id reads as a known peer.
+        self.gone: set[str] = set()
+
+    async def get_instance(self, instance_id):
+        if instance_id in self.gone:
+            return None
+        return SimpleNamespace(id=instance_id, status=PairingStatus.CONFIRMED)
 
     async def list_social_instances(self):
         return await self.list_instances(status="confirmed")
@@ -256,6 +264,35 @@ async def test_enqueue_sync_for_space_sends_begin(bus, queue, sync_manager):
     assert fed.sent[0]["payload"]["space_id"] == "sp-1"
     assert fed.sent[0]["payload"]["sync_mode"] == "initial"
     assert fed.sent[0]["payload"]["prefer_direct"] is True
+
+
+async def test_queued_begin_for_a_peer_unpaired_meanwhile_is_skipped(
+    bus, queue, sync_manager
+):
+    """The queue runs a task after it was enqueued. A household unpaired
+    (row purged) in between gets no BEGIN — ``send_event`` could only drop
+    it as an unknown instance at WARNING (federation demo, unpair-offline)
+    — and no pending request is recorded for it."""
+    fed = _FakeFederation()
+    fed_repo = _FakeFedRepo([])
+    fed_repo.gone.add("peer-a")
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=fed_repo,
+        space_repo=_FakeSpaceRepo(spaces_by_type={}, members_by_space={}),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    await queue.start()
+    try:
+        await sched.enqueue_sync_for_space(space_id="sp-1", peer_instance_id="peer-a")
+        await asyncio.sleep(0.05)
+    finally:
+        await queue.stop()
+    assert fed.sent == []
+    assert fed.requests == []
 
 
 class _Applied:

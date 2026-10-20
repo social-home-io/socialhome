@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -495,6 +496,37 @@ async def test_catch_up_deletions_apply_and_tombstone(stack):
         provider=HOUSE_B,
     )
     assert unseen not in [r[0] for r in await _rows(stack) if r[3] == 0]
+
+
+async def test_catch_up_deletion_a_member_cannot_vouch_for_is_one_info_line(
+    stack, caplog
+):
+    """Every co-member streams the deletions it holds, so a plain member's
+    catch-up carries tombstones of other households' messages: refused, but
+    honest relaying — one INFO summary, no per-record WARNING (seen in the
+    federation demo whenever c caught up from a)."""
+    other = chat_id("u-rb")
+    await _create(stack, other)
+    with caplog.at_level(logging.INFO, logger="socialhome"):
+        await stack.inbound.apply_sync_tombstones(
+            SP,
+            [{"id": other, "author_user_id": "u-rb"}] * 2,
+            provider=HOUSE_F,
+        )
+    assert [r[3] for r in await _rows(stack) if r[0] == other] == [0]
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    [summary] = [r for r in caplog.records if "skipped 2 of 2" in r.getMessage()]
+    assert summary.levelno == logging.INFO
+
+
+async def test_catch_up_deletion_with_an_unbound_id_still_warns(stack, caplog):
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        await stack.inbound.apply_sync_tombstones(
+            SP,
+            [{"id": chat_id("u-rb"), "author_user_id": "u-radm"}],
+            provider=HOUSE_B,
+        )
+    assert any("not bound to its author" in r.getMessage() for r in caplog.records)
 
 
 async def test_catch_up_deletions_need_a_roster_mirror(stack):
