@@ -3229,3 +3229,90 @@ async def test_first_publish_with_a_cert_stores_it(svc):
     row = await svc.get_space("sp-new")
     assert row.identity_public_key == k2_pk.hex()
     assert row.authority_cert == cert
+
+
+# ─── v_61 targeted delivery (``to``) ─────────────────────────────────────
+
+
+async def _two_subscribers(svc, space_id: str) -> bytes:
+    """``_setup_authority_relay`` plus a second subscriber ``sub-b``."""
+    space_seed, _admin = await _setup_authority_relay(svc, space_id=space_id)
+    sub_seed, sub_pk = _make_keypair()
+    await svc.register_instance("sub-b", sub_pk.hex(), auto_accept=True)
+    ts = _now_iso()
+    sig = _sign(
+        sub_seed,
+        {"action": "subscribe", "instance_id": "sub-b", "space_id": space_id, "ts": ts},
+    )
+    await svc.subscribe("sub-b", space_id, ts, sig)
+    ws = getattr(svc, "_ws_registry", None)
+    if ws is not None:
+        ws.sent.clear()  # the owner's new_subscriber notifies
+    return space_seed
+
+
+def _targeted_payload(space_seed: bytes, event_type: str, space_id: str) -> dict:
+    payload: dict = {"space_id": space_id, "sealed": {"ciphertext": "x:y"}}
+    payload.update(
+        _sign_authority_typed(
+            space_seed, event_type=event_type, space_id=space_id, payload=payload
+        )
+    )
+    return payload
+
+
+async def test_a_targeted_handoff_reaches_only_its_subscriber(gfs_db):
+    """The key handoff names its subscriber as ``to``: every other
+    subscriber of the space gets nothing (before v_61 all of them did)."""
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    seed = await _two_subscribers(svc, "sp-to")
+    payload = _targeted_payload(seed, "space_subscriber_key_handoff", "sp-to")
+    delivered = await svc.publish_event(
+        "sp-to", "space_subscriber_key_handoff", payload, to="sub-b"
+    )
+    assert delivered == ["sub-b"]
+    assert [instance for instance, _frame in ws.sent] == ["sub-b"]
+    # The pushed frame is the usual identity-free relay frame.
+    [(_inst, frame)] = ws.sent
+    assert set(frame) == {"type", "space_id", "event_type", "payload"}
+
+
+async def test_a_bundle_is_never_fanned_out(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    seed = await _two_subscribers(svc, "sp-bundle")
+    payload = _targeted_payload(seed, "space_author_profiles_bundle", "sp-bundle")
+    with pytest.raises(PermissionError):
+        await svc.publish_event("sp-bundle", "space_author_profiles_bundle", payload)
+    assert ws.sent == []
+    delivered = await svc.publish_event(
+        "sp-bundle", "space_author_profiles_bundle", payload, to="sub-a"
+    )
+    assert delivered == ["sub-a"] and [i for i, _f in ws.sent] == ["sub-a"]
+
+
+async def test_a_target_that_is_not_a_subscriber_reaches_nobody(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    seed = await _two_subscribers(svc, "sp-stranger")
+    payload = _targeted_payload(seed, "space_author_profiles_bundle", "sp-stranger")
+    delivered = await svc.publish_event(
+        "sp-stranger", "space_author_profiles_bundle", payload, to="someone-else"
+    )
+    assert delivered == [] and ws.sent == []
+
+
+async def test_a_targeted_bundle_still_needs_the_authority_signature(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    await _two_subscribers(svc, "sp-forged")
+    forged_seed, _pk = _make_keypair()
+    payload = _targeted_payload(
+        forged_seed, "space_author_profiles_bundle", "sp-forged"
+    )
+    with pytest.raises(PermissionError):
+        await svc.publish_event(
+            "sp-forged", "space_author_profiles_bundle", payload, to="sub-a"
+        )
+    assert ws.sent == []

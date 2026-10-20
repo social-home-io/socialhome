@@ -163,6 +163,12 @@ class GfsInfoView(GfsBaseView):
             # the field only to a server that proved it verifies it (an
             # older one would 403 the whole publish).
             "place_pin": True,
+            # v_61 — ``POST /gfs/publish`` takes an optional ``to`` (a
+            # subscriber of the space, as named in ``new_subscriber``) and
+            # delivers to that subscriber only. A household sends the
+            # targeted key handoff and the author-profile bundle only to a
+            # server that proved it; an older one would fan them out.
+            "targeted_publish": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         if cfg.instance_id_aliases:
@@ -430,6 +436,9 @@ class PublishView(GfsBaseView):
         # Legacy fields — tolerated, verified, never trusted (see the service).
         from_instance = str(body.get("from_instance") or "")
         signature = str(body.get("signature") or "")
+        # v_61 routing target: one subscriber of the space (optional).
+        to = body.get("to")
+        to = _require_short_str(to, "to") if to is not None else ""
         try:
             delivered = await svc.publish_event(
                 space_id,
@@ -437,6 +446,7 @@ class PublishView(GfsBaseView):
                 payload,
                 from_instance,
                 signature,
+                to=to,
             )
         except PermissionError as exc:
             # DEBUG only, and never the legacy ``from_instance``: the caller

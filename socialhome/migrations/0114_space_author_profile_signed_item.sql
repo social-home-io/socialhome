@@ -1,0 +1,35 @@
+-- 0114 — keep the author-signed item behind each cached author profile.
+-- Follows 0113 (space author profiles).
+--
+-- From v_61 the space's host answers a NEW GFS follower with ONE sealed
+-- bundle of the authors' profiles, delivered to that follower only (the GFS
+-- ``to`` routing target), instead of every household republishing its
+-- authors' profiles to every follower. The follower verifies each author's
+-- signature exactly as it does for a relayed ``author_profile`` item, so
+-- the host must forward the author-signed item itself — not its decoded
+-- columns, which nobody could verify.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path touching the data: ``space_author_profiles`` is
+--       written only by ``SpaceItemInbound._author_profile`` (verified
+--       relayed items; now also our own authors' items, which the host never
+--       receives back) and read by ``PersonSummaryService``, the
+--       ``/api/spaces/{id}/authors`` routes and whole-table backup / export
+--       / recovery dumps. The signed item exists only transiently in
+--       ``SpacePublicInbound._on_space_item`` (after decryption) and in
+--       ``SpaceAuthorProfileOutbound`` (our own authors), and nowhere else.
+--   (2) Alternatives rejected: re-signing the profiles with the space
+--       authority key (the follower could no longer tell an author's own
+--       statement from the host's; the rule is the author signs); keeping
+--       the signed items in memory (a host restart would send new
+--       followers an empty bundle until every author changes their profile
+--       or the epoch rotates); asking each author household for its items
+--       on demand (that is the per-household republish this replaces).
+--   (3) Smallest change: two NULL-defaulted columns on the existing table,
+--       no backfill (a row without them is simply left out of a bundle
+--       until its author's next profile item).
+ALTER TABLE space_author_profiles ADD COLUMN signed_item TEXT;
+-- The content-key epoch the item was received (or sent) under: a bundle
+-- carries only items of the epoch it hands the key for, since a follower
+-- checks each author's writer cert against that epoch.
+ALTER TABLE space_author_profiles ADD COLUMN item_epoch INTEGER;

@@ -140,6 +140,7 @@ class _Item:
         "author",
         "authorship",
         "cert_scope",
+        "epoch",
         "inner",
         "member",
         "origin",
@@ -159,8 +160,10 @@ class _Item:
         cert_scope: str,
         member: bool,
         authorship: SpaceAuthorship | None,
+        epoch: int | None = None,
     ) -> None:
         self.space = space
+        self.epoch = epoch
         self.inner = inner
         self.origin = origin
         self.author = str(inner.get("author_user_id") or "")
@@ -206,8 +209,10 @@ class SpaceItemInbound:
         cert_scope: str,
         member_household: bool,
         authorship: SpaceAuthorship | None,
+        epoch: int | None = None,
     ) -> bool:
-        """Apply one verified generic item. ``True`` when it changed
+        """Apply one verified generic item (``epoch``: the content-key epoch
+        it was verified under). ``True`` when it changed
         something here; every refusal is logged.
 
         Raises :class:`AwaitingParent` when the item's post (or a reply's
@@ -227,6 +232,7 @@ class SpaceItemInbound:
             cert_scope=cert_scope,
             member=member_household,
             authorship=authorship,
+            epoch=epoch,
         )
         if not item.target:
             return False
@@ -286,6 +292,10 @@ class SpaceItemInbound:
                 ts=item.stamp.astimezone(UTC).isoformat(timespec="microseconds"),
             ),
             picture_webp=picture,
+            # Kept so the host can forward it, author-signed, in a new
+            # follower's bundle (v_61).
+            signed_item=item.inner,
+            item_epoch=item.epoch,
         )
 
     # ── Shared checks ────────────────────────────────────────────────────

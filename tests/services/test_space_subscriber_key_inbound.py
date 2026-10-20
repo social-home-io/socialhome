@@ -29,6 +29,7 @@ import logging
 import pytest
 
 from socialhome.authority_sig import (
+    AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
     sign_authority_event,
     strip_authority_sig_fields,
@@ -39,6 +40,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.domain.space_author_profile_bundle import bundle_plaintext
 from socialhome.federation.keywrap_seal import seal_to_keywrap
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
@@ -455,3 +457,102 @@ async def test_old_key_handoff_refused_after_rotation(env):
         )
     )
     assert await env["crypto"].export_current_key(space_id) is None
+
+
+# ─── v_61 — a new follower's profiles bundle ─────────────────────────────
+
+
+class _Sink:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def apply_bundled_profiles(self, space_id, *, epoch, items):
+        self.calls.append((space_id, epoch, items))
+        return len(items)
+
+
+def _bundle_frame(env, space_id, *, plaintext: bytes, seed=None, kw_pub=None):
+    sealed = seal_to_keywrap(
+        recipient_keywrap_pub=kw_pub or env["kw_kp"].public_key, plaintext=plaintext
+    )
+    envelope: dict = {"space_id": space_id, "sealed": sealed}
+    envelope.update(
+        sign_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
+            space_id=space_id,
+            payload=strip_authority_sig_fields(envelope),
+            space_seed=seed or env["skp"].private_key,
+        )
+    )
+    return {
+        "type": "relay",
+        "event_type": AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
+        "space_id": space_id,
+        "payload": envelope,
+    }
+
+
+def _bundle_plain(space_id="sp-b", epoch=2, items=None) -> bytes:
+    return bundle_plaintext(
+        space_id=space_id,
+        epoch=epoch,
+        part=0,
+        parts=1,
+        items=items if items is not None else [{"item_type": "author_profile"}],
+    )
+
+
+async def test_a_bundle_sealed_to_us_goes_to_the_item_checks(env):
+    await env["mirror_space"]("sp-b", pubkey_hex=env["skp"].public_key.hex())
+    sink = _Sink()
+    env["svc"].attach_profiles_sink(sink)
+    await env["svc"].handle(_bundle_frame(env, "sp-b", plaintext=_bundle_plain()))
+    assert sink.calls == [("sp-b", 2, [{"item_type": "author_profile"}])]
+
+
+async def test_a_bundle_with_a_forged_authority_signature_is_dropped(env, caplog):
+    await env["mirror_space"]("sp-b", pubkey_hex=env["skp"].public_key.hex())
+    sink = _Sink()
+    env["svc"].attach_profiles_sink(sink)
+    forged = generate_space_keypair().private_key
+    with caplog.at_level(logging.WARNING):
+        await env["svc"].handle(
+            _bundle_frame(env, "sp-b", plaintext=_bundle_plain(), seed=forged)
+        )
+    assert sink.calls == []
+    assert "authority signature failed" in caplog.text
+
+
+async def test_a_bundle_sealed_to_someone_else_is_dropped_quietly(env, caplog):
+    await env["mirror_space"]("sp-b", pubkey_hex=env["skp"].public_key.hex())
+    sink = _Sink()
+    env["svc"].attach_profiles_sink(sink)
+    other = generate_x25519_keypair()
+    with caplog.at_level(logging.INFO):
+        await env["svc"].handle(
+            _bundle_frame(
+                env, "sp-b", plaintext=_bundle_plain(), kw_pub=other.public_key
+            )
+        )
+    assert sink.calls == []
+    assert "space_subscriber_key.inbound" not in caplog.text
+
+
+async def test_a_bundle_naming_another_space_inside_is_dropped(env):
+    await env["mirror_space"]("sp-b", pubkey_hex=env["skp"].public_key.hex())
+    sink = _Sink()
+    env["svc"].attach_profiles_sink(sink)
+    await env["svc"].handle(
+        _bundle_frame(env, "sp-b", plaintext=_bundle_plain(space_id="sp-other"))
+    )
+    await env["svc"].handle(_bundle_frame(env, "sp-b", plaintext=b"not a bundle"))
+    assert sink.calls == []
+
+
+async def test_a_bundle_for_an_unknown_space_or_without_a_sink_is_dropped(env):
+    sink = _Sink()
+    await env["svc"].handle(_bundle_frame(env, "sp-b", plaintext=_bundle_plain()))
+    env["svc"].attach_profiles_sink(sink)
+    await env["svc"].handle(_bundle_frame(env, "sp-b", plaintext=_bundle_plain()))
+    await env["svc"].handle({"event_type": "space_author_profiles_bundle"})
+    assert sink.calls == []

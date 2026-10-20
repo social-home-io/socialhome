@@ -97,6 +97,7 @@ from ..domain.space import SpaceRole
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
+    ITEM_TYPE_AUTHOR_PROFILE,
     ITEM_TYPE_POST_EDIT,
     POST_SHAPED_ITEM_TYPES,
     AuthorityRemoval,
@@ -564,102 +565,17 @@ class SpacePublicInbound:
             )
             return
         item_type, inner = parsed
-        post_shaped = item_type in POST_SHAPED_ITEM_TYPES
-        item_id = str(
-            (inner.get("post_id") if post_shaped else inner.get("item_target")) or ""
-        )
-        author_user_id = str(inner.get("author_user_id") or "")
-        origin_instance_id = str(inner.get("origin_instance_id") or "")
-        if origin_instance_id and origin_instance_id == self._own_instance_id:
-            log.debug("space_public.inbound: self-echo for item %s — dropped", item_id)
-            return
-        if not _item_author_verified(inner, post_shaped=post_shaped):
-            log.warning(
-                "space_public.inbound: author verification failed for space_item "
-                "%s in space %s",
-                item_id,
-                item.space_id,
-            )
-            return
-        if str(inner.get("space_id") or "") != item.space_id:
-            log.warning(
-                "space_public.inbound: space_item %s names another space — dropped",
-                item_id,
-            )
-            return
-        # The real type and its target are bound inside the author signature
-        # (verified above): nobody holding the content key can re-wrap a
-        # signed item as another kind of item, or point it at another row.
-        if inner.get("item_type") != item_type or (
-            post_shaped and inner.get("item_target") != item_id
-        ):
-            log.warning(
-                "space_public.inbound: space_item %s has no author-bound type — "
-                "dropped",
-                item_id,
-            )
-            return
-        if not _origin_is_author_household(inner, origin_instance_id):
-            log.warning(
-                "space_public.inbound: space_item %s names an origin that is not "
-                "the author's household — dropped",
-                item_id,
-            )
-            return
-        raw_cert = inner.get(WRITER_CERT_FIELD)
-        try:
-            inner_cert = WriterCert.from_wire(raw_cert)
-        except ValueError:
-            inner_cert = None
-        # A trusted-mode frame carries only the v1 fields (the binding never
-        # leaves the ciphertext): they must be exactly the inner cert's. A
-        # strict-mode frame (v_50) carries no cert at all — the inner one is
-        # the only one, and it gets every check below either way.
-        if inner_cert is None or (
-            item.writer_cert is not None and inner_cert.v1() != item.writer_cert
-        ):
-            log.warning(
-                "space_public.inbound: space_item %s cert differs from the frame's "
-                "— dropped",
-                item_id,
-            )
-            return
-        try:
-            author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
-        except ValueError:
-            return
-        if not await self._writer_certs.check_item(
+        verified = await self._verified_item(
             space,
-            raw_cert,
             epoch=item.epoch,
-            author_pk=author_pk,
-            required_scope=required_scope(item_type),
-        ):
-            log.warning(
-                "space_public.inbound: writer cert refused for space_item %s (%s) "
-                "in space %s — dropped",
-                item_id,
-                item_type,
-                item.space_id,
-            )
+            item_type=item_type,
+            inner=inner,
+            frame_cert=item.writer_cert,
+        )
+        if verified is None:
             return
-        # v2 user binding: the cert names the household's users that hold its
-        # scope — a member-published item requires it, and its author must
-        # be one.
-        try:
-            verify_writer_users(
-                inner_cert,
-                space_pubkey=bytes.fromhex(space.identity_public_key),
-                author_user_id=author_user_id,
-            )
-        except ValueError as exc:
-            log.warning(
-                "space_public.inbound: space_item %s author not bound by the "
-                "writer cert (%s) — dropped",
-                item_id,
-                exc,
-            )
-            return
+        inner_cert, item_id, author_user_id, origin_instance_id = verified
+        post_shaped = item_type in POST_SHAPED_ITEM_TYPES
         member_household = await self._holds_writer_seat(item.space_id)
         if not post_shaped:
             try:
@@ -671,6 +587,7 @@ class SpacePublicInbound:
                     cert_scope=inner_cert.scope,
                     member_household=member_household,
                     authorship=self._authorship,
+                    epoch=item.epoch,
                 )
             except AwaitingParent as wait:
                 # Re-run the whole frame when the parent lands: decrypt,
@@ -712,6 +629,173 @@ class SpacePublicInbound:
         await self._persist(
             item.space_id, item_id, author_user_id, origin_instance_id, inner
         )
+
+    async def _verified_item(
+        self,
+        space: Space,
+        *,
+        epoch: int,
+        item_type: str,
+        inner: dict[str, Any],
+        frame_cert: object | None,
+    ) -> tuple[WriterCert, str, str, str] | None:
+        """Every check a member-published item gets before it is applied
+        (see :meth:`_on_space_item`), shared with the v_61 new-follower
+        bundle (:meth:`apply_bundled_profiles`): ``(inner_cert, item_id,
+        author_user_id, origin_instance_id)``, or ``None`` (logged)."""
+        if self._writer_certs is None:
+            return None
+        post_shaped = item_type in POST_SHAPED_ITEM_TYPES
+        item_id = str(
+            (inner.get("post_id") if post_shaped else inner.get("item_target")) or ""
+        )
+        author_user_id = str(inner.get("author_user_id") or "")
+        origin_instance_id = str(inner.get("origin_instance_id") or "")
+        if origin_instance_id and origin_instance_id == self._own_instance_id:
+            log.debug("space_public.inbound: self-echo for item %s — dropped", item_id)
+            return None
+        if not _item_author_verified(inner, post_shaped=post_shaped):
+            log.warning(
+                "space_public.inbound: author verification failed for space_item "
+                "%s in space %s",
+                item_id,
+                space.id,
+            )
+            return None
+        if str(inner.get("space_id") or "") != space.id:
+            log.warning(
+                "space_public.inbound: space_item %s names another space — dropped",
+                item_id,
+            )
+            return None
+        # The real type and its target are bound inside the author signature
+        # (verified above): nobody holding the content key can re-wrap a
+        # signed item as another kind of item, or point it at another row.
+        if inner.get("item_type") != item_type or (
+            post_shaped and inner.get("item_target") != item_id
+        ):
+            log.warning(
+                "space_public.inbound: space_item %s has no author-bound type — "
+                "dropped",
+                item_id,
+            )
+            return None
+        if not _origin_is_author_household(inner, origin_instance_id):
+            log.warning(
+                "space_public.inbound: space_item %s names an origin that is not "
+                "the author's household — dropped",
+                item_id,
+            )
+            return None
+        raw_cert = inner.get(WRITER_CERT_FIELD)
+        try:
+            inner_cert = WriterCert.from_wire(raw_cert)
+        except ValueError:
+            inner_cert = None
+        # A trusted-mode frame carries only the v1 fields (the binding never
+        # leaves the ciphertext): they must be exactly the inner cert's. A
+        # strict-mode frame (v_50) carries no cert at all — the inner one is
+        # the only one, and it gets every check below either way.
+        if inner_cert is None or (
+            frame_cert is not None and inner_cert.v1() != frame_cert
+        ):
+            log.warning(
+                "space_public.inbound: space_item %s cert differs from the frame's "
+                "— dropped",
+                item_id,
+            )
+            return None
+        try:
+            author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
+        except ValueError:
+            return None
+        if not await self._writer_certs.check_item(
+            space,
+            raw_cert,
+            epoch=epoch,
+            author_pk=author_pk,
+            required_scope=required_scope(item_type),
+        ):
+            log.warning(
+                "space_public.inbound: writer cert refused for space_item %s (%s) "
+                "in space %s — dropped",
+                item_id,
+                item_type,
+                space.id,
+            )
+            return None
+        # v2 user binding: the cert names the household's users that hold its
+        # scope — a member-published item requires it, and its author must
+        # be one.
+        try:
+            verify_writer_users(
+                inner_cert,
+                space_pubkey=bytes.fromhex(space.identity_public_key),
+                author_user_id=author_user_id,
+            )
+        except ValueError as exc:
+            log.warning(
+                "space_public.inbound: space_item %s author not bound by the "
+                "writer cert (%s) — dropped",
+                item_id,
+                exc,
+            )
+            return None
+        return inner_cert, item_id, author_user_id, origin_instance_id
+
+    async def apply_bundled_profiles(
+        self, space_id: str, *, epoch: int, items: list[object]
+    ) -> int:
+        """Apply the author-signed ``author_profile`` items of a v_61
+        new-follower bundle (opened and authority-verified by
+        :class:`~socialhome.services.space_subscriber_key_inbound.SpaceSubscriberKeyInbound`).
+        Each one gets exactly the checks of a relayed item — author
+        signature, author-bound type, origin, writer cert at ``epoch`` with
+        a v2 user binding — and anything but a profile is refused. Returns
+        how many were stored. Never raises."""
+        space = await self._spaces.get(space_id)
+        if space is None or not space.identity_public_key or self._writer_certs is None:
+            return 0
+        stored = 0
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            if raw.get("item_type") != ITEM_TYPE_AUTHOR_PROFILE:
+                log.warning(
+                    "space_public.inbound: a follower bundle for space %s carries "
+                    "a %r item — dropped",
+                    space_id,
+                    raw.get("item_type"),
+                )
+                continue
+            try:
+                verified = await self._verified_item(
+                    space,
+                    epoch=epoch,
+                    item_type=ITEM_TYPE_AUTHOR_PROFILE,
+                    inner=raw,
+                    frame_cert=None,
+                )
+                if verified is None:
+                    continue
+                inner_cert, _id, _author, origin = verified
+                if await self._items.apply(
+                    space=space,
+                    item_type=ITEM_TYPE_AUTHOR_PROFILE,
+                    inner=raw,
+                    origin_instance_id=origin,
+                    cert_scope=inner_cert.scope,
+                    member_household=await self._holds_writer_seat(space_id),
+                    authorship=self._authorship,
+                    epoch=epoch,
+                ):
+                    stored += 1
+            except Exception:
+                log.exception(
+                    "space_public.inbound: a bundled profile for space %s failed",
+                    space_id,
+                )
+        return stored
 
     async def _apply_post_edit(
         self,

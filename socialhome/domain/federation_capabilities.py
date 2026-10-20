@@ -914,15 +914,21 @@ from __future__ import annotations
 #:   households: none below v_60, or nothing is published (followers keep
 #:   reading "Someone"). Space-scoped; labelled "Names for a space's
 #:   followers".
-#: * **v_61** (2026-10-20) — ``SPACE_FOLLOWER_JOINED``: when the GFS tells
-#:   the host a follower subscribed (``new_subscriber``, after the content
-#:   key handoff), the host republishes its own authors' profiles and sends
-#:   this content-free nudge to its member households, which republish
-#:   theirs — a new follower names a space's authors within seconds, not on
-#:   their next post. **Gated, degraded fallback**: a member household
-#:   below v_61 is not sent it; its authors' profiles reach the follower on
-#:   their next post (≤ a day later), as before. Not space-scoped, not
-#:   labelled (nothing stops working).
+#: * **v_61** (2026-10-20, redefined before release) — a new GFS follower's
+#:   **author-profile bundle**: when the GFS tells the host a follower
+#:   subscribed (``new_subscriber``), the host sends the content-key handoff
+#:   and then ONE ``space_author_profiles_bundle`` — the authors' own signed
+#:   ``author_profile`` items from its cache, sealed to the follower's
+#:   key-wrap key — both TARGETED to that follower alone (the GFS
+#:   ``targeted_publish`` capability: ``POST /gfs/publish`` with ``to``).
+#:   No federation event between households: an earlier, never-released v_61
+#:   had member households republish to every follower
+#:   (``SPACE_FOLLOWER_JOINED``, removed). **Fallback**: an older follower
+#:   ignores the unknown relay type, and an older GFS gets no bundle (and
+#:   the fanned-out handoff); either way the follower learns names on each
+#:   author's next post, as with v_60. Not space-scoped; labelled "Names for
+#:   new followers right away" — the version a household's followers code
+#:   reads bundles at.
 OURS: int = 61
 
 
@@ -1416,9 +1422,10 @@ class FederationCapability:
     #: households (followers are anonymous); space-scoped.
     MIN_FOR_SPACE_AUTHOR_PROFILE = 60
 
-    #: v_61 — ``SPACE_FOLLOWER_JOINED``: the host's nudge to republish
-    #: author profiles for a new GFS follower. Gated per member household.
-    MIN_FOR_FOLLOWER_JOINED = 61
+    #: v_61 — a new GFS follower's targeted author-profile bundle. Nothing
+    #: is gated on it between households (the bundle goes host → follower
+    #: through the GFS); it names the version that reads bundles.
+    MIN_FOR_FOLLOWER_PROFILE_BUNDLE = 61
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -1646,7 +1653,7 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         "Names for a space's followers",
     ),
     (
-        FederationCapability.MIN_FOR_FOLLOWER_JOINED,
+        FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE,
         "Names for new followers right away",
     ),
 ]
@@ -1720,7 +1727,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC: "synced_picture_resets",
     FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA: "local_communities",
     FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE: "follower_author_names",
-    FederationCapability.MIN_FOR_FOLLOWER_JOINED: "follower_names_on_join",
+    FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE: "follower_names_on_join",
 }
 
 

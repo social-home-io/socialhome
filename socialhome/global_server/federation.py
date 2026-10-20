@@ -32,6 +32,7 @@ from ..authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
     AUTHORITY_RELAY_EVENT_TYPES,
+    AUTHORITY_TARGET_ONLY_EVENT_TYPES,
     UnsupportedAuthoritySuite,
     authority_signing_bytes,
     strip_authority_sig_fields,
@@ -415,8 +416,16 @@ class GfsFederationService:
         payload: object,
         from_instance: str = "",
         signature: str = "",
+        *,
+        to: str = "",
     ) -> list[str]:
         """Relay an event to all subscribers of *space_id* — **anonymously**.
+
+        With *to* (``targeted_publish``, v_61) the event goes to that ONE
+        subscriber's socket only — the instance id this server itself named
+        in its ``new_subscriber`` notify, so it learns nothing new. A *to*
+        that is not a subscriber of the space reaches nobody. An event type
+        in ``AUTHORITY_TARGET_ONLY_EVENT_TYPES`` is refused without *to*.
 
         The canonical request body is ``{space_id, event_type, payload}``: the
         relaying identity is not part of the contract, so the GFS does not
@@ -486,6 +495,8 @@ class GfsFederationService:
         # receiving the relay, so ``withdrawn`` is deliberately not a reject.
 
         self._authorize_authority_relay(space_id, event_type, payload, existing)
+        if event_type in AUTHORITY_TARGET_ONLY_EVENT_TYPES and not to:
+            raise PermissionError(f"{event_type} is delivered to one subscriber only")
         await self._learn_epoch(space_id, event_type, payload)
 
         # Replay suppression — AFTER authorization, never before. Recording a
@@ -506,6 +517,8 @@ class GfsFederationService:
         self._seen_payloads.record(digest)
 
         subscribers = await self._repo.list_subscribers(space_id)
+        if to:
+            subscribers = [s for s in subscribers if s.instance_id == to]
 
         # Identity-free fan-out frame: routing fields only. No ``from_instance``
         # and no GFS-added target id — a subscriber learns nothing about which
@@ -523,7 +536,17 @@ class GfsFederationService:
             len(subscribers),
         )
 
-        return await self._fan_out(subscribers, event_body)
+        reached = await self._fan_out(subscribers, event_body)
+        if to:
+            # Never the target's id: what to whom is the household's business.
+            log.info(
+                "GFS: relayed targeted %s for space %s to its one subscriber "
+                "(%d reached)",
+                event_type,
+                space_id,
+                len(reached),
+            )
+        return reached
 
     async def _learn_epoch(
         self, space_id: str, event_type: str, payload: object

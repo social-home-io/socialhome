@@ -33,6 +33,12 @@ Pipeline — fail-closed, the relay and the GFS are NEVER trusted:
    :func:`apply_space_content_key_from_metadata`, which re-wraps under the
    local KEK via ``import_key`` (idempotent per epoch — a double delivery
    imports once).
+
+**The v_61 profiles bundle** (``space_author_profiles_bundle``), which the
+host sends a new follower right after the handoff, gets the same authority
+check and unseal; its author-signed ``author_profile`` items then go to
+:meth:`SpacePublicInbound.apply_bundled_profiles`, which verifies each one
+like a relayed item.
 """
 
 from __future__ import annotations
@@ -44,11 +50,13 @@ from typing import TYPE_CHECKING, Any
 from cryptography.exceptions import InvalidTag
 
 from ..authority_sig import (
+    AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
     UnsupportedAuthoritySuite,
     strip_authority_sig_fields,
     verify_authority_event,
 )
+from ..domain.space_author_profile_bundle import parse_bundle_plaintext
 from ..federation.keywrap_seal import UnsupportedKemSuite, open_keywrap
 from .space_service import apply_space_content_key_from_metadata
 
@@ -56,6 +64,7 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from .space_authority_pin import AuthorityPinRefresher
     from .space_crypto_service import SpaceContentEncryption
+    from .space_public_inbound import SpacePublicInbound
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +77,7 @@ class SpaceSubscriberKeyInbound:
         "_keywrap_private_key",
         "_own_instance_id",
         "_pin_refresher",
+        "_profiles_sink",
         "_spaces",
     )
 
@@ -82,6 +92,12 @@ class SpaceSubscriberKeyInbound:
         self._own_instance_id: str = ""
         self._keywrap_private_key: bytes = b""
         self._pin_refresher: AuthorityPinRefresher | None = None
+        self._profiles_sink: SpacePublicInbound | None = None
+
+    def attach_profiles_sink(self, inbound: SpacePublicInbound) -> None:
+        """Where an opened v_61 profiles bundle's items are verified and
+        applied. Until attached, a bundle is dropped."""
+        self._profiles_sink = inbound
 
     def attach_pin_refresher(self, refresher: AuthorityPinRefresher) -> None:
         """Wire the lazy pin heal (v_44), as on :class:`SpacePublicInbound`."""
@@ -103,6 +119,9 @@ class SpaceSubscriberKeyInbound:
         The frame carries no household identity — an outer ``from_instance``
         from an older GFS is neither read nor logged.
         """
+        if frame.get("event_type") == AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE:
+            await self._on_bundle(frame)
+            return
         if frame.get("event_type") != AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF:
             return
         envelope = frame.get("payload")
@@ -220,12 +239,77 @@ class SpaceSubscriberKeyInbound:
             space_id,
         )
 
+    async def _on_bundle(self, frame: dict[str, Any]) -> None:
+        """A v_61 profiles bundle: authority-verify, unseal, hand the items
+        on. Not ours (another key-wrap key) → dropped quietly."""
+        envelope = frame.get("payload")
+        if (
+            not isinstance(envelope, dict)
+            or self._profiles_sink is None
+            or not self._keywrap_private_key
+        ):
+            return
+        space_id = str(envelope.get("space_id") or "")
+        space = await self._spaces.get(space_id) if space_id else None
+        if space is None or not space.identity_public_key:
+            return
+        if not self._verify_authority(
+            space_id,
+            envelope,
+            space.identity_public_key,
+            event_type=AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
+        ):
+            log.warning(
+                "space_subscriber_key.inbound: profiles bundle authority "
+                "signature failed for space %s",
+                space_id,
+            )
+            return
+        sealed = envelope.get("sealed")
+        if not isinstance(sealed, dict):
+            return
+        try:
+            plaintext = open_keywrap(
+                sealed=sealed, recipient_keywrap_priv=self._keywrap_private_key
+            )
+        except (InvalidTag, UnsupportedKemSuite, ValueError) as exc:
+            log.debug(
+                "space_subscriber_key.inbound: cannot open profiles bundle for "
+                "space %s: %s",
+                space_id,
+                exc,
+            )
+            return
+        parsed = parse_bundle_plaintext(plaintext)
+        if parsed is None or parsed[0] != space_id:
+            log.warning(
+                "space_subscriber_key.inbound: malformed profiles bundle for space %s",
+                space_id,
+            )
+            return
+        _space, epoch, items = parsed
+        stored = await self._profiles_sink.apply_bundled_profiles(
+            space_id, epoch=epoch, items=items
+        )
+        log.info(
+            "space_subscriber_key.inbound: %d of %d author profile(s) from the "
+            "bundle stored for space %s",
+            stored,
+            len(items),
+            space_id,
+        )
+
     def _verify_authority(
-        self, space_id: str, envelope: dict, space_public_key_hex: str
+        self,
+        space_id: str,
+        envelope: dict,
+        space_public_key_hex: str,
+        *,
+        event_type: str = AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
     ) -> bool:
         try:
             return verify_authority_event(
-                event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
+                event_type=event_type,
                 space_id=space_id,
                 payload=strip_authority_sig_fields(envelope),
                 authority_sig=str(envelope.get("authority_sig") or ""),

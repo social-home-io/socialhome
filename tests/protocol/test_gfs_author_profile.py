@@ -220,3 +220,15 @@ async def test_a_relayed_picture_is_re_encoded_never_stored_as_sent(env, profile
         raw, picture_hash = stored
         assert raw != sent and b"<script>" not in raw
         assert picture_hash == got.picture_hash
+
+
+async def test_a_kept_profile_keeps_its_signed_item_for_a_hosts_bundle(env, profiles):
+    """0114 (v_61): the host forwards a relayed profile to a new follower
+    author-signed, so the item itself — with its writer cert and the epoch
+    it was verified under — is kept."""
+    inner = _profile(BOB)
+    cert = await _cert(env, BOB, "comment")
+    await _send(env, "author_profile", inner, cert)
+    epoch = await env["crypto"].get_current_epoch(SPACE)
+    [kept] = await profiles.list_signed_items(SPACE, epoch=epoch, limit=5)
+    assert kept == {**inner, "writer_cert": cert}

@@ -300,6 +300,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "addressee_key": True,
         # Verifies and lists a global space's optional place pin.
         "place_pin": True,
+        # v_61 — ``POST /gfs/publish`` takes ``to``: one subscriber only.
+        "targeted_publish": True,
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
         # address), so the GFS honestly does not offer it.
@@ -361,6 +363,32 @@ async def test_publish_endpoint_is_rate_limited_per_ip(gfs_client):
     else:  # pragma: no cover - limiter never fired
         pytest.fail("/gfs/publish was never rate-limited")
     assert allowed == PUBLISH_MAX_PER_MINUTE
+
+
+async def test_publish_refuses_a_malformed_target(gfs_client):
+    """``to`` must be a short string (a subscriber's instance id)."""
+    for bad in (123, "", "x" * 1000):
+        body = {
+            "space_id": "sp-to",
+            "event_type": "space_subscriber_key_handoff",
+            "payload": {},
+            "to": bad,
+        }
+        resp = await gfs_client.post("/gfs/publish", json=body)
+        assert resp.status == 400
+
+
+async def test_publish_passes_a_target_through(gfs_client):
+    """A well-formed ``to`` reaches the authorizer (an unknown space is the
+    usual uniform 403)."""
+    body = {
+        "space_id": "sp-to",
+        "event_type": "space_author_profiles_bundle",
+        "payload": {},
+        "to": "sub-a",
+    }
+    resp = await gfs_client.post("/gfs/publish", json=body)
+    assert resp.status == 403
 
 
 async def test_admin_static_index_served(gfs_client):

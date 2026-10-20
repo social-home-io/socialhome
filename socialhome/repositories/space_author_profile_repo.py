@@ -10,6 +10,7 @@ reads.
 from __future__ import annotations
 
 import builtins
+import json
 from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
@@ -26,8 +27,16 @@ _COLS = (
 @runtime_checkable
 class AbstractSpaceAuthorProfileRepo(Protocol):
     async def upsert_if_newer(
-        self, profile: SpaceAuthorProfile, *, picture_webp: bytes | None
+        self,
+        profile: SpaceAuthorProfile,
+        *,
+        picture_webp: bytes | None,
+        signed_item: dict | None = None,
+        item_epoch: int | None = None,
     ) -> bool: ...
+    async def list_signed_items(
+        self, space_id: str, *, epoch: int, limit: int
+    ) -> builtins.list[dict]: ...
     async def list_for(
         self, space_id: str, author_user_ids: Iterable[str]
     ) -> builtins.list[SpaceAuthorProfile]: ...
@@ -46,19 +55,28 @@ class SqliteSpaceAuthorProfileRepo:
         self._db = db
 
     async def upsert_if_newer(
-        self, profile: SpaceAuthorProfile, *, picture_webp: bytes | None
+        self,
+        profile: SpaceAuthorProfile,
+        *,
+        picture_webp: bytes | None,
+        signed_item: dict | None = None,
+        item_epoch: int | None = None,
     ) -> bool:
         """Store ``profile`` unless a row with a newer-or-equal ``ts`` is
-        held. ``True`` when it was stored."""
+        held. ``True`` when it was stored. ``signed_item`` is the
+        author-signed item it came from and ``item_epoch`` its content-key
+        epoch (0114 — what a new-follower bundle forwards)."""
         changed = await self._db.enqueue_rowcount(
             "INSERT INTO space_author_profiles(space_id, author_user_id, "
             "author_pk, display_name, bio, picture_webp, picture_hash, "
-            "profile_rev, ts) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "profile_rev, ts, signed_item, item_epoch) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(space_id, author_user_id) DO UPDATE SET "
             "author_pk=excluded.author_pk, display_name=excluded.display_name, "
             "bio=excluded.bio, picture_webp=excluded.picture_webp, "
             "picture_hash=excluded.picture_hash, "
-            "profile_rev=excluded.profile_rev, ts=excluded.ts "
+            "profile_rev=excluded.profile_rev, ts=excluded.ts, "
+            "signed_item=excluded.signed_item, item_epoch=excluded.item_epoch "
             "WHERE excluded.ts > space_author_profiles.ts",
             (
                 profile.space_id,
@@ -70,9 +88,34 @@ class SqliteSpaceAuthorProfileRepo:
                 profile.picture_hash,
                 profile.profile_rev,
                 profile.ts,
+                json.dumps(signed_item, separators=(",", ":"))
+                if signed_item is not None
+                else None,
+                item_epoch,
             ),
         )
         return bool(changed)
+
+    async def list_signed_items(
+        self, space_id: str, *, epoch: int, limit: int
+    ) -> builtins.list[dict]:
+        """The author-signed items held for ``space_id`` at ``epoch``, the
+        most recently stamped first, at most ``limit``."""
+        rows = await self._db.fetchall(
+            "SELECT signed_item FROM space_author_profiles "
+            "WHERE space_id=? AND item_epoch=? AND signed_item IS NOT NULL "
+            "ORDER BY ts DESC LIMIT ?",
+            (space_id, epoch, limit),
+        )
+        out: builtins.list[dict] = []
+        for row in rows:
+            try:
+                item = json.loads(row["signed_item"])
+            except ValueError:
+                continue
+            if isinstance(item, dict):
+                out.append(item)
+        return out
 
     async def list_for(
         self, space_id: str, author_user_ids: Iterable[str]
