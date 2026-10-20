@@ -49,6 +49,23 @@ describe('BackToTop', () => {
     const arg = scrollSpy.mock.calls[0][0] as ScrollToOptions
     expect(arg.top).toBe(0)
   })
+
+  it('while it shows, marks <html> so the page reserves room for it at the end', () => {
+    const root = document.documentElement
+    const scrollTo = (y: number) => act(() => {
+      Object.defineProperty(window, 'scrollY', { value: y, writable: true, configurable: true })
+      window.dispatchEvent(new Event('scroll'))
+    })
+    const { unmount } = render(<BackToTop />)
+    expect(root.classList.contains('sh-back-to-top-shown')).toBe(false)
+    scrollTo(700)
+    expect(root.classList.contains('sh-back-to-top-shown')).toBe(true)
+    scrollTo(0)
+    expect(root.classList.contains('sh-back-to-top-shown')).toBe(false)
+    scrollTo(900)
+    unmount()
+    expect(root.classList.contains('sh-back-to-top-shown')).toBe(false)
+  })
 })
 
 describe('BackToTop over a sticky save bar', () => {

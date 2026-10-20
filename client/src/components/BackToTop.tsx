@@ -18,6 +18,10 @@
  * so it never covers a Save button. Re-measured (once per animation
  * frame) on scroll, resize, and when such a bar mounts or unmounts.
  *
+ * Page end: while it shows, ``SHOWN_CLASS`` on <html> makes ``.sh-main``
+ * reserve the button's footprint at its bottom, so the last row's
+ * controls scroll clear of it instead of ending up underneath.
+ *
  * Modal layers: the button sits on the toast layer, above modals, and
  * the page behind an open dialog keeps its scroll position — so on a
  * phone it used to float over a bottom sheet's inputs (the right end of
@@ -37,6 +41,9 @@ export const STICKY_BAR_SELECTOR = '.sh-form-actions, .sh-savebar, .sh-timetable
 
 /** Open modal surfaces — the button hides while any is in the DOM. */
 export const MODAL_SELECTOR = '[aria-modal="true"], dialog[open]'
+
+/** On <html> while the button shows: the page keeps its end clear of it. */
+export const SHOWN_CLASS = 'sh-back-to-top-shown'
 
 /** Breathing room between a lifted button and the bar under it. */
 const LIFT_GAP_PX = 8
@@ -166,6 +173,18 @@ export function BackToTop() {
     wasHidden.current = modalOpen.value
     if (reappeared && visible.value) measure()
   }, [modalOpen.value])
+
+  // Past the fold the button floats over the bottom of the viewport, so
+  // the page's last row (a Join button, the Archived row) would scroll
+  // no further than under it. ``SHOWN_CLASS`` on <html> makes ``.sh-main``
+  // reserve the button's footprint at its end (app.css). It follows
+  // ``visible`` only — not a modal — so the page behind a dialog never
+  // changes height.
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    root.classList.toggle(SHOWN_CLASS, visible.value)
+    return () => root.classList.remove(SHOWN_CLASS)
+  }, [visible.value])
 
   if (!visible.value || modalOpen.value) return null
 

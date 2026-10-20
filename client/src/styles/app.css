@@ -15285,6 +15285,22 @@ a.sh-link-preview-link:focus-visible {
 @media (max-width: 768px) {
   .sh-back-to-top { bottom: calc(72px + env(safe-area-inset-bottom, 0px) + var(--sh-back-to-top-lift, 0px)); }
 }
+/* While the button shows (``SHOWN_CLASS`` on <html>, set by BackToTop),
+ * the page's end scrolls clear of it: ``.sh-main`` reserves the button's
+ * footprint — its offset from the viewport bottom, its 44 px and a gap —
+ * so the last row's controls (a Join button, the Archived row) never sit
+ * under it. Not while the keyboard is up (the button is hidden then) and
+ * not on the full-height chat / DM layouts, which own their bottom edge. */
+html.sh-back-to-top-shown:not(.sh-kbd-open):not(:has(body.sh-dm-thread-open))
+  .sh-main:not(:has(.sh-feed-host--chat, .sh-space-feed--chat)) {
+  padding-bottom: calc(var(--sh-space-md) + 44px + var(--sh-space-md) + env(safe-area-inset-bottom, 0px));
+}
+@media (max-width: 768px) {
+  html.sh-back-to-top-shown:not(.sh-kbd-open):not(:has(body.sh-dm-thread-open))
+    .sh-main:not(:has(.sh-feed-host--chat, .sh-space-feed--chat)) {
+    padding-bottom: calc(72px + 44px + var(--sh-space-md) + env(safe-area-inset-bottom, 0px));
+  }
+}
 
 /* Pull-to-refresh — host stays ``position: relative`` so the indicator
  * pill anchors to the top of the wrapped content. The wrapper does
