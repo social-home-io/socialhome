@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from socialhome.app_keys import federation_repo_key, federation_service_key
+from socialhome.auth import sha256_token_hash
 from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -889,3 +890,151 @@ async def test_household_moments_carry_no_bio(client):
     r = await client.get("/api/moments", headers=_auth(client._tok))
     [row] = [m for m in await r.json() if m["id"] == "m-amaka"]
     assert "bio" not in row["author"]
+
+
+# ── Audience gate on GET /api/moments/{id} (security) ───────────────────
+
+
+async def _moment_row(
+    client,
+    moment_id: str,
+    author: str,
+    *,
+    age_hours: float = 1,
+    expires_in_hours: float = 24 * 6,
+    hop_count: int = 1,
+) -> None:
+    await client._db.enqueue(
+        "INSERT INTO moments(id, author_user_id, content, origin_instance_id, "
+        "created_at, expires_at, hop_count) VALUES(?,?,?,?, "
+        "datetime('now', ?), datetime('now', ?), ?)",
+        (
+            moment_id,
+            author,
+            "hello",
+            "peer-o",
+            f"-{age_hours * 3600:.0f} seconds",
+            f"{expires_in_hours * 3600:+.0f} seconds",
+            hop_count,
+        ),
+    )
+
+
+async def _unknown_404(client) -> tuple[int, dict]:
+    r = await client.get("/api/moments/m-never-existed", headers=_auth(client._tok))
+    return r.status, await r.json()
+
+
+async def _get(client, moment_id: str) -> tuple[int, dict]:
+    r = await client.get(f"/api/moments/{moment_id}", headers=_auth(client._tok))
+    return r.status, await r.json()
+
+
+async def test_a_readable_moment_opens(client):
+    await _moment_row(client, "m-ok", "uid-bob")
+    status, body = await _get(client, "m-ok")
+    assert status == 200 and body["moment"]["id"] == "m-ok"
+
+
+async def test_a_blocked_authors_moment_is_the_unknown_id_404(client):
+    await _moment_row(client, "m-blocked", "uid-bob")
+    await client._db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?,?)",
+        (client._uid, "uid-bob"),
+    )
+    assert await _get(client, "m-blocked") == await _unknown_404(client)
+    status, body = await _unknown_404(client)
+    assert status == 404 and "m-never-existed" not in str(body)
+
+
+async def test_a_guardian_blocked_authors_moment_is_hidden(client):
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, child_protection_enabled)"
+        " VALUES('kid', 'uid-kid', 'Kid', 1)"
+    )
+    await client._db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES(?,?,?)",
+        ("uid-kid", client._uid, client._uid),
+    )
+    await _moment_row(client, "m-kid", "uid-kid")
+    assert await _get(client, "m-kid") == await _unknown_404(client)
+
+
+async def test_an_old_moment_opens_only_for_a_follower_or_its_author(client):
+    await _moment_row(client, "m-old", "uid-bob", age_hours=30)
+    assert await _get(client, "m-old") == await _unknown_404(client)
+    await client._db.enqueue(
+        "INSERT INTO user_follows(follower_user_id, followed_user_id) VALUES(?,?)",
+        (client._uid, "uid-bob"),
+    )
+    assert (await _get(client, "m-old"))[0] == 200
+    await _moment_row(client, "m-mine-old", client._uid, age_hours=40)
+    assert (await _get(client, "m-mine-old"))[0] == 200
+
+
+async def test_an_expired_moment_is_hidden_even_from_its_author(client):
+    await _moment_row(client, "m-gone", client._uid, expires_in_hours=-1)
+    assert await _get(client, "m-gone") == await _unknown_404(client)
+
+
+async def test_beyond_the_viewers_max_hops_is_hidden(client):
+    await client._db.enqueue(
+        "UPDATE users SET preferences_json=? WHERE user_id=?",
+        ('{"moments": {"max_hops": 1}}', client._uid),
+    )
+    await _moment_row(client, "m-far", "uid-bob", hop_count=2)
+    assert await _get(client, "m-far") == await _unknown_404(client)
+
+
+async def test_every_moment_action_for_a_non_reader_is_the_same_404(client):
+    """React, clear, delete and reply on a moment the caller can't read get
+    the unknown-id 404 and change nothing."""
+    await _moment_row(client, "m-hidden", "uid-bob")
+    await client._db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?,?)",
+        (client._uid, "uid-bob"),
+    )
+    h = _auth(client._tok)
+    expected = (await _unknown_404(client))[1]
+    for method, path, body in (
+        ("PUT", "/api/moments/m-hidden/reaction", {"emoji": "❤️"}),
+        ("DELETE", "/api/moments/m-hidden/reaction", None),
+        ("POST", "/api/moments", {"content": "re", "parent_moment_id": "m-hidden"}),
+    ):
+        r = await client.request(method, path, json=body, headers=h)
+        assert r.status == 404, (method, path)
+        assert await r.json() == expected
+    row = await client._db.fetchone(
+        "SELECT COUNT(*) AS n FROM moment_reactions WHERE moment_id='m-hidden'"
+    )
+    assert row["n"] == 0
+    replies = await client._db.fetchone(
+        "SELECT COUNT(*) AS n FROM moments WHERE parent_moment_id='m-hidden'"
+    )
+    assert replies["n"] == 0
+
+
+async def test_a_member_deletes_only_what_they_can_read_and_wrote(client):
+    """A non-admin: an unreadable moment is the unknown-id 404; a readable
+    one by someone else is 403; their own goes."""
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('eve','uid-eve','Eve')"
+    )
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("t-eve", "uid-eve", "t", sha256_token_hash("eve-tok")),
+    )
+    await client._db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?,?)",
+        ("uid-eve", "uid-bob"),
+    )
+    await _moment_row(client, "m-bob", "uid-bob")
+    await _moment_row(client, "m-admin", client._uid)
+    await _moment_row(client, "m-eve", "uid-eve")
+    eve = _auth("eve-tok")
+    expected = (await _unknown_404(client))[1]
+    r = await client.delete("/api/moments/m-bob", headers=eve)
+    assert r.status == 404 and await r.json() == expected
+    assert (await client.delete("/api/moments/m-admin", headers=eve)).status == 403
+    assert (await client.delete("/api/moments/m-eve", headers=eve)).status == 200
