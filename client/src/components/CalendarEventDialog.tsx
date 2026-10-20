@@ -17,7 +17,7 @@ import { t, isOne } from '@/i18n/i18n'
 import { announceSuppressedMessage } from '@/features/spaces/spaceAccess'
 import { currentUser } from '@/store/auth'
 import { householdUsers } from '@/store/householdUsers'
-import { resolveCalendarColor } from '@/utils/calendar'
+import { lastInclusiveMoment, resolveCalendarColor } from '@/utils/calendar'
 import { contentWrite } from '@/utils/contentWrite'
 import { refreshModerationMine } from '@/store/moderationMine'
 import {
@@ -317,7 +317,14 @@ export function openEditEventDialog(
   const tz = ev.tz || detectBrowserTz()
   eventTz.value = tz
   const startParts = utcIsoToLocalParts(ev.start, tz)
-  const endParts = utcIsoToLocalParts(ev.end, tz)
+  // An all-day end is exclusive at the boundary: the composer's 23:59 and
+  // the next midnight (a date-only or tz-less API create, an ICS import)
+  // both name the same last day — read the moment before it, the same
+  // rule the calendar views use. Never before the start (a zero-length row).
+  const endIso = ev.all_day && new Date(ev.end).getTime() > new Date(ev.start).getTime()
+    ? lastInclusiveMoment(ev.end).toISOString()
+    : ev.end
+  const endParts = utcIsoToLocalParts(endIso, tz)
   startDate.value = startParts.date
   startTime.value = startParts.time
   endDate.value = endParts.date

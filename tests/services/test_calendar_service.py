@@ -3213,3 +3213,95 @@ def test_a_reviewed_edits_capacity_is_normalised_like_update_event():
             None,  # type: ignore[arg-type]
             {"entity": "event", "target_id": "ev-1", "summary": "S", "capacity": True},
         )
+
+
+# ─── All-day events created without a tz name the day they were sent with ──
+
+
+async def test_all_day_without_tz_keeps_the_day_its_offset_names(federated_cal_env):
+    """A household on UTC (no tz chosen yet) gets an all-day "20–23 Oct"
+    from a client in +02:00 with no ``tz``. Reading the instants put it
+    on 19–23 Oct — a day early. The day as written is the day stored."""
+    env = federated_cal_env
+    cal = await env.cal_svc.create_calendar(name="Family", owner_username="anna")
+    ev = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Trip",
+        start="2026-10-20T00:00:00+02:00",
+        end="2026-10-23T23:59:00+02:00",
+        created_by="uid-anna",
+        all_day=True,
+    )
+    assert ev.tz == "UTC"
+    assert ev.start == datetime(2026, 10, 20, tzinfo=UTC)
+    assert ev.end == datetime(2026, 10, 24, tzinfo=UTC)
+
+
+async def test_all_day_without_tz_is_anchored_to_the_resolved_zone(federated_cal_env):
+    env = federated_cal_env
+    await env.db.enqueue("UPDATE users SET tz='Europe/Zurich' WHERE username='anna'")
+    cal = await env.cal_svc.create_calendar(name="Family", owner_username="anna")
+    ev = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Day off",
+        start="2026-10-29T00:00:00",
+        end="2026-10-29T23:59:59",
+        created_by="uid-anna",
+        all_day=True,
+    )
+    assert ev.tz == "Europe/Zurich"
+    # 29 Oct in Zurich — not 29 Oct 01:00 → 30 Oct 00:59 (two days).
+    assert ev.start == datetime(2026, 10, 28, 23, 0, tzinfo=UTC)
+    assert ev.end == datetime(2026, 10, 29, 23, 0, tzinfo=UTC)
+    # A PATCH without a tz follows the same rule in the event's own zone.
+    moved = await env.cal_svc.update_event(
+        ev.id, start="2026-10-30T00:00:00+00:00", end="2026-10-30T23:59:00+00:00"
+    )
+    assert moved.start == datetime(2026, 10, 29, 23, 0, tzinfo=UTC)
+    assert moved.end == datetime(2026, 10, 30, 23, 0, tzinfo=UTC)
+
+
+async def test_all_day_with_an_explicit_tz_and_timed_events_are_unchanged(
+    federated_cal_env,
+):
+    """The SPA's shape — UTC instants of local 00:00 / 23:59 plus ``tz`` —
+    and every timed event keep the instants they were sent with."""
+    env = federated_cal_env
+    cal = await env.cal_svc.create_calendar(name="Family", owner_username="anna")
+    spa = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="1 May",
+        start="2026-04-30T22:00:00.000Z",
+        end="2026-05-01T21:59:00.000Z",
+        created_by="uid-anna",
+        all_day=True,
+        tz="Europe/Zurich",
+    )
+    assert spa.start == datetime(2026, 4, 30, 22, 0, tzinfo=UTC)
+    assert spa.end == datetime(2026, 5, 1, 21, 59, tzinfo=UTC)
+    timed = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Dinner",
+        start="2026-10-20T19:00:00+02:00",
+        end="2026-10-20T21:00:00+02:00",
+        created_by="uid-anna",
+    )
+    assert timed.start == datetime(2026, 10, 20, 17, 0, tzinfo=UTC)
+
+
+async def test_space_all_day_without_tz_names_the_day_sent(space_cal_env):
+    """The schedule-poll bridge sends an all-day slot as UTC midnight →
+    23:59 with no tz; in a Zurich space that read as two days."""
+    env = space_cal_env
+    await env.db.enqueue("UPDATE spaces SET tz='Europe/Zurich' WHERE id='sp-cal'")
+    ev = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Picked slot",
+        start="2026-10-20T00:00:00+00:00",
+        end="2026-10-20T23:59:00+00:00",
+        created_by="uid-alice",
+        all_day=True,
+    )
+    assert ev.tz == "Europe/Zurich"
+    assert ev.start == datetime(2026, 10, 19, 22, 0, tzinfo=UTC)
+    assert ev.end == datetime(2026, 10, 20, 22, 0, tzinfo=UTC)
