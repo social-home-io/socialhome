@@ -18,6 +18,7 @@ import { householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
 import { spaceMembers, loadSpaceMembers } from '@/store/spaceMembers'
 import { currentUser } from '@/store/auth'
 import { t } from '@/i18n/i18n'
+import { personLabel } from '@/utils/names'
 import type { Person } from '@/components/PeoplePicker'
 import type { TaskItem } from '@/types'
 
@@ -71,7 +72,7 @@ export function spacePeople(spaceId: string, { subscribers = false } = {}): Pers
     .filter(m => subscribers || (m.role as string) !== 'subscriber')
     .map(m => ({
       user_id: m.user_id,
-      name: m.personal_alias || m.space_display_name || m.display_name || m.user_id.slice(0, 8),
+      name: personLabel(m.personal_alias, m.space_display_name, m.display_name),
       picture_url: m.picture_url,
       detail: m.instance_id ? m.household_name ?? null : null,
     }))
@@ -115,11 +116,12 @@ export function useTaskScope(): TaskScope {
   return useContext(TaskScopeContext)
 }
 
-/** "You" for the viewer, else the person's name, else a short id. */
+/** "You" for the viewer, else the person's name, else "Someone" — never
+ *  their id. */
 export function personName(people: readonly Person[], uid: string): string {
   if (currentUser.value?.user_id === uid) return t('tasks.you')
   const p = people.find(x => x.user_id === uid)
   if (p) return p.name
   const u = householdUsers.value.get(uid)
-  return u?.display_name || u?.username || uid.slice(0, 6)
+  return personLabel(u?.display_name, u?.username)
 }

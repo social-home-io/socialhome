@@ -21,11 +21,12 @@ describe('ModerationQueue', () => {
       },
     }))
     const { ModerationQueue } = await import('./ModerationQueue')
-    const { findByText } = render(<ModerationQueue spaceId="sp-1" />)
+    const { findByText, container } = render(<ModerationQueue spaceId="sp-1" />)
     expect(await findByText('Approve')).toBeTruthy()
-    // The submitter falls back to the user_id when the household
-    // roster doesn't have a display name for the user.
-    expect(await findByText(/uid-bob/)).toBeTruthy()
+    // The household roster has no name for the submitter: "Someone",
+    // never their user_id.
+    expect(await findByText(/Someone/)).toBeTruthy()
+    expect(container.textContent).not.toContain('uid-bob')
   })
 
   it('renders the empty state when the queue returns []', async () => {

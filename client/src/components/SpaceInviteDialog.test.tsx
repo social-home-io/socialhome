@@ -457,6 +457,7 @@ describe('SpaceInviteDialog — the links list', () => {
         makeRow({ token: 't1', uses_remaining: 2, created_by: 'pascal' }),
         makeRow({ token: 't2', role: 'subscriber', uses_remaining: 1 }),
       ],
+      members: [{ user_id: 'pascal', display_name: 'Pascal' }],
     })
     const { container } = await openDialog()
     await waitFor(() => {
@@ -465,7 +466,7 @@ describe('SpaceInviteDialog — the links list', () => {
     })
     const row = container.querySelector('[data-testid="invite-link-row-t1"]')!
     expect(row.textContent).toContain('2 uses left')
-    expect(row.textContent).toContain('by pascal')
+    expect(row.textContent).toContain('by Pascal')
     // A link minted with a 7-day life reads as seven days, not six —
     // the sentence must not contradict the picker that made it.
     expect(row.textContent).toContain('expires in 7 days')
@@ -501,7 +502,7 @@ describe('SpaceInviteDialog — the links list', () => {
     })
   })
 
-  it('keeps the raw id when the minter is no longer a member', async () => {
+  it('says "Someone" when the minter is no longer a member — never their id', async () => {
     mockReads({
       tokens: [makeRow({ token: 't1', created_by: 'ghost-id' })],
       members: [{ user_id: 'someone-else', display_name: 'Someone Else' }],
@@ -512,7 +513,8 @@ describe('SpaceInviteDialog — the links list', () => {
         .not.toBeNull()
     })
     expect(container.querySelector('[data-testid="invite-link-row-t1"]')!
-      .textContent).toContain('by ghost-id')
+      .textContent).toContain('by Someone')
+    expect(container.textContent).not.toContain('ghost-id')
   })
 
   it('marks a published link with a 🌐 and offers a link copy', async () => {
@@ -934,7 +936,10 @@ describe('SpaceInviteDialog — moderator links', () => {
 
   it('says the summary and row metadata in German, with singular forms', async () => {
     await setLocale('de')
-    mockReads({ tokens: [makeRow({ token: 'tg', uses_remaining: 1, uses: null })] })
+    mockReads({
+      tokens: [makeRow({ token: 'tg', uses_remaining: 1, uses: null })],
+      members: [{ user_id: 'pascal', display_name: 'Pascal' }],
+    })
     const result = await openDialog({ role: 'owner' })
     expect(result.container.textContent).toContain('In den Raum einladen')
     expect(result.container.textContent).toContain('Beitreten als')
@@ -945,7 +950,7 @@ describe('SpaceInviteDialog — moderator links', () => {
     const row = result.container.querySelector('[data-testid="invite-link-row-tg"]')!
     expect(row.textContent).toContain('noch 1 Platz')
     expect(row.textContent).toContain('läuft in 7 Tagen ab')
-    expect(row.textContent).toContain('von pascal')
+    expect(row.textContent).toContain('von Pascal')
     expect(row.textContent).toContain('Widerrufen')
     api.post.mockResolvedValueOnce(makeRow({ uses_remaining: 1, role: 'subscriber' }))
     await act(async () => {

@@ -2834,6 +2834,8 @@
   "user_actions.block_body": "No verás sus destacados, publicaciones, presencia ni su entrada en la lista de amigos, y no podréis enviaros mensajes. Puedes desbloquear cuando quieras en Ajustes → Privacidad → Cuentas bloqueadas.",
   "user_actions.block_confirm": "Bloquear",
   "person.someone": "Alguien",
+  "names.another_household": "otro hogar",
+  "names.a_gfs": "un GFS",
   "person.nickname_only_you": "apodo que solo ves tú",
   "person.status_until": "hasta las {time}",
   "person.status_badge": "Estado: {status}",

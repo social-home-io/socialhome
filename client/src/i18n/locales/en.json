@@ -3112,6 +3112,8 @@
   "user_actions.block_body": "You won't see their highlights, posts, presence, or friends-list entry, and neither of you can message the other. You can unblock anytime in Settings → Privacy → Blocked accounts.",
   "user_actions.block_confirm": "Block",
   "person.someone": "Someone",
+  "names.another_household": "another household",
+  "names.a_gfs": "a GFS",
   "person.nickname_only_you": "nickname only you see",
   "person.status_until": "until {time}",
   "person.status_badge": "Status: {status}",

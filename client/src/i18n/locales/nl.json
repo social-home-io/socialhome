@@ -2807,6 +2807,8 @@
   "user_actions.block_body": "Je ziet hun hoogtepunten, berichten, aanwezigheid en vermelding in de vriendenlijst niet meer, en jullie kunnen elkaar geen berichten sturen. Je kunt altijd deblokkeren via Instellingen → Privacy → Geblokkeerde accounts.",
   "user_actions.block_confirm": "Blokkeren",
   "person.someone": "Iemand",
+  "names.another_household": "een ander huishouden",
+  "names.a_gfs": "een GFS",
   "person.nickname_only_you": "bijnaam die alleen jij ziet",
   "person.status_until": "tot {time}",
   "person.status_badge": "Status: {status}",

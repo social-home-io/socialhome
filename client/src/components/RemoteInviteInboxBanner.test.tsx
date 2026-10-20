@@ -96,7 +96,7 @@ describe('RemoteInviteInboxBanner', () => {
     expect(banner?.textContent ?? '').not.toContain('h65qjeaa4b2x')
   })
 
-  it('falls back to a short hash when household lookup misses', async () => {
+  it('says "another household" when the household lookup misses — never the id', async () => {
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/remote_invites') return Promise.resolve([INVITE])
       if (url === '/api/friends') return Promise.resolve({ households: [] })
@@ -106,9 +106,10 @@ describe('RemoteInviteInboxBanner', () => {
     await waitFor(() => {
       const banner = container.querySelector('.sh-remote-invite-banner')
       expect(banner).not.toBeNull()
-      // Short hash form: 8 chars + ellipsis.
-      expect(banner?.textContent ?? '').toContain('h65qjeaa…')
+      expect(banner?.textContent ?? '').toContain('from another household')
     })
+    const text = container.querySelector('.sh-remote-invite-banner')?.textContent ?? ''
+    expect(text).not.toContain('h65qjeaa')
   })
 
   it('decline requires a confirm click before firing the API', async () => {

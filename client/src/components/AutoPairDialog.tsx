@@ -21,6 +21,7 @@ import { Button } from './Button'
 import { Modal } from './Modal'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
+import { householdLabel } from '@/utils/names'
 
 interface PeerOption {
   instance_id: string
@@ -64,7 +65,7 @@ export function AutoPairDialog({ onPaired }: Props) {
       const d = e.data as { instance_id?: string }
       if (d.instance_id === targetId) {
         setStep('paired')
-        showToast(t('connections.requests.paired', { name: targetName || d.instance_id }), 'success')
+        showToast(t('connections.requests.paired', { name: targetName || t('autopair.other_household') }), 'success')
         onPairedCb?.()
       }
     })
@@ -186,7 +187,7 @@ export function AutoPairDialog({ onPaired }: Props) {
             </div>
             <h3 style={{ margin: 0 }}>{t('autopair.paired_title')}</h3>
             <p class="sh-muted">
-              {t('autopair.paired_body', { name: targetName || targetId })}
+              {t('autopair.paired_body', { name: targetName || t('autopair.other_household') })}
             </p>
             <Button onClick={close}>{t('pairing.done')}</Button>
           </div>
@@ -217,5 +218,5 @@ export function AutoPairDialog({ onPaired }: Props) {
 }
 
 function peerName(id: string): string {
-  return peers.value.find(p => p.instance_id === id)?.display_name ?? id.slice(0, 8)
+  return householdLabel(peers.value.find(p => p.instance_id === id)?.display_name)
 }

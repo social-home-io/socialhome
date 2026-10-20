@@ -19,13 +19,14 @@
  */
 import { signal } from '@preact/signals'
 import { ws } from '@/ws'
-import { householdDisplayName } from '@/store/householdUsers'
+import { householdUsers } from '@/store/householdUsers'
+import { firstName, personLabel } from '@/utils/names'
 import { t } from '@/i18n/i18n'
 
 interface TypingState {
   scope: string
   /** ``user_id`` from the WS frame. We resolve this to a friendly
-   *  display name at render time via :func:`householdDisplayName` so a
+   *  display name at render time from the household cache so a
    *  late ``user.profile_updated`` (avatar change, rename) is reflected
    *  without rebroadcasting the typing event. ``sender_username`` from
    *  the frame is kept as a fallback for users not yet in the
@@ -51,7 +52,7 @@ if (typeof window !== 'undefined') {
     map.set(`${cid}|${uid}`, {
       scope: cid,
       userId: uid,
-      fallbackName: data.sender_username || uid,
+      fallbackName: personLabel(data.sender_username),
       ts: Date.now(),
     })
     typingUsers.value = map
@@ -73,7 +74,7 @@ if (typeof window !== 'undefined') {
     map.set(`${scope}|${uid}`, {
       scope,
       userId: uid,
-      fallbackName: data.sender_username || uid,
+      fallbackName: personLabel(data.sender_username),
       ts: Date.now(),
     })
     typingUsers.value = map
@@ -123,15 +124,13 @@ export function TypingIndicator({ scope, bubble }: TypingIndicatorProps) {
   const users = scope ? all.filter(s => s.scope === scope) : all
   if (users.length === 0) return null
   // Resolve friendly display names lazily so a profile rename shows up
-  // without rebroadcasting the typing frame. ``householdDisplayName``
-  // already falls back to the username, and the WS-frame
-  // ``fallbackName`` covers the cross-household case where the user
-  // isn't in the local household cache yet.
+  // without rebroadcasting the typing frame: the household cache's name
+  // or username first, then the WS-frame ``fallbackName`` (the
+  // cross-household case, a user not in the household cache) — which is
+  // the sender's username or "Someone", never their id.
   const names = users.map(s => {
-    const friendly = householdDisplayName(s.userId)
-    // ``householdDisplayName`` returns the bare user_id when the user
-    // isn't cached; prefer the WS-provided username in that case.
-    return friendly && friendly !== s.userId ? friendly : s.fallbackName
+    const u = householdUsers.value.get(s.userId)
+    return firstName(u?.display_name, u?.username) ?? s.fallbackName
   })
   const label = names.length === 1 ? t('typing.one', { name: names[0] })
     : names.length === 2 ? t('typing.two', { a: names[0], b: names[1] })

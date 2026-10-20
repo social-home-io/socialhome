@@ -24,6 +24,7 @@ import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
 import { haversineKm, bearing8, roundKm } from './_mapMath'
 import type { AvatarStatus } from './ConnAvatar'
 import { PIN_SIZE, SELF_SIZE, PeerPin, SelfPin, defaultPinStatus, pinHtml } from './MapPin'
+import { householdLabel } from '@/utils/names'
 
 const TRANSPORT_KEY: Record<Exclude<TransportState, null>, string> = {
   rtc: 'connections.transport.direct',
@@ -65,7 +66,7 @@ function _peerPopup(
   const root = document.createElement('div')
   root.className = 'sh-fed-popup'
   const name = document.createElement('strong')
-  name.textContent = peer.display_name ?? peer.instance_id
+  name.textContent = householdLabel(peer.display_name)
   root.append(name)
   const statusText = pinStatusText(peer, status)
   if (statusText) {
@@ -225,7 +226,7 @@ export default function FederationMap({
       if (peer.home_lat == null || peer.home_lon == null) continue
       const transport = (peer as { transport?: TransportState }).transport ?? null
       const status = statusOf(peer)
-      const label = [peer.display_name ?? peer.instance_id, pinStatusText(peer, status)]
+      const label = [householdLabel(peer.display_name), pinStatusText(peer, status)]
         .filter(Boolean).join(' · ')
       const distance =
         lat != null && lon != null
@@ -278,7 +279,7 @@ export default function FederationMap({
           {offMap.map((p) => (
             <div key={p.instance_id} class="sh-federation-map__footer-row">
               <span class="sh-federation-map__footer-dot" aria-hidden="true" />
-              <strong>{p.display_name ?? p.instance_id}</strong>
+              <strong>{householdLabel(p.display_name)}</strong>
               <span class="sh-muted">{t('connections.map.no_coords')}</span>
             </div>
           ))}

@@ -232,7 +232,7 @@ function PrivateGfs({ space, isRemoteSpace, onUpdate }: {
         `/api/spaces/${space.id}/gfs-servers`, { gfs_ids: ids },
       )
       const failedNames = (res?.failed ?? []).map(f =>
-        choices.current?.choices.find(c => c.id === f.gfs_id)?.display_name ?? f.gfs_id)
+        choices.current?.choices.find(c => c.id === f.gfs_id)?.display_name || t('names.a_gfs'))
       showToast(
         failedNames.length > 0
           ? t('space.private_gfs.channels_failed', { names: failedNames.join(', ') })

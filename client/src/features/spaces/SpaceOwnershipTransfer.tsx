@@ -17,6 +17,7 @@ import { confirmDialog } from '@/components/confirm'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
+import { personLabel } from '@/utils/names'
 
 interface RosterRow {
   user_id: string
@@ -43,7 +44,7 @@ export function ownerCandidates(
 }
 
 function nameOf(row: RosterRow): string {
-  return row.space_display_name || row.display_name || row.user_id
+  return personLabel(row.space_display_name, row.display_name)
 }
 
 interface Props {

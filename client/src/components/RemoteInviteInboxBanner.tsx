@@ -35,6 +35,7 @@ import { Button } from './Button'
 import { askLocationConsent, isApiCode } from './localConsent'
 import { showToast } from './Toast'
 import { isOne, t } from '@/i18n/i18n'
+import { firstName, householdLabel } from '@/utils/names'
 import {
   householdDisplayName,
   loadHouseholdUsers,
@@ -132,19 +133,16 @@ export function RemoteInviteInboxBanner({ onAccepted }: { onAccepted?: () => voi
 
   if (invites.length === 0 && localInvites.length === 0) return null
 
-  const householdLabel = (instance_id: string): string => {
+  /** The inviting household's name — the local alias wins over the
+   *  federated name (an admin renamed it locally), the Friends page's
+   *  precedence — or ``null`` on a lookup miss (the directory hasn't
+   *  synced yet, or the inviter isn't a confirmed household). */
+  const householdName = (instance_id: string): string | null => {
     const row = households.get(instance_id)
-    if (row) {
-      // local alias wins over federated name (admin renamed the
-      // household locally) — same precedence the Friends page uses.
-      const name = row.local_alias || row.display_name || row.federated_display_name
-      if (name) return name
-    }
-    // Lookup miss — peer-directory hasn't synced yet, or the inviter
-    // isn't on any confirmed household. Show a short hash so two
-    // distinct instances still look distinct.
-    return `${instance_id.slice(0, 8)}…`
+    return row ? firstName(row.local_alias, row.display_name, row.federated_display_name) : null
   }
+  /** …for display: never the instance id, "another household" instead. */
+  const inviterLabel = (instance_id: string): string => householdLabel(householdName(instance_id))
 
   const decide = async (
     invite: RemoteInvite,
@@ -160,7 +158,7 @@ export function RemoteInviteInboxBanner({ onAccepted }: { onAccepted?: () => voi
         // A local community: the accept carries our household's approximate
         // location to the inviting household — only once the person agreed.
         if (decision !== 'accept' || !isApiCode(exc, 'LOCATION_REQUIRED')) throw exc
-        if (!await askLocationConsent(householdLabel(invite.inviter_instance_id))) return
+        if (!await askLocationConsent(householdName(invite.inviter_instance_id))) return
         await api.post(
           `/api/remote_invites/${invite.invite_token}/accept`, { share_location: true },
         )
@@ -297,7 +295,7 @@ export function RemoteInviteInboxBanner({ onAccepted }: { onAccepted?: () => voi
           <div key={inv.invite_token} class="sh-remote-invite-banner__row">
             <div>
               <strong>{inv.space_display_hint || t('remote_invite.a_space')}</strong>
-              <FromLine name={householdLabel(inv.inviter_instance_id)} />
+              <FromLine name={inviterLabel(inv.inviter_instance_id)} />
             </div>
             <div class="sh-remote-invite-banner__actions">
               <Button

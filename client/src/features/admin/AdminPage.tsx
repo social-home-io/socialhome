@@ -529,7 +529,7 @@ function SpacesTab() {
             {publications.value.map((p) => (
               <tr key={`${p.space_id}-${p.gfs_id}`}>
                 <td>
-                  {p.space_emoji || ''} {p.space_name || p.space_id}
+                  {p.space_emoji || ''} {p.space_name || t('remote_invite.a_space')}
                 </td>
                 <td>
                   {p.gfs_display_name}

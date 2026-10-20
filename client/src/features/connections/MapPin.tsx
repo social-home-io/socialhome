@@ -13,6 +13,7 @@ import { t } from '@/i18n/i18n'
 import type { Connection } from '@/store/connections'
 import { ConnAvatar, type AvatarStatus } from './ConnAvatar'
 import { initialOf, isSpaceOnly, tintFor } from './model'
+import { householdLabel } from '@/utils/names'
 
 /** Pin box: the avatar is 44 px; the icon is anchored at its centre and
  *  the name chip hangs below the box. */
@@ -28,7 +29,7 @@ export function defaultPinStatus(peer: Connection): AvatarStatus | undefined {
 }
 
 export function PeerPin({ peer, status }: { peer: Connection; status?: AvatarStatus }) {
-  const name = peer.display_name || peer.instance_id
+  const name = householdLabel(peer.display_name)
   return (
     <div class="sh-conn-pin" data-status={status ?? 'none'}>
       <ConnAvatar letter={initialOf(name)} tint={tintFor(peer.instance_id)} status={status} />
