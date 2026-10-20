@@ -29,6 +29,8 @@ interface JoinRequest {
   /** Server-resolved applicant name — set for a remote applicant whose
    *  id isn't in the local roster (#698); may be null. */
   display_name?: string | null
+  /** Signed applicant picture; null with none or across a guardian block. */
+  picture_url?: string | null
   /** Non-null ('admin') when the row is a pending role elevation: the
    *  applicant is already a member (an admin/mod invite link seated them)
    *  and is waiting for the owner to approve the admin role. */
@@ -113,7 +115,7 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
         const name = r.display_name || resolveDisplayName(spaceId, r.user_id)
         return (
           <div key={r.id} class="sh-join-request">
-            <Avatar name={name} size={32} />
+            <Avatar name={name} src={r.picture_url ?? null} size={32} />
             <div class="sh-join-info">
               <strong>{name}</strong>
               {r.area_verdict === 'edge' && (

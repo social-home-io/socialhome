@@ -30,6 +30,20 @@ describe('JoinRequestList', () => {
     expect(view.getByText('Someone')).toBeTruthy()
     expect(view.container.textContent).not.toContain(RAW)
   })
+
+  it('shows the applicant picture the server signed', async () => {
+    householdUsers.value = new Map() as never
+    get.mockImplementation(async (url: string) => (url.endsWith('/join-requests')
+      ? [{
+        id: 'p1', space_id: 's3', user_id: 'ru-rita', display_name: 'Remote Rita',
+        picture_url: 'api/users/ru-rita/picture?v=1&sig=x', requested_at: '',
+      }]
+      : []))
+    const view = render(<JoinRequestList spaceId="s3" />)
+    await waitFor(() => expect(view.getByText('Remote Rita')).toBeTruthy())
+    const img = view.container.querySelector('.sh-join-request img') as HTMLImageElement | null
+    expect(img?.getAttribute('src')).toBe('api/users/ru-rita/picture?v=1&sig=x')
+  })
 })
 
 describe('JoinRequestList — local communities', () => {

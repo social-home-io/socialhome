@@ -373,3 +373,30 @@ describe('ModerationQueue — every feature (§4.3 Reviewed)', () => {
     expect(view.getByText('Only admins can approve this here — you can still reject it.')).toBeTruthy()
   })
 })
+
+describe('ContentReportsList — reporter names', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  it('names a reporter from another household from the server, else "Someone"', async () => {
+    const row = (id: string, over: Record<string, unknown>) => ({
+      id, target_type: 'post', target_id: 'p-1', reporter_user_id: `ru-${id}`,
+      reporter_instance_id: 'peer-v', category: 'spam', notes: null,
+      status: 'pending', created_at: '2026-04-18T00:00:00Z', ...over,
+    })
+    vi.doMock('@/api', () => ({
+      api: {
+        get: vi.fn(async (url: string) => (url === '/api/admin/reports'
+          ? [row('a', { reporter_name: 'Remote Rita' }), row('b', { reporter_name: null })]
+          : [])),
+        post: vi.fn(),
+      },
+    }))
+    const { ContentReportsList } = await import('./ModerationQueue')
+    const view = render(<ContentReportsList />)
+    await view.findByText(/Remote Rita/)
+    expect(view.container.textContent).toContain('Someone')
+    expect(view.container.textContent).not.toContain('ru-b')
+  })
+})
