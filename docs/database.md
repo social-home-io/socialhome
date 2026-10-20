@@ -189,6 +189,7 @@ themselves moments and link to the conversation root via
 | `user_follows` | Voluntary adult-to-adult follow. PK on `(follower_user_id, followed_user_id)`. Used by `list_visible_to` to extend the visibility window from 24 h to 7 d for the followed author's moments. |
 | `household_instance_bans` | Operator-managed list of remote instances banned at the household level (§Momentum-relay-policy). Inbound envelopes from a banned instance are dropped at ingress; the relay-out path also skips banned sources. Distinct from per-user `user_blocks`, which stay private to the social layer. |
 | `moment_public_registrations` | Per-`(user_id, gfs_id)` opt-in to fan moments through a GFS (§Momentum-public). `default_share` flips whether the composer pre-checks "Public via GFS"; `last_picture_digest` is the avatar hash last successfully pushed to that GFS so the profile-sync flow can skip redundant uploads. |
+| `moment_public_follows` | Follower side of §Momentum-public: one row per `(follower_user_id, followed_user_id, gfs_id)`. `followed_instance_pk` verifies every envelope the GFS forwards; `followed_display_name` (`''` when the author has no name — never their id), `followed_bio` and `followed_picture_digest` (0112, NULL until known) are the author's public profile, filled from the GFS directory at follow time and refreshed from every newly seen signed moment envelope, so their moments show a name, bio and GFS-mirrored picture instead of "Someone". |
 
 ## Notifications and push
 

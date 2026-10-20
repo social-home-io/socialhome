@@ -23,6 +23,7 @@ import aiohttp
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
 from ..domain.events import MomentCreated, MomentDeleted
+from ..domain.moment_public import public_author_bio
 from ..infrastructure.event_bus import EventBus
 from .protection_gate import ProtectionGateMixin
 
@@ -69,9 +70,9 @@ class MomentPublicOutbound(ProtectionGateMixin):
         self._http_client = http_client
         self._signing_key: bytes | None = None
         self._own_instance_id: str = ""
-        # Cached set of locally-hosted user_ids; refreshed on every
-        # subscribe + after each successful event so we don't fan out
-        # for events whose author lives on another instance.
+        # Cached set of locally-hosted user_ids, re-read on a miss (a user
+        # added since) so we don't fan out for events whose author lives
+        # on another instance.
         self._own_users: set[str] | None = None
         self._child_protection = None
 
@@ -120,6 +121,9 @@ class MomentPublicOutbound(ProtectionGateMixin):
             "author_user_id": moment.author_user_id,
             "author_username": author.username,
             "author_display_name": author.display_name,
+            # The bio the author published in the GFS directory — never
+            # longer than a directory holds.
+            "author_bio": public_author_bio(author.bio),
             "content": moment.content,
             "media_url": moment.media_url,
             "media_type": moment.media_type,
@@ -134,8 +138,18 @@ class MomentPublicOutbound(ProtectionGateMixin):
             "created_at": moment.created_at,
             "expires_at": moment.expires_at,
         }
-        signed = self._sign_envelope(envelope)
         for reg in regs:
+            # Per GFS: the author's current picture, and only when THAT
+            # server mirrors it — a follower's proxy fetch there returns
+            # exactly these bytes, the server learns nothing it does not
+            # already hold, and a removed picture is not shown.
+            digest = (
+                author.picture_hash
+                if author.picture_hash
+                and author.picture_hash == reg.last_picture_digest
+                else None
+            )
+            signed = self._sign_envelope({**envelope, "author_picture_digest": digest})
             await self._post_to_gfs(reg.gfs_id, signed, kind="publish")
 
     async def _on_deleted(self, event: MomentDeleted) -> None:
@@ -156,9 +170,12 @@ class MomentPublicOutbound(ProtectionGateMixin):
     # ── Helpers ─────────────────────────────────────────────────────────
 
     async def _is_local(self, user_id: str) -> bool:
-        if self._own_users is None:
-            users = await self._users.list_all()
-            self._own_users = {u.user_id for u in users}
+        if self._own_users is not None and user_id in self._own_users:
+            return True
+        # Not cached (first call, or a user added since): read once more,
+        # so a newly provisioned member's public moments are published.
+        users = await self._users.list_all()
+        self._own_users = {u.user_id for u in users}
         return user_id in self._own_users
 
     async def _post_to_gfs(self, gfs_id: str, signed: dict, *, kind: str) -> None:

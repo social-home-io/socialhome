@@ -51,4 +51,46 @@ describe('MomentumDetailPage authors', () => {
       [...container.querySelectorAll('img')].map(i => i.getAttribute('src')),
     ).toContain('api/users/ru-amaka/picture?v=1&sig=s')
   })
+
+  it('shows a GFS-followed author\'s name, picture and public bio', async () => {
+    const detail: MomentDetail = {
+      moment: moment('m-amaka', 'u-gfs-noor', {
+        received_via: 'gfs',
+        received_via_gfs_id: 'g1',
+        author: {
+          display_name: 'Noor Haddad',
+          picture_url: 'api/gfs/g1/moments/users/u-gfs-noor/picture?v=0123&sig=s',
+          household: null,
+          bio: 'Beekeeper. Posts the bees.',
+        },
+      }),
+      replies: [],
+      reactions: [],
+    }
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments/m-amaka' ? detail : [])
+    const { container } = render(<MomentumDetailPage />)
+    await waitFor(() => expect(container.textContent).toContain('Noor Haddad'))
+    expect(
+      container.querySelector('[data-testid="moment-author-bio"]')?.textContent,
+    ).toBe('Beekeeper. Posts the bees.')
+    expect(
+      [...container.querySelectorAll('img')].map(i => i.getAttribute('src')),
+    ).toContain('api/gfs/g1/moments/users/u-gfs-noor/picture?v=0123&sig=s')
+  })
+
+  it('shows no bio line for a household author', async () => {
+    const detail: MomentDetail = {
+      moment: moment('m-amaka', 'ru-amaka', {
+        author: { display_name: 'Amaka Okafor', picture_url: null },
+      }),
+      replies: [],
+      reactions: [],
+    }
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments/m-amaka' ? detail : [])
+    const { container } = render(<MomentumDetailPage />)
+    await waitFor(() => expect(container.textContent).toContain('Amaka Okafor'))
+    expect(container.querySelector('[data-testid="moment-author-bio"]')).toBeNull()
+  })
 })

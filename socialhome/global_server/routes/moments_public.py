@@ -159,6 +159,10 @@ class GfsUserFollowView(GfsBaseView):
                     "username": target.username,
                     "display_name": target.display_name,
                     "picture_url": target.picture_url,
+                    # The same public directory fields
+                    # ``GET /gfs/moments/users/{id}`` serves anyone.
+                    "picture_digest": target.picture_digest,
+                    "bio": target.bio,
                     "home_instance_pk": target.home_instance_pk,
                     "instance_id": target.instance_id,
                 },
@@ -197,7 +201,7 @@ class GfsMomentPublicPublishView(GfsBaseView):
     """``POST /gfs/moments/publish`` — fan a signed moment to followers."""
 
     async def post(self) -> web.Response:
-        result = await _rtc_authenticate(self)
+        result = await _rtc_authenticate(self, keep_signature=True)
         if isinstance(result, web.Response):
             return result
         body, _sender = result
@@ -210,7 +214,7 @@ class GfsMomentPublicDeleteView(GfsBaseView):
     """``POST /gfs/moments/delete`` — fan a tombstone."""
 
     async def post(self) -> web.Response:
-        result = await _rtc_authenticate(self)
+        result = await _rtc_authenticate(self, keep_signature=True)
         if isinstance(result, web.Response):
             return result
         body, _sender = result

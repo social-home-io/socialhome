@@ -18,7 +18,7 @@ group handlers by REST resource.  ``BaseView`` provides:
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from aiohttp import web
@@ -202,19 +202,27 @@ class BaseView(web.View):
         return await cp.guardian_block_counterparts(ctx.user_id)
 
     async def named_people(
-        self, user_ids: Iterable[str], *, space_id: str | None = None
+        self,
+        user_ids: Iterable[str],
+        *,
+        space_id: str | None = None,
+        gfs_via: Mapping[str, str] | None = None,
     ) -> dict[str, PersonSummary]:
         """Who each of ``user_ids`` is, as the caller may see them.
 
         Their name this household holds — with ``space_id``, the per-space
-        name first and the space's roster seat last — and ``None`` for an id
-        nobody here knows, never the id. The picture is withheld across a
-        guardian block (§CP.F2) and unsigned: sign the payload it goes in.
-        Blank ids are skipped.
+        name first and the space's roster seat last; with ``gfs_via``
+        (author → GFS id), the public profile of an author followed only
+        through that GFS — and ``None`` for an id nobody here knows, never
+        the id. The picture is withheld across a guardian block (§CP.F2)
+        and unsigned: sign the payload it goes in. Blank ids are skipped.
         """
         people = self.svc(person_summary_service_key)
         return await people.summarize(
-            self.user.user_id, {u for u in user_ids if u}, space_id=space_id
+            self.user.user_id,
+            {u for u in user_ids if u},
+            space_id=space_id,
+            gfs_via=gfs_via,
         )
 
     async def with_people(

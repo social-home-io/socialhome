@@ -534,14 +534,21 @@ class PersonSummary:
     personal_alias: str | None
     picture_url: str | None
     household: str | None
+    #: The public bio of someone known only through a public surface (a
+    #: GFS-followed author). ``None`` — and left out of :meth:`to_dict` —
+    #: for everyone else: a household friend's bio is on the person sheet.
+    bio: str | None = None
 
     def to_dict(self) -> dict[str, str | None]:
-        return {
+        out = {
             "display_name": self.display_name,
             "personal_alias": self.personal_alias,
             "picture_url": self.picture_url,
             "household": self.household,
         }
+        if self.bio is not None:
+            out["bio"] = self.bio
+        return out
 
 
 def _picture_url(user_id: str, picture_hash: str | None) -> str | None:

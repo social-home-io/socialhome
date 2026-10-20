@@ -58,4 +58,25 @@ describe('MomentumInboxTab authors', () => {
     // Only Amaka's picture: the guardian-blocked kid's is withheld.
     expect(pictures).toEqual(['api/users/ru-amaka/picture?v=1&sig=s'])
   })
+
+  it('names a GFS-followed author and labels the row as arriving via GFS', async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments'
+        ? [moment('m-noor', 'u-gfs-noor', {
+            received_via: 'gfs',
+            received_via_gfs_id: 'g1',
+            author: {
+              display_name: 'Noor Haddad',
+              picture_url: 'api/gfs/g1/moments/users/u-gfs-noor/picture?v=0123&sig=s',
+              household: null,
+              bio: 'Beekeeper.',
+            },
+          })]
+        : [])
+    const { container } = render(<MomentumInboxTab />)
+    await waitFor(() => expect(container.textContent).toContain('Noor Haddad'))
+    expect(container.querySelector('.sh-momentum-row-via-gfs')?.textContent)
+      .toContain('via GFS')
+    expect(container.textContent).not.toContain('u-gfs-noor')
+  })
 })

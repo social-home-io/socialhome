@@ -9602,6 +9602,35 @@ def cmd_verify() -> None:
         else:
             print(f"  {_what} id is bound to its creator (v_36) ✓")
 
+    # 13z. ``gfs-moment-profile``: e (paired with nobody) still names a's
+    #      user on the public moment by name and bio, never the id — and its
+    #      follow row still holds the signed profile. Opt-in.
+    gmp = state.get("gfs_moment_profile")
+    if gmp:
+        e = state["instances"]["e"]
+        s, body = _request(
+            f"http://127.0.0.1:{e['port']}/api/moments/{gmp['moment_id']}",
+            token=e["token"],
+        )
+        author = (body or {}).get("moment", {}).get("author") if s == 200 else None
+        if not author:
+            failures.append(f"e: public moment {gmp['moment_id']} gone (HTTP {s})")
+        elif (author.get("display_name"), author.get("bio")) != (
+            gmp["display_name"],
+            gmp["bio"],
+        ):
+            failures.append(f"e: public moment author drifted to {author!r}")
+        else:
+            print("  e names the GFS-followed author with name + bio ✓")
+        rows = _rows(
+            "e",
+            "SELECT followed_display_name, followed_bio, followed_picture_digest"
+            " FROM moment_public_follows WHERE followed_user_id = ?",
+            (gmp["user_id"],),
+        )
+        if not rows or rows[0][0] != gmp["display_name"] or not rows[0][2]:
+            failures.append(f"e: moment_public_follows profile is {rows!r}")
+
     # 14. Log audit — scan each backend's stdout/stderr for unhandled
     #    exceptions, ERROR-level lines, federation-pipeline rejects.
     #    Anything we can't account for (i.e. doesn't match the
@@ -15789,6 +15818,160 @@ def _lc_pending(host: str, space_id: str, user_id: str) -> list[tuple]:
     )
 
 
+def cmd_gfs_moment_profile() -> None:
+    """A public moment from a stranger reads by name, picture and bio.
+
+    Prereqs: ``up`` + ``pair`` + ``gfs-up`` + ``gfs-pair`` (a and e on the
+    GFS; e is paired with nobody). a new user on a (Noor) uploads a picture and
+    registers for public moments on the GFS (the directory gets the name, bio and
+    picture); e's user follows them there; Noor posts a public moment.
+
+    Asserts on e, which knows a's user ONLY through the GFS:
+
+    * ``GET /api/moments/{id}`` names the author with a's display name and
+      bio — never "Someone", never the id — and a picture served by e's own
+      proxy (``api/gfs/{gfs_id}/moments/users/{user_id}/picture``), which
+      returns the image bytes;
+    * e's follow row holds the profile the signed envelope carried.
+
+    And the GFS learned nothing new: its directory row already held this
+    bio and the picture whose digest the envelope names.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'up' + 'pair' + 'gfs-up' + 'gfs-pair' first")
+    a = state["instances"]["a"]
+    e = state["instances"]["e"]
+    a_url = f"http://127.0.0.1:{a['port']}"
+    e_url = f"http://127.0.0.1:{e['port']}"
+    a_gfs = state["gfs"]["pairings"]["a"]["id"]
+    e_gfs = state["gfs"]["pairings"]["e"]["id"]
+    _wait_for_gfs_ws(e["instance_id"])
+
+    # A user of its own on a: its first moment is never rate limited (one
+    # per 15 min per author), and a's own user stays as earlier steps left it.
+    name, bio = "Noor Haddad", "Beekeeper on a rooftop. Mostly bees."
+    s, prov = _request(
+        f"{a_url}/api/admin/users",
+        token=a["token"],
+        method="POST",
+        body={
+            "username": "noor",
+            "password": "harness-pwd-noor",
+            "display_name": name,
+            "is_admin": False,
+        },
+    )
+    if s not in (201, 409):
+        _must("gfs-moment-profile: provision noor(a)", s, prov, ok=(201,))
+    s, login = _request(
+        f"{a_url}/api/auth/token",
+        method="POST",
+        body={"username": "noor", "password": "harness-pwd-noor"},
+    )
+    _must("gfs-moment-profile: noor login(a)", s, login)
+    tok = login["token"]
+    s, me = _request(
+        f"{a_url}/api/me",
+        token=tok,
+        method="PATCH",
+        body={"display_name": name, "bio": bio},
+    )
+    _must("gfs-moment-profile: noor profile", s, me)
+    author_uid = me["user_id"]
+    s, pic = _upload_file(
+        f"{a_url}/api/me/picture",
+        token=tok,
+        filename="noor.webp",
+        content=_make_demo_webp(),
+        content_type="image/webp",
+    )
+    _must("gfs-moment-profile: noor picture", s, pic)
+    s, reg = _request(
+        f"{a_url}/api/moments/public/registrations",
+        token=tok,
+        method="POST",
+        body={"gfs_id": a_gfs, "default_share": True},
+    )
+    _must("gfs-moment-profile: noor register", s, reg, ok=(201,))
+    s, fol = _request(
+        f"{e_url}/api/moments/public/follows",
+        token=e["token"],
+        method="POST",
+        body={"gfs_id": e_gfs, "followed_user_id": author_uid},
+    )
+    _must("gfs-moment-profile: e follow", s, fol, ok=(201,))
+
+    content = f"🐝 public moment from {a['name']} {int(time.time())}"
+    s, m = _request(
+        f"{a_url}/api/moments",
+        token=tok,
+        method="POST",
+        body={"content": content, "is_public": True},
+    )
+    _must("gfs-moment-profile: noor public moment", s, m, ok=(201,))
+    moment_id = m["id"]
+
+    author: dict = {}
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        s, body = _request(f"{e_url}/api/moments/{moment_id}", token=e["token"])
+        if s == 200:
+            author = body["moment"].get("author") or {}
+            if author.get("display_name"):
+                break
+        time.sleep(2)
+    else:
+        raise SystemExit(
+            f"gfs-moment-profile: e never named the author of {moment_id} "
+            f"(last HTTP {s}, author={author!r})"
+        )
+    if author.get("display_name") != name:
+        raise SystemExit(
+            f"gfs-moment-profile: e names a's user {author!r}, expected {name!r}"
+        )
+    if author.get("bio") != bio:
+        raise SystemExit(
+            f"gfs-moment-profile: e shows bio {author.get('bio')!r}, expected {bio!r}"
+        )
+    picture = author.get("picture_url") or ""
+    if not picture.startswith(f"api/gfs/{e_gfs}/moments/users/{author_uid}/picture?v="):
+        raise SystemExit(f"gfs-moment-profile: e's picture URL is {picture!r}")
+    if author_uid in (author.get("display_name") or ""):
+        raise SystemExit("gfs-moment-profile: the author's id shows as their name")
+    s, raw = _http_get_bytes(f"{e_url}/{picture}")
+    if s != 200 or not raw.startswith(b"RIFF"):
+        raise SystemExit(
+            f"gfs-moment-profile: e's picture proxy → HTTP {s} ({raw[:16]!r})"
+        )
+
+    rows = _gfs_rows(
+        "SELECT bio, picture_digest FROM gfs_user_registrations WHERE user_id = ?",
+        (author_uid,),
+    )
+    if (
+        not rows
+        or rows[0][0] != bio
+        or not (rows[0][1] or "").startswith(picture.split("?v=")[1].split("&")[0])
+    ):
+        raise SystemExit(
+            f"gfs-moment-profile: the GFS directory row {rows!r} does not already "
+            "hold the bio + picture the envelope carried"
+        )
+    state["gfs_moment_profile"] = {
+        "moment_id": moment_id,
+        "user_id": author_uid,
+        "display_name": name,
+        "bio": bio,
+        "gfs_id": e_gfs,
+    }
+    _save(state)
+    print(
+        f"gfs-moment-profile: ok (e names {name!r} with bio + GFS-mirrored "
+        "picture; the GFS directory already held both)"
+    )
+
+
 def cmd_local_community() -> None:
     """A local community on the real wire (#1057): who gets in, and that the
     ~1 km point a join carries is sealed end to end and never stored.
@@ -16309,6 +16492,10 @@ def main() -> None:
         cmd_gfs_up()
         cmd_gfs_pair()
         cmd_local_community()
+        # ``gfs-moment-profile``: e (paired with nobody) follows a's user's
+        # public moments through the GFS and sees them by name, picture
+        # and bio — from the directory and the signed envelope.
+        cmd_gfs_moment_profile()
         # The closing check: every step's state still holds, and the log
         # audit is clean — offline steps' lines only inside their windows.
         cmd_verify()

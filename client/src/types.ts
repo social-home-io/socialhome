@@ -48,6 +48,9 @@ export interface PersonSummary {
   personal_alias?: string | null
   picture_url?:    string | null
   household?:      string | null
+  /** Public bio of someone known only through a public surface — an
+   *  author followed through a GFS. Absent for everyone else. */
+  bio?:            string | null
 }
 
 export interface UserStatus {

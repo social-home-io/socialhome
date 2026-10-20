@@ -8,11 +8,14 @@ when an author the local user follows posts or deletes. This handler:
    ``followed_instance_pk`` for the (viewer, author, gfs) triple in
    :class:`MomentPublicFollow`. A bad signature is dropped silently
    (with a warning) — we never persist unauthenticated content.
-2. Persists the moment with ``received_via='gfs'`` and
+2. Refreshes the author's public profile (name, bio, picture digest)
+   on every local follow of them through that GFS — the envelope is
+   signed by the author's household, so a GFS cannot rename anyone.
+3. Persists the moment with ``received_via='gfs'`` and
    ``received_via_gfs_id={gfs_id}`` so the inbox can render the chip
    AND so the federation outbound's relay path will skip it (no
    redistribute rule).
-3. Re-publishes :class:`MomentCreated` on the bus so the existing
+4. Re-publishes :class:`MomentCreated` on the bus so the existing
    realtime + notification surfaces light up exactly as for a
    household-relayed moment.
 """
@@ -27,6 +30,12 @@ from typing import TYPE_CHECKING, Any
 from ..crypto import b64url_decode, verify_ed25519
 from ..domain.events import MomentCreated, MomentDeleted
 from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
+from ..domain.moment_public import (
+    MomentPublicFollow,
+    public_author_bio,
+    public_author_name,
+    public_picture_digest,
+)
 from ..federation.owner_bound_id import MOMENT_KIND, owner_bound_id_refused
 from ..infrastructure.event_bus import EventBus
 from .inbound_media_store import verbatim_local_media_ref
@@ -66,7 +75,8 @@ class MomentPublicInbound:
             log.debug("moment_public.inbound: ignoring frame type=%r", ftype)
 
     async def _on_create(self, env: dict, *, gfs_id: str) -> None:
-        if not _verify(env, await self._lookup_pk(env, gfs_id=gfs_id)):
+        follow = await self._follow_of(env, gfs_id=gfs_id)
+        if not _verify(env, follow.followed_instance_pk if follow else None):
             log.warning(
                 "moment_public.inbound: signature failed moment=%s author=%s",
                 env.get("moment_id"),
@@ -92,6 +102,20 @@ class MomentPublicInbound:
                 env.get("moment_id"),
             )
             return
+        parent_id = env.get("parent_moment_id")
+        if parent_id and await self._moments.get(str(parent_id)) is None:
+            # A public reply to a moment this household never received (it
+            # was not public, or arrived before the follow): out of context,
+            # and the row's parent reference could not be stored anyway.
+            log.info(
+                "moment_public.inbound: reply %s to a moment not held here — dropped",
+                env.get("moment_id"),
+            )
+            return
+        if stored is None and follow is not None:
+            # Only a moment we have not seen refreshes the profile, so a
+            # replay of an old envelope cannot roll a newer one back.
+            await self._refresh_profile(env, follow, gfs_id=gfs_id)
         media_url = verbatim_local_media_ref(env.get("media_url"))
         moment = Moment(
             id=str(env["moment_id"]),
@@ -181,6 +205,10 @@ class MomentPublicInbound:
         )
 
     async def _lookup_pk(self, env: dict, *, gfs_id: str) -> str | None:
+        follow = await self._follow_of(env, gfs_id=gfs_id)
+        return follow.followed_instance_pk if follow else None
+
+    async def _follow_of(self, env: dict, *, gfs_id: str) -> MomentPublicFollow | None:
         author = str(env.get("author_user_id") or "")
         if not author:
             return None
@@ -188,8 +216,44 @@ class MomentPublicInbound:
         # find the first row that matches on (followed=author, gfs=gfs_id).
         for row in await self._follows.followers_of(author):
             if row.gfs_id == gfs_id:
-                return row.followed_instance_pk
+                return row
         return None
+
+    async def _refresh_profile(
+        self, env: dict, follow: MomentPublicFollow, *, gfs_id: str
+    ) -> None:
+        """Take the author's name, bio and picture digest from a verified
+        envelope. An author on an older build sends no bio / picture
+        keys — then the ones the follow already holds stay."""
+        author = follow.followed_user_id
+        name = (
+            public_author_name(env.get("author_display_name"), user_id=author)
+            or public_author_name(env.get("author_username"), user_id=author)
+            or follow.followed_display_name
+        )
+        bio = (
+            public_author_bio(env.get("author_bio"))
+            if "author_bio" in env
+            else follow.followed_bio
+        )
+        digest = (
+            public_picture_digest(env.get("author_picture_digest"))
+            if "author_picture_digest" in env
+            else follow.followed_picture_digest
+        )
+        if (name, bio, digest) == (
+            follow.followed_display_name,
+            follow.followed_bio,
+            follow.followed_picture_digest,
+        ):
+            return
+        await self._follows.set_profile(
+            followed_user_id=author,
+            gfs_id=gfs_id,
+            display_name=name,
+            bio=bio,
+            picture_digest=digest,
+        )
 
 
 def _row_binds(
