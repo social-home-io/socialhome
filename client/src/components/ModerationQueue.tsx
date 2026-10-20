@@ -645,6 +645,8 @@ interface ReportRow {
   target_type: string
   target_id: string
   reporter_user_id: string
+  /** The reporter's name as the server holds it; null when unknown. */
+  reporter_name?: string | null
   reporter_instance_id: string | null
   category: string
   notes: string | null
@@ -717,7 +719,9 @@ export function ContentReportsList() {
             default:               return c
           }
         })(r.category)
-        const reporterName = householdDisplayName(r.reporter_user_id)
+        // The server's name (a reporter from another household too), else
+        // this household's roster, else "Someone" — never the id.
+        const reporterName = r.reporter_name || householdDisplayName(r.reporter_user_id)
         return (
           <div key={r.id} class="sh-report-row">
             <div class="sh-report-meta">

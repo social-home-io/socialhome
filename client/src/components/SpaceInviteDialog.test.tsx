@@ -502,6 +502,20 @@ describe('SpaceInviteDialog — the links list', () => {
     })
   })
 
+  it('names a minter who left by the name the server resolved', async () => {
+    mockReads({
+      tokens: [makeRow({
+        token: 't1', created_by: 'ru-gone-admin', created_by_name: 'Remote Admin',
+      })],
+      members: [{ user_id: 'someone-else', display_name: 'Someone Else' }],
+    })
+    const { container } = await openDialog()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-link-row-t1"]')!
+        .textContent).toContain('by Remote Admin')
+    })
+  })
+
   it('says "Someone" when the minter is no longer a member — never their id', async () => {
     mockReads({
       tokens: [makeRow({ token: 't1', created_by: 'ghost-id' })],

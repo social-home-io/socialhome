@@ -74,6 +74,8 @@ interface InviteTokenRow {
   uses_remaining: number
   expires_at: string | null
   created_by: string
+  /** The minter's name as the server holds it; null when unknown. */
+  created_by_name?: string | null
   created_at: string
   /** Server-built ``socialhome://invite#…``. Preferred over a locally
    *  built one: only the backend holds the §D2b bootstrap block (issuer
@@ -352,9 +354,11 @@ function usesLabel(row: InviteTokenRow): string {
     { n: String(left) })
 }
 
-/** Display name for the link's minter, else "Someone" — never the id. */
-function creatorName(userId: string): string {
-  return memberNames.value[userId] ?? personLabel()
+/** Display name for the link's minter: the live roster's, else the name
+ *  the server resolved (a minter who has since left), else "Someone" —
+ *  never the id. */
+function creatorName(row: InviteTokenRow): string {
+  return memberNames.value[row.created_by] ?? personLabel(row.created_by_name)
 }
 
 async function loadMemberNames() {
@@ -374,7 +378,7 @@ async function loadMemberNames() {
     }
     memberNames.value = map
   } catch {
-    // Non-fatal: rows fall back to the raw id.
+    // Non-fatal: rows fall back to the server's name, else "Someone".
   }
 }
 
@@ -837,7 +841,7 @@ export function SpaceInviteDialog() {
                     {' · '}
                     {rowExpiryText(l.expires_at)}
                     {' · '}
-                    {t('invite.links.by', { name: creatorName(l.created_by) })}
+                    {t('invite.links.by', { name: creatorName(l) })}
                   </span>
                 </div>
                 <div class="sh-invite-link-row-item__actions">

@@ -27,7 +27,6 @@ import {
 } from './SpaceProfileDialog'
 import { openRemoteInviteDialog } from './RemoteInviteDialog'
 import { currentUser } from '@/store/auth'
-import { householdDisplayName, loadHouseholdUsers } from '@/store/householdUsers'
 import { resolveAvatar } from '@/utils/avatar'
 import { addBase } from '@/baseUrl'
 import { spaceSectionPath } from '@/features/spaces/spaceTabs'
@@ -86,11 +85,24 @@ interface Member {
   is_owner?: boolean
 }
 
-interface Ban {
+export interface Ban {
   user_id: string
   banned_by: string
   banned_at: string
   reason?: string | null
+  /** Server-resolved: the per-space name, else the person's household
+   *  name, else the space roster's — null when nobody here knows them. */
+  display_name?: string | null
+  /** The viewer's private nickname for them, if any. */
+  personal_alias?: string | null
+  /** Signed; null with no picture or across a guardian block. */
+  picture_url?: string | null
+}
+
+/** A banned person's label: the name the server resolved (a remote
+ *  person's too), else the viewer's nickname, else "Someone". */
+export function banName(b: Ban): string {
+  return personLabel(b.display_name, b.personal_alias)
 }
 
 /** ``space.config.changed`` event types that mean a seat's role moved
@@ -128,7 +140,6 @@ export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props
     Promise.all([p1, p2]).then(([mems, bansList]) => {
       members.value = mems as Member[]
       bans.value = bansList as Ban[]
-      if (bans.value.length > 0) void loadHouseholdUsers()
       canManage.value = hasSettingsAuthority(viewerRole)
       loading.value = false
     }).catch(() => {
@@ -419,9 +430,9 @@ export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props
             <h2 class="sh-settings-section-heading">{t('space.members.banned_heading')}</h2>
             {bans.value.map(b => (
               <div key={b.user_id} class="sh-member-row sh-member-row--banned">
-                <Avatar name={householdDisplayName(b.user_id)} size={32} />
+                <Avatar name={banName(b)} src={b.picture_url ?? null} size={32} />
                 <div class="sh-member-info">
-                  <span class="sh-member-name">{householdDisplayName(b.user_id)}</span>
+                  <span class="sh-member-name">{banName(b)}</span>
                   <span class="sh-badge sh-badge--danger">{t('space.members.banned_badge')}</span>
                   {b.reason && (
                     <span class="sh-muted">{b.reason}</span>

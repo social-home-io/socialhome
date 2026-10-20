@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from socialhome.domain.space import SpaceMember
 from socialhome.domain.user import PersonSummary, RemoteUser, User
+from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
 from socialhome.services.alias_service import AliasResolver
 from socialhome.services.person_summary_service import PersonSummaryService
 
@@ -277,3 +279,189 @@ async def test_guardian_block_counterpart_is_named_without_a_picture():
     other = await svc.summarize("uid-carol", ["uid-kid", "ru-ruth"])
     assert other["uid-kid"].picture_url
     assert other["ru-ruth"].picture_url
+
+
+# ── Space scope: per-space name → household name → roster seat ────────
+
+
+class _FakeSpaceRepo:
+    def __init__(self, members: list[SpaceMember]) -> None:
+        self.members = members
+        self.calls: list[str] = []
+
+    async def list_members(self, space_id: str) -> list[SpaceMember]:
+        self.calls.append(space_id)
+        return [m for m in self.members if m.space_id == space_id]
+
+
+class _FakeSeats:
+    def __init__(self, seats: list[SpaceRemoteMember]) -> None:
+        self.seats = seats
+        self.calls: list[str] = []
+
+    async def get_including_tombstones(self, space_id, instance_id, user_id):
+        self.calls.append(user_id)
+        for s in self.seats:
+            if s.space_id == space_id and s.user_id == user_id:
+                return s
+        return None
+
+
+def _space_svc(
+    *,
+    local: list[User] | None = None,
+    remote: list[RemoteUser] | None = None,
+    members: list[SpaceMember] | None = None,
+    seats: list[SpaceRemoteMember] | None = None,
+) -> tuple[PersonSummaryService, _FakeSpaceRepo, _FakeSeats]:
+    svc, *_ = _svc(local=local, remote=remote, instances=[_Inst("peer-v", "Vizeli")])
+    spaces = _FakeSpaceRepo(members or [])
+    seat_repo = _FakeSeats(seats or [])
+    svc.attach_space_rosters(spaces, seat_repo)  # type: ignore[arg-type]
+    return svc, spaces, seat_repo
+
+
+async def test_space_name_wins_over_the_household_name():
+    svc, *_ = _space_svc(
+        remote=[_ruth(picture_hash="fedcba9876543210")],
+        members=[
+            SpaceMember(
+                space_id="sp-1",
+                user_id="ru-ruth",
+                role="member",
+                joined_at="2026-10-01",
+                space_display_name="Ruth (choir)",
+            )
+        ],
+    )
+    out = await svc.summarize("uid-me", ["ru-ruth"], space_id="sp-1")
+    assert out["ru-ruth"].display_name == "Ruth (choir)"
+    # No per-space picture: the person's own one.
+    assert out["ru-ruth"].picture_url == (
+        "api/users/ru-ruth/picture?v=fedcba9876543210"
+    )
+
+
+async def test_space_picture_wins_over_the_household_picture():
+    svc, *_ = _space_svc(
+        local=[
+            User(
+                username="bob",
+                user_id="uid-bob",
+                display_name="Bob",
+                picture_hash="0123456789abcdef",
+            )
+        ],
+        members=[
+            SpaceMember(
+                space_id="sp-1",
+                user_id="uid-bob",
+                role="member",
+                joined_at="2026-10-01",
+                picture_hash="aaaabbbbccccdddd",
+            )
+        ],
+    )
+    out = await svc.summarize("uid-me", ["uid-bob"], space_id="sp-1")
+    assert out["uid-bob"].display_name == "Bob"
+    assert out["uid-bob"].picture_url == (
+        "api/spaces/sp-1/members/uid-bob/picture?v=aaaabbbbccccdddd"
+    )
+
+
+async def test_space_name_of_another_space_is_not_used():
+    svc, *_ = _space_svc(
+        remote=[_ruth()],
+        members=[
+            SpaceMember(
+                space_id="sp-2",
+                user_id="ru-ruth",
+                role="member",
+                joined_at="2026-10-01",
+                space_display_name="Elsewhere",
+            )
+        ],
+    )
+    out = await svc.summarize("uid-me", ["ru-ruth"], space_id="sp-1")
+    assert out["ru-ruth"].display_name == "Grandma Ruth"
+
+
+async def test_roster_seat_names_someone_no_household_table_knows():
+    """A member of a household we never paired with: only the space's
+    roster seat (kept even once they left or were banned) knows the name."""
+    svc, _spaces, seats = _space_svc(
+        seats=[
+            SpaceRemoteMember(
+                space_id="sp-1",
+                instance_id="peer-x",
+                user_id="ru-stranger",
+                display_name="Stranger Sam",
+                tombstoned=True,
+            )
+        ],
+    )
+    out = await svc.summarize("uid-me", ["ru-stranger", "ru-gone"], space_id="sp-1")
+    assert out["ru-stranger"].display_name == "Stranger Sam"
+    assert out["ru-stranger"].picture_url is None
+    assert out["ru-gone"].display_name is None
+    # The seat is read only for the people nothing else named.
+    assert sorted(seats.calls) == ["ru-gone", "ru-stranger"]
+
+
+async def test_no_space_scope_never_reads_the_space_rosters():
+    svc, spaces, seats = _space_svc(remote=[_ruth()])
+    await svc.summarize("uid-me", ["ru-ruth", "ru-gone"])
+    assert spaces.calls == [] and seats.calls == []
+
+
+async def test_space_picture_is_withheld_across_a_guardian_block():
+    svc, *_ = _space_svc(
+        local=[User(username="kid", user_id="uid-kid", display_name="Kid")],
+        members=[
+            SpaceMember(
+                space_id="sp-1",
+                user_id="uid-kid",
+                role="member",
+                joined_at="2026-10-01",
+                space_display_name="Kiddo",
+                picture_hash="aaaabbbbccccdddd",
+            )
+        ],
+    )
+    svc.attach_child_protection(_Cp())  # type: ignore[arg-type]
+    out = await svc.summarize("uid-bob", ["uid-kid"], space_id="sp-1")
+    assert out["uid-kid"].display_name == "Kiddo"
+    assert out["uid-kid"].picture_url is None
+
+
+async def test_enrich_in_a_space_scope():
+    svc, *_ = _space_svc(
+        seats=[
+            SpaceRemoteMember(
+                space_id="sp-1",
+                instance_id="peer-x",
+                user_id="ru-stranger",
+                display_name="Stranger Sam",
+            )
+        ],
+    )
+    rows = [{"user_id": "ru-stranger", "reason": "spam"}]
+    out = await svc.enrich("uid-me", rows, space_id="sp-1")
+    assert out == [
+        {
+            "user_id": "ru-stranger",
+            "reason": "spam",
+            "display_name": "Stranger Sam",
+            "personal_alias": None,
+            "picture_url": None,
+            "household": None,
+        }
+    ]
+    # The caller's rows are never touched (a sync exporter shares them).
+    assert rows == [{"user_id": "ru-stranger", "reason": "spam"}]
+
+
+async def test_local_person_without_a_display_name_reads_as_their_username():
+    svc, *_ = _svc(local=[User(username="bob", user_id="uid-bob", display_name="")])
+    out = await svc.summarize("uid-me", ["uid-bob"])
+    assert out["uid-bob"].display_name == "bob"

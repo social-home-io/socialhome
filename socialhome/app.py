@@ -2910,6 +2910,7 @@ def create_app(config: Config | None = None) -> web.Application:
     person_summary_service = PersonSummaryService(
         repos.user, repos.federation, alias_resolver
     )
+    person_summary_service.attach_space_rosters(repos.space, repos.space_remote_member)
 
     # ── Preferences service (household-wide + per-user toggles) ─────────
     preferences_service = PreferencesService(

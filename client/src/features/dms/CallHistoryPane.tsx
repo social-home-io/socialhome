@@ -22,6 +22,9 @@ interface CallRow {
   call_id: string
   conversation_id: string
   initiator_user_id: string
+  /** The caller's name as the server holds it (a caller from another
+   *  household too); null when unknown — the roster cache, else "Someone". */
+  initiator_display_name?: string | null
   callee_user_id: string | null
   call_type: 'audio' | 'video'
   status: 'ringing' | 'active' | 'ended' | 'declined' | 'missed'
@@ -111,7 +114,9 @@ export default function CallHistoryPane() {
               <span class="sh-call-icon" aria-hidden="true">
                 {statusIcon(c.status)} {c.call_type === 'video' ? '📹' : '📞'}
               </span>
-              <span class="sh-call-who">{householdDisplayName(c.initiator_user_id)}</span>
+              <span class="sh-call-who">
+                {c.initiator_display_name || householdDisplayName(c.initiator_user_id)}
+              </span>
               <span class="sh-call-dur">{formatDuration(c.duration_seconds)}</span>
               <span class="sh-call-status">{tValue('calls.state', c.status)}</span>
               {c.avg_rtt_ms != null && (

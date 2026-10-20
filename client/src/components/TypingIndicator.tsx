@@ -44,6 +44,9 @@ if (typeof window !== 'undefined') {
       conversation_id?: string
       sender_user_id?: string
       sender_username?: string
+      /** A typist on another household: the name this household holds
+       *  for them (its ``remote_users`` row or the conversation seat). */
+      sender_display_name?: string | null
     }
     const cid = data.conversation_id
     const uid = data.sender_user_id
@@ -52,7 +55,7 @@ if (typeof window !== 'undefined') {
     map.set(`${cid}|${uid}`, {
       scope: cid,
       userId: uid,
-      fallbackName: personLabel(data.sender_username),
+      fallbackName: personLabel(data.sender_display_name, data.sender_username),
       ts: Date.now(),
     })
     typingUsers.value = map

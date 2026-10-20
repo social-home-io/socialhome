@@ -39,6 +39,18 @@ describe('TypingIndicator — who is typing, never an id', () => {
     expect(text).toContain('Someone')
     expect(text).not.toContain('u-remote-9qz4')
   })
+
+  it('a typist from another household by the name the server sent', () => {
+    act(() => {
+      wsHandlers['conversation.user_typing']({
+        data: {
+          conversation_id: 'c4', sender_user_id: 'u-remote-3ab1',
+          sender_username: 'erin', sender_display_name: 'Erin Okafor',
+        },
+      })
+    })
+    expect(render(<TypingIndicator scope="c4" />).container.textContent).toContain('Erin Okafor')
+  })
 })
 
 describe('TypingIndicator', () => {

@@ -697,7 +697,9 @@ class SpaceModerationService(BusPublisherMixin):
             "op": payload.get("op"),
             "target_id": target_id,
             "submitted_by": item.submitted_by,
-            "submitted_by_display": display or item.submitted_by,
+            # ``None`` when nobody here can name them — never the id; the
+            # queue route adds the name the household's people tables hold.
+            "submitted_by_display": display,
             "submitted_at": _iso(item.submitted_at),
             "expires_at": _iso(item.expires_at),
             "status": item.status.value,

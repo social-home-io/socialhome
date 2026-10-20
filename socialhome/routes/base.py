@@ -18,12 +18,15 @@ group handlers by REST resource.  ``BaseView`` provides:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from aiohttp import web
 
 from ..app_keys import (
     child_protection_service_key,
+    media_signer_key,
+    person_summary_service_key,
     preferences_service_key,
     space_repo_key,
 )
@@ -74,6 +77,8 @@ from ..domain.timetable import (
     TimetableOrphanError,
     TimetableValidationError,
 )
+from ..domain.user import PersonSummary
+from ..media_signer import sign_media_urls_in
 from ..peer_url import InvalidPeerUrlError
 from ..repositories.page_repo import PageLockError, PageNotFoundError
 from ..security import error_response, sanitise_for_api
@@ -195,6 +200,45 @@ class BaseView(web.View):
         if ctx.user_id == SIGNED_URL_PRINCIPAL:
             return frozenset()
         return await cp.guardian_block_counterparts(ctx.user_id)
+
+    async def named_people(
+        self, user_ids: Iterable[str], *, space_id: str | None = None
+    ) -> dict[str, PersonSummary]:
+        """Who each of ``user_ids`` is, as the caller may see them.
+
+        Their name this household holds — with ``space_id``, the per-space
+        name first and the space's roster seat last — and ``None`` for an id
+        nobody here knows, never the id. The picture is withheld across a
+        guardian block (§CP.F2) and unsigned: sign the payload it goes in.
+        Blank ids are skipped.
+        """
+        people = self.svc(person_summary_service_key)
+        return await people.summarize(
+            self.user.user_id, {u for u in user_ids if u}, space_id=space_id
+        )
+
+    async def with_people(
+        self, rows: list[dict], *, space_id: str | None = None
+    ) -> list[dict]:
+        """``rows`` (each with a ``user_id``) as new dicts that also carry
+        the person's ``display_name``, ``personal_alias``, signed
+        ``picture_url`` and ``household`` (:meth:`named_people`).
+
+        ``rows`` is never mutated: a repo's rows can feed a federation
+        exporter too, which must not carry what this household knows about
+        a person.
+        """
+        people = self.svc(person_summary_service_key)
+        out = await people.enrich(self.user.user_id, rows, space_id=space_id)
+        self.sign_media(out)
+        return out
+
+    def sign_media(self, payload: Any) -> Any:
+        """Sign every media URL in ``payload`` in place (no-op unsigned)."""
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(payload, signer)
+        return payload
 
     async def body(self) -> dict:
         """Parse JSON request body; returns 400 on bad input."""

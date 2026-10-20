@@ -203,6 +203,37 @@ describe('SpaceMemberList — header count and language', () => {
   })
 })
 
+describe('SpaceMemberList — banned people by name', () => {
+  it('names each banned remote person from the server, never "Someone" for all', async () => {
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.endsWith('/members')) return []
+      if (url.endsWith('/bans')) {
+        return [
+          {
+            user_id: 'ru-rita', banned_by: 'u-o', banned_at: '2026-01-01',
+            display_name: 'Remote Rita', picture_url: 'api/users/ru-rita/picture?v=1&sig=x',
+          },
+          {
+            user_id: 'ru-sam', banned_by: 'u-o', banned_at: '2026-01-01',
+            display_name: null, personal_alias: 'Sammy',
+          },
+          { user_id: 'ru-gone', banned_by: 'u-o', banned_at: '2026-01-01', display_name: null },
+        ]
+      }
+      return []
+    })
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" />)
+    await waitFor(() => expect(r.container.querySelectorAll('.sh-member-row--banned').length).toBe(3))
+    const names = [...r.container.querySelectorAll('.sh-member-row--banned .sh-member-name')]
+      .map(n => n.textContent)
+    expect(names).toEqual(['Remote Rita', 'Sammy', 'Someone'])
+    const img = r.container.querySelector('.sh-member-row--banned img') as HTMLImageElement | null
+    expect(img?.getAttribute('src')).toContain('ru-rita')
+    expect(r.container.textContent).not.toContain('ru-gone')
+  })
+})
+
 describe('SpaceMemberList — tapping a member opens their person sheet', () => {
   const rows = [
     { user_id: 'u-m', display_name: 'Mo', role: 'moderator', joined_at: '2026-01-01' },

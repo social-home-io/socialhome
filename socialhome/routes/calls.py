@@ -373,8 +373,21 @@ class ConversationCallHistoryView(BaseView):
             conversation_id,
             limit=limit,
         )
+        # The caller's name: this household's people tables first, then the
+        # conversation seat (a group member of a household never paired
+        # with) — ``None``, never the id, when nobody here knows them.
+        people = await self.named_people({r.initiator_user_id for r in rows})
+        seats = {
+            rm.user_id: rm.display_name or rm.remote_username
+            for rm in await conv_repo.list_remote_members(conversation_id)
+            if rm.user_id
+        }
         out = []
         for r in rows:
+            person = people.get(r.initiator_user_id)
+            initiator_name = (
+                person.display_name if person is not None else None
+            ) or seats.get(r.initiator_user_id)
             samples = await call_repo.list_quality_samples(r.id)
             avg_rtt = _avg(s.rtt_ms for s in samples)
             avg_loss = _avg(s.loss_pct for s in samples)
@@ -383,6 +396,7 @@ class ConversationCallHistoryView(BaseView):
                     "call_id": r.id,
                     "conversation_id": r.conversation_id,
                     "initiator_user_id": r.initiator_user_id,
+                    "initiator_display_name": initiator_name,
                     "callee_user_id": r.callee_user_id,
                     "call_type": r.call_type,
                     "status": r.status,

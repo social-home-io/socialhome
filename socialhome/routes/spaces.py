@@ -1527,11 +1527,25 @@ class SpaceInviteTokenView(BaseView):
     async def get(self) -> web.Response:
         ctx = self.user
         svc = self.svc(space_service_key)
-        links = await svc.list_invite_links(
-            self.match("id"),
-            actor_username=ctx.username,
+        space_id = self.match("id")
+        links = await svc.list_invite_links(space_id, actor_username=ctx.username)
+        # Named here, not in the service: on a space hosted elsewhere the
+        # links are the host's answer, and its wire shape stays as it is.
+        people = await self.named_people(
+            (str(link.get("created_by") or "") for link in links), space_id=space_id
         )
-        return web.json_response({"tokens": links})
+        tokens = []
+        for link in links:
+            person = people.get(str(link.get("created_by") or ""))
+            tokens.append(
+                {
+                    **link,
+                    "created_by_name": (
+                        person.display_name if person is not None else None
+                    ),
+                }
+            )
+        return web.json_response({"tokens": tokens})
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -2046,10 +2060,17 @@ class _SpaceModerationBase(BaseView):
     async def _items(self, items, *, with_current: bool) -> web.Response:
         svc = self.svc(space_moderation_service_key)
         payload = [await svc.describe(i, with_current=with_current) for i in items]
-        signer = self.request.app.get(media_signer_key)
-        if signer is not None:
-            sign_media_urls_in(payload, signer)
-        return web.json_response(payload)
+        # The submitter's name as this household knows them (per-space name,
+        # household / ``remote_users``, roster seat); the service's own
+        # lookup is the fallback. ``None`` — never the id — when nobody does.
+        people = await self.named_people(
+            (i.submitted_by for i in items), space_id=self.match("id")
+        )
+        for row in payload:
+            person = people.get(str(row.get("submitted_by") or ""))
+            if person is not None and person.display_name:
+                row["submitted_by_display"] = person.display_name
+        return web.json_response(self.sign_media(payload))
 
 
 class SpaceModerationQueueView(_SpaceModerationBase):
@@ -2138,7 +2159,9 @@ class SpaceBanListView(BaseView):
         space = await space_svc._require_space(space_id)
         await space_svc._require_admin_or_owner(space, ctx.username)
         bans = await self.svc(space_repo_key).list_bans(space_id)
-        return web.json_response(bans)
+        # Named here, not in the repo rows: ``list_bans`` also feeds the
+        # space-sync exporter, whose wire shape must not change.
+        return web.json_response(await self.with_people(bans, space_id=space_id))
 
 
 class SpaceUnbanView(BaseView):
@@ -2770,7 +2793,20 @@ class SpaceJoinRequestCollectionView(BaseView):
             space_id,
             actor_username=ctx.username,
         )
-        return web.json_response([sanitise_for_api(r) for r in requests])
+        rows = [sanitise_for_api(r) for r in requests]
+        # The service names an applicant from their seat / local row; this
+        # household may also know them from its paired households
+        # (``remote_users``) — and the queue shows their picture.
+        people = await self.named_people(
+            (str(r.get("user_id") or "") for r in rows), space_id=space_id
+        )
+        for row in rows:
+            person = people.get(str(row.get("user_id") or ""))
+            row["display_name"] = (
+                person.display_name if person is not None else None
+            ) or row.get("display_name")
+            row["picture_url"] = person.picture_url if person is not None else None
+        return web.json_response(self.sign_media(rows))
 
     async def post(self) -> web.Response:
         ctx = self.user

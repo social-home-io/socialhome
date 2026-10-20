@@ -18,6 +18,7 @@ from ..domain.report import (
     DuplicateReportError,
     ReportRateLimitedError,
 )
+from ..domain.user import PersonSummary
 from ..services.report_service import MAX_NOTES
 from .base import BaseView, error_response
 
@@ -87,7 +88,18 @@ class AdminReportCollectionView(BaseView):
         ctx = self.user
         svc = self.svc(report_service_key)
         reports = await svc.list_pending(actor_username=ctx.username)
-        return web.json_response([_report_dict(r) for r in reports])
+        people = await self.named_people(
+            {r.reporter_user_id for r in reports}
+            | {r.target_id for r in reports if r.target_type.value == "user"}
+        )
+        out = []
+        for r in reports:
+            row = _report_dict(r)
+            row["reporter_name"] = _name(people, r.reporter_user_id)
+            if r.target_type.value == "user":
+                row["target_name"] = _name(people, r.target_id)
+            out.append(row)
+        return web.json_response(out)
 
 
 class AdminReportResolveView(BaseView):
@@ -126,14 +138,14 @@ class SpaceReportCollectionView(BaseView):
         svc = self.svc(report_service_key)
         space_id = self.match("id")
         views = await svc.review_space(space_id, actor_user_id=self.user.user_id)
-        names = await svc.display_names(
-            space_id,
+        people = await self.named_people(
             {v.report.reporter_user_id for v in views if not v.anonymous}
             | {
                 v.report.target_id
                 for v in views
                 if v.report.target_type.value == "user"
             },
+            space_id=space_id,
         )
         out = []
         for v in views:
@@ -148,14 +160,14 @@ class SpaceReportCollectionView(BaseView):
                 row["reporter_name"] = None
                 row["notes"] = None
             else:
-                row["reporter_name"] = names.get(r.reporter_user_id)
+                row["reporter_name"] = _name(people, r.reporter_user_id)
             row["anonymous"] = v.anonymous
             row["dismiss_only"] = v.dismiss_only
             # ``target_gone``: the item was deleted / moved (or the member left).
             row["target_gone"] = v.gone
             row["target_preview"] = v.preview
             if r.target_type.value == "user":
-                row["target_name"] = names.get(r.target_id)
+                row["target_name"] = _name(people, r.target_id)
             out.append(row)
         return web.json_response(out)
 
@@ -194,3 +206,9 @@ def _report_dict(r) -> dict:
         "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
         "space_id": r.space_id,
     }
+
+
+def _name(people: dict[str, PersonSummary], user_id: str) -> str | None:
+    """The name this household holds for ``user_id`` — never the id."""
+    person = people.get(user_id)
+    return person.display_name if person is not None else None

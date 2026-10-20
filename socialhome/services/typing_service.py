@@ -364,6 +364,13 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
             )
             return 0
         sender_username = seat.remote_username
+        # The name this household holds for them — its ``remote_users`` row
+        # (kept fresh by USER_UPDATED), else the seat's roster name (a group
+        # member of a household never paired with). Never the payload's.
+        remote = await self._user_repo.get_remote(sender_uid)
+        sender_display_name = (
+            remote.display_name if remote is not None else None
+        ) or seat.display_name
         members = await self._convo_repo.list_members(cid)
         blocked = await self._guardian_block_counterparts(sender_uid)
         local_targets: list[str] = []
@@ -378,6 +385,7 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
                 "conversation_id": cid,
                 "sender_user_id": sender_uid,
                 "sender_username": sender_username,
+                "sender_display_name": sender_display_name,
                 "from_instance": event.from_instance,
             },
         )
