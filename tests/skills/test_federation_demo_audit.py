@@ -314,3 +314,167 @@ def test_a_failed_private_channel_multi_run_cleans_up(harness, monkeypatch):
     assert spawned == ["a"]  # d was still running
     assert deleted == ["DELETE /api/spaces/sp-9"]
     assert state["gfs"]["pairings"]["e"]["id"] == "c"
+
+
+# ── Expected-noise windows ─────────────────────────────────────────────
+
+_C_IID = "hurw3o3ojni4b5ouy52sfaodssim4aws"
+_ABANDON = (
+    "WARNING:socialhome.federation.sync.space.provider:sync s1: abandoning "
+    f"stream for space sp to {_C_IID} after 3 consecutive chunk failures"
+)
+_FORGED = (
+    f"WARNING:svc:SPACE_CONFIG_CHANGED for sp-1 from {_C_IID}: authority "
+    "signature did not verify against the space key — dropping"
+)
+
+
+@pytest.fixture
+def demo_root(harness, tmp_path, monkeypatch):
+    """A throwaway ``/tmp/sh-demo`` with households a (the witness) and c
+    (the one a step takes offline)."""
+    monkeypatch.setattr(harness, "ROOT", tmp_path)
+    monkeypatch.setattr(harness, "NOISE_WINDOWS_PATH", tmp_path / "noise.json")
+    monkeypatch.setattr(harness, "LOG_GENERATIONS_PATH", tmp_path / "gens.json")
+    monkeypatch.setattr(harness, "STATE_PATH", tmp_path / "state.json")
+    state = {
+        "instances": {
+            "a": {"instance_id": "a" * 32, "port": 18001, "pid": 1},
+            "c": {"instance_id": _C_IID, "port": 18003, "pid": 2},
+        }
+    }
+    harness._save(state)
+    for label in ("a", "c"):
+        (tmp_path / label).mkdir()
+        harness._bump_log_generation(label)
+        (tmp_path / label / "log.txt").write_text("INFO:x:boot\n")
+    return state
+
+
+def _append(harness, label, *lines):
+    path = harness._instance_dir(label) / "log.txt"
+    path.write_text(path.read_text() + "".join(f"{line}\n" for line in lines))
+
+
+def _audit_a(harness, state):
+    return harness._audit_logs({"instances": {"a": state["instances"]["a"]}})
+
+
+def test_offline_noise_outside_any_window_is_a_finding(harness, demo_root):
+    _append(harness, "a", _ABANDON)
+    assert _audit_a(harness, demo_root)
+
+
+def test_offline_noise_naming_the_household_inside_its_window_passes(
+    harness, demo_root
+):
+    harness._open_offline_window("c")
+    _append(
+        harness, "a", _ABANDON, "WARNING:aiolibdatachannel:x: juice: Lost connectivity"
+    )
+    harness._bump_log_generation("c")  # c respawned within the step
+    harness._close_noise_windows()
+    assert _audit_a(harness, demo_root) == []
+
+
+def test_offline_window_never_excuses_a_line_about_another_household(
+    harness, demo_root
+):
+    """Precise, not blanket: inside c's window an abandon naming d fails."""
+    harness._open_offline_window("c")
+    _append(harness, "a", _ABANDON.replace(_C_IID, "d" * 32))
+    harness._close_noise_windows()
+    assert _audit_a(harness, demo_root)
+
+
+def test_offline_window_never_excuses_other_warnings(harness, demo_root):
+    harness._open_offline_window("c")
+    _append(harness, "a", f"ERROR:socialhome.app:boom while talking to {_C_IID}")
+    harness._close_noise_windows()
+    assert _audit_a(harness, demo_root)
+
+
+def test_offline_window_ends_with_the_step_once_the_household_is_back(
+    harness, demo_root
+):
+    harness._open_offline_window("c")
+    harness._bump_log_generation("c")
+    harness._close_noise_windows()
+    _append(harness, "a", _ABANDON)  # after the step ended
+    assert _audit_a(harness, demo_root)
+
+
+def test_offline_window_stays_open_while_the_household_is_still_down(
+    harness, demo_root
+):
+    """A step that leaves c down: what its peers log about c afterwards is
+    still expected."""
+    harness._open_offline_window("c")
+    harness._close_noise_windows()
+    _append(harness, "a", _ABANDON)
+    assert _audit_a(harness, demo_root) == []
+
+
+def test_a_respawned_witness_voids_its_windows(harness, demo_root):
+    """A new process truncates ``log.txt``: an old window's line numbers
+    describe a file that no longer exists."""
+    harness._open_offline_window("c")
+    harness._bump_log_generation("a")
+    (harness._instance_dir("a") / "log.txt").write_text(_ABANDON + "\n")
+    assert _audit_a(harness, demo_root)
+
+
+def test_negative_control_window_is_scoped_by_name_and_time(harness, demo_root):
+    forged = harness._open_noise_window(
+        about="c",
+        reason="test",
+        witnesses=("a",),
+        named=("authority signature did not verify",),
+        names=[f"for sp-1 from {_C_IID}"],
+    )
+    _append(harness, "a", _FORGED, _FORGED.replace("sp-1", "sp-2"))
+    harness._close_noise_windows(forged)
+    # sp-2 is not the control's space.
+    assert len(_audit_a(harness, demo_root)) == 1
+    _append(harness, "a", _FORGED)
+    assert len(_audit_a(harness, demo_root)) == 2, "closed by id, stays closed"
+
+
+def test_offline_step_closes_its_windows_after_the_tail(
+    harness, demo_root, monkeypatch
+):
+    """The witnesses' last lines about an outage land just after the step
+    (ICE consent expiry ~30 s after the kill): the window outlives the step
+    by ``OFFLINE_WINDOW_TAIL_S``, then closes — and only the windows open
+    when the step ended."""
+    monkeypatch.setattr(harness, "OFFLINE_WINDOW_TAIL_S", 0.0)
+    gate = harness.threading.Event()
+    real_sleep = harness.time.sleep
+    monkeypatch.setattr(harness.time, "sleep", lambda s: gate.wait(5) or real_sleep(0))
+
+    @harness._offline_step
+    def step():
+        harness._open_offline_window("c")
+        harness._bump_log_generation("c")  # back up within the step
+
+    step()
+    _append(harness, "a", _ABANDON)  # the tail: still expected
+    later = harness._open_noise_window(
+        about="c", reason="later", witnesses=("a",), named=("x",), names=["y"]
+    )
+    gate.set()
+    for t in harness._NOISE_TAILS:
+        t.join()
+    harness._NOISE_TAILS.clear()
+    assert _audit_a(harness, demo_root) == []
+    _append(harness, "a", _ABANDON)  # after the tail closed
+    assert len(_audit_a(harness, demo_root)) == 1
+    [still_open] = [w for w in harness._load_noise_windows() if w["id"] in later]
+    assert still_open["end"] is None, "a window opened after the step stays open"
+
+
+def test_numbered_splitter_reports_header_lines(harness):
+    text = 'INFO:a:x\nTraceback (most recent call last):\n  File "x"\nValueError: v\n\nWARNING:b:y'
+    numbered = harness._split_log_into_numbered_blocks(text)
+    assert [n for n, _, _ in numbered] == [0, 1, 5]
+    assert harness._split_log_into_blocks(text) == [(h, b) for _, h, b in numbered]
