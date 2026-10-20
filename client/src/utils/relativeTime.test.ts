@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setLocale } from '@/i18n/i18n'
 import {
+  localClockTime, localDayKey,
   relativeChatTime, relativeDocsTime, relativeFutureTime,
 } from './relativeTime'
 
@@ -179,5 +180,41 @@ describe('relativeFutureTime', () => {
     } finally {
       await setLocale('en')
     }
+  })
+})
+
+describe('localClockTime / localDayKey', () => {
+  // Server stamps are UTC (tz-aware ISO or naive SQLite); the SPA shows
+  // the viewer's wall clock and day, never a slice of the string.
+  it.each(['America/Los_Angeles', 'Europe/Zurich', 'Asia/Tokyo'])('reads the stamp in %s', (tz) => {
+    const prev = process.env.TZ
+    process.env.TZ = tz
+    try {
+      const local = new Date('2026-10-19T22:30:00Z')
+      const clock = local.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+      expect(localClockTime('2026-10-19T22:30:00+00:00')).toBe(clock)
+      expect(localClockTime('2026-10-19 22:30:00')).toBe(clock)
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const key = `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())}`
+      expect(localDayKey('2026-10-19 22:30:00')).toBe(key)
+    } finally {
+      process.env.TZ = prev
+    }
+  })
+
+  it('is the next day in Zurich for a late-evening UTC stamp', () => {
+    const prev = process.env.TZ
+    process.env.TZ = 'Europe/Zurich'
+    try {
+      expect(localDayKey('2026-10-19T22:30:00Z')).toBe('2026-10-20')
+      expect(localClockTime('2026-10-19T22:30:00Z')).toBe('12:30 AM')
+    } finally {
+      process.env.TZ = prev
+    }
+  })
+
+  it('falls back on an unparseable stamp', () => {
+    expect(localClockTime('garbage')).toBe('garbage')
+    expect(localDayKey('garbage')).toBeNull()
   })
 })

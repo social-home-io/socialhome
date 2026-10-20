@@ -20138,6 +20138,22 @@ a.sh-btn--ghost:hover {
   flex: 1;
   min-width: 0;
 }
+/* The archive row wraps avatar + body in one link: lay it out like the
+ * inbox row (avatar beside the text) and keep the text colours. */
+.sh-momentum-row-link {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sh-space-sm);
+  flex: 1;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+.sh-momentum-row-link:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--sh-radius-sm);
+}
 .sh-momentum-row-head {
   display: flex;
   align-items: baseline;
