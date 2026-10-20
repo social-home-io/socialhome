@@ -207,6 +207,34 @@ describe('CalendarEventDialog', () => {
     })
   })
 
+  describe('editing an all-day event', () => {
+    async function endDateShown(ev: Record<string, unknown>): Promise<[string, string]> {
+      const { render, cleanup } = await import('@testing-library/preact')
+      const mod = await import('./CalendarEventDialog')
+      mod.openEditEventDialog(
+        { id: 'ev1', calendar_id: 'calA', summary: 'Trip', all_day: true, tz: 'Europe/Zurich', ...ev } as never,
+        [{ id: 'calA', name: 'A cal', owner_username: 'admin', color: null }],
+      )
+      const { container } = render(<mod.CalendarEventDialog />)
+      const dates = [...container.querySelectorAll('input[type="date"]')] as HTMLInputElement[]
+      const out: [string, string] = [dates[0].value, dates[dates.length - 1].value]
+      cleanup()
+      return out
+    }
+
+    it('an exclusive-midnight end shows the last day, not the day after', async () => {
+      // 20–23 Oct in Zurich, stored with the next midnight as its end
+      // (a date-only or tz-less API create, an ICS import).
+      expect(await endDateShown({ start: '2026-10-19T22:00:00+00:00', end: '2026-10-23T22:00:00+00:00' }))
+        .toEqual(['2026-10-20', '2026-10-23'])
+    })
+
+    it('the composer’s 23:59 end shows its own day', async () => {
+      expect(await endDateShown({ start: '2026-10-19T22:00:00+00:00', end: '2026-10-23T21:59:00+00:00' }))
+        .toEqual(['2026-10-20', '2026-10-23'])
+    })
+  })
+
   describe('edit full-sync', () => {
     const CALS = [
       { id: 'calA', name: 'A cal', owner_username: 'admin', color: null },

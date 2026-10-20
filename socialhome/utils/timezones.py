@@ -137,6 +137,43 @@ def parse_event_bound(value: str, *, tz: str, is_end: bool) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def parse_all_day_bound(value: str, *, tz: str, is_end: bool) -> datetime:
+    """Parse an ALL-DAY event's bound that came WITHOUT an explicit ``tz``.
+
+    An all-day event names days, not instants, and without a ``tz`` the
+    request says nothing about which zone its instants were meant in —
+    the resolved ``tz`` (creator → household → UTC) is a fallback, not the
+    author's clock. So the value names the day *as written*:
+
+    * a date-only value is that day (exactly :func:`parse_event_bound`);
+    * a datetime is read on its own wall clock — in its own offset, or as
+      written when it has none — and only its date counts.
+
+    That day is then anchored to ``tz`` like a date-only bound: a start is
+    that day's local midnight; an end is the next local midnight after its
+    wall clock (an exclusive ``00:00`` end stays on that midnight, so
+    ``…T23:59`` and the next day's ``T00:00`` both end the same day).
+
+    With an explicit ``tz`` the caller uses :func:`parse_event_bound` —
+    the SPA sends UTC instants of local ``00:00`` / ``23:59`` in that
+    zone, which read back exactly. Raises :class:`ValueError` (→ 422).
+    """
+    try:
+        day = date.fromisoformat(value)
+    except ValueError:
+        day = None
+    if day is not None:
+        return local_day_bounds(day, tz)[1 if is_end else 0]
+    try:
+        wall = datetime.fromisoformat(value).replace(tzinfo=None)
+    except ValueError as exc:
+        raise ValueError(f"invalid datetime: {value!r}") from exc
+    day = wall.date()
+    if is_end and wall.time() != time(0, 0):
+        day += timedelta(days=1)
+    return local_instant(day, time(0, 0), tz)
+
+
 def canonical_event_bound(value: object, *, tz: str | None, is_end: bool) -> object:
     """Bring a STORED-shape bound (a backup row) to the column's invariant.
 

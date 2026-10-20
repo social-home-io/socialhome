@@ -15,9 +15,60 @@ from socialhome.utils.timezones import (
     local_date,
     local_day_bounds,
     local_instant,
+    parse_all_day_bound,
     parse_event_bound,
     zone_of,
 )
+
+
+class TestParseAllDayBound:
+    """An all-day bound sent WITHOUT a ``tz`` names the day written in the
+    value; that day is anchored to the event's zone. Reading the instant
+    instead put a ``+02:00`` midnight on the previous day in a UTC
+    household (and a UTC midnight on two days in Zurich)."""
+
+    def test_offset_midnight_names_its_own_day(self):
+        # A client in +02:00 sent "20 Oct" to a household still on UTC.
+        start = parse_all_day_bound("2026-10-20T00:00:00+02:00", tz="UTC", is_end=False)
+        end = parse_all_day_bound("2026-10-23T23:59:00+02:00", tz="UTC", is_end=True)
+        assert start == datetime(2026, 10, 20, tzinfo=UTC)
+        assert end == datetime(2026, 10, 24, tzinfo=UTC)
+
+    def test_utc_midnight_names_its_day_in_the_event_zone(self):
+        # The schedule-poll bridge's shape: "T00:00+00:00" → "T23:59+00:00".
+        start = parse_all_day_bound(
+            "2026-10-20T00:00:00+00:00", tz="Europe/Zurich", is_end=False
+        )
+        end = parse_all_day_bound(
+            "2026-10-20T23:59:00+00:00", tz="Europe/Zurich", is_end=True
+        )
+        assert start == datetime(2026, 10, 19, 22, 0, tzinfo=UTC)
+        assert end == datetime(2026, 10, 20, 22, 0, tzinfo=UTC)
+
+    def test_naive_datetime_is_its_wall_clock_day(self):
+        start = parse_all_day_bound(
+            "2026-10-29T00:00:00", tz="Europe/Zurich", is_end=False
+        )
+        end = parse_all_day_bound(
+            "2026-10-29T23:59:59", tz="Europe/Zurich", is_end=True
+        )
+        assert start == datetime(2026, 10, 28, 23, 0, tzinfo=UTC)
+        assert end == datetime(2026, 10, 29, 23, 0, tzinfo=UTC)
+
+    def test_an_exclusive_midnight_end_does_not_add_a_day(self):
+        end = parse_all_day_bound("2026-10-21T00:00:00+02:00", tz="UTC", is_end=True)
+        assert end == datetime(2026, 10, 21, tzinfo=UTC)
+
+    def test_date_only_matches_parse_event_bound(self):
+        for is_end in (False, True):
+            assert parse_all_day_bound(
+                "2026-10-20", tz="Europe/Zurich", is_end=is_end
+            ) == parse_event_bound("2026-10-20", tz="Europe/Zurich", is_end=is_end)
+
+    @pytest.mark.parametrize("bad", ["", "tomorrow", "2026-13-01", "2026-10-20T25:00"])
+    def test_malformed_raises_value_error(self, bad):
+        with pytest.raises(ValueError, match="invalid datetime"):
+            parse_all_day_bound(bad, tz="UTC", is_end=False)
 
 
 @pytest.mark.parametrize(

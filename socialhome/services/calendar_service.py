@@ -66,7 +66,7 @@ from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCale
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..utils.datetime import as_utc
 from ..utils.rrule import expand_rrule
-from ..utils.timezones import is_valid_tz, parse_event_bound
+from ..utils.timezones import is_valid_tz, parse_all_day_bound, parse_event_bound
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .inbound_media_store import require_local_media_ref
@@ -165,6 +165,22 @@ def _clean_location(value: str | None) -> str | None:
     if not trimmed:
         return None
     return trimmed[:_LOCATION_MAX]
+
+
+def _event_bound(
+    value: str, *, tz: str, is_end: bool, all_day: bool, tz_given: bool
+) -> datetime:
+    """An API ``start`` / ``end`` → the stored UTC instant.
+
+    An all-day event sent without a ``tz`` names the day written in the
+    value (:func:`parse_all_day_bound`), anchored to the resolved ``tz``;
+    everything else — a timed event, or an all-day one whose request
+    carried the zone its instants were computed in (the SPA) — keeps its
+    instant (:func:`parse_event_bound`).
+    """
+    if all_day and not tz_given:
+        return parse_all_day_bound(value, tz=tz, is_end=is_end)
+    return parse_event_bound(value, tz=tz, is_end=is_end)
 
 
 def _clean_client_event_uuid(value: str | None) -> str | None:
@@ -631,8 +647,14 @@ class CalendarService(BusPublisherMixin):
         event_tz = await self._resolve_personal_tz(
             tz, owner_username=cal.owner_username
         )
-        start_dt = parse_event_bound(start, tz=event_tz, is_end=False)
-        end_dt = parse_event_bound(end, tz=event_tz, is_end=True)
+        # ``tz`` counts only when it was used (a valid explicit zone).
+        given = event_tz == tz
+        start_dt = _event_bound(
+            start, tz=event_tz, is_end=False, all_day=all_day, tz_given=given
+        )
+        end_dt = _event_bound(
+            end, tz=event_tz, is_end=True, all_day=all_day, tz_given=given
+        )
         if end_dt < start_dt:
             raise ValueError("event end must not be before start")
 
@@ -884,13 +906,28 @@ class CalendarService(BusPublisherMixin):
             new_tz = tz
         else:
             new_tz = existing.tz
+        new_all_day = bool(all_day) if all_day is not None else existing.all_day
         new_start = (
-            parse_event_bound(start, tz=new_tz, is_end=False)
+            _event_bound(
+                start,
+                tz=new_tz,
+                is_end=False,
+                all_day=new_all_day,
+                tz_given=tz is not None,
+            )
             if start
             else existing.start
         )
         new_end = (
-            parse_event_bound(end, tz=new_tz, is_end=True) if end else existing.end
+            _event_bound(
+                end,
+                tz=new_tz,
+                is_end=True,
+                all_day=new_all_day,
+                tz_given=tz is not None,
+            )
+            if end
+            else existing.end
         )
         if new_end < new_start:
             raise ValueError("event end must not be before start")
@@ -1405,8 +1442,14 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         capacity = validate_capacity(capacity)
         # The tz first: a date-only bound names a day in the event's zone.
         event_tz = await self._resolve_space_event_tz(tz, space_id=space_id)
-        start_dt = parse_event_bound(start, tz=event_tz, is_end=False)
-        end_dt = parse_event_bound(end, tz=event_tz, is_end=True)
+        # ``tz`` counts only when it was used (a valid explicit zone).
+        given = event_tz == tz
+        start_dt = _event_bound(
+            start, tz=event_tz, is_end=False, all_day=all_day, tz_given=given
+        )
+        end_dt = _event_bound(
+            end, tz=event_tz, is_end=True, all_day=all_day, tz_given=given
+        )
         if end_dt < start_dt:
             raise ValueError("end must be at or after start")
         decision = await self._gate(
@@ -1814,13 +1857,28 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             new_tz = tz
         else:
             new_tz = existing.tz
+        new_all_day = bool(all_day) if all_day is not None else existing.all_day
         new_start = (
-            parse_event_bound(start, tz=new_tz, is_end=False)
+            _event_bound(
+                start,
+                tz=new_tz,
+                is_end=False,
+                all_day=new_all_day,
+                tz_given=tz is not None,
+            )
             if start
             else existing.start
         )
         new_end = (
-            parse_event_bound(end, tz=new_tz, is_end=True) if end else existing.end
+            _event_bound(
+                end,
+                tz=new_tz,
+                is_end=True,
+                all_day=new_all_day,
+                tz_given=tz is not None,
+            )
+            if end
+            else existing.end
         )
         if new_end < new_start:
             raise ValueError("event end must not be before start")
