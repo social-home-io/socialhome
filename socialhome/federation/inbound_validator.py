@@ -114,6 +114,17 @@ RELAY_QUEUE_TTL_SECONDS = 24 * 60 * 60
 RELAY_TIMESTAMP_SKEW_SECONDS = RELAY_QUEUE_TTL_SECONDS + TIMESTAMP_SKEW_SECONDS
 
 
+class UnpairedPeerRefusedError(ValueError):
+    """An unpair tombstone's envelope, refused by :func:`make_check_unpairing`.
+
+    Its text is exactly the ``No instance found`` a stranger gets, so the
+    wire answer (404 ``unknown_inbox``) cannot tell the two apart. The type
+    is for OUR log only: the step already logged the refusal (INFO when it
+    pulled the ``UNPAIR`` forward, DEBUG for every repeat), so the inbox
+    route must not log each of the ex-peer's envelopes again at WARNING.
+    """
+
+
 # ─── Validation context ─────────────────────────────────────────────────
 
 
@@ -515,7 +526,7 @@ def make_check_unpairing(
             " (sending it now)" if expedited else "",
         )
         ref = ctx.inbox_id or ctx.instance_id
-        raise ValueError(f"No instance found for {ref!r}")
+        raise UnpairedPeerRefusedError(f"No instance found for {ref!r}")
 
     return check_unpairing
 

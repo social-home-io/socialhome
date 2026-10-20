@@ -668,6 +668,59 @@ async def test_stream_initial_abandons_after_consecutive_chunk_failures(
     assert "abandoning stream" in caplog.text
 
 
+async def test_stream_initial_requester_gone_mid_stream_is_a_warning_not_error(
+    provider, caplog
+):
+    """The requester going offline closes the DataChannel mid-stream.
+
+    That is an ordinary disconnect: each chunk the closed channel refuses
+    counts a strike and the stream is abandoned with ONE warning that names
+    the requester — never ``stream_initial failed`` at ERROR with a
+    ``ConnectionError: DataChannel not open`` traceback (what the
+    federation demo's offline steps logged for every killed household)."""
+
+    class _ClosedRtc(_FakeRtc):
+        async def send_chunk(self, data):
+            raise ConnectionError("DataChannel not open")
+
+    session = _FakeSession(requester="peer-gone")
+    session.rtc = _ClosedRtc()
+    with (
+        patch.object(provider_mod, "MAX_CONSECUTIVE_CHUNK_FAILURES", 1),
+        caplog.at_level(logging.INFO, logger="socialhome"),
+    ):
+        await provider.stream_initial(session)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert not [r for r in caplog.records if r.exc_info]
+    [abandon] = [r for r in caplog.records if "abandoning stream" in r.getMessage()]
+    assert abandon.levelno == logging.WARNING
+    assert "peer-gone" in abandon.getMessage()
+
+
+async def test_stream_request_more_stops_on_closed_channel(provider):
+    """A REQUEST_MORE slice stops at the first chunk a closed channel
+    refuses instead of raising out of the slice."""
+
+    class _ClosedRtc(_FakeRtc):
+        calls = 0
+
+        async def send_chunk(self, data):
+            type(self).calls += 1
+            raise ConnectionError("DataChannel not open")
+
+    class _ThreeChunks:
+        async def build_chunks(self, **kw):
+            for i in range(3):
+                yield {"sync_id": "sync-x", "resource": "posts", "seq": i}
+
+    session = _FakeSession()
+    session.rtc = _ClosedRtc()
+    with patch.object(provider, "_builder", _ThreeChunks()):
+        await provider.stream_request_more(session, {"resource": "posts"})
+    assert _ClosedRtc.calls == 1
+
+
 async def test_stream_initial_failure_budget_resets_on_success(provider):
     """An isolated failure doesn't abandon a stream that recovers."""
     from unittest.mock import AsyncMock

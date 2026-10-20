@@ -157,6 +157,7 @@ class SyncSessionManager:
         "_reject_reason",
         "_requests",
         "_sessions",
+        "_started_at",
     )
 
     def __init__(
@@ -204,6 +205,9 @@ class SyncSessionManager:
         #: provider answers it with an OFFER. See
         #: :class:`PendingSyncRequest`.
         self._requests: dict[str, PendingSyncRequest] = {}
+        #: When this registry (and so this process) started. Pending
+        #: requests are in memory: none survives a restart.
+        self._started_at: float = time.time()
 
     # ─── Requester-side: the syncs WE asked for ───────────────────────────
 
@@ -243,6 +247,19 @@ class SyncSessionManager:
         """
         self._prune_requests()
         return self._requests.get(sync_id)
+
+    def restarted_recently(self) -> bool:
+        """``True`` while this household started less than
+        :data:`PENDING_REQUEST_TTL_SECONDS` ago.
+
+        Pending requests live in memory, so for that long an OFFER may
+        still answer a ``SPACE_SYNC_BEGIN`` this household sent BEFORE a
+        restart — the provider queued it while we were down, and its outbox
+        redelivers it (re-stamped) on our return. Only a log level hangs on
+        it: an OFFER for an id this process never issued is refused either
+        way.
+        """
+        return time.time() - self._started_at < PENDING_REQUEST_TTL_SECONDS
 
     def forget_sync_request(self, sync_id: str) -> None:
         """Drop a request the provider refused — an OFFER for it is no

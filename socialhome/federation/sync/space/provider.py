@@ -54,6 +54,11 @@ log = logging.getLogger(__name__)
 #: re-BEGIN is what recovers the stream (#648).
 MAX_CONSECUTIVE_CHUNK_FAILURES: int = 3
 
+#: ``DeliveryResult.error`` for a chunk the session's DataChannel refused
+#: (closed — the requester went away mid-stream — or backpressured). Not a
+#: waitable window: it counts a strike like any other failed delivery.
+SYNC_ERROR_RTC_CHANNEL: str = "rtc_channel_unavailable"
+
 #: Upper bound on a single wait for a route-discovery negative cooldown.
 #: ``RouteDiscoveryService.ROUTE_NEGATIVE_COOLDOWN_S`` is 30 s today; the cap
 #: is deliberately a local constant rather than an import of that value, so a
@@ -327,11 +332,12 @@ class SpaceSyncService:
                     consecutive_failures += 1
                     if consecutive_failures >= MAX_CONSECUTIVE_CHUNK_FAILURES:
                         log.warning(
-                            "sync %s: abandoning stream for space %s after "
-                            "%d consecutive chunk failures — the requester "
-                            "must re-BEGIN to get this metadata",
+                            "sync %s: abandoning stream for space %s to %s "
+                            "after %d consecutive chunk failures — the "
+                            "requester must re-BEGIN to get this metadata",
                             sync_id,
                             space_id,
+                            session.requester_instance_id,
                             consecutive_failures,
                         )
                         # Drop the session, or it holds one of the
@@ -752,7 +758,11 @@ class SpaceSyncService:
                 # reuses an index of the stream it runs next to.
                 next_index=_allocator(session) if indexed else None,
             ):
-                await self._send(session, envelope)
+                result = await self._send(session, envelope)
+                if result.error == SYNC_ERROR_RTC_CHANNEL:
+                    # The channel is gone; the rest of the slice would only
+                    # fail the same way.
+                    return
         except Exception:  # pragma: no cover
             log.exception(
                 "stream_request_more failed for sync_id=%s resource=%s",
@@ -763,8 +773,9 @@ class SpaceSyncService:
     async def _send(self, session, envelope: dict[str, Any]) -> DeliveryResult:
         """Serialise and dispatch one envelope to the requester.
 
-        Returns the :class:`DeliveryResult` of the ship (always ``ok=True``
-        on the RTC path, which raises rather than failing softly). A failed
+        Returns the :class:`DeliveryResult` of the ship. On the RTC path a
+        closed or backpressured DataChannel is a failed result with
+        :data:`SYNC_ERROR_RTC_CHANNEL`, not an exception. A failed
         result means the requester will be missing this chunk; callers count
         consecutive failures and abandon the stream rather than spending a
         full BFS-plus-3-hop round per remaining chunk on a path that is not
@@ -793,7 +804,26 @@ class SpaceSyncService:
                 raise RuntimeError(
                     f"SyncSessionRecord {session.sync_id} has no rtc handle",
                 )
-            await rtc_session.send_chunk(serialise_chunk(envelope))
+            try:
+                await rtc_session.send_chunk(serialise_chunk(envelope))
+            except ConnectionError as exc:
+                # The DataChannel closed under us (the requester went
+                # offline mid-stream) or is backpressured. A failed
+                # delivery like any other — it counts a strike and the
+                # stream is abandoned with one WARNING — never an
+                # exception that tears the whole stream down at ERROR
+                # with a traceback for an ordinary disconnect.
+                log.info(
+                    "sync %s: chunk to %s not sent over the DataChannel: %s",
+                    session.sync_id,
+                    session.requester_instance_id,
+                    exc,
+                )
+                return DeliveryResult(
+                    instance_id=session.requester_instance_id,
+                    ok=False,
+                    error=SYNC_ERROR_RTC_CHANNEL,
+                )
             return DeliveryResult(
                 instance_id=session.requester_instance_id,
                 ok=True,

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
+import aiolibdatachannel as rtc
 import pytest
 
 from socialhome.federation.sync_rtc import (
@@ -207,6 +210,45 @@ async def test_add_ice_candidate_rejects_empty():
     )
     with pytest.raises(ValueError):
         await s.add_ice_candidate("")
+
+
+_CAND = "candidate:1 1 UDP 2122252543 1.2.3.4 1234 typ host"
+
+
+async def test_late_ice_candidate_for_a_closed_session_is_dropped():
+    """A candidate trailing a session that already closed never reaches the
+    native layer (which would log an ERROR and raise — the SPACE_SYNC_ICE
+    handler traceback the federation demo tripped on)."""
+    s = SyncRtcSession(
+        sync_id="sid",
+        space_id="sp1",
+        requester_instance_id="r",
+        provider_instance_id="p",
+    )
+    s._pc = MagicMock(closed=False, state=rtc.RTCState.CLOSED)
+    s._pc.add_remote_candidate = AsyncMock()
+    await s.add_ice_candidate(_CAND)
+    s._pc.add_remote_candidate.assert_not_awaited()
+    s._pc = MagicMock(closed=False, state=rtc.RTCState.CONNECTED)
+    s._pc.ice_state = rtc.ICEState.CLOSED
+    s._pc.add_remote_candidate = AsyncMock()
+    await s.add_ice_candidate(_CAND)
+    s._pc.add_remote_candidate.assert_not_awaited()
+
+
+async def test_ice_candidate_the_native_layer_rejects_does_not_raise():
+    s = SyncRtcSession(
+        sync_id="sid",
+        space_id="sp1",
+        requester_instance_id="r",
+        provider_instance_id="p",
+    )
+    s._pc = MagicMock(
+        closed=False, state=rtc.RTCState.CONNECTED, ice_state=rtc.ICEState.CONNECTED
+    )
+    s._pc.add_remote_candidate = AsyncMock(side_effect=rtc.RTCError("no transport"))
+    await s.add_ice_candidate(_CAND)
+    s._pc.add_remote_candidate.assert_awaited_once()
 
 
 # ─── Lifecycle ────────────────────────────────────────────────────────────

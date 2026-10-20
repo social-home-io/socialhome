@@ -255,6 +255,65 @@ async def test_inbound_replay_logs_info_for_ephemeral_event(client, env, caplog)
     assert len(infos) == 1, [r.getMessage() for r in caplog.records]
 
 
+async def test_inbound_unpair_tombstone_404_logs_no_warning(client, env, caplog):
+    """A household we unpaired while it was offline keeps sending as if
+    paired. Each envelope is refused 404 ``unknown_inbox`` — on the wire
+    exactly what a stranger gets — but the pipeline step already logged the
+    refusal, so the route must not log every one again at WARNING (the
+    federation demo's ``unpair-offline`` step tripped verify's log audit on
+    exactly these)."""
+    import dataclasses
+    import logging as _logging
+
+    from socialhome.app_keys import federation_repo_key
+
+    fed_repo = client.server.app[federation_repo_key]
+    await fed_repo.save_instance(
+        dataclasses.replace(env["peer"], status=PairingStatus.UNPAIRING),
+    )
+    body = _build_envelope(
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={"user_id": "alice", "state": "home"},
+        msg_id="tombstone-1",
+    )
+    caplog.clear()
+    with caplog.at_level(_logging.DEBUG, logger="socialhome.routes.federation"):
+        r = await client.post("/federation/inbox/wh-test", data=body)
+    assert r.status == 404
+    assert (await r.json()) == {"error": "unknown_inbox"}
+    route = [
+        rec for rec in caplog.records if rec.name == "socialhome.routes.federation"
+    ]
+    assert not [rec for rec in route if rec.levelno >= _logging.WARNING], [
+        rec.getMessage() for rec in route
+    ]
+    assert any("refused unpaired peer" in rec.getMessage() for rec in route)
+
+
+async def test_inbound_unknown_inbox_still_logs_warning(client, env, caplog):
+    """A genuinely unknown inbox id (no tombstone) keeps its WARNING."""
+    import logging as _logging
+
+    body = _build_envelope(
+        own_iid=env["own_iid"],
+        peer_kp=env["peer_kp"],
+        session_key=env["session_key"],
+        payload={},
+        msg_id="stranger-1",
+    )
+    caplog.clear()
+    with caplog.at_level(_logging.INFO, logger="socialhome.routes.federation"):
+        r = await client.post("/federation/inbox/nonexistent", data=body)
+    assert r.status == 404
+    assert any(
+        rec.levelno == _logging.WARNING and "rejected" in rec.getMessage()
+        for rec in caplog.records
+        if rec.name == "socialhome.routes.federation"
+    )
+
+
 async def test_inbound_replay_logs_warning_for_content_event(client, env, caplog):
     """A replayed content event (DM / post / moment / …) stays at
     WARNING — operators care if their DM apparently round-tripped

@@ -969,3 +969,15 @@ async def test_begin_session_removed_carries_the_tombstone_time():
         "reason": "removed",
         "removed_at": "2026-10-10 11:00:00",
     }
+
+
+def test_restarted_recently_covers_the_pending_request_horizon():
+    """For as long as a pre-restart BEGIN could still have been answered
+    (the pending-request TTL), an unknown OFFER may be such an answer."""
+    mgr = SyncSessionManager(federation_repo=MagicMock())
+    assert mgr.restarted_recently() is True
+    with patch(
+        "socialhome.federation.sync_manager.time.time",
+        return_value=time.time() + PENDING_REQUEST_TTL_SECONDS + 1,
+    ):
+        assert mgr.restarted_recently() is False

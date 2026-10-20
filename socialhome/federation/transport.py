@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiolibdatachannel as rtc
 import orjson
-from aiohttp import ClientTimeout
+from aiohttp import ClientError, ClientTimeout
 
 from ..domain.events import PeerTransportChanged
 from ..domain.federation import (
@@ -64,6 +64,7 @@ from .gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
 )
+from .inbound_validator import UnpairedPeerRefusedError
 
 if TYPE_CHECKING:
     from ..infrastructure.event_bus import EventBus
@@ -92,6 +93,17 @@ PING_INTERVAL_S: float = 30.0
 #: 1 MiB is well above a single envelope (~10 KB) but far under the
 #: default libdatachannel message size ceiling.
 SEND_HWM_BYTES: int = 1 << 20
+
+#: What an HTTPS-inbox POST raises when the PEER is the problem — refused,
+#: reset, DNS, TLS, timed out. Logged as one line with no traceback: an
+#: offline household is ordinary operation, retried by the outbox.
+#: (``aiohttp.ClientError`` covers the connector / payload / timeout family;
+#: ``OSError`` and ``TimeoutError`` the bare socket-level shapes.)
+_PEER_UNREACHABLE_ERRORS: tuple[type[BaseException], ...] = (
+    ClientError,
+    OSError,
+    TimeoutError,
+)
 
 
 # ─── HTTPS inbox transport ─────────────────────────────────────────────────────
@@ -145,11 +157,25 @@ class HttpsInboxTransport:
             ) as resp:
                 status = resp.status
                 return 200 <= status < 300, status
-        except Exception as exc:
+        except _PEER_UNREACHABLE_ERRORS as exc:
+            # The peer is down, unreachable or slow — ordinary operation
+            # for a household that is offline: the caller marks it
+            # unreachable and the outbox retries on its backoff ladder.
+            # One line naming the peer and the cause says everything; the
+            # traceback (two chained ~25-frame aiohttp stacks) said nothing
+            # more, once per attempt, for as long as the peer stayed away.
             # ``describe_exception``, not ``exc``: the common failures here
             # (ClientOSError, ClientConnectionError, ServerTimeoutError) all
-            # render as an empty string, so this line used to name the peer
-            # and then say nothing about what went wrong.
+            # render as an empty string.
+            log.warning(
+                "HTTPS-inbox send to %s failed: %s",
+                instance.id,
+                describe_exception(exc),
+            )
+            return False, None
+        except Exception as exc:
+            # Anything else is a fault on OUR side (a bad envelope, a
+            # client-factory bug) — keep the traceback for it.
             log.warning(
                 "HTTPS-inbox send to %s failed: %s",
                 instance.id,
@@ -2261,7 +2287,12 @@ class FederationTransport:
                 try:
                     await self._inbound_handler(instance_id, raw)
                 except ValueError as exc:
-                    log.warning(
+                    # An unpair tombstone's frame was already logged by the
+                    # pipeline step (see ``make_check_unpairing``).
+                    log.log(
+                        logging.DEBUG
+                        if isinstance(exc, UnpairedPeerRefusedError)
+                        else logging.WARNING,
                         "fed RTC inbound rejected from %s: %s",
                         instance_id,
                         exc,

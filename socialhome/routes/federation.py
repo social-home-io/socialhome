@@ -36,6 +36,7 @@ from aiohttp import web
 
 from .. import app_keys as K
 from ..domain.federation import FederationEventType
+from ..federation.inbound_validator import UnpairedPeerRefusedError
 from ..rate_limiter import client_bucket
 from .base import BaseView
 
@@ -262,7 +263,17 @@ class FederationInboxView(BaseView):
             # those are the transport's DataChannel→HTTPS failover
             # noise (see ``_EXPECTED_REPLAY_EVENTS``); content-event
             # replays still WARNING so a real ops signal stays loud.
-            if _is_expected_replay(str(exc), raw_body):
+            if isinstance(exc, UnpairedPeerRefusedError):
+                # A household we unpaired while it was offline, still
+                # talking as if paired. The pipeline step logged it once
+                # (INFO when it pulled our UNPAIR forward, DEBUG after) —
+                # a WARNING per envelope here was the noise it avoids.
+                log.debug(
+                    "federation inbox: refused unpaired peer inbox_id=%s status=%d",
+                    inbox_id,
+                    status,
+                )
+            elif _is_expected_replay(str(exc), raw_body):
                 log.info(
                     "federation inbox: dedup inbox_id=%s status=%d reason=%s",
                     inbox_id,

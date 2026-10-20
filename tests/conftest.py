@@ -173,6 +173,19 @@ class _FakePeerConnection:
         self._remote_type: str | None = None
 
     @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def state(self):
+        """``aiolibdatachannel.RTCState`` — CLOSED once closed, else NEW."""
+        return _FakeRTCState.CLOSED if self._closed else _FakeRTCState.NEW
+
+    @property
+    def ice_state(self):
+        return _FakeICEState.CLOSED if self._closed else _FakeICEState.NEW
+
+    @property
     def signaling_state(self):
         """Return a ``SignalingState`` IntEnum value based on local/remote
         types.  Earlier versions of this stub returned plain strings, which

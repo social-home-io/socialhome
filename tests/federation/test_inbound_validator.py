@@ -28,6 +28,7 @@ from socialhome.federation.inbound_validator import (
     TRANSPORT_GFS_RELAY,
     InboundContext,
     InboundPipeline,
+    UnpairedPeerRefusedError,
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_peer_class,
@@ -795,7 +796,7 @@ async def test_unpairing_gate_lets_only_unpair_through_from_a_tombstone():
     for event_type in FederationEventType:
         if event_type is FederationEventType.UNPAIR:
             continue
-        with pytest.raises(ValueError, match="No instance found"):
+        with pytest.raises(UnpairedPeerRefusedError, match="No instance found"):
             await step(
                 InboundContext(
                     inbox_id="wh-x",

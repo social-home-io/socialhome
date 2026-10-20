@@ -53,6 +53,7 @@ from ..domain.events import (
     PairingIntroRelayReceived,
     PeerHomeChanged,
     PeerProtoVersionRaised,
+    PeerUnpaired,
     SpaceConfigChanged,
     SpaceRemoteSeatLive,
     SpaceSyncComplete,
@@ -144,6 +145,18 @@ def _loads(s: str | bytes) -> dict:
 
 
 log = logging.getLogger(__name__)
+
+#: ``begin_mesh_catchup_sync`` failures that are a window, not a fault: no
+#: route yet, and the route-discovery negative cooldown after one. The
+#: scheduler retries both (they never count against its attempt cap).
+_MESH_CATCHUP_TRANSIENT: frozenset[str] = frozenset(
+    {DELIVERY_ERROR_NO_ROUTE, DELIVERY_ERROR_ROUTE_COOLDOWN}
+)
+
+#: How long after a pairing is torn down a send to that household still
+#: counts as one that was in flight (a queued sync BEGIN, a handler already
+#: past its lookup) rather than a send to a household we never knew.
+UNPAIR_SEND_RACE_S: float = 300.0
 
 #: ``SPACE_SYNC_DIRECT_FAILED`` reasons that mean "no free slot now": the
 #: BEGIN was never served, so the requester asks again (``SpaceSyncDeferred``).
@@ -329,6 +342,7 @@ class FederationService:
         "_sync_manager",
         "_transport",
         "_typing_service",
+        "_unpaired_at",
         "_user_repo",
     )
 
@@ -405,6 +419,11 @@ class FederationService:
         #: diagnostics, never persisted, never sent anywhere. Bounded by
         #: the number of paired peers.
         self._relay_accepted_at: dict[str, str] = {}
+        #: peer instance_id → monotonic time we last saw it unpaired (either
+        #: side tore the pairing down). Sends already in flight then race
+        #: the row's removal; see :meth:`send_event`. Pruned past
+        #: :data:`UNPAIR_SEND_RACE_S`, so bounded by recent unpairs.
+        self._unpaired_at: dict[str, float] = {}
         self._routed_handler: SpaceRoutedHandler | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
@@ -471,6 +490,22 @@ class FederationService:
         self._bus.subscribe(ConnectionReachable, self._on_connection_reachable)
         # A sync stream we requested landed: free both sides' session.
         self._bus.subscribe(SpaceSyncComplete, self._on_space_sync_landed)
+        # A pairing torn down: sends already queued for it are expected to
+        # find no row (``send_event`` logs them at INFO, not WARNING).
+        self._bus.subscribe(PeerUnpaired, self._on_peer_unpaired)
+
+    async def _on_peer_unpaired(self, event: PeerUnpaired) -> None:
+        now = time.monotonic()
+        self._unpaired_at = {
+            iid: at
+            for iid, at in self._unpaired_at.items()
+            if now - at < UNPAIR_SEND_RACE_S
+        }
+        self._unpaired_at[event.instance_id] = now
+
+    def _unpaired_recently(self, instance_id: str) -> bool:
+        at = self._unpaired_at.get(instance_id)
+        return at is not None and time.monotonic() - at < UNPAIR_SEND_RACE_S
 
     def _build_inbound_pipeline(self):
         """Lazily construct the §24.11 validation middleware chain.
@@ -1446,7 +1481,25 @@ class FederationService:
         """
         instance = await self._federation_repo.get_instance(to_instance_id)
         if instance is None:
-            log.warning("send_event: unknown instance %s", to_instance_id)
+            # A household being unpaired (its tombstone holds our queued
+            # UNPAIR) or just unpaired (either side tore it down) is not
+            # "unknown": a send already in flight racing that deliberate act
+            # is expected, and nothing but the UNPAIR may reach it. A truly
+            # unknown id stays a WARNING — a caller sending to a household
+            # it never had a direct path to.
+            unpaired = self._unpaired_recently(to_instance_id) or (
+                await self._federation_repo.get_instance(
+                    to_instance_id, include_unpairing=True
+                )
+                is not None
+            )
+            log.log(
+                logging.INFO if unpaired else logging.WARNING,
+                "send_event: %s %s — %s not sent",
+                "unpaired" if unpaired else "unknown instance",
+                to_instance_id,
+                event_type.value,
+            )
             return DeliveryResult(
                 instance_id=to_instance_id,
                 ok=False,
@@ -2074,7 +2127,16 @@ class FederationService:
                 space_id=space_id,
             )
             if not result.ok:
-                log.warning(
+                # No route yet (a mesh still warming after a reboot, or the
+                # host offline) and the negative cooldown after one are the
+                # transient failures this method reports as ``False`` — the
+                # scheduler retries them, uncapped. Logged at INFO: a
+                # WARNING per retry tick said nothing a later success or
+                # the next failure would not. Anything else stays loud.
+                log.log(
+                    logging.INFO
+                    if result.error in _MESH_CATCHUP_TRANSIENT
+                    else logging.WARNING,
                     "mesh catch-up sync to host %s for space %s failed: %s",
                     host_instance_id,
                     space_id,
@@ -3707,9 +3769,22 @@ class FederationService:
         # issued hands the sender a requester session — and everything
         # downstream (the chunk origin pin, the space pin) hangs off that
         # session, so the whole §25.6 receive path inherits whatever it
-        # says. Refuse at WARNING: a legitimate provider cannot hit this.
+        # says. Refuse it — at WARNING, except shortly after this household
+        # started: then it is most likely a legitimate provider answering a
+        # BEGIN we sent before a restart (it queued the OFFER while we were
+        # down and redelivers it now), whose pending request died with that
+        # process.
         pending = self._sync_manager.pending_sync_request(sync_id)
         if pending is None:
+            if self._sync_manager.restarted_recently():
+                log.info(
+                    "sync %s: SPACE_SYNC_OFFER from %s for a sync this process "
+                    "never issued (an answer to one asked before a restart?) "
+                    "— dropping",
+                    sync_id,
+                    event.from_instance,
+                )
+                return
             log.warning(
                 "sync %s: unsolicited SPACE_SYNC_OFFER from %s — we never "
                 "requested this sync; dropping",
@@ -4030,13 +4105,24 @@ class FederationService:
             min_version=FederationCapability.MIN_FOR_SYNC_HTTPS_FALLBACK,
         )
         if not supports:
-            log.warning(
-                "sync %s: provider %s does not advertise v_%d — HTTPS "
-                "fallback unavailable, sync will not complete",
-                sync_id,
-                provider_instance_id,
-                FederationCapability.MIN_FOR_SYNC_HTTPS_FALLBACK,
-            )
+            if await self._federation_repo.get_instance(provider_instance_id) is None:
+                # Unpaired while the handshake ran: there is no version to
+                # judge, and no direct session to rescue. The mesh catch-up
+                # owns a mesh-only member's sync from here.
+                log.info(
+                    "sync %s: provider %s is no longer paired — dropping the "
+                    "direct session",
+                    sync_id,
+                    provider_instance_id,
+                )
+            else:
+                log.warning(
+                    "sync %s: provider %s does not advertise v_%d — HTTPS "
+                    "fallback unavailable, sync will not complete",
+                    sync_id,
+                    provider_instance_id,
+                    FederationCapability.MIN_FOR_SYNC_HTTPS_FALLBACK,
+                )
             self._sync_manager.close_session(sync_id)
             return
         decision = await self._sync_manager.trigger_relay_sync(sync_id)

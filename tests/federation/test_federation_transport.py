@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import time
 
 import aiohttp
@@ -939,6 +940,58 @@ async def test_https_inbox_transport_network_error_is_failure():
         envelope_dict={"x": 1},
     )
     assert ok is False and status is None
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 18003)"),
+        aiohttp.ClientConnectionError(),
+        aiohttp.ServerTimeoutError(),
+        TimeoutError(),
+    ],
+)
+async def test_https_inbox_unreachable_peer_logs_one_line_no_traceback(exc, caplog):
+    """An offline peer is ordinary operation: one WARNING naming the peer
+    and the cause, and no traceback (it used to be two chained ~25-frame
+    aiohttp stacks per attempt, for as long as the peer stayed away)."""
+
+    class _RaisingClient:
+        def post(self, *a, **kw):
+            raise exc
+
+    async def _factory():
+        return _RaisingClient()
+
+    wt = HttpsInboxTransport(client_factory=_factory)
+    with caplog.at_level(logging.WARNING, logger="socialhome.federation.transport"):
+        ok, status = await wt.send(
+            instance=_fake_instance("peer"),
+            envelope_dict={"x": 1},
+        )
+    assert ok is False and status is None
+    [record] = [r for r in caplog.records if "HTTPS-inbox send" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is None
+    assert "peer" in record.getMessage()
+    assert type(exc).__name__ in record.getMessage()
+
+
+async def test_https_inbox_unexpected_error_keeps_traceback(caplog):
+    """A fault on our side (not the peer being away) still logs its stack."""
+
+    class _RaisingClient:
+        def post(self, *a, **kw):
+            raise RuntimeError("boom")
+
+    async def _factory():
+        return _RaisingClient()
+
+    wt = HttpsInboxTransport(client_factory=_factory)
+    with caplog.at_level(logging.WARNING, logger="socialhome.federation.transport"):
+        await wt.send(instance=_fake_instance("peer"), envelope_dict={"x": 1})
+    [record] = [r for r in caplog.records if "HTTPS-inbox send" in r.getMessage()]
+    assert record.exc_info is not None
 
 
 # ─── PeerTransportChanged publication ─────────────────────────────────────

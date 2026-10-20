@@ -443,6 +443,13 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         authorship = self._authorship
         if authorship is None:
             return
+        # Every co-member household streams the deletions it holds, so a
+        # plain member's catch-up routinely carries tombstones it cannot
+        # vouch for — honest relaying, not a forged delete. Those are
+        # counted into one INFO line, like ``SpaceSyncReceiver._admit``'s
+        # member-household refusals; an id not bound to its author stays a
+        # WARNING (no honest provider produces one).
+        unvouched = 0
         for r in records:
             message_id = str(r.get("message_id") or r.get("id") or "")
             author = str(r.get("author_user_id") or "")
@@ -464,9 +471,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
             if not await authorship.acts_for(
                 event, space_id, author, any_role=True
             ) and not await authorship.has_content_authority(event, space_id):
-                _refuse(
-                    event, "chat deletion", message_id, "provider may not delete it"
-                )
+                unvouched += 1
                 continue
             got = await self._chat_for(
                 event, what="chat deletion", row_id=message_id, removal=True
@@ -476,6 +481,15 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
             _space, chat, _auth = got
             await self._remove(
                 event, space_id, chat, message_id, author=author, actor=author
+            )
+        if unvouched:
+            log.info(
+                "space chat sync: skipped %d of %d deletion(s) from %s for %s "
+                "— that household speaks for neither the author nor the space",
+                unvouched,
+                len(records),
+                provider,
+                space_id,
             )
 
     # ── Update ─────────────────────────────────────────────────────────

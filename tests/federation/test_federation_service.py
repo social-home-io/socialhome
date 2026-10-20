@@ -25,7 +25,11 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
-from socialhome.domain.events import ConnectionReachable, PairingConfirmed
+from socialhome.domain.events import (
+    ConnectionReachable,
+    PairingConfirmed,
+    PeerUnpaired,
+)
 from socialhome.domain.federation import (
     DELIVERY_ERROR_MESH_DEFER_FULL,
     DELIVERY_ERROR_MESH_DEFERRED,
@@ -44,6 +48,7 @@ from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.federation import FederationService
 from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.federation_service import UNPAIR_SEND_RACE_S
 from socialhome.federation.invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
 from socialhome.federation.media_framing import (
     MEDIA_AEAD_SUITE_AESGCM_256,
@@ -635,6 +640,68 @@ async def test_queue_event_seals_for_a_tombstone_and_only_queues():
         )
         == {}
     )
+
+
+async def test_send_event_to_a_tombstone_is_info_and_to_a_stranger_warning(caplog):
+    """A send racing our own unpair of a household (its tombstone holds the
+    queued UNPAIR) is expected: refused, at INFO. Only a household we never
+    knew is the WARNING-worthy ``unknown instance`` (federation demo,
+    ``unpair-offline``)."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    inst, _ = _make_remote_instance(km)
+    await fed_repo.save_instance(
+        dataclasses.replace(inst, status=PairingStatus.UNPAIRING)
+    )
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    with caplog.at_level(logging.INFO, logger="socialhome.federation"):
+        tomb = await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=FederationEventType.SPACE_SYNC_BEGIN,
+            payload={},
+        )
+        stranger = await svc.send_event(
+            to_instance_id="never-paired",
+            event_type=FederationEventType.SPACE_SYNC_BEGIN,
+            payload={},
+        )
+    assert tomb.error == stranger.error == "unknown_instance"
+    sends = [r for r in caplog.records if r.getMessage().startswith("send_event:")]
+    [about_tomb] = [r for r in sends if inst.id in r.getMessage()]
+    [about_stranger] = [r for r in sends if "never-paired" in r.getMessage()]
+    assert about_tomb.levelno == logging.INFO
+    assert "unpaired" in about_tomb.getMessage()
+    assert about_stranger.levelno == logging.WARNING
+    assert "unknown instance" in about_stranger.getMessage()
+
+
+async def test_send_event_racing_a_peer_initiated_unpair_is_info(caplog):
+    """The peer unpaired US: its row is gone outright (no tombstone on this
+    side), and a sync BEGIN already queued for it finds nothing. Within
+    ``UNPAIR_SEND_RACE_S`` of the ``PeerUnpaired`` that is expected (INFO);
+    after it, the same send is a WARNING again."""
+    bus = EventBus()
+    svc, _ = _make_service(bus=bus)
+    await bus.publish(PeerUnpaired(instance_id="ex-peer"))
+    with caplog.at_level(logging.INFO, logger="socialhome.federation"):
+        await svc.send_event(
+            to_instance_id="ex-peer",
+            event_type=FederationEventType.SPACE_SYNC_BEGIN,
+            payload={},
+        )
+        with patch(
+            "socialhome.federation.federation_service.time.monotonic",
+            return_value=time.monotonic() + UNPAIR_SEND_RACE_S + 1,
+        ):
+            await svc.send_event(
+                to_instance_id="ex-peer",
+                event_type=FederationEventType.SPACE_SYNC_BEGIN,
+                payload={},
+            )
+    levels = [
+        r.levelno for r in caplog.records if r.getMessage().startswith("send_event:")
+    ]
+    assert levels == [logging.INFO, logging.WARNING]
 
 
 async def test_queue_event_for_unknown_instance_queues_nothing():
@@ -1733,6 +1800,41 @@ async def test_begin_mesh_catchup_sync_closes_session_on_send_failure():
 
     sync_id = sync_manager.register_requester_https_session.call_args.kwargs["sync_id"]
     sync_manager.close_session.assert_called_once_with(sync_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "level"),
+    [
+        ("no_route", logging.INFO),
+        ("route_cooldown", logging.INFO),
+        ("routed_send_failed", logging.WARNING),
+    ],
+)
+async def test_begin_mesh_catchup_sync_transient_failure_is_info(caplog, error, level):
+    """``no_route`` (a mesh still warming after a reboot, or the host
+    offline) and the cooldown after it are retried by the scheduler, uncapped:
+    INFO, not a WARNING per tick. Any other failure stays a WARNING."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.register_requester_https_session = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock(
+        return_value=DeliveryResult(instance_id="host-1", ok=False, error=error),
+    )
+    with (
+        patch.object(
+            FederationService, "is_confirmed_peer", AsyncMock(return_value=False)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+        caplog.at_level(logging.INFO, logger="socialhome.federation"),
+    ):
+        shipped = await svc.begin_mesh_catchup_sync(
+            space_id="sp-1", host_instance_id="host-1"
+        )
+    assert shipped is False
+    [record] = [r for r in caplog.records if "mesh catch-up sync" in r.getMessage()]
+    assert record.levelno == level
 
 
 @pytest.mark.asyncio

@@ -1824,6 +1824,69 @@ async def test_handle_space_sync_offer_refuses_an_unsolicited_sync_id(svc):
     svc._sync_manager.apply_offer.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("recent", "level"),
+    [(False, logging.WARNING), (True, logging.INFO)],
+)
+async def test_unsolicited_offer_shortly_after_a_restart_logs_info(
+    svc, caplog, recent, level
+):
+    """An OFFER for an unknown sync_id is refused either way. Long after we
+    started it is suspicious (WARNING); shortly after, it is most likely a
+    provider answering a BEGIN we sent before a restart — it queued the
+    OFFER while we were down and its outbox redelivers it, re-stamped — and
+    the pending request died with that process (INFO: seen on every
+    restarted household in the federation demo)."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.pending_sync_request = MagicMock(return_value=None)
+    svc._sync_manager.restarted_recently = MagicMock(return_value=recent)
+    svc._sync_manager.apply_offer = AsyncMock()
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    await svc._handle_space_sync_offer(
+        _event(
+            "SPACE_SYNC_OFFER",
+            {"sync_id": "old-one", "sdp_offer": "x"},
+            space_id="sp",
+        ),
+    )
+    svc._sync_manager.apply_offer.assert_not_awaited()
+    [record] = [r for r in caplog.records if "old-one" in r.getMessage()]
+    assert record.levelno == level
+
+
+async def test_relay_retry_for_a_provider_unpaired_meanwhile_logs_info(svc, caplog):
+    """The provider was unpaired (row purged) during the 15 s ICE wait:
+    there is no version to judge, so no "does not advertise v_13" WARNING —
+    the direct session is dropped at INFO and nothing is sent."""
+    _unpair(svc)
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.trigger_relay_sync = AsyncMock()
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    with patch.object(
+        FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+    ) as send:
+        await svc._maybe_trigger_relay_retry("s", "gone-provider")
+    send.assert_not_awaited()
+    svc._sync_manager.trigger_relay_sync.assert_not_awaited()
+    svc._sync_manager.close_session.assert_called_once_with("s")
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("no longer paired" in r.getMessage() for r in caplog.records)
+
+
+async def test_relay_retry_for_an_old_paired_provider_still_warns(svc, caplog):
+    """A paired provider below v_13 keeps the loud diagnosis."""
+    svc._sync_manager = MagicMock()
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    with patch.object(
+        FederationService, "peer_supports", new_callable=AsyncMock, return_value=False
+    ):
+        await svc._maybe_trigger_relay_retry("s", "old-provider")
+    assert any(
+        r.levelno == logging.WARNING and "does not advertise" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 async def test_handle_space_sync_offer_refuses_an_offer_from_another_household(svc):
     """We asked ONE household. A second one answering with the same
     sync_id is either a race we don't want or an injection."""
