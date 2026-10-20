@@ -27,9 +27,11 @@ import {
 } from './SpaceProfileDialog'
 import { openRemoteInviteDialog } from './RemoteInviteDialog'
 import { currentUser } from '@/store/auth'
+import { householdDisplayName, loadHouseholdUsers } from '@/store/householdUsers'
 import { resolveAvatar } from '@/utils/avatar'
 import { addBase } from '@/baseUrl'
 import { spaceSectionPath } from '@/features/spaces/spaceTabs'
+import { personLabel } from '@/utils/names'
 
 /** Friendly relative duration for "joined …" — drops the
  *  utilitarian ``5/8/2026`` for "joined today" / "joined 3 days ago"
@@ -126,6 +128,7 @@ export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props
     Promise.all([p1, p2]).then(([mems, bansList]) => {
       members.value = mems as Member[]
       bans.value = bansList as Ban[]
+      if (bans.value.length > 0) void loadHouseholdUsers()
       canManage.value = hasSettingsAuthority(viewerRole)
       loading.value = false
     }).catch(() => {
@@ -244,7 +247,7 @@ export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props
   // §4.1.6 resolution priority — space_display_name > personal_alias > display_name.
   // Returns the canonical name to show plus a flag for the "✏ nickname" chip.
   const resolveName = (m: Member) => {
-    const fallback = m.display_name || m.user_id
+    const fallback = personLabel(m.display_name)
     if (m.space_display_name) {
       return { name: m.space_display_name, source: 'space' as const, fallback }
     }
@@ -342,7 +345,7 @@ export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props
                 <span class="sh-member-name">{r.name}</span>
                 {r.source === 'space' && r.name !== m.display_name && (
                   <span class="sh-member-original-name">
-                    {t('space.members.household_name', { name: m.display_name || m.user_id })}
+                    {t('space.members.household_name', { name: personLabel(m.display_name) })}
                   </span>
                 )}
                 {r.source === 'personal' && (
@@ -416,9 +419,9 @@ export function SpaceMemberList({ spaceId, viewerRole, joinRequests = 0 }: Props
             <h2 class="sh-settings-section-heading">{t('space.members.banned_heading')}</h2>
             {bans.value.map(b => (
               <div key={b.user_id} class="sh-member-row sh-member-row--banned">
-                <Avatar name={b.user_id} size={32} />
+                <Avatar name={householdDisplayName(b.user_id)} size={32} />
                 <div class="sh-member-info">
-                  <span class="sh-member-name">{b.user_id}</span>
+                  <span class="sh-member-name">{householdDisplayName(b.user_id)}</span>
                   <span class="sh-badge sh-badge--danger">{t('space.members.banned_badge')}</span>
                   {b.reason && (
                     <span class="sh-muted">{b.reason}</span>

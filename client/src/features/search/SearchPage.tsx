@@ -13,6 +13,7 @@ import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
+import { loadSpaces, spaces } from '@/store/spaces'
 
 interface Hit {
   scope: string
@@ -189,7 +190,7 @@ export default function SearchPage() {
           <li key={`${h.scope}:${h.ref_id}`} class="sh-search-hit sh-card">
             <header class="sh-row sh-justify-between">
               <strong>{SCOPE_LABELS[h.scope] ? t(SCOPE_LABELS[h.scope]) : h.scope}</strong>
-              {h.space_id && <span class="sh-muted">{h.space_id}</span>}
+              {spaceNameOf(h.space_id) && <span class="sh-muted">{spaceNameOf(h.space_id)}</span>}
             </header>
             {h.title && <h4>{h.title}</h4>}
             <p class="sh-snippet">
@@ -230,6 +231,8 @@ async function runSearch() {
     hits.value = body.hits
     counts.value = body.counts ?? {}
     hasMore.value = body.hits.length === PAGE_SIZE
+    // A hit names its space by the space's name — never its id.
+    if (spaces.value.length === 0 && body.hits.some(h => h.space_id)) void loadSpaces()
   } catch (err: unknown) {
     showToast(t('search.failed', { error: String((err as Error)?.message ?? err) }), 'error')
     hits.value = []
@@ -259,4 +262,11 @@ async function loadMore() {
   } finally {
     loadingMore.value = false
   }
+}
+
+/** The name of a hit's space when this household knows it; nothing
+ *  otherwise — the space's id is never a label. */
+function spaceNameOf(spaceId: string | null): string | null {
+  if (!spaceId) return null
+  return spaces.value.find(s => s.id === spaceId)?.name || null
 }

@@ -13,6 +13,7 @@
  */
 
 import { t } from '@/i18n/i18n'
+import { personLabel } from '@/utils/names'
 
 /** What the helpers need from a member row — satisfied by both a space
  *  member (``GET /api/spaces/{id}/members``) and a conversation member
@@ -88,7 +89,7 @@ export function findMentionTrigger(text: string, cursor: number): MentionTrigger
 
 function displayName(m: MentionMember): string {
   return (
-    m.space_display_name || m.personal_alias || m.display_name || m.mention || m.user_id
+    personLabel(m.space_display_name, m.personal_alias, m.display_name, m.mention)
   )
 }
 

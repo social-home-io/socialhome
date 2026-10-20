@@ -36,6 +36,7 @@ import { showToast } from './Toast'
 import { confirmDialog } from './confirm'
 import { isOne, t } from '@/i18n/i18n'
 import { addBase } from '@/baseUrl'
+import { personLabel } from '@/utils/names'
 
 /** Roles an invite link can seat someone as. ``owner`` is deliberately
  *  absent — ownership transfers are a separate, deliberate gesture, and
@@ -351,9 +352,9 @@ function usesLabel(row: InviteTokenRow): string {
     { n: String(left) })
 }
 
-/** Display name for the link's minter, falling back to the raw id. */
+/** Display name for the link's minter, else "Someone" — never the id. */
 function creatorName(userId: string): string {
-  return memberNames.value[userId] ?? userId
+  return memberNames.value[userId] ?? personLabel()
 }
 
 async function loadMemberNames() {

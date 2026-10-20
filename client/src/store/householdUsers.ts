@@ -13,6 +13,7 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import type { User } from '@/types'
+import { personLabel } from '@/utils/names'
 
 export const householdUsers = signal<Map<string, User>>(new Map())
 
@@ -38,17 +39,18 @@ export function invalidateHouseholdUsers(): void {
 /**
  * Resolve a user_id to its best-available display label.
  *
- * Priority: ``display_name`` → ``username`` → the raw ``user_id``.
- * Returns ``''`` for falsy input so callers can short-circuit. Use this
- * everywhere a feed surface needs to render a human-readable name from
- * the bare ``author_user_id`` / ``last_editor_user_id`` / ``locked_by``
- * id strings the API hands back. Five surfaces previously inlined the
- * same three-line resolver — this is the single source of truth.
+ * Priority: ``display_name`` → ``username`` → "Someone" — never the
+ * raw ``user_id`` (an unknown or not-yet-loaded user is not shown by
+ * id). Returns ``''`` for falsy input so callers can short-circuit. Use
+ * this everywhere a feed surface needs to render a human-readable name
+ * from the bare ``author_user_id`` / ``last_editor_user_id`` /
+ * ``locked_by`` id strings the API hands back — the single source of
+ * truth.
  */
 export function householdDisplayName(userId: string | null | undefined): string {
   if (!userId) return ''
   const u = householdUsers.value.get(userId)
-  return u?.display_name || u?.username || userId
+  return personLabel(u?.display_name, u?.username)
 }
 
 /**

@@ -2807,6 +2807,8 @@
   "user_actions.block_body": "Vous ne verrez plus ses temps forts, ses publications, sa présence ni son entrée dans la liste d'amis, et vous ne pourrez plus vous écrire. Vous pouvez débloquer à tout moment dans Paramètres → Confidentialité → Comptes bloqués.",
   "user_actions.block_confirm": "Bloquer",
   "person.someone": "Quelqu’un",
+  "names.another_household": "un autre foyer",
+  "names.a_gfs": "un GFS",
   "person.nickname_only_you": "surnom visible par vous seul",
   "person.status_until": "jusqu’à {time}",
   "person.status_badge": "Statut : {status}",

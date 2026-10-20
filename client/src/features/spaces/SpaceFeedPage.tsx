@@ -67,6 +67,7 @@ import { patchSpaceChat, spaceChatOf, spaceChatOpenTo } from '@/store/spaceChat'
 import { isMuteActive } from '@/utils/mute'
 import { resolveAvatar } from '@/utils/avatar'
 import { emptyFeedBodyKey } from './spaceFeedEmpty'
+import { personLabel } from '@/utils/names'
 
 interface SpaceDetail {
   id: string
@@ -216,7 +217,7 @@ async function loadSpaceHeader(spaceId: string) {
         }
         memberPreview.value = members.slice(0, 4).map((m) => ({
           user_id: m.user_id,
-          name: m.space_display_name || m.personal_alias || m.display_name || m.user_id,
+          name: personLabel(m.space_display_name, m.personal_alias, m.display_name),
           picture_url: m.picture_url ?? null,
         }))
       })

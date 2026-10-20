@@ -2812,6 +2812,8 @@
   "user_actions.block_body": "Du siehst dann ihre Highlights, Beiträge, Anwesenheit und ihren Eintrag in der Freundesliste nicht mehr, und ihr könnt euch keine Nachrichten schicken. Du kannst die Blockierung jederzeit unter Einstellungen → Privatsphäre → Blockierte Konten aufheben.",
   "user_actions.block_confirm": "Blockieren",
   "person.someone": "Jemand",
+  "names.another_household": "einem anderen Haushalt",
+  "names.a_gfs": "einem GFS",
   "person.nickname_only_you": "Spitzname, den nur du siehst",
   "person.status_until": "bis {time}",
   "person.status_badge": "Status: {status}",

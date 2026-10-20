@@ -29,6 +29,28 @@ describe('SearchPage', () => {
     expect(getByText('DMs')).toBeTruthy()
   })
 
+  it('names a hit’s space by its name, and never shows a space id', async () => {
+    const { render, waitFor } = await import('@testing-library/preact')
+    const { api } = await import('@/api')
+    const { spaces } = await import('@/store/spaces')
+    spaces.value = [{ id: 'sp-known', name: 'Wednesday choir' } as never]
+    vi.mocked(api.get).mockResolvedValueOnce({
+      hits: [
+        { scope: 'post', ref_id: 'p1', space_id: 'sp-known', title: '', snippet: '<mark>hi</mark>' },
+        { scope: 'post', ref_id: 'p2', space_id: 'sp-7xk2unknown', title: '', snippet: '<mark>hi</mark>' },
+      ],
+      counts: { post: 2 },
+    })
+    window.history.replaceState(null, '', '/search?q=hi')
+    const mod = await import('./SearchPage')
+    const { container } = render(<mod.default />)
+    await waitFor(() => expect(container.querySelectorAll('.sh-search-hit')).toHaveLength(2))
+    expect(container.textContent).toContain('Wednesday choir')
+    expect(container.textContent).not.toContain('sp-known')
+    expect(container.textContent).not.toContain('sp-7xk2unknown')
+    spaces.value = []
+  })
+
   it('renders a hostile snippet as text, keeping only the match highlight', async () => {
     const { render, waitFor } = await import('@testing-library/preact')
     const { api } = await import('@/api')

@@ -17,6 +17,7 @@ import { api } from '@/api'
 import { Spinner } from '@/components/Spinner'
 import { t } from '@/i18n/i18n'
 import { connections, type Connection as StoreConnection } from '@/store/connections'
+import { householdLabel } from '@/utils/names'
 
 interface Connection extends StoreConnection {
   status?: 'confirmed' | 'pending_sent' | 'pending_received' | 'unpairing'
@@ -96,7 +97,7 @@ export default function NetworkMap() {
                     : 'sh-network-peer-down'}
                 />
                 <title>
-                  {c.display_name ?? c.instance_id} ({status},
+                  {householdLabel(c.display_name)} ({status},
                   {c.reachable ? ' reachable' : ' unreachable'})
                 </title>
               </g>

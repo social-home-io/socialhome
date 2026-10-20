@@ -22,6 +22,7 @@ import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
+import { personLabel } from '@/utils/names'
 
 interface DialogState {
   open: boolean
@@ -125,7 +126,7 @@ export function AliasDialog() {
     <Modal open={s.open} onClose={closeDialog} title={t('alias.title')}>
       <div class="sh-alias-dialog">
         <p class="sh-alias-dialog-lead">
-          {t('alias.lead_before')}<strong>{s.globalDisplayName || s.targetUserId}</strong>{t('alias.lead_after')}
+          {t('alias.lead_before')}<strong>{personLabel(s.globalDisplayName)}</strong>{t('alias.lead_after')}
         </p>
         <label class="sh-alias-dialog-label" for="sh-alias-input">
           {t('alias.label')}

@@ -47,6 +47,7 @@ import {
 } from '@/store/calls'
 import { CallEmbedBlockedError, embedBlocksMicrophone, isFramed } from './embedPolicy'
 import { t } from '@/i18n/i18n'
+import { personLabel } from '@/utils/names'
 
 export type CallType = 'audio' | 'video'
 export type CallPhase =
@@ -146,7 +147,7 @@ export async function startCall(conversationId: string, type: CallType): Promise
     if (others.length + 1 > MAX_CALL_PARTICIPANTS) {
       throw new Error(t('calls.err.group_limit', { n: String(MAX_CALL_PARTICIPANTS) }))
     }
-    for (const m of others) names.set(m.user_id, m.display_name || m.username || m.user_id)
+    for (const m of others) names.set(m.user_id, personLabel(m.display_name, m.username))
     order = others.map(m => m.user_id)
     const offers: Record<string, string> = {}
     for (const m of others) {
@@ -308,9 +309,9 @@ async function loadNames(conversationId: string, session: typeof unsubs): Promis
   try {
     const rows = await api.get(`/api/conversations/${conversationId}/members`) as MemberRow[]
     if (unsubs !== session) return
-    for (const m of rows) names.set(m.user_id, m.display_name || m.username || m.user_id)
+    for (const m of rows) names.set(m.user_id, personLabel(m.display_name, m.username))
     publishPeers()
-  } catch { /* names fall back to ids */ }
+  } catch { /* names fall back to "Someone" */ }
 }
 
 function openLeg(userId: string, stream: MediaStream, state: PeerState): Leg {
@@ -595,7 +596,7 @@ function publishPeers(): void {
       const leg = legs.get(uid)
       return {
         userId: uid,
-        name: names.get(uid) ?? uid,
+        name: names.get(uid) ?? personLabel(),
         state: leg?.state ?? 'ringing',
         stream: leg?.stream ?? null,
       }

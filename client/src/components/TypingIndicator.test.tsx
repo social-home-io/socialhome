@@ -1,15 +1,45 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { wsSendMock } = vi.hoisted(() => ({ wsSendMock: vi.fn() }))
+const { wsSendMock, wsHandlers } = vi.hoisted(() => ({
+  wsSendMock: vi.fn(),
+  wsHandlers: {} as Record<string, (e: { data: unknown }) => void>,
+}))
 
 vi.mock('@/ws', () => ({
   ws: {
     send: wsSendMock,
-    on: vi.fn(() => () => {}),
+    on: vi.fn((type: string, h: (e: { data: unknown }) => void) => {
+      wsHandlers[type] = h
+      return () => {}
+    }),
   },
 }))
 
-import { sendTyping } from './TypingIndicator'
+import { render } from '@testing-library/preact'
+import { act } from 'preact/test-utils'
+import { householdUsers } from '@/store/householdUsers'
+import type { User } from '@/types'
+import { sendTyping, TypingIndicator } from './TypingIndicator'
+
+describe('TypingIndicator — who is typing, never an id', () => {
+  const typing = (cid: string, uid: string, username?: string) => act(() => {
+    wsHandlers['conversation.user_typing']({
+      data: { conversation_id: cid, sender_user_id: uid, sender_username: username },
+    })
+  })
+
+  it('a cached person by name; else the frame username; else "Someone"', () => {
+    householdUsers.value = new Map([['u-mia', { user_id: 'u-mia', username: 'mia', display_name: 'Mia' } as User]])
+    typing('c1', 'u-mia')
+    expect(render(<TypingIndicator scope="c1" />).container.textContent).toContain('Mia')
+    typing('c2', 'u-remote-7xk2', 'erin')
+    expect(render(<TypingIndicator scope="c2" />).container.textContent).toContain('erin')
+    typing('c3', 'u-remote-9qz4')
+    const text = render(<TypingIndicator scope="c3" />).container.textContent ?? ''
+    expect(text).toContain('Someone')
+    expect(text).not.toContain('u-remote-9qz4')
+  })
+})
 
 describe('TypingIndicator', () => {
   beforeEach(() => {

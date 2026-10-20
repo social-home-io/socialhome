@@ -173,7 +173,7 @@ describe('FederationMap', () => {
     expect(rows.length).toBe(2)
   })
 
-  test('uses instance_id as fallback when display_name is absent', () => {
+  test('says "another household" when display_name is absent — never the instance_id', () => {
     connections.value = [
       {
         instance_id: 'some-uuid',
@@ -184,7 +184,8 @@ describe('FederationMap', () => {
       } as never,
     ]
     render(<FederationMap />)
-    expect(screen.getByText('some-uuid')).toBeDefined()
+    expect(screen.getByText('another household')).toBeDefined()
+    expect(screen.queryByText('some-uuid')).toBeNull()
   })
 
   test('shows a tiles-unavailable message when the tile config fails', async () => {
