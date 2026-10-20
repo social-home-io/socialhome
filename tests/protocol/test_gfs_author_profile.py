@@ -201,3 +201,22 @@ async def test_a_protected_authors_name_only_profile_is_kept_as_such(env, profil
     assert got is not None
     assert (got.display_name, got.bio, got.picture_hash) == ("Bob Builder", None, None)
     assert await profiles.get_picture(SPACE, BOB.user_id) is None
+
+
+async def test_a_relayed_picture_is_re_encoded_never_stored_as_sent(env, profiles):
+    """A polyglot (a WebP with a script appended) is re-encoded before it
+    is stored and served to every viewer."""
+    sent = _webp() + b"<script>alert(1)</script>"
+    await _send(
+        env,
+        "author_profile",
+        _profile(BOB, picture_webp=sent),
+        await _cert(env, BOB, "comment"),
+    )
+    got = await _held(profiles, BOB.user_id)
+    assert got is not None
+    stored = await profiles.get_picture(SPACE, BOB.user_id)
+    if stored is not None:
+        raw, picture_hash = stored
+        assert raw != sent and b"<script>" not in raw
+        assert picture_hash == got.picture_hash

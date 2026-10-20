@@ -1530,8 +1530,10 @@ relay as every other item:
   self-cert, origin, writer cert with the v2 binding naming the author,
   epoch), then: the item must be about its own author; the content must
   decode (a name; capped sizes; the picture is WebP and matches its hash);
-  it is kept per `(space, author)` in `space_author_profiles` (migration
-  0113) only when its signed `ts` is newer than the held one. It never
+  the picture is **re-encoded** (never stored as sent — the same rule as
+  household pictures); it is kept per `(space, author)` in
+  `space_author_profiles` (migration 0113) only when its signed `ts` is
+  newer than the held one. It never
   creates a seat, a user or a member.
 - **Naming.** `PersonSummaryService` (space scope) names anyone still
   unnamed from it, and `GET /api/spaces/{id}/authors` hands the SPA the

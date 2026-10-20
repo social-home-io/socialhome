@@ -293,15 +293,17 @@ async def test_gated_on_the_known_member_households_versions():
     assert await svc.publish("sp", NOOR)
 
 
-async def test_an_unreadable_or_huge_picture_is_left_out():
+async def test_an_unreadable_picture_is_left_out():
     svc, gfs = _svc(pictures=_Pictures(user_pic=b"not an image"))
     await svc.publish("sp", NOOR)
     assert _profile(gfs).picture_webp is None
-    assert (
-        mod._shrink_sync(_webp(256, noisy=True)) is None
-        or len(mod._shrink_sync(_webp(256, noisy=True)) or b"")
-        <= PROFILE_PICTURE_MAX_BYTES
-    )
+
+
+async def test_a_noisy_picture_still_fits_the_cap():
+    svc, gfs = _svc(pictures=_Pictures(user_pic=_webp(600, noisy=True)))
+    await svc.publish("sp", NOOR)
+    pic = _profile(gfs).picture_webp
+    assert pic is None or len(pic) <= PROFILE_PICTURE_MAX_BYTES
 
 
 async def test_an_unknown_author_publishes_nothing():

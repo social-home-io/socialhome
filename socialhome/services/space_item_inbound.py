@@ -85,6 +85,7 @@ from ..domain.events import (
     PostDeleted,
     PostReactionChanged,
 )
+from ..domain.picture_hash import compute_picture_hash
 from ..domain.post import Comment, CommentType, Post, PostType
 from ..domain.space_author_profile import SpaceAuthorProfile, decode_profile_content
 from ..domain.space_item import (
@@ -115,6 +116,7 @@ from ..federation.pending_parent_buffer import (
     AwaitingParent,
 )
 from ..infrastructure.event_bus import EventBus
+from ..media.profile_picture import public_profile_picture
 from ..utils.datetime import parse_iso8601_lenient
 from .inbound_media_store import local_media_ref
 
@@ -264,6 +266,14 @@ class SpaceItemInbound:
                 item.space.id,
             )
             return False
+        # A peer's picture bytes are never stored as-is: re-encoded here, so
+        # a polyglot or anything but a plain image never reaches the table
+        # every viewer is served from (the same rule as household pictures).
+        picture = (
+            await public_profile_picture(profile.picture_webp)
+            if profile.picture_webp is not None
+            else None
+        )
         return await self._profiles.upsert_if_newer(
             SpaceAuthorProfile(
                 space_id=item.space.id,
@@ -271,11 +281,11 @@ class SpaceItemInbound:
                 author_pk=str(item.inner.get("author_pk") or ""),
                 display_name=profile.display_name,
                 bio=profile.bio,
-                picture_hash=profile.picture_hash,
+                picture_hash=compute_picture_hash(picture) if picture else None,
                 profile_rev=profile.profile_rev,
                 ts=item.stamp.astimezone(UTC).isoformat(timespec="microseconds"),
             ),
-            picture_webp=profile.picture_webp,
+            picture_webp=picture,
         )
 
     # ── Shared checks ────────────────────────────────────────────────────

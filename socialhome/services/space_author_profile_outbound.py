@@ -30,13 +30,9 @@ their next post.
 
 from __future__ import annotations
 
-import asyncio
-import io
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-
-from PIL import Image, UnidentifiedImageError
 
 from ..domain.events import (
     SpaceMemberProfileUpdated,
@@ -48,12 +44,11 @@ from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_author_profile import (
     PROFILE_BIO_MAX_LENGTH,
     PROFILE_NAME_MAX_LENGTH,
-    PROFILE_PICTURE_MAX_BYTES,
-    PROFILE_PICTURE_MAX_PX,
     encode_profile_content,
 )
 from ..domain.space_item import ITEM_TYPE_AUTHOR_PROFILE
 from ..infrastructure.event_bus import EventBus
+from ..media.profile_picture import public_profile_picture
 from .protection_gate import ProtectionGateMixin
 from .space_item_author import build_signed_item_inner
 
@@ -70,9 +65,6 @@ log = logging.getLogger(__name__)
 #: A profile already sent this epoch goes out again on the author's next
 #: post once this old, so followers who subscribed since get it too.
 PROFILE_RESEND_AFTER: timedelta = timedelta(hours=24)
-
-#: WebP qualities tried, best first, until the picture fits the cap.
-_QUALITIES: tuple[int, ...] = (80, 60, 40)
 
 
 class SpaceAuthorProfileOutbound(ProtectionGateMixin):
@@ -246,20 +238,4 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             got = await self._pictures.get_user_picture(user_id)
         if got is None:
             return None
-        return await asyncio.to_thread(_shrink_sync, got[0])
-
-
-def _shrink_sync(raw: bytes) -> bytes | None:
-    """``raw`` re-encoded as WebP of at most 256 px and 24 KB, or ``None``."""
-    try:
-        with Image.open(io.BytesIO(raw)) as src:
-            im = src.convert("RGB")
-            im.thumbnail((PROFILE_PICTURE_MAX_PX, PROFILE_PICTURE_MAX_PX))
-            for quality in _QUALITIES:
-                buf = io.BytesIO()
-                im.save(buf, "WEBP", quality=quality)
-                if buf.tell() <= PROFILE_PICTURE_MAX_BYTES:
-                    return buf.getvalue()
-    except OSError, UnidentifiedImageError, ValueError:
-        return None
-    return None
+        return await public_profile_picture(got[0])

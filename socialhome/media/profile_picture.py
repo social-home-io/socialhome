@@ -16,6 +16,10 @@ import base64
 import binascii
 
 from ..domain.picture_hash import compute_picture_hash
+from ..domain.space_author_profile import (
+    PROFILE_PICTURE_MAX_BYTES,
+    PROFILE_PICTURE_MAX_PX,
+)
 from .image_processor import ImageProcessor
 
 #: Largest side of a stored profile picture (square WebP). 384 px keeps
@@ -69,3 +73,25 @@ async def reencode_peer_picture(picture_webp_base64: object) -> tuple[bytes, str
     except binascii.Error as exc:
         raise ValueError("picture is not valid base64") from exc
     return await normalize_profile_picture(raw)
+
+
+async def public_profile_picture(raw: bytes) -> bytes | None:
+    """``raw`` re-encoded as a small public profile picture — a square WebP
+    of at most :data:`~socialhome.domain.space_author_profile.PROFILE_PICTURE_MAX_PX`
+    and :data:`~socialhome.domain.space_author_profile.PROFILE_PICTURE_MAX_BYTES`
+    — or ``None`` when it does not decode or cannot fit.
+
+    Both ends run it: the sender to fit an author profile item (v_60), the
+    receiver so a peer's bytes are never stored as-is (the same rule as
+    :func:`reencode_peer_picture`).
+    """
+    for size in (PROFILE_PICTURE_MAX_PX, 192, 128):
+        try:
+            webp = await ImageProcessor().generate_thumbnail(
+                raw, size=size, max_source_pixels=PROFILE_PICTURE_MAX_SOURCE_PIXELS
+            )
+        except ValueError:
+            return None
+        if len(webp) <= PROFILE_PICTURE_MAX_BYTES:
+            return webp
+    return None

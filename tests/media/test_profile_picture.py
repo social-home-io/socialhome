@@ -12,10 +12,15 @@ from PIL import Image
 
 from socialhome.domain.errors import ImageUnreadableError
 from socialhome.domain.picture_hash import compute_picture_hash
+from socialhome.domain.space_author_profile import (
+    PROFILE_PICTURE_MAX_BYTES,
+    PROFILE_PICTURE_MAX_PX,
+)
 from socialhome.media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     PROFILE_PICTURE_MAX_SOURCE_PIXELS,
     normalize_profile_picture,
+    public_profile_picture,
     reencode_peer_picture,
 )
 
@@ -89,3 +94,28 @@ async def test_normalize_refuses_a_truncated_image():
     raw = _png(500, 500)[:200]
     with pytest.raises(ImageUnreadableError):
         await normalize_profile_picture(raw)
+
+
+async def test_public_profile_picture_is_a_small_re_encoded_webp():
+
+    buf = io.BytesIO()
+    Image.new("RGB", (900, 600), (10, 120, 200)).save(buf, "PNG")
+    out = await public_profile_picture(buf.getvalue())
+    assert out is not None and out[:4] == b"RIFF" and out[8:12] == b"WEBP"
+    assert len(out) <= PROFILE_PICTURE_MAX_BYTES
+    with Image.open(io.BytesIO(out)) as im:
+        assert max(im.size) <= PROFILE_PICTURE_MAX_PX
+
+
+async def test_public_profile_picture_never_keeps_the_input_bytes():
+    """A WebP with trailing junk (a polyglot shape) comes back re-encoded."""
+    buf = io.BytesIO()
+
+    Image.new("RGB", (64, 64), (1, 2, 3)).save(buf, "WEBP")
+    polyglot = buf.getvalue() + b"<script>alert(1)</script>"
+    out = await public_profile_picture(polyglot)
+    assert out is None or (out != polyglot and b"<script>" not in out)
+
+
+async def test_public_profile_picture_refuses_what_is_not_an_image():
+    assert await public_profile_picture(b"<svg onload=alert(1)/>") is None
