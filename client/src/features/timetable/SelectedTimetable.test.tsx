@@ -202,6 +202,15 @@ describe('week mode — rendering', () => {
 })
 
 describe('week mode — actions', () => {
+  // Override dates are fixed in October 2026, and an undo skips overrides
+  // older than 14 days (the backend refuses them) — pin "today" so these
+  // tests don't start failing as the calendar moves on.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(Date.UTC(2026, 9, 7, 10)))
+  })
+  afterEach(() => { vi.useRealTimers() })
+
   it('Cancel this lesson POSTs a cancel override (with Undo)', async () => {
     apiPost.mockResolvedValue({ timetable: { ...tt, version: 4 } })
     const { container, findByText, getByRole } = renderWeek(week([lesson(mathe, '2026-10-05')]))
