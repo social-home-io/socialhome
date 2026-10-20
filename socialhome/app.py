@@ -1903,6 +1903,8 @@ def _wire_federation_stack(
         app[K.child_protection_service_key]
     )
     highlight_federation_outbound.wire()
+    # A remote view / reaction counts only from someone the highlight reached.
+    inbound_service.attach_highlight_audience(highlight_federation_outbound)
 
     # §11 URL rotation fan-out. Triggered by
     # PATCH /api/ha/integration/federation-base when the HA integration

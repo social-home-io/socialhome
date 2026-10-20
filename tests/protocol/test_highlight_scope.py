@@ -18,6 +18,7 @@ against the real application registry and SQLite:
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import MappingProxyType
 
@@ -382,3 +383,62 @@ async def test_the_viewers_household_views_and_reacts_on_a_local_frame(env):
     snap = await _snapshot(db)
     assert all(r[1] != "u-bob" for r in snap["reactions"])
     assert ("f-anna", "u-dora", "🎉") in snap["reactions"]
+
+
+# ── A view / reaction counts only from someone the highlight reached ────
+
+
+async def _set_audience(db, kind: str, audience: list[str]) -> None:
+    await db.enqueue(
+        "UPDATE highlights SET audience_kind=?, audience_json=? WHERE id='h-anna'",
+        (kind, json.dumps(audience)),
+    )
+
+
+_OUTSIDE_AUDIENCE = [
+    pytest.param("households", [OTHER], id="households audience without the sender"),
+    pytest.param("users", ["u-dora"], id="users audience without the viewer"),
+    pytest.param("users", [], id="users audience of nobody"),
+]
+
+
+@pytest.mark.parametrize("event_type", _REPLY_EVENTS)
+@pytest.mark.parametrize(("kind", "audience"), _OUTSIDE_AUDIENCE)
+async def test_a_reply_from_outside_the_audience_changes_nothing(
+    env, event_type, kind, audience, caplog
+):
+    """#1076 follow-up: honest households only send these for readers of the
+    highlight, so one from outside its audience is forged — dropped with a
+    WARNING, nothing stored, nothing published."""
+    app, db, published = env
+    await _set_audience(db, kind, audience)
+    before = await _snapshot(db)
+    await _send(app, event_type, _reply("f-anna", "u-bob"))
+    assert await _snapshot(db) == before
+    assert published == []
+    assert "not in the highlight's audience" in caplog.text
+
+
+async def test_a_reply_when_the_author_is_hidden_from_that_household(env):
+    app, db, published = env
+    await db.enqueue(
+        "INSERT INTO peer_user_visibility(instance_id, user_id, visible)"
+        " VALUES(?, 'u-anna', 0)",
+        (PEER,),
+    )
+    before = await _snapshot(db)
+    await _send(app, FET.HIGHLIGHT_FRAME_VIEWED, _reply("f-anna", "u-bob"))
+    assert await _snapshot(db) == before
+    assert published == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "audience"),
+    [("households", [PEER]), ("users", ["u-bob"]), ("all_paired", [])],
+)
+async def test_a_reply_from_inside_the_audience_counts(env, kind, audience):
+    app, db, published = env
+    await _set_audience(db, kind, audience)
+    await _send(app, FET.HIGHLIGHT_FRAME_VIEWED, _reply("f-anna", "u-bob"))
+    assert ("f-anna", "u-bob") in (await _snapshot(db))["views"]
+    assert len(published) == 1

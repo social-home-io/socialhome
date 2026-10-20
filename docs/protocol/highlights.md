@@ -90,7 +90,12 @@ receiver drops the event with a WARNING when:
 - `HIGHLIGHT_FRAME_VIEWED` / `_REACTED` / `_REACTION_REMOVED` come from a
   user not homed on the sender (unknown users included), or name a frame
   that is not part of that highlight here or not authored by one of our
-  users. The published author is the stored one, never the payload's.
+  users — or come from someone the highlight never reached: the sender is
+  not a household its audience resolves to, a `users` audience does not
+  name this user, the author is hidden from that household (§Privacy), or
+  a guardian block covers it (§CP.F2). The check is the outbound fan-out
+  rule asked in reverse (`HighlightFederationOutbound.reaches`), so the two
+  can't drift. The published author is the stored one, never the payload's.
 
 A frame whose `media_url` is not a local media reference
 (`api/media/<name>`, kept verbatim) is not stored: it would be an

@@ -21,7 +21,7 @@ import logging
 import pathlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import aiofiles
 import aiofiles.os
@@ -182,6 +182,15 @@ if TYPE_CHECKING:
     from .relay_policy import RelayPolicy
 
 log = logging.getLogger(__name__)
+
+
+class HighlightAudienceCheck(Protocol):
+    """Who one of our highlights reached (``HighlightFederationOutbound``)."""
+
+    async def reaches(
+        self, highlight: Highlight, *, instance_id: str, user_id: str
+    ) -> bool: ...
+
 
 #: Hold-buffer scope for DMs waiting on their sender's user sync.
 _DM_HOLD_SCOPE = DM_HOLD_SCOPE
@@ -364,6 +373,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_federation_service",
         "_gallery_repo",
         "_groups",
+        "_highlight_audience",
         "_highlight_repo",
         "_media_dir",
         "_mentions",
@@ -417,6 +427,9 @@ class FederationInboundService(ProtectionGateMixin):
         self._space_repo = space_repo
         self._user_repo = user_repo
         self._highlight_repo = highlight_repo
+        #: Who a highlight of ours reached (``HighlightFederationOutbound``):
+        #: a remote view or reaction from anyone else is dropped.
+        self._highlight_audience: HighlightAudienceCheck | None = None
         self._moment_repo = moment_repo
         self._moment_outbound = moment_outbound
         # v_3 DM media: receiver writes the embedded preview here on
@@ -3749,6 +3762,11 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── Highlight back-channel handlers ────────────────────────────────────
 
+    def attach_highlight_audience(self, audience: HighlightAudienceCheck) -> None:
+        """Wire the fan-out rule a remote view / reaction is checked
+        against (``HighlightFederationOutbound.reaches``)."""
+        self._highlight_audience = audience
+
     async def _on_highlight_frame_viewed(self, event: FederationEvent) -> None:
         """A remote viewer marked one of *our* author's frames as seen.
 
@@ -3797,7 +3815,11 @@ class FederationInboundService(ProtectionGateMixin):
           unknown user, a local member and another household's user are
           all refused;
         * the frame exists here and hangs off ``highlight_id``;
-        * that highlight is authored by one of *our* users.
+        * that highlight is authored by one of *our* users;
+        * it reached that user: their household is in the audience (a
+          ``users`` audience names them), the author is not hidden from it
+          and no guardian block covers it
+          (``HighlightFederationOutbound.reaches``).
 
         The caller publishes the stored author, never the payload's.
         """
@@ -3819,6 +3841,17 @@ class FederationInboundService(ProtectionGateMixin):
                     is None
                 ):
                     reason = "frame is not authored here"
+                elif (
+                    self._highlight_audience is not None
+                    and not await self._highlight_audience.reaches(
+                        highlight,
+                        instance_id=event.from_instance,
+                        user_id=actor_user_id,
+                    )
+                ):
+                    # Honest households only send these for readers of the
+                    # highlight; anything else is a forged view / reaction.
+                    reason = "user is not in the highlight's audience"
         if reason is None:
             return highlight
         log.warning(
