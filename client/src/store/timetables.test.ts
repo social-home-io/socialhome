@@ -397,6 +397,15 @@ describe('validity + weeks', () => {
 })
 
 describe('overrides', () => {
+  // Override dates are fixed in October 2026, and an undo skips overrides
+  // older than 14 days (the backend refuses them) — pin "today" so these
+  // tests don't start failing as the calendar moves on.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(Date.UTC(2026, 9, 7, 10)))
+  })
+  afterEach(() => { vi.useRealTimers() })
+
   it('add / patch / delete send the version', async () => {
     timetables.value = [tt('a', 1)]
     apiPost.mockResolvedValue({ timetable: tt('a', 2) })
