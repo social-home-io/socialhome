@@ -2585,6 +2585,120 @@ def cmd_gfs_space_post() -> None:
     )
 
 
+def cmd_gfs_space_author_profile() -> None:
+    """A GFS follower names a global space's authors (v_60).
+
+    Prereqs: ``gfs-space-subscribe`` + ``gfs-space-post`` (d follows a's
+    global space through the GFS and holds no roster; Erin, a member on a,
+    posted there).
+
+    1. Erin's post made a publish her profile into the space as an
+       ``author_profile`` item. d's ``GET /api/spaces/{id}/authors`` names
+       her "Erin" — d has no roster seat for her.
+    2. Erin sets a bio and a picture. The profile change republishes; d gets
+       the bio and a signed picture URL that returns WebP bytes.
+    3. The GFS saw ciphertext only: its log and database never carry Erin's
+       name or bio. c (no member, no follower) holds no profile.
+    """
+    state = _load()
+    space_id = state.get("gfs_space_id") if state else None
+    if not space_id or not state.get("gfs_space_author_user_id"):
+        raise SystemExit("run 'gfs-space-subscribe' + 'gfs-space-post' first")
+    a, d = state["instances"]["a"], state["instances"]["d"]
+    erin = state["gfs_space_author_user_id"]
+    a_url = f"http://127.0.0.1:{a['port']}"
+    d_url = f"http://127.0.0.1:{d['port']}"
+    gfs_off = _gfs_log_size()
+
+    def _authors() -> dict:
+        s, body = _request(f"{d_url}/api/spaces/{space_id}/authors", token=d["token"])
+        if s != 200:
+            raise SystemExit(
+                f"gfs-space-author-profile: d /authors → HTTP {s} {body!r}"
+            )
+        return {row["user_id"]: row for row in body}
+
+    def _wait(pred, what: str) -> dict:
+        deadline = time.monotonic() + 90
+        rows: dict = {}
+        while time.monotonic() < deadline:
+            rows = _authors()
+            if pred(rows.get(erin)):
+                return rows[erin]
+            time.sleep(3)
+        raise SystemExit(
+            f"gfs-space-author-profile: d never got {what} (last {rows.get(erin)!r})"
+        )
+
+    row = _wait(lambda r: r is not None, "Erin's profile")
+    if row["display_name"] != "Erin":
+        raise SystemExit(f"gfs-space-author-profile: d names Erin {row!r}")
+    print("  d names Erin from her published profile (no roster seat) ✓")
+
+    bio = "Grows tomatoes on the balcony."
+    s, login = _request(
+        f"{a_url}/api/auth/token",
+        method="POST",
+        body={"username": "erin", "password": "erin-pw-demo"},
+    )
+    _must("gfs-space-author-profile: erin login(a)", s, login)
+    tok = login["token"]
+    s, me = _request(f"{a_url}/api/me", token=tok, method="PATCH", body={"bio": bio})
+    _must("gfs-space-author-profile: erin bio", s, me)
+    s, pic = _upload_file(
+        f"{a_url}/api/me/picture",
+        token=tok,
+        filename="erin.webp",
+        content=_make_demo_webp(),
+        content_type="image/webp",
+    )
+    _must("gfs-space-author-profile: erin picture", s, pic)
+    row = _wait(
+        lambda r: r is not None and r.get("bio") == bio and r.get("picture_url"),
+        "Erin's bio and picture",
+    )
+    if not row["picture_url"].startswith(
+        f"api/spaces/{space_id}/authors/{erin}/picture"
+    ):
+        raise SystemExit(
+            f"gfs-space-author-profile: picture URL {row['picture_url']!r}"
+        )
+    s, raw = _http_get_bytes(f"{d_url}/{row['picture_url']}")
+    if s != 200 or not raw.startswith(b"RIFF"):
+        raise SystemExit(f"gfs-space-author-profile: picture → HTTP {s} {raw[:16]!r}")
+    print("  d gets Erin's bio and picture after her profile change ✓")
+
+    leaks = [
+        line
+        for needle in ("Erin", bio, "author_profile")
+        for line in _gfs_log_lines_matching(needle, offset=gfs_off)
+    ]
+    if leaks:
+        raise SystemExit(
+            f"gfs-space-author-profile: the GFS log names them: {leaks[:3]}"
+        )
+    for table in ("gfs_envelope_queue",):
+        try:
+            rows = _gfs_rows(f"SELECT * FROM {table}")
+        except Exception:
+            rows = []
+        blob = repr(rows)
+        if "Erin" in blob or bio in blob:
+            raise SystemExit(f"gfs-space-author-profile: GFS {table} holds the profile")
+    if _rows(
+        "c", "SELECT 1 FROM space_author_profiles WHERE space_id = ?", (space_id,)
+    ):
+        raise SystemExit("gfs-space-author-profile: c (no member) holds a profile")
+    print("  the GFS saw ciphertext only; c holds nothing ✓")
+    state["gfs_space_author_profile"] = {
+        "space_id": space_id,
+        "user_id": erin,
+        "bio": bio,
+    }
+    _save(state)
+    print("gfs-space-author-profile: ok (a follower names a global space's authors)")
+
+
 def cmd_gfs_space_rotate() -> None:
     """A content-key epoch rotation must not cut GFS subscribers off.
 
@@ -9601,6 +9715,25 @@ def cmd_verify() -> None:
             )
         else:
             print(f"  {_what} id is bound to its creator (v_36) ✓")
+
+    # 13y. ``gfs-space-author-profile`` (v_60): d, a follower with no roster,
+    #      still names Erin with her bio from her published profile. Opt-in.
+    gsap = state.get("gfs_space_author_profile")
+    if gsap:
+        d = state["instances"]["d"]
+        s, body = _request(
+            f"http://127.0.0.1:{d['port']}/api/spaces/{gsap['space_id']}/authors",
+            token=d["token"],
+        )
+        rows = {r["user_id"]: r for r in body} if s == 200 else {}
+        got = rows.get(gsap["user_id"])
+        if not got or (got.get("display_name"), got.get("bio")) != (
+            "Erin",
+            gsap["bio"],
+        ):
+            failures.append(f"d: GFS follower's author profile for Erin is {got!r}")
+        else:
+            print("  d names Erin from her published profile ✓")
 
     # 13z. ``gfs-moment-profile``: e (paired with nobody) still names a's
     #      user on the public moment by name and bio, never the id — and its

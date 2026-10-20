@@ -351,6 +351,7 @@ _SIGNED_PATH_PATTERNS: tuple[str, ...] = (
     r"^/api/media/[^/]+$",
     r"^/api/users/[^/]+/picture$",
     r"^/api/spaces/[^/]+/members/[^/]+/picture$",
+    r"^/api/spaces/[^/]+/authors/[^/]+/picture$",
     r"^/api/spaces/[^/]+/cover$",
     r"^/api/spaces/[^/]+/icon$",
     r"^/api/gfs/[^/]+/moments/users/[^/]+/picture$",

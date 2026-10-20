@@ -38,6 +38,7 @@ from socialhome.domain.gfs_member_publish import (
     SPACE_ITEM_EVENT_TYPE,
     MemberPublishRequest,
 )
+from socialhome.domain.space_author_profile import encode_profile_content
 from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
 from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
@@ -404,4 +405,92 @@ async def test_no_member_item_type_ever_reaches_the_gfs_in_plaintext(
         assert f'"{item_type}"' not in blob, f"{where} carries the item type"
         assert "item_type" not in blob, f"{where} carries an item_type field"
         for leak in secrets.values():
+            assert leak not in blob, f"{where} carries {leak!r}"
+
+
+async def test_an_author_profile_reaches_the_gfs_with_no_name_bio_or_picture(
+    gfs, caplog
+):
+    """v_60: an ``author_profile`` item — the author's name, bio and picture
+    for a space's followers — is ciphertext under the generic type like any
+    other item. The GFS-visible request, fan-out frame, queued row and logs
+    carry none of the profile."""
+    publisher = gfs.publisher
+    cert = bind_writer_users(
+        sign_writer_cert(
+            space_seed=SPACE_SEED,
+            space_id=SPACE_ID,
+            epoch=1,
+            instance_pk=publisher.pk,
+            scope="comment",
+        ),
+        space_seed=SPACE_SEED,
+        user_ids=["noor-user-id"],
+    )
+    svc = GfsMemberPublishService(
+        gfs=_HouseholdGfs(gfs.session),  # type: ignore[arg-type]
+        conn_repo=None,  # type: ignore[arg-type]
+        space_repo=_TrustedSpaces(),  # type: ignore[arg-type]
+        space_crypto=_OneKey(),  # type: ignore[arg-type]
+        writer_certs=_FixedCert(cert),  # type: ignore[arg-type]
+        own_instance_id=publisher.instance_id,
+        own_identity_seed=publisher.seed,
+    )
+    picture = b"RIFF\x00\x00\x00\x00WEBPVP8 " + os.urandom(600)
+    content, _rev = encode_profile_content(
+        display_name="Noor Haddad",
+        bio="Beekeeper on a Höngg rooftop.",
+        picture_webp=picture,
+    )
+    sent: list[dict] = []
+    real_post = gfs.session.post
+
+    def _spy(url, *a, json=None, **kw):
+        sent.append(json)
+        return real_post(url, *a, json=json, **kw)
+
+    gfs.session.post = _spy  # type: ignore[method-assign]
+    conn = GfsConnection(
+        id="c",
+        gfs_instance_id="gfs-node-a",
+        display_name="g",
+        public_key="00" * 32,
+        inbox_url=str(gfs.make_url("")).rstrip("/"),
+        status="active",
+        paired_at="",
+    )
+    inner = {
+        "item_type": "author_profile",
+        "item_target": "noor-user-id",
+        "post_id": "noor-user-id",
+        "author_user_id": "noor-user-id",
+        "author_username": "noor",
+        "content": content,
+    }
+    with caplog.at_level(logging.DEBUG):
+        accepted = await svc.publish_item(SPACE_ID, "author_profile", inner, [conn])
+        await gfs.app_[gfs_member_publish_key].wait_idle()
+    assert [c.id for c in accepted] == ["c"]
+    queued = await gfs.app_[gfs_envelope_queue_repo_key].list_for(
+        gfs.subscriber.instance_id, now=0
+    )
+    assert len(queued) == 1
+    assert queued[0].sealed["event_type"] == SPACE_ITEM_EVENT_TYPE
+    for where, blob in (
+        ("the request", json.dumps(sent, ensure_ascii=False)),
+        (
+            "the fan-out frame / queued row",
+            json.dumps([q.sealed for q in queued], ensure_ascii=False),
+        ),
+        ("the GFS logs", caplog.text),
+    ):
+        for leak in (
+            "Noor",
+            "Haddad",
+            "Beekeeper",
+            "author_profile",
+            "display_name",
+            "noor-user-id",
+            content[:40],
+        ):
             assert leak not in blob, f"{where} carries {leak!r}"

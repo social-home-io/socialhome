@@ -97,6 +97,14 @@ counts, choices, message bodies — sits inside the AES-256-GCM
 payload. There is no `"payload": plaintext_fallback` pattern, and
 there is no "trusted instance" mode that skips encryption.
 
+Names travel the same way. A space's GFS followers learn its authors' names,
+bios and pictures from the authors' own `author_profile` items (v_60): inside
+the space payload, encrypted under the space content key and signed by the
+author's household — the GFS relays ciphertext it cannot read and learns
+nothing it did not already. A protected (child) account's profile carries
+its name only. The one plaintext exception remains public Momentum, whose
+author opted into a public directory on that GFS.
+
 ## Fail closed on crypto
 
 If `SpaceContentEncryption` isn't configured at runtime, the outbound

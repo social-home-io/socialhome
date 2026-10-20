@@ -809,6 +809,7 @@ python .claude/skills/federation-demo/harness.py gfs-pair
 python .claude/skills/federation-demo/harness.py gfs-traffic
 python .claude/skills/federation-demo/harness.py gfs-space-subscribe
 python .claude/skills/federation-demo/harness.py gfs-space-post
+python .claude/skills/federation-demo/harness.py gfs-space-author-profile
 python .claude/skills/federation-demo/harness.py gfs-space-rotate
 python .claude/skills/federation-demo/harness.py gfs-authority-rotate
 python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
@@ -840,6 +841,18 @@ python .claude/skills/federation-demo/harness.py gfs-reach-pair
 python .claude/skills/federation-demo/harness.py gfs-fallback-switch
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
+
+### ``gfs-space-author-profile`` — a follower names a global space's authors (v_60)
+
+Needs ``gfs-space-subscribe`` + ``gfs-space-post``. d follows a's global
+space through the GFS and holds no roster. Erin's post published her
+profile as an ``author_profile`` item (author-signed, encrypted under the
+space content key, over the member relay): d's ``GET /api/spaces/{id}/authors``
+names her "Erin". Then Erin sets a bio and a picture on a; the profile change
+republishes and d gets the bio and a signed picture URL that returns WebP
+bytes. The GFS log (from the step's start) and its envelope queue never carry
+her name or bio, and c (no member, no follower) holds no profile.
+``verify`` (13y) re-checks d's view of Erin.
 
 ### ``gfs-member-publish`` — a member posts with the host offline (v_49)
 

@@ -17,7 +17,7 @@
  */
 import type { PersonContext } from '@/components/PersonSheet'
 import { householdUsers } from '@/store/householdUsers'
-import { spaceMembers } from '@/store/spaceMembers'
+import { spaceAuthors, spaceMembers } from '@/store/spaceMembers'
 
 export type PersonHint = NonNullable<PersonContext['person']>
 
@@ -82,6 +82,16 @@ export function personHint(
     if (!hint.picture_url && local.picture_url) hint.picture_url = local.picture_url
     hint.is_local = true
     hint.username = local.username
+  }
+  // An author a GFS follower knows only from their published profile
+  // (v_60): name, picture and public bio.
+  const author = !member && !local && spaceId
+    ? spaceAuthors.value[spaceId]?.get(userId)
+    : undefined
+  if (author) {
+    hint.display_name = author.display_name
+    if (author.picture_url) hint.picture_url = author.picture_url
+    if (author.bio) hint.bio = author.bio
   }
   return hint
 }

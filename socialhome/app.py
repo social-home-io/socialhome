@@ -244,6 +244,7 @@ from .repositories.profile_picture_repo import SqliteProfilePictureRepo
 from .repositories.public_space_repo import SqlitePublicSpaceRepo
 from .repositories.report_repo import SqliteReportRepo
 from .repositories.search_repo import SqliteSearchRepo
+from .repositories.space_author_profile_repo import SqliteSpaceAuthorProfileRepo
 from .repositories.space_bot_repo import SqliteSpaceBotRepo
 from .repositories.space_cover_repo import SqliteSpaceCoverRepo
 from .repositories.space_icon_repo import SqliteSpaceIconRepo
@@ -374,6 +375,7 @@ from .services.search_service import SearchService
 from .services.setup_service import SetupService
 from .services.shopping_service import ShoppingService
 from .services.space_approval_service import SpaceApprovalService
+from .services.space_author_profile_outbound import SpaceAuthorProfileOutbound
 from .services.space_authority_pin import owner_statement_for_delegated
 from .services.space_authority_rotation_service import SpaceAuthorityRotationService
 from .services.space_bot_service import SpaceBotService
@@ -1180,6 +1182,7 @@ def _build_repos(db: AsyncDatabase):
         public_space=SqlitePublicSpaceRepo(db),
         peer_space_directory=SqlitePeerSpaceDirectoryRepo(db),
         space_remote_member=SqliteSpaceRemoteMemberRepo(db),
+        space_author_profile=SqliteSpaceAuthorProfileRepo(db),
         space_proposal=SqliteSpaceProposalRepo(db),
         space_remote_location=SqliteSpaceRemoteLocationRepo(db),
         poll=SqlitePollRepo(db),
@@ -2913,6 +2916,7 @@ def create_app(config: Config | None = None) -> web.Application:
         repos.user, repos.federation, alias_resolver
     )
     person_summary_service.attach_space_rosters(repos.space, repos.space_remote_member)
+    person_summary_service.attach_author_profiles(repos.space_author_profile)
 
     # ── Preferences service (household-wide + per-user toggles) ─────────
     preferences_service = PreferencesService(
@@ -3440,6 +3444,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.alias_service_key] = alias_service
     app[K.alias_resolver_key] = alias_resolver
     app[K.person_summary_service_key] = person_summary_service
+    app[K.space_author_profile_repo_key] = repos.space_author_profile
     app[K.data_export_service_key] = data_export_service
     app[K.i18n_key] = i18n
     app[K.platform_adapter_key] = platform_adapter
@@ -3899,6 +3904,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # guard drops on.
         space_public_inbound.attach_identity(own_instance_id=real_instance_id)
         space_public_inbound.attach_writer_certs(writer_certs)
+        # v_60 — a GFS follower keeps the authors' published profiles.
+        space_public_inbound.attach_author_profiles(
+            app[K.space_author_profile_repo_key]
+        )
         gfs_channels.attach_inbound(space_public_inbound)
         # v_44 — a relayed frame signed by a rotated authority key heals the
         # subscriber's pin from the GFS listing's owner cert, then retries.
@@ -4300,6 +4309,21 @@ def create_app(config: Config | None = None) -> web.Application:
         space_post_outbound.attach_writer_certs(writer_certs)
         if gfs_member_publish is not None:
             space_post_outbound.attach_member_gfs(gfs_member_publish)
+            # v_60 — our authors' public profiles for a space's GFS followers.
+            author_profiles = SpaceAuthorProfileOutbound(
+                bus=bus,
+                space_repo=space_repo,
+                user_repo=user_repo,
+                picture_repo=profile_picture_repo,
+                federation_repo=repos.federation,
+                space_crypto=space_crypto,
+                member_gfs=gfs_member_publish,
+                own_instance_id=real_instance_id,
+                own_instance_pk=identity_pk,
+                own_identity_seed=identity_seed,
+            )
+            author_profiles.attach_child_protection(child_protection_service)
+            author_profiles.wire()
         # Federate per-edit config changes (rename, emoji, feature
         # toggles, location_mode flips, retention bumps) to remote
         # member stubs in realtime. Before this, SPACE_CONFIG_CHANGED

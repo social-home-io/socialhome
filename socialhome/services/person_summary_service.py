@@ -21,9 +21,13 @@ from urllib.parse import quote
 
 from ..domain.moment_public import MomentPublicFollow, gfs_picture_proxy_url
 from ..domain.space import SpaceMember
+from ..domain.space_author_profile import author_picture_url
 from ..domain.user import PersonSummary, _picture_url
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.moment_public_repo import AbstractMomentPublicFollowRepo
+from ..repositories.space_author_profile_repo import (
+    AbstractSpaceAuthorProfileRepo,
+)
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
@@ -44,6 +48,7 @@ class PersonSummaryService(ProtectionGateMixin):
 
     __slots__ = (
         "_aliases",
+        "_author_profiles",
         "_child_protection",
         "_federation",
         "_public_follows",
@@ -65,6 +70,7 @@ class PersonSummaryService(ProtectionGateMixin):
         self._spaces: AbstractSpaceRepo | None = None
         self._seats: AbstractSpaceRemoteMemberRepo | None = None
         self._public_follows: AbstractMomentPublicFollowRepo | None = None
+        self._author_profiles: AbstractSpaceAuthorProfileRepo | None = None
 
     def attach_space_rosters(
         self,
@@ -74,6 +80,10 @@ class PersonSummaryService(ProtectionGateMixin):
         """Wire the space rosters a ``space_id``-scoped summary reads."""
         self._spaces = space_repo
         self._seats = seat_repo
+
+    def attach_author_profiles(self, repo: AbstractSpaceAuthorProfileRepo) -> None:
+        """Wire the space author profiles a GFS follower holds (v_60)."""
+        self._author_profiles = repo
 
     def attach_public_follows(
         self, follow_repo: AbstractMomentPublicFollowRepo
@@ -189,6 +199,34 @@ class PersonSummaryService(ProtectionGateMixin):
                 personal_alias=summary.personal_alias,
                 picture_url=picture,
                 household=summary.household,
+            )
+        return await self._from_author_profiles(space_id, scoped, withheld)
+
+    async def _from_author_profiles(
+        self,
+        space_id: str,
+        scoped: dict[str, PersonSummary],
+        withheld: frozenset[str],
+    ) -> dict[str, PersonSummary]:
+        """Anyone still unnamed is named from the space's author profiles
+        (v_60): what a GFS follower — no roster — knows of a space's
+        authors. Name only across a guardian block (§CP.F2)."""
+        unnamed = [u for u, s in scoped.items() if s.display_name is None]
+        if not unnamed or self._author_profiles is None:
+            return scoped
+        for p in await self._author_profiles.list_for(space_id, unnamed):
+            blocked = p.author_user_id in withheld
+            scoped[p.author_user_id] = PersonSummary(
+                user_id=p.author_user_id,
+                display_name=p.display_name,
+                personal_alias=scoped[p.author_user_id].personal_alias,
+                picture_url=(
+                    None
+                    if blocked or not p.picture_hash
+                    else author_picture_url(space_id, p.author_user_id, p.picture_hash)
+                ),
+                household=None,
+                bio=None if blocked else p.bio,
             )
         return scoped
 

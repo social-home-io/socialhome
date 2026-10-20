@@ -133,6 +133,9 @@ from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 if TYPE_CHECKING:
     from ..domain.space import Space
     from ..federation.space_authorship import SpaceAuthorship
+    from ..repositories.space_author_profile_repo import (
+        AbstractSpaceAuthorProfileRepo,
+    )
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .space_authority_pin import AuthorityPinRefresher
@@ -202,6 +205,10 @@ class SpacePublicInbound:
     def attach_authorship(self, authorship: SpaceAuthorship) -> None:
         """Wire the access-level / seat check for ``space_item``."""
         self._authorship = authorship
+
+    def attach_author_profiles(self, repo: AbstractSpaceAuthorProfileRepo) -> None:
+        """Wire the v_60 follower-side author profile cache."""
+        self._items.attach_author_profiles(repo)
 
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert service."""

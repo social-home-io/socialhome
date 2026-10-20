@@ -53,6 +53,10 @@ ITEM_TYPE_COMMENT_EDIT: str = "comment_edit"
 ITEM_TYPE_COMMENT_DELETE: str = "comment_delete"
 ITEM_TYPE_REACTION_ADD: str = "reaction_add"
 ITEM_TYPE_REACTION_REMOVE: str = "reaction_remove"
+#: v_60 — the author's own public profile for followers (name, bio, a small
+#: picture), so a GFS subscriber with no roster can name them
+#: (:mod:`socialhome.domain.space_author_profile`).
+ITEM_TYPE_AUTHOR_PROFILE: str = "author_profile"
 
 #: Carried in the post-shaped (``space_public_author``) inner.
 POST_SHAPED_ITEM_TYPES: frozenset[str] = frozenset(
@@ -67,6 +71,7 @@ GENERIC_ITEM_TYPES: frozenset[str] = frozenset(
         ITEM_TYPE_COMMENT_DELETE,
         ITEM_TYPE_REACTION_ADD,
         ITEM_TYPE_REACTION_REMOVE,
+        ITEM_TYPE_AUTHOR_PROFILE,
     }
 )
 SUPPORTED_ITEM_TYPES: frozenset[str] = POST_SHAPED_ITEM_TYPES | GENERIC_ITEM_TYPES
@@ -86,6 +91,8 @@ _REQUIRED_SCOPE: dict[str, str] = {
     ITEM_TYPE_COMMENT_DELETE: WRITER_SCOPE_COMMENT,
     ITEM_TYPE_REACTION_ADD: WRITER_SCOPE_COMMENT,
     ITEM_TYPE_REACTION_REMOVE: WRITER_SCOPE_COMMENT,
+    # Any member household's own users — the cert's v2 binding names them.
+    ITEM_TYPE_AUTHOR_PROFILE: WRITER_SCOPE_COMMENT,
 }
 
 #: How far in the future a signed item stamp may lie (seconds). An edit

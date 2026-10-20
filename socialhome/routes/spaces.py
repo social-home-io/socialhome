@@ -27,6 +27,7 @@ from ..app_keys import (
     rate_limiter_key,
     report_service_key,
     space_approval_service_key,
+    space_author_profile_repo_key,
     space_bot_repo_key,
     space_chat_service_key,
     space_cover_repo_key,
@@ -62,6 +63,7 @@ from ..domain.space import (
     SpacePermissionError,
     SpaceRole,
 )
+from ..domain.space_author_profile import author_picture_url
 from ..domain.space_place import place_pin_of, place_pin_wire
 from ..domain.space_proposal import ProposalAction
 from ..domain.user import SYSTEM_AUTHOR
@@ -1269,6 +1271,61 @@ class SpaceMemberPictureView(BaseView):
         bytes_webp, _hash = got
         return web.Response(
             body=bytes_webp,
+            content_type="image/webp",
+            headers={
+                "Content-Security-Policy": MEDIA_CSP,
+                "Cache-Control": "private, max-age=31536000, immutable",
+            },
+        )
+
+
+class SpaceAuthorsView(BaseView):
+    """``GET /api/spaces/{id}/authors`` — the space's authors this household
+    knows only from their published profiles (v_60): a GFS follower holds no
+    roster. ``[{user_id, display_name, bio, picture_url}]`` (signed); name
+    only across a guardian block (§CP.F2). Anyone who may read the space."""
+
+    async def get(self) -> web.Response:
+        space_id = self.match("id")
+        await self.svc(space_service_key).require_reader(space_id, self.user.user_id)
+        withheld = await self.guardian_block_counterparts()
+        rows = []
+        for p in await self.svc(space_author_profile_repo_key).list_for_space(space_id):
+            blocked = p.author_user_id in withheld
+            rows.append(
+                {
+                    "user_id": p.author_user_id,
+                    "display_name": p.display_name,
+                    "bio": None if blocked else p.bio,
+                    "picture_url": (
+                        None
+                        if blocked or not p.picture_hash
+                        else author_picture_url(
+                            space_id, p.author_user_id, p.picture_hash
+                        )
+                    ),
+                }
+            )
+        return self._json(self.sign_media(rows))
+
+
+class SpaceAuthorPictureView(BaseView):
+    """``GET /api/spaces/{id}/authors/{user_id}/picture`` — the WebP of a
+    cached author profile (v_60). 404 when none, or across a guardian block."""
+
+    async def get(self) -> web.Response:
+        self.require_user()
+        space_id = self.match("id")
+        user_id = self.match("user_id")
+        got = await self.svc(space_author_profile_repo_key).get_picture(
+            space_id, user_id
+        )
+        if got is not None and user_id in await self.guardian_block_counterparts():
+            got = None
+        if got is None:
+            return error_response(404, "NOT_FOUND", "No picture for this author.")
+        return web.Response(
+            body=got[0],
             content_type="image/webp",
             headers={
                 "Content-Security-Policy": MEDIA_CSP,

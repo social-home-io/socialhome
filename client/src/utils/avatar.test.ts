@@ -6,9 +6,9 @@
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { householdUsers } from '@/store/householdUsers'
-import { spaceMembers } from '@/store/spaceMembers'
+import { spaceAuthors, spaceMembers } from '@/store/spaceMembers'
 import type { SpaceMemberProfile, User } from '@/types'
-import { resolveDisplayName } from './avatar'
+import { resolveAvatar, resolveDisplayName } from './avatar'
 
 function member(p: Partial<SpaceMemberProfile> & { user_id: string }): SpaceMemberProfile {
   return {
@@ -20,6 +20,7 @@ function member(p: Partial<SpaceMemberProfile> & { user_id: string }): SpaceMemb
 afterEach(() => {
   householdUsers.value = new Map()
   spaceMembers.value = {}
+  spaceAuthors.value = {}
 })
 
 describe('resolveDisplayName', () => {
@@ -44,5 +45,26 @@ describe('resolveDisplayName', () => {
 
   it('an explicit fallback still wins over "Someone"', () => {
     expect(resolveDisplayName(null, 'x', 'Home Assistant')).toBe('Home Assistant')
+  })
+})
+
+describe('a GFS follower names an author from their published profile (v_60)', () => {
+  const noor = {
+    user_id: 'u-noor', display_name: 'Noor Haddad', bio: 'Beekeeper.',
+    picture_url: 'api/spaces/s1/authors/u-noor/picture?v=1&sig=s',
+  }
+
+  it('names and pictures an author who is on no roster', () => {
+    spaceAuthors.value = { s1: new Map([['u-noor', noor]]) }
+    expect(resolveDisplayName('s1', 'u-noor')).toBe('Noor Haddad')
+    expect(resolveAvatar('s1', 'u-noor')).toBe(noor.picture_url)
+    // Another space's profile is not used.
+    expect(resolveDisplayName('s2', 'u-noor')).toBe('Someone')
+  })
+
+  it('the roster and the household always win over a profile', () => {
+    spaceAuthors.value = { s1: new Map([['u1', { ...noor, user_id: 'u1', display_name: 'Mallory' }]]) }
+    spaceMembers.value = { s1: new Map([['u1', member({ user_id: 'u1', display_name: 'Pascal' })]]) }
+    expect(resolveDisplayName('s1', 'u1')).toBe('Pascal')
   })
 })

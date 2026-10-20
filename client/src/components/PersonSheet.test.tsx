@@ -230,7 +230,7 @@ describe('PersonSheet', () => {
     await waitFor(() => { expect(q(document, 'person-limited')).not.toBeNull() })
     expect(document.querySelector('.sh-person-sheet__bio')?.textContent)
       .toBe('Beekeeper. Posts the bees.')
-    expect(q(document, 'person-limited')?.textContent).toContain('public moments')
+    expect(q(document, 'person-limited')?.textContent).toContain('share publicly')
     expect(q(document, 'person-message')).toBeNull()
   })
 
