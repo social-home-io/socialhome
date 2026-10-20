@@ -74,6 +74,19 @@ describe('HighlightShareCard', () => {
     spaceMembers.value = {}
   })
 
+  it('a friend from another household, on no roster here, reads by the server\'s name', async () => {
+    apiMock.get.mockResolvedValue({
+      ...detail('h-friend', 'ru-amaka'),
+      highlight: {
+        ...detail('h-friend', 'ru-amaka').highlight,
+        author: { display_name: 'Amaka Okafor', picture_url: null },
+      },
+    })
+    const { container, findByText } = render(<HighlightShareCard highlightId="h-friend" spaceId="s1" />)
+    expect(await findByText('Amaka Okafor')).toBeTruthy()
+    expect(container.textContent).not.toContain('Someone')
+  })
+
   it('an author nobody knows reads "Someone"', async () => {
     apiMock.get.mockResolvedValue(detail('h-unknown', 'tvnxzlljlae437w5fmwriqqvakgfynks'))
     const { container } = render(<HighlightShareCard highlightId="h-unknown" />)

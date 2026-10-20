@@ -64,6 +64,41 @@ export function householdPictureUrl(userId: string | null | undefined): string |
   return householdUsers.value.get(userId)?.picture_url ?? null
 }
 
+/** The person fields a route resolved server-side (``PersonSummary``):
+ *  a highlight / moment ``author``, a highlight views / reactions row. */
+export interface NamedPerson {
+  display_name?: string | null
+  picture_url?:  string | null
+}
+
+/**
+ * Label for someone the server already named for this view — the
+ * highlight / moment ``author``, or a "Seen by" row. The server knows
+ * people from other households; the household cache doesn't, so a
+ * remote friend would otherwise read "Someone". Falls back to the cache
+ * only for a payload without the fields. Never the raw id.
+ */
+export function namedPersonLabel(
+  userId: string | null | undefined,
+  person: NamedPerson | null | undefined,
+): string {
+  if (!userId) return ''
+  if (person?.display_name === undefined) return householdDisplayName(userId)
+  return personLabel(person.display_name)
+}
+
+/** Signed picture for :func:`namedPersonLabel`'s person. A ``null`` from
+ *  the server is final (a guardian block withholds it, §CP.F2) — the
+ *  cache is only consulted for a payload without the fields. */
+export function namedPersonPicture(
+  userId: string | null | undefined,
+  person: NamedPerson | null | undefined,
+): string | null {
+  if (!userId) return null
+  if (person?.picture_url === undefined) return householdPictureUrl(userId)
+  return person.picture_url
+}
+
 ws.on('user.profile_updated', (e) => {
   const d = e.data as {
     user_id: string

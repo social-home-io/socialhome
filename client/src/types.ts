@@ -195,6 +195,9 @@ export interface Highlight {
    *  ``gfs_connections.id``. ``null`` while not published. */
   public_gfs_id?: string | null
   public_published_at?: string | null
+  /** Who wrote it, as the server names them for the caller — a friend
+   *  on another household included (``GET /api/highlights``). */
+  author?: Omit<PersonSummary, 'user_id'>
 }
 
 /** Inbox item: highlight + frames + how many frames the viewer has not seen. */
@@ -241,6 +244,9 @@ export interface Moment {
   /** When ``received_via === 'gfs'``, points at the GFS connection
    *  the row arrived through (so the inbox chip can show a label). */
   received_via_gfs_id?: string | null
+  /** Who wrote it, as the server names them for the caller — a friend
+   *  on another household included (``GET /api/moments``). */
+  author?: Omit<PersonSummary, 'user_id'>
 }
 
 /** Author-side public-Momentum registration row. */

@@ -19649,6 +19649,9 @@ a.sh-btn--ghost:hover {
 .sh-seenby-name {
   flex: 1;
   font-weight: 500;
+  /* The sheet mounts inside the always-dark viewer (``color: #fff``);
+   * take the dialog's own text colour so names read on a light theme. */
+  color: var(--sh-text);
 }
 .sh-seenby-emoji {
   font-size: 1.15rem;

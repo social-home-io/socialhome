@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from socialhome.app_keys import federation_repo_key
+from socialhome.app_keys import federation_repo_key, federation_service_key
 from socialhome.domain.federation import (
+    FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+)
+from socialhome.federation.moment_origin import (
+    ORIGIN_IDENTITY_PK_FIELD,
+    ORIGIN_SIG_FIELD,
+    ORIGIN_SIG_SUITE_FIELD,
 )
 
 from .conftest import _auth
@@ -662,3 +668,154 @@ async def test_moment_detail_video_has_signed_poster(client):
     poster = body["moment"]["media_thumbnail_url"]
     assert poster.split("?", 1)[0] == "api/media/momvid00000000000000000000000.webp"
     assert "exp=" in poster and "sig=" in poster
+
+
+# ── Authors named for the viewer (#1073 follow-up) ──────────────────────
+#
+# The SPA named moment authors from the local household cache only, so a
+# remote friend's moment read "Someone". Each moment now carries
+# ``author`` — the name this household holds, signed picture, household
+# and the viewer's nickname — added in the route only: the federation
+# payload a moment travels in is unchanged.
+
+
+def _peer_o() -> RemoteInstance:
+    return RemoteInstance(
+        id="peer-o",
+        display_name="Okafor family",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="enc",
+        key_remote_to_self="enc",
+        remote_inbox_url="https://peer-o.example/wh",
+        local_inbox_id="wh-peer-o",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+    )
+
+
+async def _remote_amaka(client) -> None:
+    await client.app[federation_repo_key].save_instance(_peer_o())
+    await client._db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username, "
+        " display_name, picture_hash) VALUES(?,?,?,?,?)",
+        ("ru-amaka", "peer-o", "amaka", "Amaka Okafor", "cafebabecafebabe"),
+    )
+
+
+async def _seed_moment(
+    client, moment_id: str, author: str, *, parent: str | None = None
+) -> None:
+    await client._db.enqueue(
+        "INSERT INTO moments(id, author_user_id, content, parent_moment_id, "
+        "origin_instance_id, created_at, expires_at) "
+        "VALUES(?,?,?,?,?, datetime('now'), datetime('now', '+7 day'))",
+        (moment_id, author, f"from {author}", parent, "peer-o"),
+    )
+
+
+async def test_moments_name_remote_and_unknown_authors(client):
+    await _remote_amaka(client)
+    await _seed_moment(client, "m-amaka", "ru-amaka")
+    await _seed_moment(client, "m-ghost", "ru-forgotten")
+
+    for path in ("/api/moments", "/api/moments/archive"):
+        r = await client.get(path, headers=_auth(client._tok))
+        assert r.status == 200
+        rows = {m["id"]: m for m in await r.json()}
+        amaka = rows["m-amaka"]["author"]
+        assert amaka["display_name"] == "Amaka Okafor"
+        assert amaka["household"] == "Okafor family"
+        assert amaka["picture_url"].startswith(
+            "api/users/ru-amaka/picture?v=cafebabecafebabe"
+        )
+        assert "sig=" in amaka["picture_url"]
+        # Nobody here knows them: no name — never the id.
+        ghost = rows["m-ghost"]["author"]
+        assert ghost["display_name"] is None
+        assert ghost["picture_url"] is None
+
+
+async def test_moment_detail_names_author_and_reply_authors(client):
+    await _remote_amaka(client)
+    await _seed_moment(client, "m-amaka", "ru-amaka")
+    r = await client.post(
+        "/api/moments",
+        json={"content": "nice", "parent_moment_id": "m-amaka"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    r = await client.get("/api/moments/m-amaka", headers=_auth(client._tok))
+    assert r.status == 200
+    body = await r.json()
+    assert body["moment"]["author"]["display_name"] == "Amaka Okafor"
+    assert "sig=" in body["moment"]["author"]["picture_url"]
+    [reply] = body["replies"]
+    assert reply["author_user_id"] == client._uid
+    assert reply["author"]["display_name"]
+
+
+async def test_moment_reply_across_a_guardian_block_is_name_only(client):
+    """A protected kid whose guardian blocked the viewer: the kid's reply
+    names them but carries no picture (§CP.F2)."""
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, picture_hash,"
+        " child_protection_enabled) VALUES(?,?,?,?,1)",
+        ("kid", "uid-kid", "Kid", "ffff0000ffff0000"),
+    )
+    await client._db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES(?,?,?)",
+        ("uid-kid", client._uid, client._uid),
+    )
+    r = await client.post(
+        "/api/moments", json={"content": "root"}, headers=_auth(client._tok)
+    )
+    root = (await r.json())["id"]
+    await _seed_moment(client, "m-kid", "uid-kid", parent=root)
+
+    r = await client.get(f"/api/moments/{root}", headers=_auth(client._tok))
+    [reply] = (await r.json())["replies"]
+    assert reply["author"]["display_name"] == "Kid"
+    assert reply["author"]["picture_url"] is None
+
+
+async def test_moment_federation_payload_carries_no_names(client, monkeypatch):
+    """Names are a route-layer view: the MOMENT_CREATED payload a paired
+    household receives keeps exactly its wire fields."""
+    await _remote_amaka(client)
+    sent: list[dict] = []
+    fed = client.app[federation_service_key]
+
+    async def _capture(_self, *, to_instance_id, event_type, payload, **_kw):
+        sent.append({"to": to_instance_id, "type": event_type, "payload": payload})
+
+    # ``FederationService`` is slotted — patch the class for this test.
+    monkeypatch.setattr(type(fed), "send_event", _capture)
+    r = await client.post(
+        "/api/moments", json={"content": "hello"}, headers=_auth(client._tok)
+    )
+    assert r.status == 201
+    moment_id = (await r.json())["id"]
+    # Reading it back named adds nothing to what went out.
+    inbox = await client.get("/api/moments", headers=_auth(client._tok))
+    assert any(m["id"] == moment_id and m["author"] for m in await inbox.json())
+
+    created = [s for s in sent if s["type"] == FederationEventType.MOMENT_CREATED]
+    assert [s["to"] for s in created] == ["peer-o"]
+    payload = created[0]["payload"]
+    assert set(payload) == {
+        "moment_id",
+        "author_user_id",
+        "content",
+        "media_url",
+        "media_type",
+        "duration_ms",
+        "parent_moment_id",
+        "origin_instance_id",
+        "expires_at",
+        "occurred_at",
+        "hop_count",
+        ORIGIN_IDENTITY_PK_FIELD,
+        ORIGIN_SIG_SUITE_FIELD,
+        ORIGIN_SIG_FIELD,
+    }

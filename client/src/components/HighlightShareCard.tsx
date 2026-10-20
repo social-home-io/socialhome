@@ -18,6 +18,7 @@ import { api } from '@/api'
 import type { Highlight, HighlightFrame } from '@/types'
 import { t, isOne } from '@/i18n/i18n'
 import { resolveDisplayName } from '@/utils/avatar'
+import { personLabel } from '@/utils/names'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers } from '@/store/spaceMembers'
 import { highlightDateLabel } from '@/utils/highlightDate'
@@ -112,7 +113,13 @@ export function HighlightShareCard({ highlightId, note, spaceId = null }: Highli
   }
 
   const first = detail.frames[0]
-  const authorName = resolveDisplayName(spaceId, detail.highlight.author_user_id)
+  // The space's own name for them first; the server's name covers a
+  // friend from another household the local caches don't know.
+  const authorName = resolveDisplayName(
+    spaceId,
+    detail.highlight.author_user_id,
+    personLabel(detail.highlight.author?.display_name),
+  )
   return (
     <button
       type="button"

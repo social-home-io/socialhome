@@ -26,6 +26,8 @@ import { blockedUserIds, loadBlocks } from '@/store/blocks'
 import {
   householdDisplayName,
   householdPictureUrl,
+  namedPersonLabel,
+  namedPersonPicture,
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { currentUser } from '@/store/auth'
@@ -159,8 +161,8 @@ export default function MomentumInboxTab() {
             key={m.id}
             m={m}
             mine={m.author_user_id === me}
-            authorName={householdDisplayName(m.author_user_id)}
-            authorPicture={householdPictureUrl(m.author_user_id)}
+            authorName={namedPersonLabel(m.author_user_id, m.author)}
+            authorPicture={namedPersonPicture(m.author_user_id, m.author)}
             onOpen={() => loc.route(`/momentum/${m.id}`)}
             onReact={(ev) => void quickReact(m, ev)}
             onTagClick={(t) => loc.route(`/momentum?tab=archive&tag=${encodeURIComponent(t)}`)}

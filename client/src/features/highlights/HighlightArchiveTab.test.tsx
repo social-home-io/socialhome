@@ -46,6 +46,38 @@ describe('buildMonthGrid', () => {
 })
 
 
+describe('HighlightArchiveTab authors', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  it('names a friend from another household by the server\'s author, with their picture', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-05-15T12:00:00Z'))
+    vi.mocked(api.get).mockResolvedValue([{
+      highlight: {
+        id: 'h1', author_user_id: 'ru-amaka', highlight_date: '2026-05-04',
+        audience_kind: 'all_paired', audience: [],
+        created_at: '2026-05-04T08:00:00Z', expires_at: '2026-06-04T08:00:00Z',
+        author: {
+          display_name: 'Amaka Okafor',
+          picture_url: 'api/users/ru-amaka/picture?v=1&sig=s',
+        },
+      },
+      frames: [],
+      unseen_count: 0,
+    }])
+    const { container, findByRole } = render(<HighlightArchiveTab />)
+    fireEvent.click(await findByRole('button', { name: /May 4, 2026/ }))
+    await waitFor(() => expect(
+      container.querySelector('.sh-highlight-archive-tile-meta strong')!.textContent,
+    ).toBe('Amaka Okafor'))
+    expect(container.textContent).not.toContain('Someone')
+    expect(container.textContent).not.toContain('ru-amaka')
+    const img = container.querySelector('.sh-highlight-archive-tile-meta img')
+    expect(img?.getAttribute('src')).toBe('api/users/ru-amaka/picture?v=1&sig=s')
+  })
+})
+
+
 describe('HighlightArchiveTab day keys west of UTC', () => {
   const prevTz = process.env.TZ
   afterEach(() => {
