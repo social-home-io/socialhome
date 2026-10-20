@@ -1172,23 +1172,6 @@ class ReportService:
                 "only the space owner, admins and moderators can review reports"
             )
 
-    async def display_names(self, space_id: str, user_ids: set[str]) -> dict[str, str]:
-        """Names for the people a space's report rows mention — a local
-        user's display name, else the remote seat's."""
-        out: dict[str, str] = {}
-        for uid in user_ids:
-            if not uid:
-                continue
-            user = await self._users.get_by_user_id(uid)
-            if user is not None:
-                out[uid] = user.display_name or user.username
-                continue
-            if self._seats is not None:
-                seat = await self._seats.get_including_tombstones(space_id, "", uid)
-                if seat is not None and seat.display_name:
-                    out[uid] = seat.display_name
-        return out
-
     async def _decide(
         self, existing: ContentReport, actor_user_id: str, *, dismissed: bool
     ) -> None:

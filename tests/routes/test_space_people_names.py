@@ -194,3 +194,130 @@ async def test_bans_still_admin_only(client):
     )
     r = await client.get(f"/api/spaces/{sid}/bans", headers=_auth("bob-tok"))
     assert r.status == 403
+
+
+# ── GET /api/spaces/{id}/join-requests ────────────────────────────────
+
+
+async def _join_request(client, sid: str, rid: str, user_id: str, inst: str | None):
+    await client._db.enqueue(
+        "INSERT INTO space_join_requests(id, space_id, remote_applicant_instance_id,"
+        " user_id, expires_at) VALUES(?,?,?,?, datetime('now', '+7 days'))",
+        (rid, sid, inst, user_id),
+    )
+
+
+async def test_join_requests_name_remote_applicants(client):
+    sid = await _space(client)
+    # Paired with their household but not seated yet: only remote_users
+    # knows the name (no roster seat to read it from).
+    await _remote_user(
+        client, "ru-rita", "Remote Rita", picture_hash="abcd1234abcd1234"
+    )
+    await _join_request(client, sid, "jr-1", "ru-rita", "peer-v")
+    await _join_request(client, sid, "jr-2", "ru-gone", "peer-x")
+    await _local_user(
+        client, "uid-kid", "kid", picture_hash="ffff0000ffff0000", protected=True
+    )
+    await _guardian_block(client, "uid-kid", client._uid)
+    await _join_request(client, sid, "jr-3", "uid-kid", None)
+
+    r = await client.get(f"/api/spaces/{sid}/join-requests", headers=_auth(client._tok))
+    assert r.status == 200
+    rows = {row["user_id"]: row for row in await r.json()}
+    assert rows["ru-rita"]["display_name"] == "Remote Rita"
+    assert "sig=" in rows["ru-rita"]["picture_url"]
+    assert rows["ru-gone"]["display_name"] is None
+    assert rows["ru-gone"]["picture_url"] is None
+    assert rows["uid-kid"]["display_name"] == "Kid"
+    assert rows["uid-kid"]["picture_url"] is None
+
+
+# ── GET /api/spaces/{id}/invite-tokens ────────────────────────────────
+
+
+async def test_invite_links_name_their_minter(client):
+    sid = await _space(client)
+    for _ in range(2):
+        r = await client.post(
+            f"/api/spaces/{sid}/invite-tokens",
+            json={"uses": 1},
+            headers=_auth(client._tok),
+        )
+        assert r.status in (200, 201), await r.text()
+    # One link minted by a remote admin who has since left the space.
+    await _seat(client, sid, "ru-adm", "Remote Admin", gone=True)
+    await client._db.enqueue(
+        "UPDATE space_invite_tokens SET created_by='ru-adm' WHERE rowid ="
+        " (SELECT MIN(rowid) FROM space_invite_tokens WHERE space_id=?)",
+        (sid,),
+    )
+    r = await client.get(f"/api/spaces/{sid}/invite-tokens", headers=_auth(client._tok))
+    assert r.status == 200
+    names = sorted(t["created_by_name"] for t in (await r.json())["tokens"])
+    assert names == ["Admin", "Remote Admin"]
+
+
+# ── GET /api/spaces/{id}/reports + /api/admin/reports ─────────────────
+
+
+async def _report(
+    client,
+    rid: str,
+    *,
+    reporter: str,
+    target_type: str,
+    target_id: str,
+    space_id: str | None,
+) -> None:
+    await client._db.enqueue(
+        "INSERT INTO content_reports(id, target_type, target_id, reporter_user_id,"
+        " reporter_instance_id, category, space_id) VALUES(?,?,?,?,'peer-v','spam',?)",
+        (rid, target_type, target_id, reporter, space_id),
+    )
+
+
+async def test_space_reports_name_remote_reporters_and_targets(client):
+    sid = await _space(client)
+    await _remote_user(client, "ru-rita", "Remote Rita")
+    await _seat(client, sid, "ru-sam", "Stranger Sam", gone=False)
+    await _report(
+        client,
+        "rp-1",
+        reporter="ru-rita",
+        target_type="user",
+        target_id="ru-sam",
+        space_id=sid,
+    )
+    r = await client.get(f"/api/spaces/{sid}/reports", headers=_auth(client._tok))
+    assert r.status == 200, await r.text()
+    [row] = await r.json()
+    assert row["reporter_name"] == "Remote Rita"
+    assert row["target_name"] == "Stranger Sam"
+
+
+async def test_admin_reports_name_remote_reporters(client):
+    await _remote_user(client, "ru-rita", "Remote Rita")
+    await _report(
+        client,
+        "rp-1",
+        reporter="ru-rita",
+        target_type="user",
+        target_id=client._uid,
+        space_id=None,
+    )
+    await _report(
+        client,
+        "rp-2",
+        reporter="ru-gone",
+        target_type="post",
+        target_id="p-1",
+        space_id=None,
+    )
+    r = await client.get("/api/admin/reports", headers=_auth(client._tok))
+    assert r.status == 200, await r.text()
+    rows = {row["id"]: row for row in await r.json()}
+    assert rows["rp-1"]["reporter_name"] == "Remote Rita"
+    assert rows["rp-1"]["target_name"] == "Admin"
+    assert rows["rp-2"]["reporter_name"] is None
+    assert "target_name" not in rows["rp-2"]

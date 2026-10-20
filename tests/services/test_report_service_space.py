@@ -325,12 +325,6 @@ async def test_unknown_space_is_not_found(env):
         await env.svc.list_for_space("nope", actor_user_id=env.mod)
 
 
-async def test_display_names_cover_local_and_remote(env):
-    await env.remote("spA", "inst-peer", "remote-u")
-    names = await env.svc.display_names("spA", {env.member, "remote-u", "ghost", ""})
-    assert names == {env.member: "member", "remote-u": "Remote remote-u"}
-
-
 # ── Federation outbound ─────────────────────────────────────────────────
 
 

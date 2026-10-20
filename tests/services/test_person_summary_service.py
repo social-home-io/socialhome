@@ -459,3 +459,9 @@ async def test_enrich_in_a_space_scope():
     ]
     # The caller's rows are never touched (a sync exporter shares them).
     assert rows == [{"user_id": "ru-stranger", "reason": "spam"}]
+
+
+async def test_local_person_without_a_display_name_reads_as_their_username():
+    svc, *_ = _svc(local=[User(username="bob", user_id="uid-bob", display_name="")])
+    out = await svc.summarize("uid-me", ["uid-bob"])
+    assert out["uid-bob"].display_name == "bob"

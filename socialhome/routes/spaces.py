@@ -22,7 +22,6 @@ from ..app_keys import (
     media_transcode_repo_key,
     notification_repo_key,
     online_status_service_key,
-    person_summary_service_key,
     presence_service_key,
     profile_picture_repo_key,
     rate_limiter_key,
@@ -65,7 +64,7 @@ from ..domain.space import (
 )
 from ..domain.space_place import place_pin_of, place_pin_wire
 from ..domain.space_proposal import ProposalAction
-from ..domain.user import SYSTEM_AUTHOR, PersonSummary
+from ..domain.user import SYSTEM_AUTHOR
 from ..domain.zone_geo import match_zone
 from ..federation.invite_bootstrap import InviteBootstrapHint
 from ..media_signer import sign_media_urls_in, strip_signature_query
@@ -857,34 +856,6 @@ def _signed(request: web.Request, payload: dict) -> dict:
     return payload
 
 
-async def _named(
-    view: BaseView, space_id: str, user_ids: set[str]
-) -> dict[str, PersonSummary]:
-    """Who each of ``user_ids`` is in ``space_id``, as the caller may see
-    them: the per-space name, else their household's, else the space's
-    roster seat — ``display_name=None`` for an id nobody here knows, never
-    the id. The picture is withheld across a guardian block (§CP.F2) and
-    unsigned (the caller signs the payload it puts it in)."""
-    people = view.svc(person_summary_service_key)
-    return await people.summarize(
-        view.user.user_id, {u for u in user_ids if u}, space_id=space_id
-    )
-
-
-async def _with_people(view: BaseView, space_id: str, rows: list[dict]) -> list[dict]:
-    """``rows`` (each with a ``user_id``) as new dicts carrying that
-    person's ``display_name``, ``personal_alias``, signed ``picture_url``
-    and ``household`` (:func:`_named`). The rows themselves are untouched —
-    the space-sync exporter ships the same repo rows to member households
-    and must never carry what this household knows about a person."""
-    people = view.svc(person_summary_service_key)
-    out = await people.enrich(view.user.user_id, rows, space_id=space_id)
-    signer = view.request.app.get(media_signer_key)
-    if signer is not None:
-        sign_media_urls_in(out, signer)
-    return out
-
-
 def _member_to_dict_signed(
     request: web.Request,
     m,
@@ -1556,11 +1527,25 @@ class SpaceInviteTokenView(BaseView):
     async def get(self) -> web.Response:
         ctx = self.user
         svc = self.svc(space_service_key)
-        links = await svc.list_invite_links(
-            self.match("id"),
-            actor_username=ctx.username,
+        space_id = self.match("id")
+        links = await svc.list_invite_links(space_id, actor_username=ctx.username)
+        # Named here, not in the service: on a space hosted elsewhere the
+        # links are the host's answer, and its wire shape stays as it is.
+        people = await self.named_people(
+            (str(link.get("created_by") or "") for link in links), space_id=space_id
         )
-        return web.json_response({"tokens": links})
+        tokens = []
+        for link in links:
+            person = people.get(str(link.get("created_by") or ""))
+            tokens.append(
+                {
+                    **link,
+                    "created_by_name": (
+                        person.display_name if person is not None else None
+                    ),
+                }
+            )
+        return web.json_response({"tokens": tokens})
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -2169,7 +2154,7 @@ class SpaceBanListView(BaseView):
         bans = await self.svc(space_repo_key).list_bans(space_id)
         # Named here, not in the repo rows: ``list_bans`` also feeds the
         # space-sync exporter, whose wire shape must not change.
-        return web.json_response(await _with_people(self, space_id, bans))
+        return web.json_response(await self.with_people(bans, space_id=space_id))
 
 
 class SpaceUnbanView(BaseView):
@@ -2801,7 +2786,20 @@ class SpaceJoinRequestCollectionView(BaseView):
             space_id,
             actor_username=ctx.username,
         )
-        return web.json_response([sanitise_for_api(r) for r in requests])
+        rows = [sanitise_for_api(r) for r in requests]
+        # The service names an applicant from their seat / local row; this
+        # household may also know them from its paired households
+        # (``remote_users``) — and the queue shows their picture.
+        people = await self.named_people(
+            (str(r.get("user_id") or "") for r in rows), space_id=space_id
+        )
+        for row in rows:
+            person = people.get(str(row.get("user_id") or ""))
+            row["display_name"] = (
+                person.display_name if person is not None else None
+            ) or row.get("display_name")
+            row["picture_url"] = person.picture_url if person is not None else None
+        return web.json_response(self.sign_media(rows))
 
     async def post(self) -> web.Response:
         ctx = self.user

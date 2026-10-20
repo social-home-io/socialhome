@@ -165,7 +165,7 @@ class PersonSummaryService(ProtectionGateMixin):
             if (user := local.get(uid)) is not None:
                 out[uid] = PersonSummary(
                     user_id=uid,
-                    display_name=user.display_name,
+                    display_name=user.display_name or user.username,
                     personal_alias=alias,
                     picture_url=(
                         None
