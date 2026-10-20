@@ -196,6 +196,17 @@ Wire-compatible: the new keys are additive and the signature covers
 whatever keys arrive, so an older follower verifies and ignores them —
 no protocol version bump.
 
+## Protected accounts never see them
+
+A received public moment is one household-wide row. A protected (child)
+account (§CP.R) never sees it — the per-viewer visibility rule
+(`moment_repo._NOT_GFS_FOR_PROTECTED_SQL`, part of the inbox rule the detail
+read shares) leaves it out of the inbox, the archive, trending tags, a
+moment's replies and the detail read (the unknown-id 404), and the
+`moment.created` WebSocket frame (`MomentCreated.received_via = "gfs"`)
+skips protected accounts. Notifications: a GFS-delivered moment carries no
+parent author, so it never notifies anyone.
+
 ## Creator-bound moment ids (v_36)
 
 A moment's id commits to its author (`federation/owner_bound_id.py`,

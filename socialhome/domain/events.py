@@ -2373,6 +2373,9 @@ class MomentCreated(DomainEvent):
     origin_instance_id: str
     expires_at: str
     occurred_at: datetime = field(default_factory=_now)
+    #: ``"gfs"`` for a stranger's public moment that arrived through a GFS
+    #: — protected accounts never get its frame (§CP.R). ``None`` otherwise.
+    received_via: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

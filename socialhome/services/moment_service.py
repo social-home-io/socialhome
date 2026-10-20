@@ -332,8 +332,12 @@ class MomentService:
             max_hops=prefs.max_hops,
         )
 
-    async def list_replies(self, moment_id: str) -> list[Moment]:
-        return await self._moments.list_replies(moment_id)
+    async def list_replies(
+        self, moment_id: str, *, viewer_user_id: str | None = None
+    ) -> list[Moment]:
+        return await self._moments.list_replies(
+            moment_id, viewer_user_id=viewer_user_id
+        )
 
     async def list_reactions(self, moment_id: str):
         return await self._moments.list_reactions(moment_id)

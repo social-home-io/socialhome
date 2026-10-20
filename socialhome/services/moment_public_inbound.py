@@ -150,6 +150,7 @@ class MomentPublicInbound:
                 parent_author_user_id=None,
                 origin_instance_id=moment.origin_instance_id,
                 expires_at=moment.expires_at,
+                received_via="gfs",
             )
         )
 

@@ -32,15 +32,31 @@ from ..domain.moment import Moment, MomentReaction, extract_hashtags
 from .base import row_to_dict, rows_to_dicts
 from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
 
+#: A protected account (§CP.R) never sees a moment that arrived through a GFS
+#: (``received_via = 'gfs'`` — a stranger's public moment another member of
+#: the household follows). Binds the viewer once.
+_NOT_GFS_FOR_PROTECTED_SQL = """
+    NOT (
+        m.received_via = 'gfs'
+        AND EXISTS (
+            SELECT 1 FROM users
+             WHERE user_id = ? AND child_protection_enabled = 1
+        )
+    )
+"""
+
 #: What the inbox shows a viewer — the one rule :meth:`list_visible_to` and
 #: :meth:`get_readable` share, so a detail read can never show what the
 #: inbox hides: no personal block (§Privacy) or guardian block (§CP.F2,
 #: either way) between viewer and author; younger than 24 h, or the viewer
 #: follows the author (then the full retention); not expired or deleted;
-#: within the viewer's ``max_hops``. Binds the viewer four times, then the
-#: hop cap.
+#: within the viewer's ``max_hops``; and never a moment that arrived through a
+#: GFS (a stranger's public moment) for a protected account (§CP.R) — the
+#: row is household-wide, so the filter is per viewer. Binds the viewer
+#: five times, then the hop cap.
 _VISIBLE_SQL = f"""
-    m.author_user_id NOT IN (
+    {_NOT_GFS_FOR_PROTECTED_SQL}
+    AND m.author_user_id NOT IN (
         SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
     )
     AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
@@ -91,7 +107,9 @@ class AbstractMomentRepo(Protocol):
         *,
         limit: int = 50,
     ) -> list[Moment]: ...
-    async def list_replies(self, parent_moment_id: str) -> list[Moment]: ...
+    async def list_replies(
+        self, parent_moment_id: str, *, viewer_user_id: str | None = None
+    ) -> list[Moment]: ...
     async def get_readable(
         self,
         moment_id: str,
@@ -330,6 +348,7 @@ class SqliteMomentRepo:
                 viewer_user_id,
                 viewer_user_id,
                 viewer_user_id,
+                viewer_user_id,
                 capped_hops,
                 before,
                 before,
@@ -430,17 +449,30 @@ class SqliteMomentRepo:
                  OR ({_VISIBLE_SQL})
                )
             """,
-            (moment_id, viewer_user_id, *(viewer_user_id,) * 4, capped_hops),
+            (moment_id, viewer_user_id, *(viewer_user_id,) * 5, capped_hops),
         )
         return _row_to_moment(row_to_dict(row)) if row is not None else None
 
-    async def list_replies(self, parent_moment_id: str) -> list[Moment]:
-        """Replies in chronological order so the thread reads top-down."""
-        rows = await self._db.fetchall(
-            "SELECT * FROM moments WHERE parent_moment_id=?"
-            " AND deleted_at IS NULL ORDER BY created_at ASC",
-            (parent_moment_id,),
-        )
+    async def list_replies(
+        self, parent_moment_id: str, *, viewer_user_id: str | None = None
+    ) -> list[Moment]:
+        """Replies in chronological order so the thread reads top-down.
+
+        With ``viewer_user_id``, without the GFS-delivered replies a
+        protected viewer never sees (§CP.R)."""
+        if viewer_user_id is None:
+            rows = await self._db.fetchall(
+                "SELECT * FROM moments WHERE parent_moment_id=?"
+                " AND deleted_at IS NULL ORDER BY created_at ASC",
+                (parent_moment_id,),
+            )
+        else:
+            rows = await self._db.fetchall(
+                f"SELECT m.* FROM moments AS m WHERE m.parent_moment_id=?"
+                f" AND m.deleted_at IS NULL AND {_NOT_GFS_FOR_PROTECTED_SQL}"
+                " ORDER BY m.created_at ASC",
+                (parent_moment_id, viewer_user_id),
+            )
         return [m for m in (_row_to_moment(d) for d in rows_to_dicts(rows)) if m]
 
     async def count_recent_for_author(
@@ -580,7 +612,8 @@ class SqliteMomentRepo:
             SELECT mh.tag AS tag, COUNT(*) AS n
               FROM moment_hashtags AS mh
               JOIN moments AS m ON m.id = mh.moment_id
-             WHERE m.author_user_id NOT IN (
+             WHERE {_NOT_GFS_FOR_PROTECTED_SQL}
+               AND m.author_user_id NOT IN (
                  SELECT blocked_user_id FROM user_blocks
                   WHERE blocker_user_id = ?
              )
@@ -599,7 +632,7 @@ class SqliteMomentRepo:
              ORDER BY n DESC, mh.tag ASC
              LIMIT ?
             """,
-            (viewer_user_id, viewer_user_id, viewer_user_id, viewer_user_id, limit),
+            (viewer_user_id,) * 5 + (limit,),
         )
         return [(r["tag"], int(r["n"])) for r in rows]
 

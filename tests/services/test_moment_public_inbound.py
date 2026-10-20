@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from socialhome.crypto import b64url_encode, sign_ed25519
+from socialhome.domain.events import MomentCreated
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.moment_public_repo import SqliteMomentPublicFollowRepo
 from socialhome.repositories.moment_repo import SqliteMomentRepo
@@ -185,3 +186,15 @@ async def test_a_reply_to_a_held_moment_lands(db):
     await _create(inbound, _moment("m-reply", parent_moment_id="m-root"))
     got = await SqliteMomentRepo(db).get("m-reply")
     assert got is not None and got.parent_moment_id == "m-root"
+
+
+async def test_a_gfs_moment_is_published_as_gfs_received(db):
+    """The bus event says where it came from, so realtime can keep it off
+    protected accounts' sockets."""
+    bus = EventBus()
+    seen: list = []
+    bus.subscribe(MomentCreated, lambda e: seen.append(e))
+    inbound, _follows = await _env(db)
+    inbound._bus = bus  # type: ignore[attr-defined]
+    await _create(inbound, _moment("m-ev"))
+    assert [e.received_via for e in seen] == ["gfs"]
