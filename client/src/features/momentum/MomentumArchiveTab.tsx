@@ -24,7 +24,9 @@ import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { renderHashtagged } from './hashtags'
 import { addBase } from '@/baseUrl'
-import { t, formatLocale } from '@/i18n/i18n'
+import { t } from '@/i18n/i18n'
+import { formatDayKey } from '@/utils/calendar'
+import { localClockTime, localDayKey } from '@/utils/relativeTime'
 
 const moments = signal<Moment[]>([])
 const loading = signal<boolean>(true)
@@ -34,7 +36,8 @@ const activeTag = signal<string | null>(null)
 const grouped = computed<Map<string, Moment[]>>(() => {
   const m = new Map<string, Moment[]>()
   for (const x of moments.value) {
-    const day = x.created_at.slice(0, 10)
+    // The viewer's own calendar day — never the UTC date of the stamp.
+    const day = localDayKey(x.created_at) ?? x.created_at
     if (!m.has(day)) m.set(day, [])
     m.get(day)!.push(x)
   }
@@ -147,7 +150,7 @@ export default function MomentumArchiveTab() {
       {renderTrendingRow}
       {days.map(day => (
         <section key={day} class="sh-momentum-archive-day">
-          <h3>{new Date(day + 'T00:00:00Z').toLocaleDateString(formatLocale(), {
+          <h3>{formatDayKey(day, {
             weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
           })}</h3>
           <ul class="sh-momentum-list">
@@ -165,9 +168,13 @@ export default function MomentumArchiveTab() {
                     size={32}
                   />
                   <div class="sh-momentum-row-body">
-                    <div class="sh-momentum-row-meta">
-                      <strong>{namedPersonLabel(m.author_user_id, m.author)}</strong>
-                      <span class="sh-muted">{m.created_at.slice(11, 16)}</span>
+                    <div class="sh-momentum-row-head">
+                      <strong class="sh-momentum-row-author">
+                        {namedPersonLabel(m.author_user_id, m.author)}
+                      </strong>
+                      <time class="sh-muted" dateTime={m.created_at}>
+                        {localClockTime(m.created_at)}
+                      </time>
                     </div>
                     {m.content && (
                       <p class="sh-momentum-row-content">

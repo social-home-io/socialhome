@@ -22,6 +22,7 @@
  */
 
 import { isOne, formatLocale, t } from '@/i18n/i18n'
+import { dayKeyOf } from './calendar'
 
 const MS_PER_MIN = 60_000
 const MS_PER_DAY = 86_400_000
@@ -153,6 +154,29 @@ export function relativeDocsTime(iso: string): string {
     day: 'numeric',
     year: sameYear ? undefined : 'numeric',
   })
+}
+
+/**
+ * The viewer's local wall-clock time of a server timestamp — ``14:05`` /
+ * ``2:05 PM`` in the UI language. Never slice the string (``iso.slice(11,
+ * 16)`` is the UTC clock, hours off for anyone not in UTC). Falls back
+ * to the raw input on parse failure.
+ */
+export function localClockTime(iso: string): string {
+  const at = Date.parse(normaliseTimestamp(iso))
+  if (Number.isNaN(at)) return iso
+  return new Date(at).toLocaleTimeString(formatLocale(), { hour: '2-digit', minute: '2-digit' })
+}
+
+/**
+ * ``YYYY-MM-DD`` of the viewer's local calendar day a server timestamp
+ * falls on — the key to group rows "by day" with. ``iso.slice(0, 10)``
+ * is the UTC day: a post at 00:30 in Zurich lands under yesterday.
+ * ``null`` on parse failure.
+ */
+export function localDayKey(iso: string): string | null {
+  const at = Date.parse(normaliseTimestamp(iso))
+  return Number.isNaN(at) ? null : dayKeyOf(new Date(at))
 }
 
 /**
