@@ -7,9 +7,14 @@ endpoints, and the ICE-server config route.
 
 from __future__ import annotations
 
-from socialhome.app_keys import call_signaling_service_key
+from socialhome.app_keys import call_signaling_service_key, federation_repo_key
 from socialhome.auth import sha256_token_hash
-from socialhome.domain.federation import FederationEventType
+from socialhome.domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
+)
 
 from .conftest import _auth
 
@@ -349,6 +354,51 @@ async def test_conversation_history_lists_past_calls(client):
     assert r.status == 200
     body = await r.json()
     assert any(c["call_id"] == cid for c in body["calls"])
+    [row] = [c for c in body["calls"] if c["call_id"] == cid]
+    assert row["initiator_display_name"] == "Admin"
+
+
+async def test_conversation_history_names_remote_callers(client):
+    """A call started on another household reads by the caller's name: the
+    paired household's ``remote_users`` row, else the conversation seat's
+    name (a group member of a household we never paired with) — ``None``,
+    never the id, when nobody here knows them."""
+    await _seed_bob(client)
+    db = client._db
+    await client.app[federation_repo_key].save_instance(
+        RemoteInstance(
+            id="peer-v",
+            display_name="Vizeli",
+            remote_identity_pk="aa" * 32,
+            key_self_to_remote="enc",
+            key_remote_to_self="enc",
+            remote_inbox_url="https://peer-v.example/wh",
+            local_inbox_id="wh-peer-v",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
+        )
+    )
+    await db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES('ru-rita', 'peer-v', 'rita', 'Remote Rita')",
+    )
+    await db.enqueue(
+        "INSERT INTO conversation_remote_members(conversation_id, instance_id,"
+        " remote_username, user_id, display_name)"
+        " VALUES('conv-ab', 'peer-x', 'sam', 'ru-sam', 'Stranger Sam')",
+    )
+    for cid, caller in (("c-1", "ru-rita"), ("c-2", "ru-sam"), ("c-3", "ru-gone")):
+        await db.enqueue(
+            "INSERT INTO call_sessions(id, conversation_id, initiator_user_id,"
+            " call_type, status) VALUES(?, 'conv-ab', ?, 'audio', 'ended')",
+            (cid, caller),
+        )
+    r = await client.get("/api/conversations/conv-ab/calls", headers=_auth(client._tok))
+    assert r.status == 200
+    names = {
+        c["call_id"]: c["initiator_display_name"] for c in (await r.json())["calls"]
+    }
+    assert names == {"c-1": "Remote Rita", "c-2": "Stranger Sam", "c-3": None}
 
 
 # ─── /api/calls/{id}/join (group late-join) ──────────────────────────────

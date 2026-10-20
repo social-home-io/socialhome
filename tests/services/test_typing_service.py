@@ -29,10 +29,18 @@ class _FakeMember:
 
 
 class _FakeRemoteMember:
-    def __init__(self, instance_id: str, remote_username: str = ""):
+    def __init__(
+        self,
+        instance_id: str,
+        remote_username: str = "",
+        *,
+        user_id: str | None = None,
+        display_name: str | None = None,
+    ):
         self.instance_id = instance_id
         self.remote_username = remote_username
-        self.user_id = None
+        self.user_id = user_id
+        self.display_name = display_name
 
 
 class _FakeConvoRepo:
@@ -60,7 +68,9 @@ class _FakeUserRepo:
     async def get_remote(self, user_id):
         if user_id != "remote-eve":
             return None
-        return SimpleNamespace(instance_id="remote-1", remote_username="eve")
+        return SimpleNamespace(
+            instance_id="remote-1", remote_username="eve", display_name="Eve Adams"
+        )
 
 
 class _FakeWS:
@@ -310,6 +320,37 @@ async def test_handle_remote_typing_fans_to_local_members():
     assert set(targets) == {"alice", "bob"}
     assert payload["from_instance"] == "remote-1"
     assert payload["sender_user_id"] == "remote-eve"
+    # The name this household holds for them, so the SPA never says
+    # "Someone is typing" for a paired household's member.
+    assert payload["sender_display_name"] == "Eve Adams"
+
+
+async def test_handle_remote_typing_names_a_group_seat_by_its_roster_name():
+    """A group member of a household this one never paired with: no
+    ``remote_users`` row, the seat's roster name is all there is."""
+    repo = _FakeConvoRepo(
+        members=[_FakeMember("alice")],
+        remote=[
+            _FakeRemoteMember(
+                "remote-1", "sam", user_id="remote-sam", display_name="Sam Seat"
+            )
+        ],
+    )
+    ws = _FakeWS()
+    svc = TypingService(
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=ws,
+    )
+    await svc.handle_remote_typing(
+        _Event(
+            FederationEventType.DM_USER_TYPING,
+            "remote-1",
+            {"conversation_id": "c1", "sender_user_id": "remote-sam"},
+        )
+    )
+    _, payload = ws.calls[0]
+    assert payload["sender_display_name"] == "Sam Seat"
 
 
 async def test_handle_remote_typing_drops_self_target():
