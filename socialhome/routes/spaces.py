@@ -2060,10 +2060,17 @@ class _SpaceModerationBase(BaseView):
     async def _items(self, items, *, with_current: bool) -> web.Response:
         svc = self.svc(space_moderation_service_key)
         payload = [await svc.describe(i, with_current=with_current) for i in items]
-        signer = self.request.app.get(media_signer_key)
-        if signer is not None:
-            sign_media_urls_in(payload, signer)
-        return web.json_response(payload)
+        # The submitter's name as this household knows them (per-space name,
+        # household / ``remote_users``, roster seat); the service's own
+        # lookup is the fallback. ``None`` — never the id — when nobody does.
+        people = await self.named_people(
+            (i.submitted_by for i in items), space_id=self.match("id")
+        )
+        for row in payload:
+            person = people.get(str(row.get("submitted_by") or ""))
+            if person is not None and person.display_name:
+                row["submitted_by_display"] = person.display_name
+        return web.json_response(self.sign_media(payload))
 
 
 class SpaceModerationQueueView(_SpaceModerationBase):

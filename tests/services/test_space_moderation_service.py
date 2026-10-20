@@ -792,6 +792,12 @@ async def test_describe_names_a_remote_submitter_from_the_roster(env):
     assert (await env.mod.describe(item))["submitted_by_display"] == "Remote Rita"
 
 
+async def test_describe_never_names_an_unknown_submitter_by_id(env):
+    env.mod.attach_federation(_FakeModerationFederation())
+    item = replace(await _queue_create(env), submitted_by="u-nobody")
+    assert (await env.mod.describe(item))["submitted_by_display"] is None
+
+
 async def test_payload_cap_counts_stored_utf8_bytes(env, monkeypatch):
     """M2: 300 KiB of 3-byte characters is ~100 K characters but ~300 KiB
     stored — refused on the stored size."""

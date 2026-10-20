@@ -16,6 +16,7 @@ stay byte-identical.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 from socialhome.app_keys import federation_repo_key, space_repo_key
 from socialhome.auth import sha256_token_hash
@@ -24,6 +25,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.space import SpaceModerationItem
 from socialhome.federation.sync.space.exporters.bans import BansExporter
 
 from .conftest import _auth
@@ -321,3 +323,36 @@ async def test_admin_reports_name_remote_reporters(client):
     assert rows["rp-1"]["target_name"] == "Admin"
     assert rows["rp-2"]["reporter_name"] is None
     assert "target_name" not in rows["rp-2"]
+
+
+# ── GET /api/spaces/{id}/moderation ───────────────────────────────────
+
+
+async def _queued(client, sid: str, item_id: str, submitter: str) -> None:
+    now = datetime.now(UTC)
+    await client.app[space_repo_key].insert_moderation_item(
+        SpaceModerationItem(
+            id=item_id,
+            space_id=sid,
+            feature="stickies",
+            action="create",
+            submitted_by=submitter,
+            payload={"entity": "sticky", "content": "hi"},
+            current_snapshot=None,
+            submitted_at=now,
+            expires_at=now + timedelta(days=7),
+        )
+    )
+
+
+async def test_moderation_queue_names_remote_submitters(client):
+    sid = await _space(client)
+    await _remote_user(client, "ru-rita", "Remote Rita")
+    await _queued(client, sid, "mq-1", "ru-rita")
+    await _queued(client, sid, "mq-2", "ru-gone")
+    r = await client.get(f"/api/spaces/{sid}/moderation", headers=_auth(client._tok))
+    assert r.status == 200, await r.text()
+    items = {i["id"]: i for i in await r.json()}
+    assert items["mq-1"]["submitted_by_display"] == "Remote Rita"
+    # Nobody here knows them: no name — the SPA says "Someone", never the id.
+    assert items["mq-2"]["submitted_by_display"] is None
