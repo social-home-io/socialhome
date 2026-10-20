@@ -21,7 +21,9 @@ from socialhome.services import highlight_public_framing as framing
 from socialhome.services.highlight_signaling_handler import (
     MAX_CONCURRENT_VIEWERS_PER_HIGHLIGHT,
     HighlightSignalingHandler,
+    _default_peer_factory,
 )
+from socialhome.webrtc_ice import build_ice_servers
 
 # ─── Stub peer ───────────────────────────────────────────────────────────
 
@@ -883,3 +885,28 @@ async def test_aiolib_answerer_peer_close_is_idempotent():
     await peer.close()
     # Second close is a no-op, no exception escapes.
     await peer.close()
+
+
+async def test_the_answerer_takes_the_ice_list_the_app_builds():
+    """Regression: ``build_ice_servers`` makes ``{"urls": [...]}`` entries;
+    the answerer passed ``str(["stun:…"])`` as the URL, libdatachannel
+    refused the configuration (``rtcCreatePeerConnection: invalid
+    argument``) and every public viewer fell back to the GFS relay."""
+    ice = build_ice_servers(
+        stun_url="stun:stun.example.org:3478",
+        turn_url="turn:turn.example.org:3478",
+        turn_user="u",
+        turn_cred="c",
+        turn_secret=None,
+        turn_ttl_seconds=3600,
+        hmac_user_id=None,
+    )
+    peer = _default_peer_factory(ice)
+    try:
+        config = peer._pc._config  # the fake records what it was given
+        assert [(s.url, s.username, s.credential) for s in config.ice_servers] == [
+            ("stun:stun.example.org:3478", None, None),
+            ("turn:turn.example.org:3478", "u", "c"),
+        ]
+    finally:
+        await peer.close()

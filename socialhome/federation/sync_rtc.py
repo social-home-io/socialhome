@@ -33,24 +33,13 @@ from typing import Any
 
 import aiolibdatachannel as rtc
 
+from ..webrtc_ice import rtc_configuration
+
 log = logging.getLogger(__name__)
 
 
-def _build_rtc_config(ice_servers: list[dict]) -> rtc.RTCConfiguration:
-    """Flatten a Chrome-style ``ice_servers`` list. Same semantics as
-    :func:`socialhome.federation.transport._build_rtc_config`.
-    """
-    servers: list[rtc.IceServer] = []
-    for srv in ice_servers:
-        url_field = srv["urls"]
-        raw_urls = url_field if isinstance(url_field, list) else [url_field]
-        username = srv.get("username") or None
-        credential = srv.get("credential") or None
-        for url in raw_urls:
-            servers.append(
-                rtc.IceServer(url=url, username=username, credential=credential),
-            )
-    return rtc.RTCConfiguration(ice_servers=servers)
+#: Kept under its old name; see :func:`socialhome.webrtc_ice.rtc_configuration`.
+_build_rtc_config = rtc_configuration
 
 
 # ─── Constants ────────────────────────────────────────────────────────────
