@@ -1311,12 +1311,20 @@ class SpaceAuthorsView(BaseView):
 
 class SpaceAuthorPictureView(BaseView):
     """``GET /api/spaces/{id}/authors/{user_id}/picture`` — the WebP of a
-    cached author profile (v_60). 404 when none, or across a guardian block."""
+    cached author profile (v_60). 404 when none, or across a guardian block.
+
+    Anyone who may read the space (``require_reader``, as the author list)
+    — the seat-gate middleware lets a household admin through without a
+    seat, so the gate runs here too. A signed URL carries no user: it is
+    the per-file capability :class:`SpaceAuthorsView` (and the person
+    summaries of a space route) mint only behind that same read gate."""
 
     async def get(self) -> web.Response:
-        self.require_user()
+        ctx = self.user
         space_id = self.match("id")
         user_id = self.match("user_id")
+        if ctx.auth_method != "signed_url":
+            await self.svc(space_service_key).require_reader(space_id, ctx.user_id)
         got = await self.svc(space_author_profile_repo_key).get_picture(
             space_id, user_id
         )

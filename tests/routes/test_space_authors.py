@@ -90,3 +90,92 @@ async def test_across_a_guardian_block_the_name_only(client):
         f"/api/spaces/{sid}/authors/u-noor/picture", headers=_auth(client._tok)
     )
     assert pic.status == 404
+
+
+async def _seed_user(client, username: str, user_id: str, token: str) -> None:
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        (username, user_id, username.title()),
+    )
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        (f"t-{username}", user_id, "t", sha256_token_hash(token)),
+    )
+
+
+async def test_a_non_reader_never_gets_an_author_picture(client):
+    """A bearer caller with no seat in the space is refused the picture
+    exactly as the author list (``require_reader``): 403."""
+    sid = await _space_with_profile(client)
+    await _seed_user(client, "eve", "u-eve", "eve-tok")
+    for path in (
+        f"/api/spaces/{sid}/authors",
+        f"/api/spaces/{sid}/authors/u-noor/picture",
+    ):
+        r = await client.get(path, headers=_auth("eve-tok"))
+        assert r.status == 403, path
+
+
+async def test_a_household_admin_without_a_seat_gets_no_author_picture(client):
+    """Regression (M3): a household admin passes the seat-gate middleware
+    without a seat, so the picture route runs the read gate itself — the
+    same 403 the author list answers."""
+    await _seed_user(client, "eve", "u-eve", "eve-tok")
+    r = await client.post(
+        "/api/spaces", json={"name": "Eve's"}, headers=_auth("eve-tok")
+    )
+    assert r.status in (200, 201)
+    sid = (await r.json())["id"]
+    await client.app[space_author_profile_repo_key].upsert_if_newer(
+        SpaceAuthorProfile(
+            space_id=sid,
+            author_user_id="u-noor",
+            author_pk="ab" * 32,
+            display_name="Noor Haddad",
+            bio="Beekeeper.",
+            picture_hash="0123456789abcdef",
+            profile_rev="r",
+            ts="2026-10-20T08:00:00.000000+00:00",
+        ),
+        picture_webp=PIC,
+    )
+    authors = await client.get(f"/api/spaces/{sid}/authors", headers=_auth(client._tok))
+    pic = await client.get(
+        f"/api/spaces/{sid}/authors/u-noor/picture", headers=_auth(client._tok)
+    )
+    assert (authors.status, pic.status) == (403, 403)
+
+
+async def test_a_protected_child_taken_out_of_the_space_gets_no_picture(client):
+    """A protected (child) account its guardian removed from the space is
+    no reader any more: no author picture of that space."""
+    sid = await _space_with_profile(client)
+    await _seed_user(client, "kid", "u-kid", "kid-tok")
+    await client._db.enqueue(
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id='u-kid'"
+    )
+    await client._db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,'member')",
+        (sid, "u-kid"),
+    )
+    path = f"/api/spaces/{sid}/authors/u-noor/picture"
+    before = await client.get(path, headers=_auth("kid-tok"))
+    assert before.status == 200
+    await client._db.enqueue(
+        "DELETE FROM space_members WHERE space_id=? AND user_id='u-kid'", (sid,)
+    )
+    after = await client.get(path, headers=_auth("kid-tok"))
+    assert after.status == 403
+
+
+async def test_a_signed_picture_url_still_loads_without_a_bearer(client):
+    """The signed URL is the capability the author list mints behind its
+    own read gate; it carries no user, so the route serves it as is — and
+    only with a valid signature."""
+    sid = await _space_with_profile(client)
+    r = await client.get(f"/api/spaces/{sid}/authors", headers=_auth(client._tok))
+    [row] = await r.json()
+    pic = await client.get("/" + row["picture_url"])
+    assert pic.status == 200
+    tampered = await client.get("/" + row["picture_url"].replace("sig=", "sig=0"))
+    assert tampered.status == 401
