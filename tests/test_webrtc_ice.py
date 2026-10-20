@@ -281,3 +281,40 @@ def test_rtc_configuration_flattens_every_url_shape():
         ("turn:t.example:3478", "u", "c"),
         ("stun:c.example:3478", None, None),
     ]
+
+
+def test_rtc_configuration_warns_about_every_skipped_entry(caplog):
+    """#1084: a malformed ICE entry is named in a WARNING — which entry
+    and why — so a half-broken list is diagnosable, never silent."""
+    with caplog.at_level(logging.WARNING, logger="socialhome.webrtc_ice"):
+        rtc_configuration(
+            [
+                {"urls": ["stun:ok.example:3478"]},
+                "turn:leaky-user:leaky-pass@t.example",
+                {"username": "u-secret", "credential": "c-secret"},
+                {"urls": [None, "", 7], "username": "u2", "credential": "c2"},
+                {"urls": []},
+            ]
+        )
+    skipped = [r for r in caplog.records if "skipped" in r.getMessage()]
+    assert len(skipped) == 4
+    assert all(r.levelno == logging.WARNING for r in skipped)
+    assert "#4" in caplog.text
+    text = caplog.text
+    assert "#1" in text and "str" in text
+    assert "#2" in text and "no URL" in text
+    assert "#3" in text and "NoneType" in text and "int" in text
+    # Never the credentials (nor a non-dict entry's raw value).
+    for secret in ("u-secret", "c-secret", "u2", "c2", "leaky"):
+        assert secret not in text
+
+
+def test_rtc_configuration_quiet_for_a_well_formed_list(caplog):
+    with caplog.at_level(logging.WARNING, logger="socialhome.webrtc_ice"):
+        rtc_configuration(
+            [
+                {"urls": ["stun:a.example:3478"]},
+                {"url": "turn:t.example:3478", "username": "u", "credential": "c"},
+            ]
+        )
+    assert not caplog.records

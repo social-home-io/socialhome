@@ -174,19 +174,43 @@ def rtc_configuration(ice_servers: list[dict]) -> rtc.RTCConfiguration:
     becomes its own :class:`~aiolibdatachannel.IceServer` with the
     credentials as first-class fields. A malformed entry is skipped rather
     than passed through — libdatachannel refuses the whole configuration
-    (``rtcCreatePeerConnection: invalid argument``) for one bad URL.
+    (``rtcCreatePeerConnection: invalid argument``) for one bad URL — and
+    each skip is a WARNING naming the entry's position and why, never its
+    values (a TURN entry carries credentials).
     """
     servers: list[rtc.IceServer] = []
-    for srv in ice_servers:
+    for index, srv in enumerate(ice_servers):
         if not isinstance(srv, dict):
+            log.warning(
+                "WebRTC: ICE server entry #%d skipped: not an object (%s).",
+                index,
+                type(srv).__name__,
+            )
             continue
         url_field = srv.get("urls", srv.get("url"))
+        if url_field is None or url_field == []:
+            log.warning(
+                "WebRTC: ICE server entry #%d skipped: no URL ('urls' / 'url').",
+                index,
+            )
+            continue
         raw_urls = url_field if isinstance(url_field, list) else [url_field]
         username = srv.get("username") or None
         credential = srv.get("credential") or None
+        bad: list[str] = []
         for url in raw_urls:
             if isinstance(url, str) and url:
                 servers.append(
                     rtc.IceServer(url=url, username=username, credential=credential)
                 )
+            else:
+                bad.append("empty str" if url == "" else type(url).__name__)
+        if bad:
+            log.warning(
+                "WebRTC: ICE server entry #%d: %d URL(s) skipped, not a "
+                "non-empty string (%s).",
+                index,
+                len(bad),
+                ", ".join(bad),
+            )
     return rtc.RTCConfiguration(ice_servers=servers)
