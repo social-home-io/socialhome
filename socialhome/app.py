@@ -3122,6 +3122,10 @@ def create_app(config: Config | None = None) -> web.Application:
         repos.gfs_connection,
         media_dir=str(config.media_path),
     )
+    # Who shared it: a sealed author_profile frame for the public page.
+    highlight_signaling_handler.attach_author_profiles(
+        user_repo=user_repo, picture_repo=profile_picture_repo
+    )
     # Author-side signalling answerer for the public-moments live index
     # (§Momentum-public). Same shape as ``highlight_signaling_handler``:
     # ``attach_session`` + ``attach_identity`` happen in the startup hook,
@@ -3183,6 +3187,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_cal_service,
         bazaar_service,
         highlight_publication_service,
+        highlight_signaling_handler,
         moment_public_service,
         moment_public_outbound,
         moment_public_signaling_handler,

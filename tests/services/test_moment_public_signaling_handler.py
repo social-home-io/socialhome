@@ -1029,3 +1029,14 @@ async def test_an_unbound_frame_naming_a_replaced_id_still_resolves(
     )
     await _drain(handler)
     assert [url for url, _ in sess.posts] == ["https://g2.test/gfs/moment_rtc/answer"]
+
+
+async def test_resolve_media_path_accepts_the_stored_relative_form(repos):
+    """Regression: uploads are stored as ``api/media/<name>`` (no leading
+    slash); the ``/api/media/``-only check read every one as missing, so
+    the public page answered "ended" for every new upload."""
+    handler, _ = _make_handler(repos)
+    got = handler._resolve_media_path("api/media/a.jpg")
+    assert got is not None and got.name == "a.jpg"
+    assert handler._resolve_media_path("/api/media/a.jpg") == got
+    assert handler._resolve_media_path("api/media/../a.jpg") is None

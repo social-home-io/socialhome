@@ -9,15 +9,23 @@ covered indirectly by the integration suite (PR3 → real-peer).
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 from datetime import UTC, datetime, timedelta
 
 import aiofiles
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from PIL import Image
 
+from socialhome.crypto import b64url_encode
 from socialhome.domain.highlight import HighlightAudience, HighlightFrameType
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import highlight_public_framing as framing
+from socialhome.services.highlight_public_profile import open_profile, parse_viewer_key
 from socialhome.services.highlight_signaling_handler import (
     MAX_CONCURRENT_VIEWERS_PER_HIGHLIGHT,
     HighlightSignalingHandler,
@@ -910,3 +918,138 @@ async def test_the_answerer_takes_the_ice_list_the_app_builds():
         ]
     finally:
         await peer.close()
+
+
+# ─── Who shared it: the sealed author_profile frame ─────────────────────
+
+
+def _viewer_key():
+    sk = ec.generate_private_key(ec.SECP256R1())
+    raw = sk.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return sk, b64url_encode(raw)
+
+
+class _Pictures:
+    async def get_user_picture(self, user_id):
+        buf = io.BytesIO()
+        Image.new("RGB", (300, 300), (40, 90, 160)).save(buf, "WEBP")
+        return buf.getvalue(), "0123456789abcdef"
+
+
+class _Protected:
+    def __init__(self, ids) -> None:
+        self.ids = ids
+
+    def register_gate(self, gate):
+        pass
+
+    async def is_protected(self, user_id):
+        return user_id in self.ids
+
+
+async def _profile_frames(handler, highlight_id, vk):
+    frames = [
+        framing.decode(b)
+        async for b in handler._iter_highlight_frames(
+            highlight_id, viewer_key=parse_viewer_key(vk)
+        )
+    ]
+    return frames, [f for f in frames if f.header["kind"] == "author_profile"]
+
+
+async def test_a_viewer_with_a_key_gets_who_shared_it_sealed(
+    repos, published_highlight, db
+):
+    highlight_id, _f1, _f2 = published_highlight
+    await db.enqueue(
+        "UPDATE users SET bio='Bread and bees.', picture_hash='0123456789abcdef'"
+        " WHERE user_id='u1'"
+    )
+    handler, _ = _make_handler(repos)
+    handler.attach_author_profiles(
+        user_repo=SqliteUserRepo(db),
+        picture_repo=_Pictures(),  # type: ignore[arg-type]
+    )
+    sk, vk = _viewer_key()
+    frames, [prof] = await _profile_frames(handler, highlight_id, vk)
+    # Right after highlight_meta, before any media.
+    assert [f.header["kind"] for f in frames[:2]] == [
+        "highlight_meta",
+        "author_profile",
+    ]
+    assert b"Alice" not in prof.payload and b"Bread" not in prof.payload
+    opened = open_profile(sk, prof.header, prof.payload, highlight_id=highlight_id)
+    assert (opened["display_name"], opened["bio"]) == ("Alice", "Bread and bees.")
+    pic = base64.b64decode(opened["picture"])
+    assert pic[:4] == b"RIFF" and len(pic) <= 24 * 1024
+
+
+async def test_no_key_no_profile_frame(repos, published_highlight, db):
+    highlight_id, _f1, _f2 = published_highlight
+    handler, _ = _make_handler(repos)
+    handler.attach_author_profiles(
+        user_repo=SqliteUserRepo(db),
+        picture_repo=_Pictures(),  # type: ignore[arg-type]
+    )
+    _frames, profiles = await _profile_frames(handler, highlight_id, None)
+    assert profiles == []
+
+
+async def test_a_protected_author_is_named_only(repos, published_highlight, db):
+    highlight_id, _f1, _f2 = published_highlight
+    await db.enqueue("UPDATE users SET bio='x', picture_hash='0123456789abcdef'")
+    handler, _ = _make_handler(repos)
+    handler.attach_author_profiles(
+        user_repo=SqliteUserRepo(db),
+        picture_repo=_Pictures(),  # type: ignore[arg-type]
+    )
+    handler.attach_child_protection(_Protected({"u1"}))  # type: ignore[arg-type]
+    sk, vk = _viewer_key()
+    _frames, [prof] = await _profile_frames(handler, highlight_id, vk)
+    opened = open_profile(sk, prof.header, prof.payload, highlight_id=highlight_id)
+    assert opened == {"display_name": "Alice", "bio": None, "picture": None}
+
+
+async def test_the_relay_carries_the_sealed_frame_for_the_relay_viewer(
+    repos, published_highlight, db
+):
+    """The GFS pipes the relay bytes: it sees the sealed frame only."""
+    highlight_id, _f1, _f2 = published_highlight
+    handler, _ = _make_handler(repos)
+    handler.attach_author_profiles(
+        user_repo=SqliteUserRepo(db),
+        picture_repo=_Pictures(),  # type: ignore[arg-type]
+    )
+    sess = _RecordingSession()
+    handler._http_client = sess  # type: ignore[assignment]
+    sk, vk = _viewer_key()
+    await handler.handle_signal(
+        {
+            "kind": "relay_offer",
+            "relay_id": "r-1",
+            "highlight_id": highlight_id,
+            "vk": vk,
+        }
+    )
+    await _drain_relay(handler)
+    [(_url, _headers, body)] = sess.relay_calls
+    assert b"Alice" not in body
+    frames = list(framing.iter_frames(body))
+    [prof] = [f for f in frames if f.header["kind"] == "author_profile"]
+    assert (
+        open_profile(sk, prof.header, prof.payload, highlight_id=highlight_id)[
+            "display_name"
+        ]
+        == "Alice"
+    )
+
+
+async def test_resolve_media_path_accepts_the_stored_relative_form(repos):
+    """Regression: uploads are stored as ``api/media/<name>`` (no leading
+    slash); the ``/api/media/``-only check read every one as missing, so
+    the public page answered "ended" for every new upload."""
+    handler, _ = _make_handler(repos)
+    got = handler._resolve_media_path("api/media/a.jpg")
+    assert got is not None and got.name == "a.jpg"
+    assert handler._resolve_media_path("/api/media/a.jpg") == got
+    assert handler._resolve_media_path("api/media/../a.jpg") is None

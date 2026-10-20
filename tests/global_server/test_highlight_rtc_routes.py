@@ -707,3 +707,44 @@ async def test_offer_endpoint_is_rate_limited(client):
             assert r.headers.get("Retry-After") == "60"
             break
     assert saw_429, "offer endpoint was never rate-limited"
+
+
+VK = "B" + "A" * 86  # base64url shape of a 65-byte point
+
+
+@pytest.mark.parametrize(
+    ("sent_vk", "forwarded"),
+    [(VK, VK), (None, None), ("x" * 20, None), (VK + "<", None), (["list"], None)],
+)
+async def test_offer_forwards_only_a_well_shaped_viewer_key(client, sent_vk, forwarded):
+    """The viewer's ephemeral key for the sealed author profile reaches the
+    author verbatim when it is shaped like one, else not at all."""
+    body = {
+        "instance_id": "inst-author",
+        "highlight_id": "s-1",
+        "token": client._token,
+        "sdp": "v=0\r\n",
+    }
+    if sent_vk is not None:
+        body["vk"] = sent_vk
+    resp = await client.post("/gfs/highlight_rtc/offer", json=body)
+    assert resp.status == 201
+    assert client._author_ws.sent[0]["vk"] == forwarded
+
+
+async def test_relay_offer_carries_the_viewer_key(client):
+    get_task = asyncio.create_task(
+        client.get(
+            f"/gfs/highlight_rtc/relay/inst-author/s-1?token={client._token}&vk={VK}",
+        )
+    )
+    relay_id = await _await_relay_offer(client)
+    [offer] = [f for f in client._author_ws.sent if f.get("kind") == "relay_offer"]
+    assert offer["vk"] == VK
+    up = await client.post(
+        f"/gfs/highlight_rtc/relay-stream/{relay_id}",
+        data=b"\x00\x00\x00\x02{}\x00\x00\x00\x00",
+        headers=_relay_headers(client._seed, "inst-author", relay_id),
+    )
+    assert up.status == 200
+    assert (await get_task).status == 200
