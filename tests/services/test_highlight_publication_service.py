@@ -11,10 +11,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from socialhome.crypto import b64url_encode
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.highlight import Highlight, HighlightAudience
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
+from socialhome.services.highlight_public_seal import link_secret
 from socialhome.services.highlight_publication_service import (
     HighlightNotFoundError,
     HighlightPublicationError,
@@ -113,7 +115,14 @@ async def test_publish_signs_body_and_marks_local_flag(repos, seeded_highlight):
         gfs_id="gfs-abc",
         label="twitter",
     )
-    assert out == {"token": "tok-A", "url": "https://gfs/u/s/A", "label": "twitter"}
+    # The link secret rides in the fragment (never sent to the GFS) and is
+    # derived from our identity, the highlight and the token.
+    secret = link_secret(b"\x01" * 32, highlight_id=seeded_highlight.id, token="tok-A")
+    assert out == {
+        "token": "tok-A",
+        "url": f"https://gfs/u/s/A#k={b64url_encode(secret)}",
+        "label": "twitter",
+    }
     assert sess.posts and sess.posts[0][0].endswith(
         f"/gfs/highlights/{seeded_highlight.id}/publish",
     )
@@ -123,6 +132,7 @@ async def test_publish_signs_body_and_marks_local_flag(repos, seeded_highlight):
     # Body must include a signature; canonical-body equality is in
     # ``test_gfs_connection_service`` already so we only check shape here.
     assert "signature" in body
+    assert b64url_encode(secret) not in str(body)
     refreshed = await repos["highlights"].get_highlight(seeded_highlight.id)
     assert refreshed.public_gfs_id == "gfs-abc"
     assert refreshed.public_published_at is not None

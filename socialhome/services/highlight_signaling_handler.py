@@ -7,7 +7,9 @@ PeerConnection, posts the SDP answer back to the GFS via the signed
 ``/gfs/highlight_rtc/answer`` endpoint, applies remote ICE candidates as
 they arrive, and once the DataChannel opens it streams the highlight
 metadata + frame bytes using the framing protocol in
-:mod:`socialhome.services.highlight_public_framing`.
+:mod:`socialhome.services.highlight_public_framing` — every frame sealed
+end to end to the viewer's key and the link secret
+(:mod:`socialhome.services.highlight_public_seal`), on both transports.
 
 The PeerConnection itself is built by an injected factory so tests can
 swap in a stub without dragging the real
@@ -47,6 +49,7 @@ from ..repositories.user_repo import AbstractUserRepo
 from ..webrtc_ice import rtc_configuration
 from . import highlight_public_framing as framing
 from .highlight_public_profile import parse_viewer_key, seal_profile
+from .highlight_public_seal import StreamSealer, link_secret
 from .inbound_media_store import MEDIA_REF_PREFIX, local_media_ref, media_file_path
 from .protection_gate import ProtectionGateMixin
 
@@ -94,8 +97,10 @@ class _Session:
     session_id: str
     highlight_id: str
     peer: _AnswererPeer
-    #: The viewer's ephemeral key for the sealed author profile, if sent.
+    #: The viewer's ephemeral key: the whole stream is sealed to it.
     viewer_key: ec.EllipticCurvePublicKey | None = None
+    #: The share token the viewer opened (the link secret derives from it).
+    token: str = ""
     task: asyncio.Task[None] | None = None
     pending_ice: list[dict] = field(default_factory=list)
 
@@ -226,6 +231,12 @@ class HighlightSignalingHandler(ProtectionGateMixin):
         if highlight is None or highlight.public_gfs_id is None:
             await self._reject_with_error(session_id, sdp_offer, "expired")
             return
+        viewer_key = parse_viewer_key(frame.get("vk"))
+        token = str(frame.get("token") or "")
+        if viewer_key is None or not token:
+            # Nothing to seal to — never stream a highlight in the clear.
+            await self._reject_with_error(session_id, sdp_offer, "unsupported")
+            return
 
         peer = self._peer_factory(self._ice_servers)
         async with self._lock:
@@ -233,7 +244,8 @@ class HighlightSignalingHandler(ProtectionGateMixin):
                 session_id=session_id,
                 highlight_id=highlight_id,
                 peer=peer,
-                viewer_key=parse_viewer_key(frame.get("vk")),
+                viewer_key=viewer_key,
+                token=token,
             )
         task = asyncio.create_task(
             self._serve(session_id, sdp_offer),
@@ -280,10 +292,36 @@ class HighlightSignalingHandler(ProtectionGateMixin):
     async def _stream_highlight(self, session_id: str) -> None:
         """WebRTC sink: drive the shared frame generator onto the peer."""
         sess = self._sessions[session_id]
-        async for chunk in self._iter_highlight_frames(
-            sess.highlight_id, viewer_key=sess.viewer_key
+        async for chunk in self._iter_sealed_stream(
+            sess.highlight_id, token=sess.token, viewer_key=sess.viewer_key
         ):
             await sess.peer.send(chunk)
+
+    async def _iter_sealed_stream(
+        self,
+        highlight_id: str,
+        *,
+        token: str,
+        viewer_key: ec.EllipticCurvePublicKey | None,
+    ) -> AsyncIterator[bytes]:
+        """What either transport sends: ``stream_seal``, then every frame of
+        :meth:`_iter_highlight_frames` sealed to the viewer's key and the
+        link's secret. Without a key, a token or our identity: one
+        plaintext ``unsupported`` error and nothing else."""
+        if viewer_key is None or not token or self._signing_key is None:
+            yield framing.error_frame("unsupported")
+            return
+        sealer = StreamSealer(
+            viewer_key,
+            secret=link_secret(
+                self._signing_key, highlight_id=highlight_id, token=token
+            ),
+            highlight_id=highlight_id,
+        )
+        async for chunk in sealer.wrap(
+            self._iter_highlight_frames(highlight_id, viewer_key=viewer_key)
+        ):
+            yield chunk
 
     async def _iter_highlight_frames(
         self,
@@ -291,12 +329,14 @@ class HighlightSignalingHandler(ProtectionGateMixin):
         *,
         viewer_key: ec.EllipticCurvePublicKey | None = None,
     ) -> AsyncIterator[bytes]:
-        """Yield the framed highlight byte stream (meta → chunks → end).
+        """Yield the inner highlight frames (meta → chunks → end), before
+        sealing.
 
-        Single source of truth for both transports: the WebRTC path sends
-        each chunk on the DataChannel; the GFS-relay fallback pipes the
-        identical bytes into the signed streaming POST. The framing is
-        byte-for-byte the same, so the viewer's decoder is transport-blind.
+        Single source of truth for both transports (through
+        :meth:`_iter_sealed_stream`): the WebRTC path sends each sealed
+        frame on the DataChannel; the GFS-relay fallback pipes the
+        identical bytes into the signed streaming POST, so the viewer's
+        decoder is transport-blind.
         """
         highlight = await self._highlights.get_highlight(highlight_id)
         if highlight is None:
@@ -411,7 +451,10 @@ class HighlightSignalingHandler(ProtectionGateMixin):
             return
         task = asyncio.create_task(
             self._serve_relay(
-                relay_id, highlight_id, viewer_key=parse_viewer_key(frame.get("vk"))
+                relay_id,
+                highlight_id,
+                token=str(frame.get("token") or ""),
+                viewer_key=parse_viewer_key(frame.get("vk")),
             ),
             name=f"highlight-relay[{relay_id}]",
         )
@@ -423,6 +466,7 @@ class HighlightSignalingHandler(ProtectionGateMixin):
         relay_id: str,
         highlight_id: str,
         *,
+        token: str = "",
         viewer_key: ec.EllipticCurvePublicKey | None = None,
     ) -> None:
         url = await self._gfs_url(
@@ -436,7 +480,9 @@ class HighlightSignalingHandler(ProtectionGateMixin):
             async with self._http_client.post(
                 url,
                 allow_redirects=False,
-                data=self._iter_highlight_frames(highlight_id, viewer_key=viewer_key),
+                data=self._iter_sealed_stream(
+                    highlight_id, token=token, viewer_key=viewer_key
+                ),
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=600, sock_connect=15),
             ) as resp:

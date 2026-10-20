@@ -29,6 +29,7 @@ from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.highlight_repo import AbstractHighlightRepo
+from .highlight_public_seal import link_secret, link_with_secret
 from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
@@ -162,7 +163,12 @@ class HighlightPublicationService(ProtectionGateMixin):
             gfs_id=gfs_id,
             published_at=datetime.now(UTC).isoformat(),
         )
-        return {"token": token, "url": url, "label": label}
+        if self._signing_key is None:
+            raise HighlightPublicationError("Instance identity not loaded.")
+        # The link secret rides in the fragment, which browsers never send
+        # to a server: the GFS that minted the token can't open the stream.
+        secret = link_secret(self._signing_key, highlight_id=highlight.id, token=token)
+        return {"token": token, "url": link_with_secret(url, secret), "label": label}
 
     async def revoke_token(
         self,

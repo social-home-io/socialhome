@@ -78,6 +78,13 @@ KIND_ERROR: str = "error"
 #: once, right after ``highlight_meta``, only to a viewer that sent a key.
 KIND_AUTHOR_PROFILE: str = "author_profile"
 
+#: End-to-end sealing (:mod:`socialhome.services.highlight_public_seal`).
+#: ``stream_seal`` opens a sealed stream — header ``{seal_suite, epk}``,
+#: empty payload, plaintext. Every later frame is ``sealed`` — header
+#: ``{kind}`` only, payload the AES-GCM ciphertext of one whole inner frame.
+KIND_STREAM_SEAL: str = "stream_seal"
+KIND_SEALED: str = "sealed"
+
 VALID_KINDS: frozenset[str] = frozenset(
     {
         KIND_HIGHLIGHT_META,
@@ -86,6 +93,8 @@ VALID_KINDS: frozenset[str] = frozenset(
         KIND_STREAM_END,
         KIND_ERROR,
         KIND_AUTHOR_PROFILE,
+        KIND_STREAM_SEAL,
+        KIND_SEALED,
     }
 )
 
@@ -251,6 +260,16 @@ def author_profile(header_fields: dict, ciphertext: bytes) -> bytes:
     return encode({**header_fields, "kind": KIND_AUTHOR_PROFILE}, ciphertext)
 
 
+def stream_seal(header_fields: dict) -> bytes:
+    """Build the plaintext ``stream_seal`` frame that opens a sealed stream."""
+    return encode({**header_fields, "kind": KIND_STREAM_SEAL})
+
+
+def sealed(ciphertext: bytes) -> bytes:
+    """Build one ``sealed`` frame around a sealed inner frame."""
+    return encode({"kind": KIND_SEALED}, ciphertext)
+
+
 def stream_end() -> bytes:
     """Build the terminating ``stream_end`` frame."""
     return encode({"kind": KIND_STREAM_END})
@@ -258,5 +277,6 @@ def stream_end() -> bytes:
 
 def error_frame(reason: str) -> bytes:
     """Build an ``error`` frame. ``reason`` is one of the protocol's
-    reserved tags (``expired`` / ``unauthorized`` / ``backpressure``)."""
+    reserved tags (``expired`` / ``unauthorized`` / ``backpressure`` /
+    ``unsupported`` — the viewer sent no key to seal the stream to)."""
     return encode({"kind": KIND_ERROR, "error": reason})

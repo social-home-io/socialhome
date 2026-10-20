@@ -9,6 +9,13 @@
  * ``socialhome/services/highlight_public_framing.py`` — see the
  * golden-bytes test in ``tests/protocol/test_highlight_public_framing.py``.
  *
+ * End to end: the link's secret is in its fragment (``#k=…``), which the
+ * browser never sends to the GFS. The author's household seals every frame
+ * to this view's key and that secret (``stream_seal.ts``); only content-free
+ * ``error`` frames arrive in the clear, and a plaintext content frame is
+ * never shown. A link without the secret (made before this) opens nothing
+ * and contacts nobody — the page asks for a new link.
+ *
  * No SPA dependencies (signals, router, design tokens) — keeps the
  * bundle small enough to inline in the SSR page if we ever want to.
  */
@@ -24,6 +31,7 @@ import {
   type SealedHeader,
   type ViewerKey,
 } from './sealed_profile'
+import { linkSecretFromHash, makeStreamOpener, type StreamOpener } from './stream_seal'
 
 const CHANNEL_LABEL = 'highlight-public-v1'
 const FRAME_DURATION_MS = 6000
@@ -69,7 +77,9 @@ interface ViewerState {
 }
 
 interface FramingHeader extends SealedHeader {
-  kind: 'highlight_meta' | 'author_profile' | 'frame_chunk' | 'stream_end' | 'error'
+  kind:
+    | 'highlight_meta' | 'author_profile' | 'frame_chunk' | 'stream_end' | 'error'
+    | 'stream_seal' | 'sealed'
   highlight?: HighlightMeta
   frames?: FrameMeta[]
   frame_id?: string
@@ -113,7 +123,9 @@ function takeFrame(
 }
 
 
-function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: RetryControl }) {
+function PublicHighlightViewer(
+  { boot, secret, retry }: { boot: BootPayload; secret: Uint8Array<ArrayBuffer>; retry: RetryControl },
+) {
   const [state, setState] = useState<ViewerState>({
     status: 'connecting',
     message: 'Connecting…',
@@ -133,8 +145,14 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
     let pc: RTCPeerConnection | null = null
     let pollTimer: ReturnType<typeof setInterval> | null = null
     let cancelled = false
-    // This view's ephemeral key: the author seals who shared it to it.
+    // This view's ephemeral key: the author seals the whole stream to it
+    // (and to the link secret).
     let viewerKey: ViewerKey | null = null
+    let opener: StreamOpener | null = null
+    // The manifest as it arrives (the mount-time ``state`` is stale here).
+    let manifest: FrameMeta[] = []
+    // Sealed frames must open in arrival order: one promise chain.
+    let queue: Promise<void> = Promise.resolve()
 
     function setStatus(status: ViewerState['status'], message: string | null = null) {
       if (cancelled) return
@@ -156,8 +174,34 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
       setState((s) => ({ ...s, frameUrls: { ...s.frameUrls, [frameId]: url } }))
     }
 
+    function onWireFrame(header: FramingHeader, payload: Uint8Array) {
+      const bytes = payload.slice()
+      queue = queue.then(() => openWireFrame(header, bytes)).catch(() => {
+        // A frame that doesn't open: tampered, reordered or not ours.
+        opener = null
+        setStatus('error', 'This highlight couldn’t be opened. Ask for a new link.')
+      })
+    }
+
+    async function openWireFrame(header: FramingHeader, payload: Uint8Array) {
+      if (cancelled) return
+      if (header.kind === 'error') {
+        setStatus('error', humanizeError(header.error ?? 'unknown'))
+      } else if (header.kind === 'stream_seal' && viewerKey && !opener) {
+        opener = await makeStreamOpener(viewerKey.privateKey, header, secret, boot.highlightId)
+        if (!opener) setStatus('error', 'This highlight couldn’t be opened. Ask for a new link.')
+      } else if (header.kind === 'sealed' && opener) {
+        const inner = decodeFrame(await opener.open(payload))
+        if (inner && inner.header.kind !== 'stream_seal' && inner.header.kind !== 'sealed') {
+          handleHeader(inner.header, inner.payload)
+        }
+      }
+      // Anything else arrived in the clear: never shown.
+    }
+
     function handleHeader(header: FramingHeader, payload: Uint8Array) {
       if (header.kind === 'highlight_meta') {
+        manifest = header.frames ?? []
         setState((s) => ({
           ...s,
           status: 'playing',
@@ -172,7 +216,7 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
           setState((s) => ({ ...s, author, authorPicture: pictureUrl(author) }))
         })
       } else if (header.kind === 'frame_chunk' && header.frame_id) {
-        const meta = state.manifest.find((f) => f.frame_id === header.frame_id)
+        const meta = manifest.find((f) => f.frame_id === header.frame_id)
         const ct = meta?.content_type ?? 'application/octet-stream'
         appendChunk(header.frame_id, payload, !!header.is_last_chunk, ct)
       } else if (header.kind === 'stream_end') {
@@ -198,7 +242,7 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
         const url =
           `/gfs/highlight_rtc/relay/${encodeURIComponent(boot.instanceId)}` +
           `/${encodeURIComponent(boot.highlightId)}?token=${encodeURIComponent(boot.token)}` +
-          (viewerKey ? `&vk=${viewerKey.vk}` : '')
+          `&vk=${viewerKey!.vk}`
         const r = await fetch(_rel(url))
         if (!r.ok || !r.body) {
           setStatus('error', humanizeError(`HTTP ${r.status}`))
@@ -219,7 +263,7 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
             const taken = takeFrame(buf)
             if (!taken) break
             buf = taken.rest
-            handleHeader(taken.header, taken.payload)
+            onWireFrame(taken.header, taken.payload)
           }
         }
       } catch (err) {
@@ -230,6 +274,11 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
     async function main() {
       try {
         viewerKey = await makeViewerKey()
+        if (!viewerKey) {
+          // No WebCrypto: nothing could open the sealed stream, so don't ask.
+          setStatus('error', 'This browser can’t open encrypted highlights. Try another browser.')
+          return
+        }
         const ice = await fetchJson<{ servers: IceServer[] }>('/gfs/highlights/ice-servers')
         pc = new RTCPeerConnection({ iceServers: ice.servers })
         let sessionId: string | null = null
@@ -261,7 +310,7 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
         ch.onmessage = (ev) => {
           const buf = new Uint8Array(ev.data instanceof ArrayBuffer ? ev.data : new ArrayBuffer(0))
           const decoded = decodeFrame(buf)
-          if (decoded) handleHeader(decoded.header, decoded.payload)
+          if (decoded) onWireFrame(decoded.header, decoded.payload)
         }
 
         const offer = await pc.createOffer()
@@ -273,7 +322,7 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
             highlight_id: boot.highlightId,
             token: boot.token,
             sdp: offer.sdp,
-            ...(viewerKey ? { vk: viewerKey.vk } : {}),
+            vk: viewerKey.vk,
           },
         )
         sessionId = offerResp.session_id
@@ -408,10 +457,27 @@ function AuthorHeader({ author, picture }: { author: AuthorProfile; picture: str
 }
 
 
+/* The link has no secret in its fragment: an old link, or cut short. */
+export function OutdatedLink() {
+  return (
+    <div class="highlight-error" role="alert">
+      <p>This link can’t be opened.</p>
+      <p>
+        Highlight links are now end-to-end encrypted, and this one is from
+        before that or is missing its end. Ask whoever shared it for a new link.
+      </p>
+    </div>
+  )
+}
+
+
 function humanizeError(msg: string | null | undefined): string {
   // ``expired`` only arrives inside a stream the author's own household
   // sent — the GFS itself never says it (see ``viewer_errors.ts``).
   if (msg && /expired/i.test(msg)) return 'This highlight has ended.'
+  if (msg && /unsupported/i.test(msg)) {
+    return 'This page is out of date. Reload it, or ask for a new link.'
+  }
   return humanizeViewerError(msg)
 }
 
@@ -458,10 +524,17 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     root.textContent = 'Missing boot context.'
     return
   }
+  const secret = linkSecretFromHash(window.location.hash)
+  if (!secret) {
+    // A link from before highlights were end-to-end encrypted (or cut
+    // short when pasted). Contact nobody: it couldn't be opened anyway.
+    render(<OutdatedLink />, root)
+    return
+  }
   render(
     <RetryHost
       render={(retry, attempt) => (
-        <PublicHighlightViewer key={attempt} boot={boot} retry={retry} />
+        <PublicHighlightViewer key={attempt} boot={boot} secret={secret} retry={retry} />
       )}
     />,
     root,
