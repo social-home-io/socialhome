@@ -329,3 +329,50 @@ async def test_a_bio_longer_than_a_directory_holds_is_not_sent(outbound_setup, d
     [(_url, body)] = s["session"].posts
     assert body["author_bio"] is None
     assert body["author_picture_digest"] is None
+
+
+async def test_a_user_added_after_the_first_moment_still_publishes(outbound_setup, db):
+    """Regression (federation demo): the local-user set was cached on the
+    first event and never re-read, so a member provisioned later never
+    published a public moment."""
+    s = outbound_setup
+    await s["moments"].save(_moment())
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event())
+    assert len(s["session"].posts) == 1
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name, state) "
+        "VALUES('u2','noor','Noor','active')"
+    )
+    await s["moments"].save(
+        Moment(
+            id="m-2",
+            author_user_id="u2",
+            content="bees",
+            media_url=None,
+            media_type=None,
+            duration_ms=None,
+            parent_moment_id=None,
+            origin_instance_id="inst-self",
+            created_at="2026-05-06T12:00:00Z",
+            expires_at="2026-05-07T12:00:00Z",
+            is_public=True,
+        )
+    )
+    await s["regs"].upsert(user_id="u2", gfs_id="g1")
+    await s["bus"].publish(
+        MomentCreated(
+            moment_id="m-2",
+            author_user_id="u2",
+            content="bees",
+            media_url=None,
+            media_type=None,
+            duration_ms=None,
+            parent_moment_id=None,
+            parent_author_user_id=None,
+            origin_instance_id="inst-self",
+            expires_at="2026-05-07T12:00:00Z",
+        )
+    )
+    assert len(s["session"].posts) == 2
+    assert s["session"].posts[1][1]["author_user_id"] == "u2"

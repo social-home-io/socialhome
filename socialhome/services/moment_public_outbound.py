@@ -70,9 +70,9 @@ class MomentPublicOutbound(ProtectionGateMixin):
         self._http_client = http_client
         self._signing_key: bytes | None = None
         self._own_instance_id: str = ""
-        # Cached set of locally-hosted user_ids; refreshed on every
-        # subscribe + after each successful event so we don't fan out
-        # for events whose author lives on another instance.
+        # Cached set of locally-hosted user_ids, re-read on a miss (a user
+        # added since) so we don't fan out for events whose author lives
+        # on another instance.
         self._own_users: set[str] | None = None
         self._child_protection = None
 
@@ -170,9 +170,12 @@ class MomentPublicOutbound(ProtectionGateMixin):
     # ── Helpers ─────────────────────────────────────────────────────────
 
     async def _is_local(self, user_id: str) -> bool:
-        if self._own_users is None:
-            users = await self._users.list_all()
-            self._own_users = {u.user_id for u in users}
+        if self._own_users is not None and user_id in self._own_users:
+            return True
+        # Not cached (first call, or a user added since): read once more,
+        # so a newly provisioned member's public moments are published.
+        users = await self._users.list_all()
+        self._own_users = {u.user_id for u in users}
         return user_id in self._own_users
 
     async def _post_to_gfs(self, gfs_id: str, signed: dict, *, kind: str) -> None:
