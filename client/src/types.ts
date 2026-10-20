@@ -60,6 +60,16 @@ export interface UserStatus {
   expires_at: string | null
 }
 
+/** An author a GFS follower knows only from their published profile
+ *  (``GET /api/spaces/{id}/authors``, v_60) — no roster seat. */
+export interface SpaceAuthorProfile {
+  user_id:      string
+  display_name: string
+  bio:          string | null
+  /** Signed; ``null`` without a picture or across a guardian block. */
+  picture_url:  string | null
+}
+
 export interface SpaceMemberProfile {
   user_id: string
   role: 'owner' | 'admin' | 'moderator' | 'member'

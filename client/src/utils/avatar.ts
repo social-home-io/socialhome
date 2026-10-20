@@ -7,7 +7,7 @@
  * household user cache is consulted for the user's current picture URL.
  */
 import { householdUsers } from '@/store/householdUsers'
-import { spaceMembers } from '@/store/spaceMembers'
+import { spaceAuthors, spaceMembers } from '@/store/spaceMembers'
 import { t } from '@/i18n/i18n'
 
 export function resolveAvatar(
@@ -22,13 +22,19 @@ export function resolveAvatar(
   }
   const household = householdUsers.value.get(userId)
   if (household?.picture_url) return household.picture_url
+  // A GFS follower's only record of an author (v_60).
+  if (spaceId) {
+    const a = spaceAuthors.value[spaceId]?.get(userId)
+    if (a?.picture_url) return a.picture_url
+  }
   return fallback
 }
 
 /**
  * Display name for a bare user id: the member's per-space name → their
  * display name on the space roster (a remote member's household name for
- * them) → the household user → ``fallback`` ("Someone" when omitted).
+ * them) → the household user → the author profile a GFS follower holds
+ * (v_60) → ``fallback`` ("Someone" when omitted).
  * Never returns the raw id — it is not a name.
  */
 export function resolveDisplayName(
@@ -45,5 +51,10 @@ export function resolveDisplayName(
   }
   const household = householdUsers.value.get(userId)
   if (household?.display_name) return household.display_name
+  // A GFS follower's only record of an author (v_60).
+  if (spaceId) {
+    const a = spaceAuthors.value[spaceId]?.get(userId)
+    if (a?.display_name) return a.display_name
+  }
   return otherwise
 }

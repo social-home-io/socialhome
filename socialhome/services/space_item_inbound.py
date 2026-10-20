@@ -61,6 +61,14 @@ author-bound — the space authority may remove any item — but a tombstone
 for an item not held yet needs an id owner-bound to the notice's author in
 this space, so a removal that overtakes its create keeps the item gone and
 can never claim another space's id.
+
+**Author profiles** (v_60, ``author_profile``): the author's own public
+profile for followers who hold no roster. The item must name its author as
+its target (``item_target == post_id == author_user_id``, all signed); the
+profile in its signed ``content`` is decoded and checked
+(:func:`~socialhome.domain.space_author_profile.decode_profile_content`) and
+kept per ``(space, author)`` when its signed stamp is newer than the held
+one. It never creates a seat or a user.
 """
 
 from __future__ import annotations
@@ -77,8 +85,11 @@ from ..domain.events import (
     PostDeleted,
     PostReactionChanged,
 )
+from ..domain.picture_hash import compute_picture_hash
 from ..domain.post import Comment, CommentType, Post, PostType
+from ..domain.space_author_profile import SpaceAuthorProfile, decode_profile_content
 from ..domain.space_item import (
+    ITEM_TYPE_AUTHOR_PROFILE,
     ITEM_TYPE_COMMENT,
     ITEM_TYPE_COMMENT_DELETE,
     ITEM_TYPE_COMMENT_EDIT,
@@ -105,12 +116,16 @@ from ..federation.pending_parent_buffer import (
     AwaitingParent,
 )
 from ..infrastructure.event_bus import EventBus
+from ..media.profile_picture import public_profile_picture
 from ..utils.datetime import parse_iso8601_lenient
 from .inbound_media_store import local_media_ref
 
 if TYPE_CHECKING:
     from ..domain.space import Space
     from ..federation.space_authorship import SpaceAuthorship
+    from ..repositories.space_author_profile_repo import (
+        AbstractSpaceAuthorProfileRepo,
+    )
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .space_mentions import SpaceMentionResolver
@@ -160,7 +175,7 @@ class _Item:
 class SpaceItemInbound:
     """Persist member-published generic items (see the module docstring)."""
 
-    __slots__ = ("_bus", "_mentions", "_posts", "_spaces")
+    __slots__ = ("_bus", "_mentions", "_posts", "_profiles", "_spaces")
 
     def __init__(
         self,
@@ -174,6 +189,12 @@ class SpaceItemInbound:
         self._spaces = space_repo
         self._posts = space_post_repo
         self._mentions = mention_resolver
+        #: v_60 — where verified author profiles are kept. ``None`` drops.
+        self._profiles: AbstractSpaceAuthorProfileRepo | None = None
+
+    def attach_author_profiles(self, repo: AbstractSpaceAuthorProfileRepo) -> None:
+        """Wire the follower-side author profile cache (v_60)."""
+        self._profiles = repo
 
     async def apply(
         self,
@@ -219,8 +240,53 @@ class SpaceItemInbound:
             return await self._post_delete(item)
         if item_type in (ITEM_TYPE_REACTION_ADD, ITEM_TYPE_REACTION_REMOVE):
             return await self._reaction(item, added=item_type == ITEM_TYPE_REACTION_ADD)
+        if item_type == ITEM_TYPE_AUTHOR_PROFILE:
+            return await self._author_profile(item)
         log.warning("space_item: unsupported item type %r — dropped", item_type)
         return False
+
+    # ── Author profiles (v_60) ───────────────────────────────────────────
+
+    async def _author_profile(self, item: _Item) -> bool:
+        """Keep the author's verified public profile (see the module
+        docstring). Only about the item's own signed author."""
+        if self._profiles is None:
+            return False
+        if not (item.author and item.target == item.author == item.post_id):
+            log.warning(
+                "space_item: author_profile in space %s names someone else — dropped",
+                item.space.id,
+            )
+            return False
+        profile = decode_profile_content(item.inner.get("content"))
+        if profile is None:
+            log.warning(
+                "space_item: malformed author_profile for %s in space %s — dropped",
+                item.author,
+                item.space.id,
+            )
+            return False
+        # A peer's picture bytes are never stored as-is: re-encoded here, so
+        # a polyglot or anything but a plain image never reaches the table
+        # every viewer is served from (the same rule as household pictures).
+        picture = (
+            await public_profile_picture(profile.picture_webp)
+            if profile.picture_webp is not None
+            else None
+        )
+        return await self._profiles.upsert_if_newer(
+            SpaceAuthorProfile(
+                space_id=item.space.id,
+                author_user_id=item.author,
+                author_pk=str(item.inner.get("author_pk") or ""),
+                display_name=profile.display_name,
+                bio=profile.bio,
+                picture_hash=compute_picture_hash(picture) if picture else None,
+                profile_rev=profile.profile_rev,
+                ts=item.stamp.astimezone(UTC).isoformat(timespec="microseconds"),
+            ),
+            picture_webp=picture,
+        )
 
     # ── Shared checks ────────────────────────────────────────────────────
 

@@ -9,11 +9,15 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
-import type { SpaceMemberProfile } from '@/types'
+import type { SpaceAuthorProfile, SpaceMemberProfile } from '@/types'
 import { HERE_TOKEN, mentionTokenSet } from '@/utils/mentions'
 import { parseSpaceRole, type SpaceRole } from '@/features/spaces/spaceRoles'
 
 export const spaceMembers = signal<Record<string, Map<string, SpaceMemberProfile>>>({})
+
+/** Authors a GFS follower knows only from their published profile (v_60):
+ *  the fallback when someone is not on the space roster. */
+export const spaceAuthors = signal<Record<string, Map<string, SpaceAuthorProfile>>>({})
 
 const loaded = new Set<string>()
 
@@ -29,6 +33,22 @@ export async function loadSpaceMembers(spaceId: string): Promise<void> {
     spaceMembers.value = { ...spaceMembers.value, [spaceId]: m }
   } catch {
     loaded.delete(spaceId)
+    return
+  }
+  void loadSpaceAuthors(spaceId)
+}
+
+async function loadSpaceAuthors(spaceId: string): Promise<void> {
+  try {
+    const rows = await api.get(
+      `/api/spaces/${spaceId}/authors`,
+    ) as SpaceAuthorProfile[]
+    if (!rows.length) return
+    const m = new Map<string, SpaceAuthorProfile>()
+    for (const r of rows) m.set(r.user_id, r)
+    spaceAuthors.value = { ...spaceAuthors.value, [spaceId]: m }
+  } catch {
+    // An older server without the route: authors stay "Someone".
   }
 }
 

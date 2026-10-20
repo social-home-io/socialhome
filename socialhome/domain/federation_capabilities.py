@@ -904,7 +904,17 @@ from __future__ import annotations
 #:   WITHOUT them; it lists the space as before, and its join — carrying no
 #:   location — is refused by the host (``LOCATION_REQUIRED``) like any join
 #:   without one. Not space-scoped; labelled "Local communities".
-OURS: int = 59
+#: * **v_60** (2026-10-20) — author profiles for a space's GFS followers: a
+#:   member household publishes each of its authors' public profile (name,
+#:   bio, a ≤ 24 KB picture; a protected account's name only) as the
+#:   ``author_profile`` ``space_item``, author-signed and encrypted under the
+#:   space content key, so a follower without a roster names them. A
+#:   receiver below v_60 drops the unknown item type with a WARNING, and
+#:   followers are anonymous, so the **gate** is the space's known member
+#:   households: none below v_60, or nothing is published (followers keep
+#:   reading "Someone"). Space-scoped; labelled "Names for a space's
+#:   followers".
+OURS: int = 60
 
 
 class FederationCapability:
@@ -1392,6 +1402,11 @@ class FederationCapability:
     #: the fields. Not space-scoped.
     MIN_FOR_LOCAL_COMMUNITY_AREA = 59
 
+    #: v_60 — the ``author_profile`` ``space_item``: an author's public
+    #: profile for a space's GFS followers. Gated on the space's known member
+    #: households (followers are anonymous); space-scoped.
+    MIN_FOR_SPACE_AUTHOR_PROFILE = 60
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1613,6 +1628,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         "Removed profile pictures in space catch-up",
     ),
     (FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA, "Local communities"),
+    (
+        FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE,
+        "Names for a space's followers",
+    ),
 ]
 
 
@@ -1683,6 +1702,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH: "multi_gfs_posting",
     FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC: "synced_picture_resets",
     FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA: "local_communities",
+    FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE: "follower_author_names",
 }
 
 
@@ -1767,6 +1787,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE,
         FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
         FederationCapability.MIN_FOR_SPACE_CHAT,
+        FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE,
     }
 )
 

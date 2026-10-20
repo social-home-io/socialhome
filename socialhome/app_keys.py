@@ -187,6 +187,8 @@ profile_picture_repo_key: AppKey = AppKey("profile_picture_repo")
 post_repo_key: AppKey = AppKey("post_repo")
 space_repo_key: AppKey = AppKey("space_repo")
 space_remote_member_repo_key: AppKey = AppKey("space_remote_member_repo")
+#: v_60 — a GFS follower's cache of a space's author profiles.
+space_author_profile_repo_key: AppKey = AppKey("space_author_profile_repo")
 space_remote_location_repo_key: AppKey = AppKey("space_remote_location_repo")
 space_cover_repo_key: AppKey = AppKey("space_cover_repo")
 space_icon_repo_key: AppKey = AppKey("space_icon_repo")

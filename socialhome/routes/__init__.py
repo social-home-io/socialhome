@@ -347,6 +347,8 @@ from .spaces import (
     RemoteInviteCollectionView,
     RemoteInviteDecisionView,
     SpaceArchiveView,
+    SpaceAuthorPictureView,
+    SpaceAuthorsView,
     SpaceBanListView,
     SpaceBanView,
     SpaceChatUnreadView,
@@ -626,6 +628,11 @@ def setup_routes(app: web.Application) -> None:
         SpaceMemberPictureView,
     )
     app.router.add_view("/api/spaces/{id}/members/{user_id}", SpaceMemberDetailView)
+    # v_60 — the authors a GFS follower knows from their published profiles.
+    app.router.add_view("/api/spaces/{id}/authors", SpaceAuthorsView)
+    app.router.add_view(
+        "/api/spaces/{id}/authors/{user_id}/picture", SpaceAuthorPictureView
+    )
     app.router.add_view("/api/spaces/{id}/ban", SpaceBanView)
     app.router.add_view("/api/spaces/{id}/invite-tokens", SpaceInviteTokenView)
     app.router.add_view(

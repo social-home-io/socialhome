@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { householdUsers } from '@/store/householdUsers'
-import { spaceMembers } from '@/store/spaceMembers'
+import { spaceAuthors, spaceMembers } from '@/store/spaceMembers'
 import type { SpaceMemberProfile, User } from '@/types'
 import { personHint, rosterPersonHint } from './personHint'
 
@@ -105,5 +105,22 @@ describe('personHint', () => {
       display_name: 'Chidi', picture_url: 'api/s/chidi',
       household: { instance_id: 'p-okafor', display_name: 'Okafor family', is_own: false },
     })
+  })
+})
+
+describe('personHint for an author known only from their profile (v_60)', () => {
+  it('carries the name, picture and public bio', () => {
+    spaceAuthors.value = {
+      s1: new Map([['u-noor', {
+        user_id: 'u-noor', display_name: 'Noor Haddad', bio: 'Beekeeper.',
+        picture_url: 'api/spaces/s1/authors/u-noor/picture?v=1',
+      }]]),
+    }
+    expect(personHint('s1', 'u-noor')).toEqual({
+      display_name: 'Noor Haddad',
+      picture_url: 'api/spaces/s1/authors/u-noor/picture?v=1',
+      bio: 'Beekeeper.',
+    })
+    spaceAuthors.value = {}
   })
 })

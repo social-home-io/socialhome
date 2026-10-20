@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from socialhome.domain.moment_public import MomentPublicFollow
 from socialhome.domain.space import SpaceMember
+from socialhome.domain.space_author_profile import SpaceAuthorProfile
 from socialhome.domain.user import PersonSummary, RemoteUser, User
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
 from socialhome.services.alias_service import AliasResolver
@@ -563,3 +564,73 @@ class _CpNoor:
 
     async def guardian_block_counterparts(self, user_id):
         return frozenset({"u-noor"}) if user_id == "uid-kid" else frozenset()
+
+
+# ── Space author profiles (v_60): a GFS follower with no roster ──────
+
+
+class _FakeAuthorProfiles:
+    def __init__(self, rows) -> None:
+        self.rows = rows
+        self.calls: list[list[str]] = []
+
+    async def list_for(self, space_id, user_ids):
+        ids = sorted(user_ids)
+        self.calls.append(ids)
+        return [
+            r for r in self.rows if r.space_id == space_id and r.author_user_id in ids
+        ]
+
+
+def _author_profile(**kw) -> SpaceAuthorProfile:
+    base = {
+        "space_id": "sp-1",
+        "author_user_id": "u-noor",
+        "author_pk": "ab" * 32,
+        "display_name": "Noor Haddad",
+        "bio": "Beekeeper.",
+        "picture_hash": "0123456789abcdef",
+        "profile_rev": "r",
+        "ts": "2026-10-20T08:00:00+00:00",
+    }
+    base.update(kw)
+    return SpaceAuthorProfile(**base)
+
+
+async def test_an_unknown_author_is_named_from_the_space_author_profile():
+    svc, *_ = _space_svc()
+    profiles = _FakeAuthorProfiles([_author_profile()])
+    svc.attach_author_profiles(profiles)  # type: ignore[arg-type]
+    out = await svc.summarize("uid-me", ["u-noor", "u-ghost"], space_id="sp-1")
+    noor = out["u-noor"]
+    assert (noor.display_name, noor.bio, noor.household) == (
+        "Noor Haddad",
+        "Beekeeper.",
+        None,
+    )
+    assert noor.picture_url == (
+        "api/spaces/sp-1/authors/u-noor/picture?v=0123456789abcdef"
+    )
+    assert out["u-ghost"].display_name is None
+    # Only the still-unnamed ids are looked up, in one read.
+    assert profiles.calls == [["u-ghost", "u-noor"]]
+
+
+async def test_a_known_person_is_never_renamed_by_an_author_profile():
+    svc, *_ = _space_svc(remote=[_ruth()])
+    profiles = _FakeAuthorProfiles(
+        [_author_profile(author_user_id="ru-ruth", display_name="Mallory")]
+    )
+    svc.attach_author_profiles(profiles)  # type: ignore[arg-type]
+    out = await svc.summarize("uid-me", ["ru-ruth"], space_id="sp-1")
+    assert out["ru-ruth"].display_name == "Grandma Ruth"
+    assert profiles.calls == []
+
+
+async def test_an_author_profile_is_name_only_across_a_guardian_block():
+    svc, *_ = _space_svc()
+    svc.attach_child_protection(_CpNoor())  # type: ignore[arg-type]
+    svc.attach_author_profiles(_FakeAuthorProfiles([_author_profile()]))  # type: ignore[arg-type]
+    out = await svc.summarize("uid-kid", ["u-noor"], space_id="sp-1")
+    assert out["u-noor"].display_name == "Noor Haddad"
+    assert (out["u-noor"].bio, out["u-noor"].picture_url) == (None, None)

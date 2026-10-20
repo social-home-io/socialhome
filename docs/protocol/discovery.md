@@ -1506,6 +1506,67 @@ these; adversarial review of PR 2):
    [Comments, reactions and own edits / deletes](#comments-reactions-and-own-edits--deletes-v_49)
    below.
 
+### Author profiles for followers (v_60)
+
+A GFS follower holds no roster, so every post in a space it follows read
+"Someone". A member household now publishes each of its authors' public
+profile into the space as the `author_profile` item, over the same member
+relay as every other item:
+
+- **Content.** The generic inner's signed `content` is compact JSON:
+  `display_name` (the per-space name, else the household name; ≤ 64),
+  `bio` (the household bio; ≤ 300), `picture` (base64 WebP, ≤ 256 px and
+  ≤ 24 KB, re-encoded by the sender; the per-space picture, else the
+  household one), `picture_hash`, `profile_rev`. Covered by the existing
+  generic author signature — no new signing domain. A **protected**
+  account (§CP.R) sends its name only: `bio` and `picture` are `null`.
+- **The GFS sees ciphertext only** — the generic `space_item`, padded to a
+  size bucket like any item (`tests/protocol/test_gfs_member_publish_blind.py`).
+- **When.** Once per author per space per content-key epoch, after a
+  profile change, and on the author's next post a day after the last one
+  (so followers who subscribed since learn the name). Never inlined in a
+  post. Only for a public / global space with `allow_subscribers` on.
+- **Receiver.** Every check of a generic item (decrypt, author signature +
+  self-cert, origin, writer cert with the v2 binding naming the author,
+  epoch), then: the item must be about its own author; the content must
+  decode (a name; capped sizes; the picture is WebP and matches its hash);
+  the picture is **re-encoded** (never stored as sent — the same rule as
+  household pictures); it is kept per `(space, author)` in
+  `space_author_profiles` (migration 0113) only when its signed `ts` is
+  newer than the held one. It never
+  creates a seat, a user or a member.
+- **Naming.** `PersonSummaryService` (space scope) names anyone still
+  unnamed from it, and `GET /api/spaces/{id}/authors` hands the SPA the
+  list (signed `picture_url` via
+  `GET /api/spaces/{id}/authors/{user_id}/picture`), so post cards,
+  comments and highlight share cards name the author with no special case.
+  A household-known name always wins; a guardian block (§CP.F2) shows the
+  name only.
+- **Older receivers.** A receiver below v_60 drops the unknown item type at
+  WARNING ("unsupported space_item"). Followers are anonymous, so their
+  versions are unknown: the sender publishes only while every member
+  household whose version it knows is at least v_60
+  (`FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE`, space-scoped, so
+  the space banner names a lagging household).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as Author household (member)
+  participant G as GFS
+  participant F as Follower household (no roster)
+
+  A->>A: local post in a global space (allow_subscribers on)
+  A->>A: profile due? (new epoch / changed / > 24 h) — all known members ≥ v_60?
+  A->>A: build generic inner item_type=author_profile, content={name, bio, picture…}, author_sig
+  A->>A: encrypt under the space content key (padded)
+  A->>G: POST /gfs/member-publish {space_item, epoch, writer_cert, payload=ciphertext}
+  G->>F: relay {space_item, epoch, writer_cert, payload}
+  F->>F: decrypt → author_sig + self-cert → writer cert binds author → about itself?
+  F->>F: decode + cap content → keep in space_author_profiles if ts newer
+  F->>F: GET /api/spaces/{id}/authors → post cards show name, picture, bio
+```
+
 ### Comments, reactions and own edits / deletes (v_49)
 
 The member relay carries more than posts. Every item rides the same generic
@@ -1521,6 +1582,7 @@ acts on bound inside the author signature:
 | `comment_edit` | generic — full snapshot | `comment` | the comment's author only | any live seat on the origin (own row) |
 | `comment_delete` | generic | `comment` | the comment's author only | any live seat on the origin (own row) |
 | `reaction_add` / `reaction_remove` | generic | `comment` — at a follower `write`, unless the space lets followers react | the reactor | live writer seat, or a follower seat while `allow_subscriber_react` is on |
+| `author_profile` (v_60) | generic — the profile in the signed `content` | `comment` | the author, about themself only (`item_target == post_id == author_user_id`) | — (kept, never a seat; see [Author profiles for followers](#author-profiles-for-followers-v_60)) |
 
 - **Never more permissive than the host path.** The rules mirror the
   federated `SPACE_COMMENT_*`, `SPACE_POST_UPDATED` / `DELETED` handlers and
