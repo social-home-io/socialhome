@@ -1257,8 +1257,10 @@ async def _require_picture_reader(view: BaseView, space_id: str) -> None:
     through without a seat, so each picture route runs the gate itself.
 
     A signed URL carries no user and passes: it is a per-file capability
-    minted only for someone who may see it (a space route behind the read
-    gate, or a pending invite's icon)."""
+    minted only for someone who could read it when it was minted (a space
+    route behind the read gate, or a pending invite's icon) — signed URLs
+    live up to ~7 h (:data:`~socialhome.media_signer.EXP_BUCKET_SECONDS`
+    plus the default TTL), so a seat lost since then does not revoke one."""
     ctx = view.user
     if ctx.auth_method == "signed_url":
         return

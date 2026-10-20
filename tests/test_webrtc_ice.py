@@ -7,6 +7,9 @@ import hashlib
 import hmac
 import logging
 
+import pytest
+
+from socialhome import webrtc_ice
 from socialhome.webrtc_ice import (
     build_ice_servers,
     make_turn_credential,
@@ -283,6 +286,14 @@ def test_rtc_configuration_flattens_every_url_shape():
     ]
 
 
+@pytest.fixture(autouse=True)
+def _fresh_ice_warnings():
+    """Each test starts with no skipped-entry warning remembered."""
+    webrtc_ice._ICE_WARNED.clear()
+    yield
+    webrtc_ice._ICE_WARNED.clear()
+
+
 def test_rtc_configuration_warns_about_every_skipped_entry(caplog):
     """#1084: a malformed ICE entry is named in a WARNING — which entry
     and why — so a half-broken list is diagnosable, never silent."""
@@ -318,3 +329,25 @@ def test_rtc_configuration_quiet_for_a_well_formed_list(caplog):
             ]
         )
     assert not caplog.records
+
+
+def test_rtc_configuration_warns_once_per_entry_and_reason(caplog):
+    """It runs once per peer (every highlight viewer): a lasting bad entry
+    warns once per process, a new problem still warns."""
+    bad = [{"urls": ["stun:ok.example:3478"]}, "oops"]
+    with caplog.at_level(logging.WARNING, logger="socialhome.webrtc_ice"):
+        for _ in range(5):
+            rtc_configuration(bad)
+        assert len(caplog.records) == 1
+        rtc_configuration([{"urls": ["stun:ok.example:3478"]}, {"urls": []}])
+    assert len(caplog.records) == 2
+    assert "#1" in caplog.records[1].getMessage()
+    assert "no URL" in caplog.records[1].getMessage()
+
+
+def test_rtc_configuration_remembers_a_bounded_number_of_warnings(caplog):
+    many = ["oops"] * (webrtc_ice._ICE_WARNED_MAX + 10)
+    with caplog.at_level(logging.WARNING, logger="socialhome.webrtc_ice"):
+        rtc_configuration(many)
+    assert len(webrtc_ice._ICE_WARNED) == webrtc_ice._ICE_WARNED_MAX
+    assert len(caplog.records) == webrtc_ice._ICE_WARNED_MAX

@@ -105,7 +105,9 @@ async def _seed_user(client, username: str, user_id: str, token: str) -> None:
 
 async def test_a_non_reader_never_gets_an_author_picture(client):
     """A bearer caller with no seat in the space is refused the picture
-    exactly as the author list (``require_reader``): 403."""
+    exactly as the author list (``require_reader``): 403. This pins the
+    seat-gate middleware (it passed before the M3 fix too); the M3
+    regression is the household-admin test below."""
     sid = await _space_with_profile(client)
     await _seed_user(client, "eve", "u-eve", "eve-tok")
     for path in (
@@ -147,8 +149,10 @@ async def test_a_household_admin_without_a_seat_gets_no_author_picture(client):
 
 
 async def test_a_protected_child_taken_out_of_the_space_gets_no_picture(client):
-    """A protected (child) account its guardian removed from the space is
-    no reader any more: no author picture of that space."""
+    """A protected (child) account its guardian removed from the space
+    (the real guardian kick route) is no reader any more: no author
+    picture of that space. This pins the seat gate (it passed before the
+    M3 fix too)."""
     sid = await _space_with_profile(client)
     await _seed_user(client, "kid", "u-kid", "kid-tok")
     await client._db.enqueue(
@@ -161,9 +165,15 @@ async def test_a_protected_child_taken_out_of_the_space_gets_no_picture(client):
     path = f"/api/spaces/{sid}/authors/u-noor/picture"
     before = await client.get(path, headers=_auth("kid-tok"))
     assert before.status == 200
-    await client._db.enqueue(
-        "DELETE FROM space_members WHERE space_id=? AND user_id='u-kid'", (sid,)
+    r = await client.post(
+        f"/api/cp/users/u-kid/guardians/{client._uid}", headers=_auth(client._tok)
     )
+    assert r.status == 204, await r.text()
+    r = await client.post(
+        f"/api/cp/minors/u-kid/spaces/{sid}/kick", headers=_auth(client._tok)
+    )
+    assert r.status == 200, await r.text()
+    assert (await r.json())["removed"] is True
     after = await client.get(path, headers=_auth("kid-tok"))
     assert after.status == 403
 
