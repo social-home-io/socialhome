@@ -22,7 +22,7 @@ Usage::
     python .claude/skills/federation-demo/harness.py verify  # assertions across all 3
     python .claude/skills/federation-demo/harness.py unpair  # a unpairs c; both drop it; re-pair
     python .claude/skills/federation-demo/harness.py unpair-offline  # same with c down; c drops a on restart
-    python .claude/skills/federation-demo/harness.py local-community  # opt-in, after gfs-pair
+    python .claude/skills/federation-demo/harness.py local-community  # after gfs-pair (also the tail of all)
     python .claude/skills/federation-demo/harness.py down    # stop + wipe data dirs
     python .claude/skills/federation-demo/harness.py all     # everything in order
 
@@ -33,6 +33,7 @@ run independently. ``all`` is the canonical invocation.
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import os
 import secrets
@@ -113,6 +114,267 @@ def _load() -> dict:
 def _save(state: dict) -> None:
     ROOT.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, indent=2))
+
+
+# ─── Expected-noise windows ────────────────────────────────────────────────
+#
+# Some steps make households log WARNINGs on purpose: they take a household
+# offline (its peers' syncs, route discoveries and queued sends to it fail)
+# or run a negative control (a forged signature that must be refused). Those
+# lines are expected only while that act lasts, only in the logs of the
+# households that witness it, and only when they name the household
+# concerned — never as a blanket ignore. A step records each such stretch of
+# a witness's ``log.txt`` as a window; :func:`_audit_logs` suppresses a block
+# only inside a window, only when it matches one of that window's needles,
+# and — for a named needle — only when it names the window's household.
+
+NOISE_WINDOWS_PATH = ROOT / "noise_windows.json"
+LOG_GENERATIONS_PATH = ROOT / "log_generations.json"
+
+#: What a household's peers log BECAUSE it is deliberately offline. Every
+#: one of these lines names the offline household (its instance id or
+#: ``127.0.0.1:<port>``), and a window suppresses it only when it does.
+_OFFLINE_PEER_NOISE: tuple[str, ...] = (
+    # The space-sync provider streaming to a requester that went away: over
+    # HTTPS one WARNING per refused chunk, then the abandon.
+    "chunk ship to ",
+    "abandoning stream for space ",
+    # A mesh catch-up toward a host that is down: no route, then the
+    # route-discovery negative cooldown.
+    "mesh catch-up sync to host ",
+    # ``unpair-offline``: the UNPAIR to the offline household is queued.
+    "not delivered (delivery_failed) — queued for retry",
+)
+
+#: libdatachannel / libjuice status lines while a peer's process dies, or
+#: comes back with fresh ICE credentials (late connectivity checks still
+#: carry the old ufrag). The native library cannot name the peer, so these
+#: are taken un-named — but only inside an offline window.
+_OFFLINE_PEER_NATIVE_NOISE: tuple[str, ...] = (
+    "juice: Lost connectivity",
+    "juice: STUN local ufrag check failed",
+    "juice: STUN message verification failed",
+    "SCTP connection failed",
+)
+
+
+def _read_json(path: Path, default: Any) -> Any:
+    try:
+        return json.loads(path.read_text())
+    except OSError, ValueError:
+        return default
+
+
+def _log_generations() -> dict[str, int]:
+    """How many times each household's ``log.txt`` was (re)created."""
+    return _read_json(LOG_GENERATIONS_PATH, {})
+
+
+def _bump_log_generation(label: str) -> None:
+    gens = _log_generations()
+    gens[label] = gens.get(label, 0) + 1
+    ROOT.mkdir(parents=True, exist_ok=True)
+    LOG_GENERATIONS_PATH.write_text(json.dumps(gens))
+
+
+def _log_line_count(label: str) -> int:
+    """Lines in ``label``'s ``log.txt`` right now — a window's bound."""
+    try:
+        with open(_instance_dir(label) / "log.txt", "rb") as fh:
+            return sum(
+                chunk.count(b"\n") for chunk in iter(lambda: fh.read(1 << 20), b"")
+            )
+    except OSError:
+        return 0
+
+
+def _load_noise_windows() -> list[dict]:
+    return _read_json(NOISE_WINDOWS_PATH, [])
+
+
+def _save_noise_windows(windows: list[dict]) -> None:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    NOISE_WINDOWS_PATH.write_text(json.dumps(windows, indent=2))
+
+
+def _open_noise_window(
+    *,
+    about: str,
+    reason: str,
+    witnesses: Any,
+    named: tuple[str, ...],
+    names: list[str],
+    native: tuple[str, ...] = (),
+    offline: bool = False,
+) -> list[int]:
+    """Open one window per witness household (never ``about`` itself),
+    starting at the witness's current log line. Returns the window ids for
+    :func:`_close_noise_windows`.
+
+    ``offline`` marks a window opened because ``about`` was killed: the
+    step's end closes it only once ``about`` has been respawned — a
+    household a step leaves down stays expected-to-be-missed afterwards.
+    """
+    with _NOISE_LOCK:
+        return _open_noise_window_locked(
+            about=about,
+            reason=reason,
+            witnesses=witnesses,
+            named=named,
+            names=names,
+            native=native,
+            offline=offline,
+        )
+
+
+def _open_noise_window_locked(
+    *,
+    about: str,
+    reason: str,
+    witnesses: Any,
+    named: tuple[str, ...],
+    names: list[str],
+    native: tuple[str, ...],
+    offline: bool,
+) -> list[int]:
+    windows = _load_noise_windows()
+    gens = _log_generations()
+    ids: list[int] = []
+    for witness in witnesses:
+        if witness == about or not (_instance_dir(witness) / "log.txt").exists():
+            continue
+        wid = len(windows)
+        windows.append(
+            {
+                "id": wid,
+                "about": about,
+                "about_generation": gens.get(about, 0),
+                "reason": reason,
+                "offline": offline,
+                "witness": witness,
+                "generation": gens.get(witness, 0),
+                "start": _log_line_count(witness),
+                "end": None,
+                "named": list(named),
+                "names": list(names),
+                "native": list(native),
+            }
+        )
+        ids.append(wid)
+    _save_noise_windows(windows)
+    return ids
+
+
+def _open_offline_window(label: str) -> None:
+    """``label`` is about to be killed: its peers' logs may now carry the
+    :data:`_OFFLINE_PEER_NOISE` lines that name it."""
+    instances = _load().get("instances") or {}
+    info = instances.get(label)
+    if not info:
+        return
+    _open_noise_window(
+        about=label,
+        reason=f"{label} deliberately offline",
+        witnesses=[k for k in instances if k != label],
+        named=_OFFLINE_PEER_NOISE,
+        names=[info["instance_id"], f"127.0.0.1:{info['port']}"],
+        native=_OFFLINE_PEER_NATIVE_NOISE,
+        offline=True,
+    )
+
+
+#: How long an offline window outlives the step that opened it. The
+#: witnesses' last lines about an outage land after the step's own checks
+#: pass: libjuice declares "Lost connectivity" on the dead PeerConnection
+#: only when ICE consent freshness expires (~30 s after the kill), and a
+#: sync stream started across the outage fails its last chunks just after.
+OFFLINE_WINDOW_TAIL_S: float = 45.0
+
+#: Serialises every read-modify-write of ``noise_windows.json`` — the tail
+#: closes run on a timer thread beside the next step.
+_NOISE_LOCK = threading.Lock()
+
+#: Pending tail closes; a CLI step waits for its own before exiting.
+_NOISE_TAILS: list[threading.Thread] = []
+
+
+def _close_noise_windows(
+    ids: list[int] | None = None, *, among: set[int] | None = None
+) -> None:
+    """Close open windows at each witness's current log line: ``ids``
+    (always), or else every one — or every one in ``among``. Without
+    ``ids``, an offline window whose household has not been respawned since
+    (it is still down) stays open."""
+    with _NOISE_LOCK:
+        windows = _load_noise_windows()
+        gens = _log_generations()
+        for w in windows:
+            if w["end"] is not None or (ids is not None and w["id"] not in ids):
+                continue
+            if among is not None and w["id"] not in among:
+                continue
+            if gens.get(w["witness"], 0) != w["generation"]:
+                # The witness was respawned: its old log is gone, and the
+                # window with it.
+                w["end"] = w["start"]
+                continue
+            still_down = gens.get(w["about"], 0) == w["about_generation"]
+            if ids is None and w["offline"] and still_down:
+                continue
+            w["end"] = _log_line_count(w["witness"])
+        _save_noise_windows(windows)
+
+
+def _close_noise_windows_after_tail() -> None:
+    """Close the windows open now once :data:`OFFLINE_WINDOW_TAIL_S` has
+    passed — on a timer thread, so ``all`` does not wait for it."""
+    with _NOISE_LOCK:
+        among = {w["id"] for w in _load_noise_windows() if w["end"] is None}
+    if not among:
+        return
+
+    def _later() -> None:
+        time.sleep(OFFLINE_WINDOW_TAIL_S)
+        _close_noise_windows(among=among)
+
+    t = threading.Thread(target=_later, name="noise-window-tail")
+    t.start()
+    _NOISE_TAILS.append(t)
+
+
+def _offline_step(fn: Any) -> Any:
+    """Decorate a step that kills households: the windows it opened close
+    :data:`OFFLINE_WINDOW_TAIL_S` after it returns (or fails)."""
+
+    @functools.wraps(fn)
+    def _run(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _close_noise_windows_after_tail()
+
+    return _run
+
+
+def _noise_windows_for(label: str, windows: list[dict]) -> list[dict]:
+    """``label``'s windows that still describe its current ``log.txt``."""
+    gen = _log_generations().get(label, 0)
+    return [w for w in windows if w["witness"] == label and w["generation"] == gen]
+
+
+def _expected_in_window(lineno: int, block: str, windows: list[dict]) -> bool:
+    """``True`` iff the block whose header is line ``lineno`` is one a
+    window expects: inside its bounds, and a native needle — or a named
+    needle together with one of the window's names."""
+    for w in windows:
+        end = w["end"] if w["end"] is not None else float("inf")
+        if not w["start"] <= lineno < end:
+            continue
+        if any(n in block for n in w["native"]):
+            return True
+        if any(n in block for n in w["named"]) and any(m in block for m in w["names"]):
+            return True
+    return False
 
 
 # ─── HTTP helpers ──────────────────────────────────────────────────────────
@@ -397,6 +659,9 @@ def _write_config(label: str, port: int, name: str) -> None:
 
 def _spawn(label: str, port: int, *, extra_env: dict | None = None) -> int:
     d = _instance_dir(label)
+    # A new process truncates ``log.txt``: every noise window recorded
+    # against the old file is void from here on (see ``_audit_logs``).
+    _bump_log_generation(label)
     log = open(d / "log.txt", "wb")
     env = {
         **os.environ,
@@ -1516,6 +1781,7 @@ def cmd_gfs_traffic() -> None:
     print("gfs-traffic: ok (publish round-trip)")
 
 
+@_offline_step
 def cmd_gfs_replay() -> None:
     """Validate GFS-paired state survives an HFS restart.
 
@@ -1592,6 +1858,7 @@ def cmd_gfs_replay() -> None:
 
     # 2. Tear Alpha down (SIGTERM, then SIGKILL after grace) — process
     #    group so libdatachannel + the GFS WS background task exit too.
+    _open_offline_window("a")
     print(f"  killing a (pid={a['pid']}) to simulate owning-HFS downtime")
     try:
         os.killpg(a["pid"], signal.SIGTERM)
@@ -4064,6 +4331,7 @@ def cmd_gfs_invite_link_content() -> None:
     )
 
 
+@_offline_step
 def cmd_gfs_member_publish() -> None:
     """v_49 trusted-mode member publish: a link-joined member posts while
     the HOST is offline, and the space's followers still get it live.
@@ -4510,6 +4778,7 @@ def _moderation_outcomes_reach_followers(state: dict, space_id: str) -> None:
     print("  a switched the space's posts back to open")
 
 
+@_offline_step
 def cmd_gfs_member_publish_strict() -> None:
     """v_50 strict (anonymous) member publish: the owner switches the space
     to strict, and a link-joined member's post reaches a follower over the
@@ -4937,6 +5206,7 @@ def _ensure_gfs_client(state: dict, label: str) -> None:
     _wait_for_gfs_ws(info["instance_id"])
 
 
+@_offline_step
 def cmd_gfs_private_channel() -> None:
     """v_51 + the owner's ``private_gfs`` option: a PRIVATE space whose owner
     turned the connection server on gets member publishing over it through
@@ -5994,6 +6264,7 @@ def _pair_with(state: dict, label: str, base_url: str) -> dict:
     return _must(f"{label} connects to {base_url}", st, resp, ok=(201,))
 
 
+@_offline_step
 def cmd_gfs_multi_listing() -> None:
     """v_57: every GFS on the owner's list gets every item — a follower on
     GFS B alone sees what a member registered only on GFS A published while
@@ -6368,6 +6639,7 @@ def _poll_gfs_b_rows(sql: str, params: tuple, ok, *, what: str, timeout=60.0):
 HOST_RETURN_SETTLE_S = 25.0
 
 
+@_offline_step
 def cmd_gfs_private_channel_multi() -> None:
     """v_57: a PRIVATE space's channel lives on the GFSs its OWNER picks, and
     a member reaches every one of them — anonymously at the ones it never
@@ -9482,6 +9754,8 @@ def _audit_logs(state: dict) -> list[str]:
     Reports up to 5 distinct offending blocks per file (anything more
     is usually the same root cause repeating)."""
     failures: list[str] = []
+    with _NOISE_LOCK:
+        windows_all = _load_noise_windows()
     sources = list((state.get("instances") or {}).items())
     if state.get("gfs"):
         sources.append(("gfs", {"log_path": str(GFS_DIR / "log.txt")}))
@@ -9493,12 +9767,14 @@ def _audit_logs(state: dict) -> list[str]:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        blocks = _split_log_into_blocks(text)
+        windows = _noise_windows_for(label, windows_all)
         hits: list[str] = []
-        for header, block_text in blocks:
+        for lineno, header, block_text in _split_log_into_numbered_blocks(text):
             if not any(marker in header for marker in _LOG_INTERESTING):
                 continue
             if any(needle in block_text for needle in _LOG_BENIGN):
+                continue
+            if _expected_in_window(lineno, block_text, windows):
                 continue
             hits.append(header)
             if len(hits) >= 5:
@@ -9509,7 +9785,13 @@ def _audit_logs(state: dict) -> list[str]:
 
 
 def _split_log_into_blocks(text: str) -> list[tuple[str, str]]:
-    """Group lines into ``(header, full_block)`` tuples.
+    """:func:`_split_log_into_numbered_blocks` without the line numbers."""
+    return [(h, b) for _, h, b in _split_log_into_numbered_blocks(text)]
+
+
+def _split_log_into_numbered_blocks(text: str) -> list[tuple[int, str, str]]:
+    """Group lines into ``(header_lineno, header, full_block)`` tuples
+    (``header_lineno`` 0-based — what a noise window's bounds count).
 
     A block starts at the first non-indented line with one of
     :data:`_LOG_INTERESTING` markers and continues through every
@@ -9520,18 +9802,19 @@ def _split_log_into_blocks(text: str) -> list[tuple[str, str]]:
     the benign filter scans, so a Traceback whose final line names
     a known-benign cause gets suppressed cleanly.
     """
-    out: list[tuple[str, str]] = []
+    out: list[tuple[int, str, str]] = []
     cur_header: str | None = None
+    cur_lineno = 0
     cur_lines: list[str] = []
 
     def _flush() -> None:
         nonlocal cur_header, cur_lines
         if cur_header is not None:
-            out.append((cur_header, "\n".join(cur_lines)))
+            out.append((cur_lineno, cur_header, "\n".join(cur_lines)))
         cur_header = None
         cur_lines = []
 
-    for line in text.splitlines():
+    for lineno, line in enumerate(text.splitlines()):
         if not line.strip():
             _flush()
             continue
@@ -9546,6 +9829,7 @@ def _split_log_into_blocks(text: str) -> list[tuple[str, str]]:
         # Otherwise this line starts a new (header) block.
         _flush()
         cur_header = line
+        cur_lineno = lineno
         cur_lines = [line]
     _flush()
     return out
@@ -10072,6 +10356,7 @@ def cmd_visibility() -> None:
     print("visibility: ok (per-pair user-visibility filter works both ways)")
 
 
+@_offline_step
 def cmd_sync_https_fallback() -> None:
     """§25.6 HTTPS chunk-stream fallback (Part C).
 
@@ -10132,6 +10417,7 @@ def cmd_sync_https_fallback() -> None:
     needle = f"[c] HTTPS-only post {needle_marker}"
 
     # 1. Tear down dave so the realtime fan-out misses him.
+    _open_offline_window("d")
     print(f"  killing d (pid={d['pid']}) so realtime fan-out misses him")
     try:
         os.killpg(d["pid"], signal.SIGTERM)
@@ -10259,6 +10545,7 @@ def cmd_sync_https_fallback() -> None:
     print("sync-https-fallback: ok (SPACE_SYNC_CHUNK federation transport works)")
 
 
+@_offline_step
 def cmd_replay() -> None:
     """Federation outbox redelivery — kill Carol, post from Alpha, restart.
 
@@ -10309,6 +10596,7 @@ def cmd_replay() -> None:
 
     # 1. Tear down Carol — SIGTERM the process group so libdatachannel's
     #    background threads also exit cleanly.
+    _open_offline_window("c")
     print(f"  killing c (pid={c['pid']}) to simulate offline peer")
     try:
         os.killpg(c["pid"], signal.SIGTERM)
@@ -11931,6 +12219,7 @@ def cmd_space_sync_catchup_media() -> None:
     print("space-sync-catchup-media: ok")
 
 
+@_offline_step
 def cmd_admin_promote_kick() -> None:
     """Cross-household admin promotion (#114 phase 1, v_8+) — sequenced so
     it deterministically proves the v_28 ``SPACE_ROUTE_STALE`` nack.
@@ -12044,6 +12333,7 @@ def cmd_admin_promote_kick() -> None:
     print(f"  c→d route warmed: d received post {post['id']} ✓")
 
     # b. Kill d so the ephemeral key c just sealed under dies with it.
+    _open_offline_window("d")
     print(f"  killing d (pid={d['pid']}) — its RAM-only ephemeral keys die with it")
     try:
         os.killpg(d["pid"], signal.SIGTERM)
@@ -12844,6 +13134,7 @@ def _remote_member_row(label: str, space_id: str, user_id: str) -> dict | None:
     return dict(rows[0]) if rows else None
 
 
+@_offline_step
 def cmd_owner_offline() -> None:
     """Delegated-admin moderation with the OWNING household offline.
 
@@ -13216,6 +13507,7 @@ def _content_epoch(label: str, space_id: str) -> int | None:
     return rows[0][0] if rows else None
 
 
+@_offline_step
 def cmd_rotation_offline_catchup() -> None:
     """A member that was OFFLINE through a rotation catches up from the outbox (v_44).
 
@@ -13436,6 +13728,15 @@ def cmd_rotation_offline_catchup() -> None:
     finally:
         conn.close()
     hijack = f"Hijack {marker}"
+    # The negative control: a and c must refuse b's K1-signed rename, and
+    # each says so at WARNING — expected, for exactly this rename.
+    forged = _open_noise_window(
+        about="b",
+        reason="rotation-offline-catchup: b's K1-signed rename is refused",
+        witnesses=("a", "c"),
+        named=("authority signature did not verify against the space key",),
+        names=[f"SPACE_CONFIG_CHANGED for {space_id} from {b['instance_id']}"],
+    )
     s, resp = _request(
         f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}",
         token=b["token"],
@@ -13456,6 +13757,7 @@ def cmd_rotation_offline_catchup() -> None:
                 f"rotation-offline-catchup: {label} accepted b's K1 rename ({got!r})"
             )
     print("  c (and a) refused b's old-key rename ✓")
+    _close_noise_windows(forged)
 
     state["rotation_offline_catchup_space_id"] = space_id
     _save(state)
@@ -13531,6 +13833,7 @@ def cmd_gfs_authority_rotate() -> None:
     print("gfs-authority-rotate: ok (the GFS and a subscriber follow the rotation)")
 
 
+@_offline_step
 def cmd_owner_offline_ban() -> None:
     """Delegated-admin offline-of-owner BAN converges (covers the #618 path).
 
@@ -13869,6 +14172,7 @@ def _repair_a_c(a: dict, c: dict) -> None:
 
 def _kill_household(label: str, info: dict) -> None:
     """SIGTERM (then SIGKILL) one household's process group."""
+    _open_offline_window(label)
     print(f"  killing {label} (pid={info['pid']}) to simulate an offline peer")
     try:
         os.killpg(info["pid"], signal.SIGTERM)
@@ -13885,6 +14189,7 @@ def _kill_household(label: str, info: dict) -> None:
         time.sleep(0.5)
 
 
+@_offline_step
 def cmd_unpair_offline() -> None:
     """Unpair c while it is OFFLINE; c still drops a once it is back.
 
@@ -14938,6 +15243,7 @@ def cmd_forwarded_role_change() -> None:
     print("forwarded-role-change: ok")
 
 
+@_offline_step
 def cmd_page_concurrent_edit() -> None:
     """Host-sequenced space pages: one order, one state everywhere (v_48).
 
@@ -15831,10 +16137,8 @@ def main() -> None:
         # The full path: pair the inner ring → traffic + invites →
         # accept invites + RSVP-on-event (cmd_calendar) → assertions →
         # transitive auto-pair via the trust relay (cmd_relay_pair).
-        # GFS lifecycle (``gfs-up`` / ``gfs-pair`` / ``gfs-down``) is
-        # opt-in and not part of the canonical smoke run; the GFS
-        # process is heavyweight to spin up and not strictly required
-        # for the HFS↔HFS federation surface this skill validates.
+        # The rest of the GFS surface (``gfs-*``) stays opt-in; ``all``
+        # only brings the GFS up at the very end, for ``local-community``.
         cmd_up()
         cmd_pair()
         cmd_traffic()
@@ -15998,11 +16302,26 @@ def main() -> None:
         # ``unpairing`` tombstone + queued UNPAIR, and c still drops a once
         # it restarts. Then re-pairs a↔c.
         cmd_unpair_offline()
+        # ``local-community`` (#1057): who gets into a local community —
+        # paired, mesh-only, outside, edge and GFS-only (§D2b) joiners —
+        # and that the ~1 km join point is never stored. Its GFS case needs
+        # the GFS, so it runs last, after ``gfs-up`` + ``gfs-pair``.
+        cmd_gfs_up()
+        cmd_gfs_pair()
+        cmd_local_community()
+        # The closing check: every step's state still holds, and the log
+        # audit is clean — offline steps' lines only inside their windows.
+        cmd_verify()
         return
     fn = globals().get(f"cmd_{cmd.replace('-', '_')}")
     if fn is None:
         raise SystemExit(f"unknown subcommand: {cmd!r}")
-    fn()
+    try:
+        fn()
+    finally:
+        # An offline step's windows close OFFLINE_WINDOW_TAIL_S after it.
+        for t in _NOISE_TAILS:
+            t.join()
 
 
 if __name__ == "__main__":

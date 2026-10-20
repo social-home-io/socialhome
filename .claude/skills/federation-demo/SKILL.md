@@ -322,6 +322,40 @@ That single command runs the full sequence:
      with a per-step content-check failure, that's the real bug
      — the log line on its own is just the symptom.
 
+     **Expected-noise windows** (no blanket ignores). A step that
+     takes a household offline, or runs a negative control, records
+     a *window* per witness household in
+     ``/tmp/sh-demo/noise_windows.json``: a line range of that
+     witness's ``log.txt``. Inside it, and only there, a block is
+     accepted when it matches one of the window's needles **and names
+     the household concerned** (instance id or ``127.0.0.1:<port>``);
+     native libjuice / SCTP status lines, which cannot name a peer,
+     are accepted un-named inside an offline window only.
+     ``_kill_household`` (and every inline kill) opens an offline
+     window with ``_OFFLINE_PEER_NOISE`` / ``_OFFLINE_PEER_NATIVE_NOISE``;
+     ``@_offline_step`` closes it when the step returns, unless the
+     household is still down. A respawned witness voids its windows
+     (``_spawn`` truncates its log; ``log_generations.json`` tracks
+     that). ``rotation-offline-catchup``'s forged K1 rename opens a
+     window for exactly the refusal it provokes. Pinned in
+     ``tests/skills/test_federation_demo_audit.py``.
+
+     Root causes the offline steps used to trip the audit on — all
+     fixed in the product, not allow-listed: an offline peer logged a
+     two-chained-traceback WARNING per HTTPS-inbox retry; a space-sync
+     stream to a requester that died logged ``stream_initial failed``
+     at ERROR with a ``DataChannel not open`` traceback; every envelope
+     from an unpair tombstone was re-logged at WARNING by the inbox
+     route; a send to a household mid-unpair, a queued
+     ``SPACE_SYNC_BEGIN`` and a relay retry to one unpaired meanwhile
+     warned ``unknown instance`` / "does not advertise v_13"; a restarted
+     household called a legitimate provider's queued OFFER "unsolicited"
+     at WARNING; a late ICE candidate for a closed sync session escaped
+     the ``SPACE_SYNC_ICE`` handler as a traceback; a mesh catch-up's
+     transient ``no_route`` (retried, uncapped) warned on every tick; and
+     a plain member's catch-up stream of chat deletions it cannot vouch
+     for warned once per tombstone.
+
 5. ``visibility`` — per-pair user-visibility filter. Provisions a
    second local user on **a** (``ada``), confirms **b** mirrors her
    in ``/api/friends``, then hides ada from **b** via
@@ -549,8 +583,11 @@ space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
 admin-revoke-rotation → rotation-offline-catchup → space-chat → replay →
-unpair → unpair-offline`` in that order.
-The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-open-signup`` /
+unpair → unpair-offline → gfs-up → gfs-pair → local-community → verify``
+in that order. The tail brings the GFS up only because ``local-community``'s
+last case (a GFS-only joiner) needs it; the closing ``verify`` runs the log
+audit over the whole chain, so ``all`` alone is green-or-red end to end.
+Apart from ``gfs-up`` / ``gfs-pair``, the ``gfs-*`` chain (``gfs-open-signup`` /
 ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
 ``gfs-space-rotate`` / ``gfs-authority-rotate`` /
@@ -1481,11 +1518,11 @@ on the one wire that cannot fall back to a peer row — see below.
 
 ### ``local-community`` — who gets into a local community, and what the join carries (#1057)
 
-Opt-in (it needs the GFS for its last case). Prereqs: ``up`` + ``pair`` +
+Part of ``all`` (its last step before the closing ``verify``; ``all`` brings
+the GFS up for it). Prereqs when run on its own: ``up`` + ``pair`` +
 ``relay-pair`` (a ↔ d) + ``gfs-up`` + ``gfs-pair`` (d and e on the GFS);
-``traffic`` + ``calendar`` only so ``verify`` has what it checks. Run as its
-own chain (``verify`` after the whole ``all`` also sees the offline steps'
-connection-refused noise in its log audit):
+``traffic`` + ``calendar`` only so ``verify`` has what it checks. The short
+chain, for iterating on this step alone:
 
 ```bash
 python .claude/skills/federation-demo/harness.py up
