@@ -2699,6 +2699,77 @@ def cmd_gfs_space_author_profile() -> None:
     print("gfs-space-author-profile: ok (a follower names a global space's authors)")
 
 
+def cmd_gfs_space_follower_names() -> None:
+    """A NEW follower names a global space's authors within seconds (v_61).
+
+    Prereqs: ``gfs-space-author-profile`` (Erin's profile, with a bio, is
+    out). Runs LAST in its chain: it subscribes **e** to a's global space as
+    a follower, which the ``gfs-invite-link*`` steps (e as a link-joined
+    member of that space) must not find.
+
+    e refreshes its directory and subscribes. The GFS tells a
+    (``new_subscriber``); a seals the content key to e, republishes its
+    authors' profiles and nudges its member households
+    (``SPACE_FOLLOWER_JOINED``). Asserts e names Erin, with her bio, within
+    30 s — without Erin posting again. The GFS log from the subscribe on
+    carries neither her name nor her bio.
+    """
+    state = _load()
+    gsap = (state or {}).get("gfs_space_author_profile")
+    if not gsap:
+        raise SystemExit("run 'gfs-space-author-profile' first")
+    space_id, erin, bio = gsap["space_id"], gsap["user_id"], gsap["bio"]
+    e = state["instances"]["e"]
+    e_url = f"http://127.0.0.1:{e['port']}"
+    _wait_for_gfs_ws(e["instance_id"], timeout=60.0)
+    s, body = _request(
+        f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST"
+    )
+    _must("e: POST /api/public_spaces/refresh", s, body, ok=(202,))
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        s, listing = _request(f"{e_url}/api/public_spaces", token=e["token"])
+        if s == 200 and any(r.get("space_id") == space_id for r in listing):
+            break
+        time.sleep(1)
+    else:
+        raise SystemExit(f"gfs-space-follower-names: e never listed {space_id}")
+    gfs_off = _gfs_log_size()
+    t0 = time.monotonic()
+    s, sub = _request(
+        f"{e_url}/api/spaces/{space_id}/subscribe", token=e["token"], method="POST"
+    )
+    _must("e: POST /api/spaces/{id}/subscribe", s, sub, ok=(200,))
+    got: dict | None = None
+    while time.monotonic() - t0 < 60:
+        s, rows = _request(f"{e_url}/api/spaces/{space_id}/authors", token=e["token"])
+        if s == 200:
+            got = next((r for r in rows if r.get("user_id") == erin), None)
+            if got and got.get("bio") == bio:
+                break
+        time.sleep(2)
+    else:
+        raise SystemExit(
+            f"gfs-space-follower-names: e did not name Erin within 60 s ({got!r})"
+        )
+    if got["display_name"] != "Erin":
+        raise SystemExit(f"gfs-space-follower-names: e names Erin {got!r}")
+    print(
+        f"  e (new follower) names Erin with her bio after "
+        f"{time.monotonic() - t0:.0f} s, no new post ✓"
+    )
+    leaks = [
+        line
+        for needle in ("Erin", bio)
+        for line in _gfs_log_lines_matching(needle, offset=gfs_off)
+    ]
+    if leaks:
+        raise SystemExit(f"gfs-space-follower-names: GFS log names her: {leaks[:2]}")
+    state["gfs_space_follower_names"] = {"space_id": space_id, "user_id": erin}
+    _save(state)
+    print("gfs-space-follower-names: ok (a new follower is named at once)")
+
+
 def cmd_gfs_space_rotate() -> None:
     """A content-key epoch rotation must not cut GFS subscribers off.
 
@@ -9715,6 +9786,21 @@ def cmd_verify() -> None:
             )
         else:
             print(f"  {_what} id is bound to its creator (v_36) ✓")
+
+    # 13x. ``gfs-space-follower-names`` (v_61): e, a follower that joined
+    #      after Erin's profile went out, still names her. Opt-in.
+    gsfn = state.get("gfs_space_follower_names")
+    if gsfn:
+        e = state["instances"]["e"]
+        s, body = _request(
+            f"http://127.0.0.1:{e['port']}/api/spaces/{gsfn['space_id']}/authors",
+            token=e["token"],
+        )
+        names = {r["user_id"]: r.get("display_name") for r in body} if s == 200 else {}
+        if names.get(gsfn["user_id"]) != "Erin":
+            failures.append(f"e: new follower does not name Erin ({names!r})")
+        else:
+            print("  e (new follower) names Erin ✓")
 
     # 13y. ``gfs-space-author-profile`` (v_60): d, a follower with no roster,
     #      still names Erin with her bio from her published profile. Opt-in.

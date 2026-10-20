@@ -1848,6 +1848,7 @@
   "error.local_area_delegated": "Una comunidad local no puede dejar que los administradores act\u00faen por ti. Desactiva primero \u00abPermitir que los administradores act\u00faen por m\u00ed\u00bb.",
   "capability.local_communities": "Comunidades locales",
   "capability.follower_author_names": "Nombres para los seguidores de un espacio",
+  "capability.follower_names_on_join": "Nombres al instante para nuevos seguidores",
   "space.settings_page.moderation.queue_meta": "Publicaciones por revisar, solicitudes y denuncias",
   "space.settings_page.moderation.days": "días",
   "space.settings_page.danger.summary": "Archivar, ceder o eliminar",

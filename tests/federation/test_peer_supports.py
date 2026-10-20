@@ -213,9 +213,9 @@ async def test_same_claim_again_publishes_nothing_new():
 
 @pytest.mark.asyncio
 async def test_claim_is_a_high_water_mark():
-    svc = _mesh_service(_MeshRepo(seated={MESH}, claims={MESH: (60, MESH_PK.hex())}))
+    svc = _mesh_service(_MeshRepo(seated={MESH}, claims={MESH: (OURS, MESH_PK.hex())}))
     await svc.record_mesh_member_claim(_routed_event(mesh_member_claim(MESH_PK)))
-    assert await svc.space_member_supports(MESH, min_version=60)
+    assert await svc.space_member_supports(MESH, min_version=OURS)
     assert svc._bus.events == []
 
 

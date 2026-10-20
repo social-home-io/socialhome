@@ -20,7 +20,10 @@ may span any number of paired HFS instances.
 `SPACE_CREATED`, `SPACE_DISSOLVED`, `SPACE_CONFIG_CHANGED`,
 `SPACE_MEMBER_JOINED`, `SPACE_MEMBER_LEFT`, `SPACE_ROSTER_SNAPSHOT` (v_32),
 `SPACE_MEMBER_BANNED`, `SPACE_MEMBER_UNBANNED`, `SPACE_INSTANCE_LEFT`,
-`SPACE_AGE_GATE_UPDATED`, `SPACE_MEMBER_PROFILE_UPDATED`.
+`SPACE_AGE_GATE_UPDATED`, `SPACE_MEMBER_PROFILE_UPDATED`,
+`SPACE_FOLLOWER_JOINED` (v_61 — the host's content-free nudge to republish
+author profiles for a new GFS follower; see
+[discovery.md](./discovery.md#author-profiles-for-followers-v_60)).
 
 `SPACE_MEMBER_PROFILE_UPDATED` carries a member's per-space display name
 and picture. A receiver applies it only when its own roster mirror

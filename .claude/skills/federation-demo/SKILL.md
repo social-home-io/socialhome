@@ -854,6 +854,19 @@ bytes. The GFS log (from the step's start) and its envelope queue never carry
 her name or bio, and c (no member, no follower) holds no profile.
 ``verify`` (13y) re-checks d's view of Erin.
 
+### ``gfs-space-follower-names`` — a new follower is named at once (v_61)
+
+Needs ``gfs-space-author-profile``; run it **last in its own chain**
+(``up → pair → traffic → calendar → gfs-up → gfs-pair → gfs-traffic →
+gfs-space-subscribe → gfs-space-post → gfs-space-author-profile →
+gfs-space-follower-names → verify``) — it makes **e** a follower of a's
+global space, which the ``gfs-invite-link*`` steps must not find. e
+subscribes; the GFS notifies a, which seals the content key to e,
+republishes its authors' profiles and sends ``SPACE_FOLLOWER_JOINED`` to its
+member households. e must name Erin, with her bio, within 60 s without a
+new post; the GFS log from the subscribe on never carries her name or bio.
+``verify`` (13x) re-checks.
+
 ### ``gfs-member-publish`` — a member posts with the host offline (v_49)
 
 Needs ``gfs-space-subscribe`` (d follows a's global space) and

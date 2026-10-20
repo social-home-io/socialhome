@@ -3,6 +3,7 @@ followers (v_60)."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,7 @@ from socialhome.domain.events import (
     SpacePostCreated,
     UserProfileUpdated,
 )
+from socialhome.domain.federation import FederationEventType
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.space import SpaceType
 from socialhome.domain.space_author_profile import (
@@ -310,3 +312,110 @@ async def test_an_unknown_author_publishes_nothing():
     svc, gfs = _svc()
     assert not await svc.publish("sp", "someone-else")
     assert gfs.items == []
+
+
+# ── A new follower (v_61) ─────────────────────────────────────────────
+
+
+class _Posts:
+    def __init__(self, authors) -> None:
+        self.authors = set(authors)
+
+    async def list_author_ids(self, space_id):
+        return set(self.authors)
+
+
+class _Registry:
+    def __init__(self) -> None:
+        self.handlers: dict = {}
+
+    def register(self, event_type, handler):
+        self.handlers[event_type] = handler
+
+
+class _Fed:
+    def __init__(self) -> None:
+        self._event_registry = _Registry()
+        self.broadcasts: list[tuple] = []
+
+    async def broadcast_to_space_members(self, space_id, event_type, payload, **kw):
+        self.broadcasts.append((space_id, event_type, payload, kw))
+
+
+def _with_followers(svc, authors=(NOOR,)):
+    fed = _Fed()
+    svc.attach_follower_republish(
+        federation_service=fed,  # type: ignore[arg-type]
+        space_post_repo=_Posts(authors),  # type: ignore[arg-type]
+    )
+    return fed
+
+
+async def test_a_new_follower_gets_every_author_at_once_and_members_are_nudged():
+    svc, gfs = _svc()
+    fed = _with_followers(svc)
+    assert await svc.publish("sp", NOOR)  # sent already this epoch
+    await svc.on_new_follower("sp")
+    assert len(gfs.items) == 2  # republished regardless
+    [(space_id, event_type, payload, kw)] = fed.broadcasts
+    assert (space_id, event_type, payload) == (
+        "sp",
+        FederationEventType.SPACE_FOLLOWER_JOINED,
+        {"space_id": "sp"},
+    )
+    assert kw["min_proto_version"] == 61
+
+
+async def test_a_burst_of_followers_republishes_once_more_when_it_ends(monkeypatch):
+    """A follower inside the cooldown is not dropped: one trailing run (with
+    its member nudge) covers the whole burst."""
+    monkeypatch.setattr(
+        "socialhome.services.space_author_profile_outbound.FOLLOWER_REPUBLISH_COOLDOWN",
+        timedelta(milliseconds=50),
+    )
+    svc, gfs = _svc()
+    fed = _with_followers(svc)
+    await svc.on_new_follower("sp")
+    await svc.on_new_follower("sp")
+    await svc.on_new_follower("sp")
+    assert len(gfs.items) == 1 and len(fed.broadcasts) == 1
+    await asyncio.wait_for(asyncio.gather(*svc._pending.values()), 2)
+    assert len(gfs.items) == 2 and len(fed.broadcasts) == 2
+
+
+async def test_stop_cancels_a_trailing_republish():
+    svc, gfs = _svc()
+    _with_followers(svc)
+    await svc.on_new_follower("sp")
+    await svc.on_new_follower("sp")
+    assert svc._pending
+    await svc.stop()
+    assert not svc._pending and len(gfs.items) == 1
+
+
+async def test_only_the_host_may_nudge():
+    spaces = _Spaces()
+    spaces.owner = "host-inst"  # type: ignore[attr-defined]
+
+    async def _get(space_id):
+        return SimpleNamespace(
+            id=space_id,
+            space_type=SpaceType.GLOBAL,
+            owner_instance_id="host-inst",
+            features=SimpleNamespace(allow_subscribers=True),
+        )
+
+    spaces.get = _get  # type: ignore[method-assign]
+    svc, gfs = _svc(spaces=spaces)
+    fed = _with_followers(svc)
+    handler = fed._event_registry.handlers[FederationEventType.SPACE_FOLLOWER_JOINED]
+
+    def _ev(sender):
+        return SimpleNamespace(
+            from_instance=sender, space_id="sp", payload={"space_id": "sp"}
+        )
+
+    await handler(_ev("someone-else"))
+    assert gfs.items == []
+    await handler(_ev("host-inst"))
+    assert len(gfs.items) == 1

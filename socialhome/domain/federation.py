@@ -93,6 +93,11 @@ class FederationEventType(str, enum.Enum):
     SPACE_CONFIG_CATCH_UP = "space_config_catch_up"
     SPACE_DISSOLVED = "space_dissolved"
     SPACE_INSTANCE_LEFT = "space_instance_left"
+    #: v_61 — the host tells its member households "a new GFS follower
+    #: joined": each republishes its authors' ``author_profile`` items so the
+    #: follower names them at once. Carries nothing but the routing space id
+    #: (never who followed). See ``docs/protocol/discovery.md``.
+    SPACE_FOLLOWER_JOINED = "space_follower_joined"
     SPACE_MEMBER_JOINED = "space_member_joined"
     SPACE_MEMBER_LEFT = "space_member_left"
     #: v_32 — the host's whole roster for one space in one event: a list
@@ -579,6 +584,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: exactly the news a link-joined member must not miss.
         FederationEventType.SPACE_DISSOLVED,
         FederationEventType.SPACE_INSTANCE_LEFT,
+        #: The host's "a follower joined" (v_61) — a link-joined member
+        #: republishes its authors' profiles too.
+        FederationEventType.SPACE_FOLLOWER_JOINED,
         #: Config edits (name, description, features, join mode, retention)
         #: and the catch-up replay of them. A member whose config rots shows
         #: a stale space forever.
@@ -908,6 +916,9 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_CONFIG_CATCH_UP,
         FederationEventType.SPACE_DISSOLVED,
         FederationEventType.SPACE_INSTANCE_LEFT,
+        #: The host's "a follower joined" nudge (v_61): no content, accepted
+        #: only from the space's host by its handler.
+        FederationEventType.SPACE_FOLLOWER_JOINED,
         # ── Roster / membership (authority-signed; a leave is a reader's
         #    own right, and a kick is re-decided by the host) ──
         FederationEventType.SPACE_MEMBER_JOINED,

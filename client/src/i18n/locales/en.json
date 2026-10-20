@@ -2130,6 +2130,7 @@
   "error.local_area_delegated": "A local community can't let admins act for you. Turn “Let admins act for me” off first.",
   "capability.local_communities": "Local communities",
   "capability.follower_author_names": "Names for a space's followers",
+  "capability.follower_names_on_join": "Names for new followers right away",
   "space.settings_page.moderation.queue_meta": "Posts to review, join requests and reports",
   "space.settings_page.moderation.days": "days",
   "space.settings_page.danger.summary": "Archive, hand over or delete",

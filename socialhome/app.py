@@ -3197,6 +3197,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # the identity seed + KEK are available at startup.
     space_public_outbound: SpacePublicOutbound | None = None
     gfs_member_publish: GfsMemberPublishService | None = None
+    author_profiles: SpaceAuthorProfileOutbound | None = None
     gfs_channels: GfsChannelService | None = None
     space_public_inbound: SpacePublicInbound | None = None
     space_authority_rotation: SpaceAuthorityRotationService | None = None
@@ -3554,6 +3555,7 @@ def create_app(config: Config | None = None) -> web.Application:
 
     async def _on_startup(app: web.Application) -> None:
         nonlocal key_manager, federation_service, outbox_processor
+        nonlocal author_profiles
         log.info("socialhome: starting up (mode=%s)", config.mode)
         await db.startup()
 
@@ -4324,6 +4326,14 @@ def create_app(config: Config | None = None) -> web.Application:
             )
             author_profiles.attach_child_protection(child_protection_service)
             author_profiles.wire()
+            # v_61 — a new follower learns the authors' names at once.
+            author_profiles.attach_follower_republish(
+                federation_service=federation_service,
+                space_post_repo=space_post_repo,
+            )
+            space_subscriber_key_outbound.attach_follower_hook(
+                author_profiles.on_new_follower
+            )
         # Federate per-edit config changes (rename, emoji, feature
         # toggles, location_mode flips, retention bumps) to remote
         # member stubs in realtime. Before this, SPACE_CONFIG_CHANGED
@@ -5068,6 +5078,9 @@ def create_app(config: Config | None = None) -> web.Application:
         await gfs_connection_service.stop()
         # Background seat releases ride the HTTP session too.
         await gfs_space_mirror.stop()
+        # Trailing follower republishes ride the member-publish client.
+        if author_profiles is not None:
+            await author_profiles.stop()
         if gfs_member_publish is not None:
             await gfs_member_publish.stop()
         if gfs_channels is not None:

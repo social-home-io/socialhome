@@ -23,6 +23,13 @@ key and sent over the existing member-publish path
   :data:`~socialhome.domain.federation_capabilities.FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE`.
 * **Where:** only a public / global space that admits followers — a
   private space's channel readers are all members and hold the roster.
+* **A new follower (v_61):** the host, notified by the GFS
+  (``new_subscriber``, right after it sealed the content key to them),
+  republishes its own authors' profiles and sends ``SPACE_FOLLOWER_JOINED``
+  to its member households (v_61+); each republishes its authors' profiles.
+  At most once per space per :data:`FOLLOWER_REPUBLISH_COOLDOWN`. The nudge
+  carries no content and never names the follower; the GFS learns nothing
+  it does not already: the items are the usual ciphertext ``space_item`` s.
 
 In-memory bookkeeping: a restart sends each author's profile once more on
 their next post.
@@ -30,6 +37,7 @@ their next post.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -39,6 +47,7 @@ from ..domain.events import (
     SpacePostCreated,
     UserProfileUpdated,
 )
+from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_author_profile import (
@@ -53,8 +62,11 @@ from .protection_gate import ProtectionGateMixin
 from .space_item_author import build_signed_item_inner
 
 if TYPE_CHECKING:
+    from ..domain.federation import FederationEvent
+    from ..federation.federation_service import FederationService
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
+    from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .gfs_member_publish_service import GfsMemberPublishService
@@ -66,6 +78,12 @@ log = logging.getLogger(__name__)
 #: post once this old, so followers who subscribed since get it too.
 PROFILE_RESEND_AFTER: timedelta = timedelta(hours=24)
 
+#: One follower-driven republish per space at most this often — a burst of
+#: subscribes (or a hostile host) cannot make a household spam the GFS. A
+#: follower inside the window is not dropped: one trailing republish runs
+#: when it ends, covering everyone who subscribed meanwhile.
+FOLLOWER_REPUBLISH_COOLDOWN: timedelta = timedelta(seconds=30)
+
 
 class SpaceAuthorProfileOutbound(ProtectionGateMixin):
     """See the module docstring."""
@@ -74,12 +92,16 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         "_bus",
         "_child_protection",
         "_crypto",
+        "_federation",
         "_federation_repo",
         "_member_gfs",
         "_own_instance_id",
         "_own_instance_pk",
         "_own_seed",
+        "_pending",
         "_pictures",
+        "_posts",
+        "_republished",
         "_sent",
         "_spaces",
         "_users",
@@ -112,6 +134,28 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         self._child_protection = None
         #: ``(space_id, user_id)`` → ``(epoch, profile_rev, sent_at)``.
         self._sent: dict[tuple[str, str], tuple[int | None, str, datetime]] = {}
+        #: ``space_id`` → when its authors were last republished for a new
+        #: follower (v_61).
+        self._republished: dict[str, datetime] = {}
+        #: The one trailing republish per space waiting out the cooldown.
+        self._pending: dict[str, asyncio.Task[None]] = {}
+        self._federation: FederationService | None = None
+        self._posts: AbstractSpacePostRepo | None = None
+
+    def attach_follower_republish(
+        self,
+        *,
+        federation_service: FederationService,
+        space_post_repo: AbstractSpacePostRepo,
+    ) -> None:
+        """Wire the v_61 new-follower republish: who has posted in a space,
+        and the federation the host nudges its members over (and receives
+        the host's nudge on)."""
+        self._federation = federation_service
+        self._posts = space_post_repo
+        federation_service._event_registry.register(
+            FederationEventType.SPACE_FOLLOWER_JOINED, self._on_follower_joined
+        )
 
     def wire(self) -> None:
         self._bus.subscribe(SpacePostCreated, self._on_post)
@@ -136,6 +180,93 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             return
         if (event.space_id, event.user_id) in self._sent:
             await self.publish(event.space_id, event.user_id, changed=True)
+
+    # ── A new follower (v_61) ─────────────────────────────────────────
+
+    async def on_new_follower(self, space_id: str) -> None:
+        """The host was told a follower subscribed (and sealed the content
+        key to them): republish our authors and nudge the member
+        households. Never raises."""
+        try:
+            await self.republish_space(space_id, nudge=True)
+        except Exception:
+            log.exception(
+                "space_author_profile: new-follower republish failed for %s",
+                space_id,
+            )
+
+    async def _nudge_members(self, space_id: str) -> None:
+        if self._federation is None:
+            return
+        await self._federation.broadcast_to_space_members(
+            space_id,
+            FederationEventType.SPACE_FOLLOWER_JOINED,
+            {"space_id": space_id},
+            min_proto_version=FederationCapability.MIN_FOR_FOLLOWER_JOINED,
+        )
+
+    async def _on_follower_joined(self, event: FederationEvent) -> None:
+        """The host's nudge: republish our authors in that space. Only the
+        space's host may send it (anyone else is ignored at WARNING)."""
+        space_id = str(event.space_id or event.payload.get("space_id") or "")
+        space = await self._spaces.get(space_id) if space_id else None
+        if space is None or event.from_instance != space.owner_instance_id:
+            log.warning(
+                "space_author_profile: SPACE_FOLLOWER_JOINED from %s is not "
+                "from the host of space %s — ignored",
+                event.from_instance,
+                space_id,
+            )
+            return
+        await self.republish_space(space_id)
+
+    async def republish_space(self, space_id: str, *, nudge: bool = False) -> bool:
+        """Publish the profile of every local user with a post in
+        *space_id*, whatever was sent before — at most once per
+        :data:`FOLLOWER_REPUBLISH_COOLDOWN`. Inside the window one trailing
+        republish is scheduled for its end instead (never dropped). With
+        *nudge* (the host) each run also tells the member households.
+        ``True`` when it ran now."""
+        now = datetime.now(UTC)
+        last = self._republished.get(space_id)
+        if last is not None and now - last < FOLLOWER_REPUBLISH_COOLDOWN:
+            if space_id not in self._pending:
+                wait = (last + FOLLOWER_REPUBLISH_COOLDOWN - now).total_seconds()
+                self._pending[space_id] = asyncio.create_task(
+                    self._trailing(space_id, wait, nudge=nudge),
+                    name=f"author-profile-republish-{space_id}",
+                )
+            return False
+        self._republished[space_id] = now
+        authors: set[str] = {u for (s, u) in self._sent if s == space_id}
+        if self._posts is not None:
+            authors |= await self._posts.list_author_ids(space_id)
+        for user_id in sorted(authors):
+            self._sent.pop((space_id, user_id), None)
+            await self.publish(space_id, user_id)
+        if nudge:
+            await self._nudge_members(space_id)
+        return True
+
+    async def _trailing(self, space_id: str, wait: float, *, nudge: bool) -> None:
+        try:
+            await asyncio.sleep(max(wait, 0.0))
+        finally:
+            self._pending.pop(space_id, None)
+        try:
+            await self.republish_space(space_id, nudge=nudge)
+        except Exception:
+            log.exception(
+                "space_author_profile: trailing republish failed for %s", space_id
+            )
+
+    async def stop(self) -> None:
+        """Cancel the trailing republishes (graceful shutdown)."""
+        tasks = list(self._pending.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._pending.clear()
 
     # ── Publishing ────────────────────────────────────────────────────
 

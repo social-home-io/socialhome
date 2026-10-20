@@ -1821,6 +1821,7 @@
   "error.local_area_delegated": "In een buurtgemeenschap kunnen beheerders niet namens jou handelen. Zet „Beheerders mogen namens mij handelen” eerst uit.",
   "capability.local_communities": "Buurtgemeenschappen",
   "capability.follower_author_names": "Namen voor de volgers van een space",
+  "capability.follower_names_on_join": "Namen meteen voor nieuwe volgers",
   "space.settings_page.moderation.queue_meta": "Berichten om te beoordelen, verzoeken en meldingen",
   "space.settings_page.moderation.days": "dagen",
   "space.settings_page.danger.summary": "Archiveren, overdragen of verwijderen",

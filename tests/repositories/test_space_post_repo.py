@@ -903,3 +903,13 @@ async def test_sync_pages_since_a_stamp_return_only_rows_changed_after_it(env):
     )
     full, _ = await env.repo.list_sync_page(env.space_id)
     assert {p.id for p in full} == {"p-a", "p-b"}
+
+
+async def test_list_author_ids_has_everyone_with_a_live_post(env):
+    await env.repo.save(env.space_id, _post("sp-a1", author="uid-alice"))
+    await env.repo.save(env.space_id, _post("sp-a2", author="uid-alice"))
+    await env.repo.save(env.space_id, _post("sp-b1", author="uid-bob"))
+    await env.repo.save(env.space_id, _post("sp-c1", author="uid-carol"))
+    await env.repo.soft_delete("sp-c1", space_id=env.space_id)
+    assert await env.repo.list_author_ids(env.space_id) == {"uid-alice", "uid-bob"}
+    assert await env.repo.list_author_ids("other-space") == set()
