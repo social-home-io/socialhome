@@ -2,6 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
+from socialhome.app_keys import (
+    federation_repo_key,
+    federation_service_key,
+    highlight_repo_key,
+)
+from socialhome.domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
+)
+from socialhome.domain.highlight import Highlight, HighlightFrame, HighlightFrameType
+
 
 def _auth(client) -> dict:
     return {"Authorization": f"Bearer {client._tok}"}
@@ -490,3 +505,191 @@ async def test_highlight_detail_video_frame_media_status(client):
     body = await r.json()
     f = next(x for x in body["frames"] if x["id"] == frame_id)
     assert f["media_status"] == "processing"
+
+
+# ── People named for the viewer (#1073 follow-up) ───────────────────────
+#
+# The SPA named highlight authors, viewers and reactors from the local
+# household cache only, so a remote friend read "Someone". The highlight
+# now carries ``author`` and each view / reaction row the person's name,
+# signed picture and household — added in the route only: the federation
+# payloads (frame fan-out, view / reaction back-channel) are unchanged.
+
+
+def _peer_o() -> RemoteInstance:
+    return RemoteInstance(
+        id="peer-o",
+        display_name="Okafor family",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="enc",
+        key_remote_to_self="enc",
+        remote_inbox_url="https://peer-o.example/wh",
+        local_inbox_id="wh-peer-o",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+    )
+
+
+async def _remote_amaka(client) -> None:
+    await client.app[federation_repo_key].save_instance(_peer_o())
+    await client._db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username, "
+        " display_name, picture_hash) VALUES(?,?,?,?,?)",
+        ("ru-amaka", "peer-o", "amaka", "Amaka Okafor", "cafebabecafebabe"),
+    )
+
+
+async def _remote_highlight(client, highlight_id: str, author: str) -> str:
+    """Seed a highlight a paired household fanned in; returns its frame id."""
+    now = datetime.now(UTC)
+    repo = client.app[highlight_repo_key]
+    await repo.save_highlight(
+        Highlight(
+            id=highlight_id,
+            author_user_id=author,
+            highlight_date=now.date().isoformat(),
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(days=1)).isoformat(),
+        )
+    )
+    frame_id = f"{highlight_id}-f1"
+    await repo.save_frame(
+        HighlightFrame(
+            id=frame_id,
+            highlight_id=highlight_id,
+            sequence=1,
+            frame_type=HighlightFrameType.IMAGE,
+            media_url="/api/media/remote.webp",
+            created_at=now.isoformat(),
+        )
+    )
+    return frame_id
+
+
+async def test_inbox_names_remote_and_unknown_authors(client):
+    await _remote_amaka(client)
+    await _remote_highlight(client, "h-amaka", "ru-amaka")
+    await _remote_highlight(client, "h-ghost", "ru-forgotten")
+
+    r = await client.get("/api/highlights", headers=_auth(client))
+    assert r.status == 200
+    rows = {row["highlight"]["id"]: row["highlight"] for row in await r.json()}
+    amaka = rows["h-amaka"]["author"]
+    assert amaka["display_name"] == "Amaka Okafor"
+    assert amaka["household"] == "Okafor family"
+    assert amaka["picture_url"].startswith(
+        "api/users/ru-amaka/picture?v=cafebabecafebabe"
+    )
+    assert "sig=" in amaka["picture_url"]
+    # Nobody here knows them: no name — never the id.
+    assert rows["h-ghost"]["author"]["display_name"] is None
+    assert rows["h-ghost"]["author"]["picture_url"] is None
+
+
+async def test_detail_names_a_remote_author_for_a_viewer(client):
+    await _remote_amaka(client)
+    await _remote_highlight(client, "h-amaka", "ru-amaka")
+    r = await client.get("/api/highlights/h-amaka", headers=_auth(client))
+    assert r.status == 200
+    body = await r.json()
+    assert body["highlight"]["author"]["display_name"] == "Amaka Okafor"
+    # Not the author: no viewer / reactor lists at all.
+    assert "views" not in body
+    assert "reactions" not in body
+
+
+async def test_detail_names_remote_viewers_and_reactors_for_the_author(client):
+    """The author's "Seen by" sheet: a remote viewer / reactor is named
+    with a signed picture; a guardian-blocked kid by name only (§CP.F2);
+    someone nobody knows gets no name — never the id."""
+    await _remote_amaka(client)
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, picture_hash,"
+        " child_protection_enabled) VALUES(?,?,?,?,1)",
+        ("kid", "uid-kid", "Kid", "ffff0000ffff0000"),
+    )
+    await client._db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES(?,?,?)",
+        ("uid-kid", client._uid, client._uid),
+    )
+    resp = await client.post(
+        "/api/highlights/frames",
+        json={"frame_type": "image", "media_url": "/api/media/x.webp"},
+        headers=_auth(client),
+    )
+    created = await resp.json()
+    highlight_id = created["highlight"]["id"]
+    frame_id = created["frame"]["id"]
+    repo = client.app[highlight_repo_key]
+    for viewer in ("ru-amaka", "uid-kid", "ru-forgotten"):
+        await repo.mark_viewed(frame_id, viewer)
+    await repo.set_reaction(frame_id, "ru-amaka", "🔥")
+
+    r = await client.get(f"/api/highlights/{highlight_id}", headers=_auth(client))
+    assert r.status == 200
+    body = await r.json()
+    assert body["highlight"]["author"]["display_name"]
+    views = {v["viewer_user_id"]: v for v in body["views"][frame_id]}
+    assert views["ru-amaka"]["display_name"] == "Amaka Okafor"
+    assert views["ru-amaka"]["household"] == "Okafor family"
+    assert "sig=" in views["ru-amaka"]["picture_url"]
+    assert views["ru-amaka"]["viewed_at"]
+    assert views["uid-kid"]["display_name"] == "Kid"
+    assert views["uid-kid"]["picture_url"] is None
+    assert views["ru-forgotten"]["display_name"] is None
+    [reaction] = body["reactions"][frame_id]
+    assert reaction["reactor_user_id"] == "ru-amaka"
+    assert reaction["emoji"] == "🔥"
+    assert reaction["display_name"] == "Amaka Okafor"
+    assert "sig=" in reaction["picture_url"]
+
+
+async def test_back_channel_payloads_carry_no_names(client, monkeypatch):
+    """Viewing / reacting to a remote friend's frame sends the author's
+    household exactly the wire fields — never what this household knows
+    about anyone."""
+    await _remote_amaka(client)
+    frame_id = await _remote_highlight(client, "h-amaka", "ru-amaka")
+    sent: list[dict] = []
+    fed = client.app[federation_service_key]
+
+    async def _capture(_self, *, to_instance_id, event_type, payload, **_kw):
+        sent.append({"to": to_instance_id, "type": event_type, "payload": payload})
+
+    # ``FederationService`` is slotted — patch the class for this test.
+    monkeypatch.setattr(type(fed), "send_event", _capture)
+    r = await client.post(
+        f"/api/highlights/frames/{frame_id}/view", headers=_auth(client)
+    )
+    assert r.status == 200
+    r = await client.put(
+        f"/api/highlights/frames/{frame_id}/reaction",
+        json={"emoji": "🔥"},
+        headers=_auth(client),
+    )
+    assert r.status == 200
+    # Reading the highlight back named adds nothing to what went out.
+    r = await client.get("/api/highlights/h-amaka", headers=_auth(client))
+    assert (await r.json())["highlight"]["author"]["display_name"]
+
+    by_type = {s["type"]: s for s in sent}
+    viewed = by_type[FederationEventType.HIGHLIGHT_FRAME_VIEWED]
+    assert viewed["to"] == "peer-o"
+    assert set(viewed["payload"]) == {
+        "highlight_id",
+        "frame_id",
+        "viewer_user_id",
+        "author_user_id",
+        "occurred_at",
+    }
+    reacted = by_type[FederationEventType.HIGHLIGHT_FRAME_REACTED]
+    assert reacted["to"] == "peer-o"
+    assert set(reacted["payload"]) == {
+        "highlight_id",
+        "frame_id",
+        "reactor_user_id",
+        "author_user_id",
+        "emoji",
+        "occurred_at",
+    }

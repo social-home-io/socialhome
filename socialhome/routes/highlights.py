@@ -42,13 +42,16 @@ from ..domain.highlight import (
     Highlight,
     HighlightAudience,
     HighlightFrame,
+    HighlightFrameReaction,
     HighlightFrameType,
+    HighlightFrameView,
 )
 from ..domain.report import (
     DuplicateReportError,
     ReportRateLimitedError,
     ReportTargetType,
 )
+from ..domain.user import PersonSummary
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
 from .base import BaseView
@@ -72,8 +75,10 @@ def _sign_payload(request: web.Request, payload):
     return payload
 
 
-def _highlight_dict(highlight: Highlight) -> dict:
-    return {
+def _highlight_dict(
+    highlight: Highlight, *, author: PersonSummary | None = None
+) -> dict:
+    out: dict = {
         "id": highlight.id,
         "author_user_id": highlight.author_user_id,
         "highlight_date": highlight.highlight_date,
@@ -82,6 +87,12 @@ def _highlight_dict(highlight: Highlight) -> dict:
         "created_at": highlight.created_at,
         "expires_at": highlight.expires_at,
     }
+    # Who wrote it, as the caller may see them (``named_people``): the
+    # SPA's household cache only knows local people, so a remote
+    # friend's highlight would read "Someone" without this.
+    if author is not None:
+        out["author"] = author.to_dict()
+    return out
 
 
 def _frame_dict(frame: HighlightFrame, *, media_status: str | None = None) -> dict:
@@ -205,13 +216,17 @@ class HighlightsCollectionView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "auth required")
         svc = self.svc(highlight_service_key)
         rows = await svc.list_visible(ctx.user_id)
+        authors = await self.named_people(r["highlight"].author_user_id for r in rows)
         all_frames = [f for row in rows for f in row["frames"]]
         statuses = await _frame_statuses(self, all_frames)
         out: list[dict] = []
         for row in rows:
             out.append(
                 {
-                    "highlight": _highlight_dict(row["highlight"]),
+                    "highlight": _highlight_dict(
+                        row["highlight"],
+                        author=authors[row["highlight"].author_user_id],
+                    ),
                     "frames": [
                         _frame_dict(f, media_status=_frame_status(statuses, f))
                         for f in row["frames"]
@@ -236,35 +251,57 @@ class HighlightDetailView(BaseView):
             return error_response(404, "NOT_FOUND", "highlight not found")
         highlight, frames = result
         statuses = await _frame_statuses(self, frames)
+        # Authors get the per-frame views + reactions inline so the
+        # viewer can render "Viewed by N" without a second request.
+        is_author = highlight.author_user_id == ctx.user_id
+        views: dict[str, list[HighlightFrameView]] = {}
+        reactions: dict[str, list[HighlightFrameReaction]] = {}
+        if is_author:
+            repo = self.svc(highlight_service_key)._highlights
+            for f in frames:
+                views[f.id] = await repo.list_views_for_frame(f.id)
+                reactions[f.id] = await repo.list_reactions_for_frame(f.id)
+        people = await self.named_people(
+            [
+                highlight.author_user_id,
+                *(v.viewer_user_id for vs in views.values() for v in vs),
+                *(r.reactor_user_id for rs in reactions.values() for r in rs),
+            ]
+        )
         body = {
-            "highlight": _highlight_dict(highlight),
+            "highlight": _highlight_dict(
+                highlight, author=people[highlight.author_user_id]
+            ),
             "frames": [
                 _frame_dict(f, media_status=_frame_status(statuses, f)) for f in frames
             ],
         }
-        # Authors get the per-frame views + reactions inline so the
-        # viewer can render "Viewed by N" without a second request.
-        if highlight.author_user_id == ctx.user_id:
-            views_by_frame: dict[str, list[dict]] = {}
-            reactions_by_frame: dict[str, list[dict]] = {}
-            repo = self.svc(highlight_service_key)._highlights
-            for f in frames:
-                vs = await repo.list_views_for_frame(f.id)
-                rs = await repo.list_reactions_for_frame(f.id)
-                views_by_frame[f.id] = [
-                    {"viewer_user_id": v.viewer_user_id, "viewed_at": v.viewed_at}
+        if is_author:
+            # Each viewer / reactor carries their name and picture too —
+            # a friend on another household is not in the SPA's cache.
+            body["views"] = {
+                fid: [
+                    {
+                        "viewer_user_id": v.viewer_user_id,
+                        "viewed_at": v.viewed_at,
+                        **people[v.viewer_user_id].to_dict(),
+                    }
                     for v in vs
                 ]
-                reactions_by_frame[f.id] = [
+                for fid, vs in views.items()
+            }
+            body["reactions"] = {
+                fid: [
                     {
                         "reactor_user_id": r.reactor_user_id,
                         "emoji": r.emoji,
                         "reacted_at": r.reacted_at,
+                        **people[r.reactor_user_id].to_dict(),
                     }
                     for r in rs
                 ]
-            body["views"] = views_by_frame
-            body["reactions"] = reactions_by_frame
+                for fid, rs in reactions.items()
+            }
         return self._json(_sign_payload(self.request, body))
 
     async def delete(self) -> web.Response:

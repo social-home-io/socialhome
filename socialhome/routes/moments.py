@@ -41,6 +41,7 @@ from ..domain.report import (
     ReportRateLimitedError,
     ReportTargetType,
 )
+from ..domain.user import PersonSummary
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
 from .base import BaseView
@@ -67,6 +68,7 @@ def _moment_dict(
     *,
     counts: dict[str, int] | None = None,
     media_status: str | None = None,
+    author: PersonSummary | None = None,
 ) -> dict:
     base: dict = {
         "id": m.id,
@@ -100,6 +102,11 @@ def _moment_dict(
         poster = video_poster_path(m.media_url)
         if poster is not None:
             base["media_thumbnail_url"] = poster
+    # Who wrote it, as the caller may see them (``named_people``): the
+    # SPA's household cache only knows local people, so a remote
+    # friend's moment would read "Someone" without this.
+    if author is not None:
+        base["author"] = author.to_dict()
     return base
 
 
@@ -119,6 +126,26 @@ def _moment_status(statuses: dict[str, str], m: Moment) -> str | None:
         return None
     fn = media_filename(m.media_url)
     return statuses.get(fn, READY) if fn else READY
+
+
+async def _moment_list(view: BaseView, moments: list[Moment]) -> list[dict]:
+    """The inbox / archive body: counts, video status and named authors."""
+    counts = await view.svc(moment_repo_key).count_engagement_for(
+        [m.id for m in moments]
+    )
+    statuses = await _video_statuses(view, moments)
+    authors = await view.named_people(m.author_user_id for m in moments)
+    return view.sign_media(
+        [
+            _moment_dict(
+                m,
+                counts=counts.get(m.id),
+                media_status=_moment_status(statuses, m),
+                author=authors[m.author_user_id],
+            )
+            for m in moments
+        ]
+    )
 
 
 def _reaction_dict(r: MomentReaction) -> dict:
@@ -151,22 +178,7 @@ class MomentCollectionView(BaseView):
             before=before,
             limit=limit,
         )
-        repo = self.svc(moment_repo_key)
-        counts = await repo.count_engagement_for([m.id for m in moments])
-        statuses = await _video_statuses(self, moments)
-        return self._json(
-            _sign_payload(
-                self.request,
-                [
-                    _moment_dict(
-                        m,
-                        counts=counts.get(m.id),
-                        media_status=_moment_status(statuses, m),
-                    )
-                    for m in moments
-                ],
-            )
-        )
+        return self._json(await _moment_list(self, moments))
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -214,22 +226,7 @@ class MomentArchiveView(BaseView):
             limit=100,
             tag=tag,
         )
-        repo = self.svc(moment_repo_key)
-        counts = await repo.count_engagement_for([m.id for m in moments])
-        statuses = await _video_statuses(self, moments)
-        return self._json(
-            _sign_payload(
-                self.request,
-                [
-                    _moment_dict(
-                        m,
-                        counts=counts.get(m.id),
-                        media_status=_moment_status(statuses, m),
-                    )
-                    for m in moments
-                ],
-            )
-        )
+        return self._json(await _moment_list(self, moments))
 
 
 class MomentHashtagsView(BaseView):
@@ -272,6 +269,7 @@ class MomentDetailView(BaseView):
         ids = [moment.id, *[r.id for r in replies]]
         counts = await repo.count_engagement_for(ids)
         statuses = await _video_statuses(self, [moment, *replies])
+        authors = await self.named_people(m.author_user_id for m in (moment, *replies))
         return self._json(
             _sign_payload(
                 self.request,
@@ -280,12 +278,14 @@ class MomentDetailView(BaseView):
                         moment,
                         counts=counts.get(moment.id),
                         media_status=_moment_status(statuses, moment),
+                        author=authors[moment.author_user_id],
                     ),
                     "replies": [
                         _moment_dict(
                             r,
                             counts=counts.get(r.id),
                             media_status=_moment_status(statuses, r),
+                            author=authors[r.author_user_id],
                         )
                         for r in replies
                     ],

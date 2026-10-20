@@ -206,11 +206,11 @@ Household-broadcast posts that fan to a 3-hop peer mesh. Replies are themselves 
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/moments` | List visible moments (block-aware, follow-aware). |
+| GET | `/api/moments` | List visible moments (block-aware, follow-aware). Each moment carries `author`: `author` is `{display_name, personal_alias, picture_url, household}` — the name this household holds for the author (a paired household's member included), the caller's nickname for them, a signed picture and the household's name; `display_name` is `null`, never the id, for someone nobody here knows, and `picture_url` is `null` across a guardian block (§CP.F2). Added on read only — the federation payloads are unchanged. |
 | POST | `/api/moments` | Create a moment. Body: `{content, media_url?, media_type?, duration_ms?, parent_moment_id?}`. `media_url`, when present, must be a local upload (`api/media/<name>`) — anything else is `422 INVALID_MEDIA_URL`. |
-| GET | `/api/moments/archive` | Full retention-window list. Optional `?tag=<name>` filters to moments tagged with that hashtag (lowercase, no leading `#`). |
+| GET | `/api/moments/archive` | Full retention-window list. Optional `?tag=<name>` filters to moments tagged with that hashtag (lowercase, no leading `#`). Each moment carries `author`, as on `GET /api/moments`. |
 | GET | `/api/moments/hashtags` | Trending hashtags inside the viewer's visibility window. Returns `{"hashtags": [{"tag", "count"}, …]}`; `?limit=N` (default 20, capped at 50). |
-| GET | `/api/moments/{id}` | Detail incl. replies + reactions. |
+| GET | `/api/moments/{id}` | Detail incl. replies + reactions. The moment and every reply carry `author`, as on `GET /api/moments`. |
 | DELETE | `/api/moments/{id}` | Author or admin delete. |
 | PUT | `/api/moments/{id}/reaction` | Set / change reaction. Body: `{emoji}`. |
 | DELETE | `/api/moments/{id}/reaction` | Clear own reaction. |
@@ -801,8 +801,8 @@ in-process retention scheduler prunes expired and over-quota rows.
 | Method | Path | Purpose |
 |---|---|---|
 | POST   | `/api/highlights/frames` | Create or append today's frame. Body: `{frame_type, media_url, caption_text?, caption_emoji?, duration_ms?, audience_kind?, audience?[]}`. Returns `{highlight, frame}`. `media_url` must be a local upload (`api/media/<name>`) — anything else is `422 INVALID_MEDIA_URL` and nothing is created. |
-| GET    | `/api/highlights` | List highlights visible to the caller (mine + peers'). Returns `[{highlight, frames, unseen_count}]`. |
-| GET    | `/api/highlights/{id}` | Highlight detail with frames. Authors get per-frame `views` and `reactions` keyed by frame id inline. |
+| GET    | `/api/highlights` | List highlights visible to the caller (mine + peers'). Returns `[{highlight, frames, unseen_count}]`; each `highlight` carries `author`: `author` is `{display_name, personal_alias, picture_url, household}` — the name this household holds for the author (a paired household's member included), the caller's nickname for them, a signed picture and the household's name; `display_name` is `null`, never the id, for someone nobody here knows, and `picture_url` is `null` across a guardian block (§CP.F2). Added on read only — the federation payloads are unchanged. |
+| GET    | `/api/highlights/{id}` | Highlight detail with frames; `highlight.author` as on `GET /api/highlights`. Authors get per-frame `views` (`{viewer_user_id, viewed_at, …}`) and `reactions` (`{reactor_user_id, emoji, reacted_at, …}`) keyed by frame id inline; each row also carries that person's `display_name`, `personal_alias`, signed `picture_url` and `household` (same rules as `author`). |
 | DELETE | `/api/highlights/{id}` | Author removes the whole highlight. Cascades to frames / views / reactions. |
 | DELETE | `/api/highlights/frames/{id}` | Author removes one frame. |
 | POST   | `/api/highlights/frames/{id}/view` | Mark frame seen. Authors' own views are silently ignored. |
