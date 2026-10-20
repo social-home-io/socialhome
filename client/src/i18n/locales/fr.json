@@ -1821,6 +1821,7 @@
   "error.local_area_delegated": "Une communauté locale ne peut pas laisser les admins agir pour vous. Désactivez d'abord « Laisser les admins agir pour moi ».",
   "capability.local_communities": "Communautés locales",
   "capability.follower_author_names": "Noms pour les abonnés d’un espace",
+  "capability.follower_names_on_join": "Noms tout de suite pour les nouveaux abonnés",
   "space.settings_page.moderation.queue_meta": "Publications à vérifier, demandes et signalements",
   "space.settings_page.moderation.days": "jours",
   "space.settings_page.danger.summary": "Archiver, transférer ou supprimer",

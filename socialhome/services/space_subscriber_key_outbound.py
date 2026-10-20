@@ -62,6 +62,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -94,6 +95,7 @@ class SpaceSubscriberKeyOutbound:
         "_gfs",
         "_gfs_conn_repo",
         "_http_session",
+        "_on_follower",
         "_own_instance_id",
         "_spaces",
     )
@@ -114,6 +116,14 @@ class SpaceSubscriberKeyOutbound:
         # Until attached, :meth:`reconcile` no-ops.
         self._gfs_conn_repo: AbstractGfsConnectionRepo | None = None
         self._http_session: aiohttp.ClientSession | None = None
+        #: Told about a new follower once their key is sealed (v_61 author
+        #: profile republish).
+        self._on_follower: Callable[[str], Awaitable[None]] | None = None
+
+    def attach_follower_hook(self, hook: Callable[[str], Awaitable[None]]) -> None:
+        """Called with the space id after a follower's content key was
+        sealed and relayed (``SpaceAuthorProfileOutbound.on_new_follower``)."""
+        self._on_follower = hook
 
     def attach_identity(self, *, own_instance_id: str) -> None:
         self._own_instance_id = own_instance_id
@@ -175,6 +185,9 @@ class SpaceSubscriberKeyOutbound:
             keywrap_pub_hex=str(sub.get("keywrap_public_key") or ""),
             keywrap_sig=str(sub.get("keywrap_sig") or ""),
         )
+        # After the key went out: the follower can open the profiles now.
+        if self._on_follower is not None:
+            await self._on_follower(space_id)
 
     async def _seal_and_relay(
         self,

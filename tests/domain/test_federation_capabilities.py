@@ -8,7 +8,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 60
+    assert fc.OURS == 61
 
 
 def test_local_community_area_capability_threshold():
@@ -23,9 +23,14 @@ def test_local_community_area_capability_threshold():
     assert fc.features_missing_below(58) == [
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
-    assert fc.features_missing_below(59) == ["Names for a space's followers"]
-    assert fc.features_missing_below(60) == []
+    assert fc.features_missing_below(59) == [
+        "Names for a space's followers",
+        "Names for new followers right away",
+    ]
+    assert fc.features_missing_below(60) == ["Names for new followers right away"]
+    assert fc.features_missing_below(61) == []
     assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
 
 
@@ -43,10 +48,12 @@ def test_member_picture_reset_sync_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
     assert fc.features_missing_below(58) == [
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
 
@@ -65,6 +72,7 @@ def test_multi_gfs_publish_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
     assert "Posting to every GFS a space is listed on" not in (
         fc.features_missing_below(57)
@@ -87,6 +95,7 @@ def test_sync_series_rows_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
 
@@ -104,6 +113,7 @@ def test_space_chat_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
@@ -111,6 +121,7 @@ def test_space_chat_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
     assert fc.space_features_missing_below(54) == [
         "Chat in spaces",
@@ -139,6 +150,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
@@ -147,6 +159,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
 
 
@@ -167,6 +180,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
@@ -176,6 +190,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
 
 
@@ -195,6 +210,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
 
 
@@ -233,6 +249,7 @@ def test_space_authority_rotation_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -249,6 +266,7 @@ def test_space_authority_rotation_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
 
 
@@ -283,6 +301,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
 
 
@@ -803,6 +822,7 @@ def test_forwarded_role_change_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
 
 
@@ -832,6 +852,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
 
 
@@ -855,6 +876,7 @@ def test_member_gfs_publish_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
 
 
@@ -877,6 +899,7 @@ def test_strict_member_publish_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
 
 
@@ -899,6 +922,7 @@ def test_private_channels_capability_threshold():
         "Removed profile pictures in space catch-up",
         "Local communities",
         "Names for a space's followers",
+        "Names for new followers right away",
     ]
 
 
@@ -964,6 +988,7 @@ _PINNED_FEATURE_KEYS = {
     58: "synced_picture_resets",
     59: "local_communities",
     60: "follower_author_names",
+    61: "follower_names_on_join",
 }
 
 
@@ -1008,6 +1033,22 @@ def test_space_author_profile_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.features_missing_below(59) == ["Names for a space's followers"]
+    assert fc.features_missing_below(59) == [
+        "Names for a space's followers",
+        "Names for new followers right away",
+    ]
     assert fc.space_feature_keys_missing_below(59) == ["follower_author_names"]
     assert fc.CAPABILITY_FEATURE_KEYS[60] == "follower_author_names"
+
+
+def test_follower_joined_capability_threshold():
+    """v_61 — ``SPACE_FOLLOWER_JOINED``: the host's nudge to republish author
+    profiles for a new follower. Gated per member household with a degraded
+    fallback (profiles on the next post), labelled, not space-scoped."""
+    assert fc.FederationCapability.MIN_FOR_FOLLOWER_JOINED == 61
+    assert fc.FederationCapability.MIN_FOR_FOLLOWER_JOINED <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_FOLLOWER_JOINED not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(60) == ["Names for new followers right away"]
+    assert fc.CAPABILITY_FEATURE_KEYS[61] == "follower_names_on_join"

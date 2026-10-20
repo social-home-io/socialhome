@@ -781,3 +781,29 @@ async def test_reconcile_space_everywhere_skips_space_without_subscribers(recon_
 
     assert recon_env["session"].gets == []
     assert recon_env["gfs"].calls == []
+
+
+async def test_the_follower_hook_runs_after_the_key_went_out(env):
+    """v_61: author profiles are republished only once the new follower
+    holds the content key to open them — after the handoff relay."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
+    order: list[str] = []
+    real_publish = env["gfs"].publish_space_event
+
+    async def _publish(*a, **kw):
+        order.append("handoff")
+        return await real_publish(*a, **kw)
+
+    env["gfs"].publish_space_event = _publish
+
+    async def _hook(space_id):
+        order.append(f"follower:{space_id}")
+
+    env["svc"].attach_follower_hook(_hook)
+    await env["svc"].handle(
+        _new_subscriber_frame(
+            "sp-pub", sub_iid, id_kp.public_key, kw_kp.public_key, keywrap_sig
+        )
+    )
+    assert order == ["handoff", "follower:sp-pub"]

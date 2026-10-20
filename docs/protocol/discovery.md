@@ -1523,9 +1523,21 @@ relay as every other item:
 - **The GFS sees ciphertext only** — the generic `space_item`, padded to a
   size bucket like any item (`tests/protocol/test_gfs_member_publish_blind.py`).
 - **When.** Once per author per space per content-key epoch, after a
-  profile change, and on the author's next post a day after the last one
-  (so followers who subscribed since learn the name). Never inlined in a
-  post. Only for a public / global space with `allow_subscribers` on.
+  profile change, and on the author's next post a day after the last one.
+  Never inlined in a post. Only for a public / global space with
+  `allow_subscribers` on.
+- **A new follower (v_61).** When the GFS tells the host a follower
+  subscribed (`new_subscriber`), the host first seals the content key to
+  them, then republishes its own authors' profiles and sends
+  `SPACE_FOLLOWER_JOINED` (the routing `space_id` only) to its member
+  households at v_61+; each republishes the profile of every local user with
+  a post in the space. A household takes the nudge only from the space's
+  host, and republishes a space at most once per 30 s (a follower inside that window
+  is covered by one trailing republish when it ends). The new
+  follower names the authors within seconds. The GFS learns nothing new:
+  it already notified the host of the subscribe, and what follows are the
+  usual ciphertext `space_item`s (identified by household in trusted mode
+  exactly as every member item is, anonymous in strict mode).
 - **Receiver.** Every check of a generic item (decrypt, author signature +
   self-cert, origin, writer cert with the v2 binding naming the author,
   epoch), then: the item must be about its own author; the content must
@@ -1565,6 +1577,16 @@ sequenceDiagram
   F->>F: decrypt → author_sig + self-cert → writer cert binds author → about itself?
   F->>F: decode + cap content → keep in space_author_profiles if ts newer
   F->>F: GET /api/spaces/{id}/authors → post cards show name, picture, bio
+
+  Note over F,A: A new follower (v_61)
+  participant H as Host household
+  F->>G: subscribe
+  G->>H: new_subscriber
+  H->>G: sealed content-key handoff (to F only)
+  H->>G: its authors' author_profile items (ciphertext)
+  H->>A: SPACE_FOLLOWER_JOINED {space_id} (members at v_61+)
+  A->>G: its authors' author_profile items (ciphertext)
+  G->>F: relay → F names every author at once
 ```
 
 ### Comments, reactions and own edits / deletes (v_49)

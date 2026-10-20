@@ -170,6 +170,7 @@ class AbstractSpacePostRepo(Protocol):
     ) -> bool: ...
 
     async def list_space_media_urls(self, space_id: str) -> list[str]: ...
+    async def list_author_ids(self, space_id: str) -> set[str]: ...
     async def add_comment(self, comment: Comment, *, space_id: str) -> bool: ...
     async def get_comment(self, comment_id: str) -> Comment | None: ...
     async def list_comments(self, post_id: str) -> list[Comment]: ...
@@ -512,6 +513,15 @@ class SqliteSpacePostRepo:
             )
             > 0
         )
+
+    async def list_author_ids(self, space_id: str) -> set[str]:
+        """Everyone with a live post in *space_id* — who a follower may need
+        named (the v_61 author profile republish)."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT author FROM space_posts WHERE space_id=? AND deleted=0",
+            (space_id,),
+        )
+        return {str(r["author"]) for r in rows}
 
     async def list_space_media_urls(self, space_id: str) -> list[str]:
         """Every ``api/media/<file>`` URL a space's posts + image comments

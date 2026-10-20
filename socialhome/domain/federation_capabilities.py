@@ -914,7 +914,16 @@ from __future__ import annotations
 #:   households: none below v_60, or nothing is published (followers keep
 #:   reading "Someone"). Space-scoped; labelled "Names for a space's
 #:   followers".
-OURS: int = 60
+#: * **v_61** (2026-10-20) — ``SPACE_FOLLOWER_JOINED``: when the GFS tells
+#:   the host a follower subscribed (``new_subscriber``, after the content
+#:   key handoff), the host republishes its own authors' profiles and sends
+#:   this content-free nudge to its member households, which republish
+#:   theirs — a new follower names a space's authors within seconds, not on
+#:   their next post. **Gated, degraded fallback**: a member household
+#:   below v_61 is not sent it; its authors' profiles reach the follower on
+#:   their next post (≤ a day later), as before. Not space-scoped, not
+#:   labelled (nothing stops working).
+OURS: int = 61
 
 
 class FederationCapability:
@@ -1407,6 +1416,10 @@ class FederationCapability:
     #: households (followers are anonymous); space-scoped.
     MIN_FOR_SPACE_AUTHOR_PROFILE = 60
 
+    #: v_61 — ``SPACE_FOLLOWER_JOINED``: the host's nudge to republish
+    #: author profiles for a new GFS follower. Gated per member household.
+    MIN_FOR_FOLLOWER_JOINED = 61
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1632,6 +1645,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE,
         "Names for a space's followers",
     ),
+    (
+        FederationCapability.MIN_FOR_FOLLOWER_JOINED,
+        "Names for new followers right away",
+    ),
 ]
 
 
@@ -1703,6 +1720,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC: "synced_picture_resets",
     FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA: "local_communities",
     FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE: "follower_author_names",
+    FederationCapability.MIN_FOR_FOLLOWER_JOINED: "follower_names_on_join",
 }
 
 
