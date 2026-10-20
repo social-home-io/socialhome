@@ -458,3 +458,57 @@ async def test_visibility_hides_guardian_blocked_authors_both_ways(db, repo):
         "UPDATE users SET child_protection_enabled=0 WHERE user_id='u-kid'"
     )
     assert len(await repo.list_visible_to("u-kid")) == 2
+
+
+async def _one(repo, author: str, kind: HighlightAudience, audience=(), days=7):
+    return await repo.find_or_create_today(
+        author_user_id=author,
+        audience_kind=kind,
+        audience=tuple(audience),
+        highlight_date="2026-05-03",
+        expires_at=_expires(days),
+    )
+
+
+async def test_get_readable_follows_the_inbox_audience(db, repo):
+    """``get_readable`` admits exactly whom the inbox admits: the author,
+    a listed user of a ``users`` highlight, anyone for ``all_paired``."""
+    for uid, name in (("u1", "pascal"), ("u2", "maria"), ("u3", "lena")):
+        await _seed_user(db, uid, name)
+    only_maria = await _one(repo, "u1", HighlightAudience.USERS, ("u2",))
+    assert (await repo.get_readable(only_maria.id, "u1")).id == only_maria.id
+    assert (await repo.get_readable(only_maria.id, "u2")).id == only_maria.id
+    assert await repo.get_readable(only_maria.id, "u3") is None
+    assert await repo.get_readable("no-such-id", "u2") is None
+    # Waiving the audience (a share the viewer can read) admits u3.
+    waived = await repo.get_readable(only_maria.id, "u3", require_audience=False)
+    assert waived is not None and waived.id == only_maria.id
+
+
+async def test_get_readable_never_waives_blocks_or_expiry(db, repo):
+    """A waived audience still hides an expired highlight, a personally
+    blocked author and a guardian-blocked author (§CP.F2)."""
+    for uid, name in (("u1", "pascal"), ("u2", "maria"), ("u-kid", "kid")):
+        await _seed_user(db, uid, name)
+    live = await _one(repo, "u1", HighlightAudience.ALL_PAIRED)
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?, ?)",
+        ("u2", "u1"),
+    )
+    await db.enqueue(
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id='u-kid'"
+    )
+    await db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES('u-kid', 'u1', 'u-guardian')"
+    )
+    for viewer in ("u2", "u-kid"):
+        for require in (True, False):
+            assert (
+                await repo.get_readable(live.id, viewer, require_audience=require)
+                is None
+            )
+    await _seed_user(db, "u3", "lena")
+    gone = await _one(repo, "u3", HighlightAudience.ALL_PAIRED, days=-1)
+    assert await repo.get_readable(gone.id, "u1", require_audience=False) is None
+    assert await repo.get_readable(gone.id, "u3") is None

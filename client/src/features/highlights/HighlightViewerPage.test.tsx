@@ -2,12 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent, waitFor } from '@testing-library/preact'
 
 const wsHandlers = vi.hoisted(() => new Map<string, (e: { data: unknown }) => void>())
+const routeQuery = vi.hoisted(() => ({ current: {} as Record<string, string> }))
 
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }))
 vi.mock('preact-iso', () => ({
-  useRoute: () => ({ params: { highlightId: 'h1' } }),
+  useRoute: () => ({ params: { highlightId: 'h1' }, query: routeQuery.current }),
   useLocation: () => ({ route: vi.fn(), url: '/' }),
 }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
@@ -110,5 +111,37 @@ describe('HighlightViewerPage people', () => {
     expect(detailCalls).toBe(2)
     expect(document.body.textContent).not.toContain('ru-chidi')
     expect(container.textContent).not.toContain('Someone')
+  })
+})
+
+describe('HighlightViewerPage opened from a share card', () => {
+  beforeEach(() => {
+    wsHandlers.clear()
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset().mockResolvedValue({})
+    vi.mocked(api.put).mockReset().mockResolvedValue({})
+    currentUser.value = { user_id: 'uid-me', username: 'me', display_name: 'Me' } as User
+    routeQuery.current = { via_post: 'p 1' }
+  })
+
+  // The share post is what lets a space member outside the audience read
+  // the highlight — the detail read, the view mark and a reaction all
+  // carry it, or the server answers 404.
+  it('passes the share post on the detail read, view and reaction', async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => path === '/api/users' ? [] : {
+      highlight: highlight('ru-amaka', { author: { display_name: 'Amaka', picture_url: null } }),
+      frames,
+    })
+    const { findByRole } = render(<HighlightViewerPage />)
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+      '/api/highlights/frames/f1/view?via_post=p%201', {},
+    ))
+    expect(api.get).toHaveBeenCalledWith('/api/highlights/h1?via_post=p%201')
+    fireEvent.click(await findByRole('button', { name: /react/i }))
+    fireEvent.click(await findByRole('button', { name: '❤️' }))
+    await waitFor(() => expect(api.put).toHaveBeenCalledWith(
+      '/api/highlights/frames/f1/reaction?via_post=p%201', { emoji: '❤️' },
+    ))
+    routeQuery.current = {}
   })
 })

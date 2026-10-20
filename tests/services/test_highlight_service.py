@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,12 +14,14 @@ from socialhome.domain.events import (
     HighlightFrameViewed,
 )
 from socialhome.domain.highlight import HighlightAudience, HighlightFrameType
+from socialhome.domain.post import Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.highlight_service import (
     MAX_FRAMES_PER_HIGHLIGHT,
+    NOT_FOUND_MESSAGE,
     HighlightForbiddenError,
     HighlightFrameLimitError,
     HighlightNotFoundError,
@@ -259,7 +262,7 @@ async def test_explicit_audience_kind_overrides_prefs(db, svc):
     assert highlight.audience == ("inst-b",)
 
 
-async def test_get_with_frames_and_get_frame(db, svc):
+async def test_get_for_viewer_and_get_frame(db, svc):
     service, _ = svc
     await _seed_user(db, "u1", "pascal")
     highlight, frame = await service.create_or_append_frame(
@@ -267,15 +270,181 @@ async def test_get_with_frames_and_get_frame(db, svc):
         frame_type=HighlightFrameType.IMAGE,
         media_url="/api/media/x.webp",
     )
-    pair = await service.get_with_frames(highlight.id)
-    assert pair is not None
-    s, frames = pair
+    s, frames = await service.get_for_viewer(highlight.id, "u1")
     assert s.id == highlight.id and len(frames) == 1
     f = await service.get_frame(frame.id)
     assert f is not None and f.id == frame.id
-    # Missing ids return None / empty.
-    assert await service.get_with_frames("missing") is None
+    with pytest.raises(HighlightNotFoundError, match=NOT_FOUND_MESSAGE):
+        await service.get_for_viewer("missing", "u1")
     assert await service.get_frame("missing") is None
+
+
+async def _users_only(service, audience: tuple[str, ...] = ()):
+    return await service.create_or_append_frame(
+        author_user_id="u1",
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/x.webp",
+        audience_kind=HighlightAudience.USERS,
+        audience=audience,
+    )
+
+
+async def test_a_non_reader_gets_not_found_and_a_reader_forbidden(db, svc):
+    """Someone who may not read the highlight learns nothing — the
+    unknown-id error; a reader who is not the author gets the 403."""
+    service, _ = svc
+    for uid, name in (("u1", "pascal"), ("u2", "maria"), ("u3", "lena")):
+        await _seed_user(db, uid, name)
+    highlight, frame = await _users_only(service, ("u2",))
+    for actor in ("u2", "u3"):
+        expected = HighlightForbiddenError if actor == "u2" else HighlightNotFoundError
+        with pytest.raises(expected):
+            await service.delete_highlight(
+                highlight_id=highlight.id, actor_user_id=actor
+            )
+        with pytest.raises(expected):
+            await service.delete_frame(frame_id=frame.id, actor_user_id=actor)
+        with pytest.raises(expected):
+            await service.share_to_feed(
+                highlight_id=highlight.id,
+                actor_user_id=actor,
+                scope="household",
+                space_id=None,
+                note=None,
+                feed_service=None,
+                space_service=None,
+            )
+    with pytest.raises(HighlightNotFoundError, match=NOT_FOUND_MESSAGE):
+        await service.get_for_viewer(highlight.id, "u3")
+
+
+def _share_post(post_id: str, highlight_id: str, *, author: str = "u1", **kw) -> Post:
+    return Post(
+        id=post_id,
+        author=author,
+        type=PostType.HIGHLIGHT_SHARE,
+        created_at=datetime.now(UTC),
+        linked_highlight_id=highlight_id,
+        **kw,
+    )
+
+
+class _SpacePosts:
+    def __init__(self, posts: dict[str, tuple[str, Post]]) -> None:
+        self._posts = posts
+
+    async def get(self, post_id: str):
+        return self._posts.get(post_id)
+
+
+class _Spaces:
+    """The three reads the share path makes of the space repo."""
+
+    def __init__(self, spaces: dict, seats: set, banned: set = frozenset()) -> None:
+        self._spaces, self._seats, self._banned = spaces, seats, banned
+
+    async def get(self, space_id: str):
+        return self._spaces.get(space_id)
+
+    async def get_member(self, space_id: str, user_id: str):
+        return object() if (space_id, user_id) in self._seats else None
+
+    async def is_banned(self, space_id: str, user_id: str) -> bool:
+        return (space_id, user_id) in self._banned
+
+
+class _FeedPosts:
+    def __init__(self, posts: dict[str, Post]) -> None:
+        self._posts = posts
+
+    async def get(self, post_id: str):
+        return self._posts.get(post_id)
+
+
+async def test_space_share_path_needs_a_live_seat_in_a_live_space(db):
+    for uid, name in (("u1", "pascal"), ("u2", "maria")):
+        await _seed_user(db, uid, name)
+    space_posts: dict[str, tuple[str, Post]] = {}
+    spaces = _Spaces(
+        {
+            "sp-live": SimpleNamespace(dissolved=False),
+            "sp-gone": SimpleNamespace(dissolved=True),
+            "sp-ban": SimpleNamespace(dissolved=False),
+        },
+        seats={("sp-live", "u2"), ("sp-gone", "u2"), ("sp-ban", "u2")},
+        banned={("sp-ban", "u2")},
+    )
+    service = HighlightService(
+        SqliteHighlightRepo(db),
+        SqliteUserRepo(db),
+        EventBus(),
+        post_repo=_FeedPosts({}),
+        space_post_repo=_SpacePosts(space_posts),
+        space_repo=spaces,
+    )
+    highlight, frame = await _users_only(service)
+    for space_id in ("sp-live", "sp-gone", "sp-ban", "sp-missing"):
+        space_posts[f"p-{space_id}"] = (
+            space_id,
+            _share_post(f"p-{space_id}", highlight.id),
+        )
+    got, _ = await service.get_for_viewer(highlight.id, "u2", via_post_id="p-sp-live")
+    assert got.id == highlight.id
+    for post_id in ("p-sp-gone", "p-sp-ban", "p-sp-missing", "p-nowhere"):
+        with pytest.raises(HighlightNotFoundError, match=NOT_FOUND_MESSAGE):
+            await service.get_for_viewer(highlight.id, "u2", via_post_id=post_id)
+    # The frame actions follow the same share.
+    await service.mark_frame_viewed(
+        frame_id=frame.id, viewer_user_id="u2", via_post_id="p-sp-live"
+    )
+    await service.react_to_frame(
+        frame_id=frame.id, reactor_user_id="u2", emoji="🔥", via_post_id="p-sp-live"
+    )
+    await service.clear_reaction(
+        frame_id=frame.id, reactor_user_id="u2", via_post_id="p-sp-live"
+    )
+
+
+async def test_household_share_path_refuses_unshareable_posts(db):
+    """Deleted, wrong-type, other-highlight and other-author posts open nothing."""
+    for uid, name in (("u1", "pascal"), ("u2", "maria")):
+        await _seed_user(db, uid, name)
+    posts: dict[str, Post] = {}
+    service = HighlightService(
+        SqliteHighlightRepo(db),
+        SqliteUserRepo(db),
+        EventBus(),
+        post_repo=_FeedPosts(posts),
+    )
+    highlight, _ = await _users_only(service)
+    posts["ok"] = _share_post("ok", highlight.id)
+    posts["deleted"] = _share_post("deleted", highlight.id, deleted=True)
+    posts["other-author"] = _share_post("other-author", highlight.id, author="u2")
+    posts["other-highlight"] = _share_post("other-highlight", "h-else")
+    posts["wrong-type"] = Post(
+        id="wrong-type",
+        author="u1",
+        type=PostType.TEXT,
+        created_at=datetime.now(UTC),
+        linked_highlight_id=highlight.id,
+    )
+    got, _ = await service.get_for_viewer(highlight.id, "u2", via_post_id="ok")
+    assert got.id == highlight.id
+    for post_id in ("deleted", "other-author", "other-highlight", "wrong-type"):
+        with pytest.raises(HighlightNotFoundError):
+            await service.get_for_viewer(highlight.id, "u2", via_post_id=post_id)
+    # A share never opens an unknown highlight.
+    with pytest.raises(HighlightNotFoundError):
+        await service.get_for_viewer("missing", "u2", via_post_id="ok")
+
+
+async def test_unwired_share_path_opens_nothing(db, svc):
+    service, _ = svc
+    for uid, name in (("u1", "pascal"), ("u2", "maria")):
+        await _seed_user(db, uid, name)
+    highlight, _ = await _users_only(service)
+    with pytest.raises(HighlightNotFoundError):
+        await service.get_for_viewer(highlight.id, "u2", via_post_id="any-post")
 
 
 async def test_share_to_feed_household(db, svc):

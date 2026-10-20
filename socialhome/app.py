@@ -3094,6 +3094,9 @@ def create_app(config: Config | None = None) -> web.Application:
         bus,
         media_dir=pathlib.Path(config.media_path),
         media_refs=repos.media_reference,
+        post_repo=repos.post,
+        space_post_repo=repos.space_post,
+        space_repo=repos.space,
     )
     highlight_retention_scheduler = HighlightRetentionScheduler(highlight_service)
     # Public-publish service. ``attach_session`` + ``attach_identity``

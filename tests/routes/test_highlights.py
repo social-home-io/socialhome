@@ -7,8 +7,10 @@ from datetime import UTC, datetime, timedelta
 from socialhome.app_keys import (
     federation_repo_key,
     federation_service_key,
+    feed_service_key,
     highlight_repo_key,
 )
+from socialhome.auth import sha256_token_hash
 from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -693,3 +695,244 @@ async def test_back_channel_payloads_carry_no_names(client, monkeypatch):
         "emoji",
         "occurred_at",
     }
+
+
+# ─── Audience gate (GET /api/highlights/{id} + frame sub-resources) ──────
+
+
+async def _local_user(client, username: str) -> tuple[str, dict]:
+    """Seed a second local member with their own token."""
+    uid = f"uid-{username}"
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, state) "
+        "VALUES(?, ?, ?, 'active')",
+        (username, uid, username.title()),
+    )
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
+        "VALUES(?, ?, 't', ?)",
+        (f"t-{username}", uid, sha256_token_hash(f"tok-{username}")),
+    )
+    return uid, {"Authorization": f"Bearer tok-{username}"}
+
+
+async def _highlight_for(client, audience: list[str]) -> tuple[str, str]:
+    """The admin posts a highlight only ``audience`` may see."""
+    r = await client.post(
+        "/api/highlights/frames",
+        json={
+            "frame_type": "image",
+            "media_url": "/api/media/x.webp",
+            "audience_kind": "users",
+            "audience": audience,
+        },
+        headers=_auth(client),
+    )
+    assert r.status == 201, await r.text()
+    body = await r.json()
+    return body["highlight"]["id"], body["frame"]["id"]
+
+
+async def _not_found(client, headers: dict) -> dict:
+    r = await client.get("/api/highlights/no-such-highlight", headers=headers)
+    assert r.status == 404
+    return await r.json()
+
+
+async def test_detail_outside_the_audience_is_the_same_404_as_unknown(client):
+    """Unguessable ids are not authorization: a member outside a
+    ``users`` audience gets exactly the unknown-id 404."""
+    bob_uid, bob = await _local_user(client, "bob")
+    _, carol = await _local_user(client, "carol")
+    highlight_id, _ = await _highlight_for(client, [bob_uid])
+
+    url = f"/api/highlights/{highlight_id}"
+    assert (await client.get(url, headers=bob)).status == 200
+    hidden = await client.get(url, headers=carol)
+    assert hidden.status == 404
+    assert await hidden.json() == await _not_found(client, carol)
+
+
+async def test_detail_hides_a_blocked_or_guardian_blocked_author(client):
+    """The inbox's block rules hold on the detail read too."""
+    bob_uid, bob = await _local_user(client, "bob")
+    kid_uid, kid = await _local_user(client, "kid")
+    await client._db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?, ?)",
+        (bob_uid, client._uid),
+    )
+    await client._db.enqueue(
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id=?", (kid_uid,)
+    )
+    await client._db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES(?, ?, ?)",
+        (kid_uid, client._uid, client._uid),
+    )
+    highlight_id, _ = await _highlight_for(client, [bob_uid, kid_uid])
+    for headers in (bob, kid):
+        r = await client.get(f"/api/highlights/{highlight_id}", headers=headers)
+        assert r.status == 404
+
+
+async def test_detail_of_an_expired_highlight_is_404(client):
+    await _remote_amaka(client)
+    await _remote_highlight(client, "h-old", "ru-amaka")
+    await client._db.enqueue(
+        "UPDATE highlights SET expires_at=? WHERE id='h-old'",
+        ((datetime.now(UTC) - timedelta(hours=1)).isoformat(),),
+    )
+    r = await client.get("/api/highlights/h-old", headers=_auth(client))
+    assert r.status == 404
+
+
+async def test_frame_sub_resources_outside_the_audience_are_404(client):
+    """View, reaction, DM reply, delete and share answer a member outside
+    the audience the same 404 as an unknown id — and record nothing."""
+    bob_uid, _ = await _local_user(client, "bob")
+    _, carol = await _local_user(client, "carol")
+    highlight_id, frame_id = await _highlight_for(client, [bob_uid])
+    calls = [
+        ("post", f"/api/highlights/frames/{frame_id}/view", {}),
+        ("put", f"/api/highlights/frames/{frame_id}/reaction", {"emoji": "🔥"}),
+        ("delete", f"/api/highlights/frames/{frame_id}/reaction", None),
+        (
+            "post",
+            f"/api/highlights/frames/{frame_id}/dm-reply",
+            {"conversation_id": "c1", "content": "hi"},
+        ),
+        ("delete", f"/api/highlights/frames/{frame_id}", None),
+        ("delete", f"/api/highlights/{highlight_id}", None),
+        ("post", f"/api/highlights/{highlight_id}/share", {"scope": "household"}),
+    ]
+    for method, url, body in calls:
+        r = await getattr(client, method)(url, json=body, headers=carol)
+        assert r.status == 404, (method, url, r.status)
+        unknown = url.replace(frame_id, "no-such-frame").replace(
+            highlight_id, "no-such-highlight"
+        )
+        u = await getattr(client, method)(unknown, json=body, headers=carol)
+        assert u.status == 404, (method, unknown)
+        assert await r.json() == await u.json(), (method, url)
+    repo = client.app[highlight_repo_key]
+    assert await repo.list_views_for_frame(frame_id) == []
+    assert await repo.list_reactions_for_frame(frame_id) == []
+    assert await repo.get_frame(frame_id) is not None
+
+
+async def _share(client, highlight_id: str, body: dict) -> str:
+    r = await client.post(
+        f"/api/highlights/{highlight_id}/share", json=body, headers=_auth(client)
+    )
+    assert r.status == 201, await r.text()
+    return (await r.json())["post_id"]
+
+
+async def _space_with(client, seats: dict[str, str]) -> str:
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Trip Group", "space_type": "private"},
+        headers=_auth(client),
+    )
+    assert r.status == 201, await r.text()
+    space_id = (await r.json())["id"]
+    for uid, role in seats.items():
+        await client._db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, ?)",
+            (space_id, uid, role),
+        )
+    return space_id
+
+
+async def test_space_share_opens_the_highlight_to_seated_readers(client):
+    """A highlight shared into a space reads for every seat — a follower
+    (subscriber) included — through that post; not without it, and not
+    for someone with no seat."""
+    member_uid, member = await _local_user(client, "member")
+    follower_uid, follower = await _local_user(client, "follower")
+    _, outsider = await _local_user(client, "outsider")
+    space_id = await _space_with(
+        client, {member_uid: "member", follower_uid: "subscriber"}
+    )
+    highlight_id, frame_id = await _highlight_for(client, [])
+    post_id = await _share(
+        client, highlight_id, {"scope": "space", "space_id": space_id}
+    )
+    url = f"/api/highlights/{highlight_id}"
+    for headers in (member, follower):
+        assert (await client.get(url, headers=headers)).status == 404
+        r = await client.get(f"{url}?via_post={post_id}", headers=headers)
+        assert r.status == 200, await r.text()
+        body = await r.json()
+        assert body["frames"][0]["id"] == frame_id
+        assert "views" not in body
+    r = await client.get(f"{url}?via_post={post_id}", headers=outsider)
+    assert r.status == 404
+    assert await r.json() == await _not_found(client, outsider)
+    # The share opens the frame sub-resources too.
+    r = await client.post(
+        f"/api/highlights/frames/{frame_id}/view?via_post={post_id}", headers=member
+    )
+    assert r.status == 200
+    views = await client.app[highlight_repo_key].list_views_for_frame(frame_id)
+    assert [v.viewer_user_id for v in views] == [member_uid]
+
+
+async def test_household_share_opens_the_highlight_to_members(client):
+    _, carol = await _local_user(client, "carol")
+    highlight_id, _ = await _highlight_for(client, [])
+    post_id = await _share(client, highlight_id, {"scope": "household"})
+    r = await client.get(
+        f"/api/highlights/{highlight_id}?via_post={post_id}", headers=carol
+    )
+    assert r.status == 200, await r.text()
+
+
+async def test_share_path_refuses_forged_deleted_and_mismatched_posts(client):
+    """Only a live share post by the highlight's own author opens it, and
+    the author's block rules still apply through it."""
+    carol_uid, carol = await _local_user(client, "carol")
+    bob_uid, bob = await _local_user(client, "bob")
+    highlight_id, _ = await _highlight_for(client, [])
+    feed = client.app[feed_service_key]
+    forged = await feed.create_post(
+        author_user_id=carol_uid,
+        type="highlight_share",
+        content=None,
+        linked_highlight_id=highlight_id,
+    )
+    url = f"/api/highlights/{highlight_id}"
+    for post_id in (forged.id, "no-such-post"):
+        r = await client.get(f"{url}?via_post={post_id}", headers=bob)
+        assert r.status == 404, post_id
+    # A share of the author's OTHER highlight does not open this one.
+    now = datetime.now(UTC)
+    await client.app[highlight_repo_key].save_highlight(
+        Highlight(
+            id="h-other",
+            author_user_id=client._uid,
+            highlight_date=(now - timedelta(days=1)).date().isoformat(),
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(days=1)).isoformat(),
+        )
+    )
+    other = await feed.create_post(
+        author_user_id=client._uid,
+        type="highlight_share",
+        content=None,
+        linked_highlight_id="h-other",
+    )
+    r = await client.get(f"{url}?via_post={other.id}", headers=bob)
+    assert r.status == 404
+    real = await _share(client, highlight_id, {"scope": "household"})
+    assert (await client.get(f"{url}?via_post={real}", headers=bob)).status == 200
+    # Blocking the author closes the share path too.
+    await client._db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?, ?)",
+        (bob_uid, client._uid),
+    )
+    assert (await client.get(f"{url}?via_post={real}", headers=bob)).status == 404
+    # A deleted share post no longer opens it.
+    r = await client.delete(f"/api/feed/posts/{real}", headers=_auth(client))
+    assert r.status in (200, 204), await r.text()
+    assert (await client.get(f"{url}?via_post={real}", headers=carol)).status == 404
