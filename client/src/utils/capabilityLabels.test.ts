@@ -17,7 +17,7 @@ describe('featureLabels', () => {
     expect(featureLabels(
       ['Bids and offers in the bazaar', 'Space moderators'],
       ['bazaar_bids', 'space_moderators'],
-    )).toEqual(['Gebote im Basar', 'Moderatoren in Räumen'])
+    )).toEqual(['Gebote im Basar', 'Moderatoren in Spaces'])
   })
 
   it('falls back to the English label for a slug this build does not know', async () => {
@@ -25,7 +25,7 @@ describe('featureLabels', () => {
     expect(featureLabels(
       ['Something from a newer server', 'Space moderators'],
       ['from_the_future', 'space_moderators'],
-    )).toEqual(['Something from a newer server', 'Moderatoren in Räumen'])
+    )).toEqual(['Something from a newer server', 'Moderatoren in Spaces'])
   })
 
   it('falls back to the labels when the server sent no slugs', () => {

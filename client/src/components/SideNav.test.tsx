@@ -464,7 +464,7 @@ describe('SideNav in German', () => {
     const headers = Array.from(container.querySelectorAll('.sh-sidenav-group-header'))
       .map((el) => el.textContent?.trim())
     expect(headers).toEqual(['Zuhause', 'Reden', 'Entdecken', 'Einstellungen'])
-    for (const label of ['Kalender', 'Organisieren', 'Chats', 'Räume', 'Freunde',
+    for (const label of ['Kalender', 'Organize', 'Chats', 'Spaces', 'Freunde',
       'Persönlich', 'Jugendschutz', 'Verbindungen']) {
       expect(getByText(label).closest('a'), label).toBeTruthy()
     }

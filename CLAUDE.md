@@ -241,6 +241,36 @@ Refs: `client/src/baseUrl.ts` (`basePath`, `addBase`, `stripBase`),
 `socialhome/routes/spa.py` (`SpaIndexView` rewrites `<base href>`),
 `socialhome/auth.py` (`HaIngressStrategy` accepts the ingress headers).
 
+### UI strings and translations
+
+English (`client/src/i18n/locales/en.json`) is the source; de, nl, fr and
+es follow it. Any PR that adds or changes a key translates it (or lists it
+in `client/scripts/i18n-untranslated.json` for Weblate, see
+`docs/testing.md`).
+
+**Words come from the shared glossary.** The app and the website
+(`social-home.io`) use the same words, kept in
+[`social-home-io/translations`](https://github.com/social-home-io/translations).
+Clone it next to this repo before translating:
+
+```sh
+git clone https://github.com/social-home-io/translations.git ../translations
+```
+
+Follow `../translations/GUIDE.md` (register, names that stay, typography,
+security wording) and `../translations/glossary/<locale>.md`. The glossary
+wins over an existing string; when it is wrong, change it there first,
+then the app and the site. The essentials:
+
+- German and Dutch say du / je, French vous, Spanish tú.
+- Never translated: Social Home, Home Assistant, GFS, Highlights,
+  Momentum, Organize, Apps, Stickies.
+- A space is "Space" in German and "space" in Dutch, never Raum / ruimte.
+- Paired households: gekoppelt (de), gekoppeld (nl), jumelé (fr). Never
+  "verbunden" or "associé", which collide with Connections.
+- No "end-to-end" in any language: "encrypted home to home".
+- Translator hints for Weblate go in `locales/_notes.json`.
+
 ### Visually verifying UI changes
 
 **Every change that touches the SPA — layout, components, CSS, copy, dialog

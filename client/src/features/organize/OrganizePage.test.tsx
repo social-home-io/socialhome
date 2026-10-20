@@ -166,7 +166,7 @@ describe('OrganizePage', () => {
     const de = (await import('@/i18n/locales/de.json')).default as Record<string, string>
     await i18n.setLocale('de')
     const t = await mount('/organize')
-    await t.waitFor(() => expect(t.tabs()).toEqual(['Aufgaben · 3', 'Einkauf · 2', 'Notizen · 2']))
+    await t.waitFor(() => expect(t.tabs()).toEqual(['Aufgaben · 3', 'Einkauf · 2', 'Stickies · 2']))
     expect(t.getByRole('tablist').getAttribute('aria-label')).toBe(de['organize.label'])
   })
 
