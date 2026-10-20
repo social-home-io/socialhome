@@ -274,7 +274,9 @@ class MomentDetailView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "Login required.")
         svc = self.svc(moment_service_key)
         moment_id = self.match("id")
-        moment = await svc.get_moment(moment_id)
+        # Not readable by the caller → the unknown-id 404 (MomentNotFoundError,
+        # mapped by BaseView), the same body as for an id that never existed.
+        moment = await svc.get_for_viewer(moment_id, ctx.user_id)
         replies = await svc.list_replies(moment_id)
         reactions = await svc.list_reactions(moment_id)
         repo = self.svc(moment_repo_key)

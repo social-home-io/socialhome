@@ -534,3 +534,30 @@ async def test_list_visible_hides_guardian_blocked_authors_both_ways(db, repo):
         "m-ok",
     }
     assert dict(await repo.list_top_hashtags("u-kid")) == {"mine": 1, "fine": 1}
+
+
+async def test_get_readable_follows_the_inbox_rule(db):
+    """``get_readable`` and ``list_visible_to`` share one rule: a hidden
+    moment and an unknown id both read as ``None``."""
+    repo = SqliteMomentRepo(db)
+    for uid in ("u-me", "u-bob"):
+        await db.enqueue(
+            "INSERT INTO users(user_id, username, display_name, state)"
+            " VALUES(?, ?, ?, 'active')",
+            (uid, uid, uid),
+        )
+    await db.enqueue(
+        "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+        " created_at, expires_at) VALUES('m1', 'u-bob', 'x', 'o',"
+        " datetime('now'), datetime('now', '+1 day'))"
+    )
+    assert (await repo.get_readable("m1", "u-me")).id == "m1"
+    assert await repo.get_readable("nope", "u-me") is None
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id)"
+        " VALUES('u-me', 'u-bob')"
+    )
+    assert await repo.get_readable("m1", "u-me") is None
+    assert [m.id for m in await repo.list_visible_to("u-me")] == []
+    # The author always reads their own live moment.
+    assert (await repo.get_readable("m1", "u-bob")).id == "m1"

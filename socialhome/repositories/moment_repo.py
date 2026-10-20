@@ -32,6 +32,30 @@ from ..domain.moment import Moment, MomentReaction, extract_hashtags
 from .base import row_to_dict, rows_to_dicts
 from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
 
+#: What the inbox shows a viewer — the one rule :meth:`list_visible_to` and
+#: :meth:`get_readable` share, so a detail read can never show what the
+#: inbox hides: no personal block (§Privacy) or guardian block (§CP.F2,
+#: either way) between viewer and author; younger than 24 h, or the viewer
+#: follows the author (then the full retention); not expired or deleted;
+#: within the viewer's ``max_hops``. Binds the viewer four times, then the
+#: hop cap.
+_VISIBLE_SQL = f"""
+    m.author_user_id NOT IN (
+        SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
+    )
+    AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
+    AND (
+        (julianday('now') - julianday(m.created_at)) * 24 < 24
+        OR EXISTS (
+            SELECT 1 FROM user_follows
+             WHERE follower_user_id = ? AND followed_user_id = m.author_user_id
+        )
+    )
+    AND datetime(m.expires_at) > datetime('now')
+    AND m.deleted_at IS NULL
+    AND m.hop_count <= ?
+"""
+
 
 @runtime_checkable
 class AbstractMomentRepo(Protocol):
@@ -68,6 +92,13 @@ class AbstractMomentRepo(Protocol):
         limit: int = 50,
     ) -> list[Moment]: ...
     async def list_replies(self, parent_moment_id: str) -> list[Moment]: ...
+    async def get_readable(
+        self,
+        moment_id: str,
+        viewer_user_id: str,
+        *,
+        max_hops: int = 3,
+    ) -> Moment | None: ...
     async def count_recent_for_author(
         self,
         author_user_id: str,
@@ -283,22 +314,7 @@ class SqliteMomentRepo:
         rows = await self._db.fetchall(
             f"""
             SELECT m.* FROM moments AS m
-             WHERE m.author_user_id NOT IN (
-                 SELECT blocked_user_id FROM user_blocks
-                  WHERE blocker_user_id = ?
-             )
-               AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
-               AND (
-                 (julianday('now') - julianday(m.created_at)) * 24 < 24
-                 OR EXISTS (
-                     SELECT 1 FROM user_follows
-                      WHERE follower_user_id = ?
-                        AND followed_user_id = m.author_user_id
-                 )
-               )
-               AND datetime(m.expires_at) > datetime('now')
-               AND m.deleted_at IS NULL
-               AND m.hop_count <= ?
+             WHERE {_VISIBLE_SQL}
                AND (? IS NULL OR m.created_at < ?)
                AND (
                  ? IS NULL OR EXISTS (
@@ -391,6 +407,32 @@ class SqliteMomentRepo:
             (author_user_id, limit),
         )
         return [m for m in (_row_to_moment(d) for d in rows_to_dicts(rows)) if m]
+
+    async def get_readable(
+        self,
+        moment_id: str,
+        viewer_user_id: str,
+        *,
+        max_hops: int = 3,
+    ) -> Moment | None:
+        """``moment_id`` iff *viewer_user_id* may read it: its author (while
+        it is live), or anyone the inbox would show it to
+        (:data:`_VISIBLE_SQL`). ``None`` for an unknown id and a hidden one
+        alike."""
+        capped_hops = max(1, min(int(max_hops), 3))
+        row = await self._db.fetchone(
+            f"""
+            SELECT m.* FROM moments AS m
+             WHERE m.id = ?
+               AND (
+                 (m.author_user_id = ? AND m.deleted_at IS NULL
+                  AND datetime(m.expires_at) > datetime('now'))
+                 OR ({_VISIBLE_SQL})
+               )
+            """,
+            (moment_id, viewer_user_id, *(viewer_user_id,) * 4, capped_hops),
+        )
+        return _row_to_moment(row_to_dict(row)) if row is not None else None
 
     async def list_replies(self, parent_moment_id: str) -> list[Moment]:
         """Replies in chronological order so the thread reads top-down."""

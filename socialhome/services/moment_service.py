@@ -53,8 +53,20 @@ log = logging.getLogger(__name__)
 MOMENT_RATE_WINDOW = timedelta(minutes=15)
 
 
+#: The one message an unknown moment id and a moment the caller may not
+#: read both answer with — the 404 must not tell them apart.
+NOT_FOUND_MESSAGE = "moment not found"
+
+
 class MomentNotFoundError(KeyError):
-    """Raised when a moment id can't be found locally."""
+    """Raised when a moment id can't be found locally — or the caller may
+    not read it (the same error, word for word)."""
+
+    def __init__(self, *_: object) -> None:
+        super().__init__(NOT_FOUND_MESSAGE)
+
+    def __str__(self) -> str:
+        return NOT_FOUND_MESSAGE
 
 
 class MomentRateLimitError(Exception):
@@ -137,7 +149,9 @@ class MomentService:
 
         parent_author_user_id: str | None = None
         if parent_moment_id is not None:
-            parent = await self._moments.get(parent_moment_id)
+            # Replying needs reading: a parent the author may not read is
+            # the unknown-id 404, never a way to learn it exists.
+            parent = await self._readable(parent_moment_id, author_user_id)
             if parent is None:
                 raise MomentNotFoundError(parent_moment_id)
             # Threads stay flat: a reply to a reply attaches to the
@@ -210,7 +224,13 @@ class MomentService:
         actor_user_id: str,
         actor_is_admin: bool = False,
     ) -> None:
-        moment = await self._require(moment_id)
+        # An admin moderates every moment held here; anyone else must be
+        # able to read it first (else the unknown-id 404), then be its author.
+        moment = (
+            await self._require(moment_id)
+            if actor_is_admin
+            else await self.get_for_viewer(moment_id, actor_user_id)
+        )
         if moment.author_user_id != actor_user_id and not actor_is_admin:
             raise PermissionError("Only the author or an admin can delete this moment.")
         await self._moments.delete(moment_id)
@@ -234,7 +254,7 @@ class MomentService:
     ) -> None:
         if not emoji:
             raise ValueError("Reaction emoji is required.")
-        moment = await self._require(moment_id)
+        moment = await self.get_for_viewer(moment_id, reactor_user_id)
         await self._moments.set_reaction(moment_id, reactor_user_id, emoji)
         await self._bus.publish(
             MomentReactionChanged(
@@ -251,7 +271,7 @@ class MomentService:
         *,
         reactor_user_id: str,
     ) -> None:
-        moment = await self._require(moment_id)
+        moment = await self.get_for_viewer(moment_id, reactor_user_id)
         await self._moments.clear_reaction(moment_id, reactor_user_id)
         await self._bus.publish(
             MomentReactionChanged(
@@ -266,6 +286,27 @@ class MomentService:
 
     async def get_moment(self, moment_id: str) -> Moment:
         return await self._require(moment_id)
+
+    async def get_for_viewer(self, moment_id: str, viewer_user_id: str) -> Moment:
+        """The moment, iff *viewer_user_id* may read it — the inbox rule
+        (:meth:`AbstractMomentRepo.get_readable`: no personal or guardian
+        block between them, the 24 h / follower window, the viewer's
+        ``max_hops``), or they wrote it. An unguessable id is not
+        authorization: anything else raises :class:`MomentNotFoundError`,
+        exactly like an unknown id."""
+        moment = await self._readable(moment_id, viewer_user_id)
+        if moment is None:
+            raise MomentNotFoundError(moment_id)
+        return moment
+
+    async def _readable(self, moment_id: str, viewer_user_id: str) -> Moment | None:
+        viewer = await self._users.get_by_user_id(viewer_user_id)
+        prefs = parse_moment_preferences(
+            viewer.preferences_json if viewer is not None else None
+        )
+        return await self._moments.get_readable(
+            moment_id, viewer_user_id, max_hops=prefs.max_hops
+        )
 
     async def list_inbox(
         self,
