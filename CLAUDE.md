@@ -570,6 +570,33 @@ three. The `migrations/` directory is the project's longest-running data-shape
 commitment — every production row passes through every migration in order on
 startup, so changing the shape later means another migration, not an edit.
 
+### Keep the protocol efficient
+
+Every federation or GFS message is multiplied by everyone who receives it,
+so think in totals, not single sends:
+
+- **Deliver only to who needs it.** Prefer a targeted send (one household,
+  one subscriber) over fan-out. Something only one recipient can use — a
+  key sealed to one follower, a catch-up bundle for a newcomer — never goes
+  to everyone. If the transport can't target yet, add targeting (capability
+  -gated, like the GFS `place_pin` pattern) rather than broadcast.
+- **Event-driven, delta-only.** Send on change, not on a timer, and send
+  what changed, not the whole state. Repeats ride on versions / digests
+  (`profile_rev`, picture hash) so receivers can skip what they have.
+- **One actor must not trigger N × M work.** A single join, subscribe or
+  click must not make many households each send many items to many
+  recipients. Bundle instead (one sealed bundle to the one newcomer) and
+  bound every bundle (count + bytes).
+- **Rate limits are backstops, not the design.** A "max once per 30 s" cap
+  on an amplifying flow still allows thousands of amplified bursts a day.
+- **Do the math in the PR.** Any new or changed fan-out, relay or sync
+  path states its cost: recipients × items × bytes per trigger, and the
+  worst realistic case (e.g. a global space with 200 authors and 10 000
+  followers). Reviewers bounce fan-out changes without it.
+- **Bound sizes.** Pictures are small re-encoded WebP with a hard cap;
+  payloads and bundles have count and byte limits enforced by sender and
+  receiver.
+
 ### Federation protocol versioning
 
 Every confirmed peer carries a monotonic `proto_version: int` on its
