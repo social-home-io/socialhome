@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from socialhome.domain.moment_public import MomentPublicFollow
 from socialhome.domain.space import SpaceMember
 from socialhome.domain.user import PersonSummary, RemoteUser, User
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
@@ -465,3 +466,100 @@ async def test_local_person_without_a_display_name_reads_as_their_username():
     svc, *_ = _svc(local=[User(username="bob", user_id="uid-bob", display_name="")])
     out = await svc.summarize("uid-me", ["uid-bob"])
     assert out["uid-bob"].display_name == "bob"
+
+
+# ── Authors followed only through a GFS (gfs_via) ─────────────────────
+
+
+class _FakePublicFollows:
+    def __init__(self, rows) -> None:
+        self.rows = rows
+        self.calls: list[list[str]] = []
+
+    async def list_for_followed(self, followed_user_ids):
+        self.calls.append(sorted(followed_user_ids))
+        return [r for r in self.rows if r.followed_user_id in followed_user_ids]
+
+
+def _public_follow(follower: str, **kw) -> MomentPublicFollow:
+    base = {
+        "follower_user_id": follower,
+        "followed_user_id": "u-noor",
+        "gfs_id": "g1",
+        "followed_instance_pk": "ab" * 32,
+        "followed_username": "noor",
+        "followed_display_name": "Noor Haddad",
+        "created_at": "2026-10-20 08:00:00",
+        "followed_bio": "Beekeeper.",
+        "followed_picture_digest": "0123456789abcdef",
+    }
+    base.update(kw)
+    return MomentPublicFollow(**base)
+
+
+async def test_gfs_author_is_named_from_the_follow():
+    svc, *_ = _svc()
+    follows = _FakePublicFollows([_public_follow("uid-carol")])
+    svc.attach_public_follows(follows)  # type: ignore[arg-type]
+    out = await svc.summarize("uid-me", ["u-noor"], gfs_via={"u-noor": "g1"})
+    noor = out["u-noor"]
+    assert noor.display_name == "Noor Haddad"
+    assert noor.bio == "Beekeeper."
+    assert noor.household is None
+    assert noor.picture_url == (
+        "api/gfs/g1/moments/users/u-noor/picture?v=0123456789abcdef"
+    )
+    assert noor.to_dict()["bio"] == "Beekeeper."
+
+
+async def test_gfs_author_prefers_the_viewers_own_follow():
+    svc, *_ = _svc()
+    follows = _FakePublicFollows(
+        [
+            _public_follow("uid-carol", followed_display_name="Older"),
+            _public_follow("uid-me", followed_display_name="Noor"),
+        ]
+    )
+    svc.attach_public_follows(follows)  # type: ignore[arg-type]
+    out = await svc.summarize("uid-me", ["u-noor"], gfs_via={"u-noor": "g1"})
+    assert out["u-noor"].display_name == "Noor"
+
+
+async def test_a_follow_on_another_gfs_does_not_name_them():
+    svc, *_ = _svc()
+    svc.attach_public_follows(
+        _FakePublicFollows([_public_follow("uid-me", gfs_id="g2")])  # type: ignore[arg-type]
+    )
+    out = await svc.summarize("uid-me", ["u-noor"], gfs_via={"u-noor": "g1"})
+    assert out["u-noor"].display_name is None
+    assert "bio" not in out["u-noor"].to_dict()
+
+
+async def test_a_household_name_wins_and_no_public_read_happens():
+    svc, *_ = _svc(remote=[_ruth()], instances=[_Inst("peer-v", "Grandma's")])
+    follows = _FakePublicFollows([])
+    svc.attach_public_follows(follows)  # type: ignore[arg-type]
+    out = await svc.summarize("uid-me", ["ru-ruth"], gfs_via={"ru-ruth": "g1"})
+    assert out["ru-ruth"].display_name == "Grandma Ruth"
+    assert out["ru-ruth"].bio is None
+    assert follows.calls == []
+
+
+async def test_gfs_author_picture_is_withheld_across_a_guardian_block():
+    svc, *_ = _svc()
+    svc.attach_child_protection(_CpNoor())  # type: ignore[arg-type]
+    svc.attach_public_follows(
+        _FakePublicFollows([_public_follow("uid-me")])  # type: ignore[arg-type]
+    )
+    out = await svc.summarize("uid-kid", ["u-noor"], gfs_via={"u-noor": "g1"})
+    assert out["u-noor"].display_name == "Noor Haddad"
+    assert out["u-noor"].picture_url is None
+    assert out["u-noor"].bio is None
+
+
+class _CpNoor:
+    def register_gate(self, gate):
+        pass
+
+    async def guardian_block_counterparts(self, user_id):
+        return frozenset({"u-noor"}) if user_id == "uid-kid" else frozenset()

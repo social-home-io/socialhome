@@ -163,6 +163,7 @@ async def test_follow_then_unfollow(client, author, follower):
                 "instance_id": "inst-author",
                 "username": "alice",
                 "display_name": "Alice",
+                "bio": "Builds boats.",
                 "home_instance_pk": "ab" * 32,
             },
         ),
@@ -183,6 +184,10 @@ async def test_follow_then_unfollow(client, author, follower):
     assert resp.status == 201
     out = await resp.json()
     assert out["user"]["user_id"] == "u-author"
+    # The same public directory fields ``GET /gfs/moments/users/{id}``
+    # serves anyone — the follower names the author with them.
+    assert out["user"]["bio"] == "Builds boats."
+    assert out["user"]["picture_digest"] is None
     assert out["follow"]["followed_user_id"] == "u-author"
     # Unfollow.
     resp = await client.post(

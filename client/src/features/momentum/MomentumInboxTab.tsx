@@ -211,7 +211,7 @@ function MomentRow({
               class="sh-momentum-row-via-gfs"
               title={t('moment.inbox.via_gfs')}
             >
-              · via GFS
+              · {t('moment.inbox.via_gfs_chip')}
             </span>
           )}
           {!mine && (
@@ -223,7 +223,11 @@ function MomentRow({
                 ev.preventDefault()
                 ev.stopPropagation()
                 openPerson(m.author_user_id, {
-                  person: { display_name: authorName, picture_url: authorPicture },
+                  person: {
+                    display_name: authorName,
+                    picture_url: authorPicture,
+                    bio: m.author?.bio ?? null,
+                  },
                 })
               }}
             >

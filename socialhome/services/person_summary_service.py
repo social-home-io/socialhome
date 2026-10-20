@@ -16,12 +16,14 @@ record of a member of a household this one never paired with.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from urllib.parse import quote
 
+from ..domain.moment_public import MomentPublicFollow, gfs_picture_proxy_url
 from ..domain.space import SpaceMember
 from ..domain.user import PersonSummary, _picture_url
 from ..repositories.federation_repo import AbstractFederationRepo
+from ..repositories.moment_public_repo import AbstractMomentPublicFollowRepo
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
@@ -44,6 +46,7 @@ class PersonSummaryService(ProtectionGateMixin):
         "_aliases",
         "_child_protection",
         "_federation",
+        "_public_follows",
         "_seats",
         "_spaces",
         "_users",
@@ -61,6 +64,7 @@ class PersonSummaryService(ProtectionGateMixin):
         self._child_protection = None
         self._spaces: AbstractSpaceRepo | None = None
         self._seats: AbstractSpaceRemoteMemberRepo | None = None
+        self._public_follows: AbstractMomentPublicFollowRepo | None = None
 
     def attach_space_rosters(
         self,
@@ -71,12 +75,19 @@ class PersonSummaryService(ProtectionGateMixin):
         self._spaces = space_repo
         self._seats = seat_repo
 
+    def attach_public_follows(
+        self, follow_repo: AbstractMomentPublicFollowRepo
+    ) -> None:
+        """Wire the public-moment follows a ``gfs_via`` summary reads."""
+        self._public_follows = follow_repo
+
     async def summarize(
         self,
         viewer_user_id: str,
         user_ids: Iterable[str],
         *,
         space_id: str | None = None,
+        gfs_via: Mapping[str, str] | None = None,
     ) -> dict[str, PersonSummary]:
         """``{user_id: PersonSummary}`` for every id in ``user_ids``.
 
@@ -90,14 +101,60 @@ class PersonSummaryService(ProtectionGateMixin):
         anyone still unnamed the space's roster seat — kept after they left
         or were banned (tombstoned), and the only name a member of a
         household this one never paired with has here.
+
+        ``gfs_via`` maps an author of content that arrived through a GFS to
+        that GFS's id: anyone still unnamed is named from a local follow of
+        them there — their public name, bio and mirrored picture.
         """
         ids = set(user_ids)
         if not ids:
             return {}
         out = await self._summarize(viewer_user_id, ids)
-        if space_id is None or self._spaces is None:
+        if space_id is not None and self._spaces is not None:
+            out = await self._in_space(viewer_user_id, space_id, out)
+        if gfs_via:
+            out = await self._via_gfs(viewer_user_id, gfs_via, out)
+        return out
+
+    async def _via_gfs(
+        self,
+        viewer_user_id: str,
+        gfs_via: Mapping[str, str],
+        out: dict[str, PersonSummary],
+    ) -> dict[str, PersonSummary]:
+        unnamed = [
+            uid
+            for uid, summary in out.items()
+            if summary.display_name is None and gfs_via.get(uid)
+        ]
+        if not unnamed or self._public_follows is None:
             return out
-        return await self._in_space(viewer_user_id, space_id, out)
+        follows: dict[str, MomentPublicFollow] = {}
+        for f in await self._public_follows.list_for_followed(unnamed):
+            if f.gfs_id != gfs_via.get(f.followed_user_id):
+                continue
+            # The viewer's own follow first; any other local follow of the
+            # author on that GFS holds the same signed profile.
+            held = follows.get(f.followed_user_id)
+            if held is None or f.follower_user_id == viewer_user_id:
+                follows[f.followed_user_id] = f
+        withheld = await self._guardian_block_counterparts(viewer_user_id)
+        named = dict(out)
+        for uid, f in follows.items():
+            named[uid] = PersonSummary(
+                user_id=uid,
+                display_name=f.public_name,
+                personal_alias=out[uid].personal_alias,
+                picture_url=(
+                    None
+                    if uid in withheld
+                    else gfs_picture_proxy_url(f.gfs_id, uid, f.followed_picture_digest)
+                ),
+                household=None,
+                # §CP.F2: across a guardian block, the name only.
+                bio=None if uid in withheld else f.followed_bio,
+            )
+        return named
 
     async def _in_space(
         self,

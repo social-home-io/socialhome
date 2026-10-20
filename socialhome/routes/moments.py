@@ -110,6 +110,16 @@ def _moment_dict(
     return base
 
 
+def _gfs_via(moments) -> dict[str, str]:
+    """Author → GFS id for moments that arrived through a GFS, so an
+    author followed only there is named from the follow (``named_people``)."""
+    return {
+        m.author_user_id: m.received_via_gfs_id
+        for m in moments
+        if m.received_via == "gfs" and m.received_via_gfs_id
+    }
+
+
 async def _video_statuses(view: BaseView, moments) -> dict[str, str]:
     """Batch one ``status_for`` read for every video moment's filename."""
     video_fns = [
@@ -134,7 +144,9 @@ async def _moment_list(view: BaseView, moments: list[Moment]) -> list[dict]:
         [m.id for m in moments]
     )
     statuses = await _video_statuses(view, moments)
-    authors = await view.named_people(m.author_user_id for m in moments)
+    authors = await view.named_people(
+        (m.author_user_id for m in moments), gfs_via=_gfs_via(moments)
+    )
     return view.sign_media(
         [
             _moment_dict(
@@ -269,7 +281,10 @@ class MomentDetailView(BaseView):
         ids = [moment.id, *[r.id for r in replies]]
         counts = await repo.count_engagement_for(ids)
         statuses = await _video_statuses(self, [moment, *replies])
-        authors = await self.named_people(m.author_user_id for m in (moment, *replies))
+        authors = await self.named_people(
+            (m.author_user_id for m in (moment, *replies)),
+            gfs_via=_gfs_via((moment, *replies)),
+        )
         return self._json(
             _sign_payload(
                 self.request,

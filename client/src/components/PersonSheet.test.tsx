@@ -220,6 +220,28 @@ describe('PersonSheet', () => {
     expect(q(document, 'person-block')).not.toBeNull()
   })
 
+  it('someone known from their public moments (404) keeps the public bio the opener passed', async () => {
+    render(<PersonSheet />)
+    await act(async () => {
+      openPerson('u-gfs-noor', {
+        person: { display_name: 'Noor Haddad', bio: 'Beekeeper. Posts the bees.' },
+      })
+    })
+    await waitFor(() => { expect(q(document, 'person-limited')).not.toBeNull() })
+    expect(document.querySelector('.sh-person-sheet__bio')?.textContent)
+      .toBe('Beekeeper. Posts the bees.')
+    expect(q(document, 'person-limited')?.textContent).toContain('public moments')
+    expect(q(document, 'person-message')).toBeNull()
+  })
+
+  it('a 404 with no bio keeps the name-only note', async () => {
+    render(<PersonSheet />)
+    await act(async () => { openPerson('ru-space', { person: { display_name: 'Spacey' } }) })
+    await waitFor(() => { expect(q(document, 'person-limited')).not.toBeNull() })
+    expect(q(document, 'person-limited')?.textContent).toContain('only their name')
+    expect(document.querySelector('.sh-person-sheet__bio')).toBeNull()
+  })
+
   it('a 404 never offers Message, even when the opener hinted how to address them', async () => {
     // A space roster / chat hint may carry is_local + username (or a
     // remote id); once the household says "not someone you're connected

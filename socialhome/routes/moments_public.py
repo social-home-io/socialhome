@@ -23,13 +23,11 @@ Routes:
 
 from __future__ import annotations
 
-import re
-from urllib.parse import quote
-
 from aiohttp import web
 
 from ..app_keys import media_signer_key, moment_public_service_key
 from ..csp import media_response_headers
+from ..domain.moment_public import gfs_picture_proxy_url
 from ..media_signer import sign_media_urls_in
 from ..services.moment_public_service import MomentPublicError
 from .base import BaseView
@@ -155,13 +153,6 @@ class MomentPublicFollowDetailView(BaseView):
         return web.Response(status=204)
 
 
-#: Ids we put into a signed proxy path verbatim. The signature covers
-#: the decoded ``request.path``, so an id that would need percent-
-#: encoding (or a ``..`` segment) gets no avatar rather than a URL that
-#: fails to verify or resolves somewhere else.
-_PATH_SAFE_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._:-]*$")
-
-
 def mirrored_picture_url(gfs_id: str, row: dict) -> str | None:
     """Our own proxy URL for a directory row's GFS-mirrored picture.
 
@@ -173,13 +164,9 @@ def mirrored_picture_url(gfs_id: str, row: dict) -> str | None:
     """
     user_id = row.get("user_id")
     digest = row.get("picture_digest")
-    if not (isinstance(user_id, str) and isinstance(digest, str) and digest):
+    if not (isinstance(user_id, str) and isinstance(digest, str)):
         return None
-    if not (_PATH_SAFE_ID.match(gfs_id) and _PATH_SAFE_ID.match(user_id)):
-        return None
-    return (
-        f"api/gfs/{gfs_id}/moments/users/{user_id}/picture?v={quote(digest, safe='')}"
-    )
+    return gfs_picture_proxy_url(gfs_id, user_id, digest)
 
 
 class GfsUserDirectoryProxyView(BaseView):

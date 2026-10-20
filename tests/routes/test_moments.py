@@ -819,3 +819,73 @@ async def test_moment_federation_payload_carries_no_names(client, monkeypatch):
         ORIGIN_SIG_SUITE_FIELD,
         ORIGIN_SIG_FIELD,
     }
+
+
+async def _seed_gfs_follow(
+    client,
+    *,
+    author: str = "u-gfs-noor",
+    display_name: str = "Noor Haddad",
+    bio: str | None = "Beekeeper. Posts the bees.",
+    digest: str | None = "0123456789abcdef",
+) -> None:
+    await client._db.enqueue(
+        "INSERT INTO gfs_connections(id, gfs_instance_id, display_name,"
+        " public_key, inbox_url, status, paired_at) VALUES('g1', 'gfs-1',"
+        " 'GFS One', ?, 'https://gfs1.example', 'active', datetime('now'))",
+        ("aa" * 32,),
+    )
+    await client._db.enqueue(
+        "INSERT INTO moment_public_follows(follower_user_id, followed_user_id,"
+        " gfs_id, followed_instance_pk, followed_username, followed_display_name,"
+        " followed_bio, followed_picture_digest) VALUES(?,?,?,?,?,?,?,?)",
+        (client._uid, author, "g1", "bb" * 32, "noor", display_name, bio, digest),
+    )
+    await client._db.enqueue(
+        "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+        " created_at, expires_at, is_public, received_via, received_via_gfs_id)"
+        " VALUES('m-gfs', ?, 'bees!', 'inst-noor', datetime('now'),"
+        " datetime('now', '+7 day'), 1, 'gfs', 'g1')",
+        (author,),
+    )
+
+
+async def test_gfs_moment_names_its_author_with_bio_and_picture(client):
+    """An author followed only through a GFS reads by the name, bio and
+    GFS-mirrored picture their household signed — not "Someone"."""
+    await _seed_gfs_follow(client)
+    for path in ("/api/moments", "/api/moments/archive", "/api/moments/m-gfs"):
+        r = await client.get(path, headers=_auth(client._tok))
+        assert r.status == 200
+        body = await r.json()
+        row = (
+            body["moment"]
+            if "moment" in body
+            else next(m for m in body if m["id"] == "m-gfs")
+        )
+        author = row["author"]
+        assert author["display_name"] == "Noor Haddad"
+        assert author["bio"] == "Beekeeper. Posts the bees."
+        assert author["household"] is None
+        assert author["picture_url"].startswith(
+            "api/gfs/g1/moments/users/u-gfs-noor/picture?v=0123456789abcdef"
+        )
+        assert "sig=" in author["picture_url"]
+
+
+async def test_gfs_author_without_a_name_is_never_shown_as_an_id(client):
+    await _seed_gfs_follow(client, display_name="u-gfs-noor", bio=None, digest=None)
+    await client._db.enqueue("UPDATE moment_public_follows SET followed_username=''")
+    r = await client.get("/api/moments", headers=_auth(client._tok))
+    [row] = [m for m in await r.json() if m["id"] == "m-gfs"]
+    assert row["author"]["display_name"] is None
+    assert row["author"]["picture_url"] is None
+    assert "bio" not in row["author"]
+
+
+async def test_household_moments_carry_no_bio(client):
+    await _remote_amaka(client)
+    await _seed_moment(client, "m-amaka", "ru-amaka")
+    r = await client.get("/api/moments", headers=_auth(client._tok))
+    [row] = [m for m in await r.json() if m["id"] == "m-amaka"]
+    assert "bio" not in row["author"]

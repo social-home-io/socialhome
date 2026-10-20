@@ -10,7 +10,9 @@
  *     known), the serif name, and "Their name: …" when the viewer set a
  *     private nickname.
  *   • Status pill + bio. An emoji-only status becomes a badge on the
- *     photo instead of a lonely pill.
+ *     photo instead of a lonely pill. Someone known only from their
+ *     public moments (a GFS-followed author) keeps the public bio the
+ *     caller passed even though the household lookup finds nobody.
  *   • Message (primary), then Call for your own household or Follow for
  *     everyone else.
  *   • Rows: Household, Follow their moments (own household), Edit
@@ -365,7 +367,7 @@ export function PersonSheet() {
           data-testid="person-sheet"
           data-user-id={p.user_id}
         >
-          {(statusText || p.bio) && !limited && (
+          {(statusText || p.bio) && !blocked && (
             <div class="sh-person-sheet__about">
               {statusText && (
                 <p class="sh-person-sheet__status" data-testid="person-status">
@@ -382,7 +384,9 @@ export function PersonSheet() {
             <p class="sh-person-sheet__note sh-muted" data-testid="person-limited">
               {blocked
                 ? t('person.blocked_note', { name: shown })
-                : t('person.limited_note')}
+                : p.bio
+                  ? t('person.public_note')
+                  : t('person.limited_note')}
             </p>
           )}
 

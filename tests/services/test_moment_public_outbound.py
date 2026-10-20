@@ -287,3 +287,45 @@ async def test_unprotected_author_still_publishes_with_cp_wired(outbound_setup):
     await s["regs"].upsert(user_id="u1", gfs_id="g1")
     await s["bus"].publish(_created_event())
     assert len(s["session"].posts) == 1
+
+
+async def test_envelope_carries_the_directory_bio_and_mirrored_picture(
+    outbound_setup, db
+):
+    """The bio and picture digest ride the signed envelope — only what the
+    GFS directory already holds: the digest only to a GFS that mirrors the
+    current picture."""
+    s = outbound_setup
+    await db.enqueue(
+        "UPDATE users SET bio='Beekeeper.', picture_hash='0123456789abcdef'"
+        " WHERE user_id='u1'"
+    )
+    await s["moments"].save(_moment())
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["regs"].upsert(user_id="u1", gfs_id="g2")
+    await s["regs"].set_last_picture_digest(
+        user_id="u1", gfs_id="g1", digest="0123456789abcdef"
+    )
+    await s["regs"].set_last_picture_digest(
+        user_id="u1", gfs_id="g2", digest="ffffffffffffffff"
+    )
+    await s["bus"].publish(_created_event())
+    bodies = {
+        url.split("//")[1].split(".")[0]: body for url, body in s["session"].posts
+    }
+    assert bodies["gfs1"]["author_bio"] == "Beekeeper."
+    assert bodies["gfs1"]["author_picture_digest"] == "0123456789abcdef"
+    # g2 mirrors an older picture: no digest, so no stale picture shows.
+    assert bodies["gfs2"]["author_picture_digest"] is None
+    assert bodies["gfs1"]["author_display_name"] == "Alice"
+
+
+async def test_a_bio_longer_than_a_directory_holds_is_not_sent(outbound_setup, db):
+    s = outbound_setup
+    await db.enqueue("UPDATE users SET bio=? WHERE user_id='u1'", ("x" * 290,))
+    await s["moments"].save(_moment())
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event())
+    [(_url, body)] = s["session"].posts
+    assert body["author_bio"] is None
+    assert body["author_picture_digest"] is None

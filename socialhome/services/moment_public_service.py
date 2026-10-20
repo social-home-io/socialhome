@@ -23,7 +23,13 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
-from ..domain.moment_public import MomentPublicFollow, MomentPublicRegistration
+from ..domain.moment_public import (
+    MomentPublicFollow,
+    MomentPublicRegistration,
+    public_author_bio,
+    public_author_name,
+    public_picture_digest,
+)
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.moment_public_repo import (
     AbstractMomentPublicFollowRepo,
@@ -201,6 +207,9 @@ class MomentPublicService(ProtectionGateMixin):
         body = {
             "follower_user_id": follower_user_id,
             "follower_instance_id": self._require_instance_id(),
+            # The GFS authenticates every signed body by its ``instance_id``
+            # (``_rtc_authenticate``) — without it the follow is refused 422.
+            "instance_id": self._require_instance_id(),
             "followed_user_id": followed_user_id,
         }
         signed = self._sign_body(body)
@@ -220,13 +229,22 @@ class MomentPublicService(ProtectionGateMixin):
             raise MomentPublicError(f"GFS follow failed: {exc}") from exc
 
         directory = payload.get("user") or {}
+        # The directory names an author without a name by their id — an
+        # id is never a name, so it is stored as unknown ("").
+        name = public_author_name(
+            directory.get("display_name"), user_id=followed_user_id
+        )
         return await self._follows.upsert(
             follower_user_id=follower_user_id,
             followed_user_id=followed_user_id,
             gfs_id=gfs_id,
             followed_instance_pk=str(directory.get("home_instance_pk", "")),
             followed_username=str(directory.get("username", "")),
-            followed_display_name=str(directory.get("display_name", followed_user_id)),
+            followed_display_name=name or "",
+            followed_bio=public_author_bio(directory.get("bio")),
+            followed_picture_digest=public_picture_digest(
+                directory.get("picture_digest")
+            ),
         )
 
     async def unfollow(
@@ -240,6 +258,9 @@ class MomentPublicService(ProtectionGateMixin):
         body = {
             "follower_user_id": follower_user_id,
             "follower_instance_id": self._require_instance_id(),
+            # The GFS authenticates every signed body by its ``instance_id``
+            # (``_rtc_authenticate``) — without it the follow is refused 422.
+            "instance_id": self._require_instance_id(),
         }
         signed = self._sign_body(body)
         try:

@@ -20313,6 +20313,16 @@ a.sh-btn--ghost:hover {
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-width: 0;
+}
+/* Public bio of an author followed through a GFS (they have no
+ * household connection, so this is the only "about" line). */
+.sh-momentum-detail-bio {
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  color: var(--sh-text-muted);
 }
 .sh-momentum-detail-content {
   white-space: pre-wrap;

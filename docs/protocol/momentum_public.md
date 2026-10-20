@@ -23,7 +23,9 @@ uses.
   household mesh. The federation outbound (`MomentFederationOutbound.relay_inbound`)
   reads `received_via='gfs'` on the inbound payload and skips relay.
 * Replies fan out **both** through the GFS path and through the
-  replier's paired households (normal moment federation).
+  replier's paired households (normal moment federation). A follower
+  that does not hold the parent drops a GFS-delivered reply (INFO) — it
+  would be out of context, and its parent reference cannot be stored.
 * Author-side moments still fan out to paired households via the
   existing federation alongside the GFS path. Recipients dedupe by
   `moment.id` (the `moments` PRIMARY KEY makes the second save a
@@ -43,6 +45,10 @@ needed to route. For public Momentum:
 * Recipients verify the signature against the author's
   `home_instance_pk` cached in `moment_public_follows` at follow
   time. A bad signature drops the frame on the floor.
+* The GFS forwards the envelope **with its `signature`**: the same
+  signature authenticates the publish request to the GFS
+  (`_rtc_authenticate(keep_signature=True)`). An older GFS stripped it,
+  so its followers dropped every public moment as unsigned.
 
 ## Event types
 
@@ -107,8 +113,8 @@ sequenceDiagram
   G-->>B: directory listing (incl. home_instance_pk per user)
   B->>G: POST /gfs/moments/users/{user_id}/follow (signed by B's instance)
   G->>G: persist gfs_moment_follows row
-  G->>B: response carries the author's directory entry
-  B->>B: cache row in moment_public_follows (with home_instance_pk)
+  G->>B: response carries the author's directory entry (name, bio, picture_digest, home_instance_pk)
+  B->>B: cache row in moment_public_follows (with home_instance_pk + public profile)
   G->>A: WS push follow_changed (action="add")
   A->>A: composer follower count ticks up
 ```
@@ -132,6 +138,7 @@ sequenceDiagram
       G->>B: WS push incoming_public_moment
     end
     B->>B: verify Ed25519 signature against cached followed_instance_pk
+    B->>B: new moment → refresh author's name / bio / picture digest on moment_public_follows
     B->>B: persist moment (received_via='gfs', received_via_gfs_id={gfs})
     B->>B: re-publish MomentCreated on bus → realtime + notifications
     Note right of B: relay_inbound() short-circuits on received_via=='gfs'
@@ -146,6 +153,48 @@ second save is a no-op.
 A received public moment keeps `media_url` only when it is a local media
 reference (`api/media/<name>`); a third-party URL is dropped with its
 `media_type` so followers' browsers never load it.
+
+## Author profile: name, picture and bio
+
+Followers met the author only through the GFS, so they hold no roster
+row for them. The author's profile reaches them two ways — both carry
+only what the author already published in the GFS public directory, so
+the GFS learns nothing new:
+
+* **At follow time** the `POST /gfs/moments/users/{user_id}/follow`
+  response carries the directory entry: `display_name`, `bio` and
+  `picture_digest` (plus `home_instance_pk`).
+* **On every moment** the signed envelope carries `author_display_name`,
+  `author_username`, `author_bio` (only when it fits the directory's
+  280-character cap) and `author_picture_digest` — the author's current
+  picture hash, and only to a GFS whose `last_picture_digest` is that
+  hash (that server mirrors exactly those bytes; a removed or not yet
+  pushed picture sends `null`). The envelope is built per GFS for that
+  reason. Both keys sit under the author's signature, so a GFS cannot
+  rename anyone.
+
+The follower stores them on `moment_public_follows`
+(`followed_display_name`, `followed_bio`, `followed_picture_digest`) —
+refreshed only by a verified envelope for a moment it has not seen, so a
+replayed older envelope cannot roll a newer profile back. An envelope
+from an older author build has no `author_bio` / `author_picture_digest`
+keys; the held values stay. Names are checked on the way in: blank,
+overlong, or equal to the author's user id (the directory's fallback)
+counts as no name, and the SPA shows "Someone" — never an id. A picture
+digest must be 16 hex characters (the household's form) or the GFS's
+64-hex SHA-256, which is shortened to the same 16.
+
+`GET /api/moments`, `/archive` and `/{id}` name such an author from the
+follow (`PersonSummaryService`, `gfs_via`): the name, a bio, and the
+picture through the signed proxy `api/gfs/{gfs_id}/moments/users/{user_id}/picture`,
+which fetches the bytes from the GFS the household is already connected
+to — the browser never contacts the GFS. A guardian block (§CP.F2) still
+withholds the picture and the bio. A protected (child) account never publishes
+public moments, so it never reaches this path (§CP.R).
+
+Wire-compatible: the new keys are additive and the signature covers
+whatever keys arrive, so an older follower verifies and ignores them —
+no protocol version bump.
 
 ## Creator-bound moment ids (v_36)
 
@@ -219,7 +268,8 @@ identical bytes-for-bytes to the sender's canonical encoding.
   `last_picture_digest` so the profile-sync flow skips redundant
   avatar uploads.
 * `moment_public_follows` (SH) — follower-side cache, including the
-  followed user's `home_instance_pk` for signature verification.
+  followed user's `home_instance_pk` for signature verification and
+  (0112) their public `followed_bio` / `followed_picture_digest`.
 * `moments.is_public` / `moments.received_via` /
   `moments.received_via_gfs_id` — provenance on every row so the
   inbox UI can render a "via {gfs}" chip and so the federation

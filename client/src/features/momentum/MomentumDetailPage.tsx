@@ -235,6 +235,7 @@ export default function MomentumDetailPage() {
               person: {
                 display_name: namedPersonLabel(m.author_user_id, m.author),
                 picture_url: namedPersonPicture(m.author_user_id, m.author),
+                bio: m.author?.bio ?? null,
               },
             })}
           >
@@ -245,6 +246,15 @@ export default function MomentumDetailPage() {
           {t('common.close')}
         </Button>
       </header>
+
+      {/* A GFS-followed author's public bio — the only "about" line for
+          someone with no household connection. Full width under the
+          header so it reads on a phone too. */}
+      {!isAuthor && m.author?.bio && (
+        <p class="sh-momentum-detail-bio" data-testid="moment-author-bio">
+          {m.author.bio}
+        </p>
+      )}
 
       {m.content && (
         <p class="sh-momentum-detail-content">

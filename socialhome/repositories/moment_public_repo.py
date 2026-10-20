@@ -146,6 +146,13 @@ def _to_reg(row: dict) -> MomentPublicRegistration:
 # ── Follows ──────────────────────────────────────────────────────────────
 
 
+_FOLLOW_COLS = (
+    "follower_user_id, followed_user_id, gfs_id, followed_instance_pk, "
+    "followed_username, followed_display_name, created_at, "
+    "followed_bio, followed_picture_digest"
+)
+
+
 @runtime_checkable
 class AbstractMomentPublicFollowRepo(Protocol):
     async def upsert(
@@ -157,6 +164,8 @@ class AbstractMomentPublicFollowRepo(Protocol):
         followed_instance_pk: str,
         followed_username: str,
         followed_display_name: str,
+        followed_bio: str | None = None,
+        followed_picture_digest: str | None = None,
     ) -> MomentPublicFollow: ...
     async def delete(
         self, *, follower_user_id: str, followed_user_id: str, gfs_id: str
@@ -173,6 +182,18 @@ class AbstractMomentPublicFollowRepo(Protocol):
     async def followers_of(
         self, followed_user_id: str
     ) -> builtins.list[MomentPublicFollow]: ...
+    async def list_for_followed(
+        self, followed_user_ids: builtins.list[str]
+    ) -> builtins.list[MomentPublicFollow]: ...
+    async def set_profile(
+        self,
+        *,
+        followed_user_id: str,
+        gfs_id: str,
+        display_name: str,
+        bio: str | None,
+        picture_digest: str | None,
+    ) -> None: ...
 
 
 class SqliteMomentPublicFollowRepo:
@@ -188,16 +209,21 @@ class SqliteMomentPublicFollowRepo:
         followed_instance_pk: str,
         followed_username: str,
         followed_display_name: str,
+        followed_bio: str | None = None,
+        followed_picture_digest: str | None = None,
     ) -> MomentPublicFollow:
         await self._db.enqueue(
             "INSERT INTO moment_public_follows("
             "follower_user_id, followed_user_id, gfs_id, "
-            "followed_instance_pk, followed_username, followed_display_name) "
-            "VALUES(?, ?, ?, ?, ?, ?) "
+            "followed_instance_pk, followed_username, followed_display_name, "
+            "followed_bio, followed_picture_digest) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(follower_user_id, followed_user_id, gfs_id) DO UPDATE SET "
             "followed_instance_pk=excluded.followed_instance_pk, "
             "followed_username=excluded.followed_username, "
-            "followed_display_name=excluded.followed_display_name",
+            "followed_display_name=excluded.followed_display_name, "
+            "followed_bio=excluded.followed_bio, "
+            "followed_picture_digest=excluded.followed_picture_digest",
             (
                 follower_user_id,
                 followed_user_id,
@@ -205,6 +231,8 @@ class SqliteMomentPublicFollowRepo:
                 followed_instance_pk,
                 followed_username,
                 followed_display_name,
+                followed_bio,
+                followed_picture_digest,
             ),
         )
         got = await self.get(
@@ -228,9 +256,7 @@ class SqliteMomentPublicFollowRepo:
         self, *, follower_user_id: str, followed_user_id: str, gfs_id: str
     ) -> MomentPublicFollow | None:
         rows = await self._db.fetchall(
-            "SELECT follower_user_id, followed_user_id, gfs_id, "
-            "followed_instance_pk, followed_username, followed_display_name, created_at "
-            "FROM moment_public_follows "
+            f"SELECT {_FOLLOW_COLS} FROM moment_public_follows "
             "WHERE follower_user_id=? AND followed_user_id=? AND gfs_id=?",
             (follower_user_id, followed_user_id, gfs_id),
         )
@@ -241,10 +267,8 @@ class SqliteMomentPublicFollowRepo:
         self, follower_user_id: str
     ) -> builtins.list[MomentPublicFollow]:
         rows = await self._db.fetchall(
-            "SELECT follower_user_id, followed_user_id, gfs_id, "
-            "followed_instance_pk, followed_username, followed_display_name, created_at "
-            "FROM moment_public_follows WHERE follower_user_id=? "
-            "ORDER BY created_at DESC",
+            f"SELECT {_FOLLOW_COLS} FROM moment_public_follows "
+            "WHERE follower_user_id=? ORDER BY created_at DESC",
             (follower_user_id,),
         )
         return [_to_follow(r) for r in rows_to_dicts(rows)]
@@ -263,13 +287,43 @@ class SqliteMomentPublicFollowRepo:
         self, followed_user_id: str
     ) -> builtins.list[MomentPublicFollow]:
         rows = await self._db.fetchall(
-            "SELECT follower_user_id, followed_user_id, gfs_id, "
-            "followed_instance_pk, followed_username, followed_display_name, created_at "
-            "FROM moment_public_follows WHERE followed_user_id=? "
-            "ORDER BY created_at DESC",
+            f"SELECT {_FOLLOW_COLS} FROM moment_public_follows "
+            "WHERE followed_user_id=? ORDER BY created_at DESC",
             (followed_user_id,),
         )
         return [_to_follow(r) for r in rows_to_dicts(rows)]
+
+    async def list_for_followed(
+        self, followed_user_ids: builtins.list[str]
+    ) -> builtins.list[MomentPublicFollow]:
+        """Every local follow of any of ``followed_user_ids`` — one read."""
+        if not followed_user_ids:
+            return []
+        marks = ",".join("?" for _ in followed_user_ids)
+        rows = await self._db.fetchall(
+            f"SELECT {_FOLLOW_COLS} FROM moment_public_follows "
+            f"WHERE followed_user_id IN ({marks}) ORDER BY created_at DESC",
+            tuple(followed_user_ids),
+        )
+        return [_to_follow(r) for r in rows_to_dicts(rows)]
+
+    async def set_profile(
+        self,
+        *,
+        followed_user_id: str,
+        gfs_id: str,
+        display_name: str,
+        bio: str | None,
+        picture_digest: str | None,
+    ) -> None:
+        """Refresh the author's public profile on every local follow of
+        them through ``gfs_id``."""
+        await self._db.enqueue(
+            "UPDATE moment_public_follows SET followed_display_name=?, "
+            "followed_bio=?, followed_picture_digest=? "
+            "WHERE followed_user_id=? AND gfs_id=?",
+            (display_name, bio, picture_digest, followed_user_id, gfs_id),
+        )
 
 
 def _to_follow(row: dict) -> MomentPublicFollow:
@@ -281,4 +335,6 @@ def _to_follow(row: dict) -> MomentPublicFollow:
         followed_username=row["followed_username"],
         followed_display_name=row["followed_display_name"],
         created_at=row["created_at"],
+        followed_bio=row["followed_bio"],
+        followed_picture_digest=row["followed_picture_digest"],
     )

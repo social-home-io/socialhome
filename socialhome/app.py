@@ -3143,6 +3143,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── Public Momentum via GFS (§Momentum-public) ─────────────────────
     moment_public_registration_repo = SqliteMomentPublicRegistrationRepo(db)
     moment_public_follow_repo = SqliteMomentPublicFollowRepo(db)
+    person_summary_service.attach_public_follows(moment_public_follow_repo)
     moment_public_service = MomentPublicService(
         moment_public_registration_repo,
         moment_public_follow_repo,

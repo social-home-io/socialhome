@@ -517,3 +517,48 @@ async def test_push_picture_propagates_500(repos, db):
     await svc.register(user_id="u1", gfs_id="g1")
     upload_paths = [u for u in sess.posts if u.endswith("/picture")]
     assert len(upload_paths) == 1
+
+
+def _follow_reply(**user) -> dict:
+    return {
+        "user": {
+            "user_id": "u-remote",
+            "username": "bob",
+            "display_name": "Bob",
+            "home_instance_pk": "ab" * 32,
+            "instance_id": "inst-remote",
+            **user,
+        },
+        "follow": {
+            "follower_user_id": "u1",
+            "followed_user_id": "u-remote",
+            "created_at": 1,
+        },
+    }
+
+
+async def test_follow_keeps_the_directory_bio_and_picture_digest(repos):
+    """The GFS directory's full SHA-256 is kept in the household's 16-char
+    form — it only busts the browser cache on the proxy URL."""
+    sess = _StubSession(
+        body=_follow_reply(bio="Builds boats.", picture_digest="0123456789abcdef" * 4)
+    )
+    svc = _make_service(repos, session=sess)
+    f = await svc.follow(
+        follower_user_id="u1", gfs_id="g1", followed_user_id="u-remote"
+    )
+    assert f.followed_bio == "Builds boats."
+    assert f.followed_picture_digest == "0123456789abcdef"
+
+
+async def test_follow_stores_no_name_for_an_author_named_by_their_id(repos):
+    sess = _StubSession(
+        body=_follow_reply(display_name="u-remote", bio=None, picture_digest="x/../y")
+    )
+    svc = _make_service(repos, session=sess)
+    f = await svc.follow(
+        follower_user_id="u1", gfs_id="g1", followed_user_id="u-remote"
+    )
+    assert f.followed_display_name == ""
+    assert f.public_name == "bob"
+    assert f.followed_bio is None and f.followed_picture_digest is None

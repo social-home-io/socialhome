@@ -583,9 +583,10 @@ space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
 admin-revoke-rotation → rotation-offline-catchup → space-chat → replay →
-unpair → unpair-offline → gfs-up → gfs-pair → local-community → verify``
-in that order. The tail brings the GFS up only because ``local-community``'s
-last case (a GFS-only joiner) needs it; the closing ``verify`` runs the log
+unpair → unpair-offline → gfs-up → gfs-pair → local-community →
+gfs-moment-profile → verify``
+in that order. The tail brings the GFS up because ``local-community``'s
+last case (a GFS-only joiner) and ``gfs-moment-profile`` need it; the closing ``verify`` runs the log
 audit over the whole chain, so ``all`` alone is green-or-red end to end.
 Apart from ``gfs-up`` / ``gfs-pair``, the ``gfs-*`` chain (``gfs-open-signup`` /
 ``gfs-traffic``
@@ -1602,13 +1603,30 @@ with feed, chat and calendar only, which broke ``traffic`` (its Bazaar
 listing answered 403) and with it ``all``. ``_request`` follows every
 ``POST /api/spaces`` 201 with one ``PATCH {features}``.
 
-### Bazaar / public moment over GFS (TODO)
+### ``gfs-moment-profile`` — a stranger's public moment shows name, picture and bio
+
+Part of ``all`` (after ``local-community``). Prereqs when run on its own:
+``up`` + ``pair`` + ``gfs-up`` + ``gfs-pair`` (a and e on the GFS; e paired
+with nobody). a's user uploads a picture and registers for public moments
+on the GFS (``POST /api/moments/public/registrations`` — the directory gets
+name, bio and picture); e's user follows them
+(``POST /api/moments/public/follows``); a posts a public moment (a public
+reply to its own ``traffic`` moment when the 15-minute limit is spent).
+
+e knows a's user only through the GFS, and ``GET /api/moments/{id}`` on e
+must name the author with a's display name and bio (never "Someone", never
+the id) and a picture served by e's own proxy
+(``api/gfs/{gfs_id}/moments/users/{user_id}/picture``) that returns WebP
+bytes. The GFS's ``gfs_user_registrations`` row must already hold that bio
+and the picture whose digest the signed envelope named — the GFS learned
+nothing new. ``verify`` (13z) re-checks the author on e and e's
+``moment_public_follows`` profile columns.
+
+### Bazaar over GFS (TODO)
 
 Still to wire end-to-end:
 
 - ``POST /api/bazaar/listings`` for the Bazaar test path.
-- ``POST /api/moments`` with ``is_public=true`` for the public-
-  moment / GFS-following test path.
 
 ## Troubleshooting
 

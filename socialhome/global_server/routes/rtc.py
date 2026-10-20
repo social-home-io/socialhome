@@ -31,11 +31,16 @@ log = logging.getLogger(__name__)
 RELAY_AUTH_MAX_SKEW_SECONDS: int = 300
 
 
-async def _rtc_authenticate(view: GfsBaseView) -> tuple[dict, str] | web.Response:
+async def _rtc_authenticate(
+    view: GfsBaseView, *, keep_signature: bool = False
+) -> tuple[dict, str] | web.Response:
     """Shared signature check for ``/gfs/rtc/*`` POST bodies.
 
     Returns the parsed + verified payload dict + sender instance_id on
-    success, or a ready-to-return error Response.
+    success, or a ready-to-return error Response. The returned body has
+    no ``signature`` unless ``keep_signature`` — a body the GFS forwards
+    verbatim (a public moment envelope) keeps it, because the receiver
+    verifies that same signature itself.
     """
     fed_repo = view.svc(K.gfs_fed_repo_key)
     body = await view.body_or_400()
@@ -51,6 +56,8 @@ async def _rtc_authenticate(view: GfsBaseView) -> tuple[dict, str] | web.Respons
     signature = body.pop("signature", "")
     if not verify_report_signature(body, signature, sender.public_key):
         return web.json_response({"error": "invalid_signature"}, status=401)
+    if keep_signature:
+        body["signature"] = signature
     return body, instance_id
 
 

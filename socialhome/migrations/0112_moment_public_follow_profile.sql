@@ -1,0 +1,31 @@
+-- 0112 — a public-moment follow remembers the author's bio and picture.
+-- Follows 0111 (space join request area verdict).
+--
+-- People met only through a GFS showed as "Someone" on their public
+-- moments: the follower kept the name it saw at follow time
+-- (``followed_display_name``) and nothing else, and never refreshed it. The
+-- author's signed envelope now carries their bio and the digest of their
+-- GFS-mirrored picture (both already in the GFS public directory), and every
+-- envelope refreshes the follow row.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path on the table: ``SqliteMomentPublicFollowRepo``
+--       (``upsert`` from ``MomentPublicService.follow``, ``delete`` from
+--       ``unfollow`` / ``on_account_protected``, ``get`` /
+--       ``list_for_follower`` for ``GET /api/moments/public/follows``,
+--       ``lookup_followed_pk`` and ``followers_of`` for the inbound
+--       signature check in ``MomentPublicInbound``). No other code reads or
+--       writes it; the GFS's own ``gfs_moment_follows`` lives in the GFS
+--       database. The backup / export / recovery dumps copy the table whole
+--       and pick the new columns up as is.
+--   (2) Alternatives rejected: carrying name, bio and picture in each moment
+--       row (the moment table is shared with household moments, and the
+--       profile is per author, not per moment); fetching the GFS directory on
+--       every inbox read (a GFS round-trip per render, and the inbox would
+--       break while the GFS is down); reusing ``followed_display_name`` (it
+--       holds the name only); proxying the picture without a digest (the
+--       proxy URL needs one to bust the browser cache when it changes).
+--   (3) Smallest change: two NULL-defaulted ``ADD COLUMN``s, no backfill —
+--       the next envelope (or a re-follow) fills them.
+ALTER TABLE moment_public_follows ADD COLUMN followed_bio TEXT;
+ALTER TABLE moment_public_follows ADD COLUMN followed_picture_digest TEXT;
