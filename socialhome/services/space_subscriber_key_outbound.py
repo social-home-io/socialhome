@@ -52,11 +52,21 @@ Pipeline (fail-closed at every step):
 ``targeted_publish``, the handoff goes to that subscriber only
 (``POST /gfs/publish`` with ``to`` — the instance id the GFS itself named),
 not to every subscriber of the space; an older GFS still gets the fan-out.
-On a ``new_subscriber`` notify the host then sends the follower ONE sealed
-bundle of the space's author profiles (:meth:`_send_profiles_bundle`,
+For a NEW seat (``new_subscriber`` with ``reason: "subscribe"``) of a
+follower that listed ``author_profiles_bundle`` in its subscribe's
+``accepts`` (:mod:`socialhome.domain.subscriber_accepts`), the host then
+sends that follower ONE sealed bundle of the space's author profiles
+(:meth:`_send_profiles_bundle`,
 :mod:`socialhome.domain.space_author_profile_bundle`) — the authors' own
-signed ``author_profile`` items, the follower verifying each. An older GFS
-gets no bundle: the follower learns names on each author's next post.
+signed ``author_profile`` items, the follower verifying each. A
+``reason: "reconnect"`` notify (the GFS sends one per subscribed space on
+every reconnect of the follower's socket) re-seals the key and nothing
+else, so neither a GFS nor a host restart makes thousands of followers
+re-download their bundles; a frame with no / an unknown ``reason`` (an
+older GFS) or a follower that lists no ``accepts`` gets no bundle either —
+fail-safe, the follower learns names on each author's next post. Since a
+GFS can still name any household as a new subscriber, bundles are capped
+per space (:data:`MAX_BUNDLES_PER_SPACE_PER_MINUTE`).
 
 Phase 5b-c adds the owner-offline RECONCILE (:meth:`reconcile`): on each GFS-WS
 (re)connect, a seed-holder pulls the GFS subscriber list for every local
@@ -73,6 +83,7 @@ import base64
 import json
 import logging
 import time
+from collections import deque
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -91,6 +102,7 @@ from ..domain.space_author_profile_bundle import (
     bundle_plaintext,
     split_bundle,
 )
+from ..domain.subscriber_accepts import ACCEPTS_AUTHOR_PROFILES_BUNDLE
 from ..federation.keywrap_seal import seal_to_keywrap, verify_keywrap_binding
 from ..services.space_crypto_service import KEY_SUITE_AESGCM_256
 
@@ -105,25 +117,36 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: One profiles bundle per (space, follower) at most this often — the GFS
-#: re-sends ``new_subscriber`` on each of the follower's reconnects.
-BUNDLE_RESEND_AFTER_S: float = 3600.0
-
 #: At most this many profiles bundles per space per minute, whoever asks:
-#: a GFS can name any registered household in ``new_subscriber``, so a
-#: hostile one could otherwise make the host upload a bundle per name.
+#: a GFS can name any registered household in a ``reason: "subscribe"``
+#: ``new_subscriber`` (and claim it ``accepts`` a bundle), so a hostile one
+#: could otherwise make the host upload a bundle per name.
 MAX_BUNDLES_PER_SPACE_PER_MINUTE: int = 30
 
-#: Past this many remembered ``(space, follower)`` pairs, the ones older
-#: than :data:`BUNDLE_RESEND_AFTER_S` are forgotten.
-_BUNDLED_AT_PRUNE_ABOVE: int = 10_000
+#: Past this many spaces in the rate backstop, the ones with no bundle in the
+#: last minute are forgotten.
+_MAX_TRACKED_SPACES: int = 1024
+
+#: The ``new_subscriber.reason`` of a NEW seat — the only one that earns a
+#: bundle. ``"reconnect"``, a missing or an unknown reason: key handoff only.
+_REASON_SUBSCRIBE: str = "subscribe"
+
+
+def _clock() -> float:
+    return time.monotonic()
+
+
+def _opens_bundle(sub: dict[str, Any]) -> bool:
+    """The follower listed ``author_profiles_bundle`` in its subscribe."""
+    accepts = sub.get("accepts")
+    return isinstance(accepts, list) and ACCEPTS_AUTHOR_PROFILES_BUNDLE in accepts
 
 
 class SpaceSubscriberKeyOutbound:
     """``new_subscriber`` GFS frame → sealed content-key handoff producer."""
 
     __slots__ = (
-        "_bundled_at",
+        "_bundle_times",
         "_crypto",
         "_gfs",
         "_gfs_conn_repo",
@@ -152,8 +175,9 @@ class SpaceSubscriberKeyOutbound:
         #: The cached author profiles a new follower's bundle is built from
         #: (v_61). Until attached, no bundle is sent.
         self._profiles: AbstractSpaceAuthorProfileRepo | None = None
-        #: ``(space_id, subscriber)`` → monotonic time of its last bundle.
-        self._bundled_at: dict[tuple[str, str], float] = {}
+        #: ``space_id`` → monotonic times of its bundles in the last minute
+        #: (the per-space rate backstop; bounded by the limit per space).
+        self._bundle_times: dict[str, deque[float]] = {}
 
     def attach_author_profiles(self, repo: AbstractSpaceAuthorProfileRepo) -> None:
         """Wire the author-profile cache the v_61 new-follower bundle is
@@ -227,8 +251,14 @@ class SpaceSubscriberKeyOutbound:
             gfs_id=gfs_id,
         )
         # The key reached that follower alone, so its server routes by
-        # target: now the authors' names, to the same follower only.
-        if sealed_to is not None and gfs_id is not None:
+        # target: now the authors' names, to the same follower only — once,
+        # for a NEW seat (never on a reconnect) of a follower that opens it.
+        if (
+            sealed_to is not None
+            and gfs_id is not None
+            and frame.get("reason") == _REASON_SUBSCRIBE
+            and _opens_bundle(sub)
+        ):
             try:
                 await self._send_profiles_bundle(
                     gfs_id=gfs_id,
@@ -259,42 +289,31 @@ class SpaceSubscriberKeyOutbound:
         follower and relay them to it alone (v_61). Returns the parts sent.
 
         Only items of ``epoch`` (the key just handed over): the follower
-        checks each author's writer cert against it. At most one bundle per
-        ``(space, follower)`` per :data:`BUNDLE_RESEND_AFTER_S`."""
+        checks each author's writer cert against it. At most
+        :data:`MAX_BUNDLES_PER_SPACE_PER_MINUTE` bundles per space."""
         if self._profiles is None:
             return 0
-        key = (space_id, target_instance_id)
-        now = time.monotonic()
-        last = self._bundled_at.get(key)
-        if last is not None and now - last < BUNDLE_RESEND_AFTER_S:
-            return 0
-        recent = sum(
-            1
-            for (space, _target), at in self._bundled_at.items()
-            if space == space_id and now - at < 60.0
-        )
-        if recent >= MAX_BUNDLES_PER_SPACE_PER_MINUTE:
-            log.warning(
-                "space_subscriber_key.outbound: %d profiles bundles for space %s "
-                "in the last minute — this follower learns names on the next "
-                "profile change instead",
-                recent,
-                space_id,
-            )
-            return 0
-        if len(self._bundled_at) > _BUNDLED_AT_PRUNE_ABOVE:
-            self._bundled_at = {
-                k: at
-                for k, at in self._bundled_at.items()
-                if now - at < BUNDLE_RESEND_AFTER_S
-            }
+        now = _clock()
+        times = self._bundle_times.get(space_id)
+        if times is not None:
+            while times and now - times[0] >= 60.0:
+                times.popleft()
+            if len(times) >= MAX_BUNDLES_PER_SPACE_PER_MINUTE:
+                log.warning(
+                    "space_subscriber_key.outbound: %d profiles bundles for "
+                    "space %s in the last minute — this follower learns names "
+                    "on each author's next post instead",
+                    len(times),
+                    space_id,
+                )
+                return 0
         items = await self._profiles.list_signed_items(
             space_id, epoch=epoch, limit=MAX_BUNDLE_AUTHORS
         )
         parts = split_bundle(items)
         if not parts:
             return 0
-        self._bundled_at[key] = now
+        self._note_bundle(space_id, now)
         sent = 0
         for index, part in enumerate(parts):
             sealed = seal_to_keywrap(
@@ -333,6 +352,20 @@ class SpaceSubscriberKeyOutbound:
             len(parts),
         )
         return sent
+
+    def _note_bundle(self, space_id: str, now: float) -> None:
+        """Count one bundle against *space_id*'s rate backstop."""
+        times = self._bundle_times.get(space_id)
+        if times is None:
+            if len(self._bundle_times) >= _MAX_TRACKED_SPACES:
+                self._bundle_times = {
+                    space: kept
+                    for space, kept in self._bundle_times.items()
+                    if kept and now - kept[-1] < 60.0
+                }
+            times = deque(maxlen=max(1, MAX_BUNDLES_PER_SPACE_PER_MINUTE))
+            self._bundle_times[space_id] = times
+        times.append(now)
 
     async def _seal_and_relay(
         self,

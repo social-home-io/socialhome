@@ -88,6 +88,7 @@ from ..domain.space import (
     normalize_join_mode,
 )
 from ..domain.space_place import place_pin_of, place_pin_wire
+from ..domain.subscriber_accepts import OUR_ACCEPTS
 from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..gfs_proof import (
     PROOF_CAPABILITY,
@@ -2837,6 +2838,10 @@ class GfsConnectionService:
             "space_id": space_id,
             "ts": ts,
             "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
+            # v_61 — what this household opens, OUTSIDE the signed bytes (an
+            # older GFS ignores it and still verifies). Same list on every
+            # seat, follower or member, so it never tells them apart.
+            "accepts": list(OUR_ACCEPTS),
         }
         client = self._client()
         url = f"{conn.inbox_url}/gfs/subscribe"
@@ -3091,8 +3096,9 @@ class GfsConnectionService:
         ``None`` when that server has not proved ``targeted_publish`` (and
         ``anonymous_publish``) under a valid signature: nothing was sent, and
         the caller falls back (or skips). Otherwise ``True`` when the GFS
-        accepted it. No retry queue: the subscriber's next connect asks for
-        it again (``new_subscriber`` is re-sent on reconnect). The body is
+        accepted it. No retry queue: the key handoff is asked for again on
+        the subscriber's next connect (``new_subscriber`` with ``reason:
+        "reconnect"``); the one-time profiles bundle is not. The body is
         ``{space_id, event_type, payload, to}`` — still no household
         identity.
         """
