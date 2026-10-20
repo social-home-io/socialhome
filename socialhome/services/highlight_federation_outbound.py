@@ -34,6 +34,7 @@ from ..domain.events import (
     HighlightRemoved,
 )
 from ..domain.federation import FederationEventType
+from ..domain.highlight import Highlight
 from ..infrastructure.event_bus import EventBus
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
 from .protection_gate import ProtectionGateMixin
@@ -266,6 +267,30 @@ class HighlightFederationOutbound(
             return resolved
         log.debug("highlight-outbound: unknown audience_kind %r", kind)
         return set()
+
+    async def reaches(
+        self, highlight: Highlight, *, instance_id: str, user_id: str
+    ) -> bool:
+        """Whether *highlight* is delivered to *user_id* on household
+        *instance_id* — the fan-out rule below, asked in reverse.
+
+        The receiver of a remote view or reaction (``HIGHLIGHT_FRAME_VIEWED``
+        / ``_REACTED`` / ``_REACTION_REMOVED``) uses it to honour only
+        someone the highlight actually reached: the household is one the
+        audience resolves to, a ``users`` audience names this very user, the
+        author is not hidden from that household (§Privacy) and no guardian
+        block covers it (§CP.F2).
+        """
+        kind = str(highlight.audience_kind)
+        if kind == "users" and user_id not in highlight.audience:
+            return False
+        if instance_id not in await self._resolve_audience(kind, highlight.audience):
+            return False
+        if highlight.author_user_id in await self.hidden_for_peer(instance_id):
+            return False
+        return not await self._guardian_blocks_household(
+            highlight.author_user_id, instance_id
+        )
 
     async def _fan_to_audience(
         self,
