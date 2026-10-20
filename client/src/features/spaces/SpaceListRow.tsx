@@ -25,16 +25,23 @@ export function SpaceIcon({ iconUrl, emoji, name }: {
   )
 }
 
-/** "Just you" / "8 members". */
-export function membersLabel(n: number): string {
-  if (n <= 1) return t('spaces.list.just_you')
+/** "8 members" / "1 member" — and "Just you" only when ``viewerIsMember``:
+ *  the one member is then the viewer. A follower is never in the count,
+ *  so a followed space or a Discover row (a space the viewer isn't in)
+ *  with one member says "1 member". */
+export function membersLabel(n: number, viewerIsMember: boolean): string {
+  if (viewerIsMember && n <= 1) return t('spaces.list.just_you')
   return t(isOne(n) ? 'space.members.count_one' : 'space.members.count', { n: String(n) })
 }
 
 /** "8 members · active 2 h ago" — either part may be missing. */
-export function activityMeta(memberCount: number | null | undefined, lastActivityAt: string | null | undefined): string {
+export function activityMeta(
+  memberCount: number | null | undefined,
+  lastActivityAt: string | null | undefined,
+  viewerIsMember: boolean,
+): string {
   const parts: string[] = []
-  if (memberCount != null) parts.push(membersLabel(memberCount))
+  if (memberCount != null) parts.push(membersLabel(memberCount, viewerIsMember))
   if (lastActivityAt) parts.push(t('spaces.list.active', { when: relativeDocsTime(lastActivityAt) }))
   return parts.join(' · ')
 }
