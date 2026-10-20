@@ -16,8 +16,8 @@ import { openLightbox } from '@/components/ImageLightbox'
 import { MomentumArchiveSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
 import {
-  householdDisplayName,
-  householdPictureUrl,
+  namedPersonLabel,
+  namedPersonPicture,
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { ws } from '@/ws'
@@ -160,13 +160,13 @@ export default function MomentumArchiveTab() {
                     loc.route(`/momentum/${m.id}`)
                   }}>
                   <Avatar
-                    name={householdDisplayName(m.author_user_id)}
-                    src={householdPictureUrl(m.author_user_id)}
+                    name={namedPersonLabel(m.author_user_id, m.author)}
+                    src={namedPersonPicture(m.author_user_id, m.author)}
                     size={32}
                   />
                   <div class="sh-momentum-row-body">
                     <div class="sh-momentum-row-meta">
-                      <strong>{householdDisplayName(m.author_user_id)}</strong>
+                      <strong>{namedPersonLabel(m.author_user_id, m.author)}</strong>
                       <span class="sh-muted">{m.created_at.slice(11, 16)}</span>
                     </div>
                     {m.content && (
@@ -197,7 +197,7 @@ export default function MomentumArchiveTab() {
                       >
                         <img
                           src={m.media_url}
-                          alt={m.content ? '' : t('moment.photo_from', { name: householdDisplayName(m.author_user_id) })}
+                          alt={m.content ? '' : t('moment.photo_from', { name: namedPersonLabel(m.author_user_id, m.author) })}
                           loading="lazy"
                           class="sh-momentum-row-media"
                         />

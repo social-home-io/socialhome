@@ -19,9 +19,10 @@ import { Modal } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
 import {
-  householdDisplayName,
-  householdPictureUrl,
   loadHouseholdUsers,
+  namedPersonLabel,
+  namedPersonPicture,
+  type NamedPerson,
 } from '@/store/householdUsers'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Highlight, HighlightFrame } from '@/types'
@@ -36,8 +37,20 @@ import { highlightDateLabel } from '@/utils/highlightDate'
 interface HighlightDetail {
   highlight: Highlight
   frames: HighlightFrame[]
-  views?: Record<string, { viewer_user_id: string; viewed_at: string }[]>
-  reactions?: Record<string, { reactor_user_id: string; emoji: string }[]>
+  views?: Record<string, HighlightView[]>
+  reactions?: Record<string, HighlightReaction[]>
+}
+
+/** A "Seen by" row — the server names the person (a friend on another
+ *  household included). */
+interface HighlightView extends NamedPerson {
+  viewer_user_id: string
+  viewed_at: string
+}
+
+interface HighlightReaction extends NamedPerson {
+  reactor_user_id: string
+  emoji: string
 }
 
 const QUICK_REACTIONS = ['❤️', '🔥', '😂', '😮', '😢', '👏'] as const
@@ -93,47 +106,16 @@ export default function HighlightViewerPage() {
     void refetch(true)
     // Live counters for authors viewing their own highlight page —
     // ``highlight.frame_viewed`` / ``highlight.frame_reaction_changed`` arrive
-    // when a peer's viewer marks a frame seen or reacts. We mutate the
-    // local ``detail`` signal in place (cheap O(1) updates per event)
-    // instead of refetching the whole highlight — both events carry every
-    // field the UI needs.
+    // when a viewer marks a frame seen or reacts. The frames carry only the
+    // person's id, and a friend on another household is not in the local
+    // cache — refetch so the "Seen by" rows come back named by the server.
     const matches = (data: { highlight_id?: string }) => data.highlight_id === highlightId
+    const onActivity = (e: { data: unknown }) => {
+      if (matches(e.data as { highlight_id?: string }) && detail.value) void refetch(false)
+    }
     const dispose = [
-      ws.on('highlight.frame_viewed', (e) => {
-        const data = e.data as {
-          highlight_id?: string; frame_id?: string; viewer_user_id?: string
-        }
-        if (!matches(data) || !detail.value || !data.frame_id) return
-        const frameId = data.frame_id
-        const viewer = data.viewer_user_id ?? ''
-        const views = { ...(detail.value.views ?? {}) }
-        const list = views[frameId] ?? []
-        // Idempotent — a viewer marking the same frame twice is a no-op.
-        if (list.some(v => v.viewer_user_id === viewer)) return
-        views[frameId] = [
-          ...list,
-          { viewer_user_id: viewer, viewed_at: new Date().toISOString() },
-        ]
-        detail.value = { ...detail.value, views }
-      }),
-      ws.on('highlight.frame_reaction_changed', (e) => {
-        const data = e.data as {
-          highlight_id?: string; frame_id?: string;
-          reactor_user_id?: string; emoji?: string | null
-        }
-        if (!matches(data) || !detail.value || !data.frame_id) return
-        const frameId = data.frame_id
-        const reactor = data.reactor_user_id ?? ''
-        const reactions = { ...(detail.value.reactions ?? {}) }
-        const list = (reactions[frameId] ?? []).filter(
-          r => r.reactor_user_id !== reactor,
-        )
-        if (data.emoji) {
-          list.push({ reactor_user_id: reactor, emoji: data.emoji })
-        }
-        reactions[frameId] = list
-        detail.value = { ...detail.value, reactions }
-      }),
+      ws.on('highlight.frame_viewed', onActivity),
+      ws.on('highlight.frame_reaction_changed', onActivity),
     ]
     return () => { dispose.forEach(d => d()) }
   }, [highlightId])
@@ -212,6 +194,8 @@ export default function HighlightViewerPage() {
     )
   }
   const isAuthor = highlight.author_user_id === myId
+  const authorName = namedPersonLabel(highlight.author_user_id, highlight.author)
+  const authorPicture = namedPersonPicture(highlight.author_user_id, highlight.author)
 
   const onTapLeft = (e: Event) => { e.preventDefault(); goBack() }
   const onTapRight = (e: Event) => { e.preventDefault(); advance() }
@@ -303,22 +287,19 @@ export default function HighlightViewerPage() {
 
       <header class="sh-highlight-viewer-header">
         <Avatar
-          name={householdDisplayName(highlight.author_user_id)}
-          src={householdPictureUrl(highlight.author_user_id)}
+          name={authorName}
+          src={authorPicture}
           size={32}
         />
-        <strong>{householdDisplayName(highlight.author_user_id)}</strong>
+        <strong>{authorName}</strong>
         <span class="sh-muted">{highlightDateLabel(highlight.highlight_date)}</span>
         {!isAuthor && (
           <button
             type="button"
             class="sh-highlight-viewer-overflow"
-            aria-label={t('highlight.more_actions', { name: householdDisplayName(highlight.author_user_id) })}
+            aria-label={t('highlight.more_actions', { name: authorName })}
             onClick={() => openPerson(highlight.author_user_id, {
-              person: {
-                display_name: householdDisplayName(highlight.author_user_id),
-                picture_url: householdPictureUrl(highlight.author_user_id),
-              },
+              person: { display_name: authorName, picture_url: authorPicture },
             })}
           >
             ⋯
@@ -497,8 +478,8 @@ function reactionsLabel(n: number): string {
 function HighlightSeenBySheet({
   views, reactions, onClose,
 }: {
-  views: { viewer_user_id: string; viewed_at: string }[]
-  reactions: { reactor_user_id: string; emoji: string }[]
+  views: HighlightView[]
+  reactions: HighlightReaction[]
   onClose: () => void
 }) {
   const totalActivity = views.length + reactions.length
@@ -519,12 +500,12 @@ function HighlightSeenBySheet({
             {views.map(v => (
               <li key={v.viewer_user_id} class="sh-seenby-row">
                 <Avatar
-                  name={householdDisplayName(v.viewer_user_id)}
-                  src={householdPictureUrl(v.viewer_user_id)}
+                  name={namedPersonLabel(v.viewer_user_id, v)}
+                  src={namedPersonPicture(v.viewer_user_id, v)}
                   size={32}
                 />
                 <span class="sh-seenby-name">
-                  {householdDisplayName(v.viewer_user_id)}
+                  {namedPersonLabel(v.viewer_user_id, v)}
                 </span>
                 <time class="sh-muted">{relativeDocsTime(v.viewed_at)}</time>
               </li>
@@ -542,12 +523,12 @@ function HighlightSeenBySheet({
             {reactions.map(r => (
               <li key={r.reactor_user_id} class="sh-seenby-row">
                 <Avatar
-                  name={householdDisplayName(r.reactor_user_id)}
-                  src={householdPictureUrl(r.reactor_user_id)}
+                  name={namedPersonLabel(r.reactor_user_id, r)}
+                  src={namedPersonPicture(r.reactor_user_id, r)}
                   size={32}
                 />
                 <span class="sh-seenby-name">
-                  {householdDisplayName(r.reactor_user_id)}
+                  {namedPersonLabel(r.reactor_user_id, r)}
                 </span>
                 <span class="sh-seenby-emoji" aria-hidden="true">{r.emoji}</span>
               </li>

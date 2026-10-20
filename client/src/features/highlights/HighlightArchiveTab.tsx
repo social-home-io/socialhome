@@ -22,10 +22,10 @@ import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { MonthGridSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
-import { resolveDisplayName } from '@/utils/avatar'
 import { formatDayKey } from '@/utils/calendar'
 import { currentWeekStart, weekdayOrder, type WeekStart } from '@/utils/week'
 import { ws } from '@/ws'
+import { namedPersonLabel, namedPersonPicture } from '@/store/householdUsers'
 import type { HighlightInboxItem } from '@/types'
 import { addBase } from '@/baseUrl'
 import { t, isOne, formatLocale } from '@/i18n/i18n'
@@ -256,7 +256,7 @@ export default function HighlightArchiveTab() {
           <ul class="sh-highlight-archive-day-list">
             {selectedHighlights.map(s => {
               const author = s.highlight.author_user_id
-              const name = resolveDisplayName(null, author)
+              const name = namedPersonLabel(author, s.highlight.author)
               const first = s.frames[0]
               return (
                 <li key={s.highlight.id}>
@@ -279,7 +279,11 @@ export default function HighlightArchiveTab() {
                       </span>
                     )}
                     <div class="sh-highlight-archive-tile-meta">
-                      <Avatar name={name} size={32} />
+                      <Avatar
+                        name={name}
+                        src={namedPersonPicture(author, s.highlight.author)}
+                        size={32}
+                      />
                       <strong>{name}</strong>
                       <span class="sh-muted">
                         {t(isOne(s.frames.length) ? 'highlight.frames_one' : 'highlight.frames', { n: String(s.frames.length) })}

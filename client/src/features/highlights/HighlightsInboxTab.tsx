@@ -25,8 +25,8 @@ import { currentUser } from '@/store/auth'
 import { openPerson } from '@/components/PersonSheet'
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
 import {
-  householdDisplayName,
-  householdPictureUrl,
+  namedPersonLabel,
+  namedPersonPicture,
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { ws } from '@/ws'
@@ -107,8 +107,8 @@ export default function HighlightsInboxTab() {
       : 'sh-highlight-ring'
     const onClick = () => loc.route(`/highlights/${item.highlight.id}`)
     const isMine = item.highlight.author_user_id === me
-    const name = householdDisplayName(item.highlight.author_user_id)
-    const picture = householdPictureUrl(item.highlight.author_user_id)
+    const name = namedPersonLabel(item.highlight.author_user_id, item.highlight.author)
+    const picture = namedPersonPicture(item.highlight.author_user_id, item.highlight.author)
     return (
       <div key={item.highlight.id} class="sh-highlight-ring-wrap">
         <button
@@ -181,7 +181,7 @@ export default function HighlightsInboxTab() {
             const isMine = item.highlight.author_user_id === me
             const name = isMine
               ? t('highlight.inbox.you')
-              : householdDisplayName(item.highlight.author_user_id)
+              : namedPersonLabel(item.highlight.author_user_id, item.highlight.author)
             return (
               <a
                 key={item.highlight.id}

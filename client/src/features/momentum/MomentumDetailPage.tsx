@@ -25,9 +25,9 @@ import { openPerson } from '@/components/PersonSheet'
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
 import { currentUser } from '@/store/auth'
 import {
-  householdDisplayName,
-  householdPictureUrl,
   loadHouseholdUsers,
+  namedPersonLabel,
+  namedPersonPicture,
 } from '@/store/householdUsers'
 import { t, isOne, formatLocale } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
@@ -132,28 +132,28 @@ export default function MomentumDetailPage() {
     return (
       <li key={mm.id} class="sh-momentum-row">
         <Avatar
-          name={householdDisplayName(mm.author_user_id)}
-          src={householdPictureUrl(mm.author_user_id)}
+          name={namedPersonLabel(mm.author_user_id, mm.author)}
+          src={namedPersonPicture(mm.author_user_id, mm.author)}
           size={32}
         />
         <div class="sh-momentum-row-body">
           <div class="sh-momentum-row-head">
             <strong class="sh-momentum-row-author">
-              {replyMine ? t('highlight.inbox.you') : householdDisplayName(mm.author_user_id)}
+              {replyMine ? t('highlight.inbox.you') : namedPersonLabel(mm.author_user_id, mm.author)}
             </strong>
             <span class="sh-muted">· {relativeChatTime(mm.created_at)}</span>
             {!replyMine && (
               <button
                 type="button"
                 class="sh-momentum-row-overflow"
-                aria-label={t('highlight.more_actions', { name: householdDisplayName(mm.author_user_id) })}
+                aria-label={t('highlight.more_actions', { name: namedPersonLabel(mm.author_user_id, mm.author) })}
                 onClick={(ev) => {
                   ev.preventDefault()
                   ev.stopPropagation()
                   openPerson(mm.author_user_id, {
                     person: {
-                      display_name: householdDisplayName(mm.author_user_id),
-                      picture_url: householdPictureUrl(mm.author_user_id),
+                      display_name: namedPersonLabel(mm.author_user_id, mm.author),
+                      picture_url: namedPersonPicture(mm.author_user_id, mm.author),
                     },
                   })
                 }}
@@ -213,12 +213,12 @@ export default function MomentumDetailPage() {
     <div class="sh-momentum-detail">
       <header class="sh-momentum-detail-header">
         <Avatar
-          name={householdDisplayName(m.author_user_id)}
-          src={householdPictureUrl(m.author_user_id)}
+          name={namedPersonLabel(m.author_user_id, m.author)}
+          src={namedPersonPicture(m.author_user_id, m.author)}
           size={48}
         />
         <div class="sh-momentum-detail-meta">
-          <strong>{isAuthor ? t('highlight.inbox.you') : householdDisplayName(m.author_user_id)}</strong>
+          <strong>{isAuthor ? t('highlight.inbox.you') : namedPersonLabel(m.author_user_id, m.author)}</strong>
           <span class="sh-muted">
             {new Date(m.created_at).toLocaleString(formatLocale(), {
               dateStyle: 'medium',
@@ -230,11 +230,11 @@ export default function MomentumDetailPage() {
           <button
             type="button"
             class="sh-momentum-row-overflow"
-            aria-label={t('highlight.more_actions', { name: householdDisplayName(m.author_user_id) })}
+            aria-label={t('highlight.more_actions', { name: namedPersonLabel(m.author_user_id, m.author) })}
             onClick={() => openPerson(m.author_user_id, {
               person: {
-                display_name: householdDisplayName(m.author_user_id),
-                picture_url: householdPictureUrl(m.author_user_id),
+                display_name: namedPersonLabel(m.author_user_id, m.author),
+                picture_url: namedPersonPicture(m.author_user_id, m.author),
               },
             })}
           >
@@ -270,7 +270,7 @@ export default function MomentumDetailPage() {
         >
           <img
             src={m.media_url}
-            alt={m.content ? '' : t('moment.photo_from', { name: householdDisplayName(m.author_user_id) })}
+            alt={m.content ? '' : t('moment.photo_from', { name: namedPersonLabel(m.author_user_id, m.author) })}
             class="sh-momentum-detail-media"
           />
         </button>
