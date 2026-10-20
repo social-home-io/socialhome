@@ -1,9 +1,11 @@
 /**
  * HighlightShareCard — feed-card body for ``post.type === 'highlight_share'``.
  *
- * Lazy-fetches the linked highlight via ``GET /api/highlights/{id}`` (the
- * server already gates by audience, so a 404 here means "expired" or
- * "not visible to me"). Renders a thumbnail of the first frame plus the
+ * Lazy-fetches the linked highlight via ``GET /api/highlights/{id}?via_post=``.
+ * The server gates the read: a reader outside the highlight's audience
+ * sees it only through a share post they can read, so the card passes
+ * its post id (and the viewer link carries it on). A 404 here means
+ * "expired" or "not visible to me". Renders a thumbnail of the first frame plus the
  * sharer's optional note + a "Tap to watch" affordance that routes to
  * :class:`HighlightViewerPage`.
  *
@@ -36,14 +38,23 @@ export interface HighlightShareCardProps {
   /** The space the post lives in, so a remote author resolves through
    *  that space's roster. ``null`` / absent on the household feed. */
   spaceId?: string | null
+  /** The ``highlight_share`` post this card renders — the server opens
+   *  the highlight to whoever can read that post. */
+  postId?: string | null
+}
+
+/** ``?via_post=`` suffix for the share path, or ``''`` without a post. */
+export function viaPostQuery(postId: string | null | undefined): string {
+  return postId ? `?via_post=${encodeURIComponent(postId)}` : ''
 }
 
 const cache = signal<Record<string, HighlightDetailResponse | null>>({})
 const loading = signal<Record<string, boolean>>({})
 
 
-export function HighlightShareCard({ highlightId, note, spaceId = null }: HighlightShareCardProps) {
+export function HighlightShareCard({ highlightId, note, spaceId = null, postId = null }: HighlightShareCardProps) {
   const loc = useLocation()
+  const via = viaPostQuery(postId)
 
   // The highlight only carries the author's id; resolve it like a post
   // author (space roster → household users), never print the id.
@@ -57,7 +68,7 @@ export function HighlightShareCard({ highlightId, note, spaceId = null }: Highli
     if (highlightId in cache.value) return
     if (loading.value[highlightId]) return
     loading.value = { ...loading.value, [highlightId]: true }
-    api.get(`/api/highlights/${highlightId}`)
+    api.get(`/api/highlights/${highlightId}${via}`)
       .then((d: HighlightDetailResponse) => {
         cache.value = { ...cache.value, [highlightId]: d }
       })
@@ -71,7 +82,7 @@ export function HighlightShareCard({ highlightId, note, spaceId = null }: Highli
         delete next[highlightId]
         loading.value = next
       })
-  }, [highlightId])
+  }, [highlightId, via])
 
   if (!highlightId) {
     return (
@@ -124,7 +135,7 @@ export function HighlightShareCard({ highlightId, note, spaceId = null }: Highli
     <button
       type="button"
       class="sh-highlight-share-card"
-      onClick={() => loc.route(`/highlights/${detail.highlight.id}`)}
+      onClick={() => loc.route(`/highlights/${detail.highlight.id}${via}`)}
       aria-label={t('highlight.share_card.watch_aria', { name: authorName })}
     >
       {first && first.frame_type === 'image' ? (

@@ -19,6 +19,13 @@ Routes:
 * ``POST   /api/highlights/{id}/share``                   — share into a feed
 * ``POST   /api/highlights/frames/{id}/dm-reply``         — DM reply with snapshot
 
+Every ``{id}`` read and frame action is audience-gated in the service
+(``HighlightService._require_readable``): a caller who may not read the
+highlight gets the same 404 as an unknown id. The detail read and the
+frame view / reaction / DM-reply calls take an optional ``?via_post=``
+— the ``highlight_share`` post the caller opened it from — so a space or
+household share card reads for everyone who can read that post.
+
 The DM-reply endpoint is intentionally on the highlights surface (rather
 than ``/api/conversations/.../messages``) so the snapshot construction
 stays next to the highlight domain. Internally it routes through
@@ -112,6 +119,13 @@ def _frame_dict(frame: HighlightFrame, *, media_status: str | None = None) -> di
     if frame.frame_type is HighlightFrameType.VIDEO:
         out["media_status"] = media_status if media_status is not None else READY
     return out
+
+
+def _via_post(view: BaseView) -> str | None:
+    """``?via_post=`` — the ``highlight_share`` post the caller opened the
+    highlight from. Only a hint: the service checks the caller can read
+    that post and that it shares this highlight."""
+    return view.request.query.get("via_post") or None
 
 
 async def _frame_statuses(view: BaseView, frames) -> dict[str, str]:
@@ -246,10 +260,11 @@ class HighlightDetailView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "auth required")
         highlight_id = self.match("id")
         svc = self.svc(highlight_service_key)
-        result = await svc.get_with_frames(highlight_id)
-        if result is None:
-            return error_response(404, "NOT_FOUND", "highlight not found")
-        highlight, frames = result
+        # Not the author or in the audience and no readable share → the
+        # unknown-id 404 (``HighlightNotFoundError``, mapped by BaseView).
+        highlight, frames = await svc.get_for_viewer(
+            highlight_id, ctx.user_id, via_post_id=_via_post(self)
+        )
         statuses = await _frame_statuses(self, frames)
         # Authors get the per-frame views + reactions inline so the
         # viewer can render "Viewed by N" without a second request.
@@ -336,7 +351,11 @@ class HighlightFrameViewView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "auth required")
         frame_id = self.match("id")
         svc = self.svc(highlight_service_key)
-        await svc.mark_frame_viewed(frame_id=frame_id, viewer_user_id=ctx.user_id)
+        await svc.mark_frame_viewed(
+            frame_id=frame_id,
+            viewer_user_id=ctx.user_id,
+            via_post_id=_via_post(self),
+        )
         return web.json_response({"ok": True})
 
 
@@ -357,6 +376,7 @@ class HighlightFrameReactionView(BaseView):
             frame_id=frame_id,
             reactor_user_id=ctx.user_id,
             emoji=emoji.strip(),
+            via_post_id=_via_post(self),
         )
         return web.json_response({"ok": True})
 
@@ -366,7 +386,11 @@ class HighlightFrameReactionView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "auth required")
         frame_id = self.match("id")
         svc = self.svc(highlight_service_key)
-        await svc.clear_reaction(frame_id=frame_id, reactor_user_id=ctx.user_id)
+        await svc.clear_reaction(
+            frame_id=frame_id,
+            reactor_user_id=ctx.user_id,
+            via_post_id=_via_post(self),
+        )
         return web.json_response({"ok": True})
 
 
@@ -426,6 +450,7 @@ class HighlightDmReplyView(BaseView):
             conversation_id=conversation_id,
             content=content,
             dm_service=self.svc(dm_service_key),
+            via_post_id=_via_post(self),
         )
         return self._json(
             {"message_id": getattr(message, "id", None)},

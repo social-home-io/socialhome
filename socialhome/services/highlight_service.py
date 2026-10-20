@@ -15,11 +15,13 @@ instances based on the audience kind, and each per-peer envelope sends
 the body inside the encrypted payload. See
 ``highlight_federation_outbound.py``.
 
-Authorization: callers are responsible for verifying the
-``actor_user_id`` matches the resource owner (route layer does this via
-:class:`BaseView`). The service still raises :class:`PermissionError`
-when an actor tries to mutate someone else's frame / highlight so any
-mis-wired caller can't do silent damage.
+Authorization: every read and every frame action first proves the
+caller may read the highlight (:meth:`HighlightService._require_readable`)
+— the inbox rule (audience, expiry, personal and guardian blocks), or a
+share post of it the caller can read. A caller who may not read it gets
+:class:`HighlightNotFoundError`, word for word what an unknown id gets,
+so an id is never an existence oracle. A reader who is not the author
+and tries to mutate it gets :class:`HighlightForbiddenError`.
 """
 
 from __future__ import annotations
@@ -45,9 +47,11 @@ from ..domain.highlight import (
     HighlightFrameReplySnapshot,
     HighlightFrameType,
 )
+from ..domain.post import Post, PostType
 from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from .inbound_media_store import require_local_media_ref
+from .space_member_guard import seat_of
 from .user_preferences import parse_highlights_preferences
 
 if TYPE_CHECKING:
@@ -55,6 +59,9 @@ if TYPE_CHECKING:
 
     from ..infrastructure.event_bus import EventBus
     from ..repositories.highlight_repo import AbstractHighlightRepo
+    from ..repositories.post_repo import AbstractPostRepo
+    from ..repositories.space_post_repo import AbstractSpacePostRepo
+    from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
 
 log = logging.getLogger(__name__)
@@ -62,6 +69,10 @@ log = logging.getLogger(__name__)
 #: Hard ceiling on frames per highlight per day. Prevents storage abuse and
 #: keeps the viewer responsive on slow networks.
 MAX_FRAMES_PER_HIGHLIGHT: int = 30
+
+#: The one message an unknown id and a highlight the caller may not read
+#: both answer with — the 404 body must not tell them apart.
+NOT_FOUND_MESSAGE = "highlight not found"
 
 
 class HighlightNotFoundError(LookupError):
@@ -79,7 +90,16 @@ class HighlightFrameLimitError(ValueError):
 class HighlightService:
     """Personal highlights: create / view / react / share / expire."""
 
-    __slots__ = ("_bus", "_highlights", "_media_dir", "_media_refs", "_users")
+    __slots__ = (
+        "_bus",
+        "_highlights",
+        "_media_dir",
+        "_media_refs",
+        "_posts",
+        "_space_posts",
+        "_spaces",
+        "_users",
+    )
 
     def __init__(
         self,
@@ -89,6 +109,9 @@ class HighlightService:
         *,
         media_dir: pathlib.Path | None = None,
         media_refs: AbstractMediaReferenceRepo | None = None,
+        post_repo: AbstractPostRepo | None = None,
+        space_post_repo: AbstractSpacePostRepo | None = None,
+        space_repo: AbstractSpaceRepo | None = None,
     ) -> None:
         self._highlights = repo
         self._users = user_repo
@@ -97,6 +120,94 @@ class HighlightService:
         # expiry once no other row references them.
         self._media_dir = media_dir
         self._media_refs = media_refs
+        # The share path: a ``highlight_share`` post opens the highlight
+        # to whoever reads that post. Unwired, no share opens anything.
+        self._posts = post_repo
+        self._space_posts = space_post_repo
+        self._spaces = space_repo
+
+    # ── Read gate ──────────────────────────────────────────────────────
+
+    async def _require_readable(
+        self,
+        highlight_id: str,
+        viewer_user_id: str,
+        via_post_id: str | None = None,
+    ) -> Highlight:
+        """The highlight, iff *viewer_user_id* may read it.
+
+        Two ways in, and nothing else — an unguessable id is not one:
+
+        * the inbox rule (:meth:`AbstractHighlightRepo.get_readable`): the
+          author, or someone in the audience, while it is live and no
+          personal or guardian block stands between them;
+        * a share: *via_post_id* is a live ``highlight_share`` post of
+          this highlight, written by its author, that the viewer can read
+          (the household feed, or a space they hold a seat in — a
+          follower included). The share waives only the audience; expiry
+          and both block kinds still apply.
+
+        Anything else raises :class:`HighlightNotFoundError` with
+        :data:`NOT_FOUND_MESSAGE`, exactly like an unknown id.
+        """
+        highlight = await self._highlights.get_readable(highlight_id, viewer_user_id)
+        if highlight is None and via_post_id:
+            stored = await self._highlights.get_highlight(highlight_id)
+            if stored is not None and await self._shared_via(
+                via_post_id, stored, viewer_user_id
+            ):
+                highlight = await self._highlights.get_readable(
+                    highlight_id, viewer_user_id, require_audience=False
+                )
+        if highlight is None:
+            raise HighlightNotFoundError(NOT_FOUND_MESSAGE)
+        return highlight
+
+    async def _require_readable_frame(
+        self,
+        frame_id: str,
+        viewer_user_id: str,
+        via_post_id: str | None = None,
+    ) -> tuple[HighlightFrame, Highlight]:
+        """``(frame, highlight)`` iff the viewer may read the frame's
+        highlight (:meth:`_require_readable`); the same 404 otherwise."""
+        frame = await self._highlights.get_frame(frame_id)
+        if frame is None:
+            raise HighlightNotFoundError(NOT_FOUND_MESSAGE)
+        highlight = await self._require_readable(
+            frame.highlight_id, viewer_user_id, via_post_id
+        )
+        return frame, highlight
+
+    async def _shared_via(
+        self, post_id: str, highlight: Highlight, viewer_user_id: str
+    ) -> bool:
+        """Is *post_id* a live share of *highlight* by its own author that
+        *viewer_user_id* can read? Only the author shares a highlight
+        (:meth:`share_to_feed`), so a post by anyone else linking it —
+        a forged federated one included — opens nothing."""
+        post: Post | None = None
+        if self._posts is not None:
+            # The household feed: every local member reads it.
+            post = await self._posts.get(post_id)
+        if post is None and self._space_posts is not None and self._spaces:
+            found = await self._space_posts.get(post_id)
+            if found is not None:
+                space_id, post = found
+                space = await self._spaces.get(space_id)
+                if (
+                    space is None
+                    or space.dissolved
+                    or await seat_of(self._spaces, space_id, viewer_user_id) is None
+                ):
+                    return False
+        return (
+            post is not None
+            and not post.deleted
+            and post.type == PostType.HIGHLIGHT_SHARE
+            and post.linked_highlight_id == highlight.id
+            and post.author == highlight.author_user_id
+        )
 
     # ── Create / append ─────────────────────────────────────────────────
 
@@ -206,13 +317,11 @@ class HighlightService:
         *,
         frame_id: str,
         viewer_user_id: str,
+        via_post_id: str | None = None,
     ) -> None:
-        frame = await self._highlights.get_frame(frame_id)
-        if frame is None:
-            raise HighlightNotFoundError(frame_id)
-        highlight = await self._highlights.get_highlight(frame.highlight_id)
-        if highlight is None:
-            raise HighlightNotFoundError(frame.highlight_id)
+        frame, highlight = await self._require_readable_frame(
+            frame_id, viewer_user_id, via_post_id
+        )
         if highlight.author_user_id == viewer_user_id:
             # Authors don't accumulate views on their own frames.
             return
@@ -232,13 +341,11 @@ class HighlightService:
         frame_id: str,
         reactor_user_id: str,
         emoji: str,
+        via_post_id: str | None = None,
     ) -> None:
-        frame = await self._highlights.get_frame(frame_id)
-        if frame is None:
-            raise HighlightNotFoundError(frame_id)
-        highlight = await self._highlights.get_highlight(frame.highlight_id)
-        if highlight is None:
-            raise HighlightNotFoundError(frame.highlight_id)
+        frame, highlight = await self._require_readable_frame(
+            frame_id, reactor_user_id, via_post_id
+        )
         await self._highlights.set_reaction(frame_id, reactor_user_id, emoji)
         await self._bus.publish(
             HighlightFrameReactionChanged(
@@ -255,13 +362,11 @@ class HighlightService:
         *,
         frame_id: str,
         reactor_user_id: str,
+        via_post_id: str | None = None,
     ) -> None:
-        frame = await self._highlights.get_frame(frame_id)
-        if frame is None:
-            raise HighlightNotFoundError(frame_id)
-        highlight = await self._highlights.get_highlight(frame.highlight_id)
-        if highlight is None:
-            raise HighlightNotFoundError(frame.highlight_id)
+        frame, highlight = await self._require_readable_frame(
+            frame_id, reactor_user_id, via_post_id
+        )
         await self._highlights.clear_reaction(frame_id, reactor_user_id)
         await self._bus.publish(
             HighlightFrameReactionChanged(
@@ -281,12 +386,7 @@ class HighlightService:
         frame_id: str,
         actor_user_id: str,
     ) -> None:
-        frame = await self._highlights.get_frame(frame_id)
-        if frame is None:
-            raise HighlightNotFoundError(frame_id)
-        highlight = await self._highlights.get_highlight(frame.highlight_id)
-        if highlight is None:
-            raise HighlightNotFoundError(frame.highlight_id)
+        frame, highlight = await self._require_readable_frame(frame_id, actor_user_id)
         if highlight.author_user_id != actor_user_id:
             raise HighlightForbiddenError("only the author can delete their frame")
         await self._highlights.delete_frame(frame_id)
@@ -307,9 +407,7 @@ class HighlightService:
         highlight_id: str,
         actor_user_id: str,
     ) -> None:
-        highlight = await self._highlights.get_highlight(highlight_id)
-        if highlight is None:
-            raise HighlightNotFoundError(highlight_id)
+        highlight = await self._require_readable(highlight_id, actor_user_id)
         if highlight.author_user_id != actor_user_id:
             raise HighlightForbiddenError("only the author can delete their highlight")
         # Collect frame media before the cascade delete so we can drop the
@@ -356,15 +454,19 @@ class HighlightService:
             )
         return out
 
-    async def get_with_frames(
+    async def get_for_viewer(
         self,
         highlight_id: str,
-    ) -> tuple[Highlight, list[HighlightFrame]] | None:
-        highlight = await self._highlights.get_highlight(highlight_id)
-        if highlight is None:
-            return None
-        frames = await self._highlights.list_frames(highlight_id)
-        return highlight, frames
+        viewer_user_id: str,
+        *,
+        via_post_id: str | None = None,
+    ) -> tuple[Highlight, list[HighlightFrame]]:
+        """The detail read: ``(highlight, frames)`` iff the viewer may read
+        it (:meth:`_require_readable`), else the unknown-id 404."""
+        highlight = await self._require_readable(
+            highlight_id, viewer_user_id, via_post_id
+        )
+        return highlight, await self._highlights.list_frames(highlight.id)
 
     async def get_frame(self, frame_id: str) -> HighlightFrame | None:
         return await self._highlights.get_frame(frame_id)
@@ -389,9 +491,7 @@ class HighlightService:
         a hard dependency on either service module while still avoiding
         SQL in the service.
         """
-        highlight = await self._highlights.get_highlight(highlight_id)
-        if highlight is None:
-            raise HighlightNotFoundError(highlight_id)
+        highlight = await self._require_readable(highlight_id, actor_user_id)
         # Only the author can share their own highlight (avoids re-sharing
         # someone else's content outside of the audience the author
         # picked).
@@ -429,6 +529,7 @@ class HighlightService:
         conversation_id: str,
         content: str,
         dm_service: Any,
+        via_post_id: str | None = None,
     ) -> Any:
         """Send a DM that quotes a highlight frame.
 
@@ -436,12 +537,9 @@ class HighlightService:
         the message (as a JSON blob) so the reply stays meaningful
         after retention purges the underlying frame.
         """
-        frame = await self._highlights.get_frame(frame_id)
-        if frame is None:
-            raise HighlightNotFoundError(frame_id)
-        highlight = await self._highlights.get_highlight(frame.highlight_id)
-        if highlight is None:
-            raise HighlightNotFoundError(frame.highlight_id)
+        frame, highlight = await self._require_readable_frame(
+            frame_id, sender_user_id, via_post_id
+        )
         sender = await self._users.get_by_user_id(sender_user_id)
         if sender is None:
             raise LookupError(f"sender {sender_user_id!r} not found")
@@ -511,6 +609,7 @@ class HighlightService:
 
 __all__ = [
     "MAX_FRAMES_PER_HIGHLIGHT",
+    "NOT_FOUND_MESSAGE",
     "HighlightForbiddenError",
     "HighlightFrameLimitError",
     "HighlightNotFoundError",

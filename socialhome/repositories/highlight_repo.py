@@ -33,6 +33,32 @@ from ..domain.highlight import (
 from .base import dump_json, load_json, row_to_dict, rows_to_dicts
 from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
 
+#: Rows a viewer may read whoever the audience is: not expired, and the
+#: author is on neither the viewer's personal block list (§Privacy) nor a
+#: guardian block with them (§CP.F2, both directions). Binds the viewer
+#: three times.
+_READABLE_SQL = f"""
+    datetime(expires_at) > datetime('now')
+    AND author_user_id NOT IN (
+        SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
+    )
+    AND author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
+"""
+
+#: The viewer is in the highlight's audience: ``all_paired`` /
+#: ``households`` admit every local user, ``users`` only the listed ones,
+#: and the author always sees their own. Binds the viewer twice.
+_IN_AUDIENCE_SQL = """
+    (
+        audience_kind IN ('all_paired','households')
+        OR (audience_kind = 'users' AND EXISTS (
+            SELECT 1 FROM json_each(highlights.audience_json) j
+            WHERE j.value = ?
+        ))
+        OR author_user_id = ?
+    )
+"""
+
 
 @runtime_checkable
 class AbstractHighlightRepo(Protocol):
@@ -62,6 +88,13 @@ class AbstractHighlightRepo(Protocol):
         self,
         viewer_user_id: str,
     ) -> builtins.list[Highlight]: ...
+    async def get_readable(
+        self,
+        highlight_id: str,
+        viewer_user_id: str,
+        *,
+        require_audience: bool = True,
+    ) -> Highlight | None: ...
     async def list_authored(
         self,
         author_user_id: str,
@@ -181,40 +214,45 @@ class SqliteHighlightRepo:
         return _row_to_highlight(row_to_dict(row))
 
     async def list_visible_to(self, viewer_user_id: str) -> list[Highlight]:
-        # Visible if:
-        #   - author is local OR audience_kind in ('all_paired','households'),
-        #   - or audience_kind='users' AND viewer in the user allow-list.
         # The receiver dropped envelopes outside the audience already, so
         # by the time we read locally we trust ``highlights`` rows. The
         # ``USERS``-kind filter still applies because one row can be
-        # surfaced to a strict subset of an instance's users.
-        # Personal blocks are applied here (§Privacy): authors the viewer
-        # has blocked never surface in their inbox, even if the audience
-        # would otherwise admit them. Block list stays local — see
-        # ``user_blocks`` table. Guardian blocks (§CP.F2) hide authors the
-        # same way, in both directions.
+        # surfaced to a strict subset of an instance's users. Personal
+        # blocks (§Privacy) and guardian blocks (§CP.F2) hide authors in
+        # both directions — see :data:`_READABLE_SQL` / :data:`_IN_AUDIENCE_SQL`.
         rows = await self._db.fetchall(
             f"""
             SELECT * FROM highlights
-            WHERE datetime(expires_at) > datetime('now')
-              AND author_user_id NOT IN (
-                  SELECT blocked_user_id FROM user_blocks
-                  WHERE blocker_user_id = ?
-              )
-              AND author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
-              AND (
-                  audience_kind IN ('all_paired','households')
-                  OR (audience_kind = 'users' AND EXISTS (
-                      SELECT 1 FROM json_each(highlights.audience_json) j
-                      WHERE j.value = ?
-                  ))
-                  OR author_user_id = ?
-              )
+            WHERE {_READABLE_SQL} AND {_IN_AUDIENCE_SQL}
             ORDER BY highlight_date DESC, created_at DESC
             """,
             (viewer_user_id,) * 5,
         )
         return [s for s in (_row_to_highlight(d) for d in rows_to_dicts(rows)) if s]
+
+    async def get_readable(
+        self,
+        highlight_id: str,
+        viewer_user_id: str,
+        *,
+        require_audience: bool = True,
+    ) -> Highlight | None:
+        """``highlight_id`` iff *viewer_user_id* may read it — the same rule
+        as :meth:`list_visible_to`, so the detail read can never show what
+        the inbox hides. ``require_audience=False`` drops only the audience
+        clause (the caller proved a share the viewer can read); expiry,
+        personal blocks and guardian blocks always apply. ``None`` for an
+        unknown id and a hidden one alike."""
+        where = _READABLE_SQL
+        params: tuple[str, ...] = (highlight_id,) + (viewer_user_id,) * 3
+        if require_audience:
+            where = f"{where} AND {_IN_AUDIENCE_SQL}"
+            params += (viewer_user_id,) * 2
+        row = await self._db.fetchone(
+            f"SELECT * FROM highlights WHERE id = ? AND {where}",
+            params,
+        )
+        return _row_to_highlight(row_to_dict(row))
 
     async def list_authored(
         self,

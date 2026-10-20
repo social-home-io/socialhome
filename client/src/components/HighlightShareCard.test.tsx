@@ -1,12 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { render, waitFor, fireEvent } from '@testing-library/preact'
+
+const route = vi.hoisted(() => vi.fn())
 
 vi.mock('@/api', () => {
   const m = { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }
   return { api: m }
 })
 vi.mock('preact-iso', () => ({
-  useLocation: () => ({ route: vi.fn(), url: '/' }),
+  useLocation: () => ({ route, url: '/' }),
 }))
 
 import { HighlightShareCard } from './HighlightShareCard'
@@ -85,6 +87,19 @@ describe('HighlightShareCard', () => {
     const { container, findByText } = render(<HighlightShareCard highlightId="h-friend" spaceId="s1" />)
     expect(await findByText('Amaka Okafor')).toBeTruthy()
     expect(container.textContent).not.toContain('Someone')
+  })
+
+  // The highlight's audience may not include this reader — the share post
+  // is what opens it, so both the fetch and the viewer link carry it.
+  it('reads and opens the highlight through its share post', async () => {
+    apiMock.get.mockResolvedValue(detail('h-shared', 'u-pascal'))
+    const { container } = render(
+      <HighlightShareCard highlightId="h-shared" postId="p 1" spaceId="s1" />,
+    )
+    await waitFor(() => expect(container.querySelector('button')).toBeTruthy())
+    expect(apiMock.get).toHaveBeenCalledWith('/api/highlights/h-shared?via_post=p%201')
+    fireEvent.click(container.querySelector('button')!)
+    expect(route).toHaveBeenCalledWith('/highlights/h-shared?via_post=p%201')
   })
 
   it('an author nobody knows reads "Someone"', async () => {

@@ -306,6 +306,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
             {post.type === 'highlight_share' && (
               <HighlightShareCard
                 highlightId={post.linked_highlight_id ?? null}
+                postId={post.id}
                 spaceId={scopedSpaceId}
                 note={post.content}
               />

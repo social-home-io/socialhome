@@ -17,6 +17,7 @@ import { isRestricted } from '@/components/ProtectedNotice'
 import { Avatar } from '@/components/Avatar'
 import { Modal } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
+import { viaPostQuery } from '@/components/HighlightShareCard'
 import { currentUser } from '@/store/auth'
 import {
   loadHouseholdUsers,
@@ -68,9 +69,12 @@ const seenBySheetFrameId = signal<string | null>(null)
 
 
 export default function HighlightViewerPage() {
-  const { params } = useRoute()
+  const { params, query } = useRoute()
   const loc = useLocation()
   const highlightId = params.highlightId
+  // Opened from a space / household share card: the share post is what
+  // lets a reader outside the audience see it — every call carries it.
+  const via = viaPostQuery(query?.via_post)
   const myId = currentUser.value?.user_id
   // Video frames default muted so a tap into the inbox doesn't blast
   // sound through a quiet room. The user can flip the toggle per-
@@ -89,7 +93,7 @@ export default function HighlightViewerPage() {
     // Resolve raw user_ids (author + viewer + reactor) to display names.
     void loadHouseholdUsers()
     const refetch = (initial: boolean) =>
-      api.get(`/api/highlights/${highlightId}`)
+      api.get(`/api/highlights/${highlightId}${via}`)
         .then((d: HighlightDetail) => {
           detail.value = d
           if (initial) loading.value = false
@@ -118,7 +122,7 @@ export default function HighlightViewerPage() {
       ws.on('highlight.frame_reaction_changed', onActivity),
     ]
     return () => { dispose.forEach(d => d()) }
-  }, [highlightId])
+  }, [highlightId, via])
 
   // Auto-progress: stamp a per-frame timer that ticks the index.
   // Stored as a ref so pause/resume can clear/recreate without losing
@@ -151,8 +155,8 @@ export default function HighlightViewerPage() {
     const frame = detail.value.frames[currentIndex.value]
     if (!frame) return
     if (detail.value.highlight.author_user_id === myId) return  // authors don't mark
-    api.post(`/api/highlights/frames/${frame.id}/view`, {}).catch(() => {})
-  }, [currentIndex.value, detail.value?.highlight.id])
+    api.post(`/api/highlights/frames/${frame.id}/view${via}`, {}).catch(() => {})
+  }, [currentIndex.value, detail.value?.highlight.id, via])
 
   const advance = () => {
     if (!detail.value) return
@@ -202,7 +206,7 @@ export default function HighlightViewerPage() {
 
   const react = async (emoji: string) => {
     try {
-      await api.put(`/api/highlights/frames/${frame.id}/reaction`, { emoji })
+      await api.put(`/api/highlights/frames/${frame.id}/reaction${via}`, { emoji })
       reactionsOpen.value = false
       showToast(t('highlight.viewer.reaction_sent'), 'success')
     } catch (err: unknown) {
