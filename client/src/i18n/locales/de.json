@@ -3370,6 +3370,7 @@
   "space.zones_page.title": "Zonen · {name}",
   "space.join_request.title": "Beitritt zu {name} anfragen",
   "space.join_request.sent_to": "Deine Anfrage geht an die Admins von {host}.",
+  "space.join_request.sent_to_admins": "Deine Anfrage geht an die Admins des Raums.",
   "space.join_request.auto_added": "Sobald sie zustimmen, bist du automatisch dabei.",
   "space.join_request.needs_connection": "Das klappt erst, wenn dein Haushalt mit ihrem verbunden ist.",
   "space.join_request.message_label": "Kurze Nachricht hinzufügen (optional)",

@@ -41,3 +41,15 @@ describe('JoinRequestModal — a local community', () => {
     expect(view.queryByTestId('join-request-location-blocked')).toBeNull()
   })
 })
+
+describe('JoinRequestModal — who the request goes to', () => {
+  it('names the host household when we know it', () => {
+    const view = render(<JoinRequestModal {...base} onSubmit={vi.fn()} />)
+    expect(view.getByText(/Your request goes to the admins of Keller household\./)).toBeTruthy()
+  })
+
+  it('a host we know no name for: the space’s admins, never an id', () => {
+    const view = render(<JoinRequestModal {...base} hostDisplayName={null} hostIsPaired={false} onSubmit={vi.fn()} />)
+    expect(view.getByText(/Your request goes to the space’s admins\./)).toBeTruthy()
+  })
+})

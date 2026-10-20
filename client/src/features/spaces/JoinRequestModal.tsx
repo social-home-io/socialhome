@@ -14,7 +14,9 @@ export interface JoinRequestModalProps {
   open: boolean
   onClose: () => void
   spaceName: string
-  hostDisplayName: string
+  /** The host household's name; ``null`` when we don't know it (a
+   *  GFS-listed host) — the line then names no household. */
+  hostDisplayName: string | null
   hostIsPaired: boolean
   /** Called with the message body on submit. Caller does the POST. */
   onSubmit: (message: string) => Promise<void>
@@ -52,7 +54,9 @@ export function JoinRequestModal({
   return (
     <Modal open={open} onClose={onClose} title={t('space.join_request.title', { name: spaceName })}>
       <p class="sh-muted">
-        {t('space.join_request.sent_to', { host: hostDisplayName })}
+        {hostDisplayName
+          ? t('space.join_request.sent_to', { host: hostDisplayName })
+          : t('space.join_request.sent_to_admins')}
         {' '}
         {hostIsPaired
           ? t('space.join_request.auto_added')

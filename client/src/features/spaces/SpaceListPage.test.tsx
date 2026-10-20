@@ -403,6 +403,10 @@ describe('SpaceListPage — Discover', () => {
     })
     const r = await renderPage('/spaces?discover=global')
     await r.findByText('Global art')
+    // An unpaired host has no name we know — the row leaves the host out
+    // rather than showing its instance id.
+    const meta = (await r.findByText('Global art')).closest('li')!.querySelector('.sh-spaces-row__m')!
+    expect(meta.textContent).toBe('90 members · ask to join')
     expect(r.getByRole('button', { name: 'Follow: Global art' })).toBeTruthy()
     r.fireEvent.click(r.getByRole('button', { name: 'Follow: Global art' }))
     await r.waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/spaces/gArt/subscribe', {}))

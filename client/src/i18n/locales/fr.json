@@ -3370,6 +3370,7 @@
   "space.zones_page.title": "Zones · {name}",
   "space.join_request.title": "Demander à rejoindre {name}",
   "space.join_request.sent_to": "Votre demande est envoyée aux administrateurs de {host}.",
+  "space.join_request.sent_to_admins": "Votre demande est envoyée aux administrateurs de l’espace.",
   "space.join_request.auto_added": "Vous serez ajouté automatiquement dès leur accord.",
   "space.join_request.needs_connection": "Cela ne fonctionne que si votre foyer est connecté au leur.",
   "space.join_request.message_label": "Ajoutez un court message (facultatif)",

@@ -3397,6 +3397,7 @@
   "space.zones_page.title": "Zonas · {name}",
   "space.join_request.title": "Solicitar unirte a {name}",
   "space.join_request.sent_to": "Tu solicitud llega a los administradores de {host}.",
+  "space.join_request.sent_to_admins": "Tu solicitud llega a los administradores del espacio.",
   "space.join_request.auto_added": "En cuanto lo aprueben, te añadiremos automáticamente.",
   "space.join_request.needs_connection": "Esto solo funciona cuando tu hogar esté conectado con el suyo.",
   "space.join_request.message_label": "Añade un mensaje corto (opcional)",

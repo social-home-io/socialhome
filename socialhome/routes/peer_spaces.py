@@ -36,14 +36,15 @@ class PeerSpaceCollectionView(BaseView):
         entries = await repo.list_all(max_min_age=max_min_age)
         federation_repo = self.svc(K.federation_repo_key)
         unique_instances = {e.instance_id for e in entries}
-        host_info: dict[str, tuple[str, bool]] = {}
+        # An unnamed host is ``None`` — never its instance id as a name.
+        host_info: dict[str, tuple[str | None, bool]] = {}
         for iid in unique_instances:
             inst = await federation_repo.get_instance(iid)
             if inst is None:
-                host_info[iid] = (iid, False)
+                host_info[iid] = (None, False)
             else:
                 host_info[iid] = (
-                    inst.display_name or iid,
+                    inst.display_name or None,
                     inst.status is PairingStatus.CONFIRMED,
                 )
         return web.json_response(
@@ -51,12 +52,8 @@ class PeerSpaceCollectionView(BaseView):
                 {
                     "space_id": e.space_id,
                     "host_instance_id": e.instance_id,
-                    "host_display_name": host_info.get(
-                        e.instance_id, (e.instance_id, False)
-                    )[0],
-                    "host_is_paired": host_info.get(
-                        e.instance_id, (e.instance_id, False)
-                    )[1],
+                    "host_display_name": host_info[e.instance_id][0],
+                    "host_is_paired": host_info[e.instance_id][1],
                     "name": e.name,
                     "description": e.description,
                     "emoji": e.emoji,

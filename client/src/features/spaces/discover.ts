@@ -183,17 +183,27 @@ export function discoverAction(e: DirectoryEntry): DiscoverAction {
 }
 
 /**
- * Human-readable label for the host household. A GFS-listed space is
- * usually hosted by a household we never paired with, so the backend
- * falls back to the raw 52-char instance id — shorten it to ``abcd1234…``
- * like the rest of the app; a real display name is shown in full.
+ * The host household's name, or ``null`` when we don't know it. A
+ * GFS-listed space is usually hosted by a household we never paired
+ * with, and a GFS directory carries no host name — the GFS shields
+ * households from each other — so there is nothing to show: callers
+ * leave the host out (or say it generically). Never an instance id: an
+ * older server sent the id in place of a name, and that is not a name.
  */
-export function hostLabel(entry: DirectoryEntry): string {
+export function hostLabel(entry: DirectoryEntry): string | null {
   const name = entry.host_display_name
-  if (!name || name === entry.host_instance_id) {
-    return `${entry.host_instance_id.slice(0, 8)}…`
-  }
+  if (!name || name === entry.host_instance_id) return null
   return name
+}
+
+/** The toast after a join request went to another household: "Request
+ *  sent to <host>" — or, when we don't know the host's name, "Request
+ *  sent for <space>". */
+export function requestSentToast(entry: DirectoryEntry): string {
+  const host = hostLabel(entry)
+  return host
+    ? t('spaces.browse.request_sent_to', { host })
+    : t('spaces.browse.request_sent_for', { name: entry.name })
 }
 
 /**

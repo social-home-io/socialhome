@@ -108,9 +108,13 @@ describe('matchesTerm / hostLabel / contentIsGated', () => {
     expect(matchesTerm('', 'x')).toBe(true)
     expect(matchesTerm('zzz', 'x', null)).toBe(false)
   })
-  it('shortens a raw instance id', () => {
-    expect(hostLabel(entry({ host_display_name: 'abcdefghijklmnop', host_instance_id: 'abcdefghijklmnop' }))).toBe('abcdefgh…')
+  it('names a known host, and never shows an instance id as one', () => {
     expect(hostLabel(entry())).toBe('Keller household')
+    // A GFS directory carries no host name: unknown is null.
+    expect(hostLabel(entry({ host_display_name: null }))).toBeNull()
+    expect(hostLabel(entry({ host_display_name: '' }))).toBeNull()
+    // An older server sent the raw id in place of a name.
+    expect(hostLabel(entry({ host_display_name: 'abcdefghijklmnop', host_instance_id: 'abcdefghijklmnop' }))).toBeNull()
   })
   it('only a public / global space that takes no followers is gated', () => {
     expect(contentIsGated(entry({ allow_subscribers: false }))).toBe(true)

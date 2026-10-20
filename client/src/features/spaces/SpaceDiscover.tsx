@@ -44,7 +44,7 @@ import {
 import type { DirectoryEntry, GfsConnection, HouseholdSpaceRow } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
-  buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, entryRadiusKm, hostLabel,
+  buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, entryRadiusKm, hostLabel, requestSentToast,
   joinCarriesLocation, joinModeWord, matchesTerm, withMembership, DISCOVER_SOURCES, type DiscoverAction,
   type DiscoverSource,
 } from './discover'
@@ -113,12 +113,14 @@ function actionLabel(a: Exclude<DiscoverAction, null>): string {
 
 /** "Sara's household · 6 members · ask to join" — and, for a pinned
  *  global space without a radius hint, "about 3 km away" from our home
- *  (with a hint the distance is in the row's hint chip). */
+ *  (with a hint the distance is in the row's hint chip). A host whose
+ *  name we don't know (GFS-listed) is left out. */
 function entryMeta(e: DirectoryEntry, source: DiscoverSource, home: Home | null | undefined): string {
   const parts: string[] = []
   const km = source === 'global' && hintVerdict(e, home) === null ? pinDistanceKm(e, home) : null
   if (km !== null) parts.push(distanceLabel(km))
-  if (source !== 'household') parts.push(hostLabel(e))
+  const host = source !== 'household' ? hostLabel(e) : null
+  if (host) parts.push(host)
   // Discover lists spaces the viewer isn't in — never "Just you".
   parts.push(membersLabel(e.member_count, false))
   const mode = joinModeWord(e)
@@ -206,7 +208,7 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           host_instance_id: e.host_instance_id,
           ...(carries ? { share_location: true } : {}),
         })
-        showToast(t('spaces.browse.request_sent_to', { host: hostLabel(e) }), 'success')
+        showToast(requestSentToast(e), 'success')
         markPending(e.space_id)
       }
     } catch (exc) {

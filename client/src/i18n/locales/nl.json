@@ -3370,6 +3370,7 @@
   "space.zones_page.title": "Zones · {name}",
   "space.join_request.title": "Vragen om lid te worden van {name}",
   "space.join_request.sent_to": "Je verzoek gaat naar de beheerders van {host}.",
+  "space.join_request.sent_to_admins": "Je verzoek gaat naar de beheerders van de ruimte.",
   "space.join_request.auto_added": "Zodra ze akkoord gaan, word je automatisch toegevoegd.",
   "space.join_request.needs_connection": "Dit werkt pas als jouw huishouden met dat van hen verbonden is.",
   "space.join_request.message_label": "Voeg een kort bericht toe (optioneel)",
