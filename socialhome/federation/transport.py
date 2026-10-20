@@ -55,6 +55,7 @@ from ..domain.federation import (
 )
 from ..exception_text import describe_exception
 from ..peer_http import post_to_peer
+from ..webrtc_ice import rtc_configuration
 from . import app_framing, media_framing
 
 # Runtime import of two ints only — the relay transport class itself stays
@@ -207,26 +208,9 @@ _MediaInboundCallback = Callable[[str, bytes, bytes], Awaitable[Any]]
 _AppInboundCallback = Callable[[str, bytes, bytes], Awaitable[Any]]
 
 
-def _build_rtc_config(ice_servers: list[dict]) -> rtc.RTCConfiguration:
-    """Flatten a Chrome-style ``ice_servers`` list into an
-    :class:`aiolibdatachannel.RTCConfiguration`.
-
-    Each entry may carry a single ``urls`` string or a list of them
-    plus optional TURN ``username`` / ``credential``. We map each URL
-    to an :class:`~aiolibdatachannel.IceServer` so credentials ride as
-    first-class fields rather than being spliced into URL userinfo.
-    """
-    servers: list[rtc.IceServer] = []
-    for srv in ice_servers:
-        url_field = srv["urls"]
-        raw_urls = url_field if isinstance(url_field, list) else [url_field]
-        username = srv.get("username") or None
-        credential = srv.get("credential") or None
-        for url in raw_urls:
-            servers.append(
-                rtc.IceServer(url=url, username=username, credential=credential),
-            )
-    return rtc.RTCConfiguration(ice_servers=servers)
+#: Kept under its old name for callers and tests; the builder lives in
+#: :func:`socialhome.webrtc_ice.rtc_configuration`.
+_build_rtc_config = rtc_configuration
 
 
 def _ice_fingerprint(ice_servers: list[dict]) -> frozenset[tuple]:

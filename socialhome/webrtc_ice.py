@@ -21,6 +21,8 @@ import hmac
 import logging
 import time
 
+import aiolibdatachannel as rtc
+
 log = logging.getLogger(__name__)
 
 
@@ -159,3 +161,32 @@ def warn_if_turn_unusable(ice_servers: list[dict]) -> None:
         # caller was ``build_ice_servers`` (it emits at most one), but this
         # is now also handed HA Core's pulled list, which can carry several
         # — and a bad entry behind a good one must still be reported.
+
+
+def rtc_configuration(ice_servers: list[dict]) -> rtc.RTCConfiguration:
+    """Flatten a Chrome-style ``ice_servers`` list (:func:`build_ice_servers`)
+    into an :class:`aiolibdatachannel.RTCConfiguration` — the one builder
+    every peer uses (federation transport, space sync, the public
+    highlight / moment answerers).
+
+    Each entry carries ``urls`` as a string or a list (``url`` accepted as
+    an alias) plus optional TURN ``username`` / ``credential``; every URL
+    becomes its own :class:`~aiolibdatachannel.IceServer` with the
+    credentials as first-class fields. A malformed entry is skipped rather
+    than passed through — libdatachannel refuses the whole configuration
+    (``rtcCreatePeerConnection: invalid argument``) for one bad URL.
+    """
+    servers: list[rtc.IceServer] = []
+    for srv in ice_servers:
+        if not isinstance(srv, dict):
+            continue
+        url_field = srv.get("urls", srv.get("url"))
+        raw_urls = url_field if isinstance(url_field, list) else [url_field]
+        username = srv.get("username") or None
+        credential = srv.get("credential") or None
+        for url in raw_urls:
+            if isinstance(url, str) and url:
+                servers.append(
+                    rtc.IceServer(url=url, username=username, credential=credential)
+                )
+    return rtc.RTCConfiguration(ice_servers=servers)

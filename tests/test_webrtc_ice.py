@@ -10,6 +10,7 @@ import logging
 from socialhome.webrtc_ice import (
     build_ice_servers,
     make_turn_credential,
+    rtc_configuration,
     warn_if_no_turn,
     warn_if_turn_unusable,
 )
@@ -261,3 +262,22 @@ def test_warn_if_no_turn_quiet_when_turn_present(caplog):
             [{"urls": ["turn:t.example:3478"], "username": "u", "credential": "c"}],
         )
     assert "no TURN server configured" not in caplog.text
+
+
+def test_rtc_configuration_flattens_every_url_shape():
+    cfg = rtc_configuration(
+        [
+            {"urls": ["stun:a.example:3478", "stun:b.example:3478"]},
+            {"urls": "turn:t.example:3478", "username": "u", "credential": "c"},
+            {"url": "stun:c.example:3478"},
+            {"urls": [None, ""]},
+            "not a dict",
+        ]
+    )
+    servers = [(s.url, s.username, s.credential) for s in cfg.ice_servers]
+    assert servers == [
+        ("stun:a.example:3478", None, None),
+        ("stun:b.example:3478", None, None),
+        ("turn:t.example:3478", "u", "c"),
+        ("stun:c.example:3478", None, None),
+    ]

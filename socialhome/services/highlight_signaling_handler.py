@@ -39,6 +39,7 @@ import aiolibdatachannel as rtc
 from ..crypto import b64url_encode, sign_ed25519
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.highlight_repo import AbstractHighlightRepo
+from ..webrtc_ice import rtc_configuration
 from . import highlight_public_framing as framing
 
 log = logging.getLogger(__name__)
@@ -590,21 +591,13 @@ class _AiolibAnswererPeer:
     __slots__ = ("_channel", "_channel_event", "_pc")
 
     def __init__(self, ice_servers: list[dict[str, Any]]) -> None:
-        cfg = rtc.RTCConfiguration(
-            ice_servers=[
-                rtc.IceServer(
-                    # Wire shape is ``{"urls": "..."} `` or ``{"url": "..."}``
-                    # depending on the dict provenance — accept both.
-                    url=str(entry.get("urls") or entry.get("url") or ""),
-                    username=entry.get("username"),
-                    credential=entry.get("credential"),
-                )
-                if isinstance(entry, dict)
-                else entry
-                for entry in ice_servers
-            ],
+        # ``urls`` is a list in the shape ``build_ice_servers`` makes:
+        # ``str(["stun:…"])`` used to reach libdatachannel as the URL, which
+        # refused the whole configuration (``rtcCreatePeerConnection:
+        # invalid argument``) — every public viewer fell back to the relay.
+        self._pc: rtc.PeerConnection = rtc.PeerConnection(
+            rtc_configuration(ice_servers)
         )
-        self._pc: rtc.PeerConnection = rtc.PeerConnection(cfg)
         self._channel: rtc.DataChannel | None = None
         # Set when the viewer-opened DataChannel arrives so ``wait_open``
         # can return — replaces the missing
