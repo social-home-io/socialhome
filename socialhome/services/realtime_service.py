@@ -1803,14 +1803,24 @@ class RealtimeService:
 
     async def _on_moment_created(self, event: MomentCreated) -> None:
         # Whole-household broadcast — the SPA refetches ``/api/moments``
-        # to pick up the audience-filtered shape (block-aware, etc.).
+        # to pick up the audience-filtered shape (block-aware, etc.). A
+        # stranger's moment that came through a GFS never reaches a
+        # protected account's sockets (§CP.R), not even as a refresh hint.
+        withheld: frozenset[str] = frozenset()
+        if event.received_via == "gfs":
+            withheld = frozenset(
+                u.user_id
+                for u in await self._user_repo.list_active()
+                if u.child_protection_enabled
+            )
         await self._broadcast_household(
             {
                 "type": "moment.created",
                 "moment_id": event.moment_id,
                 "author_user_id": event.author_user_id,
                 "parent_moment_id": event.parent_moment_id,
-            }
+            },
+            withheld=withheld,
         )
 
     async def _on_moment_deleted(self, event: MomentDeleted) -> None:

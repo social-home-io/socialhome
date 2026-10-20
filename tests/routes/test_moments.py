@@ -1038,3 +1038,85 @@ async def test_a_member_deletes_only_what_they_can_read_and_wrote(client):
     assert r.status == 404 and await r.json() == expected
     assert (await client.delete("/api/moments/m-admin", headers=eve)).status == 403
     assert (await client.delete("/api/moments/m-eve", headers=eve)).status == 200
+
+
+# ── Protected accounts never see GFS-delivered moments (§CP.R) ──────────
+
+
+async def _kid_and_gfs_moment(client) -> dict:
+    """A protected member (Kid) and the admin in one household; the admin
+    follows a stranger's public moments, so a GFS moment (with a hashtag
+    and a GFS reply) sits household-wide next to a household moment."""
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, child_protection_enabled)"
+        " VALUES('kid', 'uid-kid', 'Kid', 1)"
+    )
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("t-kid", "uid-kid", "t", sha256_token_hash("kid-tok")),
+    )
+    await client._db.enqueue(
+        "INSERT INTO gfs_connections(id, gfs_instance_id, display_name, public_key,"
+        " inbox_url, status, paired_at) VALUES('g1', 'gfs-1', 'G', 'aa',"
+        " 'https://g.example', 'active', datetime('now'))"
+    )
+    for mid, via, content, parent in (
+        ("m-house", "household", "family dinner #pasta", None),
+        ("m-gfs", "gfs", "stranger moment #bees", None),
+        ("m-gfs-reply", "gfs", "stranger reply", "m-house"),
+    ):
+        await client._db.enqueue(
+            "INSERT INTO moments(id, author_user_id, content, parent_moment_id,"
+            " origin_instance_id, created_at, expires_at, is_public, received_via,"
+            " received_via_gfs_id) VALUES(?,?,?,?, 'inst-x', datetime('now'),"
+            " datetime('now', '+1 day'), ?, ?, ?)",
+            (
+                mid,
+                "u-stranger" if via == "gfs" else "uid-bob",
+                content,
+                parent,
+                1 if via == "gfs" else 0,
+                via,
+                "g1" if via == "gfs" else None,
+            ),
+        )
+    for mid, tag in (("m-house", "pasta"), ("m-gfs", "bees")):
+        await client._db.enqueue(
+            "INSERT INTO moment_hashtags(moment_id, tag) VALUES(?, ?)", (mid, tag)
+        )
+    return {"kid": _auth("kid-tok"), "adult": _auth(client._tok)}
+
+
+async def _ids(client, path, headers) -> set[str]:
+    r = await client.get(path, headers=headers)
+    assert r.status == 200
+    return {m["id"] for m in await r.json()}
+
+
+async def test_a_protected_member_never_sees_a_gfs_moment(client):
+    h = await _kid_and_gfs_moment(client)
+    for path in ("/api/moments", "/api/moments/archive"):
+        assert "m-gfs" in await _ids(client, path, h["adult"])
+        kid = await _ids(client, path, h["kid"])
+        assert "m-gfs" not in kid and "m-gfs-reply" not in kid
+        assert "m-house" in kid
+    # Detail: the unknown-id 404, byte for byte.
+    r = await client.get("/api/moments/m-gfs", headers=h["kid"])
+    unknown = await client.get("/api/moments/m-never", headers=h["kid"])
+    assert r.status == 404 and await r.json() == await unknown.json()
+    assert (await client.get("/api/moments/m-gfs", headers=h["adult"])).status == 200
+    # Replies inside a household moment: the GFS reply is left out.
+    r = await client.get("/api/moments/m-house", headers=h["kid"])
+    assert [x["id"] for x in (await r.json())["replies"]] == []
+    r = await client.get("/api/moments/m-house", headers=h["adult"])
+    assert [x["id"] for x in (await r.json())["replies"]] == ["m-gfs-reply"]
+    # Counts: the trending tags leave the GFS moment out.
+    r = await client.get("/api/moments/hashtags", headers=h["kid"])
+    assert {t["tag"] for t in (await r.json())["hashtags"]} == {"pasta"}
+    r = await client.get("/api/moments/hashtags", headers=h["adult"])
+    assert {t["tag"] for t in (await r.json())["hashtags"]} == {"pasta", "bees"}
+    # Acting on it is the same 404.
+    r = await client.put(
+        "/api/moments/m-gfs/reaction", json={"emoji": "❤️"}, headers=h["kid"]
+    )
+    assert r.status == 404

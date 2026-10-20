@@ -277,7 +277,7 @@ class MomentDetailView(BaseView):
         # Not readable by the caller → the unknown-id 404 (MomentNotFoundError,
         # mapped by BaseView), the same body as for an id that never existed.
         moment = await svc.get_for_viewer(moment_id, ctx.user_id)
-        replies = await svc.list_replies(moment_id)
+        replies = await svc.list_replies(moment_id, viewer_user_id=ctx.user_id)
         reactions = await svc.list_reactions(moment_id)
         repo = self.svc(moment_repo_key)
         ids = [moment.id, *[r.id for r in replies]]
