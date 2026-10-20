@@ -22,6 +22,7 @@ project's other schedulers.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -35,12 +36,19 @@ import aiofiles
 import aiofiles.os
 import aiohttp
 import aiolibdatachannel as rtc
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from ..crypto import b64url_encode, sign_ed25519
+from ..media.profile_picture import public_profile_picture
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.highlight_repo import AbstractHighlightRepo
+from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
+from ..repositories.user_repo import AbstractUserRepo
 from ..webrtc_ice import rtc_configuration
 from . import highlight_public_framing as framing
+from .highlight_public_profile import parse_viewer_key, seal_profile
+from .inbound_media_store import MEDIA_REF_PREFIX, local_media_ref, media_file_path
+from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +94,8 @@ class _Session:
     session_id: str
     highlight_id: str
     peer: _AnswererPeer
+    #: The viewer's ephemeral key for the sealed author profile, if sent.
+    viewer_key: ec.EllipticCurvePublicKey | None = None
     task: asyncio.Task[None] | None = None
     pending_ice: list[dict] = field(default_factory=list)
 
@@ -93,10 +103,11 @@ class _Session:
 # ─── Handler ───────────────────────────────────────────────────────────
 
 
-class HighlightSignalingHandler:
+class HighlightSignalingHandler(ProtectionGateMixin):
     """Drives the author-side half of §highlights_public WebRTC."""
 
     __slots__ = (
+        "_child_protection",
         "_gfs_repo",
         "_highlights",
         "_http_client",
@@ -105,9 +116,11 @@ class HighlightSignalingHandler:
         "_media_dir",
         "_own_instance_id",
         "_peer_factory",
+        "_pictures",
         "_relay_tasks",
         "_sessions",
         "_signing_key",
+        "_users",
     )
 
     def __init__(
@@ -132,6 +145,11 @@ class HighlightSignalingHandler:
         #: framed bytes go out over a signed streaming POST instead).
         self._relay_tasks: set[asyncio.Task[None]] = set()
         self._lock = asyncio.Lock()
+        self._child_protection = None
+        #: Where the author's name, bio and picture come from (``None``:
+        #: no ``author_profile`` frame is sent).
+        self._users: AbstractUserRepo | None = None
+        self._pictures: AbstractProfilePictureRepo | None = None
 
     # ── Late-bound wiring ────────────────────────────────────────────────
 
@@ -150,6 +168,16 @@ class HighlightSignalingHandler:
 
     def attach_ice_servers(self, servers: list[dict[str, Any]]) -> None:
         self._ice_servers = list(servers)
+
+    def attach_author_profiles(
+        self,
+        *,
+        user_repo: AbstractUserRepo,
+        picture_repo: AbstractProfilePictureRepo,
+    ) -> None:
+        """Wire where the sealed ``author_profile`` frame reads from."""
+        self._users = user_repo
+        self._pictures = picture_repo
 
     # ── Frame entry point ───────────────────────────────────────────────
 
@@ -205,6 +233,7 @@ class HighlightSignalingHandler:
                 session_id=session_id,
                 highlight_id=highlight_id,
                 peer=peer,
+                viewer_key=parse_viewer_key(frame.get("vk")),
             )
         task = asyncio.create_task(
             self._serve(session_id, sdp_offer),
@@ -251,12 +280,16 @@ class HighlightSignalingHandler:
     async def _stream_highlight(self, session_id: str) -> None:
         """WebRTC sink: drive the shared frame generator onto the peer."""
         sess = self._sessions[session_id]
-        async for chunk in self._iter_highlight_frames(sess.highlight_id):
+        async for chunk in self._iter_highlight_frames(
+            sess.highlight_id, viewer_key=sess.viewer_key
+        ):
             await sess.peer.send(chunk)
 
     async def _iter_highlight_frames(
         self,
         highlight_id: str,
+        *,
+        viewer_key: ec.EllipticCurvePublicKey | None = None,
     ) -> AsyncIterator[bytes]:
         """Yield the framed highlight byte stream (meta → chunks → end).
 
@@ -291,10 +324,39 @@ class HighlightSignalingHandler:
             "expires_at": highlight.expires_at,
         }
         yield framing.highlight_meta(highlight_dict, manifest)
+        if viewer_key is not None:
+            profile = await self._author_profile(highlight.author_user_id)
+            if profile is not None:
+                fields, ciphertext = seal_profile(
+                    viewer_key, highlight_id=highlight.id, profile=profile
+                )
+                yield framing.author_profile(fields, ciphertext)
         for f in frames:
             async for chunk in self._iter_frame_chunks(f):
                 yield chunk
         yield framing.stream_end()
+
+    async def _author_profile(self, user_id: str) -> dict | None:
+        """The author's public profile for the page: name, bio and a small
+        picture (base64 WebP) — the name only for a protected account
+        (§CP.R; it can't publish a highlight, but never leak one that
+        slipped through). ``None`` when unwired or unknown."""
+        if self._users is None:
+            return None
+        user = await self._users.get_by_user_id(user_id)
+        if user is None:
+            return None
+        name = user.display_name or user.username
+        if await self._is_protected(user_id):
+            return {"display_name": name, "bio": None, "picture": None}
+        picture = None
+        if self._pictures is not None and user.picture_hash:
+            got = await self._pictures.get_user_picture(user_id)
+            if got is not None:
+                small = await public_profile_picture(got[0])
+                if small is not None:
+                    picture = base64.b64encode(small).decode("ascii")
+        return {"display_name": name, "bio": user.bio or None, "picture": picture}
 
     async def _iter_frame_chunks(self, frame_row) -> AsyncIterator[bytes]:
         path = self._resolve_media_path(frame_row.media_url)
@@ -348,13 +410,21 @@ class HighlightSignalingHandler:
             )
             return
         task = asyncio.create_task(
-            self._serve_relay(relay_id, highlight_id),
+            self._serve_relay(
+                relay_id, highlight_id, viewer_key=parse_viewer_key(frame.get("vk"))
+            ),
             name=f"highlight-relay[{relay_id}]",
         )
         self._relay_tasks.add(task)
         task.add_done_callback(self._relay_tasks.discard)
 
-    async def _serve_relay(self, relay_id: str, highlight_id: str) -> None:
+    async def _serve_relay(
+        self,
+        relay_id: str,
+        highlight_id: str,
+        *,
+        viewer_key: ec.EllipticCurvePublicKey | None = None,
+    ) -> None:
         url = await self._gfs_url(
             f"/gfs/highlight_rtc/relay-stream/{relay_id}",
             highlight_id,
@@ -366,7 +436,7 @@ class HighlightSignalingHandler:
             async with self._http_client.post(
                 url,
                 allow_redirects=False,
-                data=self._iter_highlight_frames(highlight_id),
+                data=self._iter_highlight_frames(highlight_id, viewer_key=viewer_key),
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=600, sock_connect=15),
             ) as resp:
@@ -407,21 +477,21 @@ class HighlightSignalingHandler:
         }
 
     def _resolve_media_path(self, media_url: str | None) -> pathlib.Path | None:
-        """Resolve ``/api/media/{filename}`` to the on-disk path.
+        """Resolve a local media ref (``api/media/{filename}``, leading ``/``
+        tolerated) to the on-disk path.
 
         Defends against path traversal — ``filename`` must not contain
         a slash or start with a dot, same guard
         :class:`MediaServeView` applies on the HTTP path.
         """
-        if not media_url:
+        # Uploads are stored as ``api/media/<name>`` (no leading slash) —
+        # the old ``/api/media/``-only check read every one as missing.
+        ref = local_media_ref(media_url)
+        if ref is None:
             return None
-        prefix = "/api/media/"
-        if not media_url.startswith(prefix):
-            return None
-        filename = media_url[len(prefix) :]
-        if "/" in filename or "\\" in filename or filename.startswith("."):
-            return None
-        return pathlib.Path(self._media_dir) / filename
+        return media_file_path(
+            pathlib.Path(self._media_dir), ref[len(MEDIA_REF_PREFIX) :]
+        )
 
     async def _media_size(self, media_url: str | None) -> int:
         path = self._resolve_media_path(media_url)

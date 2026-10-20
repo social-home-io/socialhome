@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from aiohttp import web
 
@@ -38,6 +39,18 @@ RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS: float = 30.0
 #: Author body is read in chunks this size and piped straight to the
 #: guest — independent of the framing chunk size (pure byte passthrough).
 RELAY_READ_CHUNK_BYTES: int = 64 * 1024
+
+
+#: A viewer key is a base64url raw P-256 point (65 bytes → 87 chars).
+_VIEWER_KEY_RE = re.compile(r"[A-Za-z0-9_-]{86,88}")
+
+
+def _viewer_key(value: object) -> str | None:
+    """The viewer's ephemeral public key, passed to the author verbatim when
+    it has the right shape — never stored, never logged."""
+    if isinstance(value, str) and _VIEWER_KEY_RE.fullmatch(value):
+        return value
+    return None
 
 
 async def _servable(
@@ -103,6 +116,9 @@ class HighlightRtcOfferView(GfsBaseView):
                 "highlight_id": highlight_id,
                 "token": token,
                 "sdp": sdp,
+                # The viewer's ephemeral key: the author seals who shared
+                # the highlight to it (opaque to us; shape-checked only).
+                "vk": _viewer_key(body.get("vk")),
             },
         )
         return web.json_response({"session_id": session_id}, status=201)
@@ -197,6 +213,7 @@ class HighlightRelayStreamView(GfsBaseView):
                 "relay_id": relay_id,
                 "highlight_id": highlight_id,
                 "token": token,
+                "vk": _viewer_key(self.request.query.get("vk")),
             },
         )
 

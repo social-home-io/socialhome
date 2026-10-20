@@ -16,6 +16,14 @@ import { render } from 'preact'
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { humanizeViewerError } from './viewer_errors'
 import { RetryHost, ViewerError, type RetryControl } from './viewer_retry'
+import {
+  makeViewerKey,
+  openProfile,
+  pictureUrl,
+  type AuthorProfile,
+  type SealedHeader,
+  type ViewerKey,
+} from './sealed_profile'
 
 const CHANNEL_LABEL = 'highlight-public-v1'
 const FRAME_DURATION_MS = 6000
@@ -55,10 +63,13 @@ interface ViewerState {
   highlight: HighlightMeta | null
   frameUrls: Record<string, string>
   currentIndex: number
+  /** Who shared it — opened from the sealed ``author_profile`` frame. */
+  author: AuthorProfile | null
+  authorPicture: string | null
 }
 
-interface FramingHeader {
-  kind: 'highlight_meta' | 'frame_chunk' | 'stream_end' | 'error'
+interface FramingHeader extends SealedHeader {
+  kind: 'highlight_meta' | 'author_profile' | 'frame_chunk' | 'stream_end' | 'error'
   highlight?: HighlightMeta
   frames?: FrameMeta[]
   frame_id?: string
@@ -110,6 +121,8 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
     highlight: null,
     frameUrls: {},
     currentIndex: 0,
+    author: null,
+    authorPicture: null,
   })
 
   // Per-frame chunk buffer — kept in a ref-like store so the message
@@ -120,6 +133,8 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
     let pc: RTCPeerConnection | null = null
     let pollTimer: ReturnType<typeof setInterval> | null = null
     let cancelled = false
+    // This view's ephemeral key: the author seals who shared it to it.
+    let viewerKey: ViewerKey | null = null
 
     function setStatus(status: ViewerState['status'], message: string | null = null) {
       if (cancelled) return
@@ -150,6 +165,12 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
           manifest: header.frames ?? [],
           highlight: header.highlight ?? null,
         }))
+      } else if (header.kind === 'author_profile' && viewerKey) {
+        const key = viewerKey
+        void openProfile(key.privateKey, header, payload.slice(), boot.highlightId).then((author) => {
+          if (cancelled || !author) return
+          setState((s) => ({ ...s, author, authorPicture: pictureUrl(author) }))
+        })
       } else if (header.kind === 'frame_chunk' && header.frame_id) {
         const meta = state.manifest.find((f) => f.frame_id === header.frame_id)
         const ct = meta?.content_type ?? 'application/octet-stream'
@@ -176,7 +197,8 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
       try {
         const url =
           `/gfs/highlight_rtc/relay/${encodeURIComponent(boot.instanceId)}` +
-          `/${encodeURIComponent(boot.highlightId)}?token=${encodeURIComponent(boot.token)}`
+          `/${encodeURIComponent(boot.highlightId)}?token=${encodeURIComponent(boot.token)}` +
+          (viewerKey ? `&vk=${viewerKey.vk}` : '')
         const r = await fetch(_rel(url))
         if (!r.ok || !r.body) {
           setStatus('error', humanizeError(`HTTP ${r.status}`))
@@ -207,6 +229,7 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
 
     async function main() {
       try {
+        viewerKey = await makeViewerKey()
         const ice = await fetchJson<{ servers: IceServer[] }>('/gfs/highlights/ice-servers')
         pc = new RTCPeerConnection({ iceServers: ice.servers })
         let sessionId: string | null = null
@@ -250,6 +273,7 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
             highlight_id: boot.highlightId,
             token: boot.token,
             sdp: offer.sdp,
+            ...(viewerKey ? { vk: viewerKey.vk } : {}),
           },
         )
         sessionId = offerResp.session_id
@@ -294,6 +318,7 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
       if (pc) try { pc.close() } catch { /* tolerated */ }
       // Release all blob URLs.
       Object.values(state.frameUrls).forEach((u) => URL.revokeObjectURL(u))
+      if (state.authorPicture) URL.revokeObjectURL(state.authorPicture)
     }
   }, [boot.instanceId, boot.highlightId, boot.token])
 
@@ -336,6 +361,7 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
 
   return (
     <div class="highlight-viewer">
+      {state.author && <AuthorHeader author={state.author} picture={state.authorPicture} />}
       <div class="progress">
         {state.manifest.map((_, i) => (
           <span
@@ -360,6 +386,24 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
         )}
       </div>
     </div>
+  )
+}
+
+
+/* Who shared it: picture (or initials), name and bio. Plain text only. */
+function AuthorHeader({ author, picture }: { author: AuthorProfile; picture: string | null }) {
+  const initials = author.display_name
+    .split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]!.toUpperCase()).join('')
+  return (
+    <header class="highlight-author" aria-label={`Shared by ${author.display_name}`}>
+      {picture
+        ? <img class="highlight-author-pic" src={picture} alt="" width={48} height={48} />
+        : <span class="highlight-author-pic highlight-author-initials" aria-hidden="true">{initials}</span>}
+      <div class="highlight-author-text">
+        <p class="highlight-author-name">{author.display_name}</p>
+        {author.bio && <p class="highlight-author-bio">{author.bio}</p>}
+      </div>
+    </header>
   )
 }
 

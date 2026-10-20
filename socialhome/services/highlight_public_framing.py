@@ -29,6 +29,9 @@ Header kinds (v1):
   byte_length}``. Payload is the raw bytes for that chunk.
 - ``stream_end`` — emitted after the final ``frame_chunk``. Viewer
   closes the channel on receipt. No payload.
+- ``author_profile`` — who shared it, right after ``highlight_meta``,
+  only to a viewer that sent an ephemeral key: header ``{seal_suite, epk,
+  nonce}``, payload the profile sealed to that key.
 - ``error`` — emitted in place of any frame the author cannot serve.
   ``error`` field carries the reason string (``expired`` /
   ``unauthorized`` / ``backpressure``). Channel closes immediately
@@ -69,6 +72,11 @@ KIND_MOMENT_INDEX_META: str = "moment_index_meta"
 KIND_FRAME_CHUNK: str = "frame_chunk"
 KIND_STREAM_END: str = "stream_end"
 KIND_ERROR: str = "error"
+#: Who shared the highlight, sealed to the viewer's ephemeral key
+#: (:mod:`socialhome.services.highlight_public_profile`). Header:
+#: ``{seal_suite, epk, nonce}``; payload: the AES-GCM ciphertext. Sent
+#: once, right after ``highlight_meta``, only to a viewer that sent a key.
+KIND_AUTHOR_PROFILE: str = "author_profile"
 
 VALID_KINDS: frozenset[str] = frozenset(
     {
@@ -77,6 +85,7 @@ VALID_KINDS: frozenset[str] = frozenset(
         KIND_FRAME_CHUNK,
         KIND_STREAM_END,
         KIND_ERROR,
+        KIND_AUTHOR_PROFILE,
     }
 )
 
@@ -235,6 +244,11 @@ def frame_chunk(
         },
         payload,
     )
+
+
+def author_profile(header_fields: dict, ciphertext: bytes) -> bytes:
+    """Build the sealed ``author_profile`` frame."""
+    return encode({**header_fields, "kind": KIND_AUTHOR_PROFILE}, ciphertext)
 
 
 def stream_end() -> bytes:

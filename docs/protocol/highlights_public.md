@@ -57,7 +57,7 @@ Public-viewer WebRTC signalling (added in PR2):
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/gfs/highlights/ice-servers` | Anonymous list of STUN/TURN URLs the browser bootstrap feeds into `RTCPeerConnection`. |
-| POST | `/gfs/highlight_rtc/offer` | Anonymous. Body: `{instance_id, highlight_id, token, sdp}`. GFS verifies the token, stores the offer in :class:`GfsRtcSession`, and pushes a `highlight_signal` WS frame to the author's instance. Returns `201 {session_id}`. Every non-success state (unknown / revoked / expired token, URL mismatch, unpublished, author offline) gets the one uniform `503 {"error":"unavailable"}`. |
+| POST | `/gfs/highlight_rtc/offer` | Anonymous. Body: `{instance_id, highlight_id, token, sdp, vk?}` (`vk`: the viewer's ephemeral P-256 key, see "Who shared it"; forwarded to the author only when shaped like one, never stored or logged). GFS verifies the token, stores the offer in :class:`GfsRtcSession`, and pushes a `highlight_signal` WS frame to the author's instance. Returns `201 {session_id}`. Every non-success state (unknown / revoked / expired token, URL mismatch, unpublished, author offline) gets the one uniform `503 {"error":"unavailable"}`. |
 | GET | `/gfs/highlight_rtc/session/{session_id}` | Anonymous. Browser polls until `answer_sdp` and any author-side ICE candidates land. |
 | POST | `/gfs/highlight_rtc/ice/viewer` | Anonymous. Body: `{session_id, candidate}`. Forwards to the author's WS as a `highlight_signal kind=ice` frame. |
 | POST | `/gfs/highlight_rtc/answer` | Author SH only (Ed25519-signed). Body: `{instance_id, session_id, sdp, signature}`. Authority guard: `session.initiator_id` must match the signing instance. |
@@ -68,7 +68,7 @@ GFS-relay fallback (used when the direct DataChannel can't connect — see
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token=...` | Anonymous, token-gated (same token as the offer flow). Chunked `application/octet-stream`: the GFS pushes a `highlight_signal kind=relay_offer` to the author and pipes the framed bytes the author streams back. Every non-success state (bad / expired token, URL mismatch, author offline, relay capacity, author never connects) gets the uniform `503 {"error":"unavailable"}`, sent at once (only the never-connects branch waits its 30 s budget). `422` (missing token). |
+| GET | `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token=...&vk=...` | Anonymous, token-gated (same token as the offer flow); optional `vk` as on the offer. Chunked `application/octet-stream`: the GFS pushes a `highlight_signal kind=relay_offer` to the author and pipes the framed bytes the author streams back. Every non-success state (bad / expired token, URL mismatch, author offline, relay capacity, author never connects) gets the uniform `503 {"error":"unavailable"}`, sent at once (only the never-connects branch waits its 30 s budget). `422` (missing token). |
 | POST | `/gfs/highlight_rtc/relay-stream/{relay_id}` | Author SH only. Header-auth: `X-SH-Instance` + `X-SH-Signature` (Ed25519 over canonical `{"instance_id","relay_id"}`); body is the raw framed byte stream. `403` (relay's target instance != signer), `404` (unknown relay), `401` (bad signature), `422` (missing headers). |
 
 The viewer DataChannel has label `highlight-public-v1` and uses the
@@ -159,6 +159,7 @@ the wire is:
 | `kind` | Direction | Header fields | Payload |
 |---|---|---|---|
 | `highlight_meta` | author → viewer (first frame) | `highlight` (full Highlight dict), `frames` (manifest: `[{frame_id, sequence, content_type, byte_length, caption_text, caption_emoji, duration_ms}, …]`) | empty |
+| `author_profile` | author → viewer (right after `highlight_meta`, only when the viewer sent `vk`) | `seal_suite`, `epk`, `nonce` | the author's `{display_name, bio, picture}` sealed to `vk` (see "Who shared it") |
 | `frame_chunk` | author → viewer | `frame_id`, `sequence`, `chunk_index`, `is_last_chunk`, `byte_length` | up to `CHUNK_SIZE` (64 KiB) bytes |
 | `stream_end` | author → viewer (terminator) | `kind` only | empty |
 | `error` | author → viewer | `error` (one of `expired`, `unauthorized`, `backpressure`) | empty |
@@ -168,6 +169,40 @@ SEND_HWM_BYTES` (1 MiB) before pushing the next chunk. Reference
 encoder + decoder: `socialhome/services/highlight_public_framing.py`;
 golden-bytes test in `tests/protocol/test_highlight_public_framing.py`
 (release-blocker per CLAUDE.md §27.9).
+
+## Who shared it (sealed author profile)
+
+The page names the author above the highlight: display name, bio and a
+small picture (WebP ≤ 256 px / 24 KB, re-encoded by the author's
+household). They travel **inside the highlight stream**, sealed to the
+viewer, so the GFS stores nothing new and relays only ciphertext on both
+transports:
+
+1. The viewer bundle makes an ephemeral **P-256 ECDH** key pair for this
+   view (WebCrypto; X25519 isn't in every supported browser yet) and sends
+   the raw public point (base64url) as `vk` with its offer and its relay
+   GET. Without WebCrypto it sends none and the page shows the highlight
+   without the author.
+2. The GFS forwards `vk` in the `highlight_signal` `offer` /
+   `relay_offer` frame when it is shaped like a key; it never stores or
+   logs it.
+3. The author's household makes its own ephemeral pair, derives
+   `HKDF-SHA256(ECDH, salt="", info="sh-highlight-public-profile:v1")` and
+   seals the profile JSON with AES-256-GCM, the highlight id as associated
+   data. Frame header: `seal_suite` (`p256-hkdf-sha256-aes256gcm`,
+   `SUPPORTED_PROFILE_SEAL_SUITES`), `epk`, `nonce`; the viewer refuses an
+   unknown suite and shows no author.
+4. The DataChannel is DTLS end to end anyway; on the relay fallback the
+   GFS pipes the sealed frame like every other byte.
+
+A protected (child) account cannot publish a highlight (§CP.R); if one
+streams anyway, the profile carries the name only. An older viewer bundle
+sends no `vk`, and an older author ignores it — nothing changes for them.
+**Residual:** the GFS minted the share token, so it could open the link
+like any viewer; sealing keeps the profile out of everything it relays.
+Reference: `socialhome/services/highlight_public_profile.py`,
+`client/gfs/sealed_profile.ts` (interop test with a Python-sealed golden
+vector).
 
 ## Sequence (public viewer flow)
 
@@ -182,11 +217,12 @@ sequenceDiagram
     G-->>V: 200 SSR landing + bootstrap.js (same shell for every URL)
     V->>G: GET /gfs/highlights/ice-servers
     G-->>V: { servers: [...] }
-    V->>G: POST /gfs/highlight_rtc/offer {sdp}
+    V->>V: ephemeral P-256 key pair (vk)
+    V->>G: POST /gfs/highlight_rtc/offer {sdp, vk}
     G->>G: resolve_token + author_online (both, every request)
     Note over G,V: any failure → uniform 503 {"error":"unavailable"}
     G->>G: store offer in GfsRtcSession
-    G->>A: WS push { type:"highlight_signal", kind:"offer", session_id, sdp }
+    G->>A: WS push { type:"highlight_signal", kind:"offer", session_id, sdp, vk }
     G-->>V: 201 { session_id }
     A->>A: open answerer PeerConnection
     A->>G: POST /gfs/highlight_rtc/answer (signed) {session_id, sdp}
@@ -198,15 +234,16 @@ sequenceDiagram
     alt direct DataChannel connects
         V-->>A: DataChannel "highlight-public-v1" opens (direct, no GFS)
         A->>V: highlight_meta frame
+        A->>V: author_profile frame (sealed to vk)
         A->>V: frame_chunk × N (per frame)
         A->>V: stream_end
     else WebRTC fails — GFS-relay fallback
-        V->>G: GET /gfs/highlight_rtc/relay/{i}/{s}?token={t}
+        V->>G: GET /gfs/highlight_rtc/relay/{i}/{s}?token={t}&vk={vk}
         G->>G: register transient RelayBridge {relay_id}
-        G->>A: WS push { kind:"relay_offer", relay_id, highlight_id, token }
+        G->>A: WS push { kind:"relay_offer", relay_id, highlight_id, token, vk }
         A->>G: POST /gfs/highlight_rtc/relay-stream/{relay_id} (header-signed)
         Note over G: GFS pipes byte-identical frames<br/>(stores nothing)
-        G-->>V: chunked octet-stream (highlight_meta → frame_chunk × N → stream_end)
+        G-->>V: chunked octet-stream (highlight_meta → author_profile (sealed) → frame_chunk × N → stream_end)
     end
 ```
 

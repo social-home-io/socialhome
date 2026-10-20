@@ -55,6 +55,7 @@ from .highlight_signaling_handler import (
     _content_type_for,
     _default_peer_factory,
 )
+from .inbound_media_store import MEDIA_REF_PREFIX, local_media_ref, media_file_path
 from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
@@ -435,21 +436,21 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
         }
 
     def _resolve_media_path(self, media_url: str | None) -> pathlib.Path | None:
-        """Resolve ``/api/media/{filename}`` to the on-disk path.
+        """Resolve a local media ref (``api/media/{filename}``, leading ``/``
+        tolerated) to the on-disk path.
 
         Defends against path traversal — ``filename`` must not contain a
         slash or start with a dot, same guard :class:`MediaServeView`
         applies on the HTTP path.
         """
-        if not media_url:
+        # Uploads are stored as ``api/media/<name>`` (no leading slash) —
+        # the old ``/api/media/``-only check read every one as missing.
+        ref = local_media_ref(media_url)
+        if ref is None:
             return None
-        prefix = "/api/media/"
-        if not media_url.startswith(prefix):
-            return None
-        filename = media_url[len(prefix) :]
-        if "/" in filename or "\\" in filename or filename.startswith("."):
-            return None
-        return pathlib.Path(self._media_dir) / filename
+        return media_file_path(
+            pathlib.Path(self._media_dir), ref[len(MEDIA_REF_PREFIX) :]
+        )
 
     async def _media_size(self, media_url: str | None) -> int:
         path = self._resolve_media_path(media_url)
