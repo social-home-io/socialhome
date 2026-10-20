@@ -339,6 +339,49 @@ async def test_list_subscribers_with_keys_unknown_space_is_empty(fed):
     assert await fed.list_subscribers_with_keys("nope") == []
 
 
+async def _seat(fed, *, instance_id: str, status: str = "active") -> None:
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id=instance_id,
+            display_name=instance_id,
+            public_key="ab" * 32,
+            status=status,
+        )
+    )
+    await fed.add_subscriber(space_id="sp-get", instance_id=instance_id)
+
+
+async def test_get_subscriber_returns_one_active_seat(fed):
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="o", display_name="O", public_key="aa" * 32, status="active"
+        )
+    )
+    await fed.upsert_space(
+        GlobalSpace(space_id="sp-get", owning_instance="o", status="active")
+    )
+    await _seat(fed, instance_id="s-on")
+    await _seat(fed, instance_id="s-off", status="banned")
+    got = await fed.get_subscriber("sp-get", "s-on")
+    assert got is not None and got.instance_id == "s-on"
+    # Same semantics as list_subscribers: an inactive instance is no seat.
+    assert await fed.get_subscriber("sp-get", "s-off") is None
+    assert await fed.get_subscriber("sp-get", "nobody") is None
+    assert await fed.get_subscriber("other", "s-on") is None
+
+
+async def test_get_subscriber_is_a_primary_key_lookup(fed, gfs_db):
+    """The (space_id, instance_id) PRIMARY KEY covers the point lookup — no
+    scan of the space's seats, and no new index or migration."""
+    plan = await gfs_db.fetchall(
+        "EXPLAIN QUERY PLAN " + fed.GET_SUBSCRIBER_SQL, ("sp", "i")
+    )
+    details = [str(dict(r).get("detail", "")) for r in plan]
+    assert details, "no query plan"
+    assert not any(d.startswith("SCAN") for d in details), details
+    assert any("sqlite_autoindex_space_subscribers" in d for d in details), details
+
+
 # ── Admin helpers ─────────────────────────────────────────────────────
 
 

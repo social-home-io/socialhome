@@ -1884,10 +1884,20 @@ async def test_subscriber_reconnect_renotifies_owner(gfs_db):
     await svc.on_subscriber_connected("sub-rc")
 
     assert len(ws.sent) == 1
-    # Byte-identical to the frame ``subscribe`` emits — the owner's handler
-    # parses exactly one shape.
-    assert ws.sent[0] == subscribe_frame
+    # The frame ``subscribe`` emits, but as a key repair: ``reason`` says
+    # reconnect (the owner sends no bundle for it) and no ``accepts`` (they
+    # are only known at subscribe time).
     inst, frame = ws.sent[0]
+    sub_inst, sub_frame = subscribe_frame
+    assert sub_frame["reason"] == "subscribe"
+    assert frame["reason"] == "reconnect"
+    expected_sub = dict(sub_frame["subscriber"])
+    del expected_sub["accepts"]
+    assert {**frame, "reason": "subscribe", "subscriber": expected_sub} == {
+        **sub_frame,
+        "subscriber": expected_sub,
+    }
+    assert inst == sub_inst
     assert inst == "owner-rc"
     assert frame["type"] == "new_subscriber"
     assert frame["space_id"] == "sp-rc"
@@ -3316,3 +3326,106 @@ async def test_a_targeted_bundle_still_needs_the_authority_signature(gfs_db):
             "sp-forged", "space_author_profiles_bundle", payload, to="sub-a"
         )
     assert ws.sent == []
+
+
+# ─── v_61 ``new_subscriber`` reason + accepts (bundle once) ──────────────
+
+
+async def _owner_and_keywrap_sub(svc, *, space_id: str) -> bytes:
+    """Publish *space_id* under ``owner-r``; register ``sub-r`` with a
+    key-wrap key. Returns the subscriber's seed."""
+    owner_seed, owner_pk = _make_keypair()
+    sub_seed, sub_pk = _make_keypair()
+    await svc.register_instance("owner-r", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance(
+        "sub-r",
+        sub_pk.hex(),
+        auto_accept=True,
+        keywrap_public_key="cc" * 32,
+        kem_suite="x25519",
+        keywrap_sig="a2V5d3JhcHNpZw",
+    )
+    await _publish_known_space(
+        svc, owner_seed, owning_instance="owner-r", space_id=space_id
+    )
+    return sub_seed
+
+
+async def _signed_subscribe(svc, sub_seed: bytes, space_id: str, **kw) -> None:
+    ts = _now_iso()
+    sig = _sign(
+        sub_seed,
+        {"action": "subscribe", "instance_id": "sub-r", "space_id": space_id, "ts": ts},
+    )
+    await svc.subscribe("sub-r", space_id, ts, sig, **kw)
+
+
+def _notifies(ws) -> list[dict]:
+    return [f for _i, f in ws.sent if f.get("type") == "new_subscriber"]
+
+
+async def test_a_new_seat_notifies_with_reason_subscribe_and_accepts(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-r1")
+    await _signed_subscribe(svc, sub_seed, "sp-r1", accepts=("author_profiles_bundle",))
+    [frame] = _notifies(ws)
+    assert frame["reason"] == "subscribe"
+    assert frame["subscriber"]["accepts"] == ["author_profiles_bundle"]
+
+
+async def test_a_new_seat_without_accepts_forwards_an_empty_list(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-r2")
+    await _signed_subscribe(svc, sub_seed, "sp-r2")
+    [frame] = _notifies(ws)
+    assert frame["reason"] == "subscribe"
+    assert frame["subscriber"]["accepts"] == []
+
+
+async def test_a_resubscribe_of_a_held_seat_notifies_nobody(gfs_db):
+    """REGRESSION (H1): the follower re-subscribes every seat on each GFS-WS
+    reconnect, and the WS hello already re-notifies (``reason: reconnect``),
+    so a re-subscribe of a held seat must not notify again (each
+    ``subscribe`` notify can cost the host a ~1 MB bundle)."""
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-r3")
+    await _signed_subscribe(svc, sub_seed, "sp-r3")
+    ws.sent.clear()
+    await _signed_subscribe(svc, sub_seed, "sp-r3", accepts=("author_profiles_bundle",))
+    assert _notifies(ws) == []
+    subs = await svc._repo.list_subscribers("sp-r3")
+    assert [s.instance_id for s in subs] == ["sub-r"]
+
+
+async def test_a_reconnect_notifies_with_reason_reconnect_and_no_accepts(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-r4")
+    await _signed_subscribe(svc, sub_seed, "sp-r4", accepts=("author_profiles_bundle",))
+    ws.sent.clear()
+    await svc.on_subscriber_connected("sub-r")
+    [frame] = _notifies(ws)
+    assert frame["reason"] == "reconnect"
+    assert "accepts" not in frame["subscriber"]
+    assert frame["subscriber"]["keywrap_public_key"] == "cc" * 32
+
+
+async def test_a_targeted_publish_reads_one_seat_not_the_list(gfs_db, monkeypatch):
+    """REGRESSION (H3): a targeted publish looks its one seat up by primary
+    key instead of reading every subscriber row of the space."""
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    seed = await _two_subscribers(svc, "sp-pk")
+
+    async def _no_list(self, space_id: str):
+        raise AssertionError("list_subscribers read on a targeted publish")
+
+    monkeypatch.setattr(SqliteGfsFederationRepo, "list_subscribers", _no_list)
+    payload = _targeted_payload(seed, "space_author_profiles_bundle", "sp-pk")
+    delivered = await svc.publish_event(
+        "sp-pk", "space_author_profiles_bundle", payload, to="sub-b"
+    )
+    assert delivered == ["sub-b"]

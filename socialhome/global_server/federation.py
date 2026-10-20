@@ -156,6 +156,14 @@ MAX_SUBSCRIPTIONS_PER_INSTANCE: int = 500
 #: never correctness.
 MAX_RECONNECT_NOTIFIES: int = 50
 
+#: ``new_subscriber.reason`` (v_61): a NEW seat — the owner may send the
+#: one-time author-profiles bundle (if the subscriber ``accepts`` it).
+NEW_SUBSCRIBER_REASON_SUBSCRIBE: str = "subscribe"
+
+#: ``new_subscriber.reason`` (v_61): the subscriber's WS came back — the
+#: owner repairs the content-key handoff only, never a bundle.
+NEW_SUBSCRIBER_REASON_RECONNECT: str = "reconnect"
+
 
 def _bounded_image_uri(uri: str | None, *, space_id: str, kind: str) -> str | None:
     """*uri*, or ``""`` when it exceeds ``SPACE_IMAGE_DATA_URI_MAX_CHARS``.
@@ -516,9 +524,14 @@ class GfsFederationService:
             return []
         self._seen_payloads.record(digest)
 
-        subscribers = await self._repo.list_subscribers(space_id)
         if to:
-            subscribers = [s for s in subscribers if s.instance_id == to]
+            # One seat by primary key — never every row of the space (a
+            # reconnect / reconcile storm of targeted handoffs would read
+            # N seats N times).
+            seat = await self._repo.get_subscriber(space_id, to)
+            subscribers = [seat] if seat is not None else []
+        else:
+            subscribers = await self._repo.list_subscribers(space_id)
 
         # Identity-free fan-out frame: routing fields only. No ``from_instance``
         # and no GFS-added target id — a subscriber learns nothing about which
@@ -843,6 +856,8 @@ class GfsFederationService:
         space_id: str,
         ts: str,
         signature: str,
+        *,
+        accepts: tuple[str, ...] = (),
     ) -> None:
         """Add *instance_id* as a subscriber of *space_id*.
 
@@ -860,6 +875,15 @@ class GfsFederationService:
         GFS has never seen published (no auto-creation of a pending row from
         an unauthenticated demand signal — a subscription must target a real
         published space).
+
+        *accepts* (v_61) — the optional relay deliveries the subscriber can
+        open (:mod:`socialhome.domain.subscriber_accepts`), already
+        validated by the route. NOT in the signed bytes (an older GFS still
+        verifies the subscribe) and never stored: it is forwarded to the
+        owner only in the ``reason: "subscribe"`` notify of a NEW seat.
+        Re-subscribing a seat already held notifies nobody — the follower's
+        WS hello already re-notified (``reason: "reconnect"``, see
+        :meth:`on_subscriber_connected`) for the key repair.
         """
         inst = await self._verify_signed_request(
             instance_id,
@@ -902,6 +926,12 @@ class GfsFederationService:
             instance_id=instance_id,
         )
         log.debug("GFS: %s subscribed to space %s", instance_id, space_id)
+        if space_id in held:
+            # A re-take (the follower re-subscribes every seat on each GFS-WS
+            # reconnect): the hello's ``reason: "reconnect"`` notify already
+            # asked the owner for the key repair — a second notify would only
+            # double the owner's work.
+            return
 
         # Phase 5b-b — best-effort notify the space OWNER so a seed-holder can
         # seal the per-space content key to this new subscriber (the GFS stays
@@ -912,7 +942,11 @@ class GfsFederationService:
         # subscriber list). If the owner is offline (no WS), the frame is
         # dropped — that, too, is the reconcile's job, NOT a subscribe failure.
         await self._notify_owner_new_subscriber(
-            existing.owning_instance, space_id, inst
+            existing.owning_instance,
+            space_id,
+            inst,
+            reason=NEW_SUBSCRIBER_REASON_SUBSCRIBE,
+            accepts=accepts,
         )
 
     async def _notify_owner_new_subscriber(
@@ -920,30 +954,41 @@ class GfsFederationService:
         owning_instance: str,
         space_id: str,
         subscriber: ClientInstance,
+        *,
+        reason: str,
+        accepts: tuple[str, ...] = (),
     ) -> None:
         """Push a ``new_subscriber`` frame to the space owner's WS (best-effort).
 
         Carries the subscriber's registered Ed25519 identity ``public_key`` +
         its published key-wrap pubkey/suite/self-signature so the owner can
         verify the key-wrap binding end-to-end (``verify_keywrap_binding``,
-        anti-GFS-substitution) before sealing. Never raises — a missing socket
-        or a send error is logged and swallowed (the 5b-c reconcile backstops
+        anti-GFS-substitution) before sealing. *reason* (v_61) is
+        ``"subscribe"`` for a NEW seat — then the subscriber's *accepts*
+        labels ride along — or ``"reconnect"`` for the key repair on the
+        subscriber's WS hello; the owner sends the one-time author-profiles
+        bundle only for ``"subscribe"``. Never raises — a missing socket or
+        a send error is logged and swallowed (the 5b-c reconcile backstops
         an offline owner)."""
         if self._ws_registry is None:
             return
+        sub: dict[str, object] = {
+            "instance_id": subscriber.instance_id,
+            "identity_public_key": subscriber.public_key,
+            "keywrap_public_key": subscriber.keywrap_public_key,
+            "kem_suite": subscriber.kem_suite,
+            "keywrap_sig": subscriber.keywrap_sig,
+        }
+        if reason == NEW_SUBSCRIBER_REASON_SUBSCRIBE:
+            sub["accepts"] = list(accepts)
         try:
             await self._ws_registry.send(
                 owning_instance,
                 {
                     "type": "new_subscriber",
+                    "reason": reason,
                     "space_id": space_id,
-                    "subscriber": {
-                        "instance_id": subscriber.instance_id,
-                        "identity_public_key": subscriber.public_key,
-                        "keywrap_public_key": subscriber.keywrap_public_key,
-                        "kem_suite": subscriber.kem_suite,
-                        "keywrap_sig": subscriber.keywrap_sig,
-                    },
+                    "subscriber": sub,
                 },
             )
         except Exception as exc:  # defensive — never fail a subscribe on notify
@@ -1026,6 +1071,7 @@ class GfsFederationService:
                 space.owning_instance,
                 space.space_id,
                 subscriber,
+                reason=NEW_SUBSCRIBER_REASON_RECONNECT,
             )
             sent += 1
         if sent:
