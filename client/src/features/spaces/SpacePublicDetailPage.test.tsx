@@ -223,6 +223,22 @@ describe('SpacePublicDetailPage — a GFS-listed space whose household we never 
     expect(container.textContent).not.toMatch(/Connect|Connections|pair/i)
   })
 
+  it('a host whose name we never learned is left out — never shown by its id', async () => {
+    cacheDirectoryEntries([{ ...far(true), host_display_name: null }])
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Follow'))
+    expect(container.textContent).not.toContain('hosted by')
+    expect(container.textContent).not.toContain('remote-9')
+    expect(container.textContent).not.toContain('remote-9'.slice(0, 8))
+  })
+
+  it('a named host is shown by its name', async () => {
+    cacheDirectoryEntries([far(true)])
+    const { getByText } = await renderPage()
+    await waitFor(() => getByText('Follow'))
+    expect(getByText(/hosted by Far Household/)).toBeTruthy()
+  })
+
   it('otherwise says members can invite you, with no action', async () => {
     cacheDirectoryEntries([far(false)])
     const { container, getByText, queryByRole } = await renderPage()

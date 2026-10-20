@@ -867,9 +867,11 @@ export interface HouseholdSpaceRow {
 export interface DirectoryEntry {
   /** Unique id of the listed space (host's side). */
   space_id: string
-  /** Display-ready host household label. */
+  /** The host household's id — for routing a join request, never shown. */
   host_instance_id: string
-  host_display_name: string
+  /** The host household's name, from a pairing; ``null`` when we don't
+   *  know it (a GFS directory carries none). Show it via ``hostLabel``. */
+  host_display_name: string | null
   /** True when we've already CONFIRMED-paired with this host. */
   host_is_paired: boolean
   name: string

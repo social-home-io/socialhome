@@ -47,14 +47,18 @@ class PublicSpaceCollectionView(BaseView):
         )
         federation_repo = self.svc(K.federation_repo_key)
         unique_instances = {lst.instance_id for lst in listings}
-        host_info: dict[str, tuple[str, bool]] = {}
+        # The host's name is only ever the one a pairing told us: a GFS
+        # directory carries none (the GFS shields households from each
+        # other), so an unknown or unnamed host is ``None`` — never its
+        # instance id standing in for a name.
+        host_info: dict[str, tuple[str | None, bool]] = {}
         for iid in unique_instances:
             inst = await federation_repo.get_instance(iid)
             if inst is None:
-                host_info[iid] = (iid, False)
+                host_info[iid] = (None, False)
             else:
                 host_info[iid] = (
-                    inst.display_name or iid,
+                    inst.display_name or None,
                     inst.status is PairingStatus.CONFIRMED,
                 )
         return web.json_response(
@@ -63,12 +67,8 @@ class PublicSpaceCollectionView(BaseView):
                     "space_id": lst.space_id,
                     "instance_id": lst.instance_id,
                     "host_instance_id": lst.instance_id,
-                    "host_display_name": host_info.get(
-                        lst.instance_id, (lst.instance_id, False)
-                    )[0],
-                    "host_is_paired": host_info.get(
-                        lst.instance_id, (lst.instance_id, False)
-                    )[1],
+                    "host_display_name": host_info[lst.instance_id][0],
+                    "host_is_paired": host_info[lst.instance_id][1],
                     "name": lst.name,
                     "description": lst.description,
                     "emoji": lst.emoji,

@@ -35,7 +35,7 @@ import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import { askLocationConsent, isApiCode, locationConsentText, noHomeText } from '@/components/localConsent'
 import {
-  contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel,
+  contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, requestSentToast,
   joinCarriesLocation, joinModeChip,
   sourceOf, type DiscoverAction,
 } from './discover'
@@ -213,7 +213,7 @@ export default function SpacePublicDetailPage() {
           `/api/public_spaces/${entry.space_id}/join-request`,
           { host_instance_id: entry.host_instance_id, ...(carries ? { share_location: true } : {}) },
         )
-        showToast(t('spaces.browse.request_sent_to', { host: hostLabel(entry) }), 'success')
+        showToast(requestSentToast(entry), 'success')
         patch({ request_pending: true })
       }
     } catch (exc) {
@@ -264,6 +264,8 @@ export default function SpacePublicDetailPage() {
 
   const entry = detail.value
   const isLocal = entry.host_instance_id === 'local'
+  // A host whose name we don't know (GFS-listed) isn't mentioned at all.
+  const host = isLocal ? null : hostLabel(entry)
   // Back to the list — to the Discover chip this space came from, unless
   // the viewer is in it already.
   const back = entry.already_member ? '/spaces' : `/spaces?discover=${sourceOf(entry)}`
@@ -328,8 +330,8 @@ export default function SpacePublicDetailPage() {
           <p class="sh-muted">
             {t(isOne(entry.member_count) ? 'space.header.members_one' : 'space.header.members',
               { count: String(entry.member_count) })}
-            {!isLocal && (
-              <> · {t('space.public.hosted_by', { host: hostLabel(entry) })}</>
+            {host && (
+              <> · {t('space.public.hosted_by', { host })}</>
             )}
             {pinKm !== null && (
               <span data-testid="place-distance"> · 📍 {distanceLabel(pinKm)}</span>
@@ -439,7 +441,7 @@ export default function SpacePublicDetailPage() {
           open={true}
           onClose={() => setActiveModal(null)}
           spaceName={activeModal.name}
-          hostDisplayName={activeModal.host_display_name}
+          hostDisplayName={hostLabel(activeModal)}
           hostIsPaired={activeModal.host_is_paired}
           locationNote={joinCarriesLocation(activeModal)
             ? locationConsentText(hostLabel(activeModal)) : null}

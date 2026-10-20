@@ -377,3 +377,38 @@ async def test_list_carries_the_pin_and_its_radius_hint(client):
     r = await client.get("/api/public_spaces", headers=_auth(client._tok))
     entry = next(s for s in await r.json() if s["space_id"] == "sp-pin")
     assert (entry["lat"], entry["lon"], entry["radius_km"]) == (47.3769, 8.5417, 10.0)
+
+
+async def _remote_instance(client, iid: str, display_name: str) -> None:
+    await client._db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status) VALUES(?, ?, 'pk', 'k1', 'k2', '', ?,"
+        " 'confirmed')",
+        (iid, display_name, f"inbox-{iid}"),
+    )
+
+
+async def test_list_never_names_an_unknown_host_by_its_instance_id(client):
+    """A GFS directory carries no host name — the GFS shields households
+    from each other — so a listing whose host we don't know has no name.
+    It is ``null``, never the raw instance id standing in for one."""
+    await _seed(client, space_id="sp-far", instance_id="x7qk2m9vbe4wt5ny8hc3rj6dpa")
+    r = await client.get("/api/public_spaces", headers=_auth(client._tok))
+    entry = next(s for s in await r.json() if s["space_id"] == "sp-far")
+    assert entry["host_display_name"] is None
+    assert entry["host_is_paired"] is False
+    assert entry["host_instance_id"] == "x7qk2m9vbe4wt5ny8hc3rj6dpa"
+
+
+async def test_list_names_a_paired_host_and_never_an_unnamed_one_by_id(client):
+    await _remote_instance(client, "hh-keller", "Keller household")
+    await _remote_instance(client, "hh-blank", "")
+    await _seed(client, space_id="sp-keller", instance_id="hh-keller")
+    await _seed(client, space_id="sp-blank", instance_id="hh-blank")
+    r = await client.get("/api/public_spaces", headers=_auth(client._tok))
+    rows = {s["space_id"]: s for s in await r.json()}
+    assert rows["sp-keller"]["host_display_name"] == "Keller household"
+    assert rows["sp-keller"]["host_is_paired"] is True
+    assert rows["sp-blank"]["host_display_name"] is None
+    assert rows["sp-blank"]["host_is_paired"] is True

@@ -3406,6 +3406,7 @@
   "space.zones_page.title": "Zones · {name}",
   "space.join_request.title": "Request to join {name}",
   "space.join_request.sent_to": "Your request goes to the admins of {host}.",
+  "space.join_request.sent_to_admins": "Your request goes to the space’s admins.",
   "space.join_request.auto_added": "You'll be added automatically once they approve.",
   "space.join_request.needs_connection": "This only works once your household is connected with theirs.",
   "space.join_request.message_label": "Add a short message (optional)",
