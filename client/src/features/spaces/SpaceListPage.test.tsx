@@ -161,8 +161,28 @@ describe('SpaceListPage — sections', () => {
     // Uploaded icon wins; else the emoji; else the initial.
     expect(r.getByText('Garden').closest('a')!.querySelector('img')!.getAttribute('src')).toContain('/api/spaces/sG/icon')
     expect(r.getByText('Band').closest('a')!.querySelector('.sh-spaces-row__ic')!.textContent).toBe('B')
-    // One member: "Just you".
+    // One member, and it is the viewer: "Just you".
     expect(r.getByText('Band').closest('a')!.textContent).toContain('Just you')
+  })
+
+  it('"Just you" only when the one member is the viewer — a followed space or a Discover row says "1 member"', async () => {
+    wire({
+      spaces: [
+        ...SPACES,
+        { id: 'sF', name: 'Solo blog', space_type: 'global', emoji: null, my_role: 'subscriber', member_count: 1, last_activity_at: null, needs_you: null },
+      ],
+    })
+    const r = await renderPage()
+    // A follower is never counted, so the one member is the owner.
+    const followed = (await r.findByText('Solo blog')).closest('a')!
+    expect(followed.textContent).toContain('1 member')
+    expect(followed.textContent).not.toContain('Just you')
+    // Discover lists spaces the viewer is not in.
+    const discover = r.getByRole('region', { name: 'Discover' })
+    const choir = (await r.findByText('Hottingen Community Choir')).closest('li')!
+    expect(discover.contains(choir)).toBe(true)
+    expect(choir.textContent).toContain('1 member')
+    expect(discover.textContent).not.toContain('Just you')
   })
 
   it('a long name is clamped to two lines, never cut to one', async () => {

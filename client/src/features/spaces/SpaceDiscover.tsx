@@ -119,7 +119,8 @@ function entryMeta(e: DirectoryEntry, source: DiscoverSource, home: Home | null 
   const km = source === 'global' && hintVerdict(e, home) === null ? pinDistanceKm(e, home) : null
   if (km !== null) parts.push(distanceLabel(km))
   if (source !== 'household') parts.push(hostLabel(e))
-  parts.push(membersLabel(e.member_count))
+  // Discover lists spaces the viewer isn't in — never "Just you".
+  parts.push(membersLabel(e.member_count, false))
   const mode = joinModeWord(e)
   if (mode) parts.push(mode)
   return parts.join(' · ')

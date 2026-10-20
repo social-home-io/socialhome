@@ -90,7 +90,8 @@ function rowLabel(s: Space, meta: string, needs: number, unread: number): string
 }
 
 function MemberRow({ space: s, following }: { space: Space; following?: boolean }) {
-  const activity = activityMeta(s.member_count, s.last_activity_at)
+  // A follower isn't in the count: "Just you" is for a member's own row.
+  const activity = activityMeta(s.member_count, s.last_activity_at, !following)
   const meta = following
     ? [t('spaces.list.following_meta'), activity].filter(Boolean).join(' · ')
     : activity
