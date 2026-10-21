@@ -43,6 +43,11 @@ https://{gfs_host}/highlight/{instance_id}/{highlight_id}/{token}#k={link_secret
   info="sh-highlight-link:v1" ‖ 0 ‖ highlight_id ‖ 0 ‖ token)`` and appends it
   to the URL the GFS returned — the secret itself is never stored, and only
   the author's household can make one.
+  Because it derives from the **long-term identity seed**, an identity
+  rotation (a new seed) changes every secret: every public highlight link
+  made before it stops opening (the stream no longer opens under the old
+  `#k`), and the author makes new links from the share menu. Nothing on the
+  GFS has to change; the old tokens just open nothing.
 
 ## Wire endpoints
 

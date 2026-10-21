@@ -1129,6 +1129,15 @@ decryption.
   - `instance_id = base32(SHA256(identity_pk)[:20]).lower()`
   - `space_id    = base32(SHA256(space_pk)[:20]).lower()`
   - `user_id     = base32(SHA256(instance_pk ‖ 0x00 ‖ username)[:20]).lower()`
+- Public highlight link secret (the `#k=` fragment, never sent to a server):
+  - `link_secret = HKDF-SHA256(identity_seed, salt="", info=b"sh-highlight-link:v1" ‖ 0x00 ‖ highlight_id ‖ 0x00 ‖ token)`
+  - Nothing is stored for it, so it is bound to the **long-term identity
+    seed**: an identity rotation (a new seed) changes every link secret, and
+    every public highlight link made before the rotation stops opening. The
+    author makes new links from the highlight's share menu; nothing on the
+    GFS changes (its old tokens simply open nothing). The household only
+    derives a secret for a share token it minted itself and still holds
+    (`highlight_public_tokens`), of at most 256 characters.
 
 ## Post-quantum migration path
 
