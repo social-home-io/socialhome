@@ -103,3 +103,28 @@ async def test_set_branding_without_registry_is_safe():
     await svc.set_branding(server_name="New", admin_ip="1.2.3.4")
 
     assert await admin.get_config("server_name") == "New"
+
+
+class _RecordingFanOut:
+    def __init__(self) -> None:
+        self.forwarded: list[dict] = []
+
+    def forward_to_all(self, push: dict) -> bool:
+        self.forwarded.append(push)
+        return True
+
+
+async def test_a_rename_is_forwarded_to_the_other_cluster_nodes_once():
+    """The households connected to the other nodes get the notice too —
+    one forward, after this node's own broadcast."""
+    admin = _StubAdminRepo({"server_name": "Old"})
+    reg, fan_out = _RecordingRegistry(), _RecordingFanOut()
+    svc = _make_service(admin_repo=admin, ws_registry=reg)
+    svc.attach_fan_out(fan_out)
+
+    await svc.set_branding(server_name="New", admin_ip="1.2.3.4")
+    await svc.set_branding(server_name="New", admin_ip="1.2.3.4")  # unchanged
+
+    want = {"type": "server_info_updated", "server_name": "New"}
+    assert reg.broadcasts == [want]
+    assert fan_out.forwarded == [want]

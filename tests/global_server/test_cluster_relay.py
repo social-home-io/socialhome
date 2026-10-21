@@ -42,6 +42,9 @@ class _Registry:
     def is_connected(self, instance_id: str) -> bool:
         return instance_id in self.online
 
+    def connected_instances(self) -> set[str]:
+        return set(self.online)
+
     async def send(self, instance_id: str, frame: dict) -> bool:
         if instance_id in self.failing or instance_id not in self.online:
             return False
@@ -509,3 +512,41 @@ async def test_the_origin_queues_a_moment_no_peer_holds_as_its_socket_frame():
     on_settled(frozenset({_A}))
     await _settle(svc)
     assert relay.queued == [([_B], _MOMENT_PUSH)]
+
+
+# ─── GFS-wide notices (audience ``all``) ──────────────────────────────────
+
+_RENAME_PUSH = {"type": "server_info_updated", "server_name": "New"}
+_RENAME = {"server_name": "New", "event_type": "server_info_updated"}
+
+
+def test_a_gfs_wide_notice_is_forwarded_and_never_remembered():
+    cluster = _Cluster()
+    svc = _fan_out(cluster=cluster)
+    assert svc.forward_to_all(_RENAME_PUSH) is True
+    assert svc.forward_to_all(_RENAME_PUSH) is True
+    items = [item for item, _cb in cluster.items]
+    assert items == [_item(_RENAME, kind=mod.AUDIENCE_ALL, key="*")] * 2
+    assert ForwardedRelay.from_wire(items[0].to_wire()) == items[0]
+    assert not svc.seen_frame(items[0].frame)
+
+
+async def test_a_gfs_wide_notice_reaches_every_socket_here_each_time():
+    svc, registry, _relay, _l = _receiver(online={_A, _B})
+    notice = _item(_RENAME, kind=mod.AUDIENCE_ALL, key="*")
+    assert await svc.apply([notice]) == {}
+    await _settle(svc)
+    await svc.apply([notice])
+    await _settle(svc)
+    assert sorted(registry.sent) == sorted([(_A, _RENAME_PUSH), (_B, _RENAME_PUSH)] * 2)
+
+
+async def test_a_gfs_wide_notice_with_another_key_or_type_reaches_nobody():
+    svc, registry, _relay, _l = _receiver(online={_A})
+    await svc.apply([_item(_RENAME, kind=mod.AUDIENCE_ALL, key="sp")])
+    await _settle(svc)
+    assert registry.sent == []
+    wire = _item(
+        {"event_type": "envelope", "sealed": {}}, kind=mod.AUDIENCE_ALL, key="*"
+    ).to_wire()
+    assert ForwardedRelay.from_wire(wire) is None

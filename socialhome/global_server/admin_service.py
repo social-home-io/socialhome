@@ -18,6 +18,7 @@ from ..crypto import b64url_decode, verify_ed25519
 from .domain import GfsAppeal, GfsFraudReport
 
 if TYPE_CHECKING:
+    from .cluster_relay import ClusterRelayFanOut
     from .federation import GfsFederationService
     from .repositories import (
         AbstractGfsAdminRepo,
@@ -40,6 +41,7 @@ class GfsAdminService:
     __slots__ = (
         "_admin_repo",
         "_cluster",
+        "_fan_out",
         "_fed_repo",
         "_federation",
         "_fraud_threshold",
@@ -61,6 +63,12 @@ class GfsAdminService:
         self._fraud_threshold = fraud_threshold
         self._ws_registry = ws_registry
         self._cluster = None  # attached in GfsApp
+        self._fan_out: ClusterRelayFanOut | None = None
+
+    def attach_fan_out(self, fan_out: ClusterRelayFanOut) -> None:
+        """Wire the cluster fan-out, so a rename reaches the households
+        connected to the other nodes too."""
+        self._fan_out = fan_out
 
     def attach_cluster(self, cluster) -> None:
         """Wire the :class:`ClusterService` for NODE_SYNC_REPORT fan-out.
@@ -255,13 +263,15 @@ class GfsAdminService:
             await self._admin_repo.set_config("header_image_file", header_image_file)
         await self._log("set_branding", None, None, admin_ip)
         # Real-time push: tell every connected client household the server
-        # was renamed so it refreshes without waiting for a reconnect
-        # (the reconnect-refresh path stays as the fallback, incl. clients
-        # on other cluster nodes). Only fire on an actual name change.
+        # was renamed so it refreshes without waiting for a reconnect (the
+        # reconnect-refresh path stays as the fallback). The sockets on the
+        # other cluster nodes get it through one forward per node. Only fire
+        # on an actual name change.
         if self._ws_registry is not None and name_changed and server_name is not None:
-            delivered = await self._ws_registry.broadcast(
-                {"type": "server_info_updated", "server_name": server_name}
-            )
+            push = {"type": "server_info_updated", "server_name": server_name}
+            delivered = await self._ws_registry.broadcast(push)
+            if self._fan_out is not None:
+                self._fan_out.forward_to_all(push)
             log.info(
                 "GFS: server renamed to %r — notified %d connected client(s)",
                 server_name,

@@ -36,6 +36,7 @@ from socialhome.global_server import cluster as cluster_mod
 from socialhome.global_server import member_publish as mp_mod
 from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
+    gfs_admin_service_key,
     gfs_channel_repo_key,
     gfs_channel_service_key,
     gfs_cluster_key,
@@ -1658,3 +1659,27 @@ async def test_author_notices_reach_the_authors_socket_on_another_node(
     assert author_rest == []
     mail = await mailbox.get(_AUTHOR_USER, on_b)
     assert mail is not None and mail.delivered
+
+
+async def test_a_rename_on_one_node_reaches_households_on_every_node(
+    shared_db_nodes,
+):
+    """An admin rename taken by node A tells the households connected to
+    node B too (one forward, audience ``all``). Before, only node A's
+    sockets heard it; the rest waited for their next reconnect."""
+    a, b = shared_db_nodes
+    owner_seed, follower_seed, _space_seed = await _seed_households(a.app)
+    async with (
+        aiohttp.ClientSession() as http,
+        http.ws_connect(a.make_url("/gfs/ws")) as on_a,
+        http.ws_connect(b.make_url("/gfs/ws")) as on_b,
+    ):
+        await _ws_hello(on_a, _OWNER_ID, owner_seed)
+        await _ws_hello(on_b, _FOLLOWER_ID, follower_seed)
+        await _await_connected(a.app, _OWNER_ID)
+        await _await_connected(b.app, _FOLLOWER_ID)
+        await a.app[gfs_admin_service_key].set_branding(
+            server_name="Renamed GFS", admin_ip="127.0.0.1"
+        )
+        frames = [await _next_frame(ws, "server_info_updated") for ws in (on_a, on_b)]
+    assert frames == [{"type": "server_info_updated", "server_name": "Renamed GFS"}] * 2

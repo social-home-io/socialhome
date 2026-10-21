@@ -434,6 +434,13 @@ The Social Home ↔ GFS link is split by direction:
   its socket pushes its undelivered keys (a key request answered from the
   mailbox marks the kept key undelivered first). See
   [momentum_public.md](momentum_public.md#cluster-delivery).
+- **A rename reaches households on every cluster node.** The node that
+  took the admin rename pushes `server_info_updated` to its own sockets and
+  forwards it once per peer node on the same `relays` path (audience `all`,
+  key `*`; the only frame type allowed for it is `server_info_updated`, and
+  it is not deduped, so renaming back within ten minutes arrives too). Each
+  node pushes it to every socket it holds. An older node drops the unknown
+  audience; its households refresh on their next reconnect, as before.
 - **One public identity per GFS, however many nodes.** `[server] instance_id`
   is the GFS's PUBLIC identity: `/gfs/info` serves it, the capability block
   is signed over it, and households pin it at pairing and sign it as the

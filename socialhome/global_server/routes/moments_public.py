@@ -47,6 +47,7 @@ from ...moment_public_seal import (
 )
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
+from ..cluster_relay import AUDIENCE_KEY_MAX_LEN
 from ..domain import GfsUserPicture
 from ..html_page import html_response
 from ..moment_media import MediaRefused
@@ -64,6 +65,12 @@ _PICTURE_MIME_ALLOWED = frozenset({"image/jpeg", "image/png", "image/webp"})
 
 #: Bio length cap. Twitter-shaped — short enough to render in a card.
 _MAX_BIO_LEN = 280
+
+#: Longest ``user_id`` a registration may carry. The user id is the key of
+#: the author's ``followers`` audience in a cluster forward, which every node
+#: refuses past this length — a longer id would register fine and then never
+#: reach a follower on another node.
+MAX_USER_ID_LEN = AUDIENCE_KEY_MAX_LEN
 
 #: Body cap for an encrypted publish / delete: the ciphertext cap plus the
 #: routing fields and signature.
@@ -123,6 +130,8 @@ class GfsUserRegisterView(GfsBaseView):
         instance_id = str(body.get("instance_id") or "")
         if not user_id or not instance_id:
             return web.json_response({"error": "user_id_required"}, status=422)
+        if len(user_id) > MAX_USER_ID_LEN or not user_id.isprintable():
+            return web.json_response({"error": "invalid_user_id"}, status=422)
         if instance_id != sender_instance_id:
             # The signing instance must match the registration instance —
             # we don't let one paired SH register a user on behalf of
