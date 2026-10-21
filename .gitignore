@@ -38,6 +38,10 @@ integration_token.txt
 # Frontend
 client/node_modules/
 client/dist/
+# Pinned public-highlight viewer build (client/scripts/build-pinned-viewer.mjs),
+# published to gh-pages by .github/workflows/pinned-viewer.yml. Only its
+# manifest, socialhome/pinned_viewer.json, is committed.
+client/dist-pinned/
 client/coverage/
 client/vite.config.ts.timestamp-*.mjs
 socialhome/static/*

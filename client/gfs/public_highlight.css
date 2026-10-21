@@ -1,0 +1,33 @@
+/* Public-highlight viewer styles — the ONE source for both pages.
+ *
+ * The pinned page (scripts/build-pinned-viewer.mjs) inlines these rules,
+ * joined without line breaks, in a <style> its CSP admits by hash. The
+ * GFS-served landing carries the same text as ``_VIEWER_CSS`` in
+ * socialhome/global_server/routes/highlights.py; a pytest keeps the two
+ * identical. One rule per line; this comment is dropped by the build.
+ */
+html,body{margin:0;padding:0;background:#111;color:#eee;font-family:system-ui,sans-serif;height:100%;}
+#root{height:100vh;display:flex;}
+.highlight-viewer{display:flex;flex-direction:column;width:100%;}
+.highlight-author{display:flex;align-items:center;gap:12px;padding:12px 12px 0;}
+.highlight-author-pic{width:48px;height:48px;border-radius:50%;flex:none;object-fit:cover;background:#333;}
+.highlight-author-initials{display:flex;align-items:center;justify-content:center;font-weight:600;color:#ddd;}
+.highlight-author-text{min-width:0;}
+.highlight-author-name{margin:0;font-weight:600;overflow-wrap:anywhere;}
+.highlight-author-bio{margin:2px 0 0;color:#bbb;font-size:.9em;line-height:1.4;overflow-wrap:anywhere;}
+.progress{display:flex;gap:4px;padding:12px;}
+.progress .seg{flex:1;height:3px;background:rgba(255,255,255,.2);border-radius:2px;}
+.progress .seg.done{background:rgba(255,255,255,.6);}
+.progress .seg.active{background:#fff;}
+.stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:0 12px;position:relative;}
+.stage img,.stage video{max-width:100%;max-height:100%;border-radius:8px;}
+.caption{position:absolute;bottom:24px;padding:8px 14px;background:rgba(0,0,0,.5);border-radius:8px;max-width:80%;}
+.highlight-error,.highlight-end{padding:24px;text-align:center;width:100%;align-self:center;}
+.highlight-error p{margin:0 0 16px;}
+.viewer-retry{min-height:40px;padding:8px 18px;border-radius:999px;border:1px solid rgba(255,255,255,.35);background:transparent;color:#eee;font:inherit;cursor:pointer;}
+.viewer-retry:hover{border-color:#fff;}
+.viewer-retry:focus-visible{outline:2px solid #fff;outline-offset:2px;}
+.status{color:#aaa;font-size:.9em;text-align:center;}
+.highlight-incomplete{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px 12px;margin:12px;padding:8px 12px;border-radius:8px;background:rgba(255,255,255,.08);color:#ddd;font-size:.9em;text-align:center;}
+.highlight-incomplete p{margin:0;}
+.highlight-end>p{margin:0;}
