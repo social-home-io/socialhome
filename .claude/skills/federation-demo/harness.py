@@ -1324,6 +1324,187 @@ def _gfs_cluster_cross_node_push(urls: list[str]) -> None:
     asyncio.run(_run())
 
 
+def _gfs_cluster_register(url: str, label: str) -> tuple[str, bytes]:
+    """Register a fresh household on the GFS node at *url*; returns its
+    (instance id, identity seed)."""
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
+
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    body = {
+        "token": _gfs_landing_token(url),
+        "instance_id": iid,
+        "public_key": kp.public_key.hex(),
+        "display_name": f"{label}-{iid[:6]}",
+    }
+    # A fresh ``X-Forwarded-For`` per call: the steps before already spent
+    # this address's per-IP register budget on every node.
+    req = urllib.request.Request(
+        f"{url}/gfs/register",
+        data=json.dumps(body).encode(),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Forwarded-For": f"127.{secrets.randbelow(255)}.1."
+            f"{secrets.randbelow(255)}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            code, resp = r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        code, resp = exc.code, exc.read()
+    if code not in (200, 201) or (resp or {}).get("status") != "registered":
+        raise SystemExit(f"gfs-cluster: {label} register → {code} {resp!r}")
+    return iid, kp.private_key
+
+
+def _gfs_cluster_cross_node_moment(urls: list[str]) -> None:
+    """Step 3f of ``gfs-cluster``: a public moment and its tombstone reach
+    every follower household on every node, exactly once.
+
+    Before the fix ``MomentPublicRegistry`` pushed a moment only to the
+    sockets of the node that took ``POST /gfs/moments/publish`` — on 4 nodes
+    ~3 followers in 4 missed each moment. Now the node forwards the
+    encrypted envelope once per peer node (``NODE_DRAIN_HINT.relays``,
+    audience ``followers``) and each node pushes it to the follower sockets
+    it holds. One follower per node; the moment is published via node 0 and
+    deleted via node 1; each follower must get exactly one frame of each (a
+    further 2 s window must stay empty).
+    """
+    import asyncio
+
+    import aiohttp
+
+    from socialhome.crypto import b64url_encode, sign_ed25519
+    from socialhome.moment_public_seal import seal_body
+
+    def _signed(seed: bytes, body: dict) -> dict:
+        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+        return body | {"signature": b64url_encode(sign_ed25519(seed, canonical))}
+
+    author_id, author_seed = _gfs_cluster_register(urls[0], "moment-author")
+    followers = [_gfs_cluster_register(url, "moment-fan") for url in urls]
+    author_user = f"u-cluster-{secrets.token_hex(4)}"
+    code, resp = _request(
+        f"{urls[1 % len(urls)]}/gfs/moments/users/register",
+        method="POST",
+        body=_signed(
+            author_seed,
+            {
+                "user_id": author_user,
+                "instance_id": author_id,
+                "username": author_user,
+                "display_name": "Cluster author",
+                "home_instance_pk": "aa" * 32,
+            },
+        ),
+        timeout=15.0,
+    )
+    if code not in (200, 201):
+        raise SystemExit(f"gfs-cluster: moment author register → {code} {resp!r}")
+    for index, (iid, seed) in enumerate(followers):
+        code, resp = _request(
+            f"{urls[(index + 2) % len(urls)]}/gfs/moments/users/{author_user}/follow",
+            method="POST",
+            body=_signed(
+                seed,
+                {
+                    "instance_id": iid,
+                    "follower_instance_id": iid,
+                    "follower_user_id": f"fan-{iid[:8]}",
+                    "moment_suites": {"kem": ["x25519"], "seal": ["aesgcm-256"]},
+                },
+            ),
+            timeout=15.0,
+        )
+        if code != 201:
+            raise SystemExit(f"gfs-cluster: moment follow → {code} {resp!r}")
+
+    def _hello(instance_id: str, seed: bytes) -> dict:
+        ts = int(time.time())
+        sig = sign_ed25519(seed, f"{instance_id}|{ts}".encode())
+        return {
+            "type": "hello",
+            "instance_id": instance_id,
+            "ts": ts,
+            "sig": b64url_encode(sig),
+        }
+
+    def _envelope(op: str) -> dict:
+        return _signed(
+            author_seed,
+            {
+                "instance_id": author_id,
+                "author_user_id": author_user,
+                **seal_body(
+                    step_key=secrets.token_bytes(32),
+                    author_user_id=author_user,
+                    key_gen=int(time.time()),
+                    key_step=0,
+                    moment_id=f"m-{secrets.token_hex(6)}",
+                    body={"op": op, "content": "across nodes"},
+                ),
+            },
+        )
+
+    async def _frames(ws, frame_type: str, seconds: float, *, first: bool) -> list:
+        frames: list[dict] = []
+        deadline = time.monotonic() + seconds
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                msg = await ws.receive(timeout=left)
+            except TimeoutError:
+                break
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                break
+            frame = json.loads(msg.data)
+            if frame.get("type") == frame_type:
+                frames.append(frame)
+                if first:
+                    break
+        return frames
+
+    async def _run() -> None:
+        async with aiohttp.ClientSession() as http:
+            sockets = []
+            for url, (iid, seed) in zip(urls, followers, strict=True):
+                ws = await http.ws_connect(f"{url}/gfs/ws")
+                await ws.send_json(_hello(iid, seed))
+                sockets.append(ws)
+            await asyncio.sleep(1.0)  # every socket registered on its node
+            for path, frame_type, via in (
+                ("publish", "incoming_public_moment", 0),
+                ("delete", "incoming_public_moment_delete", 1 % len(urls)),
+            ):
+                envelope = _envelope("create" if path == "publish" else "delete")
+                async with http.post(
+                    f"{urls[via]}/gfs/moments/{path}", json=envelope
+                ) as r:
+                    if r.status != 200:
+                        raise SystemExit(f"gfs-cluster: moment {path} → {r.status}")
+                for index, ws in enumerate(sockets):
+                    got = await _frames(ws, frame_type, 10.0, first=True)
+                    got += await _frames(ws, frame_type, 2.0, first=False)
+                    if len(got) != 1 or got[0].get("payload") != envelope:
+                        raise SystemExit(
+                            f"gfs-cluster: the follower on node {index} got "
+                            f"{len(got)} {frame_type} frame(s) for a moment "
+                            f"{path} via node {via} (want exactly 1) — the "
+                            "moment fan-out is not cluster-wide "
+                            "(NODE_DRAIN_HINT.relays, audience followers)."
+                        )
+            for ws in sockets:
+                await ws.close()
+            print(
+                f"  public moment via node 0 + its delete via node {1 % len(urls)}"
+                f" → exactly one copy each on the follower socket of each of "
+                f"the {len(urls)} nodes ✓"
+            )
+
+    asyncio.run(_run())
+
+
 def _gfs_cluster_cross_node_broadcast(urls: list[str]) -> None:
     """Step 3e of ``gfs-cluster``: a BROADCAST reaches every follower on
     every node, exactly once.
@@ -1345,7 +1526,6 @@ def _gfs_cluster_cross_node_broadcast(urls: list[str]) -> None:
     from socialhome.authority_sig import sign_authority_event
     from socialhome.crypto import (
         b64url_encode,
-        derive_instance_id,
         generate_identity_keypair,
         sign_ed25519,
     )
@@ -1354,34 +1534,7 @@ def _gfs_cluster_cross_node_broadcast(urls: list[str]) -> None:
         return json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
 
     def _register(url: str) -> tuple[str, bytes]:
-        kp = generate_identity_keypair()
-        iid = derive_instance_id(kp.public_key)
-        body = {
-            "token": _gfs_landing_token(url),
-            "instance_id": iid,
-            "public_key": kp.public_key.hex(),
-            "display_name": f"broadcast-{iid[:6]}",
-        }
-        # A fresh ``X-Forwarded-For`` per call: the steps before already
-        # spent this address's per-IP register budget on every node.
-        req = urllib.request.Request(
-            f"{url}/gfs/register",
-            data=json.dumps(body).encode(),
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-Forwarded-For": f"127.{secrets.randbelow(255)}.1."
-                f"{secrets.randbelow(255)}",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as r:
-                code, resp = r.status, json.loads(r.read() or b"{}")
-        except urllib.error.HTTPError as exc:
-            code, resp = exc.code, exc.read()
-        if code not in (200, 201) or (resp or {}).get("status") != "registered":
-            raise SystemExit(f"gfs-cluster: broadcast register → {code} {resp!r}")
-        return iid, kp.private_key
+        return _gfs_cluster_register(url, "broadcast")
 
     owner_id, owner_seed = _register(urls[0])
     followers = [_register(url) for url in urls]
@@ -1834,9 +1987,11 @@ def cmd_gfs_cluster() -> None:
 
     # 3d. Single-recipient pushes reach a socket held by another node.
     # 3e. A broadcast reaches the followers on EVERY node, exactly once.
+    # 3f. So does a public moment, and its tombstone.
     try:
         _gfs_cluster_cross_node_push(urls)
         _gfs_cluster_cross_node_broadcast(urls)
+        _gfs_cluster_cross_node_moment(urls)
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise
@@ -1855,7 +2010,8 @@ def cmd_gfs_cluster() -> None:
         "replayed frame refused; concurrent cross-process "
         "registrations + space publishes serialise on the lock; owner "
         "notices + targeted relays reach a socket on another node; a "
-        "broadcast reaches every node's followers exactly once)"
+        "broadcast and a public moment + its delete reach every node's "
+        "followers exactly once)"
     )
 
 

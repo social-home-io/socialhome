@@ -971,7 +971,16 @@ budget; busier traffic fills frames instead of adding them) — and an older
 node simply ignores the key, so a mixed-version cluster keeps today's
 behaviour. A household's `relay_seen_at` (the offline-copy window) is
 re-marked hourly while its socket stays open, so a long-lived connection on
-any node keeps its catch-up position. Every push
+any node keeps its catch-up position. Public moments use the same path
+(`MomentPublicRegistry`): a moment or tombstone is forwarded once per peer
+with audience `followers` (the author's follower households that can open
+it), and a recently-seen follower household no node holds gets it queued in
+the shared relay queue as its own `incoming_public_moment[_delete]` frame;
+`follow_changed` / `moment_key_request` for an author whose socket is
+elsewhere ride as audience `instance` items; and a sealed moment key for a
+household elsewhere stays undelivered in the shared mailbox while the
+household id rides the drain hint, so the node holding its socket pushes it
+(a hinted drain runs the queue drain, then the mailbox). Every push
 to a `/gfs/ws` socket is bounded by `WS_SEND_TIMEOUT_S` (10 s,
 `global_server/ws_registry.py`): a socket whose peer stopped reading is
 evicted and closed (1013) rather than holding an accept, a drain or a fan-out

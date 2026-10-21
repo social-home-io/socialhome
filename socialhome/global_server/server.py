@@ -44,7 +44,12 @@ from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
 from .channels import GfsChannelService, build_channel_rate_limit
 from .cluster import ClusterService
-from .cluster_relay import AUDIENCE_CHANNEL, AUDIENCE_SPACE, ClusterRelayFanOut
+from .cluster_relay import (
+    AUDIENCE_CHANNEL,
+    AUDIENCE_FOLLOWERS,
+    AUDIENCE_SPACE,
+    ClusterRelayFanOut,
+)
 from .config import (
     DEFAULT_CONFIG_FILENAME,
     GfsConfig,
@@ -378,13 +383,6 @@ class GfsApp:
             ws_registry,
             base_url=config.base_url,
         )
-        moment_public = MomentPublicRegistry(
-            repos.moment_public_users,
-            repos.moment_public_follows,
-            ws_registry,
-            instances=repos.federation,
-            mailbox=repos.moment_key_mailbox,
-        )
         # Opaque household-to-household envelope relay (§D2b): pushes a
         # sealed blob to the addressed household's live socket, or queues it
         # until its next hello. Content-blind — it never opens the box.
@@ -393,11 +391,35 @@ class GfsApp:
             queue_repo=repos.envelope_queue,
             ws_registry=ws_registry,
         )
+        # Broadcast items (``/gfs/publish``, member publishes, channel items,
+        # public moments) ride the coalesced drain hint ONCE per peer node;
+        # each node pushes them to the sockets it holds (``cluster_relay``).
+        cluster_fan_out = ClusterRelayFanOut(
+            ws_registry=ws_registry, relay=envelope_relay
+        )
+        moment_public = MomentPublicRegistry(
+            repos.moment_public_users,
+            repos.moment_public_follows,
+            ws_registry,
+            instances=repos.federation,
+            mailbox=repos.moment_key_mailbox,
+            relay=envelope_relay,
+            fan_out=cluster_fan_out,
+            cluster=cluster,
+        )
+
+        async def _drain_hinted(instance_id: str) -> int:
+            # What a NODE_DRAIN_HINT runs for a household whose socket is
+            # HERE: its queued rows, then the sealed moment keys another node
+            # kept for it in the shared mailbox.
+            drained = await envelope_relay.drain(instance_id)
+            return drained + await moment_public.on_follower_connected(instance_id)
+
         # Cross-node drain: after an enqueue the relay hints the cluster, and
         # an inbound NODE_DRAIN_HINT drains through the relay. Wired by
         # setters because each needs the other.
         envelope_relay.attach_cluster(cluster)
-        cluster.attach_drain(envelope_relay.drain)
+        cluster.attach_drain(_drain_hinted)
         # The same for the two single-recipient pushes of the federation
         # service: an owner's ``new_subscriber`` notice rides the drain hint
         # to the node holding the owner's socket, and a targeted ``to`` relay
@@ -405,17 +427,14 @@ class GfsApp:
         federation.attach_cluster(cluster)
         federation.attach_relay(envelope_relay)
         cluster.attach_subscriber_notice(federation.deliver_forwarded_notice)
-        # Broadcast items (``/gfs/publish``, member publishes, channel items)
-        # ride the same drain hint ONCE per peer node; each node pushes them
-        # to the sockets it holds (``cluster_relay``).
-        cluster_fan_out = ClusterRelayFanOut(
-            ws_registry=ws_registry, relay=envelope_relay
-        )
         cluster_fan_out.attach_cluster(cluster)
         cluster.attach_forwarded_relays(cluster_fan_out.apply)
         envelope_relay.attach_fan_out(cluster_fan_out)
         federation.attach_fan_out(cluster_fan_out)
         cluster_fan_out.register_audience(AUDIENCE_SPACE, federation.audience_targets)
+        cluster_fan_out.register_audience(
+            AUDIENCE_FOLLOWERS, moment_public.audience_targets
+        )
         # Trusted-mode member publish (v_49): writer-cert-authorized items
         # fanned out through the same push-or-queue path as envelopes.
         # What households pin from ``/gfs/info`` and sign into each request

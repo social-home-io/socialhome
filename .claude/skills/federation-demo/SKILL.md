@@ -1119,6 +1119,13 @@ WS pushes across allocs. The step:
    accepting node forwards the item once per peer node in the coalesced
    ``NODE_DRAIN_HINT.relays``; before that fan-out was node-local and the
    step fails with "the follower on node 1 got 0 copies".
+   Then a **public moment**: an author registered via node 1, one follower
+   household per node (each following through a different node), an
+   encrypted moment published via node 0 and its tombstone via node 1 —
+   every follower must get exactly one ``incoming_public_moment`` and one
+   ``incoming_public_moment_delete`` (audience ``followers`` on the same
+   ``relays`` path). Before, the moment fan-out was node-local and the step
+   fails with "the follower on node 1 got 0 incoming_public_moment frame(s)".
 6. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 

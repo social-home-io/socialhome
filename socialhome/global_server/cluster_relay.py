@@ -14,8 +14,13 @@ the item pushes it to its own sockets as before, then hands it to
 ``NODE_DRAIN_HINT`` frame (key ``relays``, see
 :meth:`~socialhome.global_server.cluster.ClusterService.forward_relay`) —
 one frame per peer per flush, however many subscribers and items. The frame
-names the AUDIENCE, not the recipients: ``("space", space_id)`` or
-``("channel", channel_id)``. Every receiving node resolves that audience
+names the AUDIENCE, not the recipients: ``("space", space_id)``,
+``("channel", channel_id)``, ``("followers", author_user_id)`` (a public
+moment or its tombstone) or ``("instance", instance_id)`` (a push for one
+household the origin had no socket for — ``follow_changed`` /
+``moment_key_request`` to an author). The last two are TYPED: their frame
+names the socket frame type it is pushed as, from a fixed allow-list
+(:data:`TYPED_FRAME_TYPES`). Every receiving node resolves that audience
 from the shared database and pushes to the members whose socket it holds
 (:meth:`ClusterRelayFanOut.apply`). A receiver never forwards again, so
 there are no loops.
@@ -29,8 +34,13 @@ socket lives on one node, so each subscriber gets the item once. The same
 memory makes a replay of a broadcast to ANOTHER node a no-op there
 (``GfsFederationService.publish_event``).
 
-**Offline copies.** Member and channel items are queued for a recently-seen
-subscriber with no socket (``queue_ok``, see :mod:`.member_publish`). Only
+An ``instance`` item is the exception (:data:`DEDUPED_KINDS`): it is
+forwarded only after the origin found no socket, and the same request a
+minute later must reach the household again.
+
+**Offline copies.** Member, channel and moment items are queued for a
+recently-seen subscriber with no socket (``queue_ok``, see
+:mod:`.member_publish`). Only
 the node that holds a socket knows it does, so for those items each
 receiver answers the ``NODE_DRAIN_HINT`` POST with ``held``: per audience,
 the instance ids it holds a socket for. The origin then queues
@@ -39,15 +49,18 @@ only for the recently-seen subscribers that NO node holds — instead of one
 queue row per subscriber on another node. A receiver whose push to a held
 socket fails queues that one itself.
 
-**Rolling upgrade.** An older node ignores ``relays`` and answers without
-``held``. The origin therefore treats every subscriber it did not hear about
-as unreached and queues it as before, and the older node drains those rows
-on the drain hint — exactly the behaviour before this change. An older
-origin never forwards, so a newer receiver keeps draining its rows.
+**Rolling upgrade.** An older node ignores ``relays`` — and any item of an
+audience kind it does not know (``followers`` / ``instance`` before the
+moment fan-out) — and answers without ``held`` for it. The origin
+therefore treats every subscriber it did not hear about as unreached and
+queues it as before, and the older node drains those rows on the drain
+hint — exactly the behaviour before this change. An older origin never
+forwards, so a newer receiver keeps draining its rows.
 
 **What the GFS learns.** Nothing new: the forwarded frame is the same
-identity-free ``{space_id, event_type, payload…}`` the node already pushes to
-sockets, the audience is an id the shared database already holds, ``skip`` is
+frame the node already pushes to sockets (an identity-free space item, a
+moment ciphertext, an author notice built from the shared database), the
+audience is an id the shared database already holds, ``skip`` is
 the publisher the accepting node already authenticated, and ``held`` lists
 instance ids of the same cluster's own sockets.
 """
@@ -64,6 +77,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from ..moment_public_seal import MOMENT_FRAME_TYPES
 from .envelope_relay import (
     ENVELOPE_INSTANCE_ID_RE,
     RELAY_FAN_OUT_CONCURRENCY,
@@ -81,10 +95,34 @@ log = logging.getLogger(__name__)
 
 #: Audience kinds a forwarded item may name. ``space``: the space's active
 #: subscribers (``/gfs/publish`` broadcasts and member publishes). ``channel``:
-#: a private channel's seats for its open epochs (v_51).
+#: a private channel's seats for its open epochs (v_51). ``followers``: the
+#: follower households of a public-Momentum author that can open its moments
+#: (key: the author's user id). ``instance``: one household (key: its
+#: instance id) — a single-recipient push the origin had no socket for.
 AUDIENCE_SPACE: str = "space"
 AUDIENCE_CHANNEL: str = "channel"
-AUDIENCE_KINDS: frozenset[str] = frozenset({AUDIENCE_SPACE, AUDIENCE_CHANNEL})
+AUDIENCE_FOLLOWERS: str = "followers"
+AUDIENCE_INSTANCE: str = "instance"
+AUDIENCE_KINDS: frozenset[str] = frozenset(
+    {AUDIENCE_SPACE, AUDIENCE_CHANNEL, AUDIENCE_FOLLOWERS, AUDIENCE_INSTANCE}
+)
+
+#: Socket frame types an item of a TYPED audience kind may be pushed as.
+#: Its frame is ``{"event_type": <socket frame type>, …fields}`` and goes out
+#: as ``{"type": <event_type>, …fields}``; the receiver refuses any other
+#: type, so a forwarded item can never become, say, an ``envelope`` frame.
+#: The other kinds are space items, pushed as ``{"type": "relay", …frame}``.
+TYPED_FRAME_TYPES: dict[str, frozenset[str]] = {
+    AUDIENCE_FOLLOWERS: MOMENT_FRAME_TYPES,
+    AUDIENCE_INSTANCE: frozenset({"follow_changed", "moment_key_request"}),
+}
+
+#: Kinds whose items are remembered by digest (:data:`RELAY_FORWARD_SEEN_TTL_S`)
+#: so one node never pushes the same bytes twice. A single-recipient push is
+#: forwarded only after the origin found no socket for it, so no node pushes
+#: it twice — and a legitimate repeat (the same ``moment_key_request`` a
+#: minute later) must not be muted.
+DEDUPED_KINDS: frozenset[str] = AUDIENCE_KINDS - {AUDIENCE_INSTANCE}
 
 #: Longest audience key (a space or channel id) a forwarded item may carry —
 #: the relay routes' own bound on identifier-shaped fields.
@@ -156,6 +194,36 @@ def _valid_key(raw: object) -> bool:
     )
 
 
+def _valid_frame(kind: str, frame: dict) -> bool:
+    """A forwarded frame never names its own ``type``; a typed kind's
+    ``event_type`` must be one it may be pushed as."""
+    if "type" in frame:
+        return False
+    typed = TYPED_FRAME_TYPES.get(kind)
+    if typed is None:
+        return _valid_key(frame.get("event_type"))
+    return frame.get("event_type") in typed
+
+
+def typed_frame(frame_type: str, fields: dict) -> dict:
+    """The forwarded frame of a typed-kind push ``{"type": frame_type,
+    **fields}`` (*fields* without ``type``)."""
+    return {**fields, "event_type": frame_type}
+
+
+def typed_push(kind: str, frame: dict) -> dict:
+    """The socket frame a forwarded *frame* of audience *kind* goes out as."""
+    if kind not in TYPED_FRAME_TYPES:
+        return {"type": RELAY_FRAME_TYPE, **frame}
+    fields = {k: v for k, v in frame.items() if k != "event_type"}
+    return {"type": frame["event_type"], **fields}
+
+
+async def _one_household(instance_id: str) -> list[str]:
+    """The ``instance`` audience: the one household the key names."""
+    return [instance_id] if ENVELOPE_INSTANCE_ID_RE.fullmatch(instance_id) else []
+
+
 @dataclass(slots=True, frozen=True)
 class ForwardedRelay:
     """One broadcast item forwarded to the other cluster nodes.
@@ -179,6 +247,21 @@ class ForwardedRelay:
     def digest(self) -> bytes:
         """The dedupe key: BLAKE2b-256 of the frame's canonical JSON."""
         return SeenPayloadCache.digest(self.frame)
+
+    @property
+    def deduped(self) -> bool:
+        """Whether this item is pushed at most once per node (by digest)."""
+        return self.kind in DEDUPED_KINDS
+
+    def push_frame(self) -> dict:
+        """What a socket receives: a space item as ``{"type": "relay", …}``,
+        an item of a typed kind (:data:`TYPED_FRAME_TYPES`) as its own type."""
+        return typed_push(self.kind, self.frame)
+
+    def queued_frame(self) -> dict:
+        """What an offline copy is queued as (``GfsEnvelopeRelay.drain``
+        turns it back into :meth:`push_frame`)."""
+        return self.push_frame() if self.kind in TYPED_FRAME_TYPES else self.frame
 
     def to_wire(self) -> dict:
         return {
@@ -204,8 +287,7 @@ class ForwardedRelay:
             and (skip == "" or ENVELOPE_INSTANCE_ID_RE.fullmatch(skip))
             and isinstance(queue, bool)
             and isinstance(frame, dict)
-            and _valid_key(frame.get("event_type"))
-            and "type" not in frame
+            and _valid_frame(aud[0], frame)
         ):
             return None
         return cls(
@@ -264,7 +346,9 @@ class ClusterRelayFanOut:
         self._relay = relay
         self._clock = clock
         self._cluster: ClusterService | None = None
-        self._audiences: dict[str, AudienceResolver] = {}
+        self._audiences: dict[str, AudienceResolver] = {
+            AUDIENCE_INSTANCE: _one_household
+        }
         self._seen = SeenPayloadCache(
             ttl_s=RELAY_FORWARD_SEEN_TTL_S, cap=RELAY_FORWARD_SEEN_MAX
         )
@@ -319,17 +403,34 @@ class ClusterRelayFanOut:
         item = ForwardedRelay(
             kind=kind, key=key, skip=skip, queue=bool(targets), frame=frame
         )
-        on_settled = partial(self._queue_unheld, targets, frame) if targets else None
+        on_settled = (
+            partial(self._queue_unheld, targets, item.queued_frame())
+            if targets
+            else None
+        )
         if not self._cluster.forward_relay(item, on_settled=on_settled):
             return False
         self._pending_targets += len(targets)
-        self._seen.record(item.digest())
+        if item.deduped:
+            self._seen.record(item.digest())
         return True
 
     def forward_to_space(self, space_id: str, frame: dict) -> bool:
         """:meth:`forward` a broadcast ``/gfs/publish`` relay to the space's
         subscribers on the other nodes (nothing is queued for a broadcast)."""
         return self.forward(kind=AUDIENCE_SPACE, key=space_id, frame=frame)
+
+    def forward_to_household(self, instance_id: str, push: dict) -> bool:
+        """:meth:`forward` a single-recipient socket frame *push* (one of
+        :data:`TYPED_FRAME_TYPES` for ``instance``) that found no socket on
+        this node, to whichever node holds *instance_id*'s socket. Nothing is
+        queued: a household connected nowhere misses it, as on one node."""
+        fields = {k: v for k, v in push.items() if k != "type"}
+        return self.forward(
+            kind=AUDIENCE_INSTANCE,
+            key=instance_id,
+            frame=typed_frame(str(push.get("type")), fields),
+        )
 
     def _queue_unheld(
         self, targets: list[str], frame: dict, held: frozenset[str]
@@ -365,7 +466,7 @@ class ClusterRelayFanOut:
             return {}
         held: dict[str, set[str]] = {}
         resolved: dict[str, list[str] | None] = {}
-        jobs: list[tuple[list[str], dict, bool]] = []
+        jobs: list[tuple[list[str], ForwardedRelay]] = []
         for item in items:
             audience = item.audience
             if audience not in resolved:
@@ -376,13 +477,14 @@ class ClusterRelayFanOut:
             local = [t for t in targets if self._ws_registry.is_connected(t)]
             if item.queue:
                 held.setdefault(audience, set()).update(local)
-            digest = item.digest()
-            if self._seen.seen(digest):
-                continue
-            self._seen.record(digest)
+            if item.deduped:
+                digest = item.digest()
+                if self._seen.seen(digest):
+                    continue
+                self._seen.record(digest)
             push = [t for t in local if t != item.skip]
             if push:
-                jobs.append((push, item.frame, item.queue))
+                jobs.append((push, item))
         if jobs:
             self._spawn(self._push(jobs), name="gfs-cluster-relay-push")
         return {aud: sorted(ids) for aud, ids in held.items() if ids}
@@ -399,10 +501,10 @@ class ClusterRelayFanOut:
             )
             return None
 
-    async def _push(self, jobs: list[tuple[list[str], dict, bool]]) -> None:
+    async def _push(self, jobs: list[tuple[list[str], ForwardedRelay]]) -> None:
         limit = asyncio.Semaphore(RELAY_FAN_OUT_CONCURRENCY)
-        for targets, frame, queue in jobs:
-            push = {"type": RELAY_FRAME_TYPE, **frame}
+        for targets, item in jobs:
+            push = item.push_frame()
             failed: list[str] = []
 
             async def _one(target: str, push: dict = push, failed=failed) -> None:
@@ -411,10 +513,10 @@ class ClusterRelayFanOut:
                         failed.append(target)
 
             await asyncio.gather(*(_one(t) for t in targets))
-            if queue and failed:
+            if item.queue and failed:
                 # Reported held, so the origin will not queue these: the
                 # socket dropped between the report and the push.
-                await self._queue(failed, frame)
+                await self._queue(failed, item.queued_frame())
 
     def _spawn(self, coro: Any, *, name: str) -> None:
         task = asyncio.get_running_loop().create_task(coro, name=name)

@@ -85,6 +85,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from ..moment_public_seal import MOMENT_FRAME_TYPES
 from .public import ClientIpResolver, build_window_limiter
 
 if TYPE_CHECKING:
@@ -221,6 +222,23 @@ RELAY_FRAME_TYPE: str = "relay"
 #: ``gfs_envelope_queue.frame_type`` values (CHECK-constrained in 0014).
 QUEUE_KIND_ENVELOPE: str = "envelope"
 QUEUE_KIND_RELAY: str = RELAY_FRAME_TYPE
+
+#: Socket frame types a queued RELAY row may carry as-is, with their own
+#: ``type``: a public moment and its tombstone, queued for a follower
+#: household no node holds a socket for (``MomentPublicRegistry``). Every
+#: other row is a space item and goes out as ``{"type": "relay", …}``. An
+#: older node drains such a row as ``{"type": "relay", **row}``, in which the
+#: row's own ``type`` wins — the same frame.
+QUEUED_TYPED_FRAME_TYPES: frozenset[str] = MOMENT_FRAME_TYPES
+
+
+def queued_relay_push(row: dict) -> dict:
+    """The socket frame a queued RELAY *row* goes out as (see
+    :data:`QUEUED_TYPED_FRAME_TYPES`)."""
+    if row.get("type") in QUEUED_TYPED_FRAME_TYPES:
+        return dict(row)
+    return {**row, "type": RELAY_FRAME_TYPE}
+
 
 #: Per-recipient caps for queued RELAY items (member-published space items,
 #: ``POST /gfs/member-publish``). Counted separately from the envelope caps
@@ -658,7 +676,10 @@ class GfsEnvelopeRelay:
 
     async def queue_relay_many(self, targets: list[str], frame: dict) -> int:
         """Queue one relay *frame* for each of *targets* (serialised once) and
-        hint the cluster. Returns how many were queued."""
+        hint the cluster. Returns how many were queued. *frame* is a space
+        item without its ``type``, or a typed frame of
+        :data:`QUEUED_TYPED_FRAME_TYPES` (a public moment), which drains
+        unchanged."""
         if not targets:
             return 0
         blob = orjson.dumps(frame).decode()  # once, however many targets
@@ -727,7 +748,7 @@ class GfsEnvelopeRelay:
         delivered = 0
         for envelope in pending:
             if envelope.frame_type == QUEUE_KIND_RELAY:
-                frame = {"type": RELAY_FRAME_TYPE, **envelope.sealed}
+                frame = queued_relay_push(envelope.sealed)
             else:
                 frame = {"type": ENVELOPE_FRAME_TYPE, "sealed": envelope.sealed}
             sent = await self._ws_registry.send(to_instance, frame)
