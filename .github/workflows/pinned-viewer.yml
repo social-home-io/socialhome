@@ -116,6 +116,12 @@ jobs:
           else
             git worktree add --orphan -b gh-pages pages
           fi
+          # This job's checkout is sparse (only .github, so no dependency
+          # code runs next to the write token), and a new worktree inherits
+          # those rules: `git add v/<hash>/…` and the cmp below would see
+          # nothing outside .github. gh-pages holds only the viewer, so
+          # check it out in full; the repo checkout itself stays sparse.
+          git -C pages sparse-checkout disable
           if [[ -e "pages/$path" ]]; then
             # Content-addressed: an existing version never changes.
             cmp staged/index.html "pages/$path/index.html"
