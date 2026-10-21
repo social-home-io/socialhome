@@ -124,6 +124,43 @@ You do **not** need separate secrets per instance — the
 `expiry:user_id` scheme already binds each credential to its
 consumer.
 
+## GFS (public highlight viewer)
+
+The GFS hands TURN to **anonymous** browsers: the public highlight viewer
+fetches `GET /gfs/highlights/ice-servers` (cross-origin, from the pinned
+viewer's page) right before it opens its one `RTCPeerConnection`. So the GFS
+only ever serves **short-lived** credentials, minted per answer with the same
+TURN REST scheme — never a static user / password:
+
+```toml
+# global_server.toml
+[webrtc]
+stun_urls        = ["stun:stun.l.google.com:19302"]
+turn_url         = "turns:<your.turn.hostname>:5349"
+turn_secret      = "<coturn's static-auth-secret>"   # or GFS_TURN_SECRET
+turn_ttl_seconds = 600                               # 60 … 86400
+```
+
+`GFS_TURN_URL`, `GFS_TURN_SECRET` and `GFS_TURN_TTL_SECONDS` override the
+file (inject the secret from your vault). The coturn side is the recipe
+above (`use-auth-secret`, `static-auth-secret` = the same string).
+
+* `username = "<expiry>:gfs-viewer-<random>"` — a fresh random id per answer,
+  so two answers are not linkable; `credential = base64(HMAC-SHA1(secret,
+  username))`. The secret itself is never served.
+* coturn refuses every request carrying an expired username — an
+  allocation's refresh included — so a credential is useless
+  `turn_ttl_seconds` after it was minted. A viewer uses it within seconds
+  (the highlight is a bounded download, and it fetches a new answer for
+  every connection), so the 10-minute default leaves plenty of room.
+* `turn_url` without `turn_secret` is **not served** (fail closed): the GFS
+  logs a WARNING at startup and answers STUN only.
+* The endpoint is rate-limited to 30 answers / min per client address and
+  sends `Cache-Control: no-store`. Set coturn's `user-quota` /
+  `total-quota` too — anyone can still collect fresh credentials.
+* Without TURN the viewer falls back to the GFS relay when direct WebRTC
+  fails, so TURN on a GFS is optional.
+
 ## Home Assistant deployments (`ha` / `haos`)
 
 Under either Home Assistant mode, Social Home **pulls** an ICE-server list

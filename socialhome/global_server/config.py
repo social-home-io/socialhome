@@ -49,6 +49,18 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_DATA_DIR = "/var/lib/sh-gfs"
+
+#: Lifetime of a TURN credential minted for the public-highlight viewer. A
+#: viewer uses it within seconds (it fetches one per connection, and a
+#: highlight download is short); coturn refuses every request — a refresh of
+#: an existing allocation included — once it has passed, so a scraped one is
+#: worthless after 10 minutes.
+DEFAULT_TURN_TTL_SECONDS: int = 600
+
+#: Bounds on ``[webrtc] turn_ttl_seconds``: below a minute the viewer may not
+#: finish gathering candidates; above a day "short-lived" means nothing.
+MIN_TURN_TTL_SECONDS: int = 60
+MAX_TURN_TTL_SECONDS: int = 86_400
 DEFAULT_CONFIG_FILENAME = "global_server.toml"
 
 #: Peer networks whose ``X-Forwarded-For`` header the GFS believes by default:
@@ -145,8 +157,16 @@ class GfsConfig:
 
     # [webrtc]
     stun_urls: tuple[str, ...] = ("stun:stun.l.google.com:19302",)
+    #: TURN server handed to the anonymous public-highlight viewer, e.g.
+    #: ``turns:turn.example.org:5349``. Served ONLY together with
+    #: ``turn_secret``: every answer carries a fresh short-lived credential
+    #: (TURN REST API, coturn ``use-auth-secret``) — never a static one.
     turn_url: str = ""
+    #: coturn's ``static-auth-secret``. Never leaves this server: only the
+    #: HMAC credentials minted with it do.
     turn_secret: str = ""
+    #: Lifetime of each minted TURN credential (seconds, at least 60).
+    turn_ttl_seconds: int = DEFAULT_TURN_TTL_SECONDS
 
     # [cluster]
     cluster_enabled: bool = False
@@ -214,6 +234,9 @@ class GfsConfig:
             stun_urls=tuple(webrtc.get("stun_urls") or default_stun),
             turn_url=str(webrtc.get("turn_url") or ""),
             turn_secret=str(webrtc.get("turn_secret") or ""),
+            turn_ttl_seconds=_turn_ttl(
+                webrtc.get("turn_ttl_seconds", DEFAULT_TURN_TTL_SECONDS)
+            ),
             cluster_enabled=bool(cluster.get("enabled", False)),
             cluster_node_id=str(cluster.get("node_id") or ""),
             cluster_peers=_normalized_peers(cluster.get("peers") or ()),
@@ -241,6 +264,21 @@ class GfsConfig:
             if alias and alias != self.instance_id and alias not in seen:
                 seen.append(alias)
         return replace(self, instance_id_aliases=tuple(seen))
+
+    def check_turn(self) -> None:
+        """WARN when ``[webrtc] turn_url`` is set without ``turn_secret``.
+
+        This server hands TURN to anonymous viewers only with a fresh
+        short-lived credential, so a URL without the secret is never
+        served (fail closed — a static or missing credential on a public
+        endpoint is an open relay). Never raises."""
+        if self.turn_url.strip() and not self.turn_secret:
+            log.warning(
+                "[webrtc] turn_url is set but turn_secret is empty, so no TURN "
+                "server is offered to public-highlight viewers. Set turn_secret "
+                "(GFS_TURN_SECRET) to coturn's static-auth-secret "
+                "(use-auth-secret mode); see docs/operations/turn.md.",
+            )
 
     def check_cluster_identity(self) -> None:
         """Log an ERROR for a cluster node whose ``[cluster] node_id`` is
@@ -343,6 +381,15 @@ class GfsConfig:
                 if "GFS_WRITE_BATCH_WINDOW_MS" in env
                 else self.write_batch_window_ms
             ),
+            # The TURN secret is what a vault injects; the URL and TTL ride
+            # along so a deploy template can set all three the same way.
+            turn_url=env.get("GFS_TURN_URL", self.turn_url),
+            turn_secret=env.get("GFS_TURN_SECRET", self.turn_secret),
+            turn_ttl_seconds=(
+                _turn_ttl(env["GFS_TURN_TTL_SECONDS"])
+                if "GFS_TURN_TTL_SECONDS" in env
+                else self.turn_ttl_seconds
+            ),
         )._with_clean_aliases()
 
     @classmethod
@@ -425,6 +472,17 @@ def _normalized_advertise_url(raw: object, origin: str) -> str:
             "prefix]; no query, fragment or credentials)"
         )
     return url
+
+
+def _turn_ttl(raw: int | str) -> int:
+    """Parse ``turn_ttl_seconds``; outside 60 s – 1 day is a config error."""
+    value = int(raw)
+    if not MIN_TURN_TTL_SECONDS <= value <= MAX_TURN_TTL_SECONDS:
+        raise ValueError(
+            f"turn_ttl_seconds must be {MIN_TURN_TTL_SECONDS}..{MAX_TURN_TTL_SECONDS}"
+            f", got {value}"
+        )
+    return value
 
 
 def _window_ms(raw: int | str) -> int:
@@ -514,9 +572,15 @@ open_signup = false
 password_hash = ""
 
 [webrtc]
-stun_urls   = ["stun:stun.l.google.com:19302"]
-turn_url    = ""
-turn_secret = ""
+# STUN/TURN for the anonymous public-highlight viewer. TURN is offered only
+# with BOTH turn_url and turn_secret, and then with a fresh short-lived
+# credential per answer (coturn use-auth-secret: turn_secret = coturn's
+# static-auth-secret). Never a static TURN user/password. Env overrides:
+# GFS_TURN_URL, GFS_TURN_SECRET, GFS_TURN_TTL_SECONDS.
+stun_urls        = ["stun:stun.l.google.com:19302"]
+turn_url         = ""
+turn_secret      = ""
+turn_ttl_seconds = 600
 
 [cluster]
 # Several GFS nodes can gossip state over POST /cluster/sync. Membership is

@@ -19,9 +19,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
 
 from aiohttp import web
 
+from ...webrtc_ice import make_turn_credential
 from .. import app_keys as K
 from ..public_unavailable import unavailable_response
 from .base import GfsBaseView
@@ -337,30 +339,44 @@ class HighlightRtcAuthorIceView(GfsBaseView):
 
 
 class HighlightIceServersView(GfsBaseView):
-    """``GET /gfs/highlights/ice-servers`` — public list of STUN/TURN URLs.
+    """``GET /gfs/highlights/ice-servers`` — STUN/TURN for the anonymous viewer.
 
-    The vanilla-TS bootstrap fetches this on first paint so it can
-    build the ``RTCPeerConnection`` config. We expose only what's safe
-    for an anonymous viewer: STUN servers, and TURN URLs with
-    short-lived credentials when the operator configured them.
+    The viewer fetches this right before it builds its one
+    ``RTCPeerConnection``. STUN comes from ``[webrtc] stun_urls``. TURN is
+    offered only when the operator set BOTH ``turn_url`` and ``turn_secret``,
+    and then with a credential minted for this one answer (TURN REST API,
+    coturn ``use-auth-secret``): ``username = "<expiry>:<random id>"``,
+    ``credential = base64(HMAC-SHA1(turn_secret, username))``, valid for
+    ``turn_ttl_seconds``. The secret never leaves the server, the random id
+    links no two answers, and a scraped credential dies at its expiry — the
+    page is CORS-readable from the pinned viewer's origin
+    (:mod:`..viewer_cors`), so a static credential here would be an open
+    relay for anyone. ``ttl`` (seconds) tells the viewer how long the TURN
+    entry stays usable: it fetches a fresh one for each connection.
+    Per-IP rate-limited (:func:`..public.build_ice_servers_rate_limit`) and
+    never cached (``Cache-Control: no-store``).
     """
 
     async def get(self) -> web.Response:
         config = self.svc(K.gfs_config_key)
-        servers: list[dict] = []
-        stun = (
-            getattr(config, "ice_stun_url", "").strip()
-            or "stun:stun.l.google.com:19302"
-        )
-        servers.append({"urls": [stun]})
-        turn_url = getattr(config, "ice_turn_url", "")
-        if turn_url:
-            entry: dict = {"urls": [turn_url]}
-            user = getattr(config, "ice_turn_user", "")
-            cred = getattr(config, "ice_turn_credential", "")
-            if user:
-                entry["username"] = user
-            if cred:
-                entry["credential"] = cred
-            servers.append(entry)
-        return web.json_response({"servers": servers})
+        servers: list[dict] = [
+            {"urls": [url]} for url in config.stun_urls if url.strip()
+        ]
+        body: dict = {"servers": servers}
+        if config.turn_url.strip() and config.turn_secret:
+            username, credential = make_turn_credential(
+                config.turn_secret,
+                f"gfs-viewer-{secrets.token_hex(8)}",
+                ttl_seconds=config.turn_ttl_seconds,
+            )
+            servers.append(
+                {
+                    "urls": [config.turn_url.strip()],
+                    "username": username,
+                    "credential": credential,
+                }
+            )
+            body["ttl"] = config.turn_ttl_seconds
+        response = web.json_response(body)
+        response.headers["Cache-Control"] = "no-store"
+        return response
