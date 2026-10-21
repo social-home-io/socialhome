@@ -584,9 +584,10 @@ app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
 admin-revoke-rotation → rotation-offline-catchup → space-chat → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
-gfs-moment-profile → verify``
+gfs-moment-profile → gfs-highlight-link → verify``
 in that order. The tail brings the GFS up because ``local-community``'s
-last case (a GFS-only joiner) and ``gfs-moment-profile`` need it; the closing ``verify`` runs the log
+last case (a GFS-only joiner), ``gfs-moment-profile`` and
+``gfs-highlight-link`` need it; the closing ``verify`` runs the log
 audit over the whole chain, so ``all`` alone is green-or-red end to end.
 Apart from ``gfs-up`` / ``gfs-pair``, the ``gfs-*`` chain (``gfs-open-signup`` /
 ``gfs-traffic``
@@ -1673,6 +1674,24 @@ holds that same epoch as a delivered key (``is_own = 0``) — the GFS logged
 ``sealed key(s) delivered`` and refused nothing (``encryption_required``) —
 and that neither the GFS log nor ``gfs.db`` / ``gfs.db-wal`` contains the
 moment's text or id. **v_63:** the moment carries a picture; e must keep it (`api/media/gm-…`, WebP bytes) from one encrypted blob, and no blob under the GFS's `media/moments/` may contain a readable WebP.
+
+### ``gfs-highlight-link`` — a public highlight link opens the pinned viewer
+
+Part of ``all`` (after ``gfs-moment-profile``). Prereqs when run on its own:
+``up`` + ``gfs-up`` + ``gfs-pair``. a adds a frame to today's highlight and
+publishes it on its GFS (``POST /api/highlights/{id}/publish``). The link
+must open the pinned viewer — the shipped default base URL plus the
+``v/<hash>/`` of the committed ``socialhome/pinned_viewer.json`` — with
+``#g=<the GFS address a talks to>&i=<a>&h=<highlight>&t=<token>&k=<43-char
+secret>``, and the GFS log from the step's start must not hold the secret.
+The GFS must answer the pinned page cross-origin on exactly the anonymous
+viewer routes: ``Access-Control-Allow-Origin: *`` on
+``GET /gfs/highlights/ice-servers`` and on the ``OPTIONS`` preflight of
+``POST /gfs/highlight_rtc/offer`` (204, no ``Allow-Credentials``), and no
+``Access-Control-*`` header on ``GET /gfs/info`` or the signed
+``/gfs/highlight_rtc/answer``. Then a unpublishes again. The step doesn't
+open the link in a browser (the files are published to GitHub Pages only on
+release); ``client/gfs/*.test.ts`` cover the page.
 
 ### Bazaar over GFS (TODO)
 

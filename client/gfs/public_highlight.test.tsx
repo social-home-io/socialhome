@@ -45,6 +45,118 @@ describe('public highlight bootstrap', () => {
   })
 })
 
+const SECRET = '0htX0WWeIJnofu_HTifPGX_9pz5oTvHMWAG9Ys-9JyQ'
+
+function pinnedHash(over: Record<string, string> = {}): string {
+  return '#' + new URLSearchParams({
+    g: 'https://gfs.example.org',
+    i: 'inst-1',
+    h: 'hl-1',
+    t: 'tok-1',
+    k: SECRET,
+    ...over,
+  }).toString()
+}
+
+describe('the GFS-served page (boot block) is unchanged', () => {
+  it('fetches relative to the page, as before, without the pinned options', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'))
+    window.location.hash = pinnedHash({ g: 'https://elsewhere.example' })
+    await import('./public_highlight')
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    expect(fetchSpy.mock.calls[0][0]).toBe('gfs/highlights/ice-servers')
+    expect(fetchSpy.mock.calls[0][1]).toBeUndefined()
+  })
+})
+
+describe('the pinned page (no boot block, everything in the fragment)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="root"></div>'
+  })
+
+  it('talks to the GFS named in the fragment, absolute, without the secret', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'))
+    window.location.hash = pinnedHash()
+    await import('./public_highlight')
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    const [url, init] = fetchSpy.mock.calls[0]
+    expect(url).toBe('https://gfs.example.org/gfs/highlights/ice-servers')
+    expect(init).toMatchObject({
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+      mode: 'cors',
+    })
+    for (const call of fetchSpy.mock.calls) {
+      expect(String(call[0]).startsWith('https://gfs.example.org/')).toBe(true)
+      expect(String(call[0])).not.toContain('0htX0WWe')
+      expect(JSON.stringify(call[1] ?? {})).not.toContain('0htX0WWe')
+    }
+  })
+
+  it('posts the offer to the GFS with the ids from the fragment, never the secret', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).endsWith('/gfs/highlights/ice-servers')) {
+        return new Response(JSON.stringify({ servers: [] }), { status: 200 })
+      }
+      return new Response('{}', { status: 503 })
+    })
+    class FakePc {
+      iceConnectionState = 'new'
+      remoteDescription = null
+      addEventListener() {}
+      createDataChannel() { return {} }
+      async createOffer() { return { type: 'offer', sdp: 'v=0' } }
+      async setLocalDescription() {}
+      close() {}
+    }
+    vi.stubGlobal('RTCPeerConnection', FakePc)
+    window.location.hash = pinnedHash()
+    await import('./public_highlight')
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2))
+    const [url, init] = fetchSpy.mock.calls[1]
+    expect(url).toBe('https://gfs.example.org/gfs/highlight_rtc/offer')
+    expect(init).toMatchObject({ method: 'POST', credentials: 'omit', referrerPolicy: 'no-referrer' })
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body).toMatchObject({ instance_id: 'inst-1', highlight_id: 'hl-1', token: 'tok-1' })
+    expect(JSON.stringify(body)).not.toContain('0htX0WWe')
+    vi.unstubAllGlobals()
+  })
+
+  it('without the secret asks for a new link and fetches nothing', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const params = new URLSearchParams(pinnedHash().slice(1))
+    params.delete('k')
+    window.location.hash = '#' + params.toString()
+    await import('./public_highlight')
+    expect(document.querySelector('[role="alert"]')?.textContent).toMatch(
+      /Ask whoever shared it for a new link/,
+    )
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['an http GFS that is not localhost', { g: 'http://gfs.example.org' }],
+    ['a javascript: GFS', { g: 'javascript:alert(1)' }],
+    ['an overlong token', { t: 'a'.repeat(300) }],
+  ])('refuses %s and fetches nothing', async (_name, over) => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    window.location.hash = pinnedHash(over)
+    await import('./public_highlight')
+    expect(document.querySelector('[role="alert"]')?.textContent).toMatch(
+      /link is incomplete or damaged/,
+    )
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('keeps the fragment in the address bar so a reload still opens it', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'))
+    const h = pinnedHash()
+    window.location.hash = h
+    await import('./public_highlight')
+    expect(window.location.hash).toBe(h)
+  })
+})
+
 describe('a stream that closes early', () => {
   it('says part of the highlight did not arrive when there is no stream_end', async () => {
     const { closedStreamVerdict } = await import('./public_highlight')

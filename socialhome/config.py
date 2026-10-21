@@ -91,6 +91,7 @@ DEFAULT_TOML_FILE = f"{DEFAULT_CONFIG_DIR}/socialhome.toml"
 _PREFIXED_SECTIONS: dict[str, str] = {
     "webrtc": "webrtc_",
     "gfs": "gfs_",
+    "highlights": "highlights_",
 }
 _CORE_SECTIONS: frozenset[str] = frozenset(
     {
@@ -99,12 +100,18 @@ _CORE_SECTIONS: frozenset[str] = frozenset(
         "federation",
         "webrtc",
         "gfs",
+        "highlights",
     }
 )
 
 
 #: The project's GFS — the shipped ``[gfs] default_url``.
 PROJECT_GFS_URL = "https://gfs.social-home.io"
+
+#: Where the project publishes the pinned public-highlight viewer (GitHub
+#: Pages of this repo, ``.github/workflows/pinned-viewer.yml``) — the shipped
+#: ``[highlights] public_viewer_base_url``.
+PROJECT_PINNED_VIEWER_URL = "https://viewer.social-home.io"
 
 #: The project GFS's identity, pinned before an open sign-up while the
 #: household uses the shipped :data:`PROJECT_GFS_URL`. The PUBLIC KEY is the
@@ -223,6 +230,15 @@ class Config:
     #: See :meth:`gfs_default_pin` for how the shipped pin applies.
     gfs_default_instance_id: str = ""
     gfs_default_public_key: str = ""
+
+    #: Where public highlight links open the PINNED viewer — a static,
+    #: content-addressed page no GFS serves (``[highlights]
+    #: public_viewer_base_url`` / ``SH_HIGHLIGHTS_PUBLIC_VIEWER_BASE_URL``).
+    #: A link is ``{this}/v/<hash>/#g=<gfs>&i=…&h=…&t=…&k=…``; self-hosters
+    #: may host the published files anywhere. The empty string falls back
+    #: to the GFS-served page (``{gfs}/highlight/…#k=…``) — less safe: that
+    #: GFS then serves the script that reads the link secret.
+    highlights_public_viewer_base_url: str = PROJECT_PINNED_VIEWER_URL
 
     #: Set ``True`` in TLS (HTTPS) deployments to mark session cookies
     #: and the app-bundle path-scoped cookie as ``Secure`` so they are
@@ -474,6 +490,11 @@ class Config:
             )
             .strip()
             .lower(),
+            highlights_public_viewer_base_url=_str_opt(
+                "highlights_public_viewer_base_url",
+                "SH_HIGHLIGHTS_PUBLIC_VIEWER_BASE_URL",
+                PROJECT_PINNED_VIEWER_URL,
+            ).strip(),
             db_write_batch_max=_int_opt(
                 "db_write_batch_max",
                 "SH_DB_WRITE_BATCH_MAX",

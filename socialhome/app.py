@@ -186,6 +186,7 @@ from .media.video_processor import VideoProcessor
 from .media_signer import MediaUrlSigner, derive_signing_key
 from .outbound_fetch import OutboundFetcher
 from .peer_http import post_to_peer
+from .pinned_viewer import load_pinned_viewer
 from .platform import build_platform_adapter
 from .platform.adapter import Capability, PlatformAdapter
 from .rate_limiter import RateLimiter, build_rate_limit_middleware
@@ -3138,6 +3139,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # Mints a link only on a GFS whose signed capability block proves
         # its viewer page opens the sealed stream.
         gfs_capabilities=gfs_connection_service,
+        # Links open the pinned viewer (a page no GFS serves); empty base
+        # URL → the GFS-served page (less safe, self-hosters' choice).
+        public_viewer_base_url=config.highlights_public_viewer_base_url,
+        pinned_viewer=load_pinned_viewer(),
     )
     # Author-side signalling answerer for the public-highlight flow.
     # ``attach_session`` + ``attach_identity`` happen in the startup

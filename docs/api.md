@@ -814,7 +814,7 @@ in-process retention scheduler prunes expired and over-quota rows.
 | DELETE | `/api/highlights/frames/{id}/reaction` | Clear the caller's reaction on this frame. |
 | POST   | `/api/highlights/{id}/share` | Author shares the highlight into a feed. Body: `{scope: 'household' \| 'space', space_id?, note?}`. Creates a `highlight_share` post; returns 201 `{post_id, highlight_id}` or 202 `{queued: true}` for moderated spaces. |
 | POST   | `/api/highlights/frames/{id}/dm-reply` | Send a DM that quotes a frame. Body: `{conversation_id, content}`. The frame snapshot is frozen on the message so the reply survives retention. |
-| POST   | `/api/highlights/{id}/publish` | Author mints a public share token via a paired GFS (403 `ACCOUNT_PROTECTED` / `public_links` for a protected account). Body: `{gfs_id, label?}`. Returns 201 `{token, url, label}` — the URL is `https://{gfs}/highlight/{instance}/{highlight}/{token}#k={link_secret}` (the fragment is never sent to a server; see `docs/protocol/highlights_public.md`). The household keeps a SHA-256 of the token and streams only for its own live tokens. **409 `GFS_TOO_OLD`** (`params.feature = "public_highlight"`) when the GFS's signed `/gfs/info` block does not prove `sealed_highlight_stream` (its viewer page can't open the sealed stream) — nothing is sent to that GFS. Mint additional tokens with repeat calls. |
+| POST   | `/api/highlights/{id}/publish` | Author mints a public share token via a paired GFS (403 `ACCOUNT_PROTECTED` / `public_links` for a protected account). Body: `{gfs_id, label?}`. Returns 201 `{token, url, label}` — the URL opens the pinned viewer, `{public_viewer_base_url}/v/<hash>/#g={gfs}&i={instance}&h={highlight}&t={token}&k={link_secret}` (`[highlights] public_viewer_base_url`, default `https://viewer.social-home.io`; `v/<hash>/` from the committed `socialhome/pinned_viewer.json`), or — with that setting empty, or a GFS address the viewer refuses (not `https://`) — the GFS-served `https://{gfs}/highlight/{instance}/{highlight}/{token}#k={link_secret}`. The fragment is never sent to a server; see `docs/protocol/highlights_public.md`. The household keeps a SHA-256 of the token and streams only for its own live tokens. **409 `GFS_TOO_OLD`** (`params.feature = "public_highlight"`) when the GFS's signed `/gfs/info` block does not prove `sealed_highlight_stream` (its viewer page can't open the sealed stream) — nothing is sent to that GFS. Mint additional tokens with repeat calls. |
 | GET    | `/api/highlights/{id}/publish` | Local publication snapshot: `{published, gfs_id, published_at}`. Token list lives on the GFS. |
 | DELETE | `/api/highlights/{id}/publish` | Drop the publication; CASCADE on the GFS revokes every token. |
 | DELETE | `/api/highlights/{id}/publish/{token}` | Revoke a single share token; other tokens under the same publication keep working. The household forgets the token first, so it stops streaming that link even if the GFS call then fails. |
@@ -1553,6 +1553,18 @@ routes are not an author-presence oracle. Failures are answered at once,
 with no added delay. Only success shows the author's household was connected
 (a `201` offer means it is online). That residual is in
 [`principles.md`](./principles.md#the-gfs-is-not-an-author-presence-oracle).
+
+**CORS (public highlight viewer only).** The pinned viewer runs on another
+origin (`docs/protocol/highlights_public.md`, "Pinned viewer"), so the
+anonymous highlight viewer routes — `GET /gfs/highlights/ice-servers`,
+`POST /gfs/highlight_rtc/offer`, `GET /gfs/highlight_rtc/session/{id}`,
+`POST /gfs/highlight_rtc/ice/viewer`, `GET /gfs/highlight_rtc/relay/{i}/{h}`
+— send `Access-Control-Allow-Origin: *` on every response (`503`, `429`
+and the streamed relay included) and answer the `OPTIONS` preflight with
+`204` (`Allow-Methods: GET, POST, OPTIONS`, `Allow-Headers: content-type`,
+`Max-Age: 600`). Never `Allow-Credentials`. No other GFS route — the signed
+author routes, the landing page, household, admin, moments — sends a CORS
+header. Rate limits are unchanged.
 
 | Method | Path | Purpose |
 |---|---|---|

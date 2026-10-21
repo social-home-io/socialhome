@@ -1,0 +1,138 @@
+name: Pinned viewer — publish
+
+# Publishes the PINNED public-highlight viewer (docs/protocol/highlights_public.md,
+# "Pinned viewer") to the ``gh-pages`` branch of this repo. GitHub Pages serves
+# it on its own origin, https://viewer.social-home.io (a custom domain, so no
+# other Pages site shares the origin), which is the default
+# ``[highlights] public_viewer_base_url``. A public highlight link opens
+# ``v/<hash>/`` there, a page no GFS serves, so no GFS can rewrite the script
+# that reads the link's secret.
+#
+# The path is content-addressed (``client/scripts/build-pinned-viewer.mjs``):
+# a version is only ever ADDED, never changed or deleted, so links minted by
+# every earlier release keep opening. An existing ``v/<hash>/`` must be
+# byte-identical to the rebuild, or the run fails.
+#
+# Two jobs, so no dependency code runs next to a write token: ``build``
+# installs the npm dependencies and builds with a READ-only token that it
+# does not keep in .git/config; ``publish`` only downloads the built files
+# and runs git. Third-party actions are pinned by commit SHA.
+#
+# One-time owner setup: see the PR that added this file (Pages source
+# ``gh-pages`` / root, the ``viewer.social-home.io`` custom domain + HTTPS,
+# a ruleset on ``gh-pages`` blocking force-push and deletion).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pinned-viewer-gh-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the pinned viewer
+    # A manual run only from main or a release tag.
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # Same pnpm / Node as CI's ``frontend`` job, so the bytes match the
+      # manifest CI checked.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "24"
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10
+      - name: Install
+        working-directory: client
+        run: pnpm install --frozen-lockfile
+      - name: Build the pinned viewer
+        working-directory: client
+        run: pnpm run build:pinned-viewer
+      - name: The build is the version this release links to
+        # ``socialhome/pinned_viewer.json`` is committed and names the
+        # ``v/<hash>/`` the household mints links to. A rebuild that differs
+        # would publish a version no release links to.
+        run: git diff --exit-code -- socialhome/pinned_viewer.json
+      - name: Stage this version
+        run: |
+          set -euo pipefail
+          path="$(node -p "require('./socialhome/pinned_viewer.json').path")"
+          if [[ ! "$path" =~ ^v/[0-9a-f]{16}/$ ]]; then
+            echo "unexpected manifest path: $path" >&2
+            exit 1
+          fi
+          mkdir -p staged
+          cp "client/dist-pinned/$path/index.html" "client/dist-pinned/$path/viewer.js" staged/
+          printf '%s' "$path" > staged/PATH
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: pinned-viewer
+          path: staged/
+          if-no-files-found: error
+
+  publish:
+    name: Add this version to gh-pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # Push to ``gh-pages`` with the default GITHUB_TOKEN; nothing else, and
+      # no dependency code runs in this job.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pinned-viewer
+          path: staged
+      - name: Add this version to gh-pages
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          path="$(cat staged/PATH)"
+          if [[ ! "$path" =~ ^v/[0-9a-f]{16}/$ ]]; then
+            echo "unexpected manifest path: $path" >&2
+            exit 1
+          fi
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git fetch --no-tags --depth=1 origin +gh-pages:refs/remotes/origin/gh-pages
+            git worktree add -B gh-pages pages origin/gh-pages
+          else
+            git worktree add --orphan -b gh-pages pages
+          fi
+          if [[ -e "pages/$path" ]]; then
+            # Content-addressed: an existing version never changes.
+            cmp staged/index.html "pages/$path/index.html"
+            cmp staged/viewer.js "pages/$path/viewer.js"
+          else
+            mkdir -p "pages/$path"
+            cp staged/index.html staged/viewer.js "pages/$path"
+          fi
+          # Serve the files as they are (no Jekyll processing), on the
+          # viewer's own origin.
+          touch pages/.nojekyll
+          printf 'viewer.social-home.io\n' > pages/CNAME
+          cd pages
+          git add .nojekyll CNAME "$path"
+          if git diff --cached --quiet; then
+            echo "gh-pages already has $path"
+            exit 0
+          fi
+          git commit -m "Pinned highlight viewer $path ($REF_NAME)"
+          git push origin gh-pages

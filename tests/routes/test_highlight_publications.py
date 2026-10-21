@@ -15,6 +15,8 @@ from socialhome.app_keys import (
     highlight_publication_service_key,
     highlight_repo_key,
 )
+from socialhome.config import PROJECT_PINNED_VIEWER_URL
+from socialhome.pinned_viewer import load_pinned_viewer
 from socialhome.services.highlight_publication_service import (
     GfsTooOldError,
     HighlightNotFoundError,
@@ -285,3 +287,15 @@ async def test_revoke_token_failure_maps_to_502(
         headers=_auth(client._tok),
     )
     assert r.status == 502
+
+
+# ── Wiring ──────────────────────────────────────────────────────────────
+
+
+async def test_app_wires_the_pinned_viewer_into_publication(client):
+    """The real service mints pinned-viewer links: the config's base URL
+    (default: the project's Pages) and the committed manifest."""
+    svc = client.server.app[highlight_publication_service_key]
+    assert svc._viewer_base_url == PROJECT_PINNED_VIEWER_URL
+    assert svc._pinned_viewer == load_pinned_viewer()
+    assert svc._pinned_viewer is not None

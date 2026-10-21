@@ -30,6 +30,12 @@ from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
 from ..domain.errors import CodedError
 from ..domain.federation import GfsConnection
+from ..pinned_viewer import (
+    PinnedViewer,
+    pinned_link,
+    viewer_base_url,
+    viewer_gfs_base,
+)
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.highlight_repo import AbstractHighlightRepo
 from .highlight_public_seal import (
@@ -91,7 +97,9 @@ class HighlightPublicationService(ProtectionGateMixin):
         "_highlights",
         "_http_client",
         "_own_instance_id",
+        "_pinned_viewer",
         "_signing_key",
+        "_viewer_base_url",
     )
 
     def __init__(
@@ -101,8 +109,14 @@ class HighlightPublicationService(ProtectionGateMixin):
         *,
         http_client: aiohttp.ClientSession | None = None,
         gfs_capabilities: SealedHighlightCapability | None = None,
+        public_viewer_base_url: str = "",
+        pinned_viewer: PinnedViewer | None = None,
     ) -> None:
         self._highlights = highlight_repo
+        # Links open the pinned viewer (a page no GFS serves) when both are
+        # set; otherwise the GFS-served page (see :meth:`_share_link`).
+        self._viewer_base_url = public_viewer_base_url
+        self._pinned_viewer = pinned_viewer
         self._gfs = gfs_repo
         self._gfs_caps = gfs_capabilities
         self._http_client = http_client
@@ -218,7 +232,10 @@ class HighlightPublicationService(ProtectionGateMixin):
         # The link secret rides in the fragment, which browsers never send
         # to a server: the GFS that minted the token can't open the stream.
         secret = link_secret(self._signing_key, highlight_id=highlight.id, token=token)
-        return {"token": token, "url": link_with_secret(url, secret), "label": label}
+        link = self._share_link(
+            conn, gfs_url=url, highlight_id=highlight.id, token=token, secret=secret
+        )
+        return {"token": token, "url": link, "label": label}
 
     async def revoke_token(
         self,
@@ -316,6 +333,56 @@ class HighlightPublicationService(ProtectionGateMixin):
                 await self._highlights.mark_unpublished(highlight.id)
 
     # ── Internal helpers ─────────────────────────────────────────────────
+
+    def _share_link(
+        self,
+        conn: GfsConnection,
+        *,
+        gfs_url: str,
+        highlight_id: str,
+        token: str,
+        secret: bytes,
+    ) -> str:
+        """The link a viewer opens.
+
+        Pinned (default): ``{public_viewer_base_url}/v/<hash>/#g=…&k=…`` —
+        a static page no GFS serves, so no GFS can rewrite the script that
+        reads the secret. ``g`` is the address this household itself talks
+        to that GFS on (its pinned ``inbox_url``), never one the GFS's
+        reply suggests.
+
+        Fallback, less safe (the GFS serves the script): the GFS's own
+        ``url`` plus ``#k``, when ``public_viewer_base_url`` is empty, the
+        manifest is unusable, or the viewer would refuse that GFS address
+        (plain http to a non-localhost host).
+        """
+        if self._viewer_base_url and self._pinned_viewer is not None:
+            base = viewer_base_url(self._viewer_base_url)
+            if base is None:
+                log.warning(
+                    "highlights.public_viewer_base_url %r is not an https base "
+                    "a pinned link may name; minting the GFS-served link instead",
+                    self._viewer_base_url,
+                )
+                return link_with_secret(gfs_url, secret)
+            gfs_base = viewer_gfs_base(conn.inbox_url)
+            if gfs_base is not None:
+                return pinned_link(
+                    base,
+                    self._pinned_viewer,
+                    gfs_base=gfs_base,
+                    instance_id=self._require_instance_id(),
+                    highlight_id=highlight_id,
+                    token=token,
+                    secret=secret,
+                )
+            log.warning(
+                "GFS %s: address %r can't be named in a pinned viewer link "
+                "(https only); minting the GFS-served link instead",
+                conn.id,
+                conn.inbox_url,
+            )
+        return link_with_secret(gfs_url, secret)
 
     async def _require_owned(
         self,

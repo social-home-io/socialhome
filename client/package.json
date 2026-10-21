@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build && vite build --config vite.gfs.config.ts",
     "build:gfs": "vite build --config vite.gfs.config.ts",
+    "build:pinned-viewer": "node scripts/build-pinned-viewer.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

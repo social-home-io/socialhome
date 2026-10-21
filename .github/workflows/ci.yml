@@ -290,6 +290,22 @@ jobs:
       - name: Build
         working-directory: client
         run: pnpm run build
+      - name: Pinned highlight viewer — reproducible, manifest committed
+        working-directory: client
+        # The public highlight link opens a content-addressed page pinned by
+        # SRI (docs/protocol/highlights_public.md, "Pinned viewer"). Built
+        # twice: the bytes must not differ. A change to the viewer code
+        # changes the hash, so ``socialhome/pinned_viewer.json`` must be
+        # regenerated (``pnpm build:pinned-viewer``) in the same PR.
+        run: |
+          pnpm run build:pinned-viewer
+          sha256sum dist-pinned/v/*/* > "$RUNNER_TEMP/pinned-first.txt"
+          pnpm run build:pinned-viewer
+          sha256sum dist-pinned/v/*/* | diff "$RUNNER_TEMP/pinned-first.txt" -
+          if ! git diff --exit-code -- ../socialhome/pinned_viewer.json; then
+            echo "::error file=socialhome/pinned_viewer.json::The pinned viewer changed: run 'pnpm build:pinned-viewer' in client/ and commit socialhome/pinned_viewer.json" >&2
+            exit 1
+          fi
       - name: Self-hosted fonts check (no Google Fonts in the bundles)
         working-directory: client
         # Fails if a font CDN host appears anywhere in the built SPA / GFS /

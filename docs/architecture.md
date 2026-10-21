@@ -32,6 +32,12 @@ is author-online only; an offline author still yields "unavailable". One
 framing module and one transient in-memory `RelayBridge` serve both
 highlights and moments, and **the GFS stores zero highlight/moment
 content bytes** — the bridge is a pure pipe, never an at-rest copy.
+A public highlight link opens the **pinned viewer** — a static,
+content-addressed page pinned by SRI on an origin no GFS runs (default:
+the project's GitHub Pages, `[highlights] public_viewer_base_url`) — which
+talks to the GFS cross-origin (CORS on the anonymous viewer routes only).
+The GFS serves no code that reads the link's secret
+([highlights_public.md](./protocol/highlights_public.md#pinned-viewer)).
 
 Public moments that fan out to **followers** are encrypted from the GFS
 (v_62): each author's household holds a random per-author generation root

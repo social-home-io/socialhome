@@ -303,3 +303,39 @@ def test_shipped_pin_applies_only_to_the_shipped_url(monkeypatch):
 def test_operator_id_with_shipped_url_keeps_the_shipped_key():
     cfg = Config(gfs_default_instance_id="gfs-2")
     assert cfg.gfs_default_pin() == ("gfs-2", PROJECT_KEY)
+
+
+# ─── [highlights] public_viewer_base_url ────────────────────────────────
+
+
+def test_public_viewer_base_url_defaults_to_the_project_pages():
+    """Public highlight links open the pinned viewer on the project's
+    GitHub Pages, on its own custom-domain origin, unless the operator says
+    otherwise."""
+    expected = "https://viewer.social-home.io"
+    assert config_mod.PROJECT_PINNED_VIEWER_URL == expected
+    assert Config().highlights_public_viewer_base_url == expected
+    assert Config.from_env().highlights_public_viewer_base_url == expected
+
+
+def test_public_viewer_base_url_from_toml_highlights_section(tmp_path, monkeypatch):
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text(
+        '[highlights]\npublic_viewer_base_url = " https://viewer.example.org/ "\n'
+    )
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    cfg = Config.from_env()
+    assert cfg.highlights_public_viewer_base_url == "https://viewer.example.org/"
+    # A core section — never handed to the platform adapter.
+    assert "highlights" not in cfg.platform_options
+
+
+def test_public_viewer_base_url_empty_and_env_override(tmp_path, monkeypatch):
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text(
+        '[highlights]\npublic_viewer_base_url = "https://viewer.example.org"\n'
+    )
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    monkeypatch.setenv("SH_HIGHLIGHTS_PUBLIC_VIEWER_BASE_URL", "")
+    # Empty: links fall back to the GFS-served page.
+    assert Config.from_env().highlights_public_viewer_base_url == ""

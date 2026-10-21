@@ -198,9 +198,19 @@ its fragment (`#k=`), which browsers never send to a server, and the
 author's household seals every frame to the viewer's ephemeral key and that
 secret, on the direct DataChannel and on the GFS relay alike. Nothing is
 streamed in the clear: a viewer without a key or a link without a secret
-gets nothing. The residual is the one every web page has: the GFS serves the
-viewer's script. See
-[`protocol/highlights_public.md`](./protocol/highlights_public.md#end-to-end-sealed-stream).
+gets nothing.
+
+The link opens the **pinned viewer**: a static, content-addressed page with
+its script pinned by SRI, on an origin no GFS runs (by default the project's
+GitHub Pages). A GFS serves no code the viewer runs, so it can't rewrite the
+script that reads the secret; an SRI hash on a GFS-served page would not
+help, since the GFS controls that HTML. The trust moves to the page host —
+the `social-home-io` org and GitHub Pages, or a self-hoster's own host — and
+the content-addressed path and SRI hash let anyone check that what it serves
+is the released build. The GFS-served page remains only for older links and
+for households that set `public_viewer_base_url` empty (less safe: that GFS
+serves the script). See
+[`protocol/highlights_public.md`](./protocol/highlights_public.md#pinned-viewer).
 
 ### The GFS is not an author-presence oracle
 

@@ -1,9 +1,17 @@
-/* Public-highlight viewer for the GFS landing page (§highlights_public).
+/* Public-highlight viewer (§highlights_public).
  *
- * Preact bootstrap. The GFS-side SSR landing renders an empty
- * ``<div id="root">`` and a ``<script id="boot">`` JSON payload with
- * ``{instanceId, highlightId, token}``; this module mounts the viewer
- * into that root.
+ * Preact bootstrap, for two pages:
+ *
+ * - The **pinned** page (``v/<hash>/``, built by
+ *   ``scripts/build-pinned-viewer.mjs``): a static, content-addressed page
+ *   on an origin no GFS runs, with this script pinned by SRI. There is no
+ *   boot block; the whole context — GFS URL, ids, token, secret — is in
+ *   the fragment (``pinned_link.ts``) and every request goes, absolute and
+ *   without credentials, to the GFS it names. A GFS can't rewrite this
+ *   page's script, so it can't read the secret.
+ * - The GFS-served landing (older links, and the self-hosted fallback):
+ *   an empty ``<div id="root">`` and a ``<script id="boot">`` JSON payload
+ *   with ``{instanceId, highlightId, token}``; requests stay relative.
  *
  * Wire framing must stay in lockstep with
  * ``socialhome/services/highlight_public_framing.py`` — see the
@@ -32,6 +40,7 @@ import {
   type ViewerKey,
 } from './sealed_profile'
 import { linkSecretFromHash, makeStreamOpener, type StreamOpener } from './stream_seal'
+import { pinnedBootFromHash, pinnedEndpoint, pinnedRequestInit } from './pinned_link'
 
 const CHANNEL_LABEL = 'highlight-public-v1'
 const FRAME_DURATION_MS = 6000
@@ -43,6 +52,9 @@ interface BootPayload {
   instanceId: string
   highlightId: string
   token: string
+  /** The GFS base URL on the pinned page; absent on the GFS-served page,
+   *  where every request stays relative to it. */
+  gfs?: string
 }
 
 interface IceServer { urls: string[] | string; username?: string; credential?: string }
@@ -293,7 +305,7 @@ function PublicHighlightViewer(
           `/gfs/highlight_rtc/relay/${encodeURIComponent(boot.instanceId)}` +
           `/${encodeURIComponent(boot.highlightId)}?token=${encodeURIComponent(boot.token)}` +
           `&vk=${viewerKey!.vk}`
-        const r = await fetch(_rel(url))
+        const r = await gfsFetch(boot.gfs, url)
         if (!r.ok || !r.body) {
           setStatus('error', humanizeError(`HTTP ${r.status}`))
           return
@@ -330,7 +342,7 @@ function PublicHighlightViewer(
           setStatus('error', 'This browser can’t open encrypted highlights. Try another browser.')
           return
         }
-        const ice = await fetchJson<{ servers: IceServer[] }>('/gfs/highlights/ice-servers')
+        const ice = await fetchJson<{ servers: IceServer[] }>(boot.gfs, '/gfs/highlights/ice-servers')
         pc = new RTCPeerConnection({ iceServers: ice.servers })
         let sessionId: string | null = null
         let ackedCandidates = 0
@@ -346,7 +358,7 @@ function PublicHighlightViewer(
 
         pc.addEventListener('icecandidate', (ev) => {
           if (!ev.candidate || !sessionId) return
-          void postJson('/gfs/highlight_rtc/ice/viewer', {
+          void postJson(boot.gfs, '/gfs/highlight_rtc/ice/viewer', {
             session_id: sessionId,
             candidate: ev.candidate.toJSON ? ev.candidate.toJSON() : {
               candidate: ev.candidate.candidate,
@@ -368,6 +380,7 @@ function PublicHighlightViewer(
         const offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
         const offerResp = await postJson<{ session_id: string }>(
+          boot.gfs,
           '/gfs/highlight_rtc/offer',
           {
             instance_id: boot.instanceId,
@@ -392,7 +405,7 @@ function PublicHighlightViewer(
             const session = await fetchJson<{
               answer_sdp: string | null
               ice_candidates: RTCIceCandidateInit[]
-            }>(`/gfs/highlight_rtc/session/${encodeURIComponent(sessionId!)}`)
+            }>(boot.gfs, `/gfs/highlight_rtc/session/${encodeURIComponent(sessionId!)}`)
             if (session.answer_sdp && pc!.remoteDescription === null) {
               await pc!.setRemoteDescription({ type: 'answer', sdp: session.answer_sdp })
             }
@@ -421,7 +434,7 @@ function PublicHighlightViewer(
       Object.values(state.frameUrls).forEach((u) => URL.revokeObjectURL(u))
       if (state.authorPicture) URL.revokeObjectURL(state.authorPicture)
     }
-  }, [boot.instanceId, boot.highlightId, boot.token])
+  }, [boot.instanceId, boot.highlightId, boot.token, boot.gfs])
 
   // Auto-advance once we have a renderable frame.
   useEffect(() => {
@@ -526,6 +539,18 @@ function AuthorHeader({ author, picture }: { author: AuthorProfile; picture: str
 }
 
 
+/* A pinned link whose fragment is missing a part, too long or malformed
+ * (e.g. a GFS address that isn't https). Nothing is contacted. */
+export function BrokenLink() {
+  return (
+    <div class="highlight-error" role="alert">
+      <p>This link can’t be opened.</p>
+      <p>This link is incomplete or damaged. Ask whoever shared it for a new link.</p>
+    </div>
+  )
+}
+
+
 /* The link has no secret in its fragment: an old link, or cut short. */
 export function OutdatedLink() {
   return (
@@ -559,15 +584,24 @@ function humanizeError(msg: string | null | undefined): string {
 const _rel = (p: string): string => p.replace(/^\/+/, '')
 
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const r = await fetch(_rel(url))
+/* One request to the GFS. On the pinned page (``gfs`` set): absolute on
+ * that GFS, cross-origin, no credentials, no referrer. On the GFS-served
+ * page: relative, exactly as before. */
+function gfsFetch(gfs: string | undefined, path: string, init?: RequestInit): Promise<Response> {
+  if (gfs) return fetch(pinnedEndpoint(gfs, path), pinnedRequestInit(init))
+  return init ? fetch(_rel(path), init) : fetch(_rel(path))
+}
+
+
+async function fetchJson<T>(gfs: string | undefined, url: string): Promise<T> {
+  const r = await gfsFetch(gfs, url)
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return r.json() as Promise<T>
 }
 
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const r = await fetch(_rel(url), {
+async function postJson<T>(gfs: string | undefined, url: string, body: unknown): Promise<T> {
+  const r = await gfsFetch(gfs, url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -577,27 +611,52 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 }
 
 
-// Bootstrap entry — read ``<script id="boot">`` and mount.
-(function bootstrap(): void {
+/* The boot context: the GFS page's ``<script id="boot">`` block, or — on
+ * the pinned page, which has none — the link's fragment. The fragment is
+ * left in the address bar: a reload (or a copy of the address) still opens
+ * the highlight, and the secret is already in the browser's history from
+ * the navigation itself, so dropping it now would hide nothing. */
+function readBoot(root: HTMLElement): BootPayload | null {
   const bootEl = document.getElementById('boot')
-  const root = document.getElementById('root')
-  if (!bootEl || !root) return
+  if (!bootEl) {
+    // The pinned page is never meant to be framed: a framer on the same
+    // origin could read its DOM. (A meta tag can't set frame-ancestors.)
+    if (window.top !== window) {
+      render(<BrokenLink />, root)
+      return null
+    }
+    const pinned = pinnedBootFromHash(window.location.hash)
+    if (!pinned) render(<BrokenLink />, root)
+    return pinned
+  }
   let boot: BootPayload
   try {
     boot = JSON.parse(bootEl.textContent || '{}')
   } catch {
     root.textContent = 'Couldn’t parse boot payload.'
-    return
+    return null
   }
   if (!boot.instanceId || !boot.highlightId || !boot.token) {
     root.textContent = 'Missing boot context.'
-    return
+    return null
   }
+  // The GFS page never takes a GFS address from the fragment.
+  return { instanceId: boot.instanceId, highlightId: boot.highlightId, token: boot.token }
+}
+
+
+// Bootstrap entry — read the boot context and mount.
+(function bootstrap(): void {
+  const root = document.getElementById('root')
+  if (!root) return
+  const boot = readBoot(root)
+  if (!boot) return
   const secret = linkSecretFromHash(window.location.hash)
   if (!secret) {
-    // A link from before highlights were end-to-end encrypted (or cut
-    // short when pasted). Contact nobody: it couldn't be opened anyway.
-    render(<OutdatedLink />, root)
+    // Contact nobody: nothing could open the stream anyway. On the GFS
+    // page, a link from before highlights were end-to-end encrypted (or
+    // cut short when pasted); every pinned link had one, so it was cut.
+    render(boot.gfs ? <BrokenLink /> : <OutdatedLink />, root)
     return
   }
   render(

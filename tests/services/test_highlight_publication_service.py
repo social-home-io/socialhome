@@ -8,6 +8,7 @@ sign-then-POST pattern is exercised end-to-end without a real socket.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qsl
 
 import pytest
 
@@ -15,6 +16,7 @@ from socialhome.crypto import b64url_encode
 from socialhome.domain.errors import CodedError
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.highlight import Highlight, HighlightAudience
+from socialhome.pinned_viewer import PinnedViewer, load_pinned_viewer
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 from socialhome.services.highlight_public_seal import (
@@ -115,9 +117,23 @@ class _Caps:
         return self.supported
 
 
-def _make_service(repos, *, session, caps: _Caps | None = None):
+_PINNED = PinnedViewer(path="v/0123456789abcdef/", integrity="sha384-" + "A" * 64)
+
+
+def _make_service(
+    repos,
+    *,
+    session,
+    caps: _Caps | None = None,
+    viewer_base: str = "",
+    pinned: PinnedViewer | None = None,
+):
     svc = HighlightPublicationService(
-        repos["highlights"], repos["gfs"], gfs_capabilities=caps or _Caps()
+        repos["highlights"],
+        repos["gfs"],
+        gfs_capabilities=caps or _Caps(),
+        public_viewer_base_url=viewer_base,
+        pinned_viewer=pinned,
     )
     svc.attach_session(session)
     svc.attach_identity(own_instance_id="inst-self", signing_key=b"\x01" * 32)
@@ -157,6 +173,71 @@ async def test_publish_signs_body_and_marks_local_flag(repos, seeded_highlight):
     refreshed = await repos["highlights"].get_highlight(seeded_highlight.id)
     assert refreshed.public_gfs_id == "gfs-abc"
     assert refreshed.public_published_at is not None
+
+
+async def test_publish_mints_a_pinned_viewer_link(repos, seeded_highlight):
+    """With a viewer base URL, the link opens the pinned page (no GFS serves
+    it) and carries the GFS address, ids, token and secret in its fragment."""
+    sess = _StubSession(body={"token": "tok-A", "url": "https://gfs/u/s/A"})
+    svc = _make_service(
+        repos,
+        session=sess,
+        viewer_base="https://viewer.example/socialhome/",
+        pinned=_PINNED,
+    )
+    out = await svc.publish(seeded_highlight.id, "u1", gfs_id="gfs-abc")
+    secret = link_secret(b"\x01" * 32, highlight_id=seeded_highlight.id, token="tok-A")
+    page, fragment = out["url"].split("#", 1)
+    assert page == "https://viewer.example/socialhome/v/0123456789abcdef/"
+    # ``g`` is the GFS address this household talks to (the pinned
+    # connection's inbox_url), not whatever URL the GFS returned.
+    assert dict(parse_qsl(fragment)) == {
+        "g": "https://gfs.example",
+        "i": "inst-self",
+        "h": seeded_highlight.id,
+        "t": "tok-A",
+        "k": b64url_encode(secret),
+    }
+    assert b64url_encode(secret) not in str(sess.posts)
+
+
+async def test_publish_falls_back_to_the_gfs_page_without_a_viewer_base(
+    repos, seeded_highlight
+):
+    """``public_viewer_base_url = ""``: the GFS-served page with ``#k`` (the
+    self-hosted, less safe mode)."""
+    sess = _StubSession(body={"token": "tok-A", "url": "https://gfs/u/s/A"})
+    svc = _make_service(repos, session=sess, viewer_base="", pinned=_PINNED)
+    out = await svc.publish(seeded_highlight.id, "u1", gfs_id="gfs-abc")
+    secret = link_secret(b"\x01" * 32, highlight_id=seeded_highlight.id, token="tok-A")
+    assert out["url"] == f"https://gfs/u/s/A#k={b64url_encode(secret)}"
+
+
+async def test_publish_falls_back_without_a_manifest(repos, seeded_highlight):
+    sess = _StubSession(body={"token": "tok-A", "url": "https://gfs/u/s/A"})
+    svc = _make_service(
+        repos, session=sess, viewer_base="https://v.example", pinned=None
+    )
+    out = await svc.publish(seeded_highlight.id, "u1", gfs_id="gfs-abc")
+    assert out["url"].startswith("https://gfs/u/s/A#k=")
+
+
+async def test_publish_falls_back_when_the_viewer_would_refuse_the_gfs_url(
+    db, repos, seeded_highlight
+):
+    """A GFS reached over plain http on a non-localhost host (a LAN or
+    container address) can't be named in a pinned link: the viewer refuses
+    it, so the GFS-served page is minted instead of a dead link."""
+    await db.enqueue(
+        "UPDATE gfs_connections SET inbox_url = ? WHERE id = ?",
+        ("http://gfs:8765", "gfs-abc"),
+    )
+    sess = _StubSession(body={"token": "tok-A", "url": "http://gfs:8765/h/A"})
+    svc = _make_service(
+        repos, session=sess, viewer_base="https://v.example", pinned=_PINNED
+    )
+    out = await svc.publish(seeded_highlight.id, "u1", gfs_id="gfs-abc")
+    assert out["url"].startswith("http://gfs:8765/h/A#k=")
 
 
 async def test_publish_remembers_the_minted_token(repos, seeded_highlight):
@@ -532,3 +613,25 @@ async def test_publishing_on_another_gfs_pulls_the_first_publication(
     assert (
         await highlights.get_highlight(seeded_highlight.id)
     ).public_gfs_id == "gfs-b"
+
+
+async def test_a_plain_http_viewer_base_falls_back_to_the_gfs_page(
+    repos, seeded_highlight, caplog
+):
+    """Review: an ``http://`` viewer base would let the network swap the
+    page that reads the secret; it is never used."""
+    svc = HighlightPublicationService(
+        repos["highlights"],
+        repos["gfs"],
+        gfs_capabilities=_Caps(),
+        public_viewer_base_url="http://viewer.example",
+        pinned_viewer=load_pinned_viewer(),
+    )
+    svc.attach_session(
+        _StubSession(body={"token": "tok-A", "url": "https://gfs/u/s/A"})
+    )
+    svc.attach_identity(own_instance_id="inst-self", signing_key=b"\x01" * 32)
+    with caplog.at_level("WARNING"):
+        out = await svc.publish(seeded_highlight.id, "u1", gfs_id="gfs-abc")
+    assert out["url"].startswith("https://gfs/u/s/A#k=")
+    assert "viewer.example" in caplog.text

@@ -45,6 +45,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16231,6 +16232,126 @@ def _lc_pending(host: str, space_id: str, user_id: str) -> list[tuple]:
     )
 
 
+def _cors_probe(
+    url: str, *, method: str = "GET", origin: str = "https://viewer.example"
+) -> tuple[int, dict[str, str]]:
+    """``url`` with an ``Origin`` header (and the preflight headers for
+    ``OPTIONS``): its status and response headers, lower-cased."""
+    headers = {"Origin": origin}
+    if method == "OPTIONS":
+        headers["Access-Control-Request-Method"] = "POST"
+        headers["Access-Control-Request-Headers"] = "content-type"
+    req = urllib.request.Request(url, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}
+    except urllib.error.HTTPError as exc:
+        return exc.code, {k.lower(): v for k, v in exc.headers.items()}
+
+
+def cmd_gfs_highlight_link() -> None:
+    """A public highlight link opens the PINNED viewer, not a GFS page.
+
+    Prereqs: ``up`` + ``gfs-up`` + ``gfs-pair`` (a on the GFS).
+
+    a publishes today's highlight on its GFS. Asserts:
+
+    * the link is ``{public_viewer_base_url}/v/<hash>/#g=…&i=…&h=…&t=…&k=…``
+      — the shipped default base URL and the ``v/<hash>/`` of the committed
+      ``socialhome/pinned_viewer.json``; ``g`` is the GFS address a talks
+      to, ``i`` / ``h`` / ``t`` its instance, highlight and the token the
+      GFS minted, ``k`` the 32-byte secret (43 base64url chars);
+    * the GFS never saw the secret (its log from the step's start);
+    * the GFS answers the pinned page cross-origin on exactly the anonymous
+      viewer routes: ``Access-Control-Allow-Origin: *`` on the ice-servers
+      GET and the offer preflight (204), none on ``/gfs/info`` or the signed
+      ``/gfs/highlight_rtc/answer``.
+
+    Then unpublishes, so later steps see no public link.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'up' + 'gfs-up' + 'gfs-pair' first")
+    a = state["instances"]["a"]
+    a_url = f"http://127.0.0.1:{a['port']}"
+    gfs = f"http://127.0.0.1:{GFS_PORT}"
+    a_gfs = state["gfs"]["pairings"]["a"]["id"]
+    log_offset = _gfs_log_size()
+
+    s, created = _request(
+        f"{a_url}/api/highlights/frames",
+        token=a["token"],
+        method="POST",
+        body={
+            "media_url": _upload_demo_image(a_url, token=a["token"], label="a"),
+            "frame_type": "image",
+            "caption_text": "[a] highlight — shared by a public link",
+            "audience_kind": "all_paired",
+        },
+    )
+    created = _must("gfs-highlight-link: frame(a)", s, created, ok=(201,))
+    highlight_id = created["highlight"]["id"]
+
+    s, pub = _request(
+        f"{a_url}/api/highlights/{highlight_id}/publish",
+        token=a["token"],
+        method="POST",
+        body={"gfs_id": a_gfs},
+    )
+    pub = _must("gfs-highlight-link: publish(a)", s, pub, ok=(201,))
+    link, token = pub["url"], pub["token"]
+    manifest = json.loads((REPO_ROOT / "socialhome" / "pinned_viewer.json").read_text())
+    page, _, fragment = link.partition("#")
+    expected_page = f"https://viewer.social-home.io/{manifest['path']}"
+    if page != expected_page:
+        raise SystemExit(
+            f"gfs-highlight-link: link opens {page!r}, expected the pinned "
+            f"viewer {expected_page!r}"
+        )
+    params = dict(urllib.parse.parse_qsl(fragment))
+    expected = {"g": gfs, "i": a["instance_id"], "h": highlight_id, "t": token}
+    if {k: params.get(k) for k in expected} != expected:
+        raise SystemExit(
+            f"gfs-highlight-link: fragment {params!r} does not carry {expected!r}"
+        )
+    secret = params.get("k", "")
+    if len(secret) != 43:
+        raise SystemExit(f"gfs-highlight-link: no 32-byte secret in {fragment!r}")
+    print(f"  a: link opens the pinned viewer {manifest['path']} ✓")
+
+    leaked = _gfs_log_lines_matching(secret, offset=log_offset)
+    if leaked:
+        raise SystemExit(f"gfs-highlight-link: the GFS log holds the secret: {leaked}")
+    print("  gfs never saw the link secret ✓")
+
+    s, h = _cors_probe(f"{gfs}/gfs/highlights/ice-servers")
+    if s != 200 or h.get("access-control-allow-origin") != "*":
+        raise SystemExit(f"gfs-highlight-link: ice-servers CORS: HTTP {s} {h!r}")
+    s, h = _cors_probe(f"{gfs}/gfs/highlight_rtc/offer", method="OPTIONS")
+    if (
+        s != 204
+        or h.get("access-control-allow-origin") != "*"
+        or "access-control-allow-credentials" in h
+    ):
+        raise SystemExit(f"gfs-highlight-link: offer preflight: HTTP {s} {h!r}")
+    for path, method in (
+        ("/gfs/info", "GET"),
+        ("/gfs/highlight_rtc/answer", "OPTIONS"),
+    ):
+        s, h = _cors_probe(f"{gfs}{path}", method=method)
+        if any(k.startswith("access-control-") for k in h):
+            raise SystemExit(f"gfs-highlight-link: CORS on {method} {path}: {h!r}")
+    print("  gfs: CORS on the anonymous viewer routes only ✓")
+
+    s, out = _request(
+        f"{a_url}/api/highlights/{highlight_id}/publish",
+        token=a["token"],
+        method="DELETE",
+    )
+    _must("gfs-highlight-link: unpublish(a)", s, out, ok=(200, 204))
+    print("gfs-highlight-link: ok")
+
+
 def cmd_gfs_moment_profile() -> None:
     """A public moment from a stranger reads by name, picture and bio.
 
@@ -17004,6 +17125,10 @@ def main() -> None:
         # public moments through the GFS and sees them by name, picture
         # and bio — from the directory and the signed envelope.
         cmd_gfs_moment_profile()
+        # ``gfs-highlight-link``: a public highlight link opens the pinned
+        # viewer (a page no GFS serves), the GFS never sees its secret and
+        # answers CORS on the anonymous viewer routes only.
+        cmd_gfs_highlight_link()
         # The closing check: every step's state still holds, and the log
         # audit is clean — offline steps' lines only inside their windows.
         cmd_verify()
