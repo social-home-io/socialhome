@@ -2806,6 +2806,112 @@ def cmd_gfs_space_follower_names() -> None:
     )
 
 
+def _wait_for_gfs_ws_since(
+    instance_id: str, *, offset: int, timeout: float = 60.0
+) -> None:
+    """:func:`_wait_for_gfs_ws`, but only for a registration logged after
+    byte ``offset`` — i.e. a RE-connect."""
+    marker = f"gfs.ws.register: instance={instance_id}"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _gfs_log_lines_matching(marker, offset=offset):
+            return
+        time.sleep(1.0)
+    raise SystemExit(
+        f"{instance_id} did not re-open its GFS WebSocket within {timeout:.0f}s"
+    )
+
+
+@_offline_step
+def cmd_gfs_space_follower_reconnect() -> None:
+    """A follower's reconnect re-seals the key but never re-sends the
+    author-profiles bundle (v_61) — even after the HOST restarted.
+
+    Prereqs: ``gfs-space-follower-names`` (e follows a's global space and
+    got its one bundle). Runs right after it, last in that chain.
+
+    1. Restart **a** (the host): any in-memory "already sent" record is
+       gone — before the fix that made e's next reconnect cost a ≤ 1 MB
+       bundle again (and a GFS restart one per follower).
+    2. Restart **e** (the follower): its GFS socket reconnects (the GFS
+       sends ``new_subscriber`` with ``reason: "reconnect"``) and it
+       re-subscribes every seat (a held seat: no notify at all).
+
+    Asserts, in the GFS log from e's restart on: at least one targeted
+    ``space_subscriber_key_handoff`` reached e's one socket, and no
+    ``space_author_profiles_bundle`` was relayed. e still names Erin.
+    """
+    state = _load()
+    gsfn = (state or {}).get("gfs_space_follower_names")
+    if not gsfn:
+        raise SystemExit("run 'gfs-space-follower-names' first")
+    space_id, erin = gsfn["space_id"], gsfn["user_id"]
+    a, e = state["instances"]["a"], state["instances"]["e"]
+
+    # 1. Restart the host; let its own reconnect + reconcile settle.
+    off = _gfs_log_size()
+    _kill_household("a", a)
+    state["instances"]["a"]["pid"] = _spawn("a", a["port"])
+    _save(state)
+    _wait_ready(a["port"])
+    _wait_for_gfs_ws_since(a["instance_id"], offset=off)
+    print("  a (host) restarted and re-opened its GFS socket ✓")
+    time.sleep(8)
+
+    # 2. Restart the follower.
+    gfs_off = _gfs_log_size()
+    _kill_household("e", e)
+    state["instances"]["e"]["pid"] = _spawn("e", e["port"])
+    _save(state)
+    _wait_ready(e["port"])
+    _wait_for_gfs_ws_since(e["instance_id"], offset=gfs_off)
+    print("  e (follower) restarted and re-opened its GFS socket ✓")
+
+    handoffs: list[str] = []
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        handoffs = [
+            line
+            for line in _gfs_log_lines_matching("relayed targeted", offset=gfs_off)
+            if "space_subscriber_key_handoff" in line and space_id in line
+        ]
+        if handoffs:
+            break
+        time.sleep(1)
+    else:
+        raise SystemExit(
+            "gfs-space-follower-reconnect: e's reconnect produced no targeted "
+            "key handoff for the space"
+        )
+    if not all("(1 reached)" in line for line in handoffs):
+        raise SystemExit(
+            f"gfs-space-follower-reconnect: a handoff missed e: {handoffs[:2]}"
+        )
+    # Let a late bundle (the regression) land before counting.
+    time.sleep(8)
+    bundles = _gfs_log_lines_matching("space_author_profiles_bundle", offset=gfs_off)
+    if bundles:
+        raise SystemExit(
+            f"gfs-space-follower-reconnect: e's reconnect re-sent the bundle "
+            f"after a host restart: {bundles[:2]}"
+        )
+    print(
+        f"  e's reconnect: {len(handoffs)} targeted key handoff(s), "
+        "no profiles bundle ✓"
+    )
+    s, rows = _request(
+        f"http://127.0.0.1:{e['port']}/api/spaces/{space_id}/authors",
+        token=e["token"],
+    )
+    names = {r["user_id"]: r.get("display_name") for r in rows} if s == 200 else {}
+    if names.get(erin) != "Erin":
+        raise SystemExit(f"gfs-space-follower-reconnect: e lost Erin ({names!r})")
+    print(
+        "gfs-space-follower-reconnect: ok (a reconnect re-seals the key, "
+        "never re-sends the bundle)"
+    )
+
+
 def cmd_gfs_space_rotate() -> None:
     """A content-key epoch rotation must not cut GFS subscribers off.
 

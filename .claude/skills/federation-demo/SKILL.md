@@ -859,7 +859,8 @@ her name or bio, and c (no member, no follower) holds no profile.
 Needs ``gfs-space-author-profile``; run it **last in its own chain**
 (``up → pair → traffic → calendar → gfs-up → gfs-pair → gfs-traffic →
 gfs-space-subscribe → gfs-space-post → gfs-space-author-profile →
-gfs-space-follower-names → verify``) — it makes **e** a follower of a's
+gfs-space-follower-names → gfs-space-follower-reconnect → verify``) — it
+makes **e** a follower of a's
 global space, which the ``gfs-invite-link*`` steps must not find. e
 subscribes; the GFS notifies a, which seals the content key to e and then
 ONE bundle of its cached, author-signed profiles — both targeted at e alone
@@ -869,6 +870,16 @@ on, every ``/gfs/publish`` the GFS took must be targeted with exactly one
 subscriber reached and no member may publish (no ``/gfs/member-publish*``):
 the other follower, d, is sent nothing for e's subscribe. The GFS log never
 carries her name or bio. ``verify`` (13x) re-checks.
+
+### ``gfs-space-follower-reconnect`` — a reconnect never re-sends the bundle (v_61)
+
+Needs ``gfs-space-follower-names``; runs right after it. Restarts **a** (the
+host, so no in-memory "already sent" record survives) and then **e** (the
+follower: its GFS socket reconnects, the GFS sends ``new_subscriber`` with
+``reason: "reconnect"``, and e re-subscribes a seat it already holds, which
+notifies nobody). From e's restart on, the GFS log must show at least one
+targeted ``space_subscriber_key_handoff`` reaching e's one socket and **no**
+``space_author_profiles_bundle``; e still names Erin.
 
 ### ``gfs-member-publish`` — a member posts with the host offline (v_49)
 

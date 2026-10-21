@@ -9,6 +9,7 @@ from dataclasses import asdict
 from aiohttp import web
 
 from ...domain.space_place import PlacePin, place_pin_wire
+from ...domain.subscriber_accepts import parse_accepts
 from ...gfs_proof import PROOF_CAPABILITY, bindable_base_url, parse_proof_nonce
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
@@ -167,7 +168,10 @@ class GfsInfoView(GfsBaseView):
             # subscriber of the space, as named in ``new_subscriber``) and
             # delivers to that subscriber only. A household sends the
             # targeted key handoff and the author-profile bundle only to a
-            # server that proved it; an older one would fan them out.
+            # server that proved it; an older one would fan them out. The
+            # same release tags ``new_subscriber`` with ``reason`` and the
+            # subscriber's ``accepts``; a frame without them never earns a
+            # bundle, so no separate flag is needed.
             "targeted_publish": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
@@ -481,6 +485,12 @@ class SubscribeView(GfsBaseView):
     for discovery but is not publicly readable, so there is no readership to
     join. That is the OWNER's explicit opt-in, NOT ``join_mode`` — an
     ``invite_only`` space that allows subscribers seats them normally.
+
+    A subscribe may carry ``accepts`` (v_61): the optional relay deliveries
+    the household opens, e.g. ``["author_profiles_bundle"]``. It is NOT in
+    the signed bytes, is never stored, and only rides to the space owner in
+    the ``new_subscriber`` notify of a new seat. Malformed labels are
+    dropped (it is a hint): the subscribe never fails over it.
     """
 
     async def post(self) -> web.Response:
@@ -510,12 +520,16 @@ class SubscribeView(GfsBaseView):
             except PermissionError as exc:
                 return web.json_response({"error": str(exc)}, status=403)
             return web.json_response({"status": "unsubscribed"})
+        # v_61 — what the subscriber can open, NEXT to the signed bytes (an
+        # older GFS ignores it and still verifies). Validated, never stored.
+        accepts = parse_accepts(body.get("accepts"))
         try:
             await svc.subscribe(
                 str(instance_id),
                 str(space_id),
                 str(ts),
                 str(signature),
+                accepts=accepts,
             )
         except PermissionError as exc:
             return web.json_response({"error": str(exc)}, status=403)

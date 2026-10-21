@@ -28,6 +28,7 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
 
 
@@ -525,6 +526,80 @@ async def test_subscribe_returns_subscribed(gfs_client):
     assert resp.status == 200
     body = await resp.json()
     assert body["status"] == "subscribed"
+
+
+def _signed_subscribe_body(seed, instance_id: str, space_id: str) -> dict:
+    ts = _now_iso()
+    sig = _sign(
+        seed,
+        {
+            "action": "subscribe",
+            "instance_id": instance_id,
+            "space_id": space_id,
+            "ts": ts,
+        },
+    )
+    return {
+        "instance_id": instance_id,
+        "space_id": space_id,
+        "ts": ts,
+        "signature": sig,
+    }
+
+
+async def test_subscribe_forwards_accepts_outside_the_signed_bytes(
+    gfs_client, monkeypatch
+):
+    """``accepts`` (v_61) rides next to the signed bytes: the unchanged
+    signature still verifies, and the labels reach the service."""
+    seen: list[tuple[str, ...]] = []
+    original = GfsFederationService.subscribe
+
+    async def _spy(self, *args, accepts=(), **kw):
+        seen.append(accepts)
+        return await original(self, *args, accepts=accepts, **kw)
+
+    monkeypatch.setattr(GfsFederationService, "subscribe", _spy)
+    seed = await _register_and_publish(
+        gfs_client, instance_id="inst-acc", space_id="space-acc", client_ip="127.0.0.41"
+    )
+    body = _signed_subscribe_body(seed, "inst-acc", "space-acc")
+    resp = await gfs_client.post(
+        "/gfs/subscribe", json={**body, "accepts": ["author_profiles_bundle"]}
+    )
+    assert resp.status == 200
+    assert seen == [("author_profiles_bundle",)]
+
+
+@pytest.mark.parametrize(
+    ("accepts", "forwarded"),
+    [
+        ("author_profiles_bundle", ()),
+        ([1], ()),
+        (["Bad Label", "author_profiles_bundle"], ("author_profiles_bundle",)),
+        (["x"] * 17, ("x",)),
+    ],
+)
+async def test_subscribe_malformed_accepts_still_subscribes(
+    gfs_client, monkeypatch, accepts, forwarded
+):
+    """``accepts`` is an unsigned hint: bad labels are dropped and the
+    subscribe itself still succeeds (no 400 for a future label format)."""
+    seen: list[tuple[str, ...]] = []
+    original = GfsFederationService.subscribe
+
+    async def _spy(self, *args, accepts=(), **kw):
+        seen.append(accepts)
+        return await original(self, *args, accepts=accepts, **kw)
+
+    monkeypatch.setattr(GfsFederationService, "subscribe", _spy)
+    seed = await _register_and_publish(
+        gfs_client, instance_id="inst-acx", space_id="space-acx", client_ip="127.0.0.42"
+    )
+    body = _signed_subscribe_body(seed, "inst-acx", "space-acx")
+    resp = await gfs_client.post("/gfs/subscribe", json={**body, "accepts": accepts})
+    assert resp.status == 200
+    assert seen == [forwarded]
 
 
 async def test_subscribe_space_without_subscribers_403(gfs_client):

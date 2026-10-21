@@ -147,14 +147,42 @@ INSTANCE_UPDATE_TS_SKEW_SECONDS: int = 300
 #: queued member items — one registration can stand for.
 MAX_SUBSCRIPTIONS_PER_INSTANCE: int = 500
 
-#: Max ``new_subscriber`` re-notifies triggered by a SINGLE subscriber
-#: (re)connect (Phase 5b-d). A household subscribed to hundreds of spaces must
-#: not turn its own reconnect into an unbounded fan-out of owner notifies (each
-#: one makes a seed-holder re-seal a key). Spaces beyond the cap are simply not
-#: re-notified on this connect — the Phase-5b-c reconcile (run by every
-#: seed-holder on ITS reconnect) still backstops them, so the cap costs latency,
-#: never correctness.
+#: Max ``new_subscriber`` re-notifies the WS hello itself sends for a SINGLE
+#: subscriber (re)connect (Phase 5b-d). It bounds the hello's own burst. The
+#: follower then re-subscribes each held seat, and those re-takes repair the
+#: rest (deduped by :data:`RECONNECT_NOTIFY_DEDUPE_S`). So a reconnect costs
+#: at most one key handoff per held seat
+#: (≤ :data:`MAX_SUBSCRIPTIONS_PER_INSTANCE`). The Phase-5b-c reconcile, which
+#: every seed holder runs on ITS own reconnect, still backstops an owner that
+#: was offline.
 MAX_RECONNECT_NOTIFIES: int = 50
+
+#: ``new_subscriber.reason`` (v_61): a NEW seat — the owner may send the
+#: one-time author-profiles bundle (if the subscriber ``accepts`` it).
+NEW_SUBSCRIBER_REASON_SUBSCRIBE: str = "subscribe"
+
+#: ``new_subscriber.reason`` (v_61): the subscriber's WS came back — the
+#: owner repairs the content-key handoff only, never a bundle.
+NEW_SUBSCRIBER_REASON_RECONNECT: str = "reconnect"
+
+#: A seat re-take's ``reconnect`` notify is skipped when the same
+#: ``(subscriber, space)`` was notified this recently — the WS hello's
+#: :meth:`GfsFederationService.on_subscriber_connected` usually just did,
+#: and the follower re-subscribes every seat right after it.
+RECONNECT_NOTIFY_DEDUPE_S: float = 120.0
+
+#: A NEW seat for a ``(subscriber, space)`` that already had one this
+#: recently (an unsubscribe → subscribe loop) is notified without its
+#: ``accepts``: the owner re-seals the key but sends no second bundle.
+SEAT_CHURN_WINDOW_S: float = 3600.0
+
+#: Bound on each of the two in-memory ``(subscriber, space)`` sets above.
+SEAT_NOTIFY_CACHE_MAX: int = 100_000
+
+
+def _seat_key(instance_id: str, space_id: str) -> bytes:
+    """The in-memory key of one ``(subscriber, space)`` seat."""
+    return SeenPayloadCache.digest([instance_id, space_id])
 
 
 def _bounded_image_uri(uri: str | None, *, space_id: str, kind: str) -> str | None:
@@ -344,9 +372,12 @@ class GfsFederationService:
 
     __slots__ = (
         "_epoch_repo",
+        "_hello_seats",
         "_invite_repo",
+        "_notified_seats",
         "_reconnect_tasks",
         "_repo",
+        "_seat_churn",
         "_seen_payloads",
         "_ws_registry",
     )
@@ -370,6 +401,21 @@ class GfsFederationService:
         # it (``server.py``).
         self._invite_repo = invite_repo
         self._seen_payloads = SeenPayloadCache()
+        # ``(subscriber, space)`` pairs notified in the last
+        # RECONNECT_NOTIFY_DEDUPE_S — a seat re-take skips its notify then.
+        self._notified_seats = SeenPayloadCache(
+            ttl_s=RECONNECT_NOTIFY_DEDUPE_S, cap=SEAT_NOTIFY_CACHE_MAX
+        )
+        # ``(subscriber, space)`` pairs a WS hello notified in the same
+        # window — the hello's own flap guard.
+        self._hello_seats = SeenPayloadCache(
+            ttl_s=RECONNECT_NOTIFY_DEDUPE_S, cap=SEAT_NOTIFY_CACHE_MAX
+        )
+        # ``(subscriber, space)`` pairs that got a NEW seat in the last
+        # SEAT_CHURN_WINDOW_S — a churned seat is notified without accepts.
+        self._seat_churn = SeenPayloadCache(
+            ttl_s=SEAT_CHURN_WINDOW_S, cap=SEAT_NOTIFY_CACHE_MAX
+        )
         # Strong refs to in-flight reconnect-notify tasks — an asyncio task
         # with no reference can be garbage-collected mid-await.
         self._reconnect_tasks: set[asyncio.Task[None]] = set()
@@ -516,9 +562,14 @@ class GfsFederationService:
             return []
         self._seen_payloads.record(digest)
 
-        subscribers = await self._repo.list_subscribers(space_id)
         if to:
-            subscribers = [s for s in subscribers if s.instance_id == to]
+            # One seat by primary key — never every row of the space (a
+            # reconnect / reconcile storm of targeted handoffs would read
+            # N seats N times).
+            seat = await self._repo.get_subscriber(space_id, to)
+            subscribers = [seat] if seat is not None else []
+        else:
+            subscribers = await self._repo.list_subscribers(space_id)
 
         # Identity-free fan-out frame: routing fields only. No ``from_instance``
         # and no GFS-added target id — a subscriber learns nothing about which
@@ -843,6 +894,8 @@ class GfsFederationService:
         space_id: str,
         ts: str,
         signature: str,
+        *,
+        accepts: tuple[str, ...] = (),
     ) -> None:
         """Add *instance_id* as a subscriber of *space_id*.
 
@@ -860,6 +913,19 @@ class GfsFederationService:
         GFS has never seen published (no auto-creation of a pending row from
         an unauthenticated demand signal — a subscription must target a real
         published space).
+
+        *accepts* (v_61) — the optional relay deliveries the subscriber can
+        open (:mod:`socialhome.domain.subscriber_accepts`), already
+        validated by the route. NOT in the signed bytes (an older GFS still
+        verifies the subscribe) and never stored: it is forwarded to the
+        owner only in the ``reason: "subscribe"`` notify of a NEW seat — and
+        not even then when the same seat was new within
+        :data:`SEAT_CHURN_WINDOW_S` (an unsubscribe → subscribe loop earns
+        the key again, never a second bundle). Re-subscribing a seat already
+        held sends ``reason: "reconnect"`` (key repair only), unless that
+        seat was notified within :data:`RECONNECT_NOTIFY_DEDUPE_S` — usually
+        by the follower's WS hello (:meth:`on_subscriber_connected`), which
+        reaches at most :data:`MAX_RECONNECT_NOTIFIES` seats.
         """
         inst = await self._verify_signed_request(
             instance_id,
@@ -897,11 +963,34 @@ class GfsFederationService:
         }
         if space_id not in held and len(held) >= MAX_SUBSCRIPTIONS_PER_INSTANCE:
             raise PermissionError("subscription limit reached")
-        await self._repo.add_subscriber(
+        created = await self._repo.add_subscriber(
             space_id=space_id,
             instance_id=instance_id,
         )
         log.debug("GFS: %s subscribed to space %s", instance_id, space_id)
+        seat = _seat_key(instance_id, space_id)
+        if not created:
+            # A re-take (the follower re-subscribes every seat on each GFS-WS
+            # reconnect). Usually the hello's ``reason: "reconnect"`` notify
+            # just covered it; but the hello notifies at most
+            # MAX_RECONNECT_NOTIFIES seats, so a seat it did not reach gets
+            # its key repair here — once, never a bundle.
+            if existing.owning_instance == instance_id or self._notified_seats.seen(
+                seat
+            ):
+                return
+            await self._notify_owner_new_subscriber(
+                existing.owning_instance,
+                space_id,
+                inst,
+                reason=NEW_SUBSCRIBER_REASON_RECONNECT,
+            )
+            return
+        if self._seat_churn.seen(seat):
+            # Unsubscribed and back within the window: the key again, but
+            # the one-time bundle is not re-earned by churning the seat.
+            accepts = ()
+        self._seat_churn.record(seat)
 
         # Phase 5b-b — best-effort notify the space OWNER so a seed-holder can
         # seal the per-space content key to this new subscriber (the GFS stays
@@ -912,7 +1001,11 @@ class GfsFederationService:
         # subscriber list). If the owner is offline (no WS), the frame is
         # dropped — that, too, is the reconcile's job, NOT a subscribe failure.
         await self._notify_owner_new_subscriber(
-            existing.owning_instance, space_id, inst
+            existing.owning_instance,
+            space_id,
+            inst,
+            reason=NEW_SUBSCRIBER_REASON_SUBSCRIBE,
+            accepts=accepts,
         )
 
     async def _notify_owner_new_subscriber(
@@ -920,30 +1013,45 @@ class GfsFederationService:
         owning_instance: str,
         space_id: str,
         subscriber: ClientInstance,
+        *,
+        reason: str,
+        accepts: tuple[str, ...] = (),
     ) -> None:
         """Push a ``new_subscriber`` frame to the space owner's WS (best-effort).
 
         Carries the subscriber's registered Ed25519 identity ``public_key`` +
         its published key-wrap pubkey/suite/self-signature so the owner can
         verify the key-wrap binding end-to-end (``verify_keywrap_binding``,
-        anti-GFS-substitution) before sealing. Never raises — a missing socket
-        or a send error is logged and swallowed (the 5b-c reconcile backstops
+        anti-GFS-substitution) before sealing. *reason* (v_61) is
+        ``"subscribe"`` for a NEW seat — then the subscriber's *accepts*
+        labels ride along — or ``"reconnect"`` for the key repair on the
+        subscriber's WS hello; the owner sends the one-time author-profiles
+        bundle only for ``"subscribe"``. Never raises — a missing socket or
+        a send error is logged and swallowed (the 5b-c reconcile backstops
         an offline owner)."""
         if self._ws_registry is None:
             return
+        sub: dict[str, object] = {
+            "instance_id": subscriber.instance_id,
+            "identity_public_key": subscriber.public_key,
+            "keywrap_public_key": subscriber.keywrap_public_key,
+            "kem_suite": subscriber.kem_suite,
+            "keywrap_sig": subscriber.keywrap_sig,
+        }
+        if reason == NEW_SUBSCRIBER_REASON_SUBSCRIBE:
+            sub["accepts"] = list(accepts)
+        # Recorded BEFORE the send, so a concurrent re-take of the same seat
+        # sees it. An owner that was offline then gets its repair from the
+        # next re-take after the window, or from its own 5b-c reconcile.
+        self._notified_seats.record(_seat_key(subscriber.instance_id, space_id))
         try:
             await self._ws_registry.send(
                 owning_instance,
                 {
                     "type": "new_subscriber",
+                    "reason": reason,
                     "space_id": space_id,
-                    "subscriber": {
-                        "instance_id": subscriber.instance_id,
-                        "identity_public_key": subscriber.public_key,
-                        "keywrap_public_key": subscriber.keywrap_public_key,
-                        "kem_suite": subscriber.kem_suite,
-                        "keywrap_sig": subscriber.keywrap_sig,
-                    },
+                    "subscriber": sub,
                 },
             )
         except Exception as exc:  # defensive — never fail a subscribe on notify
@@ -1013,6 +1121,12 @@ class GfsFederationService:
             # An owner needs no handoff to itself.
             if space.owning_instance == instance_id:
                 continue
+            # A flapping socket: this seat's owner was asked by a hello
+            # moments ago. Only a HELLO counts here: a subscribe notify sent
+            # while the socket was down must still be repaired now.
+            seat = _seat_key(instance_id, space.space_id)
+            if self._hello_seats.seen(seat):
+                continue
             if sent >= MAX_RECONNECT_NOTIFIES:
                 log.info(
                     "GFS: reconnect notify for %s capped at %d spaces "
@@ -1026,7 +1140,9 @@ class GfsFederationService:
                 space.owning_instance,
                 space.space_id,
                 subscriber,
+                reason=NEW_SUBSCRIBER_REASON_RECONNECT,
             )
+            self._hello_seats.record(seat)
             sent += 1
         if sent:
             log.debug(

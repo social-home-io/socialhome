@@ -915,17 +915,26 @@ from __future__ import annotations
 #:   reading "Someone"). Space-scoped; labelled "Names for a space's
 #:   followers".
 #: * **v_61** (2026-10-20, redefined before release) — a new GFS follower's
-#:   **author-profile bundle**: when the GFS tells the host a follower
-#:   subscribed (``new_subscriber``), the host sends the content-key handoff
-#:   and then ONE ``space_author_profiles_bundle`` — the authors' own signed
+#:   **author-profile bundle**: when the GFS tells the host a follower took
+#:   a NEW seat (``new_subscriber`` with ``reason: "subscribe"``; a reconnect
+#:   is ``"reconnect"``, as is a re-subscribe of a held seat the hello did not
+#:   just notify; a seat re-created within an hour of its last new seat
+#:   forwards no ``accepts``) and the follower's subscribe listed
+#:   ``author_profiles_bundle`` in ``accepts``
+#:   (next to the signed bytes, forwarded only in that frame), the host
+#:   sends the content-key handoff and then ONE
+#:   ``space_author_profiles_bundle`` — the authors' own signed
 #:   ``author_profile`` items from its cache, sealed to the follower's
 #:   key-wrap key — both TARGETED to that follower alone (the GFS
 #:   ``targeted_publish`` capability: ``POST /gfs/publish`` with ``to``).
+#:   A reconnect re-seals the key only, never a bundle. ``reason`` and
+#:   ``accepts`` ship with ``targeted_publish`` and a frame without them
+#:   earns no bundle (fail-safe), so they need no capability flag.
 #:   No federation event between households: an earlier, never-released v_61
 #:   had member households republish to every follower
 #:   (``SPACE_FOLLOWER_JOINED``, removed). **Fallback**: an older follower
-#:   ignores the unknown relay type, and an older GFS gets no bundle (and
-#:   the fanned-out handoff); either way the follower learns names on each
+#:   lists no ``accepts`` (so is sent no bundle), and an older GFS gets no
+#:   bundle (and the fanned-out handoff); either way the follower learns names on each
 #:   author's next post, as with v_60. Not space-scoped; labelled "Names for
 #:   new followers right away" — the version a household's followers code
 #:   reads bundles at.

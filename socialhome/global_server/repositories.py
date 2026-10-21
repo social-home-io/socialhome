@@ -139,7 +139,7 @@ class AbstractGfsFederationRepo(Protocol):
         *,
         space_id: str,
         instance_id: str,
-    ) -> None: ...
+    ) -> bool: ...
     async def remove_subscriber(
         self,
         *,
@@ -148,6 +148,9 @@ class AbstractGfsFederationRepo(Protocol):
     ) -> None: ...
     async def purge_subscribers(self, space_id: str) -> int: ...
     async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]: ...
+    async def get_subscriber(
+        self, space_id: str, instance_id: str
+    ) -> GfsSubscriber | None: ...
     async def list_recently_seen_subscribers(
         self, space_id: str, *, within_s: int
     ) -> set[str]: ...
@@ -174,6 +177,14 @@ class SqliteGfsFederationRepo:
     """SQLite-backed :class:`AbstractGfsFederationRepo`."""
 
     __slots__ = ("_db",)
+
+    #: One seat by its ``(space_id, instance_id)`` PRIMARY KEY, active
+    #: instance only — same JOIN as :meth:`list_subscribers`.
+    GET_SUBSCRIBER_SQL: str = (
+        "SELECT ci.instance_id FROM space_subscribers ss"
+        " JOIN client_instances ci USING (instance_id)"
+        " WHERE ss.space_id = ? AND ss.instance_id = ? AND ci.status = 'active'"
+    )
 
     def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
@@ -499,8 +510,11 @@ class SqliteGfsFederationRepo:
         *,
         space_id: str,
         instance_id: str,
-    ) -> None:
-        await self._db.enqueue(
+    ) -> bool:
+        """Take a seat; ``True`` only when this call created it (an
+        existing seat is left as is). Decided by the INSERT itself, so two
+        concurrent subscribes for one new seat never both see "new"."""
+        inserted = await self._db.enqueue_rowcount(
             "INSERT OR IGNORE INTO space_subscribers(space_id, instance_id) "
             "VALUES(?, ?)",
             (space_id, instance_id),
@@ -511,6 +525,7 @@ class SqliteGfsFederationRepo:
             "WHERE space_id=?",
             (space_id, space_id),
         )
+        return inserted > 0
 
     async def remove_subscriber(
         self,
@@ -573,6 +588,17 @@ class SqliteGfsFederationRepo:
             (space_id,),
         )
         return [GfsSubscriber(instance_id=r["instance_id"]) for r in rows]
+
+    async def get_subscriber(
+        self, space_id: str, instance_id: str
+    ) -> GfsSubscriber | None:
+        """The one seat of *instance_id* on *space_id* (an active instance),
+        or ``None`` — a point lookup on the table's PRIMARY KEY, for a
+        targeted (``to``) publish."""
+        row = await self._db.fetchone(self.GET_SUBSCRIBER_SQL, (space_id, instance_id))
+        if row is None:
+            return None
+        return GfsSubscriber(instance_id=row["instance_id"])
 
     async def list_recently_seen_subscribers(
         self, space_id: str, *, within_s: int

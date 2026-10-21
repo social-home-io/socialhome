@@ -42,7 +42,9 @@ nobody) and refuses `space_author_profiles_bundle` without one. It learns
 nothing new: it chose the subscriber, and the payload stays opaque. A
 household sends `to` only to a server whose signed capability block proves
 `targeted_publish`; an older server gets the fan-out it always got (the key
-handoff) or nothing (the profiles bundle).
+handoff) or nothing (the profiles bundle). A targeted publish reads the one
+seat by its `(space_id, instance_id)` primary key, never the space's whole
+subscriber list.
 
 ## Transport (SH ↔ GFS)
 
@@ -337,11 +339,13 @@ The Social Home ↔ GFS link is split by direction:
   household whose socket is down is not delivered and waits for the
   household to reconnect (Phase 5b-d below re-triggers the key handoff; a
   missed post is recovered by the subscriber-side refresh, never by the
-  GFS). The GFS also pushes a `{type:"new_subscriber", space_id,
+  GFS). The GFS also pushes a `{type:"new_subscriber", reason, space_id,
   subscriber:{instance_id, identity_public_key, keywrap_public_key,
-  kem_suite, keywrap_sig}}` frame to a space **owner** when a household
-  subscribes, so a seed-holder can hand the new subscriber the content key
-  (Phase 5b-b, below). This frame is best-effort — dropped if the owner has
+  kem_suite, keywrap_sig, accepts?}}` frame to a space **owner** when a
+  household takes a NEW seat (`reason:"subscribe"`, with the `accepts`
+  labels of that subscribe) or its socket reconnects (`reason:"reconnect"`,
+  no `accepts`), so a seed-holder can hand the subscriber the content key
+  (Phase 5b-b, below). Re-subscribing a seat already held sends no frame. This frame is best-effort — dropped if the owner has
   no socket; the 5b-c reconcile backstops an offline owner, and the
   subscriber's own (re)connect re-triggers the notify (Phase 5b-d).
 - **A rejected hello names no reason that leaks registration.** An unknown
@@ -1126,8 +1130,9 @@ on a fast path driven by the GFS `new_subscriber` notify (the owner-offline
 RECONCILE — a seed-holder pulling the subscriber list to catch up missed
 deliveries — is **Phase 5b-c**, below):
 
-1. **GFS notify.** On a successful `subscribe`, the GFS pushes a
-   `new_subscriber` frame to the space **owner** carrying the new subscriber's
+1. **GFS notify.** On a successful `subscribe` that creates a **new** seat,
+   the GFS pushes a `new_subscriber` frame (`reason:"subscribe"`) to the space
+   **owner** carrying the new subscriber's
    registered Ed25519 `identity_public_key` + its published key-wrap pubkey /
    suite / self-signature (`keywrap_public_key`, `kem_suite`, `keywrap_sig`).
    Only the owner is notified (the GFS authoritatively knows `owning_instance`;
@@ -1273,8 +1278,9 @@ undeliverable by design and simply waits for the socket to come back.
 
 Phase 5b-d closes the gap from the subscriber's side: when a household's
 `/gfs/ws` socket connects — **after** the hello is verified and the socket
-registered, never before — the GFS re-emits the **same** `new_subscriber` frame
-to the owner of every space that household subscribes to
+registered, never before — the GFS re-emits the `new_subscriber` frame, tagged
+`reason:"reconnect"` (and without `accepts`), to the owner of every space that
+household subscribes to
 (`GfsFederationService.on_subscriber_connected`). The owner then runs the
 identical verified seal-and-relay as 5b-b, this time with the subscriber's
 socket up to receive it.
@@ -1286,8 +1292,17 @@ to re-seal is the only content-blind repair. It is idempotent (the subscriber's
 dispatched as a background task so the WebSocket handshake never waits on it,
 fail-soft at every step (missing space, owner with no socket, repo/send error →
 logged and skipped), skips a space the connecting instance itself owns, and is
-capped at `MAX_RECONNECT_NOTIFIES` (50) spaces per connect — beyond the cap the
-5b-c reconcile still backstops, so the cap costs latency, never correctness.
+capped at `MAX_RECONNECT_NOTIFIES` (50) spaces per connect. The follower
+re-subscribes every seat right after its hello (the reconnect self-heal);
+re-taking a held seat sends the same `reason:"reconnect"` notify unless that
+seat was notified in the last 120 s (`RECONNECT_NOTIFY_DEDUPE_S`, in memory),
+so the seats past the cap get their key repair too. The first 50 are usually
+not repaired twice: the hello runs as a background task, so an early re-take
+can race it, and a duplicate handoff is idempotent. The hello itself skips a
+seat an earlier hello notified within that window (a subscribe notify sent
+while the socket was down does not count), so a flapping socket does not re-notify
+its owners on every reconnect. A reconnect therefore costs at most one
+~1–2 KB handoff per held seat: a 500-seat follower costs ≈ 750 KB. The 5b-c reconcile still backstops an offline owner.
 
 WebRTC is **not** used for the SH↔GFS leg — the GFS is publicly
 reachable, so NAT traversal buys nothing while DTLS plus per-connection
@@ -1589,24 +1604,63 @@ its own items back). From v_61 the row keeps the **author-signed item
 itself** with its writer cert and epoch (`signed_item`, `item_epoch`,
 migration 0114), so the host can forward it unchanged:
 
-- **One bundle, one follower.** When the GFS tells the host a follower
-  subscribed (`new_subscriber`, carrying the follower's GFS-registered
-  identity + key-wrap key), the host seals the content key to them and then
-  sends ONE `space_author_profiles_bundle`: the cached items of the current
+- **One bundle, one follower, once.** When the GFS tells the host a follower
+  took a NEW seat (`new_subscriber` with `reason:"subscribe"`, carrying the
+  follower's GFS-registered identity + key-wrap key and the `accepts` labels
+  of its subscribe), the host seals the content key to them and then — only
+  if `accepts` lists `author_profiles_bundle` — sends ONE
+  `space_author_profiles_bundle`: the cached items of the current
   epoch, the most recently stamped first, sealed to the follower's
   key-wrap key exactly like the handoff (`seal_to_keywrap`, KEM-suite
   tagged) and authority-signed. Both go out **targeted** — `POST
   /gfs/publish` with `to` = that follower — so no other subscriber receives
   a byte for it.
+- **Never on a reconnect.** The GFS re-sends `new_subscriber` for every
+  subscribed space on each reconnect of the follower's socket, tagged
+  `reason:"reconnect"`: the host re-seals the key and sends **no** bundle.
+  The follower re-subscribes every seat on each GFS-WS reconnect too; a
+  seat it already holds earns at most that same `reason:"reconnect"` key
+  repair (none when the hello just notified it). So neither a GFS nor a host
+  restart makes the followers download their bundles again — the decision
+  needs no host-side memory. A frame with no or an unknown `reason` (a GFS
+  without this rule) earns no bundle either: fail-safe, which is why
+  `reason` needs no capability flag of its own (it ships with
+  `targeted_publish`, the bundle's precondition).
+- **Only to a follower that opens it.** `accepts` is an optional list of
+  short labels (`[a-z0-9_]`, ≤ 16 × ≤ 48 chars) the follower sends **next
+  to** the signed `/gfs/subscribe` bytes — the signed canonical is
+  unchanged, so an older GFS still verifies the subscribe and ignores the
+  field. The GFS keeps only well-formed labels (a malformed one is dropped,
+  never a 400: it is a hint), stores nothing and forwards
+  it only in the `reason:"subscribe"` frame. Every subscribe carries the
+  same list, member seats included, so it never tells the GFS which seats
+  are writers'. An older follower lists nothing and is sent no ≤ 1 MB
+  bundle it would drop. The GFS could add or strip labels; adding only
+  costs the host bundles within the cap below, stripping only delays names.
 - **Bounded.** At most 50 authors and 1 MB of items, split into parts of at
-  most 160 KB (each sealed part fits the GFS's 256 KB publish cap). At most
-  one bundle per `(space, follower)` an hour: the GFS re-sends
-  `new_subscriber` on each of the follower's reconnects; the key is re-sealed
-  every time, the bundle is not. And at most 30 bundles per space a minute,
-  whoever is named: a GFS can name any registered household in
-  `new_subscriber`, so a hostile one cannot make the host upload a bundle
+  most 160 KB (each sealed part fits the GFS's 256 KB publish cap). And at
+  most 30 bundles per space a minute (a bounded per-space window), whoever
+  is named: a GFS can name any registered household in a `reason:
+  "subscribe"` frame, so a hostile one cannot make the host upload a bundle
   per name (it could never read one — each is sealed to the named
   household's verified key-wrap key).
+- **Churn earns no second bundle.** An unsubscribe → subscribe makes a new
+  seat, so two guards stop a loop: the GFS forwards no `accepts` for a seat
+  of the same `(follower, space)` that was new within an hour of its
+  last new seat (`SEAT_CHURN_WINDOW_S`), and the host bundles one follower of a space at
+  most once an hour (`BUNDLE_PER_FOLLOWER_EVERY_S`, an LRU of ≤ 10 000) —
+  so one follower's loop cannot use up the space's per-minute cap and leave
+  real newcomers without names. The key is re-sealed every time.
+- **One-time and best effort.** The bundle is sent for the subscribe
+  notify only, and that notify reaches the owner only while the owner's
+  socket is up **on the same GFS node** (`ws_registry.send` is local; a
+  cluster does not forward `new_subscriber`). So the bundle is lost when the
+  follower's socket is down at subscribe time, when the owner is offline,
+  and in a cluster whenever the owner's socket is on another node (behind a
+  4-node round robin, about 3 subscribes in 4). The key is not lost: the
+  follower's reconnect and the owner's 5b-c reconcile both re-seal it. The
+  names then arrive with each author's next real profile change. (Follow-up:
+  forward `new_subscriber` across cluster nodes.)
 - **The host cannot vouch.** The follower authority-verifies the envelope,
   opens it, and runs **every** check of a relayed item on each bundled item
   (author signature + self-cert, author-bound type, origin is the author's
@@ -1627,6 +1681,24 @@ republished to every follower, ≈ *A* × 25 KB × *N* (200 authors × 10 000
 followers ≈ 50 GB), and the key handoff went to all *N*; now ≤ 1 MB plus
 one handoff, to one connection.
 
+Reconnects (a GFS restart re-connecting 10 000 followers, each holding a
+seat in the space): before, each reconnect re-notified the host twice (WS
+hello + re-subscribe), and every reconnect more than an hour after that
+follower's last bundle — or any after a host restart, the dedupe being in
+memory — cost a ≤ 1 MB bundle per follower ≈ 10 GB of uploads; each targeted publish also read the space's whole subscriber list,
+10 000 × 10 000 = 10⁸ row reads on the GFS. Now: one `reason:"reconnect"`
+notify per follower-space, answered by one ~1–2 KB targeted key handoff
+(≈ 10–20 MB in all) and **no** bundle, each publish a single primary-key
+lookup.
+
+Seat churn (one follower looping unsubscribe → subscribe on one space):
+before this fix, every loop was a new seat and a ≤ 1 MB bundle, limited only
+by the 30-per-space-a-minute cap ≈ 30 MB/min ≈ 43 GB/day of host upload,
+starving real newcomers; now one bundle per follower per hour (≤ 24 MB/day),
+every other loop a ~1–2 KB key handoff. A follower with more than 50 seats:
+before this fix seats 51+ got no key repair on a reconnect until an owner's
+own reconnect; now one ~1–2 KB handoff for each of them, once per reconnect.
+
 ```mermaid
 sequenceDiagram
   autonumber
@@ -1635,17 +1707,23 @@ sequenceDiagram
   participant H as Host household
   participant O as Other followers
 
-  F->>G: subscribe (signed)
-  G->>H: WS new_subscriber {subscriber: instance_id, identity + key-wrap key}
+  F->>G: subscribe (signed) + accepts: [author_profiles_bundle]
+  G->>G: new seat? (re-take: key repair only, unless just notified)
+  G->>H: WS new_subscriber {reason: subscribe, subscriber: instance_id, identity + key-wrap key, accepts}
   H->>H: verify key-wrap binding (anti-substitution)
   H->>G: POST /gfs/publish {space_key_handoff (sealed to F), to: F}
   G->>F: relay (F only)
+  H->>H: reason = subscribe and accepts bundle? (else stop here)
   H->>H: cached signed author_profile items @ current epoch (≤ 50, ≤ 1 MB)
   H->>G: POST /gfs/publish {space_author_profiles_bundle (sealed to F), to: F}
   G->>F: relay (F only)
   F->>F: authority sig → open → per item: author sig, writer cert @ epoch
   F->>F: keep in space_author_profiles → names every author at once
   Note over G,O: nothing is sent to the other followers
+  F->>G: later: WS reconnect (hello)
+  G->>H: WS new_subscriber {reason: reconnect, subscriber (no accepts)}
+  H->>G: POST /gfs/publish {space_key_handoff (sealed to F), to: F}
+  G->>F: relay (F only) — no bundle
 ```
 
 ### Comments, reactions and own edits / deletes (v_49)
