@@ -13,6 +13,10 @@
  *   an empty ``<div id="root">`` and a ``<script id="boot">`` JSON payload
  *   with ``{instanceId, highlightId, token}``; requests stay relative.
  *
+ * The pinned page also opens a shared moment (``moment_link.ts``) and a
+ * GFS's public pages — space, invite, profile (``page_link.ts``,
+ * ``public_pages.tsx``); the GFS-served page never does.
+ *
  * Wire framing must stay in lockstep with
  * ``socialhome/services/highlight_public_framing.py`` — see the
  * golden-bytes test in ``tests/protocol/test_highlight_public_framing.py``.
