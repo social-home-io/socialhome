@@ -19283,9 +19283,20 @@ a.sh-btn--ghost:hover {
   padding: var(--sh-space-md) 0;
   border-top: 1px dashed var(--sh-border);
 }
-.sh-settings-subcard:first-of-type {
+/* Only a subcard that opens its section (right under the section's
+ * ``<h2>``, or first of all) drops the divider. ``:first-of-type`` used to
+ * do this and also matched the first subcard AFTER plain toggle rows (it
+ * is the first ``<div>``): Settings › Privacy's "Show in my sidebar" then
+ * sat flush against the toggle row above it. */
+.sh-settings-subcard:first-child,
+h2 + .sh-settings-subcard {
   border-top: none;
   padding-top: 0;
+}
+/* After a toggle row the row's own dashed bottom is the divider: keep the
+ * subcard's top padding, drop its second dashed line. */
+.sh-toggle-row + .sh-settings-subcard {
+  border-top: none;
 }
 .sh-settings-subcard h3 {
   margin-top: 0;
