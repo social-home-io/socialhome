@@ -11,6 +11,7 @@ active registration — has exactly one place it could go wrong.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from aiohttp import web
@@ -18,6 +19,20 @@ from aiohttp import web
 from . import app_keys as K
 from .domain import GfsUserRegistration
 from .invites import build_invite_code
+
+#: A stored image a public page may show: a base64 ``data:`` URI of a raster
+#: type. An ``https://`` URL (or an SVG, which can carry script) is never
+#: passed on — not to the viewer, not into a link preview.
+_IMAGE_DATA_URI_RE = re.compile(
+    r"data:image/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}"
+)
+
+
+def image_data_uri(value: str | None) -> str | None:
+    """``value`` if it is a raster ``data:`` image a public page may show."""
+    if value and _IMAGE_DATA_URI_RE.fullmatch(value):
+        return value
+    return None
 
 
 async def server_name(app: web.Application) -> str:

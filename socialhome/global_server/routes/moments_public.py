@@ -51,9 +51,9 @@ from ..admin_service import verify_report_signature
 from ..cluster_relay import AUDIENCE_KEY_MAX_LEN
 from ..domain import GfsUserPicture
 from ..html_page import html_response
+from ..link_preview import person_handoff
 from ..moment_media import MediaRefused
 from ..page_models import load_person_page
-from ..public import viewer_redirect
 from .base import GfsBaseView
 from .rtc import RELAY_AUTH_MAX_SKEW_SECONDS, _rtc_authenticate
 
@@ -614,15 +614,16 @@ class GfsUserDirectoryHtmlView(GfsBaseView):
 class GfsUserDetailHtmlView(GfsBaseView):
     """``GET /moments/{user_id}`` — per-user landing with Follow CTA.
 
-    A ``302`` to the pinned viewer when one is configured
-    (:mod:`..public_viewer`; it reads ``GET /gfs/pages/people/{user_id}``),
-    else rendered here."""
+    The hand-off page to the pinned viewer when one is configured
+    (:mod:`..link_preview`; the viewer reads
+    ``GET /gfs/pages/people/{user_id}``), else rendered here."""
 
     async def get(self) -> web.Response:
         user_id = self.match("user_id")
         viewer = self.svc(K.gfs_public_viewer_key)
-        if viewer is not None:
-            viewer_redirect(viewer.person(user_id))
+        target = viewer.person(user_id) if viewer is not None else None
+        if viewer is not None and target is not None:
+            return await person_handoff(self.request.app, viewer, user_id, target)
         page = await load_person_page(self.request.app, user_id)
         if page is None:
             return web.Response(status=404, text="User not found")

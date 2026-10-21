@@ -1,13 +1,15 @@
-"""The public pages in the pinned viewer: redirects + their JSON.
+"""The public pages in the pinned viewer: hand-off pages + their JSON.
 
-``/spaces/{id}``, ``/join/{token}`` and ``/moments/{user}`` answer a 302 to
-the configured viewer; ``/gfs/pages/…`` serves what the viewer renders,
+``/spaces/{id}``, ``/join/{token}`` and ``/moments/{user}`` answer a
+link-preview page that refreshes to the configured viewer; ``/gfs/pages/…`` serves what the viewer renders,
 cross-origin, with images as ``data:`` URIs only.
 """
 
 from __future__ import annotations
 
 import base64
+import html
+import re
 import time
 from dataclasses import replace
 from urllib.parse import parse_qsl, urlsplit
@@ -151,7 +153,17 @@ def _fragment(location: str) -> tuple[str, dict[str, str]]:
     return page, dict(parse_qsl(fragment))
 
 
-# ─── Redirects ────────────────────────────────────────────────────────────
+_REFRESH_RE = re.compile(r'<meta http-equiv="refresh" content="0;url=([^"]+)">')
+
+
+async def _handoff_target(resp) -> str:
+    """The viewer URL the hand-off page refreshes to (HTML-unescaped)."""
+    match = _REFRESH_RE.search(await resp.text())
+    assert match, "hand-off page without a refresh"
+    return html.unescape(match.group(1))
+
+
+# ─── Hand-off pages (link preview + refresh) ──────────────────────────────
 
 
 @pytest.mark.parametrize(
@@ -162,34 +174,125 @@ def _fragment(location: str) -> tuple[str, dict[str, str]]:
         ("/moments/u-noor", "person", "u", "u-noor"),
     ],
 )
-async def test_a_public_page_redirects_to_the_pinned_viewer(
+async def test_a_public_page_hands_off_to_the_pinned_viewer(
     client, path, view, key, value
 ):
     resp = await client.get(path, allow_redirects=False)
-    assert resp.status == 302
+    assert resp.status == 200
+    assert "Location" not in resp.headers
     assert resp.headers["Cache-Control"] == "no-store"
-    page, params = _fragment(resp.headers["Location"])
+    assert resp.headers["Referrer-Policy"] == "no-referrer"
+    assert resp.headers["Content-Security-Policy"].startswith("default-src 'none'")
+    page, params = _fragment(await _handoff_target(resp))
     manifest = load_pinned_viewer()
     assert manifest is not None
     assert page == f"{_VIEWER}/{manifest.path}"
     assert params == {"v": view, "g": _GFS, key: value}
 
 
-async def test_the_redirect_names_no_token_outside_the_fragment(client):
+async def test_the_handoff_names_no_token_outside_the_fragment(client):
     resp = await client.get("/join/tok_abc-123", allow_redirects=False)
-    page, _ = _fragment(resp.headers["Location"])
+    page, _ = _fragment(await _handoff_target(resp))
     assert "tok_abc-123" not in page
+    text = await resp.text()
+    # The token appears only inside the viewer link (refresh + plain link).
+    assert text.count("tok_abc-123") == 2
 
 
-async def test_every_invite_token_gets_the_same_redirect_shape(client):
-    """Live, expired or never issued: the redirect looks the token up not at
-    all, so it can't tell a prober which tokens exist."""
+async def test_every_invite_token_gets_the_same_handoff(client):
+    """Live, expired or never issued: the hand-off looks the token up not at
+    all, so apart from echoing the token it is byte-for-byte the same."""
     await _space(client._app)
-    live = await _invite(client._app)
-    for token in (live, "never-issued"):
+    live = await _invite(client._app, token="tok_live_0001")
+    texts = []
+    for token in (live, "tok_none_0001"):
         resp = await client.get(f"/join/{token}", allow_redirects=False)
-        assert resp.status == 302
-        assert _fragment(resp.headers["Location"])[1]["t"] == token
+        assert resp.status == 200
+        assert _fragment(await _handoff_target(resp))[1]["t"] == token
+        texts.append((await resp.text()).replace(token, "TOKEN"))
+    assert texts[0] == texts[1]
+    # Generic tags only: nothing about the space the invite is for.
+    assert "Garden Club" not in texts[0]
+    assert "og:image" not in texts[0]
+
+
+async def test_the_space_handoff_carries_its_preview(client):
+    await _space(client._app)
+    await client._app[gfs_admin_repo_key].set_config("server_name", "Bern GFS")
+    resp = await client.get("/spaces/sp-garden", allow_redirects=False)
+    text = await resp.text()
+    assert '<meta property="og:title" content="Garden Club">' in text
+    assert '<meta property="og:description" content="Tomatoes and swaps">' in text
+    assert '<meta property="og:site_name" content="Bern GFS">' in text
+    assert '<meta name="twitter:card" content="summary_large_image">' in text
+    image = re.search(r'<meta property="og:image" content="([^"]+)">', text)
+    assert image is not None
+    url = html.unescape(image.group(1))
+    assert url.startswith(f"{_GFS}/gfs/pages/spaces/sp-garden/image?v=")
+    # The image URL is one this GFS serves anonymously.
+    img = await client.get(urlsplit(url).path + "?" + urlsplit(url).query)
+    assert img.status == 200
+    assert img.headers["Content-Type"] == "image/png"
+    assert await img.read() == base64.b64decode(_PNG.split(",", 1)[1])
+
+
+async def test_the_space_handoff_escapes_owner_text(client):
+    await _space(
+        client._app,
+        name='"><script>alert(1)</script>',
+        description="a & b <i>",
+        cover_url="https://tracker.example.com/c.png",
+    )
+    resp = await client.get("/spaces/sp-garden", allow_redirects=False)
+    text = await resp.text()
+    assert "<script" not in text
+    assert "&quot;&gt;&lt;script&gt;" in text
+    assert "a &amp; b &lt;i&gt;" in text
+    # An https cover/icon is never handed to a crawler to fetch.
+    assert "og:image" not in text
+    assert "tracker.example.com" not in text
+
+
+async def test_an_unlisted_space_hands_off_with_generic_tags(client):
+    await _space(client._app, status="pending")
+    resp = await client.get("/spaces/sp-garden", allow_redirects=False)
+    assert resp.status == 200
+    text = await resp.text()
+    assert "Garden Club" not in text
+    assert "og:image" not in text
+    img = await client.get("/gfs/pages/spaces/sp-garden/image")
+    assert img.status == 404
+
+
+async def test_a_broken_stored_image_is_a_404_not_a_crash(client):
+    await _space(client._app, cover_url="data:image/png;base64,iVBORw0KGgo")
+    img = await client.get("/gfs/pages/spaces/sp-garden/image")
+    assert img.status == 404
+
+
+async def test_the_person_handoff_carries_name_bio_and_picture(client):
+    await _person(client._app)
+    resp = await client.get("/moments/u-noor", allow_redirects=False)
+    text = await resp.text()
+    assert '<meta property="og:title" content="Noor Haddad">' in text
+    assert "Beekeeper on a rooftop." in text
+    assert '<meta property="og:type" content="profile">' in text
+    assert '<meta name="twitter:card" content="summary">' in text
+    assert (
+        f'<meta property="og:image" content="{_GFS}/gfs/moments/users/u-noor/'
+        'picture?v=d1">'
+    ) in text
+
+
+async def test_an_inactive_person_shows_nothing_of_theirs(client):
+    await _person(client._app)
+    await client._app[gfs_moment_public_registry_key].deregister_user("u-noor")
+    resp = await client.get("/moments/u-noor", allow_redirects=False)
+    assert resp.status == 200
+    text = await resp.text()
+    assert "Noor" not in text
+    assert "Beekeeper" not in text
+    assert "og:image" not in text
 
 
 @pytest.mark.security
@@ -209,16 +312,17 @@ async def test_an_id_the_viewer_would_refuse_renders_here_instead(client, path):
     resp = await client.get(path, allow_redirects=False)
     assert resp.status in (200, 404)
     assert "Location" not in resp.headers
+    assert "http-equiv" not in await resp.text()
 
 
 @pytest.mark.security
-async def test_the_redirect_target_never_comes_from_the_request(client):
+async def test_the_handoff_target_never_comes_from_the_request(client):
     resp = await client.get(
         "/spaces/sp-garden",
         headers={"Host": "evil.example", "X-Forwarded-Host": "evil.example"},
         allow_redirects=False,
     )
-    location = resp.headers["Location"]
+    location = await _handoff_target(resp)
     assert urlsplit(location).netloc == "viewer.example.org"
     assert _fragment(location)[1]["g"] == _GFS
 

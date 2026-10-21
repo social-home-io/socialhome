@@ -139,7 +139,8 @@ class GfsConfig:
     #: Where the PINNED viewer is published (``[server]
     #: public_viewer_base_url``, ``GFS_PUBLIC_VIEWER_BASE_URL``). The public
     #: pages ``/spaces/{id}``, ``/join/{token}`` and ``/moments/{user}``
-    #: answer a 302 to it (:mod:`.public_viewer`); empty — or not an
+    #: answer a link-preview page that refreshes to it
+    #: (:mod:`.public_viewer`, :mod:`.link_preview`); empty — or not an
     #: ``https://`` base — keeps the pages this server renders itself.
     public_viewer_base_url: str = PROJECT_PINNED_VIEWER_URL
 
@@ -608,8 +609,9 @@ trusted_proxies = [
 write_batch_window_ms = 5
 # The public pages of this server — a space's page (/spaces/<id>), an invite
 # link (/join/<token>) and a person's Momentum profile (/moments/<user>) —
-# open in the pinned Social Home viewer published here: a 302 carries the
-# page to it, everything it needs in the link's #fragment, and the viewer
+# open in the pinned Social Home viewer published here: a small page with the
+# link-preview tags refreshes to it, everything it needs in the link's
+# #fragment, and the viewer
 # reads this server's JSON (/gfs/pages/...). https only (http only for
 # localhost). Set "" to keep rendering those pages on this server instead.
 # Env override: GFS_PUBLIC_VIEWER_BASE_URL.

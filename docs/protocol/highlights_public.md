@@ -505,9 +505,10 @@ Owner decision 2026-10-21: everything a non-member opens from a GFS opens
 in this same viewer. Besides highlight and moment links that is a global
 space's page, an invite landing and a person's Momentum profile. The GFS
 keeps its own `/` landing (the operator's page); the other three answer a
-`302` when `[server] public_viewer_base_url` is set (default
+tiny hand-off page — link-preview tags plus a refresh to the viewer — when
+`[server] public_viewer_base_url` is set (default
 `https://viewer.social-home.io`, `GFS_PUBLIC_VIEWER_BASE_URL`;
-`socialhome/global_server/public_viewer.py`):
+`socialhome/global_server/public_viewer.py`, `link_preview.py`):
 
 | GFS page | Viewer link (all in the fragment) | The viewer reads |
 |---|---|---|
@@ -521,7 +522,7 @@ keeps its own `/` landing (the operator's page); the other three answer a
   committed manifest's `v/<hash>/` and the GFS's own `base_url`; the one
   request-derived value is URL-encoded after the `#`, and only when it is
   an id the viewer accepts (`A-Za-z0-9._~-`, bounded, never only dots) —
-  otherwise the GFS renders the page itself. `/join/` redirects before the
+  otherwise the GFS renders the page itself. `/join/` hands off before the
   token is looked up, so every token gets the same answer.
 - **Fallback.** An empty base (a self-hosted GFS without a viewer), one
   that isn't `https://` (localhost aside), a `base_url` the viewer would
@@ -542,14 +543,35 @@ keeps its own `/` landing (the operator's page); the other three answer a
   and the public pages follow `prefers-color-scheme`
   (`client/gfs/viewer_pages.css`, inlined after the stage's styles under
   the same hashed `<style>`; the highlight / moment stage stays dark).
-- **Cost.** Opening a page through the viewer is one redirect plus one
-  JSON read on the GFS (both in the pages' 30 / min / IP window) and the
-  static page from the viewer's host — the same work the GFS-rendered page
-  was, minus the HTML. No fan-out, nothing stored.
-- **Lost: link previews.** A chat app that unfurls `/spaces/{id}` follows
-  the 302 to a static page with no `og:` tags, so the preview shows the
-  generic page title instead of the space's name and description (the
-  cover never unfurled: it is a `data:` URI).
+- **Link previews (the hand-off page).** A chat app unfurling the link
+  reads the GFS's answer, not the viewer's (which knows nothing until its
+  script reads the fragment), so the GFS answers `200` with the page's
+  `og:` / `twitter:` tags and `<meta http-equiv="refresh" content="0;url=…">`
+  plus a plain link to the same viewer URL a `302` carried (owner decision
+  2026-10-21; `socialhome/global_server/link_preview.py`):
+  - `/spaces/{id}`: a listed space's name, description and an `og:image`
+    of `GET /gfs/pages/spaces/{id}/image` (the stored raster cover, else
+    icon, decoded — `summary_large_image` for a cover); an unlisted id gets
+    generic tags.
+  - `/moments/{user}`: display name, bio and `og:image` of the mirrored
+    picture (`GET /gfs/moments/users/{user}/picture`) — only for an ACTIVE
+    directory entry, which `GET /gfs/moments/users/{user}` already shows.
+  - `/join/{token}`: generic tags only ("You're invited to a space", the
+    server's name). The token is not looked up; the page is identical for
+    every token apart from the token echoed inside the viewer link.
+  - The page is inert: `Content-Security-Policy: default-src 'none'` (no
+    script, style, image or frame), `Cache-Control: no-store`,
+    `Referrer-Policy: no-referrer`; every value HTML-escaped and bounded
+    (title 120, description 300 chars); images only absolute URLs on the
+    GFS's own `base_url`, never a URL a household supplied.
+  - No `302` for "non-HTML clients": unfurlers send `Accept: */*` like any
+    script, so sniffing would cost the previews. The viewer is reached the
+    same way by a browser.
+- **Cost.** Opening a page through the viewer is one hand-off page plus
+  one JSON read on the GFS (both in the pages' 30 / min / IP window) and
+  the static page from the viewer's host. An unfurl is one page read plus,
+  for a space with a cover, one image read (≤ the stored cover's bytes).
+  No fan-out, nothing stored.
 
 ## Who shared it (sealed author profile)
 

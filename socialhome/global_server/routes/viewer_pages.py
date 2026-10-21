@@ -6,6 +6,8 @@
   only, and the request line never names it (``GET /join/{token}`` logs
   ``/join/***`` for the same reason).
 * ``GET  /gfs/pages/people/{user_id}`` — a person's Momentum profile.
+* ``GET  /gfs/pages/spaces/{space_id}/image`` — the space's cover (else
+  icon) as bytes, for link previews (:mod:`..link_preview`).
 
 Anonymous, cross-origin (:mod:`..viewer_cors`, no credentials), per-IP
 rate limited with the public pages (:data:`..public.LISTING_MAX_PER_MINUTE`)
@@ -26,14 +28,16 @@ source, so a page never makes a visitor's browser reach a third party.
 from __future__ import annotations
 
 import base64
-import re
+import binascii
 
 from aiohttp import web
 
+from ...csp import media_response_headers
 from .. import app_keys as K
 from ..html_page import css_color
 from ..markdown_lite import MAX_SOURCE_CHARS
 from ..page_models import (
+    image_data_uri,
     load_invite_page,
     load_person_page,
     load_space_page,
@@ -48,26 +52,12 @@ INVITE_BODY_MAX_BYTES: int = 1024
 #: Longest invite token looked up (``public_viewer.MAX_INVITE_TOKEN_CHARS``).
 _MAX_TOKEN_CHARS = 256
 
-#: A stored image the viewer may show: a base64 ``data:`` URI of a raster
-#: type. An ``https://`` URL (or an SVG, which can carry script) is never
-#: handed to the viewer.
-_IMAGE_DATA_URI_RE = re.compile(
-    r"data:image/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}"
-)
-
 #: Mirrored picture types (``moments_public._PICTURE_MIME_ALLOWED``).
 _PICTURE_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
 
 _CATEGORIES = frozenset(value for value, _label in CATEGORY_LABELS)
 
 _DEFAULT_ACCENT = "#D2542A"
-
-
-def image_data_uri(value: str | None) -> str | None:
-    """``value`` if it is a raster ``data:`` image the viewer may show."""
-    if value and _IMAGE_DATA_URI_RE.fullmatch(value):
-        return value
-    return None
 
 
 def _not_found(name: str) -> web.Response:
@@ -106,6 +96,37 @@ class SpacePageDataView(GfsBaseView):
                     "category": category or "general",
                 },
             }
+        )
+
+
+class SpacePageImageView(GfsBaseView):
+    """``GET /gfs/pages/spaces/{space_id}/image`` — a listed space's cover
+    (else its icon) as image bytes, for a chat app's link preview
+    (:mod:`..link_preview`). The same stored ``data:`` image the space page
+    already shows, decoded; nothing for an unlisted space or a stored value
+    that isn't a raster ``data:`` URI."""
+
+    async def get(self) -> web.Response:
+        space = await load_space_page(self.request.app, self.match("space_id"))
+        stored = None
+        if space is not None:
+            stored = image_data_uri(space["cover_url"]) or image_data_uri(
+                space["icon_url"]
+            )
+        header, _, data = (stored or "").partition(",")
+        try:
+            image = base64.b64decode(data, validate=True)
+        except binascii.Error:
+            image = b""
+        if not image:
+            raise web.HTTPNotFound()
+        mime = header.removeprefix("data:").removesuffix(";base64")
+        return web.Response(
+            body=image,
+            headers={
+                **media_response_headers(mime, "space"),
+                "Cache-Control": "public, max-age=3600",
+            },
         )
 
 

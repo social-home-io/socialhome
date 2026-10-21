@@ -1472,7 +1472,8 @@ never executes outside its unit tests.
    ``publish_to_gfs`` — the blob is parked on the connection server's
    bulletin board and the response carries the shareable ``gfs.url``.
 2. **The public page.** The harness opens that URL the way a visitor's
-   browser does: a ``302`` to the pinned viewer (the shipped
+   browser does: a hand-off page — generic link-preview tags (never the
+   space's name) and a ``<meta http-equiv="refresh">`` — to the pinned viewer (the shipped
    ``public_viewer_base_url`` + the committed manifest's ``v/<hash>/``)
    with ``v=join``, ``g`` and the token in the fragment only, then the
    viewer's cross-origin ``POST /gfs/pages/invite {token}`` (``Access-Control-
@@ -1747,8 +1748,9 @@ release); ``client/gfs/*.test.ts`` cover the page.
 Part of ``all`` (after ``gfs-highlight-link``). Prereqs when run on its own:
 ``up`` + ``gfs-up`` + ``gfs-pair`` + ``gfs-moment-profile`` (``gfs-traffic``
 adds a listed space). Each page is opened as a browser would: ``GET
-/spaces/{id}`` and ``GET /moments/{user}`` answer ``302`` to the pinned
-viewer with ``v`` / ``g`` / the id in the fragment only (never in the path),
+/spaces/{id}`` and ``GET /moments/{user}`` answer a hand-off page (the
+page's ``og:`` tags, a strict ``default-src 'none'`` policy,
+``no-referrer``) whose refresh opens the pinned viewer with ``v`` / ``g`` / the id in the fragment only (never in the path),
 and the viewer's JSON read (``GET /gfs/pages/spaces/{id}``,
 ``GET /gfs/pages/people/{user}``) answers cross-origin without credentials:
 the listed space by name with ``data:`` images only, an unlisted one as the

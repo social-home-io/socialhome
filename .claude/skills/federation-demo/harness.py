@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import base64
 import functools
+import html
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -4206,9 +4208,12 @@ def _open_through_viewer(
 ) -> tuple[int, dict]:
     """Open a GFS public page the way a visitor's browser does now.
 
-    1. ``GET page_url`` answers ``302`` to the PINNED viewer — the shipped
-       base, the committed ``socialhome/pinned_viewer.json`` path — with
-       ``v`` / ``g`` / the page's id in the fragment only.
+    1. ``GET page_url`` answers ``200`` with a tiny hand-off page: the
+       page's link-preview tags (``og:title`` …; generic ones for an invite,
+       never naming its space) and a ``<meta http-equiv="refresh">`` to the
+       PINNED viewer — the shipped base, the committed
+       ``socialhome/pinned_viewer.json`` path — with ``v`` / ``g`` / the
+       page's id in the fragment only.
     2. The viewer then reads the page's JSON from the GFS named in ``g``,
        cross-origin: ``Access-Control-Allow-Origin: *``, never credentials
        (the invite token in a POST body, never in a URL).
@@ -4218,15 +4223,29 @@ def _open_through_viewer(
     opener = urllib.request.build_opener(_NoRedirect)
     try:
         with opener.open(urllib.request.Request(page_url), timeout=10.0) as r:
-            raise SystemExit(f"{what}: GET {page_url} answered {r.status}, not a 302")
+            status, body = r.status, r.read().decode("utf-8")
+            csp = r.headers.get("Content-Security-Policy", "")
+            referrer = r.headers.get("Referrer-Policy", "")
     except urllib.error.HTTPError as exc:
-        status, location = exc.code, exc.headers.get("Location", "")
-    if status != 302:
-        raise SystemExit(f"{what}: GET {page_url} answered {status}, not a 302")
+        raise SystemExit(
+            f"{what}: GET {page_url} answered {exc.code}, not the hand-off page"
+        ) from exc
+    if status != 200 or not csp.startswith("default-src 'none'"):
+        raise SystemExit(f"{what}: GET {page_url} is not the inert hand-off page")
+    if referrer != "no-referrer" or "<script" in body:
+        raise SystemExit(f"{what}: the hand-off page may leak a referrer or run code")
+    match = re.search(r'<meta http-equiv="refresh" content="0;url=([^"]+)">', body)
+    if match is None:
+        raise SystemExit(f"{what}: the hand-off page has no refresh to the viewer")
+    if '<meta property="og:title"' not in body:
+        raise SystemExit(f"{what}: the hand-off page carries no link preview")
+    if view == "join" and "og:image" in body:
+        raise SystemExit(f"{what}: an invite's preview shows more than generic tags")
+    location = html.unescape(match.group(1))
     manifest = json.loads((REPO_ROOT / "socialhome" / "pinned_viewer.json").read_text())
     page, _, fragment = location.partition("#")
     if page != f"{_VIEWER_BASE}/{manifest['path']}":
-        raise SystemExit(f"{what}: redirected to {page!r}, not the pinned viewer")
+        raise SystemExit(f"{what}: hands off to {page!r}, not the pinned viewer")
     if value in page:
         raise SystemExit(f"{what}: the viewer URL names {value!r} outside the fragment")
     params = dict(urllib.parse.parse_qsl(fragment))
@@ -4234,7 +4253,8 @@ def _open_through_viewer(
     if params != {"v": view, "g": gfs, key: value} or not gfs:
         raise SystemExit(f"{what}: fragment {params!r} is not v={view}, g, {key}")
     print(
-        f"  {what}: 302 to the pinned viewer {manifest['path']}, all in the fragment ✓"
+        f"  {what}: link preview + refresh to the pinned viewer "
+        f"{manifest['path']}, all in the fragment ✓"
     )
     headers = {"Origin": _VIEWER_BASE}
     if view == "join":
@@ -4648,7 +4668,8 @@ def cmd_gfs_invite_link() -> None:
     print(f"  a minted a member link, published at {join_url}")
 
     # 2. The public page, read exactly as a visitor's browser reads it: a
-    #    302 to the pinned viewer, which reads the page's JSON from the GFS.
+    #    hand-off page (link preview + refresh) to the pinned viewer, which
+    #    reads the page's JSON from the GFS.
     s, page = _open_through_viewer(
         join_url,
         view="join",
@@ -17330,8 +17351,9 @@ def cmd_gfs_public_pages() -> None:
     (Noor Haddad registered for public moments); ``gfs-traffic`` for a
     listed space (without it the space page's not-found state is checked).
 
-    For each page (``/spaces/{id}``, ``/moments/{user}``) asserts the 302 to
-    the pinned viewer with everything in the fragment and that the viewer's
+    For each page (``/spaces/{id}``, ``/moments/{user}``) asserts the
+    hand-off page (link-preview tags + a refresh) to the pinned viewer with
+    everything in the fragment and that the viewer's
     JSON read answers cross-origin with what the page shows; a page that
     isn't listed is one ``404 {server_name}``. ``gfs-invite-link`` covers
     ``/join/{token}`` the same way.
@@ -18247,7 +18269,7 @@ def main() -> None:
         # answers CORS on the anonymous viewer routes only.
         cmd_gfs_highlight_link()
         # ``gfs-public-pages``: the GFS's space page and Noor's profile open
-        # in the pinned viewer (302, everything in the fragment) and its
+        # in the pinned viewer (preview + refresh, all in the fragment) and its
         # JSON answers cross-origin.
         cmd_gfs_public_pages()
         # The closing check: every step's state still holds, and the log
