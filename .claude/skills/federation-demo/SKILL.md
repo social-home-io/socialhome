@@ -584,7 +584,7 @@ app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
 admin-revoke-rotation → rotation-offline-catchup → space-chat → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
-gfs-moment-profile → gfs-highlight-link → verify``
+gfs-moment-profile → gfs-highlight-link → gfs-public-pages → verify``
 in that order. The tail brings the GFS up because ``local-community``'s
 last case (a GFS-only joiner), ``gfs-moment-profile`` and
 ``gfs-highlight-link`` need it; the closing ``verify`` runs the log
@@ -1471,9 +1471,13 @@ never executes outside its unit tests.
 1. **Mint.** a mints a ``member`` link with
    ``publish_to_gfs`` — the blob is parked on the connection server's
    bulletin board and the response carries the shareable ``gfs.url``.
-2. **The public page.** The harness fetches that URL with a plain HTTP
-   client, exactly as a visitor's browser would: 200, the space's
-   name, the ``socialhome://invite#…`` code — and **not** a's
+2. **The public page.** The harness opens that URL the way a visitor's
+   browser does: a ``302`` to the pinned viewer (the shipped
+   ``public_viewer_base_url`` + the committed manifest's ``v/<hash>/``)
+   with ``v=join``, ``g`` and the token in the fragment only, then the
+   viewer's cross-origin ``POST /gfs/pages/invite {token}`` (``Access-Control-
+   Allow-Origin: *``, no credentials): 200, the space's name, the
+   ``socialhome://invite#…`` code, a PNG QR — and **not** a's
    ``inbox_url``. The page is public, so a household address on it
    would publish a network location to strangers.
 3. **The blob.** Decoded (base64url JSON) and asserted to hold public
@@ -1737,6 +1741,23 @@ viewer routes: ``Access-Control-Allow-Origin: *`` on
 ``/gfs/highlight_rtc/answer``. Then a unpublishes again. The step doesn't
 open the link in a browser (the files are published to GitHub Pages only on
 release); ``client/gfs/*.test.ts`` cover the page.
+
+### ``gfs-public-pages`` — the GFS's public pages open in the pinned viewer
+
+Part of ``all`` (after ``gfs-highlight-link``). Prereqs when run on its own:
+``up`` + ``gfs-up`` + ``gfs-pair`` + ``gfs-moment-profile`` (``gfs-traffic``
+adds a listed space). Each page is opened as a browser would: ``GET
+/spaces/{id}`` and ``GET /moments/{user}`` answer ``302`` to the pinned
+viewer with ``v`` / ``g`` / the id in the fragment only (never in the path),
+and the viewer's JSON read (``GET /gfs/pages/spaces/{id}``,
+``GET /gfs/pages/people/{user}``) answers cross-origin without credentials:
+the listed space by name with ``data:`` images only, an unlisted one as the
+single ``404 {server_name}``, and Noor's profile with her picture and the
+``gfs_id`` the Follow button needs. ``gfs-invite-link`` (step 2 and the
+revoke) and ``gfs-moment-profile`` open ``/join/{token}`` and
+``/moments/{user}`` the same way. Like ``gfs-highlight-link`` it doesn't
+render the page in a browser (published on release only); the
+``client/gfs/public_pages.test.tsx`` suite covers rendering.
 
 ### Bazaar over GFS (TODO)
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from socialhome.config import PROJECT_PINNED_VIEWER_URL
 from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
 from socialhome.global_server.config import (
     DEFAULT_TURN_TTL_SECONDS,
@@ -666,3 +667,34 @@ def test_check_turn_warns_only_for_a_url_without_a_secret(caplog):
 def test_example_toml_documents_turn_ttl():
     assert "turn_ttl_seconds = 600\n" in EXAMPLE_TOML
     assert "GFS_TURN_SECRET" in EXAMPLE_TOML
+
+
+def test_public_viewer_defaults_to_the_project_viewer(tmp_dir):
+    p = Path(tmp_dir) / "g.toml"
+    p.write_text('[server]\nbase_url = "https://gfs.example.org"\n')
+    assert GfsConfig.from_toml(p).public_viewer_base_url == PROJECT_PINNED_VIEWER_URL
+    assert GfsConfig().public_viewer_base_url == PROJECT_PINNED_VIEWER_URL
+
+
+def test_public_viewer_can_be_turned_off_in_toml(tmp_dir):
+    p = Path(tmp_dir) / "g.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://gfs.example.org"\npublic_viewer_base_url = ""\n'
+    )
+    assert GfsConfig.from_toml(p).public_viewer_base_url == ""
+
+
+def test_public_viewer_env_overrides_the_file(tmp_dir, monkeypatch):
+    p = Path(tmp_dir) / "g.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://gfs.example.org"\n'
+        'public_viewer_base_url = "https://viewer.example.org"\n'
+    )
+    monkeypatch.setenv("GFS_PUBLIC_VIEWER_BASE_URL", " ")
+    assert GfsConfig.load(p).public_viewer_base_url == ""
+    monkeypatch.setenv("GFS_PUBLIC_VIEWER_BASE_URL", "https://v2.example.org")
+    assert GfsConfig.load(p).public_viewer_base_url == "https://v2.example.org"
+
+
+def test_the_example_config_names_the_project_viewer():
+    assert f'public_viewer_base_url = "{PROJECT_PINNED_VIEWER_URL}"' in EXAMPLE_TOML

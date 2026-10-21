@@ -38,6 +38,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from ..access_log import RedactingAccessLogger
 from ..db import AsyncDatabase
 from ..hardening import install_security_headers
+from ..pinned_viewer import load_pinned_viewer
 from . import app_keys as K
 from .addressee import GfsAddressee
 from .admin import AdminAuth, build_admin_middleware, hash_password
@@ -77,6 +78,7 @@ from .public import (
     build_register_rate_limit,
     build_signup_rate_limit,
 )
+from .public_viewer import build_public_viewer_links
 from .relay_bridge import RelayBridge
 from .repositories import (
     SqliteClusterRepo,
@@ -567,6 +569,11 @@ class GfsApp:
         a[K.gfs_invite_repo_key] = self.repos.invites
         a[K.gfs_invite_service_key] = self.services.invites
         a[K.gfs_token_service_key] = self.services.tokens
+        # The public pages hand off to the pinned viewer when one is set.
+        a[K.gfs_public_viewer_key] = build_public_viewer_links(
+            self.config,
+            load_pinned_viewer() if self.config.public_viewer_base_url else None,
+        )
 
     def _register_routes(self) -> None:
         """Mount relay / cluster / rtc / admin / public / static routes."""

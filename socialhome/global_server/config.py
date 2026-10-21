@@ -12,7 +12,8 @@ Loaded with layered precedence:
    ``GFS_TRUSTED_PROXIES`` — comma-separated IPs/CIDRs, empty to clear;
    ``GFS_WRITE_BATCH_WINDOW_MS`` — the DB write-coalescing window;
    ``GFS_OPEN_SIGNUP`` — ``true``/``false``, the ``[policy] open_signup``
-   switch)
+   switch; ``GFS_PUBLIC_VIEWER_BASE_URL`` — the pinned viewer the public
+   pages redirect to, empty for the pages this server renders itself)
    — override the matching ``[server]`` key when set, so an orchestrator can retarget a
    single value (e.g. a per-instance port) without rewriting the file.
    This mirrors :class:`socialhome.config.Config` (env > file > defaults).
@@ -41,6 +42,7 @@ import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from socialhome.config import PROJECT_PINNED_VIEWER_URL
 from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
 
 from .node_route import valid_route_tag
@@ -134,6 +136,12 @@ class GfsConfig:
     #: IMMEDIATE``, so it does not hold the file lock the other cluster nodes
     #: share — it only adds latency. ``0`` commits each statement alone.
     write_batch_window_ms: int = DEFAULT_WRITE_BATCH_WINDOW_MS
+    #: Where the PINNED viewer is published (``[server]
+    #: public_viewer_base_url``, ``GFS_PUBLIC_VIEWER_BASE_URL``). The public
+    #: pages ``/spaces/{id}``, ``/join/{token}`` and ``/moments/{user}``
+    #: answer a 302 to it (:mod:`.public_viewer`); empty — or not an
+    #: ``https://`` base — keeps the pages this server renders itself.
+    public_viewer_base_url: str = PROJECT_PINNED_VIEWER_URL
 
     # [branding] — start values; admin portal overrides via DB.
     server_name: str = "My Global Server"
@@ -256,6 +264,11 @@ class GfsConfig:
             write_batch_window_ms=_window_ms(
                 server.get("write_batch_window_ms", DEFAULT_WRITE_BATCH_WINDOW_MS)
             ),
+            # A missing key keeps the project viewer; an explicit "" turns
+            # the redirect off (the pages render here, as before).
+            public_viewer_base_url=str(
+                server.get("public_viewer_base_url", PROJECT_PINNED_VIEWER_URL)
+            ).strip(),
             source_path=str(p),
         )
         if not cfg.base_url:
@@ -417,6 +430,9 @@ class GfsConfig:
             ),
             # The TURN secret is what a vault injects; the URL and TTL ride
             # along so a deploy template can set all three the same way.
+            public_viewer_base_url=env.get(
+                "GFS_PUBLIC_VIEWER_BASE_URL", self.public_viewer_base_url
+            ).strip(),
             turn_url=env.get("GFS_TURN_URL", self.turn_url),
             turn_secret=env.get("GFS_TURN_SECRET", self.turn_secret),
             turn_ttl_seconds=(
@@ -590,6 +606,14 @@ trusted_proxies = [
 # wait holds no lock, so it is safe on a cluster sharing one database file.
 # 0 commits every write on its own. Env override: GFS_WRITE_BATCH_WINDOW_MS.
 write_batch_window_ms = 5
+# The public pages of this server — a space's page (/spaces/<id>), an invite
+# link (/join/<token>) and a person's Momentum profile (/moments/<user>) —
+# open in the pinned Social Home viewer published here: a 302 carries the
+# page to it, everything it needs in the link's #fragment, and the viewer
+# reads this server's JSON (/gfs/pages/...). https only (http only for
+# localhost). Set "" to keep rendering those pages on this server instead.
+# Env override: GFS_PUBLIC_VIEWER_BASE_URL.
+public_viewer_base_url = "https://viewer.social-home.io"
 
 [branding]
 server_name       = "My Global Server"

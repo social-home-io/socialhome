@@ -8,6 +8,12 @@ Server-side-rendered HTML. No JS framework, no build step. Three routes:
   next to the ``socialhome://invite#<blob>`` code + QR a visitor copies into
   their OWN Social Home. A pure read — see :func:`handle_invite_page`.
 
+With ``[server] public_viewer_base_url`` set, the space page and the invite
+landing answer a ``302`` to the pinned viewer instead
+(:mod:`.public_viewer`), which renders them from ``/gfs/pages/…``; the
+renderers here stay the fallback for a GFS without a viewer. The landing
+(``/``) is the operator's own page and always renders here.
+
 Shared QR-token service handles the single-use 10-minute pairing token
 (spec §24.7.4) with a 1-new-token-per-30-s-per-IP rate limit.
 """
@@ -35,8 +41,8 @@ from ..rate_limiter import client_bucket
 from . import app_keys as K
 from .config import DEFAULT_TRUSTED_PROXIES
 from .html_page import css_color, html_response
-from .invites import build_invite_code
 from .markdown_lite import render_markdown
+from .page_models import load_invite_page, load_space_page, server_name
 from .repositories import PAIR_TOKEN_TTL_SECONDS as REPO_PAIR_TOKEN_TTL_SECONDS
 
 if TYPE_CHECKING:
@@ -417,14 +423,16 @@ def build_window_limiter(
 
 
 def _is_public_listing(path: str) -> bool:
-    """The public HTML pages — landing, per-space, and invite-link pages.
+    """The public HTML pages — landing, per-space, and invite-link pages —
+    and their JSON for the pinned viewer (``/gfs/pages/…``): one budget, so
+    redirect + data costs a visitor two of the same 30.
 
     ``/join/`` belongs here: it is the same kind of anonymous, unauthenticated
     SSR page, and it is the one an attacker would hammer to walk the token
     space. It writes nothing, so there is no per-household identity to key a
     limiter on — the client address is all there is.
     """
-    return path == "/" or path.startswith(("/spaces/", "/join/"))
+    return path == "/" or path.startswith(("/spaces/", "/join/", "/gfs/pages/"))
 
 
 def _is_public_rtc_entry(path: str) -> bool:
@@ -1248,36 +1256,28 @@ async def handle_landing(request: web.Request) -> web.Response:
     return html_response(html, inline_styles=[css])
 
 
+def viewer_redirect(link: str | None) -> None:
+    """Hand the page to the pinned viewer: ``302`` to *link* when one was
+    built (:mod:`.public_viewer` — the target comes from configuration
+    only; the request's id rides URL-encoded in the fragment). The
+    ``Location`` may carry an invite token, so no cache keeps the answer."""
+    if link is not None:
+        raise web.HTTPFound(link, headers={"Cache-Control": "no-store"})
+
+
 async def handle_space_page(request: web.Request) -> web.Response:
-    """GET /spaces/{slug} — per-space public page."""
-    cfg = request.app[K.gfs_config_key]
-    admin_repo = request.app[K.gfs_admin_repo_key]
-    fed_repo = request.app[K.gfs_fed_repo_key]
-
+    """GET /spaces/{slug} — per-space public page (or a 302 to the viewer)."""
     slug = request.match_info["slug"]
-    space = await fed_repo.get_space(slug)
-    # Owner-withdrawn rows are hidden from the public page too — the same
-    # discovery surface the listing + detail route filter (``hide_space``).
-    if space is None or space.status != "active" or space.withdrawn:
+    viewer = request.app[K.gfs_public_viewer_key]
+    if viewer is not None:
+        viewer_redirect(viewer.space(slug))
+    space = await load_space_page(request.app, slug)
+    if space is None:
         raise web.HTTPNotFound(reason="Space not found or not published")
-
-    server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
-    space_dict = {
-        "space_id": space.space_id,
-        "name": space.name,
-        "description": space.description,
-        "about_markdown": space.about_markdown,
-        "cover_url": space.cover_url,
-        "icon_url": space.icon_url,
-        "accent_color": space.accent_color,
-        "primary_color": space.primary_color,
-        "subscriber_count": space.subscriber_count,
-        "category": space.category,
-    }
     html, css = _render_space_page(
-        space=space_dict,
-        server_name=server_name,
-        base_url=cfg.base_url,
+        space=space,
+        server_name=await server_name(request.app),
+        base_url=request.app[K.gfs_config_key].base_url,
     )
     return html_response(html, inline_styles=[css])
 
@@ -1308,37 +1308,22 @@ async def handle_invite_page(request: web.Request) -> web.Response:
     (never published, moderator-banned, owner-withdrawn). One answer for all
     of those: distinguishing them would tell an anonymous prober which tokens
     once existed.
-    """
-    cfg = request.app[K.gfs_config_key]
-    admin_repo = request.app[K.gfs_admin_repo_key]
-    fed_repo = request.app[K.gfs_fed_repo_key]
-    invite_svc = request.app[K.gfs_invite_service_key]
 
-    invite = await invite_svc.get_live(request.match_info["gfs_token"])
-    space: dict | None = None
-    invite_code = ""
-    if invite is not None:
-        space_row = await fed_repo.get_space(invite.space_id)
-        if (
-            space_row is not None
-            and space_row.status == "active"
-            and not space_row.withdrawn
-        ):
-            # Directory metadata only — all of it already served publicly on
-            # ``/spaces/{id}`` and ``GET /gfs/spaces``.
-            space = {
-                "name": space_row.name,
-                "accent_color": space_row.accent_color,
-                "icon_url": space_row.icon_url,
-                "space_id": space_row.space_id,
-            }
-            invite_code = build_invite_code(invite.blob)
-    server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
+    With a viewer configured it answers a ``302`` to it BEFORE looking the
+    token up — every token gets the same redirect, so the redirect says
+    nothing either; the viewer asks ``POST /gfs/pages/invite``.
+    """
+    token = request.match_info["gfs_token"]
+    viewer = request.app[K.gfs_public_viewer_key]
+    if viewer is not None:
+        viewer_redirect(viewer.invite(token))
+    space = await load_invite_page(request.app, token)
+    invite_code = space["invite_code"] if space else ""
     qr_data = await _render_qr_png_data_uri(invite_code) if space else ""
     html, css = _render_invite_page(
         space=space,
         invite_code=invite_code,
         invite_qr_data_uri=qr_data,
-        server_name=server_name,
+        server_name=await server_name(request.app),
     )
     return html_response(html, inline_styles=[css], status=200 if space else 404)

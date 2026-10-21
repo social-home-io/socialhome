@@ -20,7 +20,8 @@ Three surfaces:
   ``GET /gfs/moments/users/{user_id}`` (per-user JSON),
   ``GET /gfs/moments/users/{user_id}/picture`` (avatar bytes).
 * **Public landing** ``GET /moments`` and ``GET /moments/{user_id}``
-  (HTML SPA shells) — anon-browseable directory + per-user pages.
+  (HTML SPA shells) — anon-browseable directory + per-user pages. The
+  per-user page hands off to the pinned viewer when one is configured.
 
 All signed endpoints reuse :func:`_rtc_authenticate` so the same
 middleware that gates the Highlights publish flow gates these.
@@ -51,6 +52,8 @@ from ..cluster_relay import AUDIENCE_KEY_MAX_LEN
 from ..domain import GfsUserPicture
 from ..html_page import html_response
 from ..moment_media import MediaRefused
+from ..page_models import load_person_page
+from ..public import viewer_redirect
 from .base import GfsBaseView
 from .rtc import RELAY_AUTH_MAX_SKEW_SECONDS, _rtc_authenticate
 
@@ -609,15 +612,21 @@ class GfsUserDirectoryHtmlView(GfsBaseView):
 
 
 class GfsUserDetailHtmlView(GfsBaseView):
-    """``GET /moments/{user_id}`` — per-user landing with Follow CTA."""
+    """``GET /moments/{user_id}`` — per-user landing with Follow CTA.
+
+    A ``302`` to the pinned viewer when one is configured
+    (:mod:`..public_viewer`; it reads ``GET /gfs/pages/people/{user_id}``),
+    else rendered here."""
 
     async def get(self) -> web.Response:
-        registry = self.svc(K.gfs_moment_public_registry_key)
         user_id = self.match("user_id")
-        reg = await registry.get_registration(user_id)
-        if reg is None or reg.status != "active":
+        viewer = self.svc(K.gfs_public_viewer_key)
+        if viewer is not None:
+            viewer_redirect(viewer.person(user_id))
+        page = await load_person_page(self.request.app, user_id)
+        if page is None:
             return web.Response(status=404, text="User not found")
-        followers = await registry.follower_count(user_id)
+        reg, followers = page.registration, page.follower_count
         cfg = self.request.app[K.gfs_config_key]
         gfs_id = cfg.instance_id
         picture_src = (

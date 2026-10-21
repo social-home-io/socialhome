@@ -12,6 +12,7 @@
  */
 import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
+import { t } from './viewer_i18n'
 
 export const AUTO_RETRY_DELAYS_MS: readonly number[] = [10_000, 30_000, 60_000]
 
@@ -72,7 +73,7 @@ export function ViewerError({
     <div class={className} role="alert">
       <p>{message}</p>
       <button ref={button} type="button" class="viewer-retry" onClick={retry.manual}>
-        Try again
+        {t('retry')}
       </button>
     </div>
   )

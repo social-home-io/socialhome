@@ -139,6 +139,22 @@ def viewer_gfs_base(url: str) -> str | None:
     return _https_base(url)
 
 
+def viewer_page_link(
+    base_url: str,
+    viewer: PinnedViewer,
+    *,
+    gfs_base: str,
+    view: str,
+    params: list[tuple[str, str]],
+) -> str:
+    """The link that opens one of the viewer's public pages (``view``: a
+    space, an invite, a person) for the GFS at ``gfs_base``. Like
+    :func:`pinned_link`, everything rides in the fragment, so the viewer's
+    host never logs which page was opened (nor an invite token)."""
+    fragment = urlencode([("v", view), ("g", gfs_base), *params])
+    return f"{base_url.rstrip('/')}/{viewer.path}#{fragment}"
+
+
 def pinned_link(
     base_url: str,
     viewer: PinnedViewer,

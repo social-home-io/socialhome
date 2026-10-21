@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { UNAVAILABLE_COPY, humanizeViewerError } from './viewer_errors'
+import { humanizeViewerError } from './viewer_errors'
+import { LOCALES } from './viewer_i18n'
+
+const UNAVAILABLE_COPY = LOCALES.en['error.unavailable']
 
 describe('humanizeViewerError', () => {
   it('maps the uniform GFS 503 to neutral "not available" copy', () => {
@@ -24,6 +27,12 @@ describe('humanizeViewerError', () => {
   it('falls back to a generic message when there is none', () => {
     expect(humanizeViewerError(null)).toBe('Couldn’t connect.')
     expect(humanizeViewerError('')).toBe('Couldn’t connect.')
+  })
+
+  it('says "not available" in every language, never "offline"', () => {
+    for (const table of Object.values(LOCALES)) {
+      expect(table['error.unavailable'].toLowerCase()).not.toMatch(/offline|online|ended|beendet|hors ligne|desconect/)
+    }
   })
 
   it('passes other messages through unchanged', () => {

@@ -137,6 +137,11 @@ from .rtc import (
     RtcPingView,
     RtcSessionView,
 )
+from .viewer_pages import (
+    InvitePageDataView,
+    PersonPageDataView,
+    SpacePageDataView,
+)
 from .ws import GfsWebSocketView
 
 
@@ -222,6 +227,12 @@ def register_routes(
     app.router.add_get("/", handle_landing)
     app.router.add_get("/spaces/{slug}", handle_space_page)
     app.router.add_get("/join/{gfs_token}", handle_invite_page)
+    # Their content as JSON for the pinned viewer (``..public_viewer``), which
+    # the pages above redirect to when one is configured. Anonymous,
+    # cross-origin (``..viewer_cors``), rate limited with the pages.
+    app.router.add_view("/gfs/pages/spaces/{space_id}", SpacePageDataView)
+    app.router.add_view("/gfs/pages/invite", InvitePageDataView)
+    app.router.add_view("/gfs/pages/people/{user_id}", PersonPageDataView)
 
     # Cluster (spec §24.10).
     app.router.add_view("/cluster/sync", ClusterSyncView)

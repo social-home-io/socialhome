@@ -318,7 +318,8 @@ parks it, a visitor's browser picks it up.
 | | |
 |---|---|
 | `POST /gfs/spaces/{id}/invite` | Owner parks a blob. Body `{owning_instance, blob, expires_at, ts, signature}`, signed over canonical `{action:"mint_invite", owning_instance, space_id, ts}` and verified against the household's registered instance key (±300 s). Returns `201 {gfs_token, url}`. |
-| `GET /join/{gfs_token}` | Public HTML page. Shows the space's already-public directory metadata and the `socialhome://invite#<blob>` code — copyable text **and** a QR of the same string. |
+| `GET /join/{gfs_token}` | Public page. Shows the space's already-public directory metadata and the `socialhome://invite#<blob>` code — copyable text **and** a QR of the same string. With `[server] public_viewer_base_url` set (the default) it is a `302` to the pinned viewer, which renders it (below); empty, this server renders it. |
+| `POST /gfs/pages/invite` | The same page's content for the viewer: body `{token}`, answer `{server_name, space: {name, accent_color, icon}, invite_code, qr}` or one `404 {server_name}` for every dead link. Cross-origin, no credentials, the same 30 / min / IP window as `/join/`. |
 | `DELETE\|POST /gfs/spaces/{id}/invite/{gfs_token}` | Owner takes it down. Signed over `{action:"revoke_invite", gfs_token, owning_instance, space_id, ts}`. `204`, idempotent. |
 
 The `action` discriminator lives inside the signed bytes on both verbs,
@@ -364,6 +365,23 @@ access log, which this redaction does not reach — redact the path
 component of `/join/` lines there too (or drop them entirely) and keep
 access-log retention short; Social Home itself never needs them.
 
+**In the pinned viewer.** The page a visitor sees is the same static,
+content-addressed page a public highlight link opens
+([highlights_public.md](highlights_public.md#pinned-viewer), "The
+public pages"): `GET /join/{token}` answers `302` to
+`{viewer}/v/<hash>/#v=join&g=<this GFS>&t=<token>` without looking the
+token up, so the redirect is the same for every token. The token rides
+only in the fragment — the viewer's host never receives it, and no
+`Referer` carries it — and the viewer hands it to this server in a POST
+body, so it is never in a request line either. The page keeps every
+flow: the space's name and icon, the three steps, the code with a Copy
+button (it selects the code where the clipboard is refused), the QR
+(still rendered here, delivered as a `data:` PNG — the viewer ships no
+QR encoder), "New to Social Home? Learn how to get it", and the one
+"expired or revoked" state; in the visitor's language (en, de, nl, fr,
+es) and colour scheme. A GFS without a viewer renders the page itself,
+as before; old links keep working either way.
+
 **Nor may the blob carry an address.** The page is served to anyone with
 the link, so the payload holds public keys and ids only — the redeem
 travels by instance id through `POST /gfs/envelope` (above). This is the
@@ -389,6 +407,7 @@ sequenceDiagram
     participant G as Connection server (GFS)
     participant B as Visitor's browser
     participant R as Redeemer household
+    participant V as Pinned viewer (static page)
 
     O->>G: GET /gfs/info
     G-->>O: capabilities {invite_links: true} + signature
@@ -399,6 +418,10 @@ sequenceDiagram
     O-->>B: shares {gfs}/join/{gfs_token} (chat, email, paper)
 
     B->>G: GET /join/{gfs_token}
+    G-->>B: 302 {viewer}/v/<hash>/#v=join&g=…&t={gfs_token}
+    B->>V: GET /v/<hash>/ (the fragment stays in the browser)
+    V-->>B: index.html + viewer.js (SRI)
+    B->>G: POST /gfs/pages/invite {token} (CORS, no credentials)
     Note over G: pure read — no counter, no row, no token in any log
     G-->>B: space name + icon + socialhome://invite#<blob> + QR
     B-->>R: human copies the code into their OWN Social Home

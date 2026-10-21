@@ -77,7 +77,10 @@ async def test_every_frame_after_the_opening_one_is_ciphertext():
     for f in rest:
         h, _p = _dec(f)
         assert h == {"kind": "sealed"}
-        assert b"hello" not in f and b"hl-1" not in f and b"f1" not in f
+        # The inner header's JSON values, quoted as they would appear in the
+        # clear: a bare two-byte b"f1" turns up in random ciphertext about
+        # once in a few hundred runs.
+        assert b"hello" not in f and b'"hl-1"' not in f and b'"f1"' not in f
 
     opener = StreamOpener(viewer, header, secret=secret, highlight_id="hl-1")
     inner = [_dec(opener.open(_dec(f)[1])) for f in rest]

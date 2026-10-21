@@ -3,6 +3,10 @@
  *
  *   pnpm build:pinned-viewer
  *
+ * One page for everything a Social Home link shows the outside world: a
+ * public highlight, a shared moment, and a GFS's space page, invite landing
+ * and Momentum profile (``gfs/page_link.ts``).
+ *
  * Writes
  *   client/dist-pinned/v/<hash>/index.html   static page, strict CSP meta
  *   client/dist-pinned/v/<hash>/viewer.js    the one self-contained module
@@ -28,7 +32,12 @@ const CLIENT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const OUT = join(CLIENT, 'dist-pinned')
 const STAGE = join(OUT, '.build')
 const MANIFEST = resolve(CLIENT, '..', 'socialhome', 'pinned_viewer.json')
-const CSS_SOURCE = join(CLIENT, 'gfs', 'public_highlight.css')
+/** Inlined in this order: the viewer's stage (also the GFS page's
+ *  ``_VIEWER_CSS``), then the public pages' (pinned page only). */
+const CSS_SOURCES = [
+  join(CLIENT, 'gfs', 'public_highlight.css'),
+  join(CLIENT, 'gfs', 'viewer_pages.css'),
+]
 
 /** The stylesheet as the page inlines it: comments dropped, one rule per
  *  line joined without line breaks — byte-identical to the GFS page's
@@ -72,7 +81,7 @@ function pageHtml({ css, scriptIntegrity }) {
     '<meta name="referrer" content="no-referrer">',
     '<meta name="robots" content="noindex, nofollow">',
     '<meta name="viewport" content="width=device-width,initial-scale=1">',
-    '<title>Highlight</title>',
+    '<title>Social Home</title>',
     '<link rel="icon" href="data:,">',
     `<style>${css}</style>`,
     '</head>',
@@ -90,7 +99,7 @@ async function main() {
   await build({ configFile: join(CLIENT, 'vite.pinned.config.ts'), root: CLIENT })
   const script = await readFile(join(STAGE, 'viewer.js'))
   const scriptIntegrity = `sha384-${digest('sha384', script).toString('base64')}`
-  const css = inlineCss(await readFile(CSS_SOURCE, 'utf8'))
+  const css = (await Promise.all(CSS_SOURCES.map((f) => readFile(f, 'utf8')))).map(inlineCss).join('')
   const html = pageHtml({ css, scriptIntegrity })
   const hash = digest('sha384', Buffer.from(html, 'utf8')).toString('hex').slice(0, 16)
   const dir = join(OUT, 'v', hash)

@@ -4189,20 +4189,78 @@ def cmd_gfs_space_no_subscribers() -> None:
 # ─── Step: gfs-invite-link ─────────────────────────────────────────────────
 
 
-def _http_get_text(url: str, *, timeout: float = 10.0) -> tuple[int, str]:
-    """Plain GET returning ``(status, body_text)`` — no auth, no JSON.
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Hand a 3xx back as an ``HTTPError`` instead of following it."""
 
-    :func:`_request` decodes JSON and carries a bearer token; the
-    connection server's ``/join/{gfs_token}`` page is HTML served to
-    anyone, and reading it exactly as a visitor's browser would is the
-    point of the assertion.
+    def redirect_request(self, *args, **kwargs):  # type: ignore[override]
+        return None
+
+
+#: Where the shipped GFS config sends its public pages (``[server]
+#: public_viewer_base_url``) and the origin the viewer's requests carry.
+_VIEWER_BASE = "https://viewer.social-home.io"
+
+
+def _open_through_viewer(
+    page_url: str, *, view: str, key: str, value: str, what: str
+) -> tuple[int, dict]:
+    """Open a GFS public page the way a visitor's browser does now.
+
+    1. ``GET page_url`` answers ``302`` to the PINNED viewer — the shipped
+       base, the committed ``socialhome/pinned_viewer.json`` path — with
+       ``v`` / ``g`` / the page's id in the fragment only.
+    2. The viewer then reads the page's JSON from the GFS named in ``g``,
+       cross-origin: ``Access-Control-Allow-Origin: *``, never credentials
+       (the invite token in a POST body, never in a URL).
+
+    Returns that JSON answer's ``(status, body)``.
     """
-    req = urllib.request.Request(url, headers={"Accept": "text/html"})
+    opener = urllib.request.build_opener(_NoRedirect)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, r.read().decode("utf-8", errors="replace")
+        with opener.open(urllib.request.Request(page_url), timeout=10.0) as r:
+            raise SystemExit(f"{what}: GET {page_url} answered {r.status}, not a 302")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", errors="replace")
+        status, location = exc.code, exc.headers.get("Location", "")
+    if status != 302:
+        raise SystemExit(f"{what}: GET {page_url} answered {status}, not a 302")
+    manifest = json.loads((REPO_ROOT / "socialhome" / "pinned_viewer.json").read_text())
+    page, _, fragment = location.partition("#")
+    if page != f"{_VIEWER_BASE}/{manifest['path']}":
+        raise SystemExit(f"{what}: redirected to {page!r}, not the pinned viewer")
+    if value in page:
+        raise SystemExit(f"{what}: the viewer URL names {value!r} outside the fragment")
+    params = dict(urllib.parse.parse_qsl(fragment))
+    gfs = params.get("g", "")
+    if params != {"v": view, "g": gfs, key: value} or not gfs:
+        raise SystemExit(f"{what}: fragment {params!r} is not v={view}, g, {key}")
+    print(
+        f"  {what}: 302 to the pinned viewer {manifest['path']}, all in the fragment ✓"
+    )
+    headers = {"Origin": _VIEWER_BASE}
+    if view == "join":
+        req = urllib.request.Request(
+            f"{gfs}/gfs/pages/invite",
+            method="POST",
+            data=json.dumps({"token": value}).encode(),
+            headers={**headers, "Content-Type": "application/json"},
+        )
+    else:
+        segment = "spaces" if view == "space" else "people"
+        req = urllib.request.Request(
+            f"{gfs}/gfs/pages/{segment}/{value}", headers=headers
+        )
+    try:
+        with urllib.request.urlopen(req, timeout=15.0) as r:
+            status, hdrs, raw = r.status, r.headers, r.read()
+    except urllib.error.HTTPError as exc:
+        status, hdrs, raw = exc.code, exc.headers, exc.read()
+    if hdrs.get("Access-Control-Allow-Origin") != "*" or hdrs.get(
+        "Access-Control-Allow-Credentials"
+    ):
+        raise SystemExit(
+            f"{what}: the page JSON is not readable cross-origin: {dict(hdrs)!r}"
+        )
+    return status, json.loads(raw or b"{}")
 
 
 def _decode_invite_blob(code: str) -> dict:
@@ -4589,12 +4647,22 @@ def cmd_gfs_invite_link() -> None:
     invite_token = link["token"]
     print(f"  a minted a member link, published at {join_url}")
 
-    # 2. The public page, read exactly as a visitor's browser reads it.
-    s, html = _http_get_text(join_url)
+    # 2. The public page, read exactly as a visitor's browser reads it: a
+    #    302 to the pinned viewer, which reads the page's JSON from the GFS.
+    s, page = _open_through_viewer(
+        join_url,
+        view="join",
+        key="t",
+        value=join_url.rstrip("/").rsplit("/", 1)[-1],
+        what="gfs-invite-link",
+    )
     if s != 200:
         raise SystemExit(
-            f"gfs-invite-link: GET {join_url} answered HTTP {s}, expected 200",
+            f"gfs-invite-link: POST /gfs/pages/invite answered HTTP {s}, expected 200",
         )
+    if not str(page.get("qr", "")).startswith("data:image/png;base64,"):
+        raise SystemExit("gfs-invite-link: the invite page carries no QR of the code")
+    html = json.dumps(page, ensure_ascii=False)
     if "socialhome://invite#" not in html:
         raise SystemExit(
             "gfs-invite-link: the /join page carries no socialhome://invite# "
@@ -4615,12 +4683,7 @@ def cmd_gfs_invite_link() -> None:
     print("  the /join page shows the space + a code, and no household address ✓")
 
     # 3. Same claim, structurally: decode the blob and look for an address.
-    start = html.index("socialhome://invite#")
-    end = min(
-        (i for i in (html.find("<", start), html.find("&", start)) if i > 0),
-        default=len(html),
-    )
-    payload = _decode_invite_blob(html[start:end].strip())
+    payload = _decode_invite_blob(str(page["invite_code"]))
     flat = json.dumps(payload)
     # ``127.0.0.1:1800`` catches every household port in this sandbox
     # (18001-18005) without catching the connection server's own 18765,
@@ -4821,23 +4884,26 @@ def cmd_gfs_invite_link() -> None:
         method="DELETE",
     )
     _must("a revokes the link", s, body, ok=(204,))
-    s, dead_html = _http_get_text(join_url)
+    gfs_token = join_url.rstrip("/").rsplit("/", 1)[-1]
+    s, dead = _open_through_viewer(
+        join_url, view="join", key="t", value=gfs_token, what="gfs-invite-link"
+    )
     if s != 404:
         raise SystemExit(
-            f"gfs-invite-link: GET {join_url} after the revoke answered HTTP "
+            f"gfs-invite-link: the invite page after the revoke answered HTTP "
             f"{s}, expected 404 — the blob is still on the bulletin board.",
         )
-    if "This invite has expired or was revoked" not in dead_html:
+    if set(dead) != {"server_name"}:
         raise SystemExit(
-            "gfs-invite-link: the 404 is not the styled page — a dead link "
-            "still deserves one. Body starts: " + dead_html[:200],
+            "gfs-invite-link: the dead link's answer is not the one "
+            f'"expired or revoked" shape ({{server_name}}): {dead!r}',
         )
-    if invite_token in dead_html:
+    if invite_token in json.dumps(dead) or gfs_token in json.dumps(dead):
         raise SystemExit(
             "gfs-invite-link: the revoked page echoes the dead token back — "
             "it invites the credential being copy-pasted onward.",
         )
-    print("  revoked: the /join page is a styled 404 that names no token ✓")
+    print("  revoked: the invite page is the one 404 that names no token ✓")
     s, denied = _request(
         f"{e_base}/api/spaces/join",
         token=e["token"],
@@ -10727,7 +10793,14 @@ def cmd_verify() -> None:
             )
         il_url = state.get("gfs_invite_join_url")
         if il_url:
-            s, dead = _http_get_text(il_url)
+            s, dead_body = _open_through_viewer(
+                il_url,
+                view="join",
+                key="t",
+                value=il_url.rstrip("/").rsplit("/", 1)[-1],
+                what="verify: revoked invite",
+            )
+            dead = json.dumps(dead_body)
             if s != 404:
                 failures.append(
                     f"GFS: the revoked /join page answers HTTP {s}, expected "
@@ -17250,6 +17323,85 @@ def cmd_gfs_highlight_link() -> None:
     print("gfs-highlight-link: ok")
 
 
+def cmd_gfs_public_pages() -> None:
+    """A GFS's space page and a person's profile open in the pinned viewer.
+
+    Prereqs: ``up`` + ``gfs-up`` + ``gfs-pair`` + ``gfs-moment-profile``
+    (Noor Haddad registered for public moments); ``gfs-traffic`` for a
+    listed space (without it the space page's not-found state is checked).
+
+    For each page (``/spaces/{id}``, ``/moments/{user}``) asserts the 302 to
+    the pinned viewer with everything in the fragment and that the viewer's
+    JSON read answers cross-origin with what the page shows; a page that
+    isn't listed is one ``404 {server_name}``. ``gfs-invite-link`` covers
+    ``/join/{token}`` the same way.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'up' + 'gfs-up' + 'gfs-pair' first")
+    gfs = f"http://127.0.0.1:{GFS_PORT}"
+
+    space_id = state.get("gfs_space_id")
+    if not space_id:
+        # ``gfs-traffic`` lists one without recording it: take the directory's.
+        s, listing = _request(f"{gfs}/gfs/spaces")
+        rows = (
+            listing if isinstance(listing, list) else (listing or {}).get("spaces", [])
+        )
+        space_id = next((r.get("space_id") for r in rows if r.get("space_id")), None)
+    if space_id:
+        s, page = _open_through_viewer(
+            f"{gfs}/spaces/{space_id}",
+            view="space",
+            key="s",
+            value=space_id,
+            what="gfs-public-pages: space",
+        )
+        space = page.get("space") or {}
+        if s != 200 or space.get("space_id") != space_id or not space.get("name"):
+            raise SystemExit(f"gfs-public-pages: space page JSON {s} {page!r}")
+        for field in ("cover", "icon"):
+            if space.get(field) is not None and not str(space[field]).startswith(
+                "data:image/"
+            ):
+                raise SystemExit(f"gfs-public-pages: {field} is not a data: image")
+        print(f"  space page: {space['name']!r}, {space['member_count']} member(s) ✓")
+    s, page = _open_through_viewer(
+        f"{gfs}/spaces/sp-not-listed",
+        view="space",
+        key="s",
+        value="sp-not-listed",
+        what="gfs-public-pages: unlisted space",
+    )
+    if s != 404 or set(page) != {"server_name"}:
+        raise SystemExit(f"gfs-public-pages: unlisted space answered {s} {page!r}")
+    print("  an unlisted space is one 404 {server_name} ✓")
+
+    s, directory = _request(f"{gfs}/gfs/moments/users?q=noor")
+    _must("gfs-public-pages: directory", s, directory)
+    noor = next(
+        (u for u in directory.get("users", []) if u.get("username") == "noor"), None
+    )
+    if noor is None:
+        raise SystemExit("gfs-public-pages: run 'gfs-moment-profile' first (no Noor)")
+    s, page = _open_through_viewer(
+        f"{gfs}/moments/{noor['user_id']}",
+        view="person",
+        key="u",
+        value=noor["user_id"],
+        what="gfs-public-pages: profile",
+    )
+    person = page.get("person") or {}
+    if s != 200 or person.get("display_name") != noor["display_name"]:
+        raise SystemExit(f"gfs-public-pages: profile JSON {s} {page!r}")
+    if not str(person.get("picture") or "").startswith("data:image/"):
+        raise SystemExit("gfs-public-pages: the profile carries no picture")
+    if not page.get("gfs_id"):
+        raise SystemExit("gfs-public-pages: no gfs_id for the Follow button")
+    print(f"  profile: {person['display_name']!r} with picture and Follow ✓")
+    print("gfs-public-pages: ok")
+
+
 def cmd_gfs_moment_profile() -> None:
     """A public moment from a stranger reads by name, picture and bio.
 
@@ -17534,7 +17686,14 @@ def cmd_gfs_moment_profile() -> None:
         raise SystemExit(f"gfs-moment-profile: the shared picture blob → HTTP {s}")
     if _gfs_log_lines_matching(frag["k"], offset=link_off):
         raise SystemExit("gfs-moment-profile: the GFS log shows the link's key")
-    s, page = _http_get_bytes(f"http://127.0.0.1:{GFS_PORT}/moments/{author_uid}")
+    s, profile = _open_through_viewer(
+        f"http://127.0.0.1:{GFS_PORT}/moments/{author_uid}",
+        view="person",
+        key="u",
+        value=author_uid,
+        what="gfs-moment-profile",
+    )
+    page = json.dumps(profile).encode()
     if s != 200 or content.encode() in page or b"moment_rtc" in page:
         raise SystemExit(
             f"gfs-moment-profile: /moments/{author_uid} → HTTP {s} shows moments"
@@ -18087,6 +18246,10 @@ def main() -> None:
         # viewer (a page no GFS serves), the GFS never sees its secret and
         # answers CORS on the anonymous viewer routes only.
         cmd_gfs_highlight_link()
+        # ``gfs-public-pages``: the GFS's space page and Noor's profile open
+        # in the pinned viewer (302, everything in the fragment) and its
+        # JSON answers cross-origin.
+        cmd_gfs_public_pages()
         # The closing check: every step's state still holds, and the log
         # audit is clean — offline steps' lines only inside their windows.
         cmd_verify()

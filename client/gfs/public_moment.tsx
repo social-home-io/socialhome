@@ -17,6 +17,7 @@ import { useEffect, useState } from 'preact/hooks'
 import type { MomentBoot } from './moment_link'
 import { CONTENT_TYPES, openBlob, openShare, type ShareBody } from './moment_seal'
 import { pinnedEndpoint, pinnedRequestInit } from './pinned_link'
+import { t } from './viewer_i18n'
 
 type State =
   | { status: 'loading' }
@@ -105,21 +106,21 @@ export function PublicMomentViewer({ boot }: { boot: MomentBoot }) {
   }, [boot])
 
   if (state.status === 'loading') {
-    return <p class="status" role="status">Opening this moment…</p>
+    return <p class="status" role="status">{t('moment.opening')}</p>
   }
   if (state.status === 'gone') {
     return (
       <div class="highlight-error" role="alert">
-        <p>This moment is no longer available.</p>
-        <p>Moments end after a while, and the person who shared it may have deleted it.</p>
+        <p>{t('moment.gone')}</p>
+        <p>{t('moment.gone_body')}</p>
       </div>
     )
   }
   if (state.status === 'broken') {
     return (
       <div class="highlight-error" role="alert">
-        <p>This link can’t be opened.</p>
-        <p>This link is incomplete or damaged. Ask whoever shared it for a new link.</p>
+        <p>{t('link.broken')}</p>
+        <p>{t('link.broken_body')}</p>
       </div>
     )
   }
@@ -127,7 +128,7 @@ export function PublicMomentViewer({ boot }: { boot: MomentBoot }) {
   const kind = body.media ? CONTENT_TYPES[body.media.content_type] : undefined
   const name = typeof body.author_name === 'string' && body.author_name.trim()
     ? body.author_name.trim()
-    : 'Someone'
+    : t('moment.someone')
   return (
     <article class="highlight-viewer moment-viewer">
       <header class="highlight-author">

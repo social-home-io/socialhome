@@ -36,6 +36,12 @@ the project's GitHub Pages, `[highlights] public_viewer_base_url`) — which
 talks to the GFS cross-origin (CORS on the anonymous viewer routes only).
 The GFS serves no code that reads the link's secret
 ([highlights_public.md](./protocol/highlights_public.md#pinned-viewer)).
+The same viewer is the GFS's public face for non-members: its space
+page, invite landing and Momentum profile redirect there
+(`[server] public_viewer_base_url`, everything in the fragment) and are
+rendered from the GFS's `/gfs/pages/*` JSON, in five languages; a GFS
+without a viewer renders them itself, and its `/` landing always stays
+its own ([the public pages](./protocol/highlights_public.md#the-public-pages-one-viewer-for-the-outside-world)).
 
 Public moments that fan out to **followers** are encrypted from the GFS
 (v_62): each author's household holds a random per-author generation root

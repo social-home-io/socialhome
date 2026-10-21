@@ -21,6 +21,7 @@ from .member_publish import GfsMemberPublishService
 from .moment_media import GfsMomentMediaStore
 from .moment_public_registry import MomentPublicRegistry
 from .node_route import MisrouteWarning
+from .public_viewer import PublicViewerLinks
 from .relay_bridge import RelayBridge
 from .repositories import (
     AbstractClusterRepo,
@@ -117,3 +118,7 @@ gfs_member_publish_key: AppKey[GfsMemberPublishService] = AppKey("gfs_member_pub
 #: seats and relay — keyed by a random id, never by a space.
 gfs_channel_repo_key: AppKey[AbstractGfsChannelRepo] = AppKey("gfs_channel_repo")
 gfs_channel_service_key: AppKey[GfsChannelService] = AppKey("gfs_channel_service")
+
+#: Viewer links for the public pages (``/spaces``, ``/join``, ``/moments/{user}``)
+#: — ``None`` when they render on this server (:mod:`.public_viewer`).
+gfs_public_viewer_key: AppKey[PublicViewerLinks | None] = AppKey("gfs_public_viewer")
