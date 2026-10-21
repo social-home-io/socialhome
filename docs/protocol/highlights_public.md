@@ -1,9 +1,10 @@
 # Highlights — public sharing via GFS
 
 A highlight author can opt a single highlight into public sharing through a
-paired Global Federation Server (GFS). The GFS mints a revocable URL
-the author can paste into Twitter / email / SMS; anyone visiting the
-URL gets a public landing page. The page bootstraps a WebRTC
+paired Global Federation Server (GFS). The GFS mints a revocable share
+token; the author's household turns it into a link the author can paste into
+Twitter / email / SMS. The link opens the **pinned viewer** — a static,
+content-addressed page no GFS serves (see "Pinned viewer"). The page bootstraps a WebRTC
 DataChannel **directly to the author's instance**; GFS only relays SDP/ICE
 during the handshake. When WebRTC can't connect, the GFS pipes the stream —
 and on both paths every byte of the highlight is **sealed end to end** to
@@ -21,15 +22,50 @@ revoking a token (or unpublishing) takes effect on the next request.
 - **HFS** runs :class:`HighlightPublicationService` (publish / revoke /
   unpublish) and (PR2) :class:`HighlightSignalingHandler` for the WebRTC
   answerer side.
-- **GFS** runs :class:`HighlightPublicationRegistry` and serves the
-  ``/highlight/{instance}/{highlight}/{token}`` public landing page. PR2 adds
-  the public ``/gfs/highlight_rtc/*`` signalling endpoints.
+- **GFS** runs :class:`HighlightPublicationRegistry`, the public
+  ``/gfs/highlight_rtc/*`` signalling endpoints (with CORS for the pinned
+  viewer) and the ``/highlight/{instance}/{highlight}/{token}`` landing page
+  (older links and the self-hosted fallback only).
+- **Pinned viewer**: static files on an origin no GFS runs — by default the
+  project's GitHub Pages (`https://social-home-io.github.io/socialhome/`),
+  published by `.github/workflows/pinned-viewer.yml`.
 
 ## URL shape
+
+The household mints (pinned viewer, the default):
+
+```
+{public_viewer_base_url}/v/{hash}/#g={gfs_base_url}&i={instance_id}&h={highlight_id}&t={token}&k={link_secret}
+```
+
+e.g. `https://social-home-io.github.io/socialhome/v/0123456789abcdef/#g=https%3A%2F%2Fgfs.social-home.io&i=…&h=…&t=…&k=…`.
+Everything after `#` stays in the browser; the page's own URL carries
+nothing about the highlight.
+
+* ``public_viewer_base_url`` — household config `[highlights]
+  public_viewer_base_url` / `SH_HIGHLIGHTS_PUBLIC_VIEWER_BASE_URL`, default
+  `https://social-home-io.github.io/socialhome`.
+* ``v/{hash}/`` — the viewer version this release links to, from the
+  committed `socialhome/pinned_viewer.json` (see "Pinned viewer").
+* ``g`` — the GFS base URL the viewer sends every request to: the address
+  the household itself talks to that GFS on (its pinned connection's
+  `inbox_url`), never one the GFS's reply suggests. Must be `https://`
+  (`http://` only to `localhost` / `127.0.0.1`, for dev and the demo), no
+  credentials, query or fragment, ≤ 512 chars — the viewer refuses anything
+  else and the household never mints a link the viewer would refuse.
+* ``i`` / ``h`` / ``t`` — as the path segments below; ≤ 128 / 128 / 256
+  chars of `[A-Za-z0-9._~-]`, checked by the viewer.
+
+**Fallback** (the GFS-served page — older links, and households with
+`public_viewer_base_url = ""`, the manifest missing, or a GFS address the
+viewer would refuse such as `http://gfs:8765`):
 
 ```
 https://{gfs_host}/highlight/{instance_id}/{highlight_id}/{token}#k={link_secret}
 ```
+
+This is the less safe mode: that GFS serves the script that reads `#k` (see
+"Pinned viewer"). Self-hosters who don't want a third origin can choose it.
 
 * ``instance_id`` — author's HFS instance id.
 * ``highlight_id`` — opaque highlight id on that instance.
@@ -65,9 +101,15 @@ Public (no signature):
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/highlight/{instance_id}/{highlight_id}/{token}` | SSR landing page. Always `200` with the same viewer shell and `Cache-Control: no-store` (the URL carries the share token). The GFS does not look up the token or check whether the author is online here (see "Not a presence oracle" below). The viewer's offer call is the first point that consults state. |
+| GET | `/highlight/{instance_id}/{highlight_id}/{token}` | SSR landing page (older links and the fallback; the household mints pinned-viewer links by default). Always `200` with the same viewer shell and `Cache-Control: no-store` (the URL carries the share token). The GFS does not look up the token or check whether the author is online here (see "Not a presence oracle" below). The viewer's offer call is the first point that consults state. |
 
-Public-viewer WebRTC signalling (added in PR2):
+Public-viewer WebRTC signalling (added in PR2). The anonymous rows below,
+and the relay GET, answer **CORS** for the pinned viewer on another origin:
+`Access-Control-Allow-Origin: *`, never credentials, and an `OPTIONS`
+preflight (`204`, `Allow-Methods: GET, POST, OPTIONS`,
+`Allow-Headers: content-type`, `Max-Age: 600`). The signed author routes,
+the landing page and every other GFS route send no CORS header
+(`global_server/viewer_cors.py`):
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -268,10 +310,9 @@ federation shape changed, so `OURS` is not bumped (the GFS leg has no
 
 **Residuals:**
 
-- The GFS serves the viewer page and its script, so a GFS that rewrote
-  that script could read the fragment in the browser. Sealing removes
-  everything the GFS sees on the wire and at rest; it cannot remove trust in
-  the code a web page is served with (a pinned viewer is the follow-up).
+- On the **fallback** page the GFS serves the viewer's script, so a GFS that
+  rewrote it could read the fragment in the browser. The pinned viewer (the
+  default) removes that: see "Pinned viewer".
 - The stream's integrity rests on the link secret alone; frames are not
   signed by the household. A GFS that ALSO holds the full link (say, it was
   posted publicly where the GFS saw it) can swap `vk` and `epk` and read or
@@ -281,6 +322,91 @@ federation shape changed, so `OURS` is not bumped (the GFS leg has no
 `socialhome/services/highlight_public_seal.py`,
 `client/gfs/stream_seal.ts` (interop test with a Python-sealed golden
 vector).
+
+## Pinned viewer
+
+Sealing hides the highlight from the GFS on the wire and at rest. It can't
+hide it from the code a page is served with: a GFS that serves the viewer
+page could rewrite its script to read `#k` in the browser. Putting an SRI
+`integrity` on the `<script>` of a GFS-served page doesn't help — the GFS
+controls that HTML, so it can drop the attribute or read `location.hash`
+itself. The link must open a page **the GFS does not serve**.
+
+**The page.** `client/scripts/build-pinned-viewer.mjs`
+(`pnpm build:pinned-viewer`, Vite config `client/vite.pinned.config.ts`)
+builds `client/gfs/public_highlight.tsx` into one self-contained ES module
+(no chunks, nothing fetched at run time) and writes:
+
+- `client/dist-pinned/v/<hash>/viewer.js`;
+- `client/dist-pinned/v/<hash>/index.html` — a fixed static page:
+  `<script type="module" src="viewer.js" integrity="sha384-…"
+  crossorigin="anonymous">`, the styles inline
+  (`client/gfs/public_highlight.css`, identical to the GFS page's), and a
+  `<meta>` CSP: `default-src 'none'; script-src 'self' 'sha384-…';
+  style-src 'sha256-…'; img-src blob: data:; media-src blob:;
+  connect-src https: http://localhost:* http://127.0.0.1:*; base-uri
+  'none'; form-action 'none'`, plus `<meta name="referrer"
+  content="no-referrer">`. (`'self'` sits beside the script hash for
+  browsers that don't match a hash against an external script; the tag's
+  `integrity` pins the bytes either way.)
+- `socialhome/pinned_viewer.json` — `{"version": 1, "path": "v/<hash>/",
+  "integrity": "sha384-…"}`, **committed**. The household reads it at
+  startup and mints links to that path.
+
+`<hash>` is the first 16 hex chars of the sha384 of `index.html`, which
+carries the script's sha384 and the styles, so the path covers every byte
+served under it: a path never changes content. The build is reproducible
+(same lockfile, same bytes: no timestamps, one output file). CI's `frontend`
+job builds it twice, compares the bytes, and fails when the committed
+manifest differs — a viewer change must regenerate the manifest in the same
+PR.
+
+**Publishing.** `.github/workflows/pinned-viewer.yml` runs on every
+published release (and by hand): it rebuilds, checks the build equals the
+committed manifest, and adds `v/<hash>/` to the `gh-pages` branch of this
+repo (with `.nojekyll`). It only ever **adds** a version — an existing one
+must be byte-identical — so links minted by every earlier release keep
+opening. Anyone can audit a served version: fetch `v/<hash>/viewer.js`,
+compare its sha384 with the `integrity` in the release's
+`socialhome/pinned_viewer.json`, and rebuild from the tag.
+
+**Bootstrap.** With no `<script id="boot">` block, the viewer reads its
+context from the fragment (`client/gfs/pinned_link.ts`) and refuses a
+missing, overlong or malformed field, or a `g` that isn't `https://`
+(`http://` only to localhost), before contacting anyone (*"This link is
+incomplete or damaged…"*). Every request goes to `g` + the route, absolute,
+`mode: 'cors'`, `credentials: 'omit'`, `referrerPolicy: 'no-referrer'`; the
+secret is never part of one. On the GFS-served page (boot block present)
+everything is as before, relative to the page.
+
+**The fragment stays in the address bar.** The viewer does not
+`history.replaceState` it away: a reload, or copying the address, still
+opens the highlight, and the secret is already in the browser history from
+the navigation itself, so dropping it after load would hide nothing. Treat
+the link — and the browser history that holds it — as the bearer secret it
+is.
+
+**Trust model.** GFS operators are no longer trusted with the page: a GFS
+sees the token, `vk` and the sealed bytes, never the secret, and serves no
+code the viewer runs. Trusted instead: the `social-home-io` GitHub org and
+GitHub Pages (or whoever hosts `public_viewer_base_url`), which serve the
+page. The content-addressed path and the SRI hash make what they serve
+auditable against the released build; they don't stop a compromised host
+from serving a *different* page at a version path, which a viewer would
+only notice by checking. A self-hoster can host the published files
+anywhere (`public_viewer_base_url`), or set it empty to fall back to the
+GFS-served page (less safe).
+
+**Residuals.**
+
+- The page host (GitHub Pages / the `social-home-io` org, or the
+  self-hoster's host) is trusted to serve the released files.
+- The fragment sits in the address bar and the browser history (see above).
+- A GFS that ALSO holds the full link can swap `vk` / `epk` for that view
+  (see "End-to-end sealed stream", residuals): the link is a bearer secret.
+- `GET /gfs/highlights/ice-servers` now answers any origin, so a web page
+  elsewhere can read the GFS's STUN/TURN list (as any non-browser client
+  always could). Short-lived TURN credentials keep that bounded.
 
 ## Who shared it (sealed author profile)
 
@@ -320,12 +446,15 @@ vector).
 sequenceDiagram
     autonumber
     participant V as Viewer<br/>(browser)
+    participant P as Pinned viewer host<br/>(GitHub Pages)
     participant G as GFS
     participant A as Author SH
 
-    V->>G: GET /highlight/{i}/{s}/{t}  (#k=secret stays in the browser)
-    G-->>V: 200 SSR landing + bootstrap.js (same shell for every URL)
-    V->>V: no #k → "ask for a new link", stop (no further request)
+    V->>P: GET /v/{hash}/  (#g,i,h,t,k stay in the browser)
+    P-->>V: static index.html + viewer.js (SRI-pinned, same for every link)
+    V->>V: fragment incomplete / g not https → "ask for a new link", stop
+    Note over V,G: every request below: absolute on g, CORS, no credentials
+    V->>G: OPTIONS preflight (POSTs) → 204 Access-Control-Allow-Origin: *
     V->>G: GET /gfs/highlights/ice-servers
     G-->>V: { servers: [...] }
     V->>V: ephemeral P-256 key pair (vk)
@@ -364,7 +493,9 @@ sequenceDiagram
 
 ## Public viewer bundle
 
-The viewer that the GFS landing serves is a Preact component built
+The pinned viewer is built from the same component by
+`client/vite.pinned.config.ts` (`pnpm build:pinned-viewer`, see "Pinned
+viewer"). The viewer that the GFS landing serves is a Preact component built
 from `client/gfs/public_highlight.tsx` via a separate Vite config
 (`client/vite.gfs.config.ts`) that emits a single self-contained
 IIFE bundle to `socialhome/global_server/static/highlight_public_viewer.js`.
@@ -399,7 +530,13 @@ GFS bundle alone, or `pnpm build` for both.
 - Framing: `socialhome/services/highlight_public_framing.py` +
   `tests/protocol/test_highlight_public_framing.py` (golden-bytes test).
 - Public viewer: `client/gfs/public_highlight.tsx` + the matching Vite
-  config at `client/vite.gfs.config.ts`.
+  config at `client/vite.gfs.config.ts`; the pinned build at
+  `client/vite.pinned.config.ts` + `client/scripts/build-pinned-viewer.mjs`,
+  its fragment bootstrap `client/gfs/pinned_link.ts`, its styles
+  `client/gfs/public_highlight.css`, its manifest + link builder
+  `socialhome/pinned_viewer.py` / `socialhome/pinned_viewer.json`, its
+  publish workflow `.github/workflows/pinned-viewer.yml`.
+- CORS on the anonymous viewer routes: `socialhome/global_server/viewer_cors.py`.
 
 ## Security notes
 
@@ -417,7 +554,9 @@ GFS bundle alone, or `pnpm build` for both.
   token, so a stolen token cannot be used to enumerate other
   highlights on the same instance.
 - Per-IP rate-limit on the public landing path uses the existing
-  `build_listing_rate_limit()` middleware (30/min/IP).
+  `build_listing_rate_limit()` middleware (30/min/IP). CORS adds no way
+  around the per-IP limit on the anonymous offer / relay GET (20/min/IP);
+  their `429` carries `Access-Control-Allow-Origin` so the page can say so.
 - Author can pull every token instantly via `unpublish`. There's no
   revoke-key-rotation step — the row's deletion is the revoke, and the
   author's household enforces it itself: it streams only for a token it

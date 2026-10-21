@@ -223,6 +223,20 @@ a built `@font-face` URL is absolute (it would skip the HA ingress
 a missing file. `client/src/styles/fonts.test.ts` (Vitest) and
 `tests/test_no_third_party_fonts.py` guard the same rule in source.
 
+### Pinned highlight viewer (`pnpm build:pinned-viewer`)
+
+The public highlight link opens a static, content-addressed page pinned by
+SRI (`docs/protocol/highlights_public.md`, "Pinned viewer"). The CI
+`frontend` job builds it twice and fails when the two builds' bytes differ
+(the build must be reproducible) or when the committed
+`socialhome/pinned_viewer.json` differs from the build — a change to the
+viewer code (`client/gfs/public_highlight.tsx` and what it imports, or
+`client/gfs/public_highlight.css`) must regenerate the manifest with
+`pnpm build:pinned-viewer` in the same PR. `tests/test_pinned_viewer.py`
+checks the manifest's shape and that the pinned page's styles equal the
+GFS page's; `client/gfs/pinned_link.test.ts` and
+`client/gfs/public_highlight.test.tsx` cover the fragment bootstrap.
+
 ### End-to-end: Home Assistant ingress
 
 Unit tests (`client/src/baseUrl.test.ts`, `IngressLocationProvider.test.tsx`)
@@ -281,7 +295,7 @@ fan in to `test (3.14)`). The test jobs and `typecheck` install with
    --require-hashes -r` of the result, on the App's Alpine/musl base
    image). A lock bump that loses a wheel
    or hash for one of those platforms fails here, before a release
-6. **`frontend`** — `pnpm build`, `pnpm fonts:check`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:circular`, `pnpm i18n:check`, `pnpm test`
+6. **`frontend`** — `pnpm build`, the pinned-viewer rebuild + manifest check (`pnpm build:pinned-viewer` twice), `pnpm fonts:check`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:circular`, `pnpm i18n:check`, `pnpm test`
 7. **`haos-ingress-ui`** — builds the SPA, installs the locked runtime
    set (`uv sync --locked`) and runs
    `.claude/skills/haos-ingress-ui/harness.py verify` against the
