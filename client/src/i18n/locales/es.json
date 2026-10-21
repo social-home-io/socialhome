@@ -4209,6 +4209,7 @@
   "highlight.publish.created": "Enlace público creado",
   "highlight.publish.failed": "No se pudo crear el enlace: {error}",
   "highlight.publish.gfs_too_old": "{name} todavía no puede compartir enlaces cifrados a Highlights. Quien lo administra tiene que actualizarlo. Elige otro GFS o vuelve a intentarlo más tarde.",
+  "highlight.publish.gfs_too_old_only": "{name} todavía no puede compartir enlaces cifrados a Highlights. Quien lo administra tiene que actualizarlo. Vuelve a intentarlo después.",
   "highlight.publish.copied": "Enlace copiado",
   "highlight.publish.copy_failed": "No se pudo copiar. Mantén pulsado el enlace para copiarlo tú.",
   "highlight.publish.removed": "Enlace público quitado",

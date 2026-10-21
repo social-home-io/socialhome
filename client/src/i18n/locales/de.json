@@ -4182,6 +4182,7 @@
   "highlight.publish.created": "Öffentlicher Link erstellt",
   "highlight.publish.failed": "Der Link konnte nicht erstellt werden: {error}",
   "highlight.publish.gfs_too_old": "{name} kann noch keine verschlüsselten Links zu Highlights teilen. Der Betreiber muss den GFS aktualisieren. Wähl einen anderen GFS oder versuch es später noch einmal.",
+  "highlight.publish.gfs_too_old_only": "{name} kann noch keine verschlüsselten Links zu Highlights teilen. Der Betreiber muss den GFS aktualisieren. Versuch es danach noch einmal.",
   "highlight.publish.copied": "Link kopiert",
   "highlight.publish.copy_failed": "Kopieren hat nicht geklappt. Drück lange auf den Link, um ihn selbst zu kopieren.",
   "highlight.publish.removed": "Öffentlicher Link entfernt",

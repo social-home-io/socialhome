@@ -13,7 +13,7 @@
  * future work; v1 surface is "publish (mints a token), unpublish (drops
  * them all)".
  */
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api, ApiError } from '@/api'
 import { Modal } from '@/components/Modal'
@@ -44,8 +44,9 @@ const submitting = signal(false)
 const lastIssued = signal<PublishedToken | null>(null)
 const isPublished = signal(false)
 /** The GFS that refused because it can't open encrypted highlight links yet
- *  (``GFS_TOO_OLD``): said inline, and the create button waits for another
- *  pick. */
+ *  (``GFS_TOO_OLD``): said inline. With another GFS to pick, the create
+ *  button waits for that pick; with only this one, it becomes "Try again"
+ *  (the operator may have updated it since). */
 const tooOldGfs = signal('')
 
 export function openPublishMenu(id: string, alreadyPublished: boolean): void {
@@ -69,9 +70,22 @@ export function HighlightPublishMenu() {
       .catch(() => { connections.value = [] })
   }, [open.value])
 
+  const alertRef = useRef<HTMLParagraphElement>(null)
+  const selectRef = useRef<HTMLSelectElement>(null)
+  const onlyGfs = connections.value.length === 1
+  const blocked = tooOldGfs.value !== '' && tooOldGfs.value === selectedGfs.value
+  // The disabled / relabelled button would drop focus to <body>, behind
+  // the dialog: move it to the way out — the GFS picker when there is
+  // another GFS, else the message itself (its "Try again" is next).
+  useEffect(() => {
+    if (!blocked) return
+    ;(onlyGfs ? alertRef.current : selectRef.current)?.focus()
+  }, [tooOldGfs.value])
+
   const submit = async () => {
     if (submitting.value || !selectedGfs.value) return
     submitting.value = true
+    tooOldGfs.value = ''
     try {
       const res = await api.post<PublishedToken>(
         `/api/highlights/${highlightId.value}/publish`,
@@ -153,6 +167,7 @@ export function HighlightPublishMenu() {
               />
             ) : (
               <select
+                ref={selectRef}
                 value={selectedGfs.value}
                 onChange={(e) => {
                   selectedGfs.value = (e.currentTarget as HTMLSelectElement).value
@@ -177,9 +192,9 @@ export function HighlightPublishMenu() {
               }}
             />
           </label>
-          {tooOldGfs.value !== '' && tooOldGfs.value === selectedGfs.value && (
-            <p class="sh-form-error" role="alert">
-              {t('highlight.publish.gfs_too_old', {
+          {blocked && (
+            <p class="sh-form-error" role="alert" tabIndex={-1} ref={alertRef}>
+              {t(onlyGfs ? 'highlight.publish.gfs_too_old_only' : 'highlight.publish.gfs_too_old', {
                 name: connections.value.find(c => c.id === tooOldGfs.value)?.display_name ?? '',
               })}
             </p>
@@ -187,11 +202,11 @@ export function HighlightPublishMenu() {
           <div class="sh-modal-actions">
             <Button
               type="submit"
-              disabled={
-                submitting.value || !selectedGfs.value || tooOldGfs.value === selectedGfs.value
-              }
+              disabled={submitting.value || !selectedGfs.value || (blocked && !onlyGfs)}
             >
-              {submitting.value ? t('highlight.publish.creating') : t('highlight.publish.create')}
+              {submitting.value
+                ? t('highlight.publish.creating')
+                : blocked && onlyGfs ? t('common.try_again') : t('highlight.publish.create')}
             </Button>
           </div>
         </form>
