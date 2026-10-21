@@ -513,5 +513,7 @@
   "local_area.consent.body": "Consent before a join to another household's local community (a public space only for households living nearby) sends this household's home rounded to about 1 km. '{host}' is the name of that household.",
   "local_area.consent.body_generic": "Same as local_area.consent.body when the household's name is not known (an invite link).",
   "local_area.consent.no_home": "Shown instead of the consent when this household has no home location. The menu path is Home Assistant's: Settings → System → General.",
-  "join_requests.near_edge": "Chip in the admins' join-request queue: the asking household's home is close to the edge of the local community's area, so an admin decides."
+  "join_requests.near_edge": "Chip in the admins' join-request queue: the asking household's home is close to the edge of the local community's area, so an admin decides.",
+  "highlight.publish.gfs_too_old": "Inline error in the share-a-highlight dialog: the chosen GFS runs an older version whose page can’t open encrypted highlight links. {name} is the GFS’s name. “Highlights” stays untranslated.",
+  "error.gfs_too_old": "Generic error when a GFS is too old for the requested action; its operator has to update it."
 }

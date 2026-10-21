@@ -15,7 +15,7 @@
  */
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
-import { api } from '@/api'
+import { api, ApiError } from '@/api'
 import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
 import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
@@ -43,12 +43,17 @@ const label = signal('')
 const submitting = signal(false)
 const lastIssued = signal<PublishedToken | null>(null)
 const isPublished = signal(false)
+/** The GFS that refused because it can't open encrypted highlight links yet
+ *  (``GFS_TOO_OLD``): said inline, and the create button waits for another
+ *  pick. */
+const tooOldGfs = signal('')
 
 export function openPublishMenu(id: string, alreadyPublished: boolean): void {
   highlightId.value = id
   isPublished.value = alreadyPublished
   label.value = ''
   lastIssued.value = null
+  tooOldGfs.value = ''
   open.value = true
 }
 
@@ -76,6 +81,11 @@ export function HighlightPublishMenu() {
       isPublished.value = true
       showToast(t('highlight.publish.created'), 'success')
     } catch (err: unknown) {
+      if (err instanceof ApiError && err.code === 'GFS_TOO_OLD') {
+        // A lasting state, not a blip: say it next to the GFS picker.
+        tooOldGfs.value = selectedGfs.value
+        return
+      }
       showToast(t('highlight.publish.failed', { error: String((err as Error)?.message ?? err) }), 'error')
     } finally {
       submitting.value = false
@@ -167,10 +177,19 @@ export function HighlightPublishMenu() {
               }}
             />
           </label>
+          {tooOldGfs.value !== '' && tooOldGfs.value === selectedGfs.value && (
+            <p class="sh-form-error" role="alert">
+              {t('highlight.publish.gfs_too_old', {
+                name: connections.value.find(c => c.id === tooOldGfs.value)?.display_name ?? '',
+              })}
+            </p>
+          )}
           <div class="sh-modal-actions">
             <Button
               type="submit"
-              disabled={submitting.value || !selectedGfs.value}
+              disabled={
+                submitting.value || !selectedGfs.value || tooOldGfs.value === selectedGfs.value
+              }
             >
               {submitting.value ? t('highlight.publish.creating') : t('highlight.publish.create')}
             </Button>

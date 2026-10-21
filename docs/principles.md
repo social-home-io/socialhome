@@ -172,6 +172,18 @@ GFS ban cannot gate an anonymous relay — the space-level ban is the
 moderation lever there. See
 [`protocol/discovery.md`](./protocol/discovery.md).
 
+### A public highlight link is end to end
+
+A public highlight is public to whoever holds its link — never to the GFS
+that minted the token and relays the stream. The link's secret rides in
+its fragment (`#k=`), which browsers never send to a server, and the
+author's household seals every frame to the viewer's ephemeral key and that
+secret, on the direct DataChannel and on the GFS relay alike. Nothing is
+streamed in the clear: a viewer without a key or a link without a secret
+gets nothing. The residual is the one every web page has: the GFS serves the
+viewer's script. See
+[`protocol/highlights_public.md`](./protocol/highlights_public.md#end-to-end-sealed-stream).
+
 ### The GFS is not an author-presence oracle
 
 An outsider must not be able to ask the GFS whether a household is

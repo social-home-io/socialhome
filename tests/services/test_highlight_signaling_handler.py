@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import aiofiles
 import pytest
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from PIL import Image
@@ -26,12 +27,56 @@ from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import highlight_public_framing as framing
 from socialhome.services.highlight_public_profile import open_profile, parse_viewer_key
+from socialhome.services.highlight_public_seal import (
+    MAX_TOKEN_LEN,
+    StreamOpener,
+    link_secret,
+    token_digest,
+)
 from socialhome.services.highlight_signaling_handler import (
     MAX_CONCURRENT_VIEWERS_PER_HIGHLIGHT,
     HighlightSignalingHandler,
     _default_peer_factory,
 )
 from socialhome.webrtc_ice import build_ice_servers
+
+#: The share token the viewer opened, and its ephemeral key (sent as ``vk``).
+TOKEN = "tok-1"
+VIEWER_SK = ec.generate_private_key(ec.SECP256R1())
+VK = b64url_encode(
+    VIEWER_SK.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+)
+#: ``_make_handler``'s identity seed.
+SEED = b"\x00" * 32
+
+
+def _open_stream(raw_frames, highlight_id, *, token=TOKEN, sk=VIEWER_SK):
+    """Open a sealed stream as the viewer: the decoded inner frames."""
+    first, *rest = [framing.decode(b) for b in raw_frames]
+    assert first.header["kind"] == framing.KIND_STREAM_SEAL
+    opener = StreamOpener(
+        sk,
+        first.header,
+        secret=link_secret(SEED, highlight_id=highlight_id, token=token),
+        highlight_id=highlight_id,
+    )
+    out = []
+    for f in rest:
+        assert f.header == {"kind": framing.KIND_SEALED}
+        out.append(framing.decode(opener.open(f.payload)))
+    return out
+
+
+def _split(body: bytes) -> list[bytes]:
+    out = []
+    rest = body
+    while rest:
+        hlen = int.from_bytes(rest[:4], "big")
+        plen = int.from_bytes(rest[4 + hlen : 8 + hlen], "big")
+        out.append(rest[: 8 + hlen + plen])
+        rest = rest[8 + hlen + plen :]
+    return out
+
 
 # ─── Stub peer ───────────────────────────────────────────────────────────
 
@@ -187,6 +232,10 @@ async def published_highlight(repos):
         gfs_id="gfs-abc",
         published_at=datetime.now(UTC).isoformat(),
     )
+    # The share token this household minted for the link.
+    await repos["highlights"].add_public_token(
+        highlight.id, gfs_id="gfs-abc", token_hash=token_digest(TOKEN)
+    )
     return highlight.id, f1.id, f2.id
 
 
@@ -239,6 +288,8 @@ async def test_offer_streams_metadata_then_chunks_then_stream_end(
             "session_id": "s-1",
             "highlight_id": highlight_id,
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     await _drain(handler)
@@ -249,7 +300,7 @@ async def test_offer_streams_metadata_then_chunks_then_stream_end(
     # Frame stream: meta, then 1 chunk for the small file, then 4 chunks
     # for the 200KB file (200000 / 65536 = 3 full + 1 partial), then
     # stream_end.
-    decoded = [framing.decode(b) for b in peer.frames]
+    decoded = _open_stream(peer.frames, highlight_id)
     kinds = [f.header["kind"] for f in decoded]
     assert kinds[0] == framing.KIND_HIGHLIGHT_META
     assert kinds[-1] == framing.KIND_STREAM_END
@@ -276,10 +327,12 @@ async def test_meta_manifest_carries_byte_length_and_content_type(
             "session_id": "s-1",
             "highlight_id": highlight_id,
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     await _drain(handler)
-    meta = framing.decode(peers[0].frames[0]).header
+    meta = _open_stream(peers[0].frames, highlight_id)[0].header
     by_id = {f["frame_id"]: f for f in meta["frames"]}
     assert by_id[f1]["byte_length"] == 1000
     assert by_id[f1]["content_type"] == "image/jpeg"
@@ -297,6 +350,8 @@ async def test_handler_posts_signed_answer_to_correct_gfs(repos, published_highl
             "session_id": "s-1",
             "highlight_id": highlight_id,
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     await _drain(handler)
@@ -322,7 +377,13 @@ async def test_relay_offer_posts_framed_stream_with_signed_headers(
     sess = _RecordingSession()
     handler._http_client = sess  # type: ignore[assignment]
     await handler.handle_signal(
-        {"kind": "relay_offer", "relay_id": "r-1", "highlight_id": highlight_id}
+        {
+            "kind": "relay_offer",
+            "relay_id": "r-1",
+            "highlight_id": highlight_id,
+            "token": TOKEN,
+            "vk": VK,
+        }
     )
     await _drain_relay(handler)
 
@@ -332,17 +393,8 @@ async def test_relay_offer_posts_framed_stream_with_signed_headers(
     assert headers["X-SH-Instance"] == "inst-self"
     assert headers["X-SH-Signature"]
 
-    # The streamed body is the same framing as the WebRTC path.
-    import struct
-
-    rest = body
-    decoded = []
-    while rest:
-        hlen = struct.unpack(">I", rest[:4])[0]
-        plen = struct.unpack(">I", rest[4 + hlen : 4 + hlen + 4])[0]
-        total = 4 + hlen + 4 + plen
-        decoded.append(framing.decode(rest[:total]))
-        rest = rest[total:]
+    # The streamed body is the same sealed framing as the WebRTC path.
+    decoded = _open_stream(_split(body), highlight_id)
     kinds = [d.header["kind"] for d in decoded]
     assert kinds[0] == framing.KIND_HIGHLIGHT_META
     assert kinds[-1] == framing.KIND_STREAM_END
@@ -387,6 +439,40 @@ async def test_relay_offer_signature_verifies_against_instance_key(
         headers["X-SH-Signature"],
         pk_hex,
     )
+
+
+async def test_relay_offers_beyond_the_cap_are_dropped(
+    repos, published_highlight, monkeypatch
+):
+    """#1087 review: the GFS can ask for relays at will; the uploads in
+    flight are bounded like the WebRTC viewers."""
+    highlight_id, *_ = published_highlight
+    monkeypatch.setattr(
+        "socialhome.services.highlight_signaling_handler."
+        "MAX_CONCURRENT_VIEWERS_PER_INSTANCE",
+        1,
+    )
+    handler, _ = _make_handler(repos)
+    handler._http_client = _RecordingSession()  # type: ignore[assignment]
+    gate = asyncio.Event()
+
+    async def _slow(*_a, **_kw):
+        await gate.wait()
+
+    monkeypatch.setattr(HighlightSignalingHandler, "_serve_relay", _slow)
+    for n in range(3):
+        await handler.handle_signal(
+            {
+                "kind": "relay_offer",
+                "relay_id": f"r-{n}",
+                "highlight_id": highlight_id,
+                "token": TOKEN,
+                "vk": VK,
+            }
+        )
+    assert len(handler._relay_tasks) == 1
+    gate.set()
+    await _drain_relay(handler)
 
 
 async def test_relay_offer_unpublished_highlight_posts_nothing(repos):
@@ -435,7 +521,13 @@ async def test_stop_cancels_in_flight_relay_tasks(repos, published_highlight):
 
     handler._http_client = _BlockingSession()  # type: ignore[assignment]
     await handler.handle_signal(
-        {"kind": "relay_offer", "relay_id": "r-1", "highlight_id": highlight_id}
+        {
+            "kind": "relay_offer",
+            "relay_id": "r-1",
+            "highlight_id": highlight_id,
+            "token": TOKEN,
+            "vk": VK,
+        }
     )
     await asyncio.wait_for(started.wait(), timeout=1.0)
     assert handler._relay_tasks
@@ -471,6 +563,8 @@ async def test_ice_frame_is_forwarded_to_peer(repos, published_highlight):
             "session_id": "s-1",
             "highlight_id": highlight_id,
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     # Hand off to the loop so the serve task can spin up.
@@ -508,6 +602,8 @@ async def test_offer_for_unpublished_highlight_skips_peer(repos):
             "session_id": "s-x",
             "highlight_id": "missing",
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     await _drain(handler)
@@ -538,6 +634,8 @@ async def test_per_highlight_cap_rejects_eleventh_offer(repos, published_highlig
                 "session_id": f"s-{i}",
                 "highlight_id": highlight_id,
                 "sdp": "v=0",
+                "token": TOKEN,
+                "vk": VK,
             }
         )
     # 10 sessions hold open peers.
@@ -551,6 +649,8 @@ async def test_per_highlight_cap_rejects_eleventh_offer(repos, published_highlig
             "session_id": "s-overflow",
             "highlight_id": highlight_id,
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     assert len(peers) == before
@@ -581,6 +681,8 @@ async def test_duplicate_session_id_is_dropped(repos, published_highlight):
             "session_id": "s-1",
             "highlight_id": highlight_id,
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     await handler.handle_signal(
@@ -589,6 +691,8 @@ async def test_duplicate_session_id_is_dropped(repos, published_highlight):
             "session_id": "s-1",
             "highlight_id": highlight_id,
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     assert len(peers) == 1
@@ -622,6 +726,8 @@ async def test_stop_cancels_in_flight_sessions(repos, published_highlight):
             "session_id": "s-1",
             "highlight_id": highlight_id,
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     await asyncio.sleep(0)  # allow the serve task to start
@@ -671,6 +777,8 @@ async def test_post_answer_fails_when_gfs_inactive(repos, published_highlight):
             "session_id": "s-1",
             "highlight_id": highlight_id,
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     await _drain(handler)
@@ -695,6 +803,8 @@ async def test_post_answer_logs_on_http_error(repos, published_highlight):
             "session_id": "s-1",
             "highlight_id": highlight_id,
             "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
         }
     )
     await _drain(handler)
@@ -733,6 +843,8 @@ async def test_per_instance_cap_takes_priority(repos, published_highlight):
                 "session_id": "a",
                 "highlight_id": highlight_id,
                 "sdp": "v=0",
+                "token": TOKEN,
+                "vk": VK,
             }
         )
         before = len(peers)
@@ -742,6 +854,8 @@ async def test_per_instance_cap_takes_priority(repos, published_highlight):
                 "session_id": "b",
                 "highlight_id": highlight_id,
                 "sdp": "v=0",
+                "token": TOKEN,
+                "vk": VK,
             }
         )
         assert len(peers) == before
@@ -1028,13 +1142,14 @@ async def test_the_relay_carries_the_sealed_frame_for_the_relay_viewer(
             "kind": "relay_offer",
             "relay_id": "r-1",
             "highlight_id": highlight_id,
+            "token": TOKEN,
             "vk": vk,
         }
     )
     await _drain_relay(handler)
     [(_url, _headers, body)] = sess.relay_calls
     assert b"Alice" not in body
-    frames = list(framing.iter_frames(body))
+    frames = _open_stream(_split(body), highlight_id, sk=sk)
     [prof] = [f for f in frames if f.header["kind"] == "author_profile"]
     assert (
         open_profile(sk, prof.header, prof.payload, highlight_id=highlight_id)[
@@ -1053,3 +1168,228 @@ async def test_resolve_media_path_accepts_the_stored_relative_form(repos):
     assert got is not None and got.name == "a.jpg"
     assert handler._resolve_media_path("/api/media/a.jpg") == got
     assert handler._resolve_media_path("api/media/../a.jpg") is None
+
+
+# ─── End-to-end sealed stream (the GFS never sees the highlight) ─────────
+
+
+async def test_the_direct_stream_is_sealed_end_to_end(repos, published_highlight):
+    """Every frame after ``stream_seal`` is ciphertext: no frame id, caption
+    or media byte is readable without the viewer's key and the link secret."""
+    highlight_id, f1, f2 = published_highlight
+    handler, peers = _make_handler(repos)
+    await handler.handle_signal(
+        {
+            "kind": "offer",
+            "session_id": "s-1",
+            "highlight_id": highlight_id,
+            "sdp": "v=0",
+            "token": TOKEN,
+            "vk": VK,
+        }
+    )
+    await _drain(handler)
+    wire = b"".join(peers[0].frames)
+    for clear in (f1.encode(), f2.encode(), b"highlight_meta", b"frame_chunk"):
+        assert clear not in wire
+    kinds = {framing.decode(b).header["kind"] for b in peers[0].frames}
+    assert kinds == {framing.KIND_STREAM_SEAL, framing.KIND_SEALED}
+
+
+async def test_the_relay_stream_does_not_open_without_the_link_secret(
+    repos, published_highlight
+):
+    """The GFS minted the token and pipes the relay, but the secret is
+    derived from our identity and rides only in the link's fragment."""
+    highlight_id, *_ = published_highlight
+    handler, _ = _make_handler(repos)
+    sess = _RecordingSession()
+    handler._http_client = sess  # type: ignore[assignment]
+    await handler.handle_signal(
+        {
+            "kind": "relay_offer",
+            "relay_id": "r-1",
+            "highlight_id": highlight_id,
+            "token": TOKEN,
+            "vk": VK,
+        }
+    )
+    await _drain_relay(handler)
+    [(_url, _headers, body)] = sess.relay_calls
+    first, second, *_ = [framing.decode(b) for b in _split(body)]
+    guess = StreamOpener(
+        VIEWER_SK, first.header, secret=bytes(32), highlight_id=highlight_id
+    )
+    with pytest.raises(InvalidTag):
+        guess.open(second.payload)
+    # Another token's secret doesn't open it either.
+    other = StreamOpener(
+        VIEWER_SK,
+        first.header,
+        secret=link_secret(SEED, highlight_id=highlight_id, token="tok-2"),
+        highlight_id=highlight_id,
+    )
+    with pytest.raises(InvalidTag):
+        other.open(second.payload)
+
+
+@pytest.mark.parametrize("missing", ["vk", "token"])
+async def test_an_offer_without_a_key_or_token_gets_no_stream(
+    repos, published_highlight, missing
+):
+    highlight_id, *_ = published_highlight
+    handler, peers = _make_handler(repos)
+    frame = {
+        "kind": "offer",
+        "session_id": "s-1",
+        "highlight_id": highlight_id,
+        "sdp": "v=0",
+        "token": TOKEN,
+        "vk": VK,
+    }
+    del frame[missing]
+    await handler.handle_signal(frame)
+    await _drain(handler)
+    assert peers == []
+
+
+@pytest.mark.parametrize("missing", ["vk", "token"])
+async def test_a_relay_without_a_key_or_token_streams_only_an_error(
+    repos, published_highlight, missing
+):
+    highlight_id, *_ = published_highlight
+    handler, _ = _make_handler(repos)
+    sess = _RecordingSession()
+    handler._http_client = sess  # type: ignore[assignment]
+    frame = {
+        "kind": "relay_offer",
+        "relay_id": "r-1",
+        "highlight_id": highlight_id,
+        "token": TOKEN,
+        "vk": VK,
+    }
+    del frame[missing]
+    await handler.handle_signal(frame)
+    await _drain_relay(handler)
+    [(_url, _headers, body)] = sess.relay_calls
+    assert [framing.decode(b).header for b in _split(body)] == [
+        {"kind": "error", "error": "unsupported"}
+    ]
+
+
+# ─── Only our own live links are streamed (not any token a GFS forwards) ──
+
+
+def _offer(highlight_id, token):
+    return {
+        "kind": "offer",
+        "session_id": "s-1",
+        "highlight_id": highlight_id,
+        "sdp": "v=0",
+        "token": token,
+        "vk": VK,
+    }
+
+
+def _relay(highlight_id, token):
+    return {
+        "kind": "relay_offer",
+        "relay_id": "r-1",
+        "highlight_id": highlight_id,
+        "token": token,
+        "vk": VK,
+    }
+
+
+async def _relay_headers(handler, frame):
+    sess = _RecordingSession()
+    handler._http_client = sess  # type: ignore[assignment]
+    await handler.handle_signal(frame)
+    await _drain_relay(handler)
+    [(_url, _headers, body)] = sess.relay_calls
+    return [framing.decode(b).header for b in _split(body)]
+
+
+async def _revoke(repos, highlight_id, token=TOKEN):
+    await repos["highlights"].remove_public_token(highlight_id, token_digest(token))
+
+
+@pytest.mark.parametrize("case", ["unknown", "revoked"])
+async def test_an_offer_for_a_token_we_did_not_mint_or_revoked_gets_no_stream(
+    repos, published_highlight, case
+):
+    """Revocation is ours to enforce: a GFS that forwards a token we never
+    minted, or one we revoked, gets no peer and no stream."""
+    highlight_id, *_ = published_highlight
+    handler, peers = _make_handler(repos)
+    token = "tok-forged" if case == "unknown" else TOKEN
+    if case == "revoked":
+        await _revoke(repos, highlight_id)
+    await handler.handle_signal(_offer(highlight_id, token))
+    await _drain(handler)
+    assert peers == []
+
+
+@pytest.mark.parametrize("case", ["unknown", "revoked"])
+async def test_a_relay_for_a_token_we_did_not_mint_or_revoked_gets_only_an_error(
+    repos, published_highlight, case
+):
+    highlight_id, *_ = published_highlight
+    handler, _ = _make_handler(repos)
+    token = "tok-forged" if case == "unknown" else TOKEN
+    if case == "revoked":
+        await _revoke(repos, highlight_id)
+    assert await _relay_headers(handler, _relay(highlight_id, token)) == [
+        {"kind": "error", "error": "expired"}
+    ]
+
+
+async def test_an_oversized_token_is_refused_before_any_lookup(
+    repos, published_highlight
+):
+    highlight_id, *_ = published_highlight
+    handler, peers = _make_handler(repos)
+    huge = "x" * (MAX_TOKEN_LEN + 1)
+    await handler.handle_signal(_offer(highlight_id, huge))
+    await _drain(handler)
+    assert peers == []
+    assert await _relay_headers(handler, _relay(highlight_id, huge)) == [
+        {"kind": "error", "error": "unsupported"}
+    ]
+
+
+async def test_an_expired_highlight_is_not_streamed_even_while_published(
+    repos, published_highlight, db
+):
+    """The retention scheduler may not have pruned it yet."""
+    highlight_id, *_ = published_highlight
+    await db.enqueue(
+        "UPDATE highlights SET expires_at=? WHERE id=?",
+        ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), highlight_id),
+    )
+    handler, peers = _make_handler(repos)
+    await handler.handle_signal(_offer(highlight_id, TOKEN))
+    await _drain(handler)
+    assert peers == []
+    assert await _relay_headers(handler, _relay(highlight_id, TOKEN)) == [
+        {"kind": "error", "error": "expired"}
+    ]
+
+
+async def test_a_token_revoked_mid_stream_setup_is_rechecked_before_streaming(
+    repos, published_highlight
+):
+    """The sealed stream re-checks the token itself, so a revoke between
+    the offer and the open channel still sends nothing."""
+    highlight_id, *_ = published_highlight
+    handler, _ = _make_handler(repos)
+    await _revoke(repos, highlight_id)
+    frames = [
+        f
+        async for f in handler._iter_sealed_stream(
+            highlight_id, token=TOKEN, viewer_key=parse_viewer_key(VK)
+        )
+    ]
+    assert [framing.decode(b).header for b in frames] == [
+        {"kind": "error", "error": "expired"}
+    ]

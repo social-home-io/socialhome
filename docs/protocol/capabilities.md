@@ -173,6 +173,23 @@ would be wrong (or a brand-new event type old peers can't dispatch):
 | **60** | **Names for a space's followers.** New generic `space_item` type `author_profile`: a member household publishes each author's public profile (name, bio, a ≤ 24 KB / 256 px WebP picture; a protected account's name only) in the item's author-signed `content`, encrypted under the space content key over the member relay, so a GFS follower with no roster names them (`space_author_profiles`, migration 0113; `GET /api/spaces/{id}/authors`). Sent once per author per epoch, on a profile change and on the author's next post a day later. **Gated, degraded fallback**: a receiver below v_60 drops the unknown item type with a WARNING and followers are anonymous, so the sender publishes only while every member household whose version it knows is at least v_60 — otherwise followers keep seeing "Someone". Space-scoped; labelled "Names for a space's followers". |
 | **61** | **Names for new followers right away** (redefined before release; an earlier, never-released v_61 had member households republish to every follower via `SPACE_FOLLOWER_JOINED`, now removed). When the GFS tells the host a follower took a NEW seat (`new_subscriber` with `reason: "subscribe"` — a reconnect is `reason: "reconnect"`, as is re-subscribing a held seat the hello did not just notify; a seat re-created within the hour forwards no `accepts`) and the follower's subscribe listed `author_profiles_bundle` in its `accepts` (sent next to the signed `/gfs/subscribe` bytes, never stored, forwarded only in that frame), the host sends the content-key handoff and then ONE `space_author_profiles_bundle` — the authors' own signed `author_profile` items from its cache (`space_author_profiles.signed_item`, migration 0114), sealed to the follower's key-wrap key (KEM-suite tagged), ≤ 50 authors / ≤ 1 MB in parts of ≤ 160 KB — both delivered to that follower **only**: `POST /gfs/publish` with `to` (the subscriber the GFS itself named), gated on the GFS's signed `targeted_publish` capability (a targeted publish is one primary-key seat lookup on the GFS). Every reconnect re-seals the key only — no bundle, with no host-side memory, so a GFS or host restart costs one ~1–2 KB handoff per follower-space, not a ~1 MB bundle; bundles are capped at 30 per space a minute against a GFS naming arbitrary households, and at one per follower of a space an hour against seat churn. The bundle is one-time and best effort (the subscribe notify reaches the owner only while its socket is on the same GFS node). `reason` and `accepts` ship in the same release as `targeted_publish` and a frame without them never earns a bundle (fail-safe), so they need no capability flag of their own. The follower verifies every item like a relayed one. The daily re-send of an author's profile on their next post is gone: existing followers get a profile once per epoch and once per change. **Fallback**: an older GFS (no `targeted_publish`) gets the fanned-out key handoff as before and no bundle, and an older follower lists no `accepts`, so it is sent no bundle — names then arrive with the author's next profile change or epoch. No household-to-household event, so nothing is `peer_supports`-gated (`MIN_FOR_FOLLOWER_PROFILE_BUNDLE` only names the version). Not space-scoped; labelled "Names for new followers right away". |
 
+## GFS capabilities
+
+The household↔GFS leg has **no `proto_version`**: a GFS says what its build
+can do in the `capabilities` block of `GET /gfs/info`, signed with its
+identity key (`capabilities_sig`, `b"gfs-capabilities:v1:"` + canonical
+JSON). A household trusts a flag only when that signature verifies against
+the key it pinned at pairing; an unsigned or stripped block reads as
+"unknown", re-probed later, never a sticky "no". Every per-capability gate
+goes through `GfsConnectionService._signed_capability_supported` (RAM cache,
+ratchets up). The full list and what each one gates is in
+[`docs/api.md`](../api.md) (`GET /gfs/info`). A new GFS capability needs no
+`OURS` bump unless a household↔household shape changes with it.
+
+| Capability | Gates (household side) | Older GFS |
+|---|---|---|
+| `sealed_highlight_stream` | Minting a public highlight link (`HighlightPublicationService.publish`): the GFS's viewer page opens the end-to-end sealed stream (`stream_seal` + `sealed` frames under the `#k=` link secret, see [highlights_public.md](./highlights_public.md#rollout-both-sides-must-be-new)). | Publish refused with 409 `GFS_TOO_OLD`; nothing is sent to that GFS, so no dead link is minted. |
+
 ## The version is a high-water mark
 
 A receiver never lowers a peer's stored `proto_version`: an

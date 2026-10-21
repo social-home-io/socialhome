@@ -64,6 +64,7 @@ addresses. See the last section of this document.
 | Key agreement | X25519 (ECDH) | 256-bit | Pairing-time session key derivation | `socialhome/federation/pairing_coordinator.py` |
 | Key agreement (ECIES) | X25519 + HKDF-SHA256 + AES-256-GCM | 256-bit | Sealed wall-panel connect claim (suite `x25519-hkdf-sha256-aes256gcm`) | `socialhome/dashboard/claim_seal.py` |
 | Key agreement (ECIES, browser) | P-256 ECDH + HKDF-SHA256 + AES-256-GCM | 256-bit | Who shared a public highlight, sealed to the viewer's ephemeral WebCrypto key (suite `p256-hkdf-sha256-aes256gcm`, info `sh-highlight-public-profile:v1`, AAD the highlight id). P-256 because X25519 is not in every supported browser's WebCrypto yet; the PQ lever is the same as for every ECDH here (a hybrid suite on this tag) | `socialhome/services/highlight_public_profile.py`, `client/gfs/sealed_profile.ts` |
+| Key agreement (browser, link-bound) | P-256 ECDH + link secret → HKDF-SHA256 → AES-256-GCM | 256-bit | The whole public highlight stream, sealed to the viewer's ephemeral WebCrypto key and the per-link secret in the URL fragment (suite `p256+link-hkdf-sha256-aes256gcm`, info `sh-highlight-public-stream:v1`, salt the link secret, nonce a 96-bit frame counter, AAD the highlight id). The link secret is `HKDF-SHA256(identity seed, info "sh-highlight-link:v1" ‖ highlight ‖ token)` — never sent to a server, so the GFS that minted the token can't open the stream | `socialhome/services/highlight_public_seal.py`, `client/gfs/stream_seal.ts` |
 | Symmetric AEAD | AES-256-GCM | 256-bit | Federation payloads, space content, KEK wrap | `cryptography.hazmat.primitives.ciphers.aead.AESGCM` |
 | KDF | HKDF-SHA256 | 32-byte output | Session-key derivation, KEK derivation | `cryptography.hazmat.primitives.kdf.hkdf` |
 | Hash | SHA-256 | 256-bit | Instance/space/user ID derivation, token hashing, space-page version hashes (`sha256:` suite-prefixed over title + content + cover — they recognise versions, never order them; receivers reject any other prefix, v_48) | `hashlib.sha256`, `socialhome/domain/page_version.py` |
@@ -1128,6 +1129,15 @@ decryption.
   - `instance_id = base32(SHA256(identity_pk)[:20]).lower()`
   - `space_id    = base32(SHA256(space_pk)[:20]).lower()`
   - `user_id     = base32(SHA256(instance_pk ‖ 0x00 ‖ username)[:20]).lower()`
+- Public highlight link secret (the `#k=` fragment, never sent to a server):
+  - `link_secret = HKDF-SHA256(identity_seed, salt="", info=b"sh-highlight-link:v1" ‖ 0x00 ‖ highlight_id ‖ 0x00 ‖ token)`
+  - Nothing is stored for it, so it is bound to the **long-term identity
+    seed**: an identity rotation (a new seed) changes every link secret, and
+    every public highlight link made before the rotation stops opening. The
+    author makes new links from the highlight's share menu; nothing on the
+    GFS changes (its old tokens simply open nothing). The household only
+    derives a secret for a share token it minted itself and still holds
+    (`highlight_public_tokens`), of at most 256 characters.
 
 ## Post-quantum migration path
 
