@@ -1143,6 +1143,187 @@ def _gfs_cluster_post_frame(base_url: str, raw: bytes, sig: str) -> tuple[int, A
             return exc.code, {"_raw": text}
 
 
+def _gfs_cluster_cross_node_push(urls: list[str]) -> None:
+    """Step 3d of ``gfs-cluster``: the two single-recipient pushes reach a
+    socket held by ANOTHER node.
+
+    Behind a round-robin balancer a household's socket and its next request
+    usually land on different nodes. Before the fix a ``new_subscriber``
+    notice reached the space owner only when the follower's subscribe hit
+    the owner's node, and a targeted ``to`` relay (the key handoff, the
+    author-profiles bundle) only when the publish hit the follower's node —
+    on a 4-node cluster ~3 new followers in 4 got neither. Now:
+
+    * owner's socket on node 0, follower subscribes via node 1 → the owner
+      gets ``new_subscriber`` (``reason: subscribe``, ``accepts`` intact);
+    * follower's socket on node 1, owner's targeted handoff via node 0 →
+      the follower gets the ``relay`` frame.
+    """
+    import asyncio
+
+    import aiohttp
+
+    from socialhome.authority_sig import sign_authority_event
+    from socialhome.crypto import (
+        b64url_encode,
+        derive_instance_id,
+        generate_identity_keypair,
+        sign_ed25519,
+    )
+
+    def _canonical(body: dict) -> bytes:
+        return json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+
+    def _register(url: str, *, keywrap: bool) -> tuple[str, bytes]:
+        kp = generate_identity_keypair()
+        iid = derive_instance_id(kp.public_key)
+        body: dict = {
+            "token": _gfs_landing_token(url),
+            "instance_id": iid,
+            "public_key": kp.public_key.hex(),
+            "display_name": f"cross-node-{iid[:6]}",
+        }
+        if keywrap:
+            body |= {
+                "keywrap_public_key": "cc" * 32,
+                "kem_suite": "x25519",
+                "keywrap_sig": "a2V5d3JhcHNpZw",
+            }
+        code, resp = _request(
+            f"{url}/gfs/register", method="POST", body=body, timeout=15.0
+        )
+        if code not in (200, 201) or (resp or {}).get("status") != "registered":
+            raise SystemExit(f"gfs-cluster: cross-node register → {code} {resp!r}")
+        return iid, kp.private_key
+
+    owner_id, owner_seed = _register(urls[0], keywrap=False)
+    follower_id, follower_seed = _register(urls[1], keywrap=True)
+    space = generate_identity_keypair()
+    space_id = generate_identity_keypair().public_key.hex()[:32]
+    publish = {
+        "space_id": space_id,
+        "owning_instance": owner_id,
+        "name": "Cross-node space",
+        "description": "",
+        "about_markdown": "",
+        "cover_url": "",
+        "icon_url": "",
+        "min_age": 0,
+        "category": "general",
+        "join_mode": "open",
+        "allow_subscribers": True,
+        "accent_color": "#C8902F",
+        "primary_color": "#D2542A",
+        "identity_public_key": space.public_key.hex(),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    publish["signature"] = b64url_encode(sign_ed25519(owner_seed, _canonical(publish)))
+    code, resp = _request(
+        f"{urls[2 % len(urls)]}/gfs/spaces/{space_id}/publish",
+        method="POST",
+        body=publish,
+        timeout=15.0,
+    )
+    if code not in (200, 201):
+        raise SystemExit(f"gfs-cluster: cross-node space publish → {code} {resp!r}")
+
+    def _hello(instance_id: str, seed: bytes) -> dict:
+        ts = int(time.time())
+        sig = sign_ed25519(seed, f"{instance_id}|{ts}".encode())
+        return {
+            "type": "hello",
+            "instance_id": instance_id,
+            "ts": ts,
+            "sig": b64url_encode(sig),
+        }
+
+    async def _next(ws, frame_type: str, timeout: float = 10.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                msg = await ws.receive(timeout=left)
+            except TimeoutError:
+                break
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                break
+            frame = json.loads(msg.data)
+            if frame.get("type") == frame_type:
+                return frame
+        raise SystemExit(
+            f"gfs-cluster: no {frame_type!r} frame within {timeout:.0f} s on a "
+            "socket held by another node than the request — cross-node "
+            "delivery is broken (NODE_DRAIN_HINT notices / shared relay queue)."
+        )
+
+    async def _run() -> None:
+        async with aiohttp.ClientSession() as http:
+            owner_ws = await http.ws_connect(f"{urls[0]}/gfs/ws")
+            await owner_ws.send_json(_hello(owner_id, owner_seed))
+            await asyncio.sleep(0.5)  # registered before the subscribe lands
+            ts = datetime.now(timezone.utc).isoformat()
+            signed = {
+                "action": "subscribe",
+                "instance_id": follower_id,
+                "space_id": space_id,
+                "ts": ts,
+            }
+            body = signed | {
+                "signature": b64url_encode(
+                    sign_ed25519(follower_seed, _canonical(signed))
+                ),
+                "accepts": ["author_profiles_bundle"],
+            }
+            async with http.post(f"{urls[1]}/gfs/subscribe", json=body) as r:
+                if r.status != 200:
+                    raise SystemExit(f"gfs-cluster: subscribe → {r.status}")
+            notice = await _next(owner_ws, "new_subscriber")
+            sub = notice.get("subscriber") or {}
+            if (
+                notice.get("reason") != "subscribe"
+                or notice.get("space_id") != space_id
+                or sub.get("instance_id") != follower_id
+                or sub.get("accepts") != ["author_profiles_bundle"]
+            ):
+                raise SystemExit(f"gfs-cluster: wrong cross-node notice {notice!r}")
+            print(
+                "  subscribe via node 1 → new_subscriber on the owner's socket "
+                "on node 0 (reason subscribe, accepts intact) ✓"
+            )
+
+            follower_ws = await http.ws_connect(f"{urls[1]}/gfs/ws")
+            await follower_ws.send_json(_hello(follower_id, follower_seed))
+            await asyncio.sleep(0.5)
+            payload: dict = {"space_id": space_id, "sealed": {"ciphertext": "x:y"}}
+            payload |= sign_authority_event(
+                event_type="space_subscriber_key_handoff",
+                space_id=space_id,
+                payload=payload,
+                space_seed=space.private_key,
+            )
+            async with http.post(
+                f"{urls[0]}/gfs/publish",
+                json={
+                    "space_id": space_id,
+                    "event_type": "space_subscriber_key_handoff",
+                    "payload": payload,
+                    "to": follower_id,
+                },
+            ) as r:
+                if r.status != 200:
+                    raise SystemExit(f"gfs-cluster: targeted publish → {r.status}")
+            relay = await _next(follower_ws, "relay")
+            if relay.get("payload") != payload:
+                raise SystemExit(f"gfs-cluster: wrong cross-node relay {relay!r}")
+            print(
+                "  targeted key handoff via node 0 → the follower's socket on "
+                "node 1 (shared queue + drain hint) ✓"
+            )
+            await follower_ws.close()
+            await owner_ws.close()
+
+    asyncio.run(_run())
+
+
 def cmd_gfs_cluster() -> None:
     """Prove a MULTI-PROCESS GFS cluster serves writes without deadlocking.
 
@@ -1466,6 +1647,13 @@ def cmd_gfs_cluster() -> None:
             )
     print("  ~1.5 MiB cover publishes stored intact, served by another node ✓")
 
+    # 3d. Single-recipient pushes reach a socket held by another node.
+    try:
+        _gfs_cluster_cross_node_push(urls)
+    except BaseException:
+        _gfs_cluster_down(preserve_logs=True)
+        raise
+
     # 4. Cross-node visibility: a client registered via one node is in the
     # shared DB every other node reads.
     time.sleep(1.0)
@@ -1478,7 +1666,8 @@ def cmd_gfs_cluster() -> None:
         f"gfs-cluster: ok ({len(ports)} processes, one shared SQLite DB; "
         "peers discovered incl. self-guard; foreign-seed HELLO refused, "
         "replayed frame refused; concurrent cross-process "
-        "registrations + space publishes serialise on the lock)"
+        "registrations + space publishes serialise on the lock; owner "
+        "notices + targeted relays reach a socket on another node)"
     )
 
 

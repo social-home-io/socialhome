@@ -614,28 +614,43 @@ class GfsEnvelopeRelay:
         to_queue = [t for t in offline if t in queue_ok]
         if not to_queue:
             return reached
-        blob = orjson.dumps(frame).decode()
-        now = int(time.time())
+        blob = orjson.dumps(frame).decode()  # once, however many targets
         for target in to_queue:
-            queued = await self._queue_repo.enqueue_relay(
-                target,
-                blob,
-                created_at=now,
-                expires_at=now + self._ttl,
-                max_per_recipient=RELAY_QUEUE_MAX_PER_RECIPIENT,
-                max_bytes_per_recipient=RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT,
-                max_total_bytes=RELAY_QUEUE_MAX_TOTAL_BYTES,
-            )
-            if queued:
+            if await self._queue_relay_blob(target, blob):
                 reached += 1
-                await self._after_enqueue(target)
-            else:
-                log.warning(
-                    "gfs.envelope: a space item for %s exceeds the relay "
-                    "queue caps on its own — not queued",
-                    target,
-                )
         return reached
+
+    async def queue_relay(self, target: str, frame: dict) -> bool:
+        """Queue one relay *frame* (``{space_id, event_type, payload}`` — the
+        relay push without its ``type``) for *target* and hint the cluster.
+
+        For a push that found no socket for *target* on THIS node: the node
+        that holds it drains the row on the ``NODE_DRAIN_HINT``, or the
+        target's next hello does. Same per-recipient RELAY caps, server-wide
+        cap and fair-share eviction as a member item. ``False`` when the
+        frame alone exceeds a cap (logged)."""
+        return await self._queue_relay_blob(target, orjson.dumps(frame).decode())
+
+    async def _queue_relay_blob(self, target: str, blob: str) -> bool:
+        now = int(time.time())
+        queued = await self._queue_repo.enqueue_relay(
+            target,
+            blob,
+            created_at=now,
+            expires_at=now + self._ttl,
+            max_per_recipient=RELAY_QUEUE_MAX_PER_RECIPIENT,
+            max_bytes_per_recipient=RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT,
+            max_total_bytes=RELAY_QUEUE_MAX_TOTAL_BYTES,
+        )
+        if not queued:
+            log.warning(
+                "gfs.envelope: a relay frame for %s exceeds the relay queue "
+                "caps on its own — not queued",
+                target,
+            )
+            return False
+        await self._after_enqueue(target)
+        return True
 
     async def drain(self, to_instance: str) -> int:
         """Flush queued envelopes to a connected household.

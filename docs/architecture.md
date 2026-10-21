@@ -942,7 +942,15 @@ process: during a reconnect that moves a household between nodes, a stale
 socket on the old node can in rare cases take a frame another node also
 delivers. Receivers tolerate it — a relayed §24.11 envelope is dropped by the
 pipeline's replay step (`msg_id`), an invite-bootstrap body by its
-`redeem_nonce` replay guard, a member item by its item-id dedupe. Every push
+`redeem_nonce` replay guard, a member item by its item-id dedupe. A targeted
+`POST /gfs/publish` (`to`) whose subscriber has no socket on the publishing
+node is queued the same way (`GfsEnvelopeRelay.queue_relay`). Owner notices
+ride the same hint: a `new_subscriber` notice for an owner whose socket is
+elsewhere is added to the next `NODE_DRAIN_HINT` as `notices:[…]` (ids and
+labels only, `ClusterService.hint_subscriber_notice`), and the node holding
+the owner's socket rebuilds it from the shared DB
+(`GfsFederationService.deliver_forwarded_notice`) — no frame of its own, so it
+spends nothing of a peer's 60-a-minute sync budget beyond the hint. Every push
 to a `/gfs/ws` socket is bounded by `WS_SEND_TIMEOUT_S` (10 s,
 `global_server/ws_registry.py`): a socket whose peer stopped reading is
 evicted and closed (1013) rather than holding an accept, a drain or a fan-out

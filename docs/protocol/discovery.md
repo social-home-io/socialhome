@@ -44,7 +44,12 @@ household sends `to` only to a server whose signed capability block proves
 `targeted_publish`; an older server gets the fan-out it always got (the key
 handoff) or nothing (the profiles bundle). A targeted publish reads the one
 seat by its `(space_id, instance_id)` primary key, never the space's whole
-subscriber list.
+subscriber list. When that subscriber has no socket on the node that took
+the publish — its socket is on another cluster node, or down — the frame
+goes into the shared `gfs_envelope_queue` as a relay row (the same
+per-recipient and server-wide caps and fair-share eviction as a member
+item) and reaches the socket through the drain hint below, or on the next
+hello within 24 h. `delivered_to` counts a queued frame as reached.
 
 ## Transport (SH ↔ GFS)
 
@@ -347,7 +352,9 @@ The Social Home ↔ GFS link is split by direction:
   no `accepts`), so a seed-holder can hand the subscriber the content key
   (Phase 5b-b, below). Re-subscribing a seat already held sends no frame. This frame is best-effort — dropped if the owner has
   no socket; the 5b-c reconcile backstops an offline owner, and the
-  subscriber's own (re)connect re-triggers the notify (Phase 5b-d).
+  subscriber's own (re)connect re-triggers the notify (Phase 5b-d). In a
+  cluster it reaches the owner's socket on whichever node holds it (see
+  "Owner notices reach the owner on any cluster node" below).
 - **A rejected hello names no reason that leaks registration.** An unknown
   or inactive `instance_id` and a bad (or undecodable) signature for a
   registered one both close `4401` with the single reason `auth-failed`, and
@@ -365,7 +372,23 @@ The Social Home ↔ GFS link is split by direction:
   a frame) to its member peers; the node that does hold the household's
   socket drains its queue right away instead of on the next reconnect.
   Drains are serialised per household, so a hello drain and a hint drain
-  never deliver a row twice.
+  never deliver a row twice. A targeted `to` relay whose subscriber has no
+  socket on the publishing node takes the same path.
+- **Owner notices reach the owner on any cluster node.** A
+  `new_subscriber` notice is built on the node that took the subscribe (or
+  the follower's hello); when the space owner's socket is not there, the
+  node adds `{owner, space_id, subscriber, reason, accepts}` — ids and
+  labels only, never key material — to the next coalesced `NODE_DRAIN_HINT`
+  as `notices:[…]` (≤ 256 a frame, ≤ 4096 waiting per node; past that a
+  notice is dropped and the reconcile repairs it). Repeats for one seat
+  collapse, a new seat winning over a key repair. The node holding the
+  owner's socket validates every field, checks the shared database (the
+  owner owns the space, the subscriber holds an active seat), rebuilds the
+  notice from its own rows and pushes it; a node without the socket ignores
+  it, so a notice is never forwarded twice. That node also applies the
+  `reconnect` dedupe (`RECONNECT_NOTIFY_DEDUPE_S`), because only it sees the
+  hello and the seat re-takes that a round-robin balancer spread over
+  different nodes. An older node ignores `notices` — the behaviour before.
 - **One public identity per GFS, however many nodes.** `[server] instance_id`
   is the GFS's PUBLIC identity: `/gfs/info` serves it, the capability block
   is signed over it, and households pin it at pairing and sign it as the
@@ -1708,15 +1731,14 @@ forward it unchanged:
   so one follower's loop cannot use up the space's per-minute cap and leave
   real newcomers without names. The key is re-sealed every time.
 - **One-time and best effort.** The bundle is sent for the subscribe
-  notify only, and that notify reaches the owner only while the owner's
-  socket is up **on the same GFS node** (`ws_registry.send` is local; a
-  cluster does not forward `new_subscriber`). So the bundle is lost when the
-  follower's socket is down at subscribe time, when the owner is offline,
-  and in a cluster whenever the owner's socket is on another node (behind a
-  4-node round robin, about 3 subscribes in 4). The key is not lost: the
-  follower's reconnect and the owner's 5b-c reconcile both re-seal it. The
-  names then arrive with each author's next real profile change. (Follow-up:
-  forward `new_subscriber` across cluster nodes.)
+  notify only, which reaches the owner while the owner's socket is up on
+  any node of the GFS (a cluster forwards it, see Transport). The targeted
+  parts then reach the follower's socket on any node, or wait in the queue
+  for its next hello (the follower refuses a part older than an hour). So
+  the bundle is lost only when the owner is offline at subscribe time. The
+  key is not lost even then: the follower's reconnect and the owner's 5b-c
+  reconcile both re-seal it. The names then arrive with each author's next
+  real profile change.
 - **The host cannot vouch.** The follower authority-verifies the envelope,
   opens it, and runs **every** check of a relayed item on each bundled item
   (author signature + self-cert, author-bound type, origin is the author's

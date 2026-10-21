@@ -1105,7 +1105,15 @@ WS pushes across allocs. The step:
    sequential write pays it; at the old fixed 500 ms every publish took
    ≥ 0.5 s (`GFS_WRITE_BATCH_WINDOW_MS=500` in the environment reproduces
    that: median ~509 ms, the step fails). At the 5 ms default: ~7 ms.
-5. Confirms a client registered via one node is served by the other
+5. Proves the two single-recipient pushes reach a socket held by ANOTHER
+   node: with the owner's ``/gfs/ws`` on node 0, a follower's subscribe via
+   node 1 must bring the owner a ``new_subscriber`` frame (``reason:
+   subscribe``, ``accepts`` intact — forwarded as ``NODE_DRAIN_HINT.notices``);
+   with the follower's socket on node 1, the owner's targeted ``to`` key
+   handoff via node 0 must reach it (shared relay queue + drain hint).
+   Without the cross-node path the step fails with "no 'new_subscriber'
+   frame within 10 s".
+6. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 
 ```bash

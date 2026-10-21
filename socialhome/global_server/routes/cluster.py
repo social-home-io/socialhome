@@ -306,6 +306,8 @@ class ClusterSyncView(GfsBaseView):
             await svc.apply_partition_gap(payload)
         elif msg_type == NODE_DRAIN_HINT:
             await svc.apply_drain_hint(payload.get("instances"))
+            if "notices" in payload:
+                await svc.apply_subscriber_notices(payload["notices"])
         else:
             log.debug(
                 "cluster: unknown NODE_* type %r from %r",

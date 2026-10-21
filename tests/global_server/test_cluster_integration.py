@@ -1889,3 +1889,28 @@ async def test_a_drain_hint_flushes_an_envelope_queued_by_another_node(client):
             break
         await asyncio.sleep(0.01)
     assert await queue.count_for(_HOUSEHOLD) == 0
+
+
+async def test_node_drain_hint_notices_are_dispatched(client, monkeypatch):
+    """``NODE_DRAIN_HINT.notices`` (owner notices for a socket on this node)
+    reach ``apply_subscriber_notices``; a hint without the key does not."""
+    seed = await _register_peer(client)
+    seen: list[object] = []
+
+    async def _record(self, notices):
+        seen.append(notices)
+        return 0
+
+    monkeypatch.setattr(ClusterService, "apply_subscriber_notices", _record)
+    notices = [{"owner": _HOUSEHOLD, "space_id": "sp", "subscriber": _HOUSEHOLD}]
+    for payload in ({"instances": [], "notices": notices}, {"instances": []}):
+        resp = await _sync(
+            client,
+            from_node=PEER,
+            seed=seed,
+            ip=GENUINE_IP,
+            type_=NODE_DRAIN_HINT,
+            payload=payload,
+        )
+        assert resp.status == 200
+    assert seen == [notices]
