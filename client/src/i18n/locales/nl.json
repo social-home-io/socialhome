@@ -433,6 +433,8 @@
   "settings.profile.avatar_failed": "Uploaden van avatar mislukt",
   "settings.privacy.title": "Privacy",
   "settings.privacy.online_status": "Online-status tonen aan andere gezinsleden",
+  "settings.privacy.profile_followers": "Mijn foto en bio tonen aan volgers van wereldwijde spaces",
+  "settings.privacy.profile_followers_hint": "Mensen die een wereldwijde space volgen waarin je post. Staat het uit, dan zien ze alleen je naam.",
   "settings.privacy.updated": "Privacy bijgewerkt",
   "settings.notifications.title": "Meldingen",
   "settings.notifications.push": "Pushmeldingen",

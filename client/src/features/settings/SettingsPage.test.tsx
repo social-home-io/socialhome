@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent, waitFor } from '@testing-library/preact'
+import { render, fireEvent, waitFor, screen } from '@testing-library/preact'
 
 // Mock the API module before importing the page. ``vi.hoisted`` is the
 // only way to define a ``vi.fn`` that is reachable from a ``vi.mock``
@@ -72,6 +72,7 @@ beforeEach(() => {
     hide_highlights: false,
     hide_momentum: false,
     hide_bazaar: false,
+    hide_profile_from_followers: false,
   }
   // Reset the module-level signals so each test starts with a clean slate
   // and the SpaceLocationSharingPanel re-fetches from the mock.
@@ -290,6 +291,54 @@ describe('SidebarVisibilityPanel', () => {
       const checkboxes = Array.from(panel.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[]
       expect(checkboxes[0].checked).toBe(false)
     })
+  })
+})
+
+describe('Show my picture and bio to followers of global spaces', () => {
+  const box = () =>
+    document.querySelector('#profile-followers-toggle input[type="checkbox"]') as HTMLInputElement
+
+  it('is checked by default — shown unless the person opts out', async () => {
+    await renderPrivacyTab()
+    expect(box().checked).toBe(true)
+    expect(screen.getByText('Show my picture and bio to followers of global spaces')).toBeTruthy()
+    expect(
+      screen.getByText('People who follow a global space you post in. When off, they see your name only.'),
+    ).toBeTruthy()
+  })
+
+  it('is unchecked when hide_profile_from_followers is true', async () => {
+    userPreferences.value = { ...userPreferences.value, hide_profile_from_followers: true }
+    await renderPrivacyTab()
+    expect(box().checked).toBe(false)
+  })
+
+  it('unchecking it PATCHes hide_profile_from_followers: true', async () => {
+    await renderPrivacyTab()
+    fireEvent.click(box())
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith('/api/me/preferences', { hide_profile_from_followers: true })
+    })
+    expect(userPreferences.value.hide_profile_from_followers).toBe(true)
+  })
+
+  it('checking it again PATCHes hide_profile_from_followers: false', async () => {
+    userPreferences.value = { ...userPreferences.value, hide_profile_from_followers: true }
+    await renderPrivacyTab()
+    fireEvent.click(box())
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith('/api/me/preferences', { hide_profile_from_followers: false })
+    })
+  })
+
+  it('reverts and shows a toast when the PATCH fails', async () => {
+    mockPatch.mockRejectedValueOnce(new Error('Network error'))
+    await renderPrivacyTab()
+    fireEvent.click(box())
+    await waitFor(() => {
+      expect(userPreferences.value.hide_profile_from_followers).toBe(false)
+    })
+    expect(box().checked).toBe(true)
   })
 })
 

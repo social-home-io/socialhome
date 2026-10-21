@@ -504,6 +504,8 @@
   "settings.profile.avatar_failed": "Avatar upload failed",
   "settings.privacy.title": "Privacy",
   "settings.privacy.online_status": "Show online status to other household members",
+  "settings.privacy.profile_followers": "Show my picture and bio to followers of global spaces",
+  "settings.privacy.profile_followers_hint": "People who follow a global space you post in. When off, they see your name only.",
   "settings.privacy.updated": "Privacy updated",
   "settings.notifications.title": "Notifications",
   "settings.notifications.push": "Push notifications",

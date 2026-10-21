@@ -433,6 +433,8 @@
   "settings.profile.avatar_failed": "Échec du téléversement de l'avatar",
   "settings.privacy.title": "Confidentialité",
   "settings.privacy.online_status": "Montrer le statut en ligne aux autres membres du foyer",
+  "settings.privacy.profile_followers": "Montrer ma photo et ma bio aux abonnés des espaces globaux",
+  "settings.privacy.profile_followers_hint": "Les personnes qui suivent un espace global où vous publiez. Si c'est désactivé, elles ne voient que votre nom.",
   "settings.privacy.updated": "Confidentialité mise à jour",
   "settings.notifications.title": "Notifications",
   "settings.notifications.push": "Notifications push",

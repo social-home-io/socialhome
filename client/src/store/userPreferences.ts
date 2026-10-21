@@ -5,6 +5,8 @@
  * for ``user.preferences_changed`` WS frames so a settings change on
  * another device is reflected here live (spec §18).
  *
+ * Also holds one privacy switch, ``hide_profile_from_followers``.
+ *
  * Distinct from :mod:`HouseholdToggles` (admin-set, household-wide)
  * and :mod:`presence` (DND / location-sharing). These flags are owned
  * by the individual user and only sent to that user.
@@ -18,6 +20,9 @@ export interface UserPreferences {
   hide_highlights: boolean
   hide_momentum: boolean
   hide_bazaar: boolean
+  /** "Show my picture and bio to followers of global spaces" turned off:
+   *  followers of a global space this person posts in see the name only. */
+  hide_profile_from_followers: boolean
 }
 
 const DEFAULT: UserPreferences = {
@@ -25,6 +30,7 @@ const DEFAULT: UserPreferences = {
   hide_highlights: false,
   hide_momentum: false,
   hide_bazaar: false,
+  hide_profile_from_followers: false,
 }
 
 export const userPreferences = signal<UserPreferences>(DEFAULT)
