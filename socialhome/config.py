@@ -109,7 +109,8 @@ _CORE_SECTIONS: frozenset[str] = frozenset(
 PROJECT_GFS_URL = "https://gfs.social-home.io"
 
 #: Where the project publishes the pinned public-highlight viewer (GitHub
-#: Pages of this repo, ``.github/workflows/pinned-viewer.yml``) — the shipped
+#: Pages of the ``social-home-io/viewer`` repo, which rebuilds it from each
+#: release) — the shipped
 #: ``[highlights] public_viewer_base_url``.
 PROJECT_PINNED_VIEWER_URL = "https://viewer.social-home.io"
 
