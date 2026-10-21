@@ -489,7 +489,8 @@ class SubscribeView(GfsBaseView):
     A subscribe may carry ``accepts`` (v_61): the optional relay deliveries
     the household opens, e.g. ``["author_profiles_bundle"]``. It is NOT in
     the signed bytes, is never stored, and only rides to the space owner in
-    the ``new_subscriber`` notify of a new seat; a malformed one is a 400.
+    the ``new_subscriber`` notify of a new seat. Malformed labels are
+    dropped (it is a hint): the subscribe never fails over it.
     """
 
     async def post(self) -> web.Response:
@@ -521,10 +522,7 @@ class SubscribeView(GfsBaseView):
             return web.json_response({"status": "unsubscribed"})
         # v_61 — what the subscriber can open, NEXT to the signed bytes (an
         # older GFS ignores it and still verifies). Validated, never stored.
-        try:
-            accepts = parse_accepts(body.get("accepts"))
-        except ValueError as exc:
-            raise web.HTTPBadRequest(reason=f"Bad accepts: {exc}") from exc
+        accepts = parse_accepts(body.get("accepts"))
         try:
             await svc.subscribe(
                 str(instance_id),

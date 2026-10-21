@@ -28,16 +28,19 @@ def test_unknown_labels_are_kept_and_deduped_in_order():
 
 @pytest.mark.parametrize(
     "raw",
-    [
-        "author_profiles_bundle",  # not a list
-        {"author_profiles_bundle": True},
-        [1],
-        [""],
-        ["Has-Caps"],
-        ["x" * (MAX_ACCEPTS_LABEL_CHARS + 1)],
-        [f"l{i}" for i in range(MAX_ACCEPTS_LABELS + 1)],
-    ],
+    ["author_profiles_bundle", {"author_profiles_bundle": True}, 7, True],
 )
-def test_malformed_raises(raw):
-    with pytest.raises(ValueError):
-        parse_accepts(raw)
+def test_a_non_list_is_empty_never_an_error(raw):
+    """``accepts`` is an unsigned hint: a bad shape must never fail the
+    subscribe it rides on."""
+    assert parse_accepts(raw) == ()
+
+
+def test_malformed_labels_are_dropped_and_the_rest_kept():
+    raw = [1, "", "Has-Caps", "x" * (MAX_ACCEPTS_LABEL_CHARS + 1), "ok_1"]
+    assert parse_accepts(raw) == ("ok_1",)
+
+
+def test_at_most_the_max_labels_are_kept():
+    raw = [f"l{i}" for i in range(MAX_ACCEPTS_LABELS + 5)]
+    assert parse_accepts(raw) == tuple(raw[:MAX_ACCEPTS_LABELS])

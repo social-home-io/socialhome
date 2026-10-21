@@ -35,23 +35,24 @@ _LABEL_RE = re.compile(r"^[a-z0-9_]+$")
 
 
 def parse_accepts(raw: object) -> tuple[str, ...]:
-    """Validate a wire ``accepts`` value. ``None`` (absent) is ``()``.
+    """The usable labels of a wire ``accepts`` value — never raises.
 
-    Unknown labels are kept (the list is extensible) and de-duplicated in
-    order. Raises :class:`ValueError` on anything but a bounded list of
-    short ``[a-z0-9_]`` strings."""
-    if raw is None:
+    It is an unsigned hint, so a malformed value never fails the subscribe:
+    anything but a list counts as ``()``, a label that is not a short
+    ``[a-z0-9_]`` string is dropped, duplicates collapse in order, and at
+    most :data:`MAX_ACCEPTS_LABELS` are kept. Unknown well-formed labels
+    are kept (the list is extensible)."""
+    if not isinstance(raw, list):
         return ()
-    if not isinstance(raw, list) or len(raw) > MAX_ACCEPTS_LABELS:
-        raise ValueError(f"accepts must be a list of at most {MAX_ACCEPTS_LABELS}")
     labels: list[str] = []
     for label in raw:
+        if len(labels) >= MAX_ACCEPTS_LABELS:
+            break
         if (
-            not isinstance(label, str)
-            or len(label) > MAX_ACCEPTS_LABEL_CHARS
-            or not _LABEL_RE.match(label)
+            isinstance(label, str)
+            and len(label) <= MAX_ACCEPTS_LABEL_CHARS
+            and _LABEL_RE.match(label)
+            and label not in labels
         ):
-            raise ValueError("malformed accepts label")
-        if label not in labels:
             labels.append(label)
     return tuple(labels)

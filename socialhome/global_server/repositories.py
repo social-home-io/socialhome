@@ -139,7 +139,7 @@ class AbstractGfsFederationRepo(Protocol):
         *,
         space_id: str,
         instance_id: str,
-    ) -> None: ...
+    ) -> bool: ...
     async def remove_subscriber(
         self,
         *,
@@ -510,8 +510,11 @@ class SqliteGfsFederationRepo:
         *,
         space_id: str,
         instance_id: str,
-    ) -> None:
-        await self._db.enqueue(
+    ) -> bool:
+        """Take a seat; ``True`` only when this call created it (an
+        existing seat is left as is). Decided by the INSERT itself, so two
+        concurrent subscribes for one new seat never both see "new"."""
+        inserted = await self._db.enqueue_rowcount(
             "INSERT OR IGNORE INTO space_subscribers(space_id, instance_id) "
             "VALUES(?, ?)",
             (space_id, instance_id),
@@ -522,6 +525,7 @@ class SqliteGfsFederationRepo:
             "WHERE space_id=?",
             (space_id, space_id),
         )
+        return inserted > 0
 
     async def remove_subscriber(
         self,

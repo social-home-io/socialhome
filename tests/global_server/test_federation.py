@@ -3384,11 +3384,10 @@ async def test_a_new_seat_without_accepts_forwards_an_empty_list(gfs_db):
     assert frame["subscriber"]["accepts"] == []
 
 
-async def test_a_resubscribe_of_a_held_seat_notifies_nobody(gfs_db):
+async def test_a_resubscribe_right_after_a_notify_notifies_nobody(gfs_db):
     """REGRESSION (H1): the follower re-subscribes every seat on each GFS-WS
-    reconnect, and the WS hello already re-notifies (``reason: reconnect``),
-    so a re-subscribe of a held seat must not notify again (each
-    ``subscribe`` notify can cost the host a ~1 MB bundle)."""
+    reconnect, right after the WS hello re-notified (``reason: reconnect``),
+    so a re-take of a seat notified moments ago must not notify again."""
     ws = _RecordingWsRegistry()
     svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
     sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-r3")
@@ -3396,8 +3395,99 @@ async def test_a_resubscribe_of_a_held_seat_notifies_nobody(gfs_db):
     ws.sent.clear()
     await _signed_subscribe(svc, sub_seed, "sp-r3", accepts=("author_profiles_bundle",))
     assert _notifies(ws) == []
+    await svc.on_subscriber_connected("sub-r")
+    ws.sent.clear()
+    await _signed_subscribe(svc, sub_seed, "sp-r3", accepts=("author_profiles_bundle",))
+    assert _notifies(ws) == []
     subs = await svc._repo.list_subscribers("sp-r3")
     assert [s.instance_id for s in subs] == ["sub-r"]
+
+
+async def test_a_resubscribe_the_hello_missed_gets_a_key_repair_only(gfs_db):
+    """A held seat the hello did not notify (past MAX_RECONNECT_NOTIFIES, or
+    after a GFS restart) still gets its key repair on the re-take — as
+    ``reason: reconnect``, without accepts, so never a bundle."""
+    ws = _RecordingWsRegistry()
+    repo = SqliteGfsFederationRepo(gfs_db)
+    svc = GfsFederationService(repo, ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-r5")
+    await _signed_subscribe(svc, sub_seed, "sp-r5", accepts=("author_profiles_bundle",))
+    restarted = GfsFederationService(repo, ws_registry=ws)
+    ws.sent.clear()
+    await _signed_subscribe(
+        restarted, sub_seed, "sp-r5", accepts=("author_profiles_bundle",)
+    )
+    [frame] = _notifies(ws)
+    assert frame["reason"] == "reconnect"
+    assert "accepts" not in frame["subscriber"]
+
+
+async def test_the_reconnect_cap_no_longer_strands_later_seats(gfs_db, monkeypatch):
+    """REGRESSION (review I2a): the hello notifies at most
+    MAX_RECONNECT_NOTIFIES seats; the follower's re-subscribe of the rest
+    must still reach their owners for the key repair."""
+    monkeypatch.setattr(federation_mod, "MAX_RECONNECT_NOTIFIES", 1)
+    ws = _RecordingWsRegistry()
+    repo = SqliteGfsFederationRepo(gfs_db)
+    svc = GfsFederationService(repo, ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-c1")
+    owner_seed, owner_pk = _make_keypair()
+    await svc.register_instance("owner-s", owner_pk.hex(), auto_accept=True)
+    await _publish_known_space(
+        svc, owner_seed, owning_instance="owner-s", space_id="sp-c2"
+    )
+    await _signed_subscribe(svc, sub_seed, "sp-c1")
+    await _signed_subscribe(svc, sub_seed, "sp-c2")
+    restarted = GfsFederationService(repo, ws_registry=ws)
+    ws.sent.clear()
+    await restarted.on_subscriber_connected("sub-r")
+    hello = {f["space_id"] for f in _notifies(ws)}
+    assert len(hello) == 1
+    ws.sent.clear()
+    await _signed_subscribe(restarted, sub_seed, "sp-c1")
+    await _signed_subscribe(restarted, sub_seed, "sp-c2")
+    repaired = {f["space_id"] for f in _notifies(ws)}
+    assert repaired == {"sp-c1", "sp-c2"} - hello
+    assert all(f["reason"] == "reconnect" for f in _notifies(ws))
+
+
+async def test_a_churned_seat_gets_the_key_but_not_the_bundle_again(gfs_db):
+    """REGRESSION (review I1): unsubscribe → subscribe makes a NEW seat; it
+    must not re-earn the one-time bundle within the churn window."""
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-ch")
+    await _signed_subscribe(svc, sub_seed, "sp-ch", accepts=("author_profiles_bundle",))
+    ts = _now_iso()
+    sig = _sign(
+        sub_seed,
+        {
+            "action": "unsubscribe",
+            "instance_id": "sub-r",
+            "space_id": "sp-ch",
+            "ts": ts,
+        },
+    )
+    await svc.unsubscribe("sub-r", "sp-ch", ts, sig)
+    ws.sent.clear()
+    await _signed_subscribe(svc, sub_seed, "sp-ch", accepts=("author_profiles_bundle",))
+    [frame] = _notifies(ws)
+    assert frame["reason"] == "subscribe"
+    assert frame["subscriber"]["accepts"] == []
+
+
+async def test_concurrent_subscribes_for_one_new_seat_notify_once(gfs_db):
+    """Review M2: two concurrent subscribes for the same new seat — only the
+    one whose INSERT created the row notifies ``subscribe``."""
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-cc")
+    await asyncio.gather(
+        _signed_subscribe(svc, sub_seed, "sp-cc", accepts=("author_profiles_bundle",)),
+        _signed_subscribe(svc, sub_seed, "sp-cc", accepts=("author_profiles_bundle",)),
+    )
+    reasons = [f["reason"] for f in _notifies(ws)]
+    assert reasons == ["subscribe"]
 
 
 async def test_a_reconnect_notifies_with_reason_reconnect_and_no_accepts(gfs_db):

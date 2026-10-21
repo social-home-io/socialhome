@@ -1469,3 +1469,24 @@ async def test_cluster_remove_stale_siblings_drops_only_stale_own_key_rows(gfs_d
         "garbled",
         "approved",
     }
+
+
+async def test_add_subscriber_says_whether_it_created_the_seat(fed):
+    """The INSERT itself decides "new seat" (review M2), so two concurrent
+    subscribes for one seat can never both notify ``subscribe``."""
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="o", display_name="O", public_key="aa" * 32, status="active"
+        )
+    )
+    await fed.upsert_space(
+        GlobalSpace(space_id="sp-new", owning_instance="o", status="active")
+    )
+    await fed.upsert_instance(
+        ClientInstance(
+            instance_id="s", display_name="S", public_key="ab" * 32, status="active"
+        )
+    )
+    assert await fed.add_subscriber(space_id="sp-new", instance_id="s") is True
+    assert await fed.add_subscriber(space_id="sp-new", instance_id="s") is False
+    assert [s.instance_id for s in await fed.list_subscribers("sp-new")] == ["s"]

@@ -164,6 +164,25 @@ NEW_SUBSCRIBER_REASON_SUBSCRIBE: str = "subscribe"
 #: owner repairs the content-key handoff only, never a bundle.
 NEW_SUBSCRIBER_REASON_RECONNECT: str = "reconnect"
 
+#: A seat re-take's ``reconnect`` notify is skipped when the same
+#: ``(subscriber, space)`` was notified this recently — the WS hello's
+#: :meth:`GfsFederationService.on_subscriber_connected` usually just did,
+#: and the follower re-subscribes every seat right after it.
+RECONNECT_NOTIFY_DEDUPE_S: float = 120.0
+
+#: A NEW seat for a ``(subscriber, space)`` that already had one this
+#: recently (an unsubscribe → subscribe loop) is notified without its
+#: ``accepts``: the owner re-seals the key but sends no second bundle.
+SEAT_CHURN_WINDOW_S: float = 3600.0
+
+#: Bound on each of the two in-memory ``(subscriber, space)`` sets above.
+SEAT_NOTIFY_CACHE_MAX: int = 100_000
+
+
+def _seat_key(instance_id: str, space_id: str) -> bytes:
+    """The in-memory key of one ``(subscriber, space)`` seat."""
+    return SeenPayloadCache.digest([instance_id, space_id])
+
 
 def _bounded_image_uri(uri: str | None, *, space_id: str, kind: str) -> str | None:
     """*uri*, or ``""`` when it exceeds ``SPACE_IMAGE_DATA_URI_MAX_CHARS``.
@@ -353,8 +372,10 @@ class GfsFederationService:
     __slots__ = (
         "_epoch_repo",
         "_invite_repo",
+        "_notified_seats",
         "_reconnect_tasks",
         "_repo",
+        "_seat_churn",
         "_seen_payloads",
         "_ws_registry",
     )
@@ -378,6 +399,16 @@ class GfsFederationService:
         # it (``server.py``).
         self._invite_repo = invite_repo
         self._seen_payloads = SeenPayloadCache()
+        # ``(subscriber, space)`` pairs notified in the last
+        # RECONNECT_NOTIFY_DEDUPE_S — a seat re-take skips its notify then.
+        self._notified_seats = SeenPayloadCache(
+            ttl_s=RECONNECT_NOTIFY_DEDUPE_S, cap=SEAT_NOTIFY_CACHE_MAX
+        )
+        # ``(subscriber, space)`` pairs that got a NEW seat in the last
+        # SEAT_CHURN_WINDOW_S — a churned seat is notified without accepts.
+        self._seat_churn = SeenPayloadCache(
+            ttl_s=SEAT_CHURN_WINDOW_S, cap=SEAT_NOTIFY_CACHE_MAX
+        )
         # Strong refs to in-flight reconnect-notify tasks — an asyncio task
         # with no reference can be garbage-collected mid-await.
         self._reconnect_tasks: set[asyncio.Task[None]] = set()
@@ -880,10 +911,14 @@ class GfsFederationService:
         open (:mod:`socialhome.domain.subscriber_accepts`), already
         validated by the route. NOT in the signed bytes (an older GFS still
         verifies the subscribe) and never stored: it is forwarded to the
-        owner only in the ``reason: "subscribe"`` notify of a NEW seat.
-        Re-subscribing a seat already held notifies nobody — the follower's
-        WS hello already re-notified (``reason: "reconnect"``, see
-        :meth:`on_subscriber_connected`) for the key repair.
+        owner only in the ``reason: "subscribe"`` notify of a NEW seat — and
+        not even then when the same seat was new within
+        :data:`SEAT_CHURN_WINDOW_S` (an unsubscribe → subscribe loop earns
+        the key again, never a second bundle). Re-subscribing a seat already
+        held sends ``reason: "reconnect"`` (key repair only), unless that
+        seat was notified within :data:`RECONNECT_NOTIFY_DEDUPE_S` — usually
+        by the follower's WS hello (:meth:`on_subscriber_connected`), which
+        reaches at most :data:`MAX_RECONNECT_NOTIFIES` seats.
         """
         inst = await self._verify_signed_request(
             instance_id,
@@ -921,17 +956,32 @@ class GfsFederationService:
         }
         if space_id not in held and len(held) >= MAX_SUBSCRIPTIONS_PER_INSTANCE:
             raise PermissionError("subscription limit reached")
-        await self._repo.add_subscriber(
+        created = await self._repo.add_subscriber(
             space_id=space_id,
             instance_id=instance_id,
         )
         log.debug("GFS: %s subscribed to space %s", instance_id, space_id)
-        if space_id in held:
+        seat = _seat_key(instance_id, space_id)
+        if not created:
             # A re-take (the follower re-subscribes every seat on each GFS-WS
-            # reconnect): the hello's ``reason: "reconnect"`` notify already
-            # asked the owner for the key repair — a second notify would only
-            # double the owner's work.
+            # reconnect). Usually the hello's ``reason: "reconnect"`` notify
+            # just covered it; but the hello notifies at most
+            # MAX_RECONNECT_NOTIFIES seats, so a seat it did not reach gets
+            # its key repair here — once, never a bundle.
+            if self._notified_seats.seen(seat):
+                return
+            await self._notify_owner_new_subscriber(
+                existing.owning_instance,
+                space_id,
+                inst,
+                reason=NEW_SUBSCRIBER_REASON_RECONNECT,
+            )
             return
+        if self._seat_churn.seen(seat):
+            # Unsubscribed and back within the window: the key again, but
+            # the one-time bundle is not re-earned by churning the seat.
+            accepts = ()
+        self._seat_churn.record(seat)
 
         # Phase 5b-b — best-effort notify the space OWNER so a seed-holder can
         # seal the per-space content key to this new subscriber (the GFS stays
@@ -981,6 +1031,7 @@ class GfsFederationService:
         }
         if reason == NEW_SUBSCRIBER_REASON_SUBSCRIBE:
             sub["accepts"] = list(accepts)
+        self._notified_seats.record(_seat_key(subscriber.instance_id, space_id))
         try:
             await self._ws_registry.send(
                 owning_instance,
