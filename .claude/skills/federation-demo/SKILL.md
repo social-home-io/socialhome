@@ -1672,7 +1672,7 @@ author's moment content key (``moment_public_keys``, ``is_own = 1``), that e
 holds that same epoch as a delivered key (``is_own = 0``) — the GFS logged
 ``sealed key(s) delivered`` and refused nothing (``encryption_required``) —
 and that neither the GFS log nor ``gfs.db`` / ``gfs.db-wal`` contains the
-moment's text or id.
+moment's text or id. **v_63:** the moment carries a picture; e must keep it (`api/media/gm-…`, WebP bytes) from one encrypted blob, and no blob under the GFS's `media/moments/` may contain a readable WebP.
 
 ### Bazaar over GFS (TODO)
 

@@ -632,10 +632,10 @@ async def test_inbound_public_early_delete_binds_its_origin(db):
     assert created == []
 
 
-async def test_inbound_public_moment_drops_a_remote_media_url(db):
-    """F7: a public moment's ``media_url`` (signed by its author, relayed by
-    the GFS) is stored only when it is a local media reference — a tracker
-    URL would load from every follower's browser."""
+async def test_inbound_public_moment_never_keeps_a_sent_media_url(db):
+    """F7 / v_63: a ``media_url`` in a public moment names a file on the
+    AUTHOR's household (or a tracker) — never one here. Neither is kept;
+    a moment's file arrives only as an encrypted blob (``media``)."""
     inbound, moment_repo, _created = await _public_inbound_env(db)
     for mid, url in (
         ("m-trk", "https://tracker.example/p.png"),
@@ -645,7 +645,6 @@ async def test_inbound_public_moment_drops_a_remote_media_url(db):
         await inbound.handle(
             {"type": "incoming_public_moment", "payload": env}, gfs_id="g1"
         )
-    trk = await moment_repo.get("m-trk")
-    assert trk is not None and trk.media_url is None and trk.media_type is None
-    ok = await moment_repo.get("m-ok")
-    assert ok is not None and ok.media_url == "api/media/a.webp"
+    for mid in ("m-trk", "m-ok"):
+        got = await moment_repo.get(mid)
+        assert got is not None and got.media_url is None and got.media_type is None

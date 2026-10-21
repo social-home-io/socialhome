@@ -16322,11 +16322,18 @@ def cmd_gfs_moment_profile() -> None:
     _must("gfs-moment-profile: e follow", s, fol, ok=(201,))
 
     content = f"🐝 public moment from {a['name']} {int(time.time())}"
+    # v_63: with a picture — it must reach e as an encrypted blob.
+    picture_url = _upload_demo_image(a_url, token=tok, label="a")
     s, m = _request(
         f"{a_url}/api/moments",
         token=tok,
         method="POST",
-        body={"content": content, "is_public": True},
+        body={
+            "content": content,
+            "is_public": True,
+            "media_url": picture_url,
+            "media_type": "image",
+        },
     )
     _must("gfs-moment-profile: noor public moment", s, m, ok=(201,))
     moment_id = m["id"]
@@ -16426,6 +16433,37 @@ def cmd_gfs_moment_profile() -> None:
                     f"gfs-moment-profile: the GFS's {db_file} holds {secret!r}"
                 )
     print("  the GFS log and database hold no moment text ✓")
+
+    # v_63 — the picture: e keeps it from an encrypted blob, and the GFS
+    # holds that blob only as ciphertext.
+    media_url = ""
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        s, body = _request(f"{e_url}/api/moments/{moment_id}", token=e["token"])
+        media_url = (
+            (body.get("moment") or {}).get("media_url") or "" if s == 200 else ""
+        )
+        if media_url:
+            break
+        time.sleep(2)
+    if "api/media/gm-" not in media_url:
+        raise SystemExit(
+            f"gfs-moment-profile: e's moment has no kept picture ({media_url!r})"
+        )
+    s, raw = _http_get_bytes(f"{e_url}/{media_url}")
+    if s != 200 or not raw.startswith(b"RIFF"):
+        raise SystemExit(
+            f"gfs-moment-profile: e's kept picture → HTTP {s} ({raw[:12]!r})"
+        )
+    blobs = list((GFS_DIR / "media" / "moments").glob("[0-9a-f]*"))
+    if not blobs:
+        raise SystemExit("gfs-moment-profile: the GFS holds no moment blob")
+    for path in blobs:
+        if b"WEBP" in path.read_bytes():
+            raise SystemExit("gfs-moment-profile: a GFS blob holds a readable WebP")
+    print(
+        f"  e keeps the picture from one encrypted GFS blob ({len(blobs)} on the GFS, none readable) ✓"
+    )
 
     state["gfs_moment_profile"] = {
         "moment_id": moment_id,

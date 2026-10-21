@@ -961,7 +961,20 @@ from __future__ import annotations
 #:   them. No household-to-household event, so nothing is
 #:   ``peer_supports``-gated; labelled "Public moments encrypted from the
 #:   GFS".
-OURS: int = 62
+#: * **v_63** (2026-10-21) — **photos and videos of public moments reach
+#:   GFS followers, encrypted.** The author's household seals a moment's
+#:   file once (``media_suite: "aesgcm-256-pad"`` — AES-256-GCM under a key
+#:   derived from the moment's item key, padded to a size bucket, ≤ 8 MB),
+#:   uploads the same blob to each GFS that proved the signed
+#:   ``encrypted_moment_media`` capability (``PUT /gfs/moments/media/{sha256}``)
+#:   and names it inside the sealed moment (``media: {blob_id, media_suite,
+#:   content_type, poster_blob_id?}``); followers fetch, check the address,
+#:   open and keep it. **Fallback**: a v_62 follower ignores ``media`` (it
+#:   gets the moment without its file, as before); an older GFS gets no
+#:   blob, so its followers get the moment without the file. Nothing is
+#:   ``peer_supports``-gated (author → GFS → follower); labelled "Photos and
+#:   videos in public moments".
+OURS: int = 63
 
 
 class FederationCapability:
@@ -1465,6 +1478,11 @@ class FederationCapability:
     #: the version that opens encrypted public moments.
     MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS = 62
 
+    #: v_63 — a public moment's photo / video as one encrypted,
+    #: content-addressed blob on the GFS. Nothing is gated on it between
+    #: households; it names the version that fetches moment media.
+    MIN_FOR_ENCRYPTED_MOMENT_MEDIA = 63
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1698,6 +1716,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS,
         "Public moments encrypted from the GFS",
     ),
+    (
+        FederationCapability.MIN_FOR_ENCRYPTED_MOMENT_MEDIA,
+        "Photos and videos in public moments",
+    ),
 ]
 
 
@@ -1771,6 +1793,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE: "follower_author_names",
     FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE: "follower_names_on_join",
     FederationCapability.MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS: "encrypted_public_moments",
+    FederationCapability.MIN_FOR_ENCRYPTED_MOMENT_MEDIA: "public_moment_media",
 }
 
 

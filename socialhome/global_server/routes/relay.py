@@ -187,6 +187,12 @@ class GfsInfoView(GfsBaseView):
             # requests). A household publishes public moments only to a
             # server that proved this; an older one gets none at all.
             "encrypted_moments": True,
+            # v_63 — encrypted public-moment media: ``PUT/GET
+            # /gfs/moments/media/{blob_id}`` keeps the padded ciphertext of a
+            # moment's file (content-addressed, bounded, expiring). A
+            # household uploads moment media only to a server that proved it;
+            # an older one gets the moment without its file.
+            "encrypted_moment_media": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         if cfg.instance_id_aliases:

@@ -306,6 +306,7 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # The public highlight viewer page opens the end-to-end sealed stream.
         "sealed_highlight_stream": True,
         "encrypted_moments": True,
+        "encrypted_moment_media": True,
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
         # address), so the GFS honestly does not offer it.

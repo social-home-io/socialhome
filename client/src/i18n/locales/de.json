@@ -1830,6 +1830,7 @@
   "capability.follower_author_names": "Namen für die Follower eines Space",
   "capability.follower_names_on_join": "Namen für neue Follower sofort",
   "capability.encrypted_public_moments": "Öffentliche Momente vor dem GFS verschlüsselt",
+  "capability.public_moment_media": "Fotos und Videos in öffentlichen Momenten",
   "space.settings_page.moderation.queue_meta": "Beiträge zum Prüfen, Beitrittsanfragen und Meldungen",
   "space.settings_page.moderation.days": "Tagen",
   "space.settings_page.danger.summary": "Archivieren, übergeben oder löschen",

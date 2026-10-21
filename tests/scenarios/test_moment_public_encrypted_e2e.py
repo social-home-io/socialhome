@@ -10,6 +10,7 @@ and every frame it pushed — carries no moment text, id or author name.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -48,6 +49,12 @@ from socialhome.services.moment_public_key_outbound import (
     ROTATE_AT_MOST_EVERY_S,
     MomentPublicKeyOutbound,
 )
+from socialhome.services.moment_public_media_inbound import (
+    MomentPublicMediaInbound,
+)
+from socialhome.services.moment_public_media_outbound import (
+    MomentPublicMediaOutbound,
+)
 from socialhome.services.moment_public_outbound import MomentPublicOutbound
 from socialhome.services.moment_public_service import MomentPublicService
 
@@ -56,6 +63,8 @@ from socialhome.services.moment_public_service import MomentPublicService
 SECRET_TEXT = "Bees swarmed the plum tree at dawn"
 MOMENT_ID = "m-plum-tree-7f3a"
 SECRET_NAME = "Noor Al-Haddad"
+#: The moment's picture — must never cross the GFS readable either.
+PICTURE = b"RIFF\x00\x10\x00\x00WEBPVP8 " + b"plum-tree-pixels" * 400
 
 
 class _Household:
@@ -87,14 +96,29 @@ class _Wire:
     def __init__(self, tc: TestClient, seen: list) -> None:
         self._tc = tc
         self._seen = seen
+        #: Every media blob uploaded (ciphertext).
+        self.blobs: list[bytes] = []
 
     def post(self, url, *, json=None, **_kw):
         self._seen.append(json)
         return self._tc.post(url.removeprefix("https://gfs.test"), json=json)
 
+    def put(self, url, *, data=None, headers=None, **_kw):
+        self._seen.append({"put": url, "bytes": len(data or b"")})
+        self.blobs.append(data)
+        return self._tc.put(
+            url.removeprefix("https://gfs.test"), data=data, headers=headers
+        )
+
+    def get(self, url, **_kw):
+        return self._tc.get(url.removeprefix("https://gfs.test"))
+
 
 class _Proven:
     async def encrypted_moments_supported(self, gfs_id: str) -> bool:
+        return True
+
+    async def encrypted_moment_media_supported(self, gfs_id: str) -> bool:
         return True
 
 
@@ -186,6 +210,19 @@ async def world(tmp_path, monkeypatch):
         outbound.attach_identity(
             own_instance_id=author.instance_id, signing_key=author.ident.private_key
         )
+        a_media = tmp_path / "author-media"
+        a_media.mkdir()
+        (a_media / "plum.webp").write_bytes(PICTURE)
+        media_out = MomentPublicMediaOutbound(
+            gfs_repo=SqliteGfsConnectionRepo(a_db),
+            gfs_service=_Proven(),  # type: ignore[arg-type]
+            media_dir=a_media,
+        )
+        media_out.attach_session(wire)  # type: ignore[arg-type]
+        media_out.attach_identity(
+            own_instance_id=author.instance_id, signing_key=author.ident.private_key
+        )
+        outbound.attach_media(media_out)
         outbound.wire()
 
         # ── The follower household ───────────────────────────────────
@@ -208,6 +245,13 @@ async def world(tmp_path, monkeypatch):
             key_manager=KeyManager(os.urandom(32)),
             keywrap_private_key=follower.wrap.private_key,
         )
+        f_media = tmp_path / "follower-media"
+        f_media.mkdir()
+        media_in = MomentPublicMediaInbound(
+            gfs_repo=SqliteGfsConnectionRepo(f_db), media_dir=f_media
+        )
+        media_in.attach_session(wire)  # type: ignore[arg-type]
+        await media_in.start()
         inbound = MomentPublicInbound(
             bus=EventBus(),
             moment_repo=f_moments,
@@ -226,6 +270,7 @@ async def world(tmp_path, monkeypatch):
             signing_key=follower.ident.private_key,
         )
         follow_svc.attach_key_inbound(keys_in)
+        inbound.attach_media(media_in)
 
         async def pump(*, drop: set[str] = frozenset()) -> list[str]:
             """Hand every frame the GFS pushed to its household, until quiet.
@@ -241,6 +286,7 @@ async def world(tmp_path, monkeypatch):
                     await keys_out.flush()
                 elif to == follower.instance_id:
                     await inbound.handle(frame, gfs_id="g1")
+                    await media_in.drain()
             return delivered
 
         yield {
@@ -259,7 +305,11 @@ async def world(tmp_path, monkeypatch):
             "inbound": inbound,
             "keys_out": keys_out,
             "gfs_dir": tmp_path / "gfs",
+            "follower_media": f_media,
+            "wire": wire,
+            "media_in": media_in,
         }
+        await media_in.stop()
     await a_db.shutdown()
     await f_db.shutdown()
 
@@ -321,11 +371,16 @@ async def test_a_follower_opens_the_moment_the_gfs_could_not_read(world):
     assert await w["pump"]() == ["follow_changed", "moment_key"]
     await _post_moment(w)
     assert await w["pump"]() == ["incoming_public_moment"]
-    got = await w["follower_moments"].get(MOMENT_ID)
-    assert got is not None
+    got = await _until_stored(w, MOMENT_ID)
     assert got.content == SECRET_TEXT
-    assert got.media_url == "api/media/plum.webp"
     assert got.received_via == "gfs"
+    # v_63: the picture came as one encrypted blob, opened and kept here.
+    assert got.media_type == "image"
+    assert got.media_url.startswith("api/media/gm-")
+    kept = w["follower_media"] / got.media_url.removeprefix("api/media/")
+    assert kept.read_bytes() == PICTURE
+    [blob] = w["wire"].blobs
+    assert b"plum-tree-pixels" not in blob
     _assert_gfs_saw_no_content(w)
 
 
@@ -418,3 +473,13 @@ async def test_a_leaving_household_triggers_one_lazy_rotation(world, monkeypatch
     await _post_moment(w, "m-again")
     assert await w["pump"]() == ["incoming_public_moment"]
     assert _published_gens(w)[-1] == new_gen
+
+
+async def _until_stored(w, moment_id: str):
+    """The moment once the background media fetch has kept its file."""
+    for _ in range(200):
+        got = await w["follower_moments"].get(moment_id)
+        if got is not None:
+            return got
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{moment_id} never stored")

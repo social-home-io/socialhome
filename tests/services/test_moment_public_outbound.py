@@ -8,11 +8,14 @@ remote-author events are skipped — and an unproven GFS gets nothing.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import pytest
 
 from socialhome.domain.events import (
+    MediaTranscodeFailed,
+    MediaTranscodeReady,
     MomentCreated,
     MomentDeleted,
     UserDeprovisioned,
@@ -20,13 +23,14 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.moment import Moment
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.moment_public_seal import ENVELOPE_FIELDS, open_body
+from socialhome.moment_public_seal import ENVELOPE_FIELDS, item_key, open_body
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.moment_public_repo import (
     SqliteMomentPublicRegistrationRepo,
 )
 from socialhome.repositories.moment_repo import SqliteMomentRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.moment_public_media_outbound import PreparedMedia
 from socialhome.services.moment_public_outbound import MomentPublicOutbound
 
 
@@ -503,3 +507,135 @@ async def test_a_remote_authors_moment_reads_the_users_once_a_minute(outbound_se
     await s["bus"].publish(UserDeprovisioned(user_id="u-new", username="n"))
     assert not await s["sub"]._is_local("u-new")
     assert len(calls) == 1
+
+
+# ── Encrypted media (v_63) ────────────────────────────────────────────────
+
+
+class _Media:
+    """Stand-in for ``MomentPublicMediaOutbound``: records what happens."""
+
+    def __init__(self, *, ready: bool = True, none: bool = False) -> None:
+        self.ready = ready
+        self.none = none
+        self.calls: list[tuple] = []
+
+    async def prepare(self, moment, *, item_key):
+        self.calls.append(("prepare", moment.id, item_key))
+        if self.none:
+            return None
+        return PreparedMedia(
+            body={
+                "blob_id": "b" * 64,
+                "media_suite": "aesgcm-256-pad",
+                "content_type": "image/webp",
+            },
+            blobs={"b" * 64: b"blob"},
+            ready=self.ready,
+        )
+
+    async def upload(self, gfs_id, prepared, *, author_user_id, expires_at):
+        self.calls.append(("upload", gfs_id, author_user_id, expires_at))
+        return True
+
+    def remember(self, author, moment_id, gfs_id, prepared):
+        self.calls.append(("remember", moment_id, gfs_id))
+
+    async def withdraw(self, author, moment_id):
+        self.calls.append(("withdraw", moment_id))
+        return 1
+
+
+def _with_media(url: str, media_type: str, duration_ms: int | None = None) -> Moment:
+    return dataclasses.replace(
+        _moment(), media_url=url, media_type=media_type, duration_ms=duration_ms
+    )
+
+
+async def test_media_is_sealed_once_uploaded_first_and_named_in_the_body(
+    outbound_setup,
+):
+    s = outbound_setup
+    media = _Media()
+    s["sub"].attach_media(media)
+    await s["moments"].save(_with_media("api/media/x.webp", "image"))
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["regs"].upsert(user_id="u1", gfs_id="g2")
+    await s["bus"].publish(_created_event())
+    kinds = [c[0] for c in media.calls]
+    assert kinds.count("prepare") == 1  # one seal for every GFS
+    assert [c[1] for c in media.calls if c[0] == "upload"] == ["g1", "g2"]
+    # The media is sealed under the moment's item key.
+    assert media.calls[0][2] == item_key(KEY, "m-1")
+    body = _opened(s["session"].posts[0][1])
+    assert body["media"]["blob_id"] == "b" * 64
+    # The author's local reference never travels: it names nothing there.
+    assert "media_url" not in body
+    assert body["media_type"] == "image"
+
+
+async def test_a_video_still_transcoding_waits_for_its_file(outbound_setup):
+    s = outbound_setup
+    media = _Media(ready=False)
+    s["sub"].attach_media(media)
+    await s["moments"].save(_with_media("api/media/clip.webm", "video", 3000))
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event())
+    assert s["session"].posts == []
+    media.ready = True
+    await s["bus"].publish(
+        MediaTranscodeReady(
+            output_filename="other.webm",
+            thumbnail_filename="other.webp",
+            owner_user_id="u1",
+        )
+    )
+    assert s["session"].posts == []
+    await s["bus"].publish(
+        MediaTranscodeReady(
+            output_filename="clip.webm",
+            thumbnail_filename="clip.webp",
+            owner_user_id="u1",
+        )
+    )
+    assert len(s["session"].posts) == 1
+    assert _opened(s["session"].posts[0][1])["media"]["blob_id"] == "b" * 64
+
+
+async def test_a_failed_transcode_publishes_the_moment_without_its_file(
+    outbound_setup,
+):
+    s = outbound_setup
+    s["sub"].attach_media(_Media(ready=False))
+    await s["moments"].save(_with_media("api/media/clip.webm", "video", 3000))
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event())
+    await s["bus"].publish(
+        MediaTranscodeFailed(output_filename="clip.webm", owner_user_id="u1")
+    )
+    [(_, env)] = s["session"].posts
+    body = _opened(env)
+    assert "media" not in body and body["media_type"] is None
+
+
+async def test_a_file_we_dont_send_leaves_the_moment_without_media(outbound_setup):
+    s = outbound_setup
+    s["sub"].attach_media(_Media(none=True))
+    await s["moments"].save(_with_media("api/media/x.webp", "image"))
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event())
+    body = _opened(s["session"].posts[0][1])
+    assert "media" not in body and body["media_type"] is None
+
+
+async def test_a_delete_withdraws_the_media(outbound_setup):
+    s = outbound_setup
+    media = _Media()
+    s["sub"].attach_media(media)
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1", author_user_id="u1", origin_instance_id="inst-self"
+        )
+    )
+    assert ("withdraw", "m-1") in media.calls

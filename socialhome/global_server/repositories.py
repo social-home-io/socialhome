@@ -38,6 +38,7 @@ from .domain import (
     GfsInviteToken,
     GfsMomentFollow,
     GfsMomentKeyMail,
+    GfsMomentMedia,
     GfsQueuedEnvelope,
     GfsSpaceEpoch,
     GfsSpaceStrictState,
@@ -2088,6 +2089,92 @@ def _row_to_follow(row: dict | None) -> GfsMomentFollow | None:
 
 
 # ─── Sealed moment key mailbox (v_62) ────────────────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsMomentMediaRepo(Protocol):
+    async def add(self, media: GfsMomentMedia) -> bool: ...
+    async def get(self, blob_id: str) -> GfsMomentMedia | None: ...
+    async def author_usage(
+        self, author_user_id: str, *, since: int
+    ) -> tuple[int, int]: ...
+    async def delete(self, blob_id: str, *, author_user_id: str) -> int: ...
+    async def expired(self, now: int, *, limit: int) -> list[str]: ...
+    async def delete_ids(self, blob_ids: list[str]) -> int: ...
+    async def ids_for_author(self, author_user_id: str) -> list[str]: ...
+
+
+class SqliteGfsMomentMediaRepo:
+    """Encrypted moment media metadata (v_63) — the bytes are files."""
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def add(self, media: GfsMomentMedia) -> bool:
+        changed = await self._db.enqueue_rowcount(
+            "INSERT OR IGNORE INTO gfs_moment_media(blob_id, author_user_id,"
+            " size, expires_at) VALUES(?,?,?,?)",
+            (media.blob_id, media.author_user_id, media.size, media.expires_at),
+        )
+        return changed > 0
+
+    async def get(self, blob_id: str) -> GfsMomentMedia | None:
+        row = await self._db.fetchone(
+            "SELECT blob_id, author_user_id, size, expires_at, created_at"
+            " FROM gfs_moment_media WHERE blob_id=?",
+            (blob_id,),
+        )
+        if row is None:
+            return None
+        return GfsMomentMedia(
+            blob_id=row["blob_id"],
+            author_user_id=row["author_user_id"],
+            size=int(row["size"]),
+            expires_at=int(row["expires_at"]),
+            created_at=int(row["created_at"]),
+        )
+
+    async def author_usage(self, author_user_id: str, *, since: int) -> tuple[int, int]:
+        """``(live bytes, blobs uploaded since *since*)`` of one author."""
+        row = await self._db.fetchone(
+            "SELECT COALESCE(SUM(size), 0) AS live,"
+            " COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) AS recent"
+            " FROM gfs_moment_media WHERE author_user_id=?",
+            (since, author_user_id),
+        )
+        if row is None:  # pragma: no cover - an aggregate always has a row
+            return 0, 0
+        return int(row["live"]), int(row["recent"])
+
+    async def delete(self, blob_id: str, *, author_user_id: str) -> int:
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_moment_media WHERE blob_id=? AND author_user_id=?",
+            (blob_id, author_user_id),
+        )
+
+    async def expired(self, now: int, *, limit: int) -> list[str]:
+        rows = await self._db.fetchall(
+            "SELECT blob_id FROM gfs_moment_media WHERE expires_at <= ?"
+            " ORDER BY expires_at LIMIT ?",
+            (now, limit),
+        )
+        return [str(r["blob_id"]) for r in rows]
+
+    async def delete_ids(self, blob_ids: list[str]) -> int:
+        if not blob_ids:
+            return 0
+        marks = ",".join("?" for _ in blob_ids)
+        return await self._db.enqueue_rowcount(
+            f"DELETE FROM gfs_moment_media WHERE blob_id IN ({marks})",
+            tuple(blob_ids),
+        )
+
+    async def ids_for_author(self, author_user_id: str) -> list[str]:
+        rows = await self._db.fetchall(
+            "SELECT blob_id FROM gfs_moment_media WHERE author_user_id=?",
+            (author_user_id,),
+        )
+        return [str(r["blob_id"]) for r in rows]
 
 
 @runtime_checkable
