@@ -9220,6 +9220,17 @@ def cmd_verify() -> None:
     # trusted spaces, anonymous to servers they never joined). The OURS
     # round-trip above proves every pair advertises >= v_57. Pin it, and when
     # ``gfs-multi-listing`` ran, check what it left behind.
+    # v_64 — a public moment's sealed, signed ``sent_at``: followers refuse a
+    # replayed envelope. Nothing is gated between households (author → GFS →
+    # follower); the OURS round-trip above proves every pair is at >= v_64,
+    # and ``gfs-moment-profile`` delivers a moment that carries it.
+    if int(_Cap.MIN_FOR_PUBLIC_MOMENT_SENT_AT) != 64 or _OURS < 64:
+        failures.append(
+            "MIN_FOR_PUBLIC_MOMENT_SENT_AT moved off v_64 (or OURS fell below "
+            "it) — followers would take replayed public moments"
+        )
+    else:
+        print("  v_64 signed send time on public moments in place ✓")
     if int(_Cap.MIN_FOR_MULTI_GFS_PUBLISH) != 57 or _OURS < 57:
         failures.append(
             "MIN_FOR_MULTI_GFS_PUBLISH moved off v_57 (or OURS fell below it) — "

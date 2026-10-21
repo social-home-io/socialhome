@@ -1831,6 +1831,7 @@
   "capability.follower_names_on_join": "Namen für neue Follower sofort",
   "capability.encrypted_public_moments": "Öffentliche Momente vor dem GFS verschlüsselt",
   "capability.public_moment_media": "Fotos und Videos in öffentlichen Momenten",
+  "capability.public_moment_sent_at": "Öffentliche Momente mit Zeitstempel",
   "space.settings_page.moderation.queue_meta": "Beiträge zum Prüfen, Beitrittsanfragen und Meldungen",
   "space.settings_page.moderation.days": "Tagen",
   "space.settings_page.danger.summary": "Archivieren, übergeben oder löschen",

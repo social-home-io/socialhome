@@ -22,6 +22,12 @@ signed ``encrypted_moments`` capability gets **no public moments at
 all** — never a plaintext fallback — and the author's sharing settings
 say so (``GET /api/moments/public/registrations`` → ``delivery``).
 
+**Signed send time (v_64).** Every sealed body carries ``sent_at`` — the
+Unix second the envelope was signed — so a follower refuses a captured
+envelope re-posted later (:mod:`.moment_public_inbound`). It rides inside
+the ciphertext the signature covers: no new plaintext field, no extra
+message, ~25 bytes per moment.
+
 Runs alongside :class:`MomentFederationOutbound`: the original
 moment also still goes to paired households via the existing relay,
 so a follower that is *both* household-paired and a GFS-follower
@@ -395,6 +401,11 @@ class MomentPublicOutbound(ProtectionGateMixin):
     ) -> dict:
         if self._signing_key is None:
             raise RuntimeError("MomentPublicOutbound used before attach_identity")
+        # v_64: when this envelope was signed, sealed into the body — so it is
+        # under the signature (which covers the ciphertext) and the AEAD, and
+        # the GFS still sees nothing new. Followers refuse an envelope sent
+        # longer ago than any honest delivery takes (a replay).
+        body = {**body, "sent_at": int(time.time())}
         return sign_wire(
             self._signing_key,
             {

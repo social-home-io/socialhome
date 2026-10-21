@@ -974,7 +974,21 @@ from __future__ import annotations
 #:   blob, so its followers get the moment without the file. Nothing is
 #:   ``peer_supports``-gated (author → GFS → follower); labelled "Photos and
 #:   videos in public moments".
-OURS: int = 63
+#: * **v_64** (2026-10-21) — **a public moment carries its signed send
+#:   time.** The author's household seals ``sent_at`` (Unix seconds of
+#:   signing) into every public-moment body — create and delete — so it is
+#:   under the envelope signature (which covers the ciphertext) and the
+#:   AEAD, with no new plaintext field for the GFS. A follower refuses an
+#:   envelope sent more than 25 h ago (a GFS's 24 h offline queue + the key
+#:   wait + skew) or more than 5 min ahead, and a create whose
+#:   ``created_at`` is after its ``sent_at``; once an author sent one, an
+#:   envelope of theirs without it is refused; and a moment already held is
+#:   never stored or announced twice. **Fallback**: a v_63 author's
+#:   envelopes (no ``sent_at``) are judged by the older rules
+#:   (``created_at`` / ``expires_at``); a v_63 follower ignores the field.
+#:   Nothing is ``peer_supports``-gated (author → GFS → follower); labelled
+#:   "Time-stamped public moments".
+OURS: int = 64
 
 
 class FederationCapability:
@@ -1483,6 +1497,11 @@ class FederationCapability:
     #: households; it names the version that fetches moment media.
     MIN_FOR_ENCRYPTED_MOMENT_MEDIA = 63
 
+    #: v_64 — a public moment's sealed, signed ``sent_at``; followers refuse
+    #: a replayed envelope. Nothing is gated on it between households; it
+    #: names the version that sends and checks it.
+    MIN_FOR_PUBLIC_MOMENT_SENT_AT = 64
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1720,6 +1739,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ENCRYPTED_MOMENT_MEDIA,
         "Photos and videos in public moments",
     ),
+    (
+        FederationCapability.MIN_FOR_PUBLIC_MOMENT_SENT_AT,
+        "Time-stamped public moments",
+    ),
 ]
 
 
@@ -1794,6 +1817,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE: "follower_names_on_join",
     FederationCapability.MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS: "encrypted_public_moments",
     FederationCapability.MIN_FOR_ENCRYPTED_MOMENT_MEDIA: "public_moment_media",
+    FederationCapability.MIN_FOR_PUBLIC_MOMENT_SENT_AT: "public_moment_sent_at",
 }
 
 

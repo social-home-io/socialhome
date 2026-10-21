@@ -85,6 +85,22 @@ directory. Nothing more is claimed.
   live (7 days) is refused **before** anything is read from it — a replayed
   old envelope can neither re-store an expired moment nor roll a profile
   back (review finding M7).
+* **Signed send time (v_64).** Every sealed body — create and delete —
+  carries `sent_at`, the Unix second the author's household signed the
+  envelope. It is inside the ciphertext the envelope signature covers (and
+  bound by the AEAD), so nobody else can set, shift or strip it, and the
+  GFS sees no new field. A follower refuses an envelope sent more than
+  25 h ago (`SENT_AT_MAX_AGE_S`: the GFS's 24 h offline queue + the 10 min
+  key wait + skew — a captured envelope re-posted later), one more than
+  5 min ahead of its clock, and a create whose `created_at` is after its
+  `sent_at`. Once an author's envelope carried `sent_at`, one of theirs
+  without it is refused (monotonic per author, in memory). A moment
+  already held is never stored or announced twice — a replay inside the
+  window, a second GFS, or the household relay having delivered it first.
+  **Older senders:** a v_63 household's envelopes have no `sent_at` and are
+  judged by the rules above; a v_63 follower ignores the field. **Cost:**
+  ~25 bytes inside each ciphertext; no extra message, no new plaintext
+  field, nothing stored.
 
 **What stays readable on purpose: the author directory.** An author opts into
 a GFS's public directory — `display_name`, `username`, `bio`, avatar and
@@ -594,9 +610,10 @@ compare.
   ``moment_public_follows.followed_instance_pk``). The choice of hex
   for keys + base64url for signatures matches the existing
   Highlights flow.
-* **Nonce**: none. Replay protection is provided at the transport
-  layer (the GFS only routes within an active WS), and the moment
-  envelope's ``moment_id`` is unique per author.
+* **Freshness**: the sealed, signed ``sent_at`` (v_64, above) bounds a
+  replay to 25 h; a follower keeps one copy per ``moment_id`` (unique per
+  author), and the GFS drops a re-posted identical envelope for 10 min
+  (its seen-payload cache).
 
 The recipient's verification is in
 ``socialhome/services/moment_public_inbound.py:_verify`` — single

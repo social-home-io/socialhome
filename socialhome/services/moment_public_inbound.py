@@ -26,7 +26,10 @@ handler:
    ``received_via_gfs_id={gfs_id}`` so the inbox can render the chip
    AND so the federation outbound's relay path will skip it (no
    redistribute rule).
-6. Re-publishes :class:`MomentCreated` on the bus so the existing
+6. Refuses a replay (v_64): the sealed, signed ``sent_at`` must be within
+   :data:`SENT_AT_MAX_AGE_S` (and not ahead of the clock); a moment
+   already held is never stored or announced twice.
+7. Re-publishes :class:`MomentCreated` on the bus so the existing
    realtime + notification surfaces light up exactly as for a
    household-relayed moment.
 """
@@ -79,6 +82,15 @@ MAX_HELD: int = 256
 #: How long a held envelope waits for its key.
 HOLD_FOR_S: float = 600.0
 
+#: v_64: an envelope signed longer ago than this is refused (a replay). An
+#: honest one can wait out a GFS's offline queue (24 h,
+#: ``envelope_relay.ENVELOPE_QUEUE_TTL_SECONDS``) and then its key here
+#: (:data:`HOLD_FOR_S`); a test pins the window above both plus the skew.
+SENT_AT_MAX_AGE_S: int = 25 * 3600
+
+#: v_64: how far ahead of this household's clock a send time may be.
+SENT_AT_MAX_SKEW_S: int = 300
+
 #: The frame type an envelope arrives in → the ``op`` its sealed body names.
 _OPS: dict[str, str] = {
     "incoming_public_moment": "create",
@@ -87,7 +99,15 @@ _OPS: dict[str, str] = {
 
 
 class MomentPublicInbound:
-    __slots__ = ("_bus", "_follows", "_held", "_keys", "_media", "_moments")
+    __slots__ = (
+        "_bus",
+        "_follows",
+        "_held",
+        "_keys",
+        "_media",
+        "_moments",
+        "_sends_time",
+    )
 
     def __init__(
         self,
@@ -106,6 +126,10 @@ class MomentPublicInbound:
         #: ``(author, generation)`` → ``[(monotonic time, op, envelope,
         #: gfs_id)]`` waiting for that generation's key, oldest first.
         self._held: dict[tuple[str, int], list[tuple[float, str, dict, str]]] = {}
+        #: Authors whose envelopes carried ``sent_at`` (v_64): from then on
+        #: one without it can only be an older envelope replayed. Bounded by
+        #: the follows — only a followed author's signature verifies.
+        self._sends_time: set[str] = set()
 
     def attach_media(self, media: MomentPublicMediaInbound) -> None:
         self._media = media
@@ -170,6 +194,15 @@ class MomentPublicInbound:
                 author,
             )
             return
+        refusal = self._send_time_refusal(author, op, body)
+        if refusal is not None:
+            log.info(
+                "moment_public.inbound: %s by author %s refused — %s",
+                op,
+                author,
+                refusal,
+            )
+            return
         # The moment id is the envelope's (bound into the AEAD).
         body["moment_id"] = env["moment_id"]
         if op == "create":
@@ -181,6 +214,37 @@ class MomentPublicInbound:
             )
         else:
             await self._on_delete(body, outer_instance_id=str(env["instance_id"]))
+
+    def _send_time_refusal(self, author: str, op: str, body: dict) -> str | None:
+        """Why the signed send time (v_64) refuses *body*, or ``None``.
+
+        ``sent_at`` is sealed and signed with the moment, so nobody but the
+        author's household can set or strip it. Present: an integer within
+        :data:`SENT_AT_MAX_AGE_S` before now and :data:`SENT_AT_MAX_SKEW_S`
+        after, and a create's ``created_at`` not after it. Absent: an older
+        (v_63) author household — the older rules apply — unless this author
+        already sent one, so a pre-upgrade envelope can't be replayed past
+        the window.
+        """
+        if "sent_at" not in body:
+            if author in self._sends_time:
+                return "no send time from an author who sends one (a replay)"
+            return None
+        sent = body["sent_at"]
+        if not is_wire_int(sent):
+            return "malformed send time"
+        assert isinstance(sent, int)
+        now = time.time()
+        if sent > now + SENT_AT_MAX_SKEW_S:
+            return "sent in the future"
+        if now - sent > SENT_AT_MAX_AGE_S:
+            return "sent too long ago (a replay)"
+        if op == "create":
+            created = _unix_or_none(body.get("created_at"))
+            if created is not None and created > sent + SENT_AT_MAX_SKEW_S:
+                return "created after it was sent"
+        self._sends_time.add(author)
+        return None
 
     def _hold(self, author: str, gen: int, op: str, env: dict, gfs_id: str) -> None:
         """Keep *env* until its key arrives — bounded per generation and in
@@ -253,6 +317,14 @@ class MomentPublicInbound:
             # refused for as long as its tombstone lives.
             log.info(
                 "moment_public.inbound: refusing create for deleted moment=%s",
+                env.get("moment_id"),
+            )
+            return
+        if stored is not None:
+            # Held already (a replay within the window, a second GFS, or the
+            # household relay first): one moment is stored and announced once.
+            log.debug(
+                "moment_public.inbound: moment %s already held — not re-stored",
                 env.get("moment_id"),
             )
             return
@@ -418,6 +490,17 @@ class MomentPublicInbound:
             bio=bio,
             picture_digest=digest,
         )
+
+
+def _unix_or_none(value: object) -> float | None:
+    """Unix seconds of an ISO 8601 time (naive = UTC), or ``None``."""
+    try:
+        when = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return when.timestamp()
 
 
 def _still_live(body: dict) -> bool:

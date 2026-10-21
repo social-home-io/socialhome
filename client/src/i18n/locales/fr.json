@@ -1826,6 +1826,7 @@
   "capability.follower_names_on_join": "Noms tout de suite pour les nouveaux abonnés",
   "capability.encrypted_public_moments": "Moments publics chiffrés pour le GFS",
   "capability.public_moment_media": "Photos et vidéos dans les moments publics",
+  "capability.public_moment_sent_at": "Moments publics horodatés",
   "space.settings_page.moderation.queue_meta": "Publications à vérifier, demandes et signalements",
   "space.settings_page.moderation.days": "jours",
   "space.settings_page.danger.summary": "Archiver, transférer ou supprimer",
