@@ -310,11 +310,12 @@ The Social Home ↔ GFS link is split by direction:
     `delivered_to: 0` and no fan-out. It still can't dedupe on the post id:
     that lives inside the encrypted payload.
 
-    That cache is in-memory and **per GFS node**, so it is a burst bound, not
-    a content-id store. Past the TTL, after a restart, or on a sibling node the
-    same bytes fan out once more — in a cluster of N nodes behind one address a
-    replay burst is suppressed only **1-in-N**, since each node must see the
-    bytes once before it starts suppressing them. The standing content-layer
+    That cache is in-memory, so it is a burst bound, not a content-id
+    store: past the TTL or after a restart the same bytes fan out once more.
+    In a cluster every node that received the forwarded broadcast (see
+    "Broadcasts reach followers on every cluster node" below) remembers it
+    for 10 minutes, so a replay to a sibling node is suppressed too. The
+    standing content-layer
     backstop is therefore still **subscriber-side dedupe by the post id**
     carried inside the payload, enforced by the HFS `space_public_inbound`
     consumer (the same way moments dedupe by `moment_id`), and the relay stays
@@ -368,12 +369,40 @@ The Social Home ↔ GFS link is split by direction:
   share one database — so one `gfs_envelope_queue` — but each knows only its
   own sockets. A node that queues an envelope or member item for a household
   it holds no socket for sends one coalesced, fire-and-forget
-  `NODE_DRAIN_HINT {instances:[…]}` (ids only; ≤ 0.5 s of batching, ≤ 256 ids
+  `NODE_DRAIN_HINT {instances:[…]}` (ids only; 0.5 s of batching and at most one frame per 1.5 s, ≤ 256 ids
   a frame) to its member peers; the node that does hold the household's
   socket drains its queue right away instead of on the next reconnect.
   Drains are serialised per household, so a hello drain and a hint drain
   never deliver a row twice. A targeted `to` relay whose subscriber has no
   socket on the publishing node takes the same path.
+- **Broadcasts reach followers on every cluster node.** A broadcast
+  `/gfs/publish` (`space_post_public` and every other untargeted space event),
+  a member publish (identified or anonymous) and a channel item are pushed by
+  the node that accepted them to the sockets IT holds, then forwarded ONCE
+  per peer node — not once per subscriber — as `relays:[{aud, skip, q,
+  frame}]` in the next coalesced `NODE_DRAIN_HINT` (≤ 64 items / 768 KiB a
+  frame, ≤ 2048 items / 32 MiB waiting; past that an item is not forwarded,
+  with a WARNING). The frame names the audience (`space` + space id, or
+  `channel` + channel id), not the recipients: each receiving node resolves
+  it from the shared database and pushes to the members whose socket it
+  holds, skipping the publisher. A node remembers every frame it pushed or
+  forwarded (its own BLAKE2b digest, 10 min), so no node pushes one item
+  twice, and a receiver never forwards again — no loops. Member and channel
+  items also need an offline copy for a recently-seen subscriber with no
+  socket anywhere: for those (`q`) the receiver answers with `held` — the
+  audience members it holds a socket for — and the accepting node queues
+  only for the recently-seen subscribers no node holds (one queue row each,
+  as before for an offline subscriber; before this change every subscriber
+  on another node also got a row, and one not "seen" got nothing). A
+  receiver whose push to a held socket fails queues that one itself.
+  **Rolling upgrade:** an older node ignores `relays` and answers without
+  `held`, so the accepting node queues for its subscribers exactly as before
+  and that node drains them on the hint; an older accepting node never
+  forwards. **What the GFS learns:** nothing new — the forwarded frame is the
+  same identity-free frame the sockets get, the audience is an id the shared
+  database already holds, `skip` is the publisher the accepting node already
+  authenticated (empty for an anonymous publish) and `held` lists the
+  cluster's own sockets.
 - **Owner notices reach the owner on any cluster node.** A
   `new_subscriber` notice is built on the node that took the subscribe (or
   the follower's hello); when the space owner's socket is not there, the
@@ -1414,6 +1443,12 @@ POST /gfs/member-publish
   drained on its next hello, or at once by the cluster node holding its
   socket (`NODE_DRAIN_HINT`, see Transport above) — but only for a subscriber that held a WS
   session for at least 60 s within those 24 h (a bare hello earns nothing).
+  A live session re-marks itself every hour, so a household that simply
+  stays connected (for days, on any cluster node) stays in that window and
+  still gets its copies queued once its socket drops. A subscriber
+  connected to another cluster node gets the item live through the
+  cluster forward ("Broadcasts reach followers on every cluster node"
+  above), never through a queue row.
   Room is made by fair-share eviction: a recipient's own oldest item at its
   per-recipient cap, the largest holder's oldest item at the server-wide
   cap, in the same transaction as the insert. One registered household may

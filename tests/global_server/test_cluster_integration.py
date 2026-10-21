@@ -1914,3 +1914,38 @@ async def test_node_drain_hint_notices_are_dispatched(client, monkeypatch):
         )
         assert resp.status == 200
     assert seen == [notices]
+
+
+async def test_node_drain_hint_relays_are_dispatched_and_answer_held(
+    client, monkeypatch
+):
+    """``NODE_DRAIN_HINT.relays`` (broadcast items another node accepted)
+    reach ``apply_forwarded_relays`` and its ``held`` map is the reply; a
+    hint without the key keeps the plain ``{"status": "ok"}`` reply an older
+    sender expects."""
+    seed = await _register_peer(client)
+    seen: list[object] = []
+
+    async def _record(self, relays):
+        seen.append(relays)
+        return {"space:sp": [_HOUSEHOLD]}
+
+    monkeypatch.setattr(ClusterService, "apply_forwarded_relays", _record)
+    relays = [{"id": "x", "aud": ["space", "sp"], "frame": {}}]
+    replies = []
+    for payload in ({"instances": [], "relays": relays}, {"instances": []}):
+        resp = await _sync(
+            client,
+            from_node=PEER,
+            seed=seed,
+            ip=GENUINE_IP,
+            type_=NODE_DRAIN_HINT,
+            payload=payload,
+        )
+        assert resp.status == 200
+        replies.append(await resp.json())
+    assert seen == [relays]
+    assert replies == [
+        {"status": "ok", "held": {"space:sp": [_HOUSEHOLD]}},
+        {"status": "ok"},
+    ]

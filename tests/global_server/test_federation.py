@@ -3797,3 +3797,76 @@ async def test_a_targeted_frame_the_queue_refuses_reaches_nobody(gfs_db):
         )
         == []
     )
+
+
+class _RecordingFanOut:
+    """``ClusterRelayFanOut`` stand-in: records broadcast forwards."""
+
+    def __init__(self, *, seen: bool = False) -> None:
+        self.seen = seen
+        self.forwarded: list[tuple[str, dict]] = []
+
+    def seen_frame(self, frame: dict) -> bool:
+        return self.seen
+
+    def forward_to_space(self, space_id: str, frame: dict) -> bool:
+        self.forwarded.append((space_id, frame))
+        return True
+
+
+async def test_a_broadcast_is_forwarded_once_to_the_other_nodes(gfs_db):
+    """REGRESSION: a broadcast ``/gfs/publish`` reached only the sockets of
+    the node that took it — (N−1)/N of the followers on N nodes missed every
+    post. It is now forwarded ONCE (per node, not per subscriber) for the
+    other nodes to push to the sockets they hold."""
+    fan_out = _RecordingFanOut()
+    svc = GfsFederationService(
+        SqliteGfsFederationRepo(gfs_db), ws_registry=_PartialWsRegistry({"sub-a"})
+    )
+    svc.attach_fan_out(fan_out)
+    seed = await _two_subscribers(svc, "sp-f1")
+    payload = _targeted_payload(seed, "space_subscriber_key_handoff", "sp-f1")
+    assert await svc.publish_event(
+        "sp-f1", "space_subscriber_key_handoff", payload
+    ) == ["sub-a"]
+    assert fan_out.forwarded == [
+        (
+            "sp-f1",
+            {
+                "space_id": "sp-f1",
+                "event_type": "space_subscriber_key_handoff",
+                "payload": payload,
+            },
+        )
+    ]
+    assert await svc.audience_targets("sp-f1") == ["sub-a", "sub-b"]
+
+
+async def test_a_targeted_publish_is_never_forwarded(gfs_db):
+    fan_out = _RecordingFanOut()
+    svc = GfsFederationService(
+        SqliteGfsFederationRepo(gfs_db), ws_registry=_PartialWsRegistry({"sub-b"})
+    )
+    svc.attach_fan_out(fan_out)
+    seed = await _two_subscribers(svc, "sp-f2")
+    payload = _targeted_payload(seed, "space_subscriber_key_handoff", "sp-f2")
+    await svc.publish_event(
+        "sp-f2", "space_subscriber_key_handoff", payload, to="sub-b"
+    )
+    assert fan_out.forwarded == []
+
+
+async def test_a_broadcast_another_node_forwarded_here_is_a_replay(gfs_db):
+    """The same bytes another node already took and forwarded are suppressed
+    here too — before, each node had to see them once itself."""
+    fan_out = _RecordingFanOut(seen=True)
+    ws = _PartialWsRegistry({"sub-a", "sub-b"})
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    svc.attach_fan_out(fan_out)
+    seed = await _two_subscribers(svc, "sp-f3")
+    payload = _targeted_payload(seed, "space_subscriber_key_handoff", "sp-f3")
+    assert (
+        await svc.publish_event("sp-f3", "space_subscriber_key_handoff", payload) == []
+    )
+    assert fan_out.forwarded == []
+    assert ws.sent == []

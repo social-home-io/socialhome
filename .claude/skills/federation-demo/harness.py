@@ -1324,6 +1324,191 @@ def _gfs_cluster_cross_node_push(urls: list[str]) -> None:
     asyncio.run(_run())
 
 
+def _gfs_cluster_cross_node_broadcast(urls: list[str]) -> None:
+    """Step 3e of ``gfs-cluster``: a BROADCAST reaches every follower on
+    every node, exactly once.
+
+    Before the fix a broadcast ``/gfs/publish`` (``space_post_public`` and
+    every other broadcast space event, member publishes, channel items)
+    reached only the sockets of the node that took the request — on 4 nodes
+    behind the round-robin balancer ~3 followers in 4 missed each post. Now
+    the accepting node forwards each item ONCE per peer node inside the
+    coalesced ``NODE_DRAIN_HINT`` and every node pushes it to the sockets it
+    holds. One follower per node; the post is published via node 0; each
+    follower must get exactly one ``relay`` frame (a further 2 s window
+    must stay empty — no duplicate).
+    """
+    import asyncio
+
+    import aiohttp
+
+    from socialhome.authority_sig import sign_authority_event
+    from socialhome.crypto import (
+        b64url_encode,
+        derive_instance_id,
+        generate_identity_keypair,
+        sign_ed25519,
+    )
+
+    def _canonical(body: dict) -> bytes:
+        return json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+
+    def _register(url: str) -> tuple[str, bytes]:
+        kp = generate_identity_keypair()
+        iid = derive_instance_id(kp.public_key)
+        body = {
+            "token": _gfs_landing_token(url),
+            "instance_id": iid,
+            "public_key": kp.public_key.hex(),
+            "display_name": f"broadcast-{iid[:6]}",
+        }
+        # A fresh ``X-Forwarded-For`` per call: the steps before already
+        # spent this address's per-IP register budget on every node.
+        req = urllib.request.Request(
+            f"{url}/gfs/register",
+            data=json.dumps(body).encode(),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Forwarded-For": f"127.{secrets.randbelow(255)}.1."
+                f"{secrets.randbelow(255)}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                code, resp = r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as exc:
+            code, resp = exc.code, exc.read()
+        if code not in (200, 201) or (resp or {}).get("status") != "registered":
+            raise SystemExit(f"gfs-cluster: broadcast register → {code} {resp!r}")
+        return iid, kp.private_key
+
+    owner_id, owner_seed = _register(urls[0])
+    followers = [_register(url) for url in urls]
+    space = generate_identity_keypair()
+    space_id = generate_identity_keypair().public_key.hex()[:32]
+    publish = {
+        "space_id": space_id,
+        "owning_instance": owner_id,
+        "name": "Broadcast space",
+        "description": "",
+        "about_markdown": "",
+        "cover_url": "",
+        "icon_url": "",
+        "min_age": 0,
+        "category": "general",
+        "join_mode": "open",
+        "allow_subscribers": True,
+        "accent_color": "#C8902F",
+        "primary_color": "#D2542A",
+        "identity_public_key": space.public_key.hex(),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    publish["signature"] = b64url_encode(sign_ed25519(owner_seed, _canonical(publish)))
+    code, resp = _request(
+        f"{urls[1 % len(urls)]}/gfs/spaces/{space_id}/publish",
+        method="POST",
+        body=publish,
+        timeout=15.0,
+    )
+    if code not in (200, 201):
+        raise SystemExit(f"gfs-cluster: broadcast space publish → {code} {resp!r}")
+    for index, (iid, seed) in enumerate(followers):
+        ts = datetime.now(timezone.utc).isoformat()
+        signed = {
+            "action": "subscribe",
+            "instance_id": iid,
+            "space_id": space_id,
+            "ts": ts,
+        }
+        body = signed | {
+            "signature": b64url_encode(sign_ed25519(seed, _canonical(signed)))
+        }
+        code, resp = _request(
+            f"{urls[(index + 2) % len(urls)]}/gfs/subscribe",
+            method="POST",
+            body=body,
+            timeout=15.0,
+        )
+        if code != 200:
+            raise SystemExit(f"gfs-cluster: broadcast subscribe → {code} {resp!r}")
+
+    def _hello(instance_id: str, seed: bytes) -> dict:
+        ts = int(time.time())
+        sig = sign_ed25519(seed, f"{instance_id}|{ts}".encode())
+        return {
+            "type": "hello",
+            "instance_id": instance_id,
+            "ts": ts,
+            "sig": b64url_encode(sig),
+        }
+
+    async def _relays(ws, seconds: float, *, first: bool) -> list[dict]:
+        frames: list[dict] = []
+        deadline = time.monotonic() + seconds
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                msg = await ws.receive(timeout=left)
+            except TimeoutError:
+                break
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                break
+            frame = json.loads(msg.data)
+            if frame.get("type") == "relay" and frame.get("space_id") == space_id:
+                frames.append(frame)
+                if first:
+                    break
+        return frames
+
+    async def _run() -> None:
+        async with aiohttp.ClientSession() as http:
+            sockets = []
+            for url, (iid, seed) in zip(urls, followers, strict=True):
+                ws = await http.ws_connect(f"{url}/gfs/ws")
+                await ws.send_json(_hello(iid, seed))
+                sockets.append(ws)
+            await asyncio.sleep(1.0)  # every socket registered on its node
+            payload: dict = {
+                "space_id": space_id,
+                "epoch": 1,
+                "ciphertext": "broadcast-across-nodes",
+            }
+            payload |= sign_authority_event(
+                event_type="space_post_public",
+                space_id=space_id,
+                payload=payload,
+                space_seed=space.private_key,
+            )
+            async with http.post(
+                f"{urls[0]}/gfs/publish",
+                json={
+                    "space_id": space_id,
+                    "event_type": "space_post_public",
+                    "payload": payload,
+                },
+            ) as r:
+                if r.status != 200:
+                    raise SystemExit(f"gfs-cluster: broadcast publish → {r.status}")
+            for index, ws in enumerate(sockets):
+                got = await _relays(ws, 10.0, first=True)
+                got += await _relays(ws, 2.0, first=False)
+                if len(got) != 1 or got[0].get("payload") != payload:
+                    raise SystemExit(
+                        f"gfs-cluster: the follower on node {index} got "
+                        f"{len(got)} copies of a post published via node 0 "
+                        "(want exactly 1) — the broadcast fan-out is not "
+                        "cluster-wide (NODE_DRAIN_HINT.relays)."
+                    )
+            for ws in sockets:
+                await ws.close()
+            print(
+                f"  public post via node 0 → exactly one copy on the follower "
+                f"socket of each of the {len(urls)} nodes ✓"
+            )
+
+    asyncio.run(_run())
+
+
 def cmd_gfs_cluster() -> None:
     """Prove a MULTI-PROCESS GFS cluster serves writes without deadlocking.
 
@@ -1648,8 +1833,10 @@ def cmd_gfs_cluster() -> None:
     print("  ~1.5 MiB cover publishes stored intact, served by another node ✓")
 
     # 3d. Single-recipient pushes reach a socket held by another node.
+    # 3e. A broadcast reaches the followers on EVERY node, exactly once.
     try:
         _gfs_cluster_cross_node_push(urls)
+        _gfs_cluster_cross_node_broadcast(urls)
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise
@@ -1667,7 +1854,8 @@ def cmd_gfs_cluster() -> None:
         "peers discovered incl. self-guard; foreign-seed HELLO refused, "
         "replayed frame refused; concurrent cross-process "
         "registrations + space publishes serialise on the lock; owner "
-        "notices + targeted relays reach a socket on another node)"
+        "notices + targeted relays reach a socket on another node; a "
+        "broadcast reaches every node's followers exactly once)"
     )
 
 

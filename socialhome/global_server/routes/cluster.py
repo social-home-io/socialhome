@@ -308,6 +308,11 @@ class ClusterSyncView(GfsBaseView):
             await svc.apply_drain_hint(payload.get("instances"))
             if "notices" in payload:
                 await svc.apply_subscriber_notices(payload["notices"])
+            if "relays" in payload:
+                # Broadcast items another node accepted: pushed to the sockets
+                # held here; ``held`` tells the origin whom not to queue for.
+                held = await svc.apply_forwarded_relays(payload["relays"])
+                return web.json_response({"status": "ok", "held": held})
         else:
             log.debug(
                 "cluster: unknown NODE_* type %r from %r",

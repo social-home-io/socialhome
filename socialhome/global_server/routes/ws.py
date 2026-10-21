@@ -60,7 +60,7 @@ from aiohttp import WSMsgType, web
 
 from ... import crypto
 from .. import app_keys as K
-from ..envelope_relay import RELAY_SEEN_MIN_SESSION_S
+from ..envelope_relay import RELAY_SEEN_MIN_SESSION_S, RELAY_SEEN_REFRESH_S
 from ..federation import TIMING_UNIFORM_DUMMY_KEY_HEX
 
 log = logging.getLogger(__name__)
@@ -78,14 +78,33 @@ WS_CLOSE_PROTOCOL_VIOLATION = 4400
 WS_AUTH_FAILED_REASON = b"auth-failed"
 
 
-async def _mark_seen_after(
+async def _mark_seen_while_open(
     fed_repo, instance_id: str, ws: web.WebSocketResponse
 ) -> None:
     """Mark *instance_id* relay-seen once its socket has stayed open for
-    :data:`RELAY_SEEN_MIN_SESSION_S`."""
-    await asyncio.sleep(RELAY_SEEN_MIN_SESSION_S)
-    if not ws.closed:
-        await fed_repo.mark_relay_seen(instance_id, at=int(time.time()))
+    :data:`RELAY_SEEN_MIN_SESSION_S`, then again every
+    :data:`RELAY_SEEN_REFRESH_S` while it stays open.
+
+    The refresh is what keeps a long-lived household in the offline-copy
+    window (``relay_seen_at`` within the 24 h queue TTL): marked only once, a
+    socket held for more than a day — on whichever cluster node — aged out
+    while still connected, and got nothing queued once it dropped. A failed
+    write is logged and retried at the next tick; it never ends the loop."""
+    delay = RELAY_SEEN_MIN_SESSION_S
+    while True:
+        await asyncio.sleep(delay)
+        delay = RELAY_SEEN_REFRESH_S
+        if ws.closed:
+            return
+        try:
+            await fed_repo.mark_relay_seen(instance_id, at=int(time.time()))
+        except Exception as exc:
+            log.warning(
+                "gfs.ws: relay-seen mark failed for %s: %r",
+                instance_id,
+                exc,
+                exc_info=True,
+            )
 
 
 class GfsWebSocketView(web.View):
@@ -129,10 +148,11 @@ class GfsWebSocketView(web.View):
         # v_49 — a session held long enough marks the household "seen": only
         # seen households get member-published items queued while offline (a
         # bare hello must not earn disk). Marked from a timer WHILE the socket
-        # is open, never from the ``finally`` below, which aiohttp may cancel
-        # mid-way when the peer drops.
+        # is open, and refreshed hourly while it stays open, never from the
+        # ``finally`` below, which aiohttp may cancel mid-way when the peer
+        # drops.
         seen_timer = asyncio.create_task(
-            _mark_seen_after(fed_repo, instance_id, ws),
+            _mark_seen_while_open(fed_repo, instance_id, ws),
             name=f"gfs-ws-seen-{instance_id}",
         )
 

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import re
 
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.capabilities_sig import (
@@ -40,6 +42,10 @@ from socialhome.global_server.cluster import (
     is_member,
     member_url,
     parse_cluster_sig_suite,
+)
+from socialhome.global_server.cluster_relay import (
+    ForwardedRelay,
+    wire_size,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClusterNode
@@ -1484,14 +1490,23 @@ async def _flushed(svc: ClusterService) -> None:
 
 
 def _record_broadcasts(monkeypatch) -> list[tuple[str, dict, bool]]:
+    """Record every broadcast. Drain-hint frames go out through
+    ``_broadcast_collect`` (best effort, replies read): recorded with
+    ``ignore_errors=True``, like the fire-and-forget broadcasts."""
     sent: list[tuple[str, dict, bool]] = []
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_MIN_GAP_S", 0.0)
 
     async def fake_broadcast(
         self, msg_type, payload, *, ignore_errors=False, session=None
     ):
         sent.append((msg_type, payload, ignore_errors))
 
+    async def fake_collect(self, msg_type, payload):
+        sent.append((msg_type, payload, True))
+        return []
+
     monkeypatch.setattr(ClusterService, "_broadcast", fake_broadcast)
+    monkeypatch.setattr(ClusterService, "_broadcast_collect", fake_collect)
     return sent
 
 
@@ -1546,12 +1561,15 @@ async def test_a_failing_flush_is_logged_and_the_next_hint_still_flushes(
     monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
     calls: list[dict] = []
 
-    async def flaky(self, msg_type, payload, *, ignore_errors=False, session=None):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_MIN_GAP_S", 0.0)
+
+    async def flaky(self, msg_type, payload):
         calls.append(payload)
         if len(calls) == 1:
             raise RuntimeError("roster read failed")
+        return []
 
-    monkeypatch.setattr(ClusterService, "_broadcast", flaky)
+    monkeypatch.setattr(ClusterService, "_broadcast_collect", flaky)
     svc = _drain_cluster(gfs_db)
     with caplog.at_level("WARNING"):
         svc.hint_drain(_HOME_A)
@@ -2137,3 +2155,316 @@ async def test_a_failing_notice_delivery_is_logged_and_the_rest_still_go(
         await svc.stop()
     assert delivered == ["b"]
     assert "subscriber notice delivery failed" in caplog.text
+
+
+# ─── Broadcast relay items (NODE_DRAIN_HINT.relays) ──────────────────────
+
+_RELAY_FRAME = {"space_id": "sp", "event_type": "space_item", "payload": "c2VhbGVk"}
+
+
+def _relay_item(n: int = 0, *, queue: bool = False) -> ForwardedRelay:
+    frame = {**_RELAY_FRAME, "payload": f"item-{n}"}
+    return ForwardedRelay(
+        kind="space",
+        key="sp",
+        skip="",
+        queue=queue,
+        frame=frame,
+    )
+
+
+def _record_collects(monkeypatch, replies=()) -> list[dict]:
+    """Record each drain-hint frame; every send answers *replies*."""
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_MIN_GAP_S", 0.0)
+    sent: list[dict] = []
+
+    async def fake_collect(self, msg_type, payload):
+        assert msg_type == NODE_DRAIN_HINT
+        sent.append(payload)
+        return list(replies)
+
+    monkeypatch.setattr(ClusterService, "_broadcast_collect", fake_collect)
+    return sent
+
+
+async def test_forward_relay_is_refused_when_the_cluster_is_disabled(gfs_db):
+    svc = _drain_cluster(gfs_db, enabled=False)
+    assert svc.forward_relay(_relay_item()) is False
+    assert svc._drain_hint_task is None
+
+
+async def test_relay_items_ride_the_next_drain_hint(gfs_db, monkeypatch):
+    sent = _record_collects(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    assert svc.forward_relay(_relay_item(1))
+    assert svc.forward_relay(_relay_item(2))
+    svc.hint_drain(_HOME_A)
+    await _flushed(svc)
+    assert sent == [
+        {
+            "instances": [_HOME_A],
+            "relays": [_relay_item(1).to_wire(), _relay_item(2).to_wire()],
+        }
+    ]
+    await svc.stop()
+
+
+async def test_relay_items_are_split_by_count_and_bytes(gfs_db, monkeypatch):
+    sent = _record_collects(monkeypatch)
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_PER_FRAME", 2)
+    svc = _drain_cluster(gfs_db)
+    for n in range(5):
+        svc.forward_relay(_relay_item(n))
+    await _flushed(svc)
+    assert [len(p["relays"]) for p in sent] == [2, 2, 1]
+    assert [p["instances"] for p in sent] == [[], [], []]
+    sent.clear()
+    one = wire_size(_relay_item(0).to_wire())
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_PER_FRAME", 64)
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_FRAME_BYTES", 2 * one + 1)
+    for n in range(3):
+        svc.forward_relay(_relay_item(n))
+    await _flushed(svc)
+    assert [len(p["relays"]) for p in sent] == [2, 1]
+    await svc.stop()
+
+
+async def test_drain_hint_frames_are_paced(gfs_db, monkeypatch):
+    """At most one frame per DRAIN_HINT_MIN_GAP_S, so a steady stream stays
+    inside the receiver's per-minute sync budget."""
+    sent = _record_collects(monkeypatch)
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_MIN_GAP_S", 0.2)
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_PER_FRAME", 1)
+    stamps: list[float] = []
+    real = ClusterService._broadcast_collect
+
+    async def stamped(self, msg_type, payload):
+        stamps.append(asyncio.get_running_loop().time())
+        return await real(self, msg_type, payload)
+
+    monkeypatch.setattr(ClusterService, "_broadcast_collect", stamped)
+    svc = _drain_cluster(gfs_db)
+    svc.forward_relay(_relay_item(1))
+    svc.forward_relay(_relay_item(2))
+    await _flushed(svc)
+    svc.hint_drain(_HOME_A)
+    await _flushed(svc)
+    assert len(sent) == 3
+    gaps = [b - a for a, b in itertools.pairwise(stamps)]
+    assert all(gap >= 0.18 for gap in gaps), gaps
+    await svc.stop()
+
+
+async def test_settled_items_get_the_ids_the_newer_peers_hold(gfs_db, monkeypatch):
+    replies = [
+        {"status": "ok", "held": {"space:sp": [_HOME_A]}},
+        {"status": "ok"},  # an older node
+        None,  # a peer that did not answer
+    ]
+    _record_collects(monkeypatch, replies)
+    svc = _drain_cluster(gfs_db)
+    settled: list[frozenset[str]] = []
+    svc.forward_relay(_relay_item(queue=True), on_settled=settled.append)
+    svc.forward_relay(_relay_item(9))  # a broadcast: nothing to settle
+    await _flushed(svc)
+    assert settled == [frozenset({_HOME_A})]
+    await svc.stop()
+
+
+async def test_a_failed_relay_frame_settles_with_nobody_held(
+    gfs_db, monkeypatch, caplog
+):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_MIN_GAP_S", 0.0)
+
+    async def broken(self, msg_type, payload):
+        raise RuntimeError("roster read failed")
+
+    monkeypatch.setattr(ClusterService, "_broadcast_collect", broken)
+    svc = _drain_cluster(gfs_db)
+    settled: list[frozenset[str]] = []
+    svc.forward_relay(_relay_item(queue=True), on_settled=settled.append)
+    with caplog.at_level("WARNING"):
+        await _flushed(svc)
+    assert settled == [frozenset()]
+    assert "1 relay item(s) not sent" in caplog.text
+    await svc.stop()
+
+
+async def test_pending_relay_items_are_bounded(gfs_db, monkeypatch, caplog):
+    _record_collects(monkeypatch)
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_PENDING", 1)
+    svc = _drain_cluster(gfs_db)
+    with caplog.at_level("WARNING"):
+        assert svc.forward_relay(_relay_item(1))
+        assert not svc.forward_relay(_relay_item(2))
+        assert not svc.forward_relay(_relay_item(3))  # inside the warn interval
+    assert caplog.text.count("not forwarding") == 1
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_PENDING", 99)
+    one = wire_size(_relay_item(0).to_wire())
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_PENDING_BYTES", one + 1)
+    assert not svc.forward_relay(_relay_item(4))  # over the byte cap
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_FRAME_BYTES", one - 1)
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_PENDING_BYTES", 1 << 30)
+    assert not svc.forward_relay(_relay_item(5))  # bigger than a frame
+    await svc.stop()
+
+
+async def test_stop_settles_the_relay_items_it_never_sent(gfs_db, monkeypatch):
+    """At shutdown nobody reported a socket for anybody: the origin queues
+    every offline copy it would have."""
+    sent = _record_collects(monkeypatch)
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 30.0)
+    svc = _drain_cluster(gfs_db)
+    settled: list[frozenset[str]] = []
+    svc.forward_relay(_relay_item(queue=True), on_settled=settled.append)
+    svc.forward_relay(_relay_item(2))
+    await asyncio.sleep(0.01)  # the flush is waiting out its delay
+    await svc.stop()
+    assert sent == []
+    assert settled == [frozenset()]
+    assert svc._relay_pending == [] and svc._relay_pending_bytes == 0
+
+
+async def test_stopping_between_two_frames_keeps_the_rest_for_stop(gfs_db, monkeypatch):
+    sent = _record_collects(monkeypatch)
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_PER_FRAME", 1)
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_MIN_GAP_S", 30.0)
+    svc = _drain_cluster(gfs_db)
+    settled: list[frozenset[str]] = []
+    svc.forward_relay(_relay_item(1), on_settled=settled.append)
+    svc.forward_relay(_relay_item(2, queue=True), on_settled=settled.append)
+    for _ in range(200):
+        if sent:
+            break
+        await asyncio.sleep(0.01)
+    assert len(sent) == 1  # the second frame waits out the gap
+    await svc.stop()
+    assert settled == [frozenset(), frozenset()]
+
+
+async def test_apply_forwarded_relays_validates_and_delegates(gfs_db, monkeypatch):
+    svc = _drain_cluster(gfs_db)
+    assert await svc.apply_forwarded_relays([_relay_item().to_wire()]) == {}
+    seen: list[list[ForwardedRelay]] = []
+
+    async def _apply(items):
+        seen.append(items)
+        return {"space:sp": [_HOME_A]}
+
+    svc.attach_forwarded_relays(_apply)
+    assert await svc.apply_forwarded_relays("nope") == {}
+    assert await svc.apply_forwarded_relays([{"aud": "bad"}]) == {}
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_PER_FRAME", 1)
+    held = await svc.apply_forwarded_relays(
+        [{"aud": "bad"}, _relay_item(1).to_wire(), _relay_item(2).to_wire()]
+    )
+    assert held == {}
+    assert seen == []  # the one item read was malformed
+    monkeypatch.setattr(cluster_mod, "RELAY_FORWARD_MAX_PER_FRAME", 64)
+    await svc.apply_forwarded_relays([{"aud": "bad"}, _relay_item(1).to_wire()])
+    assert seen == [[_relay_item(1)]]
+
+
+async def test_a_failing_forwarded_relay_apply_is_logged(gfs_db, caplog):
+    svc = _drain_cluster(gfs_db)
+
+    async def _boom(items):
+        raise RuntimeError("db down")
+
+    svc.attach_forwarded_relays(_boom)
+    with caplog.at_level("WARNING"):
+        assert await svc.apply_forwarded_relays([_relay_item().to_wire()]) == {}
+    assert "not applied" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("body", "want"),
+    [
+        (b'{"status": "ok", "held": {}}', {"status": "ok", "held": {}}),
+        (b"[1, 2]", None),
+        (b"not json", None),
+        (b'{"held": "' + b"x" * 64 + b'"}', None),
+    ],
+)
+async def test_a_drain_hint_reply_is_read_only_when_it_is_a_small_object(
+    gfs_db, monkeypatch, body, want
+):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_REPLY_MAX_BYTES", 48)
+
+    async def _answer(request):
+        return web.Response(body=body, content_type="application/json")
+
+    app = web.Application()
+    app.router.add_post("/cluster/sync", _answer)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        svc = _drain_cluster(gfs_db)
+        reply = await svc._post_to_peer(
+            str(server.make_url("")), NODE_DRAIN_HINT, {}, read_reply=True
+        )
+        assert reply == want
+        assert (
+            await svc._post_to_peer(str(server.make_url("")), NODE_DRAIN_HINT, {})
+            is None
+        )
+    finally:
+        await server.close()
+
+
+async def test_broadcast_collect_skips_offline_peers_and_survives_failures(
+    gfs_db, monkeypatch
+):
+    svc = _drain_cluster(gfs_db)
+    repo = svc._repo
+    for node_id, status in (("up", "online"), ("down", "offline"), ("bad", "online")):
+        await repo.insert_node(
+            ClusterNode(
+                node_id=node_id,
+                url=f"http://{node_id}.test",
+                public_key=_OWN,
+                status=status,
+            )
+        )
+    posted: list[str] = []
+
+    async def fake_post(self, url, msg_type, payload, *, to="", read_reply=False):
+        posted.append(to)
+        if to == "bad":
+            raise RuntimeError("refused")
+        return {"status": "ok", "held": {}}
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+    replies = await svc._broadcast_collect(NODE_DRAIN_HINT, {"instances": []})
+    assert sorted(posted) == ["bad", "up"]
+    assert sorted(replies, key=str) == sorted(
+        [None, {"status": "ok", "held": {}}], key=str
+    )
+
+
+async def test_a_flush_cancelled_mid_send_leaves_its_items_for_stop(
+    gfs_db, monkeypatch
+):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_MIN_GAP_S", 0.0)
+    started = asyncio.Event()
+
+    async def hanging(self, msg_type, payload):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(ClusterService, "_broadcast_collect", hanging)
+    svc = _drain_cluster(gfs_db)
+    settled: list[frozenset[str]] = []
+    svc.forward_relay(_relay_item(queue=True), on_settled=settled.append)
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task = svc._drain_hint_task
+    assert task is not None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(svc._relay_pending) == 1 and settled == []
+    await svc.stop()
+    assert settled == [frozenset()]

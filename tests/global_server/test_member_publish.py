@@ -1192,7 +1192,7 @@ async def test_stop_warns_with_the_count_it_could_not_drain(gfs, monkeypatch, ca
     monkeypatch.setattr(mp_mod, "FAN_OUT_STOP_DRAIN_S", 0.05)
     gate = asyncio.Event()
 
-    async def _stuck_relay(self, targets, *, queue_ok, frame):
+    async def _stuck_relay(self, targets, *, queue_ok, frame, audience, skip):
         await gate.wait()
         return 0
 
@@ -1732,3 +1732,39 @@ async def test_a_connection_left_on_the_old_id_is_still_served_with_the_key(gfs)
         json=_body(gfs.publisher, gfs_instance_id=GFS_ID, gfs_key=await _own_key(gfs)),
     )
     assert resp.status == 200
+
+
+async def test_a_long_lived_ws_session_keeps_its_seen_mark_fresh(gfs, monkeypatch):
+    """REGRESSION: ``relay_seen_at`` was written once per WS session, so a
+    household that just stayed connected for more than the 24 h queue TTL
+    aged out of the offline-copy window while connected — and got nothing
+    queued once its socket dropped. A live session now re-marks itself."""
+    monkeypatch.setattr(ws_mod, "RELAY_SEEN_MIN_SESSION_S", 0.05)
+    monkeypatch.setattr(ws_mod, "RELAY_SEEN_REFRESH_S", 0.05, raising=False)
+    stranger = _Household()
+    fed = gfs.app_[gfs_fed_repo_key]
+    await fed.upsert_instance(stranger.instance())
+    db = gfs.app_[gfs_db_key]
+
+    async def _seen_at() -> int | None:
+        row = await db.fetchone(
+            "SELECT relay_seen_at FROM client_instances WHERE instance_id=?",
+            (stranger.instance_id,),
+        )
+        return row["relay_seen_at"]
+
+    stale = int(time.time()) - 2 * 86400
+    async with gfs.ws_connect("/gfs/ws") as ws:
+        await ws.send_json(stranger.hello())
+        await _wait_connected(gfs.app_, stranger.instance_id)
+        for _ in range(200):
+            if await _seen_at() is not None:
+                break
+            await asyncio.sleep(0.01)
+        # A day and more later, still connected.
+        await fed.mark_relay_seen(stranger.instance_id, at=stale)
+        for _ in range(200):
+            if (await _seen_at() or 0) > stale:
+                break
+            await asyncio.sleep(0.01)
+    assert (await _seen_at() or 0) >= int(time.time()) - 60

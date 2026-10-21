@@ -1181,3 +1181,77 @@ async def test_queue_relay_refuses_a_frame_over_the_cap(wiring, monkeypatch, cap
     assert await queue_repo.count_for(RECIPIENT) == 0
     assert cluster.hinted == []
     assert "exceeds the relay queue caps" in caplog.text
+
+
+# ── Cluster forward of member items (cluster_relay) ──────────────────────
+
+
+class _FanOutForward:
+    """``ClusterRelayFanOut`` stand-in: records ``forward`` calls."""
+
+    def __init__(self, *, accept: bool) -> None:
+        self.accept = accept
+        self.calls: list[dict] = []
+
+    def forward(self, **kwargs) -> bool:
+        self.calls.append(kwargs)
+        return self.accept
+
+
+async def test_a_forwarded_member_item_leaves_offline_copies_to_the_forward(
+    wiring,
+):
+    """With a cluster, the offline candidates go to the forward, which
+    queues only those no other node holds — nothing is queued here yet."""
+    _fed, queue_repo, registry, relay = wiring
+    live, away = RECIPIENT, "awayhome22222222222222222222222a"
+    registry.online.add(live)
+    forward = _FanOutForward(accept=True)
+    relay.attach_fan_out(forward)
+    reached = await relay.fan_out_relay(
+        [live, away],
+        queue_ok={live, away},
+        frame=_item(),
+        audience=("space", "sp-1"),
+        skip="publisher",
+    )
+    assert reached == 1
+    assert forward.calls == [
+        {
+            "kind": "space",
+            "key": "sp-1",
+            "frame": _item(),
+            "skip": "publisher",
+            "queue_for": [away],
+        }
+    ]
+    assert await queue_repo.count_for(away) == 0
+
+
+async def test_a_member_item_the_cluster_refuses_is_queued_at_once(wiring):
+    _fed, queue_repo, _registry, relay = wiring
+    relay.attach_fan_out(_FanOutForward(accept=False))
+    assert (
+        await relay.fan_out_relay(
+            [RECIPIENT],
+            queue_ok={RECIPIENT},
+            frame=_item(),
+            audience=("space", "sp-1"),
+        )
+        == 1
+    )
+    assert await queue_repo.count_for(RECIPIENT) == 1
+
+
+async def test_without_an_audience_nothing_is_forwarded(wiring):
+    _fed, queue_repo, _registry, relay = wiring
+    forward = _FanOutForward(accept=True)
+    relay.attach_fan_out(forward)
+    assert await _send(relay, _item()) == 1
+    assert forward.calls == []
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 1
+
+
+async def test_queue_relay_many_with_no_targets_writes_nothing(wiring):
+    _fed, _queue_repo, _registry, relay = wiring
+    assert await relay.queue_relay_many([], _item()) == 0

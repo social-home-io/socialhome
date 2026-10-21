@@ -2,8 +2,9 @@
 
 Symmetric peer-to-peer — no primary/leader. Every node runs the same
 code, shares ``client_instances`` + ``global_spaces`` registries via
-``NODE_SYNC_*`` messages, fan-outs post relays via ``NODE_RELAY``, and
-tells siblings about freshly queued envelopes via ``NODE_DRAIN_HINT``.
+``NODE_SYNC_*`` messages, and tells siblings about freshly queued envelopes,
+owner notices and broadcast relay items via the coalesced
+``NODE_DRAIN_HINT`` (``NODE_RELAY`` is a legacy frame nothing sends).
 State sync is last-write-wins with two exceptions: a ``banned`` record
 always wins over any subsequent non-ban upsert, and a locally-``withdrawn``
 space stays withdrawn against a peer's stale ``withdrawn=0`` row.
@@ -45,6 +46,17 @@ from ..domain.space import normalize_category, normalize_join_mode
 from ..domain.space_place import PlacePin, parse_place_pin_wire, place_pin_wire
 from ..domain.subscriber_accepts import parse_accepts
 from ..gfs_proof import sign_possession_proof
+from .cluster_relay import (
+    RELAY_FORWARD_MAX_FRAME_BYTES,
+    RELAY_FORWARD_MAX_PENDING,
+    RELAY_FORWARD_MAX_PENDING_BYTES,
+    RELAY_FORWARD_MAX_PER_FRAME,
+    RELAY_FORWARD_WARN_INTERVAL_S,
+    ForwardedRelay,
+    SettleCallback,
+    held_from_replies,
+    wire_size,
+)
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
 from .envelope_relay import ENVELOPE_INSTANCE_ID_RE
 from .federation import certified_authority_repin
@@ -214,6 +226,9 @@ NODE_HEARTBEAT = "NODE_HEARTBEAT"
 NODE_SYNC_CLIENT = "NODE_SYNC_CLIENT"
 NODE_SYNC_SPACE = "NODE_SYNC_SPACE"
 NODE_SYNC_REPORT = "NODE_SYNC_REPORT"  # Phase Z — fraud aggregation
+#: Legacy: nothing sends it any more (it never had a production caller).
+#: Broadcast relays ride ``NODE_DRAIN_HINT.relays`` instead — see
+#: :mod:`.cluster_relay`. The receiver still accepts it from an older node.
 NODE_RELAY = "NODE_RELAY"
 NODE_POLICY_PUSH = "NODE_POLICY_PUSH"
 #: Spec §24.10.3 / §4.4.6 — partition-healing pair. ``CATCHUP`` is sent
@@ -238,12 +253,31 @@ NODE_PARTITION_GAP = "NODE_PARTITION_GAP"
 #: (rather than a frame of its own) keeps it inside the same coalesced send,
 #: so it costs a peer's per-minute sync budget nothing extra; an older node
 #: ignores the key, which is exactly how it behaved before.
+#:
+#: And the optional ``relays`` list: broadcast relay items this node accepted
+#: (``ForwardedRelay.to_wire``) for every other node to push to the sockets it
+#: holds — one copy per peer, however many subscribers. A newer receiver
+#: answers ``{"status": "ok", "held": {audience: [instance id, ...]}}`` for
+#: the items that may need an offline copy; an older one ignores the key and
+#: answers without ``held``. See :mod:`.cluster_relay`.
 NODE_DRAIN_HINT = "NODE_DRAIN_HINT"
 
 #: How long :meth:`ClusterService.hint_drain` gathers ids before it sends one
 #: ``NODE_DRAIN_HINT``. A burst (a catch-up backfill, a space fan-out to many
 #: offline subscribers) becomes one frame per peer instead of one per row.
 DRAIN_HINT_DELAY_S: float = 0.5
+
+#: Minimum seconds between two ``NODE_DRAIN_HINT`` frames to one peer, so a
+#: steady stream of relays, ids and notices stays at <= 40 frames a minute —
+#: inside the receiver's :data:`CLUSTER_RATE_LIMIT_PER_MIN` (60) with room for
+#: heartbeats and syncs. Whatever arrives meanwhile rides the next frame, so
+#: busier traffic means fuller frames, not more of them. Idle, the first frame
+#: still goes after :data:`DRAIN_HINT_DELAY_S`.
+DRAIN_HINT_MIN_GAP_S: float = 1.5
+
+#: Largest reply body read from a peer's ``NODE_DRAIN_HINT`` answer (its
+#: ``held`` lists: ~35 bytes an instance id).
+DRAIN_HINT_REPLY_MAX_BYTES: int = 8 * 1024 * 1024
 
 #: Max instance ids in one ``NODE_DRAIN_HINT`` frame (a bigger batch is split),
 #: and the most a receiver reads from one frame.
@@ -567,6 +601,7 @@ class ClusterService:
         "_heartbeat_task",
         "_hint_drains",
         "_hint_rerun",
+        "_hint_sent_at",
         "_identity_mismatches",
         "_identity_transitional",
         "_instance_id",
@@ -581,6 +616,11 @@ class ClusterService:
         "_partition_gaps",
         "_peers",
         "_process_start",
+        "_relay_cb",
+        "_relay_dropped",
+        "_relay_pending",
+        "_relay_pending_bytes",
+        "_relay_warned_at",
         "_repo",
         "_seen_frames",
         "_seen_relays",
@@ -728,6 +768,21 @@ class ClusterService:
         self._notice_cb: NoticeDelivery | None = None
         #: Running inbound notice deliveries, awaited / cancelled in ``stop``.
         self._notice_tasks: set[asyncio.Task] = set()
+        #: Broadcast relay items waiting for the next ``NODE_DRAIN_HINT``
+        #: flush: ``(item, its wire dict, its wire size, settle callback)``.
+        self._relay_pending: list[
+            tuple[ForwardedRelay, dict, int, SettleCallback | None]
+        ] = []
+        self._relay_pending_bytes = 0
+        #: Items refused at the pending caps since the last WARNING.
+        self._relay_dropped = 0
+        self._relay_warned_at = -math.inf
+        #: ``ClusterRelayFanOut.apply``, set by :meth:`attach_forwarded_relays`.
+        self._relay_cb: (
+            Callable[[list[ForwardedRelay]], Awaitable[dict[str, list[str]]]] | None
+        ) = None
+        #: Monotonic time the last ``NODE_DRAIN_HINT`` frame went out.
+        self._hint_sent_at = -math.inf
 
     # ─── /cluster/sync budgets ───────────────────────────────────────
 
@@ -953,6 +1008,13 @@ class ClusterService:
         self._drain_hint_pending.clear()
         self._notice_pending.clear()
         self._hint_rerun.clear()
+        # Relay items that never went out: no peer reported a socket for
+        # anybody, so the origin queues every offline copy it would have.
+        unsent, self._relay_pending = self._relay_pending, []
+        self._relay_pending_bytes = 0
+        for _item, _wire, _size, on_settled in unsent:
+            if on_settled is not None:
+                on_settled(frozenset())
         if self._notice_tasks:
             tasks = set(self._notice_tasks)
             _done, still = await asyncio.wait(tasks, timeout=5.0)
@@ -1244,6 +1306,86 @@ class ClusterService:
         self._drain_hint_pending.add(instance_id)
         self._schedule_hint_flush()
 
+    def forward_relay(
+        self, item: ForwardedRelay, *, on_settled: SettleCallback | None = None
+    ) -> bool:
+        """Send a broadcast relay *item* to every other node in the next
+        coalesced ``NODE_DRAIN_HINT`` (:mod:`.cluster_relay`).
+
+        Synchronous and cheap — called from the fan-out path. *on_settled*
+        runs once the frame went to every member peer, with the ids their
+        replies report ``held`` for the item's audience (the empty set if
+        none answered, or at shutdown). ``False`` — nothing is sent — when
+        cluster mode is off or the pending caps
+        (:data:`~.cluster_relay.RELAY_FORWARD_MAX_PENDING`, ``…_BYTES``) are
+        reached (WARNING once a minute); the caller then delivers as on a
+        single node."""
+        if not self._enabled:
+            return False
+        wire = item.to_wire()
+        size = wire_size(wire)
+        if (
+            size > RELAY_FORWARD_MAX_FRAME_BYTES
+            or len(self._relay_pending) >= RELAY_FORWARD_MAX_PENDING
+            or self._relay_pending_bytes + size > RELAY_FORWARD_MAX_PENDING_BYTES
+        ):
+            self._note_relay_dropped()
+            return False
+        self._relay_pending.append((item, wire, size, on_settled))
+        self._relay_pending_bytes += size
+        self._schedule_hint_flush()
+        return True
+
+    def _note_relay_dropped(self) -> None:
+        self._relay_dropped += 1
+        now = self._clock()
+        if now - self._relay_warned_at < RELAY_FORWARD_WARN_INTERVAL_S:
+            return
+        log.warning(
+            "cluster: %d relay item(s) (%d bytes) already wait for the next "
+            "drain hint — not forwarding %d more since the last warning; their "
+            "subscribers on other nodes miss them live (offline copies are "
+            "still queued, space sync catches up)",
+            len(self._relay_pending),
+            self._relay_pending_bytes,
+            self._relay_dropped,
+        )
+        self._relay_dropped = 0
+        self._relay_warned_at = now
+
+    def attach_forwarded_relays(
+        self, apply: Callable[[list[ForwardedRelay]], Awaitable[dict[str, list[str]]]]
+    ) -> None:
+        """Register ``ClusterRelayFanOut.apply`` — what an inbound
+        ``NODE_DRAIN_HINT.relays`` runs."""
+        self._relay_cb = apply
+
+    async def apply_forwarded_relays(self, relays: object) -> dict[str, list[str]]:
+        """Inbound ``NODE_DRAIN_HINT.relays`` — validate, push to the sockets
+        held here (in the background) and return ``held`` for the reply.
+
+        At most :data:`~.cluster_relay.RELAY_FORWARD_MAX_PER_FRAME` items are
+        read; a malformed one is skipped. Never forwards an item again."""
+        if self._relay_cb is None or not isinstance(relays, list):
+            return {}
+        items = [
+            item
+            for item in (
+                ForwardedRelay.from_wire(raw)
+                for raw in relays[:RELAY_FORWARD_MAX_PER_FRAME]
+            )
+            if item is not None
+        ]
+        if not items:
+            return {}
+        try:
+            return await self._relay_cb(items)
+        except Exception as exc:
+            log.warning(
+                "cluster: forwarded relay items not applied: %r", exc, exc_info=True
+            )
+            return {}
+
     def hint_subscriber_notice(
         self,
         owner: str,
@@ -1305,48 +1447,98 @@ class ClusterService:
         self._notice_dropped = 0
         return notices
 
-    async def _flush_drain_hints(self) -> None:
-        """Send pending ids and owner notices after the coalescing delay;
-        repeat while new ones arrived during a send. Ends on ``stop`` (the
-        ``_stop`` event)."""
-        while (self._drain_hint_pending or self._notice_pending) and (
-            not self._stop.is_set()
-        ):
+    async def _hint_wait(self, *, min_delay: float) -> bool:
+        """Sleep at least *min_delay*, and until :data:`DRAIN_HINT_MIN_GAP_S`
+        has passed since the last frame. ``False`` once ``stop`` was called."""
+        delay = max(
+            min_delay, self._hint_sent_at + DRAIN_HINT_MIN_GAP_S - self._clock()
+        )
+        if delay > 0:
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=DRAIN_HINT_DELAY_S)
+                await asyncio.wait_for(self._stop.wait(), timeout=delay)
             except TimeoutError:
                 pass
-            if self._stop.is_set():
+        return not self._stop.is_set()
+
+    def _take_relay_chunks(self) -> list[list[tuple]]:
+        """Pending relay items, split into frames by count and bytes."""
+        pending, self._relay_pending = self._relay_pending, []
+        self._relay_pending_bytes = 0
+        chunks: list[list[tuple]] = []
+        size = 0
+        for entry in pending:
+            if (
+                not chunks
+                or len(chunks[-1]) >= RELAY_FORWARD_MAX_PER_FRAME
+                or size + entry[2] > RELAY_FORWARD_MAX_FRAME_BYTES
+            ):
+                chunks.append([])
+                size = 0
+            chunks[-1].append(entry)
+            size += entry[2]
+        return chunks
+
+    async def _flush_drain_hints(self) -> None:
+        """Send pending ids, owner notices and relay items after the
+        coalescing delay, paced to :data:`DRAIN_HINT_MIN_GAP_S` between
+        frames; repeat while new ones arrived during a send. Ends on ``stop``
+        (the ``_stop`` event), which settles relay items still unsent."""
+        while (
+            self._drain_hint_pending or self._notice_pending or self._relay_pending
+        ) and not self._stop.is_set():
+            if not await self._hint_wait(min_delay=DRAIN_HINT_DELAY_S):
                 return
             batch = sorted(self._drain_hint_pending)
             self._drain_hint_pending.clear()
             notices = self._take_pending_notices()
+            chunks = self._take_relay_chunks()
             frames = max(
                 math.ceil(len(batch) / DRAIN_HINT_MAX_IDS),
                 math.ceil(len(notices) / SUBSCRIBER_NOTICE_MAX_PER_FRAME),
+                len(chunks),
             )
             for index in range(frames):
+                if index and not await self._hint_wait(min_delay=0.0):
+                    # Stopping: ``stop`` settles the unsent relay items.
+                    for chunk in chunks[index:]:
+                        self._relay_pending.extend(chunk)
+                    return
                 ids = batch[index * DRAIN_HINT_MAX_IDS :][:DRAIN_HINT_MAX_IDS]
                 notes = notices[index * SUBSCRIBER_NOTICE_MAX_PER_FRAME :][
                     :SUBSCRIBER_NOTICE_MAX_PER_FRAME
                 ]
+                chunk = chunks[index] if index < len(chunks) else []
                 payload: dict = {"instances": ids}
                 if notes:
                     payload["notices"] = notes
+                if chunk:
+                    payload["relays"] = [wire for _item, wire, _size, _cb in chunk]
+                replies: list[dict | None] = []
                 try:
-                    await self._broadcast(NODE_DRAIN_HINT, payload, ignore_errors=True)
+                    replies = await self._broadcast_collect(NODE_DRAIN_HINT, payload)
+                except asyncio.CancelledError:
+                    # ``stop`` gave up waiting: it settles these after us.
+                    for unsent in chunks[index:]:
+                        self._relay_pending.extend(unsent)
+                    raise
                 except Exception as exc:
                     # Best effort: the household still gets the rows on its
-                    # next hello, an owner its notice from its reconcile.
+                    # next hello, an owner its notice from its reconcile, an
+                    # offline subscriber its copy from the origin's queue.
                     # Logged so a broken roster read is visible.
                     log.warning(
-                        "cluster: drain hint for %d household(s) and %d "
-                        "subscriber notice(s) not sent: %r",
+                        "cluster: drain hint for %d household(s), %d "
+                        "subscriber notice(s) and %d relay item(s) not sent: %r",
                         len(ids),
                         len(notes),
+                        len(chunk),
                         exc,
                         exc_info=True,
                     )
+                self._hint_sent_at = self._clock()
+                for item, _wire, _size, on_settled in chunk:
+                    if on_settled is not None:
+                        on_settled(held_from_replies(replies, item.audience))
 
     async def apply_drain_hint(self, instances: object) -> int:
         """Inbound ``NODE_DRAIN_HINT`` — drain the listed households whose
@@ -2388,6 +2580,30 @@ class ClusterService:
                         exc_info=True,
                     )
 
+    async def _broadcast_collect(
+        self, msg_type: str, payload: dict
+    ) -> list[dict | None]:
+        """Send one frame to every online member peer CONCURRENTLY and return
+        each peer's JSON reply (``None`` for a failed send or a reply that
+        is not a JSON object). Never retries — the callers are best effort."""
+        peers = [r for r in await self.member_peers() if r.status != "offline"]
+
+        async def _one(row: ClusterNode) -> dict | None:
+            url = member_url(row)
+            try:
+                reply = await self._post_to_peer(
+                    url, msg_type, payload, to=row.node_id, read_reply=True
+                )
+            except Exception as exc:
+                log.debug(
+                    "cluster: %s to %r failed: %r", msg_type, url, exc, exc_info=True
+                )
+                return None
+            self._fail_counts[url] = 0
+            return reply
+
+        return list(await asyncio.gather(*(_one(r) for r in peers)))
+
     def _signed_frame(
         self, msg_type: str, payload: dict, *, to: str = ""
     ) -> tuple[bytes, str]:
@@ -2427,7 +2643,12 @@ class ClusterService:
         *,
         to: str = "",
         session: aiohttp.ClientSession | None = None,
-    ) -> None:
+        read_reply: bool = False,
+    ) -> dict | None:
+        """POST one signed frame; raise on a transport error or a status
+        >= 300. With *read_reply* return the reply's JSON object (``None``
+        when it is not one, or larger than
+        :data:`DRAIN_HINT_REPLY_MAX_BYTES`)."""
         canonical, sig = self._signed_frame(msg_type, payload, to=to)
         own_session = session is None
         active = session if session is not None else aiohttp.ClientSession()
@@ -2445,6 +2666,18 @@ class ClusterService:
                 # >= 300: a redirect is not followed, so it is not a sync.
                 if resp.status >= 300:
                     raise RuntimeError(f"peer {peer_url} returned {resp.status}")
+                if not read_reply:
+                    return None
+                raw = bytearray()
+                async for chunk in resp.content.iter_chunked(64 * 1024):
+                    raw += chunk
+                    if len(raw) > DRAIN_HINT_REPLY_MAX_BYTES:
+                        return None
+                try:
+                    reply = json.loads(raw)
+                except ValueError:
+                    return None
+                return reply if isinstance(reply, dict) else None
         finally:
             if own_session:
                 await active.close()

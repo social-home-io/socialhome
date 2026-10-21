@@ -87,6 +87,7 @@ from ..gfs_channel import (
     verify_unregister,
 )
 from .addressee import GfsAddressee
+from .cluster_relay import AUDIENCE_CHANNEL
 from .domain import CHANNEL_EPOCH_GRACE_S, GfsChannel
 from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import MAX_SUBSCRIPTIONS_PER_INSTANCE, SeenPayloadCache
@@ -412,6 +413,17 @@ class GfsChannelService:
 
     # ── Publish ──────────────────────────────────────────────────────────
 
+    async def audience_targets(self, channel_id: str) -> list[str]:
+        """The seats a forwarded channel item reaches (the cluster audience
+        resolver, :mod:`.cluster_relay`): the same open-epoch seats as a
+        local fan-out."""
+        ch = await self._channels.get(channel_id)
+        if ch is None:
+            return []
+        return await self._channels.list_targets(
+            channel_id, _open_epochs(ch, now=self._now())
+        )
+
     def _resolver(self, channel_id: str):
         async def _resolve() -> tuple[list[str], set[str]]:
             ch = await self._channels.get(channel_id)
@@ -432,6 +444,7 @@ class GfsChannelService:
             publisher_id=publisher_id,
             frame=frame,
             resolve=self._resolver(channel_id),
+            audience=(AUDIENCE_CHANNEL, channel_id),
         ):
             raise MemberPublishBusy()
 

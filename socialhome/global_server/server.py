@@ -44,6 +44,7 @@ from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
 from .channels import GfsChannelService, build_channel_rate_limit
 from .cluster import ClusterService
+from .cluster_relay import AUDIENCE_CHANNEL, AUDIENCE_SPACE, ClusterRelayFanOut
 from .config import (
     DEFAULT_CONFIG_FILENAME,
     GfsConfig,
@@ -404,6 +405,17 @@ class GfsApp:
         federation.attach_cluster(cluster)
         federation.attach_relay(envelope_relay)
         cluster.attach_subscriber_notice(federation.deliver_forwarded_notice)
+        # Broadcast items (``/gfs/publish``, member publishes, channel items)
+        # ride the same drain hint ONCE per peer node; each node pushes them
+        # to the sockets it holds (``cluster_relay``).
+        cluster_fan_out = ClusterRelayFanOut(
+            ws_registry=ws_registry, relay=envelope_relay
+        )
+        cluster_fan_out.attach_cluster(cluster)
+        cluster.attach_forwarded_relays(cluster_fan_out.apply)
+        envelope_relay.attach_fan_out(cluster_fan_out)
+        federation.attach_fan_out(cluster_fan_out)
+        cluster_fan_out.register_audience(AUDIENCE_SPACE, federation.audience_targets)
         # Trusted-mode member publish (v_49): writer-cert-authorized items
         # fanned out through the same push-or-queue path as envelopes.
         # What households pin from ``/gfs/info`` and sign into each request
@@ -432,6 +444,7 @@ class GfsApp:
             gfs_instance_id=config.instance_id,
             addressee=addressee,
         )
+        cluster_fan_out.register_audience(AUDIENCE_CHANNEL, channels.audience_targets)
         # Periodic retention sweep — purges expired admin sessions, expired
         # highlight publications, aged pair tokens, and envelopes whose TTL
         # ran out (the GFS otherwise has no recurring cleanup loop; these
@@ -459,6 +472,7 @@ class GfsApp:
             highlight_pubs=highlight_pubs,
             moment_public=moment_public,
             envelope_relay=envelope_relay,
+            cluster_fan_out=cluster_fan_out,
             member_publish=member_publish,
             channels=channels,
             addressee=addressee,
@@ -579,6 +593,9 @@ class GfsApp:
         await self.services.member_publish.stop()
         await self.services.addressee.stop()
         await self.services.cluster.stop()
+        # After the cluster settled its unsent items (their offline copies),
+        # before the database goes.
+        await self.services.cluster_fan_out.close()
         await self.services.ws_registry.close_all()
         session = app.get(K.gfs_http_session_key)
         if session is not None:
