@@ -1,69 +1,135 @@
-"""A new follower's author-profile bundle (v_61): bounds and wire shape."""
+"""A new follower's author-profile bundle (v_61): names first, pictures
+after, every part padded to a size bucket."""
 
 from __future__ import annotations
 
 import json
 
+import pytest
+
 from socialhome.domain import space_author_profile_bundle as b
+from socialhome.domain.space_author_profile import PROFILE_PICTURE_FIELD
+from socialhome.domain.space_item import ITEM_SIZE_BUCKETS, PAD_FIELD
 
 
-def _item(i: int, pad: int = 0) -> dict:
-    return {"item_type": "author_profile", "n": i, "pad": "x" * pad}
+def _item(i: int, *, picture: str | None = None, pad: int = 0) -> dict:
+    inner = {
+        "item_type": "author_profile",
+        "author_user_id": f"u{i}",
+        "n": i,
+        "pad": "x" * pad,
+    }
+    if picture is not None:
+        inner[PROFILE_PICTURE_FIELD] = picture
+    return inner
 
 
-def test_a_small_cast_is_one_part():
-    items = [_item(i) for i in range(3)]
-    assert b.split_bundle(items) == [items]
+def _entry(i: int, **kw) -> b.BundleEntry:
+    return b.BundleEntry(epoch=i % 3, item=_item(i, **kw), picture_hash=f"{i:016x}")
 
 
-def test_parts_stay_under_the_part_cap_and_keep_order():
-    items = [_item(i, pad=50_000) for i in range(8)]
-    parts = b.split_bundle(items)
+def _parse(raw: bytes) -> dict:
+    return json.loads(raw)
+
+
+def test_the_first_part_carries_every_name_and_no_picture_bytes():
+    entries = [_entry(i, picture="A" * 20_000) for i in range(5)]
+    parts = b.build_bundle_parts("sp", entries)
+    first = _parse(parts[0])
+    assert [x["item"]["n"] for x in first["items"]] == list(range(5))
+    assert all(PROFILE_PICTURE_FIELD not in x["item"] for x in first["items"])
+    assert [x["epoch"] for x in first["items"]] == [i % 3 for i in range(5)]
+    assert first["pictures"] == []
+
+
+def test_pictures_follow_in_later_parts_by_author_and_signed_hash():
+    entries = [_entry(i, picture=f"PIC{i}") for i in range(3)]
+    parts = b.build_bundle_parts("sp", entries)
+    pics = [p for raw in parts[1:] for p in _parse(raw)["pictures"]]
+    assert pics == [
+        {"author": f"u{i}", "hash": f"{i:016x}", "picture": f"PIC{i}"} for i in range(3)
+    ]
+    assert all(_parse(raw)["items"] == [] for raw in parts[1:])
+
+
+def test_an_author_without_a_picture_sends_no_picture_part():
+    parts = b.build_bundle_parts("sp", [_entry(1), _entry(2)])
+    assert len(parts) == 1
+
+
+def test_every_part_is_padded_to_a_bucket():
+    entries = [_entry(i, picture="P" * (i * 3000 + 10)) for i in range(12)]
+    parts = b.build_bundle_parts("sp", entries)
     assert len(parts) > 1
-    assert [x for p in parts for x in p] == items
-    for part in parts:
-        size = sum(len(json.dumps(x, separators=(",", ":"))) for x in part)
-        assert size <= b.BUNDLE_PART_MAX_BYTES
+    for raw in parts:
+        assert len(raw) in ITEM_SIZE_BUCKETS
+        assert PAD_FIELD in _parse(raw)
+        assert len(raw) <= b.BUNDLE_PART_MAX_BYTES
+
+
+def test_parts_number_themselves():
+    entries = [_entry(i, picture="P" * 30_000) for i in range(10)]
+    parts = [_parse(raw) for raw in b.build_bundle_parts("sp", entries)]
+    assert [p["part"] for p in parts] == list(range(len(parts)))
+    assert {p["parts"] for p in parts} == {len(parts)}
+    assert {p["space_id"] for p in parts} == {"sp"}
 
 
 def test_at_most_the_author_cap():
-    items = [_item(i) for i in range(b.MAX_BUNDLE_AUTHORS + 10)]
-    assert sum(len(p) for p in b.split_bundle(items)) == b.MAX_BUNDLE_AUTHORS
+    entries = [_entry(i) for i in range(b.MAX_BUNDLE_AUTHORS + 10)]
+    first = _parse(b.build_bundle_parts("sp", entries)[0])
+    assert len(first["items"]) == b.MAX_BUNDLE_AUTHORS
 
 
-def test_the_total_cap_holds():
-    items = [_item(i, pad=150_000) for i in range(b.MAX_BUNDLE_AUTHORS)]
-    parts = b.split_bundle(items)
-    total = sum(len(json.dumps(x, separators=(",", ":"))) for p in parts for x in p)
-    assert total <= b.MAX_BUNDLE_BYTES
-    assert sum(len(p) for p in parts) < len(items)
-
-
-def test_an_item_too_big_for_any_part_is_left_out():
-    big = _item(0, pad=b.BUNDLE_PART_MAX_BYTES + 1)
-    small = _item(1)
-    assert b.split_bundle([big, small]) == [[small]]
+def test_names_that_do_not_fit_one_part_are_left_out():
+    entries = [_entry(i, pad=20_000) for i in range(10)]
+    parts = b.build_bundle_parts("sp", entries)
+    first = _parse(parts[0])
+    assert 0 < len(first["items"]) < 10
+    assert len(parts[0]) <= b.BUNDLE_PART_MAX_BYTES
 
 
 def test_nothing_in_nothing_out():
-    assert b.split_bundle([]) == []
+    assert b.build_bundle_parts("sp", []) == []
 
 
-def test_plaintext_round_trip():
-    raw = b.bundle_plaintext(space_id="sp", epoch=4, part=0, parts=1, items=[_item(1)])
-    assert b.parse_bundle_plaintext(raw) == ("sp", 4, [_item(1)])
+def test_round_trip():
+    entries = [_entry(i, picture=f"PIC{i}") for i in range(2)]
+    parsed = [
+        b.parse_bundle_plaintext(raw) for raw in b.build_bundle_parts("sp", entries)
+    ]
+    assert parsed[0] is not None
+    assert parsed[0].space_id == "sp"
+    assert [(e, i["n"]) for e, i in parsed[0].items] == [(0, 0), (1, 1)]
+    pics = [p for part in parsed if part is not None for p in part.pictures]
+    assert pics == [("u0", f"{0:016x}", "PIC0"), ("u1", f"{1:016x}", "PIC1")]
 
 
-def test_malformed_plaintext_is_refused():
-    for raw in (
-        b"not json",
-        b"[]",
-        json.dumps({"space_id": "", "epoch": 1, "items": []}).encode(),
-        json.dumps({"space_id": "sp", "epoch": True, "items": []}).encode(),
-        json.dumps({"space_id": "sp", "epoch": -1, "items": []}).encode(),
-        json.dumps({"space_id": "sp", "epoch": 1, "items": {}}).encode(),
-        json.dumps(
-            {"space_id": "sp", "epoch": 1, "items": [{}] * (b.MAX_BUNDLE_AUTHORS + 1)}
-        ).encode(),
-    ):
-        assert b.parse_bundle_plaintext(raw) is None
+@pytest.mark.parametrize(
+    "body",
+    [
+        "not json",
+        [],
+        {"space_id": "", "items": [], "pictures": []},
+        {"space_id": "sp", "items": {}, "pictures": []},
+        {"space_id": "sp", "items": [], "pictures": {}},
+        {"space_id": "sp", "items": [{"epoch": True, "item": {}}], "pictures": []},
+        {"space_id": "sp", "items": [{"epoch": -1, "item": {}}], "pictures": []},
+        {"space_id": "sp", "items": [{"epoch": 1, "item": []}], "pictures": []},
+        {
+            "space_id": "sp",
+            "items": [{"epoch": 1, "item": {}}] * (b.MAX_BUNDLE_AUTHORS + 1),
+            "pictures": [],
+        },
+        {
+            "space_id": "sp",
+            "items": [],
+            "pictures": [{"author": "u", "hash": "h", "picture": "p"}]
+            * (b.MAX_BUNDLE_AUTHORS + 1),
+        },
+        {"space_id": "sp", "items": [], "pictures": [{"author": 1, "hash": "h"}]},
+    ],
+)
+def test_malformed_plaintext_is_refused(body):
+    raw = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+    assert b.parse_bundle_plaintext(raw) is None

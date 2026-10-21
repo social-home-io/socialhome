@@ -8,11 +8,18 @@ the generic ``author_profile`` item (:mod:`socialhome.domain.space_author_profil
 key and sent over the existing member-publish path
 (:meth:`GfsMemberPublishService.schedule_item`). The GFS sees ciphertext only.
 
-* **When:** once per author per space per content-key epoch, and again when
-  the profile changes (``UserProfileUpdated`` / ``SpaceMemberProfileUpdated``)
-  — every follower gets each change once. Never inlined in each post, and
-  never re-sent just because time passed (v_61): a follower who subscribed
-  mid-epoch gets the names from the host's targeted bundle instead.
+* **When:** on the author's first post in the space, then only when the
+  profile really changes (``UserProfileUpdated`` / ``SpaceMemberProfileUpdated``).
+  Every follower gets each change once. A content-key rotation or a restart
+  sends nothing: the dedupe is the persisted cache row's ``profile_rev``,
+  not anything in memory. A follower who subscribes later gets the names
+  from the host's targeted bundle, which carries each item under the epoch
+  it was published at.
+* **Picture:** the signed content names the picture by its hash. The bytes
+  ride beside it as the unsigned sidecar (``picture``) only when the
+  picture changed. So a name or bio change is a 1–4 KiB item, and only a
+  new picture is a 64 KiB one. The public re-encode is cached per source
+  picture (:class:`~socialhome.media.profile_picture.PublicPictureCache`).
 * **What:** the per-space name, else the household name; the household bio;
   the per-space picture, else the household one, re-encoded to at most
   256 px and 24 KB (``None`` when it can't fit). A **protected** account
@@ -31,8 +38,8 @@ key and sent over the existing member-publish path
   author-profile cache (:meth:`attach_profile_cache`), so a host's bundle
   names its own authors.
 
-In-memory bookkeeping: a restart sends each author's profile once more on
-their next post.
+No in-memory bookkeeping: what was sent is the cache row
+(:meth:`attach_profile_cache`), so a restart or a rotation re-sends nothing.
 """
 
 from __future__ import annotations
@@ -52,12 +59,14 @@ from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_author_profile import (
     PROFILE_BIO_MAX_LENGTH,
     PROFILE_NAME_MAX_LENGTH,
+    PROFILE_PICTURE_FIELD,
     SpaceAuthorProfile,
+    encode_picture_sidecar,
     encode_profile_content,
 )
 from ..domain.space_item import ITEM_TYPE_AUTHOR_PROFILE
 from ..infrastructure.event_bus import EventBus
-from ..media.profile_picture import public_profile_picture
+from ..media.profile_picture import PublicPictureCache
 from .protection_gate import ProtectionGateMixin
 from .space_item_author import build_signed_item_inner
 from .space_writer_cert_service import WRITER_CERT_FIELD
@@ -89,9 +98,9 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         "_own_instance_id",
         "_own_instance_pk",
         "_own_seed",
+        "_picture_cache",
         "_pictures",
         "_profile_cache",
-        "_sent",
         "_spaces",
         "_users",
         "_writer_certs",
@@ -110,6 +119,7 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         own_instance_id: str,
         own_instance_pk: bytes,
         own_identity_seed: bytes,
+        picture_cache: PublicPictureCache | None = None,
     ) -> None:
         self._bus = bus
         self._spaces = space_repo
@@ -121,9 +131,10 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         self._own_instance_id = own_instance_id
         self._own_instance_pk = own_instance_pk
         self._own_seed = own_identity_seed
+        self._picture_cache = (
+            picture_cache if picture_cache is not None else PublicPictureCache()
+        )
         self._child_protection = None
-        #: ``(space_id, user_id)`` → ``(epoch, profile_rev, sent_at)``.
-        self._sent: dict[tuple[str, str], tuple[int | None, str, datetime]] = {}
         self._profile_cache: AbstractSpaceAuthorProfileRepo | None = None
         self._writer_certs: SpaceWriterCertService | None = None
 
@@ -133,12 +144,12 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         *,
         writer_certs: SpaceWriterCertService,
     ) -> None:
-        """Keep every profile item we send in the author-profile cache too,
-        signed item and epoch included (0114): the host's new-follower
-        bundle is built from it, and a household never receives its own
-        items back. The item is kept as a follower receives it — with our
-        writer cert for its epoch (*writer_certs*), which the member-publish
-        path adds when it seals."""
+        """Wire the author-profile cache: the record of what we published
+        (the dedupe, persisted) and, on a seed holder, the signed items the
+        host's new-follower bundle forwards. The bundle sends each item as
+        a follower receives it: with our writer cert for its epoch
+        (*writer_certs*) and the original picture. Until this is wired,
+        nothing is published."""
         self._profile_cache = repo
         self._writer_certs = writer_certs
 
@@ -156,31 +167,34 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         await self.publish(event.space_id, event.post.author)
 
     async def _on_profile(self, event: UserProfileUpdated) -> None:
-        for space_id, user_id in list(self._sent):
-            if user_id == event.user_id:
-                await self.publish(space_id, user_id, changed=True)
+        if self._profile_cache is None:
+            return
+        for space_id in await self._profile_cache.list_spaces_for_author(
+            event.user_id, self._own_instance_pk.hex()
+        ):
+            await self.publish(space_id, event.user_id)
 
     async def _on_space_profile(self, event: SpaceMemberProfileUpdated) -> None:
-        if event.origin_instance_id is not None:
+        if event.origin_instance_id is not None or self._profile_cache is None:
             return
-        if (event.space_id, event.user_id) in self._sent:
-            await self.publish(event.space_id, event.user_id, changed=True)
+        if await self._profile_cache.get(event.space_id, event.user_id) is not None:
+            await self.publish(event.space_id, event.user_id)
 
     # ── Publishing ────────────────────────────────────────────────────
 
-    async def publish(
-        self, space_id: str, user_id: str, *, changed: bool = False
-    ) -> bool:
-        """Publish ``user_id``'s profile into ``space_id`` when it is due
-        (see the module docstring). ``True`` when one was scheduled.
-        Never raises."""
+    async def publish(self, space_id: str, user_id: str) -> bool:
+        """Publish ``user_id``'s profile into ``space_id`` when it differs
+        from what we last published there (see the module docstring).
+        ``True`` when one was scheduled. Never raises."""
         try:
-            return await self._publish(space_id, user_id, changed=changed)
+            return await self._publish(space_id, user_id)
         except Exception:
             log.exception("space_author_profile: publish failed for space=%s", space_id)
             return False
 
-    async def _publish(self, space_id: str, user_id: str, *, changed: bool) -> bool:
+    async def _publish(self, space_id: str, user_id: str) -> bool:
+        if self._profile_cache is None:
+            return False
         space = await self._spaces.get(space_id)
         if (
             space is None
@@ -210,16 +224,17 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         if bio is not None:
             bio = bio[:PROFILE_BIO_MAX_LENGTH]
         picture = None if protected else await self._picture(space_id, user_id)
+        picture_hash = compute_picture_hash(picture) if picture else None
         content, rev = encode_profile_content(
-            display_name=name, bio=bio, picture_webp=picture
+            display_name=name, bio=bio, picture_hash=picture_hash
         )
+        # The dedupe is what we last published here, persisted: a restart
+        # or a content-key rotation sends nothing.
+        held = await self._profile_cache.get(space_id, user_id)
+        if held is not None and held.profile.profile_rev == rev:
+            return False
         epoch = await self._crypto.get_current_epoch(space_id)
         now = datetime.now(UTC)
-        held = self._sent.get((space_id, user_id))
-        if held is not None and held[0] == epoch and held[1] == rev:
-            return False
-        if changed and held is not None and held[1] == rev:
-            return False
         inner = build_signed_item_inner(
             item_type=ITEM_TYPE_AUTHOR_PROFILE,
             item_target=user_id,
@@ -234,40 +249,53 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             ts=now.isoformat(),
             content=content,
         )
+        sidecar = encode_picture_sidecar(picture) if picture else None
+        # The bytes go out only with a new picture: a name or bio change
+        # keeps the follower's held picture of the same signed hash.
+        new_picture = sidecar is not None and (
+            held is None or held.profile.picture_hash != picture_hash
+        )
+        outbound = {**inner, PROFILE_PICTURE_FIELD: sidecar} if new_picture else inner
         if not self._member_gfs.schedule_item(
-            space_id, user_id, ITEM_TYPE_AUTHOR_PROFILE, inner
+            space_id, user_id, ITEM_TYPE_AUTHOR_PROFILE, outbound
         ):
             return False
-        self._sent[(space_id, user_id)] = (epoch, rev, now)
-        if self._profile_cache is not None:
-            # As a follower receives it: with our writer cert for the epoch.
-            # Without one there is nothing a follower could verify, so only
-            # the decoded profile is kept.
-            cert = (
-                await self._writer_certs.own_cert(space_id, epoch)
-                if self._writer_certs is not None and epoch is not None
-                else None
-            )
-            await self._profile_cache.upsert_if_newer(
-                SpaceAuthorProfile(
-                    space_id=space_id,
-                    author_user_id=user_id,
-                    author_pk=self._own_instance_pk.hex(),
-                    display_name=name,
-                    bio=bio,
-                    picture_hash=compute_picture_hash(picture) if picture else None,
-                    profile_rev=rev,
-                    ts=now.isoformat(timespec="microseconds"),
-                ),
-                picture_webp=picture,
-                signed_item=(
-                    {**inner, WRITER_CERT_FIELD: cert.to_wire()}
-                    if cert is not None
-                    else None
-                ),
-                item_epoch=epoch if cert is not None else None,
-            )
+        await self._profile_cache.upsert_if_newer(
+            SpaceAuthorProfile(
+                space_id=space_id,
+                author_user_id=user_id,
+                author_pk=self._own_instance_pk.hex(),
+                display_name=name,
+                bio=bio,
+                picture_hash=picture_hash,
+                profile_rev=rev,
+                ts=now.isoformat(timespec="microseconds"),
+            ),
+            picture_webp=picture,
+            **await self._bundle_copy(space_id, epoch, inner, sidecar),
+        )
         return True
+
+    async def _bundle_copy(
+        self, space_id: str, epoch: int | None, inner: dict, sidecar: str | None
+    ) -> dict:
+        """``signed_item`` / ``item_epoch`` for the cache. On a seed holder
+        (only a host builds bundles) that is the item as a follower receives
+        it: our writer cert for its epoch and the picture sidecar. Elsewhere,
+        or with no cert to verify by, it is nothing."""
+        if (
+            self._writer_certs is None
+            or epoch is None
+            or await self._spaces.get_space_seed(space_id) is None
+        ):
+            return {"signed_item": None, "item_epoch": None}
+        cert = await self._writer_certs.own_cert(space_id, epoch)
+        if cert is None:
+            return {"signed_item": None, "item_epoch": None}
+        item = {**inner, WRITER_CERT_FIELD: cert.to_wire()}
+        if sidecar is not None:
+            item[PROFILE_PICTURE_FIELD] = sidecar
+        return {"signed_item": item, "item_epoch": epoch}
 
     async def _members_understand(self, space_id: str) -> bool:
         """Every member household whose version we know is v_60+."""
@@ -290,4 +318,5 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             got = await self._pictures.get_user_picture(user_id)
         if got is None:
             return None
-        return await public_profile_picture(got[0])
+        raw, source_hash = got
+        return await self._picture_cache.get(source_hash, raw)

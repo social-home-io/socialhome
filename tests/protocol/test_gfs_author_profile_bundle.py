@@ -14,6 +14,7 @@ epoch — and that nothing but a profile is ever applied from a bundle.
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -22,7 +23,7 @@ from socialhome.repositories.space_author_profile_repo import (
     SqliteSpaceAuthorProfileRepo,
 )
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
-from tests.protocol.test_gfs_author_profile import _profile
+from tests.protocol.test_gfs_author_profile import _profile, _webp
 from tests.protocol.test_gfs_member_publish_items import (
     BOB,
     EVE,
@@ -43,10 +44,10 @@ async def profiles(env):
     return repo
 
 
-async def _bundle(env, *items, epoch=None):
+async def _bundle(env, *items, epoch=None, pictures=()):
     epoch = epoch if epoch is not None else await env["crypto"].get_current_epoch(SPACE)
     return await env["inbound"].apply_bundled_profiles(
-        SPACE, epoch=epoch, items=list(items)
+        SPACE, items=[(epoch, item) for item in items], pictures=list(pictures)
     )
 
 
@@ -98,14 +99,46 @@ async def test_a_bundled_profile_about_someone_else_is_refused(env, profiles):
     assert await _held(profiles, BOB.user_id) is None
 
 
-async def test_a_bundle_at_a_stale_epoch_is_refused(env, profiles):
-    """The certs are checked at the bundle's epoch, which must be open here."""
+async def test_a_profile_from_an_earlier_epoch_is_kept(env, profiles):
+    """H2: a key rotation must not force every author to republish. A
+    bundled item carries the epoch it was published at, and its writer cert
+    is checked at THAT epoch (the bundle itself is authority-signed and
+    sealed to this follower), even after rotations."""
     old = await env["crypto"].get_current_epoch(SPACE)
     item = {**_profile(BOB), "writer_cert": await _cert(env, BOB, "comment")}
     await env["crypto"].rotate_epoch(SPACE)
     await env["crypto"].rotate_epoch(SPACE)
-    assert await _bundle(env, item, epoch=old) == 0
+    assert await _bundle(env, item, epoch=old) == 1
+    assert (await _held(profiles, BOB.user_id)).display_name == "Bob Builder"
+
+
+async def test_a_cert_for_another_epoch_than_the_item_claims_is_refused(env, profiles):
+    """The cert binds its epoch: an item claiming another epoch fails."""
+    old = await env["crypto"].get_current_epoch(SPACE)
+    item = {**_profile(BOB), "writer_cert": await _cert(env, BOB, "comment")}
+    await env["crypto"].rotate_epoch(SPACE)
+    assert await _bundle(env, item, epoch=old + 1) == 0
     assert await _held(profiles, BOB.user_id) is None
+
+
+async def test_a_bundled_picture_attaches_only_to_its_signed_hash(env, profiles):
+    """Names come first; a later part carries the pictures. A picture is
+    kept only when its bytes hash to the author's signed hash."""
+    picture = _webp()
+    item = {
+        **_profile(BOB, sidecar=False),
+        "writer_cert": await _cert(env, BOB, "comment"),
+    }
+    assert await _bundle(env, item) == 1
+    assert await profiles.get_picture(SPACE, BOB.user_id) is None
+    held = await _held(profiles, BOB.user_id)
+    other = base64.b64encode(_webp() + b"x").decode()
+    assert await _bundle(env, pictures=[(BOB.user_id, held.picture_hash, other)]) == 0
+    assert await profiles.get_picture(SPACE, BOB.user_id) is None
+    good = base64.b64encode(picture).decode()
+    assert await _bundle(env, pictures=[(BOB.user_id, held.picture_hash, good)]) == 1
+    stored = await profiles.get_picture(SPACE, BOB.user_id)
+    assert stored is not None and stored[1] == held.picture_hash
 
 
 async def test_nothing_but_a_profile_is_applied_from_a_bundle(env, profiles):
@@ -124,6 +157,4 @@ async def test_nothing_but_a_profile_is_applied_from_a_bundle(env, profiles):
 
 async def test_a_bundle_for_an_unknown_space_is_ignored(env, profiles):
     item = {**_profile(BOB), "writer_cert": await _cert(env, BOB, "comment")}
-    assert (
-        await env["inbound"].apply_bundled_profiles("nope", epoch=0, items=[item]) == 0
-    )
+    assert await env["inbound"].apply_bundled_profiles("nope", items=[(0, item)]) == 0

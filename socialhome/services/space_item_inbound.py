@@ -85,9 +85,14 @@ from ..domain.events import (
     PostDeleted,
     PostReactionChanged,
 )
-from ..domain.picture_hash import compute_picture_hash
 from ..domain.post import Comment, CommentType, Post, PostType
-from ..domain.space_author_profile import SpaceAuthorProfile, decode_profile_content
+from ..domain.space_author_profile import (
+    PROFILE_PICTURE_FIELD,
+    SpaceAuthorProfile,
+    decode_picture_sidecar,
+    decode_profile_content,
+    without_picture_sidecar,
+)
 from ..domain.space_item import (
     ITEM_TYPE_AUTHOR_PROFILE,
     ITEM_TYPE_COMMENT,
@@ -255,7 +260,13 @@ class SpaceItemInbound:
 
     async def _author_profile(self, item: _Item) -> bool:
         """Keep the author's verified public profile (see the module
-        docstring). Only about the item's own signed author."""
+        docstring). Only about the item's own signed author.
+
+        The picture bytes ride beside the signed content as a sidecar,
+        accepted only when they hash to the signed ``picture_hash``. A
+        newer item that names the held hash and carries no bytes keeps
+        the held picture. The author-signed item itself is kept only by a
+        seed holder: only a host builds new-follower bundles."""
         if self._profiles is None:
             return False
         if not (item.author and item.target == item.author == item.post_id):
@@ -272,14 +283,41 @@ class SpaceItemInbound:
                 item.space.id,
             )
             return False
-        # A peer's picture bytes are never stored as-is: re-encoded here, so
-        # a polyglot or anything but a plain image never reaches the table
-        # every viewer is served from (the same rule as household pictures).
-        picture = (
-            await public_profile_picture(profile.picture_webp)
-            if profile.picture_webp is not None
-            else None
+        held = await self._profiles.get(item.space.id, item.author)
+        same_picture = (
+            held is not None
+            and profile.picture_hash is not None
+            and held.profile.picture_hash == profile.picture_hash
         )
+        raw_sidecar = item.inner.get(PROFILE_PICTURE_FIELD)
+        sidecar = decode_picture_sidecar(raw_sidecar, profile.picture_hash)
+        if raw_sidecar is not None and sidecar is None:
+            log.warning(
+                "space_item: author_profile picture for %s in space %s is not the "
+                "signed picture — kept without it",
+                item.author,
+                item.space.id,
+            )
+        # A peer's picture bytes are never stored as-is: they are re-encoded
+        # here, so a polyglot or anything but a plain image never reaches the
+        # table every viewer is served from. Re-encoded only when we don't
+        # already hold this signed picture.
+        picture: bytes | None = None
+        if sidecar is not None and not (same_picture and held and held.has_picture):
+            picture = await public_profile_picture(sidecar)
+        signed_item: dict | None = None
+        if await self._spaces.get_space_seed(item.space.id) is not None:
+            signed_item = without_picture_sidecar(item.inner)
+            # The original bytes are what a follower checks against the
+            # signed hash, so the host keeps them with the item: these ones,
+            # or the ones it held for the same signed hash.
+            keep = (
+                raw_sidecar
+                if sidecar is not None
+                else (held.picture_sidecar if same_picture and held else None)
+            )
+            if keep:
+                signed_item[PROFILE_PICTURE_FIELD] = keep
         return await self._profiles.upsert_if_newer(
             SpaceAuthorProfile(
                 space_id=item.space.id,
@@ -287,15 +325,45 @@ class SpaceItemInbound:
                 author_pk=str(item.inner.get("author_pk") or ""),
                 display_name=profile.display_name,
                 bio=profile.bio,
-                picture_hash=compute_picture_hash(picture) if picture else None,
+                picture_hash=profile.picture_hash,
                 profile_rev=profile.profile_rev,
                 ts=item.stamp.astimezone(UTC).isoformat(timespec="microseconds"),
             ),
             picture_webp=picture,
-            # Kept so the host can forward it, author-signed, in a new
-            # follower's bundle (v_61).
-            signed_item=item.inner,
-            item_epoch=item.epoch,
+            signed_item=signed_item,
+            item_epoch=item.epoch if signed_item is not None else None,
+        )
+
+    async def attach_bundled_picture(
+        self, space_id: str, author_user_id: str, picture_hash: str, raw: object
+    ) -> bool:
+        """A picture from a later part of a new-follower bundle: kept when
+        its bytes are the picture the author signed for (the held row's
+        ``picture_hash``), re-encoded like every peer picture. Never raises."""
+        if self._profiles is None:
+            return False
+        held = await self._profiles.get(space_id, author_user_id)
+        if (
+            held is None
+            or held.has_picture
+            or held.profile.picture_hash is None
+            or held.profile.picture_hash != picture_hash
+        ):
+            return False
+        picture = decode_picture_sidecar(raw, held.profile.picture_hash)
+        if picture is None:
+            log.warning(
+                "space_item: a bundled picture for %s in space %s is not the "
+                "signed picture — dropped",
+                author_user_id,
+                space_id,
+            )
+            return False
+        stored = await public_profile_picture(picture)
+        if stored is None:
+            return False
+        return await self._profiles.set_picture(
+            space_id, author_user_id, picture_hash, stored
         )
 
     # ── Shared checks ────────────────────────────────────────────────────

@@ -281,21 +281,20 @@ class SpaceSubscriberKeyInbound:
             )
             return
         parsed = parse_bundle_plaintext(plaintext)
-        if parsed is None or parsed[0] != space_id:
+        if parsed is None or parsed.space_id != space_id:
             log.warning(
                 "space_subscriber_key.inbound: malformed profiles bundle for space %s",
                 space_id,
             )
             return
-        _space, epoch, items = parsed
         stored = await self._profiles_sink.apply_bundled_profiles(
-            space_id, epoch=epoch, items=items
+            space_id, items=parsed.items, pictures=parsed.pictures
         )
         log.info(
-            "space_subscriber_key.inbound: %d of %d author profile(s) from the "
-            "bundle stored for space %s",
+            "space_subscriber_key.inbound: %d of %d author profile(s) and "
+            "picture(s) from a bundle part stored for space %s",
             stored,
-            len(items),
+            len(parsed.items) + len(parsed.pictures),
             space_id,
         )
 

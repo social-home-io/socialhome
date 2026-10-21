@@ -41,7 +41,7 @@ import aiolibdatachannel as rtc
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from ..crypto import b64url_encode, sign_ed25519
-from ..media.profile_picture import public_profile_picture
+from ..media.profile_picture import PublicPictureCache
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.highlight_repo import AbstractHighlightRepo
 from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
@@ -129,6 +129,7 @@ class HighlightSignalingHandler(ProtectionGateMixin):
         "_media_dir",
         "_own_instance_id",
         "_peer_factory",
+        "_picture_cache",
         "_pictures",
         "_relay_tasks",
         "_sessions",
@@ -163,6 +164,7 @@ class HighlightSignalingHandler(ProtectionGateMixin):
         #: no ``author_profile`` frame is sent).
         self._users: AbstractUserRepo | None = None
         self._pictures: AbstractProfilePictureRepo | None = None
+        self._picture_cache = PublicPictureCache()
 
     # ── Late-bound wiring ────────────────────────────────────────────────
 
@@ -187,10 +189,16 @@ class HighlightSignalingHandler(ProtectionGateMixin):
         *,
         user_repo: AbstractUserRepo,
         picture_repo: AbstractProfilePictureRepo,
+        picture_cache: PublicPictureCache | None = None,
     ) -> None:
-        """Wire where the sealed ``author_profile`` frame reads from."""
+        """Wire where the sealed ``author_profile`` frame reads from. The
+        small public picture is re-encoded once per source picture
+        (*picture_cache*, shared with the author-profile publisher), never
+        on every view."""
         self._users = user_repo
         self._pictures = picture_repo
+        if picture_cache is not None:
+            self._picture_cache = picture_cache
 
     # ── Frame entry point ───────────────────────────────────────────────
 
@@ -419,7 +427,7 @@ class HighlightSignalingHandler(ProtectionGateMixin):
         if self._pictures is not None and user.picture_hash:
             got = await self._pictures.get_user_picture(user_id)
             if got is not None:
-                small = await public_profile_picture(got[0])
+                small = await self._picture_cache.get(got[1], got[0])
                 if small is not None:
                     picture = base64.b64encode(small).decode("ascii")
         return {"display_name": name, "bio": user.bio or None, "picture": picture}

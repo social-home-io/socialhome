@@ -66,7 +66,9 @@ re-download their bundles; a frame with no / an unknown ``reason`` (an
 older GFS) or a follower that lists no ``accepts`` gets no bundle either —
 fail-safe, the follower learns names on each author's next post. Since a
 GFS can still name any household as a new subscriber, bundles are capped
-per space (:data:`MAX_BUNDLES_PER_SPACE_PER_MINUTE`), and a follower that
+per space (an hourly byte budget, :data:`BUNDLE_BYTES_PER_SPACE_PER_HOUR`;
+names first, pictures only within :data:`PICTURE_BYTES_PER_SPACE_PER_HOUR`),
+and a follower that
 churns its seat (unsubscribe → subscribe) is bundled at most once an hour
 (:data:`BUNDLE_PER_FOLLOWER_EVERY_S`).
 
@@ -101,8 +103,7 @@ from ..authority_sig import (
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_author_profile_bundle import (
     MAX_BUNDLE_AUTHORS,
-    bundle_plaintext,
-    split_bundle,
+    build_bundle_parts,
 )
 from ..domain.subscriber_accepts import ACCEPTS_AUTHOR_PROFILES_BUNDLE
 from ..federation.keywrap_seal import seal_to_keywrap, verify_keywrap_binding
@@ -119,14 +120,20 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: At most this many profiles bundles per space per minute, whoever asks:
-#: a GFS can name any registered household in a ``reason: "subscribe"``
-#: ``new_subscriber`` (and claim it ``accepts`` a bundle), so a hostile one
-#: could otherwise make the host upload a bundle per name.
-MAX_BUNDLES_PER_SPACE_PER_MINUTE: int = 30
+#: The most bundle bytes (padded plaintext parts) one space's host uploads
+#: an hour, whoever asks. A GFS can name any registered household in a
+#: ``reason: "subscribe"`` ``new_subscriber`` and claim that it ``accepts`` a
+#: bundle, and anyone can register and subscribe, so this bounds what a flood
+#: of fresh followers can drain: at most 24 × this a day per space.
+BUNDLE_BYTES_PER_SPACE_PER_HOUR: int = 16 * 1024 * 1024
 
-#: The most spaces the rate backstop tracks; past it, the least recently
-#: bundled space is forgotten (O(1)).
+#: Of that budget, what picture parts may use. Names (part 0, ≤ 128 KiB) can
+#: always use the rest, so under a flood a newcomer still gets every name
+#: (at least ~32 names-only bundles an hour) and only the pictures wait.
+PICTURE_BYTES_PER_SPACE_PER_HOUR: int = 12 * 1024 * 1024
+
+#: The most spaces the budget tracks; past it, the least recently bundled
+#: space is forgotten (O(1)).
 _MAX_TRACKED_SPACES: int = 1024
 
 #: One bundle per ``(space, follower)`` at most this often — a follower that
@@ -159,7 +166,7 @@ class SpaceSubscriberKeyOutbound:
     """``new_subscriber`` GFS frame → sealed content-key handoff producer."""
 
     __slots__ = (
-        "_bundle_times",
+        "_bundle_bytes",
         "_bundled",
         "_crypto",
         "_gfs",
@@ -191,7 +198,7 @@ class SpaceSubscriberKeyOutbound:
         self._profiles: AbstractSpaceAuthorProfileRepo | None = None
         #: ``space_id`` → monotonic times of its bundles in the last minute
         #: (the per-space rate backstop; bounded by the limit per space).
-        self._bundle_times: OrderedDict[str, deque[float]] = OrderedDict()
+        self._bundle_bytes: OrderedDict[str, deque[tuple[float, int]]] = OrderedDict()
         #: ``(space_id, follower)`` → monotonic time of its last bundle, in
         #: bundle order (oldest first) — the per-follower churn guard.
         self._bundled: OrderedDict[tuple[str, str], float] = OrderedDict()
@@ -283,7 +290,6 @@ class SpaceSubscriberKeyOutbound:
                     seed=seed,
                     target_instance_id=target,
                     keywrap_pub=sealed_to[0],
-                    epoch=sealed_to[1],
                 )
             except Exception:
                 log.exception(
@@ -300,14 +306,17 @@ class SpaceSubscriberKeyOutbound:
         seed: bytes,
         target_instance_id: str,
         keywrap_pub: bytes,
-        epoch: int,
     ) -> int:
         """Seal the space's cached, author-signed profile items to ONE new
         follower and relay them to it alone (v_61). Returns the parts sent.
 
-        Only items of ``epoch`` (the key just handed over): the follower
-        checks each author's writer cert against it. At most
-        :data:`MAX_BUNDLES_PER_SPACE_PER_MINUTE` bundles per space."""
+        Names first (part 0); then pictures. Every part is padded and sealed
+        separately. Each item keeps the epoch it was published at; the
+        follower checks its writer cert there. Only authors whose household
+        is still a member household are bundled. A follower is bundled at most
+        once per :data:`BUNDLE_PER_FOLLOWER_EVERY_S`. The space's hourly byte
+        budget (:data:`BUNDLE_BYTES_PER_SPACE_PER_HOUR`, of which pictures
+        get :data:`PICTURE_BYTES_PER_SPACE_PER_HOUR`) bounds the rest."""
         if self._profiles is None:
             return 0
         now = _clock()
@@ -320,37 +329,39 @@ class SpaceSubscriberKeyOutbound:
                 space_id,
             )
             return 0
-        times = self._bundle_times.get(space_id)
-        if times is not None:
-            while times and now - times[0] >= 60.0:
-                times.popleft()
-            if len(times) >= MAX_BUNDLES_PER_SPACE_PER_MINUTE:
-                log.warning(
-                    "space_subscriber_key.outbound: %d profiles bundles for "
-                    "space %s in the last minute — this follower learns names "
-                    "on each author's next post instead",
-                    len(times),
-                    space_id,
-                )
-                return 0
-        items = await self._profiles.list_signed_items(
-            space_id, epoch=epoch, limit=MAX_BUNDLE_AUTHORS
+        entries = await self._profiles.list_signed_items(
+            space_id, limit=MAX_BUNDLE_AUTHORS
         )
-        parts = split_bundle(items)
+        households = set(await self._spaces.list_member_instances(space_id))
+        households.add(self._own_instance_id)
+        entries = [
+            e for e in entries if str(e.item.get("origin_instance_id")) in households
+        ]
+        parts = build_bundle_parts(space_id, entries)
         if not parts:
             return 0
-        self._note_bundle(space_id, target_instance_id, now)
+        used = self._budget_used(space_id, now)
         sent = 0
-        for index, part in enumerate(parts):
+        for index, plaintext in enumerate(parts):
+            cap = (
+                BUNDLE_BYTES_PER_SPACE_PER_HOUR
+                if index == 0
+                else PICTURE_BYTES_PER_SPACE_PER_HOUR
+            )
+            if used + len(plaintext) > cap:
+                log.warning(
+                    "space_subscriber_key.outbound: space %s used %d of its "
+                    "hourly bundle bytes — this follower gets %d of %d part(s) "
+                    "(%s)",
+                    space_id,
+                    used,
+                    index,
+                    len(parts),
+                    "no names" if index == 0 else "names, not every picture",
+                )
+                break
             sealed = seal_to_keywrap(
-                recipient_keywrap_pub=keywrap_pub,
-                plaintext=bundle_plaintext(
-                    space_id=space_id,
-                    epoch=epoch,
-                    part=index,
-                    parts=len(parts),
-                    items=part,
-                ),
+                recipient_keywrap_pub=keywrap_pub, plaintext=plaintext
             )
             envelope: dict = {"space_id": space_id, "sealed": sealed}
             envelope.update(
@@ -361,6 +372,8 @@ class SpaceSubscriberKeyOutbound:
                     space_seed=seed,
                 )
             )
+            self._spend(space_id, now, len(plaintext))
+            used += len(plaintext)
             if await self._gfs.publish_space_event_to(
                 gfs_id,
                 space_id=space_id,
@@ -369,29 +382,44 @@ class SpaceSubscriberKeyOutbound:
                 to_instance_id=target_instance_id,
             ):
                 sent += 1
+        if sent:
+            self._remember_follower(space_id, target_instance_id, now)
         log.info(
             "space_subscriber_key.outbound: sent a new follower of space %s "
             "%d author profile(s) in %d of %d targeted part(s)",
             space_id,
-            sum(len(p) for p in parts),
+            len(entries),
             sent,
             len(parts),
         )
         return sent
 
-    def _note_bundle(self, space_id: str, follower: str, now: float) -> None:
-        """Count one bundle against *space_id*'s rate backstop and remember
-        *follower* for :data:`BUNDLE_PER_FOLLOWER_EVERY_S`. Both maps are
-        LRU-bounded with O(1) eviction."""
-        times = self._bundle_times.get(space_id)
-        if times is None:
-            times = deque(maxlen=max(1, MAX_BUNDLES_PER_SPACE_PER_MINUTE))
-            self._bundle_times[space_id] = times
-            if len(self._bundle_times) > _MAX_TRACKED_SPACES:
-                self._bundle_times.popitem(last=False)
+    def _budget_used(self, space_id: str, now: float) -> int:
+        """Bundle bytes *space_id* sent in the last hour (expired ones
+        dropped)."""
+        spent = self._bundle_bytes.get(space_id)
+        if spent is None:
+            return 0
+        while spent and now - spent[0][0] >= 3600.0:
+            spent.popleft()
+        return sum(size for _at, size in spent)
+
+    def _spend(self, space_id: str, now: float, size: int) -> None:
+        """Count *size* bytes against *space_id*'s hourly budget. LRU-bounded
+        with O(1) eviction."""
+        spent = self._bundle_bytes.get(space_id)
+        if spent is None:
+            spent = deque()
+            self._bundle_bytes[space_id] = spent
+            if len(self._bundle_bytes) > _MAX_TRACKED_SPACES:
+                self._bundle_bytes.popitem(last=False)
         else:
-            self._bundle_times.move_to_end(space_id)
-        times.append(now)
+            self._bundle_bytes.move_to_end(space_id)
+        spent.append((now, size))
+
+    def _remember_follower(self, space_id: str, follower: str, now: float) -> None:
+        """Remember *follower* for :data:`BUNDLE_PER_FOLLOWER_EVERY_S`
+        (LRU-bounded, O(1) eviction)."""
         key = (space_id, follower)
         self._bundled.pop(key, None)
         self._bundled[key] = now

@@ -11,11 +11,15 @@ from PIL import Image
 
 from socialhome.domain.picture_hash import compute_picture_hash
 from socialhome.domain.space_author_profile import (
+    PROFILE_PICTURE_FIELD,
     PROFILE_PICTURE_MAX_BYTES,
     author_picture_url,
+    decode_picture_sidecar,
     decode_profile_content,
+    encode_picture_sidecar,
     encode_profile_content,
     profile_rev,
+    without_picture_sidecar,
 )
 
 
@@ -25,26 +29,73 @@ def _webp() -> bytes:
     return buf.getvalue()
 
 
-def test_round_trip():
+def test_round_trip_carries_the_hash_not_the_bytes():
+    """The signed content names the picture by its hash only: the bytes
+    ride beside it as an unsigned sidecar, so a names-only item stays
+    author-verifiable and small."""
     pic = _webp()
     content, rev = encode_profile_content(
-        display_name="Noor Haddad", bio="Beekeeper.", picture_webp=pic
+        display_name="Noor Haddad",
+        bio="Beekeeper.",
+        picture_hash=compute_picture_hash(pic),
     )
+    assert 'picture"' not in content.replace("picture_hash", "")
+    assert len(content) < 256
     p = decode_profile_content(content)
     assert p is not None
-    assert (p.display_name, p.bio, p.picture_webp) == ("Noor Haddad", "Beekeeper.", pic)
+    assert (p.display_name, p.bio) == ("Noor Haddad", "Beekeeper.")
     assert p.picture_hash == compute_picture_hash(pic)
     assert p.profile_rev == rev
 
 
 def test_name_only():
     content, rev = encode_profile_content(
-        display_name="Kid", bio=None, picture_webp=None
+        display_name="Kid", bio=None, picture_hash=None
     )
     p = decode_profile_content(content)
     assert p is not None
-    assert (p.bio, p.picture_webp, p.picture_hash) == (None, None, None)
+    assert (p.bio, p.picture_hash) == (None, None)
     assert p.profile_rev == rev == profile_rev("Kid", None, None)
+
+
+def test_sidecar_round_trip():
+    pic = _webp()
+    wire = encode_picture_sidecar(pic)
+    assert decode_picture_sidecar(wire, compute_picture_hash(pic)) == pic
+
+
+@pytest.mark.parametrize(
+    "wire",
+    [
+        None,
+        7,
+        "",
+        "!!!not base64!!!",
+        base64.b64encode(b"GIF89a....").decode(),
+        base64.b64encode(
+            b"RIFF\0\0\0\0WEBP" + bytes(PROFILE_PICTURE_MAX_BYTES)
+        ).decode(),
+        "A" * (PROFILE_PICTURE_MAX_BYTES * 2 + 4),
+    ],
+)
+def test_a_malformed_sidecar_is_refused(wire):
+    assert decode_picture_sidecar(wire, "0123456789abcdef") is None
+
+
+def test_a_sidecar_that_does_not_match_the_signed_hash_is_refused():
+    """The sidecar is outside the author signature: only the signed hash
+    makes it the author's picture."""
+    pic = _webp()
+    assert (
+        decode_picture_sidecar(encode_picture_sidecar(pic), "0123456789abcdef") is None
+    )
+    assert decode_picture_sidecar(encode_picture_sidecar(pic), None) is None
+
+
+def test_without_picture_sidecar_strips_only_the_sidecar():
+    inner = {"content": "x", PROFILE_PICTURE_FIELD: "abc", "writer_cert": {}}
+    assert without_picture_sidecar(inner) == {"content": "x", "writer_cert": {}}
+    assert PROFILE_PICTURE_FIELD in inner  # not mutated
 
 
 def test_rev_changes_with_every_part():
@@ -63,7 +114,9 @@ def test_rev_changes_with_every_part():
 
 
 def _raw(**body) -> str:
-    return json.dumps({"display_name": "Bob", "bio": None, "picture": None, **body})
+    return json.dumps(
+        {"display_name": "Bob", "bio": None, "picture_hash": None, **body}
+    )
 
 
 @pytest.mark.parametrize(
@@ -80,21 +133,9 @@ def _raw(**body) -> str:
         _raw(display_name="x" * 65),
         _raw(bio="x" * 301),
         _raw(bio=["list"]),
-        _raw(picture=7),
-        _raw(picture="!!!not base64!!!", picture_hash="0123456789abcdef"),
-        _raw(
-            picture=base64.b64encode(b"GIF89a....").decode(),
-            picture_hash=compute_picture_hash(b"GIF89a...."),
-        ),
-        _raw(
-            picture=base64.b64encode(_webp()).decode(), picture_hash="0123456789abcdef"
-        ),
-        _raw(
-            picture=base64.b64encode(
-                b"RIFF\0\0\0\0WEBP" + bytes(PROFILE_PICTURE_MAX_BYTES)
-            ).decode(),
-            picture_hash="x",
-        ),
+        _raw(picture_hash=7),
+        _raw(picture_hash="ab&sig=evil"),
+        _raw(picture_hash="0123456789ABCDEF"),
     ],
 )
 def test_malformed_content_is_refused(content):

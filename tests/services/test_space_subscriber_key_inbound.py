@@ -40,7 +40,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
-from socialhome.domain.space_author_profile_bundle import bundle_plaintext
+from socialhome.domain.space_item import pad_json_object
 from socialhome.federation.keywrap_seal import seal_to_keywrap
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
@@ -466,9 +466,9 @@ class _Sink:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
 
-    async def apply_bundled_profiles(self, space_id, *, epoch, items):
-        self.calls.append((space_id, epoch, items))
-        return len(items)
+    async def apply_bundled_profiles(self, space_id, *, items, pictures):
+        self.calls.append((space_id, items, pictures))
+        return len(items) + len(pictures)
 
 
 def _bundle_frame(env, space_id, *, plaintext: bytes, seed=None, kw_pub=None):
@@ -492,13 +492,22 @@ def _bundle_frame(env, space_id, *, plaintext: bytes, seed=None, kw_pub=None):
     }
 
 
-def _bundle_plain(space_id="sp-b", epoch=2, items=None) -> bytes:
-    return bundle_plaintext(
-        space_id=space_id,
-        epoch=epoch,
-        part=0,
-        parts=1,
-        items=items if items is not None else [{"item_type": "author_profile"}],
+def _bundle_plain(space_id="sp-b", epoch=2, items=None, pictures=()) -> bytes:
+    return pad_json_object(
+        {
+            "space_id": space_id,
+            "part": 0,
+            "parts": 1,
+            "items": [
+                {"epoch": epoch, "item": i}
+                for i in (
+                    items if items is not None else [{"item_type": "author_profile"}]
+                )
+            ],
+            "pictures": [
+                {"author": a, "hash": h, "picture": pic} for a, h, pic in pictures
+            ],
+        }
     )
 
 
@@ -507,7 +516,16 @@ async def test_a_bundle_sealed_to_us_goes_to_the_item_checks(env):
     sink = _Sink()
     env["svc"].attach_profiles_sink(sink)
     await env["svc"].handle(_bundle_frame(env, "sp-b", plaintext=_bundle_plain()))
-    assert sink.calls == [("sp-b", 2, [{"item_type": "author_profile"}])]
+    assert sink.calls == [("sp-b", [(2, {"item_type": "author_profile"})], [])]
+
+
+async def test_a_picture_part_goes_to_the_picture_checks(env):
+    await env["mirror_space"]("sp-b", pubkey_hex=env["skp"].public_key.hex())
+    sink = _Sink()
+    env["svc"].attach_profiles_sink(sink)
+    plain = _bundle_plain(items=[], pictures=[("uid-a", "0123456789abcdef", "UklG")])
+    await env["svc"].handle(_bundle_frame(env, "sp-b", plaintext=plain))
+    assert sink.calls == [("sp-b", [], [("uid-a", "0123456789abcdef", "UklG")])]
 
 
 async def test_a_bundle_with_a_forged_authority_signature_is_dropped(env, caplog):

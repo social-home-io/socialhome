@@ -27,7 +27,12 @@ import json
 import pytest
 from PIL import Image
 
-from socialhome.domain.space_author_profile import encode_profile_content
+from socialhome.domain.picture_hash import compute_picture_hash
+from socialhome.domain.space_author_profile import (
+    PROFILE_PICTURE_FIELD,
+    encode_picture_sidecar,
+    encode_profile_content,
+)
 from socialhome.repositories.space_author_profile_repo import (
     SqliteSpaceAuthorProfileRepo,
 )
@@ -54,14 +59,20 @@ def _webp() -> bytes:
     return buf.getvalue()
 
 
-def _profile(signer, *, about=None, ts=None, **content_kw) -> dict:
+def _profile(
+    signer, *, about=None, ts=None, sidecar: bytes | None | bool = True, **content_kw
+) -> dict:
+    """An author-signed profile item. The signed content names the picture
+    by its hash; the bytes ride as the unsigned sidecar (``sidecar=True``:
+    the picture itself; ``False``: none; bytes: these instead)."""
+    picture = content_kw.pop("picture_webp", _webp())
     content, _ = encode_profile_content(
         display_name=content_kw.pop("display_name", "Bob Builder"),
         bio=content_kw.pop("bio", "Builds boats."),
-        picture_webp=content_kw.pop("picture_webp", _webp()),
+        picture_hash=compute_picture_hash(picture) if picture else None,
     )
     target = about or signer.user_id
-    return _generic(
+    inner = _generic(
         signer,
         "author_profile",
         target,
@@ -69,6 +80,10 @@ def _profile(signer, *, about=None, ts=None, **content_kw) -> dict:
         content=content_kw.pop("content", content),
         **({"ts": ts} if ts else {}),
     )
+    rider = picture if sidecar is True else (sidecar or None)
+    if rider:
+        inner[PROFILE_PICTURE_FIELD] = encode_picture_sidecar(rider)
+    return inner
 
 
 @pytest.fixture
@@ -145,21 +160,10 @@ async def test_an_edited_profile_after_signing_is_refused(env, profiles):
         json.dumps({"display_name": "", "bio": None, "picture": None}),
         json.dumps({"display_name": "x" * 65, "bio": None, "picture": None}),
         json.dumps({"display_name": "Bob", "bio": "x" * 301, "picture": None}),
+        json.dumps({"display_name": "Bob", "bio": None, "picture_hash": 7}),
+        json.dumps({"display_name": "Bob", "bio": None, "picture_hash": "ab&sig=evil"}),
         json.dumps(
-            {
-                "display_name": "Bob",
-                "bio": None,
-                "picture": base64.b64encode(b"<svg onload=alert(1)>").decode(),
-                "picture_hash": "0123456789abcdef",
-            }
-        ),
-        json.dumps(
-            {
-                "display_name": "Bob",
-                "bio": None,
-                "picture": base64.b64encode(_webp()).decode(),
-                "picture_hash": "0123456789abcdef",  # not the bytes' hash
-            }
+            {"display_name": "Bob", "bio": None, "picture_hash": "0123456789ABCDEF"}
         ),
     ],
 )
@@ -204,9 +208,9 @@ async def test_a_protected_authors_name_only_profile_is_kept_as_such(env, profil
 
 
 async def test_a_relayed_picture_is_re_encoded_never_stored_as_sent(env, profiles):
-    """A polyglot (a WebP with a script appended) is re-encoded before it
+    """A sidecar that is the signed picture is still re-encoded before it
     is stored and served to every viewer."""
-    sent = _webp() + b"<script>alert(1)</script>"
+    sent = _webp()
     await _send(
         env,
         "author_profile",
@@ -214,21 +218,66 @@ async def test_a_relayed_picture_is_re_encoded_never_stored_as_sent(env, profile
         await _cert(env, BOB, "comment"),
     )
     got = await _held(profiles, BOB.user_id)
-    assert got is not None
+    assert got is not None and got.picture_hash == compute_picture_hash(sent)
     stored = await profiles.get_picture(SPACE, BOB.user_id)
-    if stored is not None:
-        raw, picture_hash = stored
-        assert raw != sent and b"<script>" not in raw
-        assert picture_hash == got.picture_hash
+    assert stored is not None
+    raw, picture_hash = stored
+    assert raw != sent and raw[:4] == b"RIFF"
+    assert picture_hash == got.picture_hash
 
 
-async def test_a_kept_profile_keeps_its_signed_item_for_a_hosts_bundle(env, profiles):
-    """0114 (v_61): the host forwards a relayed profile to a new follower
-    author-signed, so the item itself — with its writer cert and the epoch
-    it was verified under — is kept."""
+async def test_a_sidecar_that_is_not_the_signed_picture_is_dropped(env, profiles):
+    """The sidecar is outside the author signature: a relay or host that
+    swaps it (a polyglot, another picture) keeps the name, never the bytes."""
+    swapped = _webp() + b"<script>alert(1)</script>"
+    await _send(
+        env,
+        "author_profile",
+        _profile(BOB, sidecar=swapped),
+        await _cert(env, BOB, "comment"),
+    )
+    got = await _held(profiles, BOB.user_id)
+    assert got is not None and got.display_name == "Bob Builder"
+    assert await profiles.get_picture(SPACE, BOB.user_id) is None
+
+
+async def test_a_name_change_without_the_picture_keeps_the_held_picture(env, profiles):
+    """A name or bio change goes out without the picture bytes (a 1–4 KiB
+    item instead of 64 KiB); the follower keeps the picture of the same
+    signed hash."""
+    cert = await _cert(env, BOB, "comment")
+    await _send(env, "author_profile", _profile(BOB, ts=_now(-60)), cert)
+    before = await profiles.get_picture(SPACE, BOB.user_id)
+    assert before is not None
+    await _send(
+        env,
+        "author_profile",
+        _profile(BOB, display_name="Bob B.", sidecar=False),
+        cert,
+    )
+    got = await _held(profiles, BOB.user_id)
+    assert got is not None and got.display_name == "Bob B."
+    assert await profiles.get_picture(SPACE, BOB.user_id) == before
+
+
+async def test_a_follower_keeps_no_signed_item(env, profiles):
+    """M2: only a household that can build a bundle (holds the space seed)
+    keeps the author-signed item; a follower keeps the profile alone."""
+    await _send(env, "author_profile", _profile(BOB), await _cert(env, BOB, "comment"))
+    assert await _held(profiles, BOB.user_id) is not None
+    assert await profiles.list_signed_items(SPACE, limit=5) == []
+
+
+async def test_a_seed_holder_keeps_the_signed_item_with_its_picture(env, profiles):
+    """A host (seed holder) forwards a relayed profile to a new follower
+    author-signed, so it keeps the item — writer cert, epoch, and the
+    original picture sidecar the follower will check against the hash."""
+    await env["spaces"].set_space_seed(SPACE, env["space_kp"].private_key)
     inner = _profile(BOB)
     cert = await _cert(env, BOB, "comment")
     await _send(env, "author_profile", inner, cert)
     epoch = await env["crypto"].get_current_epoch(SPACE)
-    [kept] = await profiles.list_signed_items(SPACE, epoch=epoch, limit=5)
-    assert kept == {**inner, "writer_cert": cert}
+    [kept] = await profiles.list_signed_items(SPACE, limit=5)
+    assert kept.epoch == epoch
+    assert kept.item == {**inner, "writer_cert": cert}
+    assert kept.picture_hash == compute_picture_hash(_webp())

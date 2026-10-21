@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections import OrderedDict
 
 from ..domain.picture_hash import compute_picture_hash
 from ..domain.space_author_profile import (
@@ -95,3 +96,42 @@ async def public_profile_picture(raw: bytes) -> bytes | None:
         if len(webp) <= PROFILE_PICTURE_MAX_BYTES:
             return webp
     return None
+
+
+#: How many source pictures :class:`PublicPictureCache` remembers by
+#: default. That is at most ~24 KB each, so ~6 MB in all.
+PUBLIC_PICTURE_CACHE_ENTRIES: int = 256
+
+
+class PublicPictureCache:
+    """Remembers :func:`public_profile_picture` per SOURCE picture hash.
+
+    The re-encode can take up to three decode + encode passes, and the same
+    picture used to be re-encoded on every public highlight view and every
+    author-profile publish. Keyed by the stored source picture's hash
+    (``profile_picture_repo`` returns it beside the bytes), so a new picture
+    is a new key and nothing goes stale. A miss (``None``: unusable or too
+    big to fit) is remembered too. Bounded LRU. The CPU work itself stays in
+    :func:`public_profile_picture`, which runs it off the event loop.
+    """
+
+    __slots__ = ("_entries", "_max")
+
+    def __init__(self, *, max_entries: int = PUBLIC_PICTURE_CACHE_ENTRIES) -> None:
+        self._max = max(1, max_entries)
+        self._entries: OrderedDict[str, bytes | None] = OrderedDict()
+
+    async def get(self, source_hash: str, raw: bytes) -> bytes | None:
+        """The public picture of ``raw``, whose stored hash is
+        ``source_hash``, re-encoding it only the first time."""
+        if source_hash in self._entries:
+            self._entries.move_to_end(source_hash)
+            return self._entries[source_hash]
+        public = await public_profile_picture(raw)
+        self._entries[source_hash] = public
+        while len(self._entries) > self._max:
+            self._entries.popitem(last=False)
+        return public
+
+    def __len__(self) -> int:
+        return len(self._entries)
