@@ -40,6 +40,21 @@ SESSION_TTL_SECONDS: float = 120.0
 #: returns ``None`` and the route sheds the request — no session, no push.
 MAX_LIVE_SESSIONS: int = 1024
 
+#: Of those, most an ANONYMOUS source may hold (public-highlight offers,
+#: ``client`` set). The rest stay for the signed household signalling of
+#: ``/gfs/rtc/offer``, so anonymous viewers can never take every slot.
+MAX_PUBLIC_SESSIONS: int = 768
+
+#: Most live public sessions one client address (IPv6 by /64, as the rate
+#: limiters bucket it) may hold. A viewer needs one; a retry or two fit.
+MAX_SESSIONS_PER_CLIENT: int = 4
+
+#: Most live public sessions one author household's links may hold. One
+#: popular (or hammered) link can't take the whole public pool, and it
+#: bounds the offers pushed to that author (a household answers each with a
+#: peer of its own).
+MAX_SESSIONS_PER_AUTHOR: int = 64
+
 #: Most ICE candidates one session accepts from each side. A browser gathers
 #: a handful (host, server-reflexive, relay per interface); each viewer
 #: candidate is pushed to the author, so it is bounded like the offer.
@@ -65,6 +80,9 @@ class RtcSession:
     #: polls ``ice_candidates`` for the AUTHOR's.
     viewer_ice_count: int = 0
     created_at: float = field(default_factory=time.time)
+    #: The anonymous viewer's client bucket (public highlights); ``""`` for
+    #: a signed household session.
+    client: str = ""
 
 
 class GfsRtcSession:
@@ -88,9 +106,17 @@ class GfsRtcSession:
         #: This node's ``[cluster] route_tag``, stamped into every id.
         self._route_tag = route_tag
 
-    async def offer(self, instance_id: str, sdp: str) -> str | None:
-        """Store an SDP offer from *instance_id* and return a new session_id
+    async def offer(
+        self, instance_id: str, sdp: str, *, client: str | None = None
+    ) -> str | None:
+        """Store an SDP offer for *instance_id* and return a new session_id
         (``None`` when :data:`MAX_LIVE_SESSIONS` are live).
+
+        With *client* (an anonymous viewer's address bucket) the offer is a
+        public one: also ``None`` past :data:`MAX_PUBLIC_SESSIONS`,
+        :data:`MAX_SESSIONS_PER_CLIENT` for that client or
+        :data:`MAX_SESSIONS_PER_AUTHOR` for *instance_id* — refused, never
+        evicting someone else's session.
 
         Parameters
         ----------
@@ -112,11 +138,14 @@ class GfsRtcSession:
                 len(self._sessions),
             )
             return None
+        if client is not None and not self._public_slot_free(client, instance_id):
+            return None
         session_id = scoped_id(self._route_tag)
         self._sessions[session_id] = RtcSession(
             session_id=session_id,
             initiator_id=instance_id,
             offer_sdp=sdp,
+            client=client or "",
         )
         log.info(
             "GfsRtcSession.offer: session=%s initiator=%s sdp_len=%d",
@@ -125,6 +154,25 @@ class GfsRtcSession:
             len(sdp),
         )
         return session_id
+
+    def _public_slot_free(self, client: str, instance_id: str) -> bool:
+        """Whether one more public session for *client* → *instance_id* fits
+        (one pass over at most :data:`MAX_LIVE_SESSIONS` rows)."""
+        public = per_client = per_author = 0
+        for s in self._sessions.values():
+            if not s.client:
+                continue
+            public += 1
+            per_client += s.client == client
+            per_author += s.initiator_id == instance_id
+        if public >= MAX_PUBLIC_SESSIONS:
+            log.warning(
+                "GfsRtcSession.offer: %d public sessions live — shedding", public
+            )
+            return False
+        return per_client < MAX_SESSIONS_PER_CLIENT and (
+            per_author < MAX_SESSIONS_PER_AUTHOR
+        )
 
     async def answer(self, session_id: str, sdp: str) -> None:
         """Store the SDP answer for an existing signalling session.

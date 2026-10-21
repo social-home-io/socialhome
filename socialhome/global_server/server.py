@@ -506,11 +506,18 @@ class GfsApp:
         )
 
     def _build_app(self) -> web.Application:
+        cluster = self.services.cluster
+
+        def live_nodes() -> int:
+            return cluster.live_node_count()
+
         middlewares = [
             build_admin_middleware(self.services.admin_auth),
-            build_listing_rate_limit(self.client_ip),
-            build_public_rtc_rate_limit(self.client_ip),
-            build_ice_servers_rate_limit(self.client_ip),
+            # The anonymous public limits are cluster-wide: each node allows
+            # its share of the budget over the live nodes (``node_share``).
+            build_listing_rate_limit(self.client_ip, nodes=live_nodes),
+            build_public_rtc_rate_limit(self.client_ip, nodes=live_nodes),
+            build_ice_servers_rate_limit(self.client_ip, nodes=live_nodes),
             build_publish_rate_limit(self.client_ip),
             build_signup_rate_limit(self.client_ip),
             build_register_rate_limit(self.client_ip),

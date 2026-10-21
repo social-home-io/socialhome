@@ -48,6 +48,15 @@ RELAY_TTL_SECONDS: float = 120.0
 #: no push.
 MAX_LIVE_CHANNELS: int = 256
 
+#: Most live relays one client address (bucketed as the rate limiters do)
+#: may hold — a guest watches one stream; one retry fits.
+MAX_CHANNELS_PER_CLIENT: int = 2
+
+#: Most live relays to one author household, so one link (and one source
+#: with many addresses) can't take every channel, and the author isn't
+#: asked for more uploads than a household can serve.
+MAX_CHANNELS_PER_AUTHOR: int = 32
+
 
 @dataclass(slots=True)
 class _Channel:
@@ -62,6 +71,8 @@ class _Channel:
     #: An author upload is feeding this channel (:meth:`RelayBridge.claim`).
     claimed: bool = False
     created_at: float = field(default_factory=time.time)
+    #: The guest's client bucket (``""`` when not given).
+    client: str = ""
 
 
 class RelayBridge:
@@ -74,17 +85,35 @@ class RelayBridge:
         #: This node's ``[cluster] route_tag``, stamped into every relay id.
         self._route_tag = route_tag
 
-    def create(self, *, target_instance_id: str, scope: str = "") -> str | None:
+    def create(
+        self, *, target_instance_id: str, scope: str = "", client: str = ""
+    ) -> str | None:
         """Open a channel the author ``target_instance_id`` may stream into.
 
         Returns the ``relay_id`` the GFS pushes to the author over the WS
         and the guest's GET holds open — or ``None`` when the live-channel
         ceiling is hit, so the anonymous route sheds load with a 503
         instead of growing memory unbounded. Bounded queue → backpressure:
-        a slow guest reader throttles the author's upload.
+        a slow guest reader throttles the author's upload. Also ``None``
+        past :data:`MAX_CHANNELS_PER_CLIENT` for *client* or
+        :data:`MAX_CHANNELS_PER_AUTHOR` for the author — refused, never
+        evicting another guest's stream.
         """
         self.gc_expired()
         if len(self._channels) >= MAX_LIVE_CHANNELS:
+            return None
+        per_client = sum(
+            1 for c in self._channels.values() if client and c.client == client
+        )
+        per_author = sum(
+            1
+            for c in self._channels.values()
+            if c.target_instance_id == target_instance_id
+        )
+        if (
+            per_client >= MAX_CHANNELS_PER_CLIENT
+            or per_author >= MAX_CHANNELS_PER_AUTHOR
+        ):
             return None
         relay_id = scoped_id(self._route_tag)
         self._channels[relay_id] = _Channel(
@@ -93,6 +122,7 @@ class RelayBridge:
             scope=scope,
             queue=asyncio.Queue(maxsize=16),
             connected=asyncio.Event(),
+            client=client,
         )
         return relay_id
 

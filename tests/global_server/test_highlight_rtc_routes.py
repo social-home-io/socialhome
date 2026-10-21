@@ -33,6 +33,8 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.relay_bridge import MAX_CHANNELS_PER_CLIENT
+from socialhome.global_server.rtc_transport import MAX_SESSIONS_PER_CLIENT
 from socialhome.global_server.server import create_gfs_app
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
@@ -194,6 +196,17 @@ async def _unpublish(client) -> None:
     )
 
 
+async def _client_slots_full(client) -> None:
+    """This viewer's address already holds every public session and relay
+    it may."""
+    rtc = client._app[gfs_rtc_key]
+    for _ in range(MAX_SESSIONS_PER_CLIENT):
+        assert await rtc.offer("inst-author", "v=0", client="127.0.0.1")
+    bridge = client._app[gfs_relay_bridge_key]
+    for _ in range(MAX_CHANNELS_PER_CLIENT):
+        assert bridge.create(target_instance_id="inst-author", client="127.0.0.1")
+
+
 #: Every non-success state the anonymous viewer routes can hit, as
 #: ``(label, setup, overrides)``. They MUST be indistinguishable — an
 #: outsider must not learn whether the author's household is connected,
@@ -205,6 +218,7 @@ _FAILURE_STATES = [
     ("revoked", _revoke, {}),
     ("unpublished", _unpublish, {}),
     ("author_offline", _offline, {}),
+    ("client_slots_full", _client_slots_full, {}),
 ]
 
 
@@ -640,6 +654,8 @@ async def test_relay_failure_is_uniform_and_immediate(
     ref_budget = 0.05
     monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", ref_budget)
     client._app[gfs_ws_registry_key]._by_instance["inst-author"] = client._author_ws
+    # The reference comes from the same address: free its relay slots.
+    client._app[gfs_relay_bridge_key]._channels.clear()
     tok, _ = await client._app[gfs_highlight_pub_service_key].record_publish(
         highlight_id="s-ref",
         instance_id="inst-author",
