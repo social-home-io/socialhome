@@ -525,6 +525,10 @@ async def test_relay_round_trip_pipes_author_bytes_to_guest(client):
     resp = await get_task
     assert resp.status == 200
     assert resp.headers["Content-Type"] == "application/octet-stream"
+    # The pinned viewer reads this cross-origin: the streamed (prepared)
+    # response carries the CORS header too; the author's upload does not.
+    assert resp.headers["Access-Control-Allow-Origin"] == "*"
+    assert "Access-Control-Allow-Origin" not in up.headers
     body = await resp.read()
     assert body == framed
 

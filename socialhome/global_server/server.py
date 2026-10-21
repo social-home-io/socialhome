@@ -88,6 +88,7 @@ from .repositories import (
 )
 from .routes import register_routes
 from .rtc_transport import GfsRtcSession
+from .viewer_cors import install_viewer_cors
 from .ws_registry import GfsWebSocketRegistry
 
 log = logging.getLogger(__name__)
@@ -476,6 +477,10 @@ class GfsApp:
         # (``html_page.html_response``) and the picture proxy the media
         # one (``csp.media_response_headers``); ``setdefault`` keeps both.
         install_security_headers(app)
+        # ``Access-Control-Allow-Origin: *`` + preflight on the anonymous
+        # public-highlight viewer routes only: the pinned viewer page lives
+        # on another origin (``viewer_cors``).
+        install_viewer_cors(app)
         return app
 
     # ─── Wiring ────────────────────────────────────────────────────
