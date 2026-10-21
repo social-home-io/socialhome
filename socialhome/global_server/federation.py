@@ -69,6 +69,7 @@ from .repositories import AbstractGfsFederationRepo
 
 if TYPE_CHECKING:
     from .cluster import ClusterService
+    from .cluster_relay import ClusterRelayFanOut
     from .envelope_relay import GfsEnvelopeRelay
     from .repositories import AbstractGfsInviteRepo, AbstractGfsSpaceEpochRepo
     from .ws_registry import GfsWebSocketRegistry
@@ -392,6 +393,7 @@ class GfsFederationService:
     __slots__ = (
         "_cluster",
         "_epoch_repo",
+        "_fan_out_fwd",
         "_hello_seats",
         "_invite_repo",
         "_notified_seats",
@@ -444,6 +446,8 @@ class GfsFederationService:
         # service too). ``None`` on a single node built without them.
         self._cluster: ClusterService | None = None
         self._relay: GfsEnvelopeRelay | None = None
+        #: Set by ``attach_fan_out``: broadcasts reach the other nodes' sockets.
+        self._fan_out_fwd: ClusterRelayFanOut | None = None
 
     def attach_cluster(self, cluster: ClusterService) -> None:
         """Hand owner notices this node cannot deliver to the cluster."""
@@ -452,6 +456,16 @@ class GfsFederationService:
     def attach_relay(self, relay: GfsEnvelopeRelay) -> None:
         """Queue targeted relays whose target has no socket on this node."""
         self._relay = relay
+
+    def attach_fan_out(self, fan_out: ClusterRelayFanOut) -> None:
+        """Forward broadcast relays to the sockets on the other cluster nodes
+        (:mod:`.cluster_relay`)."""
+        self._fan_out_fwd = fan_out
+
+    async def audience_targets(self, space_id: str) -> list[str]:
+        """The active subscribers a forwarded space item reaches (the cluster
+        audience resolver, :mod:`.cluster_relay`)."""
+        return [s.instance_id for s in await self._repo.list_subscribers(space_id)]
 
     async def register_instance(
         self,
@@ -586,8 +600,23 @@ class GfsFederationService:
         # of the same bytes (e.g. one sent before the space healed its pin).
         # A forged payload can't pre-poison a legitimate one either: any change
         # to the payload — the signature field included — changes the digest.
+        # Identity-free fan-out frame: routing fields only. No ``from_instance``
+        # and no GFS-added target id — a subscriber learns nothing about which
+        # household relayed the event, and dedupes on the post id inside the
+        # encrypted payload.
+        event_body = {
+            "space_id": space_id,
+            "event_type": event_type,
+            "payload": payload,
+        }
         digest = SeenPayloadCache.digest(payload)
-        if self._seen_payloads.seen(digest):
+        # A broadcast another cluster node took and forwarded here is
+        # remembered too, so a replay of it to THIS node is a no-op as well.
+        if self._seen_payloads.seen(digest) or (
+            not to
+            and self._fan_out_fwd is not None
+            and self._fan_out_fwd.seen_frame(event_body)
+        ):
             log.debug(
                 "GFS: suppressing replayed %s for space %s (identical payload)",
                 event_type,
@@ -607,15 +636,6 @@ class GfsFederationService:
         else:
             subscribers = await self._repo.list_subscribers(space_id)
 
-        # Identity-free fan-out frame: routing fields only. No ``from_instance``
-        # and no GFS-added target id — a subscriber learns nothing about which
-        # household relayed the event, and dedupes on the post id inside the
-        # encrypted payload.
-        event_body = {
-            "space_id": space_id,
-            "event_type": event_type,
-            "payload": payload,
-        }
         log.debug(
             "GFS: relaying %s for space %s to %d subscriber(s)",
             event_type,
@@ -623,6 +643,12 @@ class GfsFederationService:
             len(subscribers),
         )
 
+        if not to and subscribers and self._fan_out_fwd is not None:
+            # The other cluster nodes push it to the subscribers whose socket
+            # they hold — one forward per node, never one per subscriber.
+            # Forwarded before the local push so their copy is not held up
+            # by it. Nothing is queued for a broadcast (WebSocket-only).
+            self._fan_out_fwd.forward_to_space(space_id, event_body)
         reached = await self._fan_out(subscribers, event_body)
         # The target's socket is on another cluster node (or down): the
         # shared queue + its drain hint reach it there, or on its next hello.

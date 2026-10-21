@@ -1113,6 +1113,12 @@ WS pushes across allocs. The step:
    handoff via node 0 must reach it (shared relay queue + drain hint).
    Without the cross-node path the step fails with "no 'new_subscriber'
    frame within 10 s".
+   Then a **broadcast**: one follower's socket on EACH node, a signed
+   ``space_post_public`` published via node 0 — every follower must get
+   exactly one ``relay`` frame (a further 2 s window must stay empty). The
+   accepting node forwards the item once per peer node in the coalesced
+   ``NODE_DRAIN_HINT.relays``; before that fan-out was node-local and the
+   step fails with "the follower on node 1 got 0 copies".
 6. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 

@@ -950,7 +950,28 @@ elsewhere is added to the next `NODE_DRAIN_HINT` as `notices:[…]` (ids and
 labels only, `ClusterService.hint_subscriber_notice`), and the node holding
 the owner's socket rebuilds it from the shared DB
 (`GfsFederationService.deliver_forwarded_notice`) — no frame of its own, so it
-spends nothing of a peer's 60-a-minute sync budget beyond the hint. Every push
+spends nothing of a peer's 60-a-minute sync budget beyond the hint.
+
+**Cross-node broadcast fan-out.** A broadcast `POST /gfs/publish`, a member
+publish and a channel item reached only the sockets of the node that took the
+request — on four nodes behind a round-robin balancer about three followers in
+four missed every post (`NODE_RELAY` never had a production caller). Now the
+accepting node pushes to its own sockets and hands the item to
+`ClusterRelayFanOut.forward` (`global_server/cluster_relay.py`); it rides the
+next `NODE_DRAIN_HINT` as `relays:[…]`, ONE copy per peer node however many
+subscribers. Each receiver resolves the item's audience (`space` / `channel`
+id) from the shared DB, pushes to the members whose socket it holds, never
+forwards again, and dedupes on its own digest of the frame (10 min). For member
+and channel items it answers with `held` (the audience members it holds), so
+the accepting node queues offline copies only for the recently-seen
+subscribers no node holds. Riding the drain hint rather than reviving
+`NODE_RELAY` keeps one coalesced, paced stream per peer — at most one frame
+per `DRAIN_HINT_MIN_GAP_S` (1.5 s, ≤ 40 / min, inside the receiver's 60 / min
+budget; busier traffic fills frames instead of adding them) — and an older
+node simply ignores the key, so a mixed-version cluster keeps today's
+behaviour. A household's `relay_seen_at` (the offline-copy window) is
+re-marked hourly while its socket stays open, so a long-lived connection on
+any node keeps its catch-up position. Every push
 to a `/gfs/ws` socket is bounded by `WS_SEND_TIMEOUT_S` (10 s,
 `global_server/ws_registry.py`): a socket whose peer stopped reading is
 evicted and closed (1013) rather than holding an accept, a drain or a fan-out

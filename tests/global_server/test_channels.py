@@ -767,3 +767,16 @@ async def test_a_channel_request_bound_to_another_key_is_refused(gfs) -> None:
     )
     resp = await gfs.post("/gfs/channels/register", json=gfs.ch.register(gfs_key=own))
     assert resp.status == 201, await resp.text()
+
+
+async def test_the_cluster_audience_of_a_channel_is_its_open_seats(gfs):
+    """What another cluster node resolves for a forwarded channel item: the
+    seats a local fan-out would reach, and nothing for an unknown channel."""
+    await _ready(gfs)
+    await _seat(gfs, gfs.member)
+    await _seat(gfs, gfs.other)
+    svc = gfs.app_[gfs_channel_service_key]
+    assert sorted(await svc.audience_targets(gfs.ch.id)) == sorted(
+        [gfs.member.instance_id, gfs.other.instance_id]
+    )
+    assert await svc.audience_targets("no-such-channel") == []

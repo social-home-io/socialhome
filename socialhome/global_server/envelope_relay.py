@@ -89,6 +89,7 @@ from .public import ClientIpResolver, build_window_limiter
 
 if TYPE_CHECKING:
     from .cluster import ClusterService
+    from .cluster_relay import ClusterRelayFanOut
     from .repositories import AbstractGfsEnvelopeQueueRepo, AbstractGfsFederationRepo
     from .ws_registry import GfsWebSocketRegistry
 
@@ -244,6 +245,15 @@ RELAY_QUEUE_MAX_TOTAL_BYTES: int = 256 * 1024 * 1024
 #: every item; a real household keeps its socket open for hours.
 RELAY_SEEN_MIN_SESSION_S: float = 60.0
 
+#: How often a LIVE ``/gfs/ws`` session re-marks its household seen, after
+#: the first mark at :data:`RELAY_SEEN_MIN_SESSION_S`. Without it a socket held
+#: for longer than the queue TTL (24 h — any household that just stays
+#: connected) aged out of the offline-copy window while still connected, and
+#: once it dropped got no queued items at all. Hourly keeps the mark at most
+#: an hour old: one primary-key UPDATE per connected household per hour
+#: (10 000 households ≈ 3 writes/s across the whole cluster).
+RELAY_SEEN_REFRESH_S: float = 60.0 * 60.0
+
 #: Max simultaneous live pushes for one member-published item.
 RELAY_FAN_OUT_CONCURRENCY: int = 8
 
@@ -352,6 +362,7 @@ class GfsEnvelopeRelay:
         "_clock",
         "_cluster",
         "_drain_locks",
+        "_fan_out",
         "_fed_repo",
         "_inflight",
         "_max_bytes",
@@ -396,6 +407,8 @@ class GfsEnvelopeRelay:
         self._saturation_warned_at = -math.inf
         #: Set by :meth:`attach_cluster`; ``None`` on a single node.
         self._cluster: ClusterService | None = None
+        #: Set by :meth:`attach_fan_out`; ``None`` on a single node.
+        self._fan_out: ClusterRelayFanOut | None = None
         self._accept_locks = KeyedLocks()
         self._drain_locks = KeyedLocks()
 
@@ -405,6 +418,12 @@ class GfsEnvelopeRelay:
         setter rather than a constructor argument: the cluster in turn calls
         :meth:`drain`, and neither can be built first."""
         self._cluster = cluster
+
+    def attach_fan_out(self, fan_out: ClusterRelayFanOut) -> None:
+        """Forward member items to the other cluster nodes through
+        *fan_out* (:meth:`fan_out_relay` with an ``audience``). A setter: the
+        fan-out queues offline copies through this relay in turn."""
+        self._fan_out = fan_out
 
     @property
     def in_flight(self) -> int:
@@ -585,19 +604,28 @@ class GfsEnvelopeRelay:
         *,
         queue_ok: set[str],
         frame: dict,
+        audience: tuple[str, str] | None = None,
+        skip: str = "",
     ) -> int:
         """Deliver a member-published space item to *targets*.
 
         ``frame`` is the identity-free fan-out frame (``SpaceItemFrame``
-        shape); it goes out as ``{type: "relay", **frame}``. Live sockets are
-        pushed with at most :data:`RELAY_FAN_OUT_CONCURRENCY` sends in flight.
-        A target without a live socket gets the frame queued for
+        shape); it goes out as ``{type: "relay", **frame}``. Live sockets on
+        THIS node are pushed with at most :data:`RELAY_FAN_OUT_CONCURRENCY`
+        sends in flight.
+
+        With an *audience* (``(kind, key)``, see :mod:`.cluster_relay`) the
+        item is then forwarded once to every other cluster node, which pushes
+        it to the sockets it holds; *skip* (the publisher) is never pushed to.
+        A target no node holds gets the frame queued for
         :data:`ENVELOPE_QUEUE_TTL_SECONDS` ONLY when it is in *queue_ok* (seen
-        recently — the caller decides), under the per-recipient RELAY caps
-        and the server-wide :data:`RELAY_QUEUE_MAX_TOTAL_BYTES`, with room
-        made by fair-share eviction in the same transaction as the insert. Callers pass
-        only active subscribers. Returns how many targets were pushed or
-        queued."""
+        recently — the caller decides), under the per-recipient RELAY caps and
+        the server-wide :data:`RELAY_QUEUE_MAX_TOTAL_BYTES`, with room made by
+        fair-share eviction in the same transaction as the insert. On a single
+        node (or when the item cannot be forwarded) every *queue_ok* target
+        without a socket here is queued at once. Callers pass only active
+        subscribers. Returns how many targets were pushed here or queued here
+        right away."""
         push = {"type": RELAY_FRAME_TYPE, **frame}
         limit = asyncio.Semaphore(RELAY_FAN_OUT_CONCURRENCY)
         offline: list[str] = []
@@ -612,13 +640,33 @@ class GfsEnvelopeRelay:
         results = await asyncio.gather(*(_push(t) for t in targets))
         reached = sum(1 for ok in results if ok)
         to_queue = [t for t in offline if t in queue_ok]
-        if not to_queue:
+        if (
+            audience is not None
+            and self._fan_out is not None
+            and self._fan_out.forward(
+                kind=audience[0],
+                key=audience[1],
+                frame=frame,
+                skip=skip,
+                queue_for=to_queue,
+            )
+        ):
+            # The nodes holding the other sockets push it; the targets none
+            # of them holds are queued once their answers are in.
             return reached
+        return reached + await self.queue_relay_many(to_queue, frame)
+
+    async def queue_relay_many(self, targets: list[str], frame: dict) -> int:
+        """Queue one relay *frame* for each of *targets* (serialised once) and
+        hint the cluster. Returns how many were queued."""
+        if not targets:
+            return 0
         blob = orjson.dumps(frame).decode()  # once, however many targets
-        for target in to_queue:
+        queued = 0
+        for target in targets:
             if await self._queue_relay_blob(target, blob):
-                reached += 1
-        return reached
+                queued += 1
+        return queued
 
     async def queue_relay(self, target: str, frame: dict) -> bool:
         """Queue one relay *frame* (``{space_id, event_type, payload}`` — the

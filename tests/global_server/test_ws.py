@@ -475,3 +475,34 @@ async def test_ws_connect_survives_reconnect_notify_failure(ws_client, monkeypat
             await asyncio.sleep(0.01)
         assert registry.is_connected("peer.home")
         assert not ws.closed
+
+
+async def test_the_seen_mark_refresh_survives_a_failed_write(monkeypatch, caplog):
+    """A failed ``relay_seen_at`` write is logged and retried on the next
+    tick; the loop ends once the socket is closed."""
+    monkeypatch.setattr(ws_routes, "RELAY_SEEN_MIN_SESSION_S", 0.0)
+    monkeypatch.setattr(ws_routes, "RELAY_SEEN_REFRESH_S", 0.0)
+
+    class _Socket:
+        closed = False
+
+    sock = _Socket()
+
+    class _Repo:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def mark_relay_seen(self, instance_id: str, *, at: int) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("db busy")
+            if self.calls == 3:
+                sock.closed = True
+
+    repo = _Repo()
+    with caplog.at_level("WARNING"):
+        await asyncio.wait_for(
+            ws_routes._mark_seen_while_open(repo, "home", sock), timeout=2
+        )
+    assert repo.calls == 3
+    assert "relay-seen mark failed for home" in caplog.text

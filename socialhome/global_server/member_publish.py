@@ -142,6 +142,7 @@ from ..writer_cert import (
 )
 from ..writer_key import InvalidWriterKey, verify_writer_key_cert, verify_writer_sig
 from .addressee import GfsAddressee
+from .cluster_relay import AUDIENCE_SPACE
 from .domain import MIN_EPOCH_STEP_INTERVAL_S, epoch_ceiling
 from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import SeenPayloadCache
@@ -234,6 +235,9 @@ class _FanOutJob:
     publisher_id: str
     frame: dict
     resolve: FanOutResolver | None = None
+    #: The cluster audience the item is forwarded for (``(kind, key)``, see
+    #: :mod:`.cluster_relay`); ``None`` means the space ``space_id``.
+    audience: tuple[str, str] | None = None
 
 
 class GfsMemberPublishService:
@@ -399,14 +403,26 @@ class GfsMemberPublishService:
                 queue.task_done()
 
     def submit_fan_out(
-        self, key: str, *, publisher_id: str, frame: dict, resolve: FanOutResolver
+        self,
+        key: str,
+        *,
+        publisher_id: str,
+        frame: dict,
+        resolve: FanOutResolver,
+        audience: tuple[str, str],
     ) -> bool:
         """Hand an accepted item with its own target resolver (a private
         channel's seats, v_51) to the SAME bounded workers, backlog and
-        per-key share as member publishes. ``False`` when stopped or full."""
+        per-key share as member publishes. *audience* is what the other
+        cluster nodes resolve to find their own sockets of those targets.
+        ``False`` when stopped or full."""
         return self._submit(
             _FanOutJob(
-                space_id=key, publisher_id=publisher_id, frame=frame, resolve=resolve
+                space_id=key,
+                publisher_id=publisher_id,
+                frame=frame,
+                resolve=resolve,
+                audience=audience,
             )
         )
 
@@ -416,7 +432,11 @@ class GfsMemberPublishService:
             targets = [t for t in resolved if t != job.publisher_id]
             if targets:
                 reached = await self._relay.fan_out_relay(
-                    targets, queue_ok=queue_ok, frame=job.frame
+                    targets,
+                    queue_ok=queue_ok,
+                    frame=job.frame,
+                    audience=job.audience,
+                    skip=job.publisher_id,
                 )
                 log.debug(
                     "gfs.channel: fan-out reached=%d of %d", reached, len(targets)
@@ -428,6 +448,7 @@ class GfsMemberPublishService:
             s.instance_id for s in subscribers if s.instance_id != job.publisher_id
         ]
         if not targets:
+            # Nobody to reach — here or on any other node (one shared DB).
             return
         # Offline copies only for subscribers seen within the queue TTL — a
         # household that never connected (or vanished long ago) would only
@@ -436,7 +457,11 @@ class GfsMemberPublishService:
             job.space_id, within_s=ENVELOPE_QUEUE_TTL_SECONDS
         )
         reached = await self._relay.fan_out_relay(
-            targets, queue_ok=recent, frame=job.frame
+            targets,
+            queue_ok=recent,
+            frame=job.frame,
+            audience=job.audience or (AUDIENCE_SPACE, job.space_id),
+            skip=job.publisher_id,
         )
         log.debug(
             "gfs.member_publish: space=%s reached=%d of %d",
