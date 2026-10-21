@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import time
 
 import pytest
 
@@ -192,6 +193,9 @@ async def test_public_local_moment_fans_to_each_registered_gfs(outbound_setup):
     body = _opened(envelope)
     assert (body["op"], body["content"]) == ("create", "hello")
     assert body["author_user_id"] == "u1"
+    # v_64: the signing time rides sealed (signed with the ciphertext).
+    assert isinstance(body["sent_at"], int)
+    assert abs(body["sent_at"] - time.time()) < 5
     # ONE ciphertext: both servers get the same bytes.
     assert s["session"].posts[1][1] == envelope
 
@@ -305,11 +309,15 @@ async def test_delete_event_fans_tombstone_to_each_registered_gfs(outbound_setup
     assert all(p[0].endswith("/gfs/moments/delete") for p in s["session"].posts)
     envelope = s["session"].posts[0][1]
     assert envelope["moment_id"] == "m-1"
-    assert _opened(envelope) == {
+    body = _opened(envelope)
+    sent_at = body.pop("sent_at")
+    assert body == {
         "op": "delete",
         "author_user_id": "u1",
         "origin_instance_id": "inst-self",
     }
+    # v_64: when it was signed, inside the signed ciphertext.
+    assert isinstance(sent_at, int) and abs(sent_at - time.time()) < 5
 
 
 async def test_outbound_used_before_attach_skips_silently(db):

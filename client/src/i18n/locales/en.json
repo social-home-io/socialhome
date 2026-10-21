@@ -2135,6 +2135,7 @@
   "capability.follower_names_on_join": "Names for new followers right away",
   "capability.encrypted_public_moments": "Public moments encrypted from the GFS",
   "capability.public_moment_media": "Photos and videos in public moments",
+  "capability.public_moment_sent_at": "Time-stamped public moments",
   "space.settings_page.moderation.queue_meta": "Posts to review, join requests and reports",
   "space.settings_page.moderation.days": "days",
   "space.settings_page.danger.summary": "Archive, hand over or delete",

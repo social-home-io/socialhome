@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.domain.events import MomentCreated
+from socialhome.global_server.envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.moment_public_seal import item_key, seal_body, sign_wire
 from socialhome.repositories.moment_public_repo import SqliteMomentPublicFollowRepo
@@ -24,6 +26,8 @@ from socialhome.services import moment_public_inbound
 from socialhome.services.moment_public_inbound import (
     HOLD_FOR_S,
     MAX_HELD_PER_EPOCH,
+    SENT_AT_MAX_AGE_S,
+    SENT_AT_MAX_SKEW_S,
     MomentPublicInbound,
 )
 from tests.moment_public_wire import (
@@ -504,3 +508,122 @@ async def test_deleting_a_moment_forgets_its_fetched_file(db):
         gfs_id="g1",
     )
     assert forgotten == ["api/media/gm-abc.webp"]
+
+
+# ── Signed send time (v_64) ───────────────────────────────────────────────
+
+
+def _created_events(inbound) -> list:
+    seen: list = []
+    bus = EventBus()
+    bus.subscribe(MomentCreated, lambda e: seen.append(e))
+    inbound._bus = bus  # type: ignore[attr-defined]
+    return seen
+
+
+def _delete(moment_id: str, **extra) -> dict:
+    return {
+        "moment_id": moment_id,
+        "author_user_id": "u-noor",
+        "instance_id": "inst-noor",
+        "origin_instance_id": "inst-noor",
+        **extra,
+    }
+
+
+async def _deliver_delete(inbound, payload: dict) -> None:
+    await inbound.handle(
+        {"type": "incoming_public_moment_delete", "payload": _signed(payload)},
+        gfs_id="g1",
+    )
+
+
+async def test_a_moment_with_a_fresh_send_time_lands(db):
+    inbound, _ = await _env(db)
+    await _create(inbound, _moment("m-fresh", sent_at=int(time.time())))
+    assert await _stored(db, "m-fresh") is not None
+
+
+async def test_a_moment_sent_longer_ago_than_any_delivery_takes_is_refused(db):
+    """A captured envelope re-posted a day later is a replay: no GFS queue
+    or key wait holds a real one that long."""
+    inbound, _ = await _env(db)
+    stale = int(time.time()) - SENT_AT_MAX_AGE_S - 60
+    await _create(inbound, _moment("m-stale", sent_at=stale))
+    assert await _stored(db, "m-stale") is None
+
+
+async def test_a_moment_sent_in_the_future_is_refused(db):
+    inbound, _ = await _env(db)
+    ahead = int(time.time()) + SENT_AT_MAX_SKEW_S + 60
+    await _create(inbound, _moment("m-ahead", sent_at=ahead))
+    assert await _stored(db, "m-ahead") is None
+
+
+async def test_a_moment_created_after_it_was_sent_is_refused(db):
+    inbound, _ = await _env(db)
+    sent = int(time.time()) - 2 * 3600
+    await _create(
+        inbound, _moment("m-later", sent_at=sent, created_at=now_iso(hours=-1))
+    )
+    assert await _stored(db, "m-later") is None
+
+
+async def test_a_send_time_that_is_not_an_integer_is_refused(db):
+    inbound, _ = await _env(db)
+    for i, bad in enumerate((True, "1700000000", 1.5, -1, None)):
+        await _create(inbound, _moment(f"m-bad-{i}", sent_at=bad))
+        assert await _stored(db, f"m-bad-{i}") is None
+
+
+async def test_an_older_authors_moment_without_a_send_time_still_lands(db):
+    """Fallback for a v_63 author household: no ``sent_at``, the older
+    rules (``created_at`` / ``expires_at``) apply."""
+    inbound, _ = await _env(db)
+    await _create(inbound, _moment("m-legacy"))
+    assert await _stored(db, "m-legacy") is not None
+
+
+async def test_once_an_author_sent_a_send_time_its_absence_is_refused(db):
+    """Monotonic per author: after a v_64 envelope, one without ``sent_at``
+    can only be an older envelope replayed."""
+    inbound, _ = await _env(db)
+    await _create(inbound, _moment("m-new", sent_at=int(time.time())))
+    await _create(inbound, _moment("m-old-replay"))
+    assert await _stored(db, "m-old-replay") is None
+
+
+async def test_a_replayed_create_of_a_held_moment_is_announced_once(db):
+    inbound, _ = await _env(db)
+    seen = _created_events(inbound)
+    payload = _moment("m-once", sent_at=int(time.time()))
+    envelope = _signed(payload)
+    for _ in range(3):
+        await inbound.handle(
+            {"type": "incoming_public_moment", "payload": envelope}, gfs_id="g1"
+        )
+    assert [e.moment_id for e in seen] == ["m-once"]
+
+
+async def test_a_stale_delete_is_refused(db):
+    inbound, _ = await _env(db)
+    await _create(inbound, _moment("m-keep", sent_at=int(time.time())))
+    stale = int(time.time()) - SENT_AT_MAX_AGE_S - 60
+    await _deliver_delete(inbound, _delete("m-keep", sent_at=stale))
+    got = await SqliteMomentRepo(db).get("m-keep", include_deleted=True)
+    assert got is not None and got.deleted_at is None
+
+
+async def test_a_fresh_delete_applies(db):
+    inbound, _ = await _env(db)
+    await _create(inbound, _moment("m-gone", sent_at=int(time.time())))
+    await _deliver_delete(inbound, _delete("m-gone", sent_at=int(time.time())))
+    got = await SqliteMomentRepo(db).get("m-gone", include_deleted=True)
+    assert got is not None and got.deleted_at is not None
+
+
+def test_the_age_window_covers_every_honest_delay():
+    """A real envelope can wait in a GFS's offline queue for its TTL and
+    then for its key here; the window must not refuse it."""
+    honest = ENVELOPE_QUEUE_TTL_SECONDS + HOLD_FOR_S + SENT_AT_MAX_SKEW_S
+    assert SENT_AT_MAX_AGE_S >= honest

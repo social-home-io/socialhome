@@ -573,13 +573,15 @@ async def test_inbound_public_create_naming_another_origin_for_a_held_id_is_refu
     assert created == []
 
 
-async def test_inbound_public_redelivery_from_the_same_author_still_lands(db):
+async def test_inbound_public_redelivery_from_the_same_author_lands_once(db):
+    """The row binding admits the same author again, and a moment already
+    held is neither re-stored nor announced twice (v_64)."""
     inbound, moment_repo, created = await _public_inbound_env(db)
     frame = {"type": "incoming_public_moment", "payload": _public_create("m-again")}
     await inbound.handle(frame, gfs_id="g1")
     await inbound.handle(frame, gfs_id="g1")
     assert await moment_repo.get("m-again") is not None
-    assert len(created) == 2
+    assert len(created) == 1
 
 
 async def test_inbound_public_delete_naming_another_origin_is_refused(db):

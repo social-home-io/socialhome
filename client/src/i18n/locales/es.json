@@ -1853,6 +1853,7 @@
   "capability.follower_names_on_join": "Nombres al instante para nuevos seguidores",
   "capability.encrypted_public_moments": "Momentos públicos cifrados frente al GFS",
   "capability.public_moment_media": "Fotos y vídeos en momentos públicos",
+  "capability.public_moment_sent_at": "Momentos públicos con marca de tiempo",
   "space.settings_page.moderation.queue_meta": "Publicaciones por revisar, solicitudes y denuncias",
   "space.settings_page.moderation.days": "días",
   "space.settings_page.danger.summary": "Archivar, ceder o eliminar",
