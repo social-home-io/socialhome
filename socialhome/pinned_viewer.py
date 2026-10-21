@@ -11,7 +11,8 @@ needs from the link's fragment, which browsers never send to any server::
 ``socialhome/pinned_viewer.json`` (written by
 ``client/scripts/build-pinned-viewer.mjs`` and committed; CI fails when it
 drifts from the viewer code) names the version this release links to.
-``.github/workflows/pinned-viewer.yml`` publishes that version's files.
+The ``social-home-io/viewer`` repo rebuilds that version from the release,
+checks it against this manifest and publishes its files.
 """
 
 from __future__ import annotations

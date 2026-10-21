@@ -50,7 +50,7 @@
 # Where a public highlight link opens the PINNED viewer: a static page no
 # GFS serves (so no GFS can rewrite the script that reads the link's
 # secret), pinned by SRI under a content-addressed path v/<hash>/. Host the
-# published files (the gh-pages branch of social-home-io/socialhome)
+# published files (the gh-pages branch of social-home-io/viewer)
 # anywhere you like and point this at it. Empty = links open the GFS's own
 # page instead (less safe: that GFS then serves the viewer's script).
 # Env: SH_HIGHLIGHTS_PUBLIC_VIEWER_BASE_URL.

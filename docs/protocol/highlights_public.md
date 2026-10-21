@@ -27,8 +27,8 @@ revoking a token (or unpublishing) takes effect on the next request.
   viewer) and the ``/highlight/{instance}/{highlight}/{token}`` landing page
   (older links and the self-hosted fallback only).
 - **Pinned viewer**: static files on an origin no GFS runs — by default the
-  project's GitHub Pages (`https://viewer.social-home.io/`),
-  published by `.github/workflows/pinned-viewer.yml`.
+  project's GitHub Pages (`https://viewer.social-home.io/`), built and
+  published by its own repo, [`social-home-io/viewer`](https://github.com/social-home-io/viewer).
 
 ## URL shape
 
@@ -361,15 +361,19 @@ job builds it twice, compares the bytes, and fails when the committed
 manifest differs — a viewer change must regenerate the manifest in the same
 PR.
 
-**Publishing.** `.github/workflows/pinned-viewer.yml` runs on every
-published release (and by hand, from `main` or a tag only). A `build` job
-installs the npm dependencies and rebuilds with a read-only token it does
-not keep, checks the build equals the committed manifest and hands the two
-files on; a separate `publish` job — no dependency code, actions pinned by
-commit SHA — adds `v/<hash>/` to the `gh-pages` branch of this repo (with
-`.nojekyll` and the `viewer.social-home.io` `CNAME`). A ruleset on
-`gh-pages` blocking force-push and deletion keeps published versions
-append-only on GitHub's side too. It only ever **adds** a version — an existing one
+**Publishing.** The viewer has its own repo,
+[`social-home-io/viewer`](https://github.com/social-home-io/viewer); nothing in this repo can write to it. Its
+workflow (daily, and by hand) picks a Social Home release — or a commit on
+`main` — checks that version of this repo out, rebuilds the viewer with a
+read-only token it does not keep, and checks the build equals the committed
+manifest; a separate job — no dependency code, actions pinned by commit SHA
+— reads `socialhome/pinned_viewer.json` straight from this repo at that
+commit, checks `viewer.js`'s sha384 against its `integrity`, and only then
+adds `v/<hash>/` to the viewer repo's `gh-pages` branch (with `.nojekyll` and
+the `viewer.social-home.io` `CNAME`). So every published version is built
+twice, by this repo's CI and by the viewer repo, and the two must agree. A
+ruleset on that `gh-pages` blocking force-push and deletion keeps published
+versions append-only on GitHub's side too. It only ever **adds** a version — an existing one
 must be byte-identical — so links minted by every earlier release keep
 opening. Anyone can audit a served version: fetch `v/<hash>/viewer.js`,
 compare its sha384 with the `integrity` in the release's
@@ -431,8 +435,9 @@ GFS-served page (less safe).
   per link), so after a script compromise the page could talk to any https
   host; SRI and the content-addressed path are what keep the script the
   released one.
-- **Push access to `gh-pages`.** Anyone who can push it (any workflow with
-  `contents: write`) could change a version's files; browsers only notice a
+- **Push access to the viewer repo's `gh-pages`.** Anyone who can push it
+  (its publish workflow, or an admin of that repo) could change a version's
+  files — nothing in this repo can; browsers only notice a
   `viewer.js` that fails its SRI, not a changed `index.html`. The ruleset
   and the audit (rebuild the tag, compare with the served bytes) are the
   checks.
@@ -564,7 +569,7 @@ GFS bundle alone, or `pnpm build` for both.
   its fragment bootstrap `client/gfs/pinned_link.ts`, its styles
   `client/gfs/public_highlight.css`, its manifest + link builder
   `socialhome/pinned_viewer.py` / `socialhome/pinned_viewer.json`, its
-  publish workflow `.github/workflows/pinned-viewer.yml`.
+  publishing: the [`social-home-io/viewer`](https://github.com/social-home-io/viewer) repo's workflow.
 - CORS on the anonymous viewer routes: `socialhome/global_server/viewer_cors.py`.
 
 ## Security notes
