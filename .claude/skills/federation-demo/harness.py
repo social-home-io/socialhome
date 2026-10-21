@@ -2764,6 +2764,20 @@ def cmd_gfs_space_follower_names() -> None:
         f"  e (new follower) names Erin with her bio after "
         f"{time.monotonic() - t0:.0f} s, no new post ✓"
     )
+    # Names come first; her picture follows in a later bundle part, checked
+    # against the hash she signed.
+    pic_deadline = time.monotonic() + 30
+    while not got.get("picture_url") and time.monotonic() < pic_deadline:
+        time.sleep(2)
+        s, rows = _request(f"{e_url}/api/spaces/{space_id}/authors", token=e["token"])
+        if s == 200:
+            got = next((r for r in rows if r.get("user_id") == erin), got)
+    if not got.get("picture_url"):
+        raise SystemExit("gfs-space-follower-names: e never got Erin's picture")
+    s, raw = _http_get_bytes(f"{e_url}/{got['picture_url']}")
+    if s != 200 or not raw.startswith(b"RIFF"):
+        raise SystemExit(f"gfs-space-follower-names: picture → HTTP {s} {raw[:16]!r}")
+    print("  e gets Erin's picture from the bundle's picture part ✓")
     # Let a late publish land before counting.
     time.sleep(3)
     publishes = _gfs_log_lines_matching("POST /gfs/publish ", offset=gfs_off)
@@ -2857,6 +2871,44 @@ def cmd_gfs_space_follower_reconnect() -> None:
     _wait_for_gfs_ws_since(a["instance_id"], offset=off)
     print("  a (host) restarted and re-opened its GFS socket ✓")
     time.sleep(8)
+
+    # 1b. H2: Erin posts after the restart. Her profile didn't change, so a
+    #     publishes NO profile item (the dedupe is the persisted cache row,
+    #     not an in-memory map a restart forgets). Her own row on a — whose
+    #     ts moves on every publish — must stay as it was.
+    def _erin_row_ts() -> str | None:
+        rows = _rows(
+            "a",
+            "SELECT ts FROM space_author_profiles WHERE space_id = ? "
+            "AND author_user_id = ?",
+            (space_id, erin),
+        )
+        return rows[0][0] if rows else None
+
+    before = _erin_row_ts()
+    if before is None:
+        raise SystemExit("gfs-space-follower-reconnect: a holds no row for Erin")
+    a_url = f"http://127.0.0.1:{a['port']}"
+    s, login = _request(
+        f"{a_url}/api/auth/token",
+        method="POST",
+        body={"username": "erin", "password": "erin-pw-demo"},
+    )
+    _must("gfs-space-follower-reconnect: erin login(a)", s, login)
+    s, post = _request(
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=login["token"],
+        method="POST",
+        body={"type": "text", "content": f"After the restart — {time.time_ns()}"},
+    )
+    _must("gfs-space-follower-reconnect: erin posts", s, post, ok=(201,))
+    time.sleep(8)
+    if _erin_row_ts() != before:
+        raise SystemExit(
+            "gfs-space-follower-reconnect: a re-published Erin's unchanged "
+            "profile after its restart"
+        )
+    print("  Erin posts after a's restart: her unchanged profile is not re-sent ✓")
 
     # 2. Restart the follower.
     gfs_off = _gfs_log_size()

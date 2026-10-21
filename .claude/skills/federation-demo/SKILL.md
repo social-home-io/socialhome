@@ -865,7 +865,9 @@ global space, which the ``gfs-invite-link*`` steps must not find. e
 subscribes; the GFS notifies a, which seals the content key to e and then
 ONE bundle of its cached, author-signed profiles — both targeted at e alone
 (``POST /gfs/publish`` with ``to``, the GFS's ``targeted_publish``). e must
-name Erin, with her bio, within 30 s without a new post. From the subscribe
+name Erin, with her bio, within 30 s without a new post, and then get her
+picture (names come first; the picture follows in a later bundle part,
+checked against the hash she signed). From the subscribe
 on, every ``/gfs/publish`` the GFS took must be targeted with exactly one
 subscriber reached and no member may publish (no ``/gfs/member-publish*``):
 the other follower, d, is sent nothing for e's subscribe. The GFS log never
@@ -877,7 +879,10 @@ Needs ``gfs-space-follower-names``; runs right after it. Restarts **a** (the
 host, so no in-memory "already sent" record survives) and then **e** (the
 follower: its GFS socket reconnects, the GFS sends ``new_subscriber`` with
 ``reason: "reconnect"``, and e re-subscribes a seat it already holds, which
-notifies nobody). From e's restart on, the GFS log must show at least one
+at most repeats that key repair). Between the two restarts Erin posts on a:
+her profile is unchanged, so a must not re-publish it (her own
+``space_author_profiles`` row on a keeps its ``ts``; the dedupe is that
+persisted row, so neither a restart nor a key rotation re-sends a profile). From e's restart on, the GFS log must show at least one
 targeted ``space_subscriber_key_handoff`` reaching e's one socket and **no**
 ``space_author_profiles_bundle``; e still names Erin.
 

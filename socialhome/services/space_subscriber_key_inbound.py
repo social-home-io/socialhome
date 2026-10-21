@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cryptography.exceptions import InvalidTag
@@ -67,6 +68,27 @@ if TYPE_CHECKING:
     from .space_public_inbound import SpacePublicInbound
 
 log = logging.getLogger(__name__)
+
+#: A profiles bundle older than this (its authority-signed ``issued_at``) is
+#: refused: a server cannot replay an old bundle to a follower forever.
+BUNDLE_MAX_AGE_S: float = 3600.0
+
+#: How far in the future a bundle's ``issued_at`` may be (clock skew).
+BUNDLE_MAX_SKEW_S: float = 300.0
+
+
+def _bundle_is_fresh(raw: object) -> bool:
+    """``raw`` is a tz-aware ISO time within the bundle's age window."""
+    if not isinstance(raw, str):
+        return False
+    try:
+        issued = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if issued.tzinfo is None:
+        return False
+    age = (datetime.now(UTC) - issued).total_seconds()
+    return -BUNDLE_MAX_SKEW_S <= age <= BUNDLE_MAX_AGE_S
 
 
 class SpaceSubscriberKeyInbound:
@@ -265,6 +287,13 @@ class SpaceSubscriberKeyInbound:
                 space_id,
             )
             return
+        if not _bundle_is_fresh(envelope.get("issued_at")):
+            log.warning(
+                "space_subscriber_key.inbound: stale or undated profiles bundle "
+                "for space %s — dropped",
+                space_id,
+            )
+            return
         sealed = envelope.get("sealed")
         if not isinstance(sealed, dict):
             return
@@ -281,21 +310,20 @@ class SpaceSubscriberKeyInbound:
             )
             return
         parsed = parse_bundle_plaintext(plaintext)
-        if parsed is None or parsed[0] != space_id:
+        if parsed is None or parsed.space_id != space_id:
             log.warning(
                 "space_subscriber_key.inbound: malformed profiles bundle for space %s",
                 space_id,
             )
             return
-        _space, epoch, items = parsed
         stored = await self._profiles_sink.apply_bundled_profiles(
-            space_id, epoch=epoch, items=items
+            space_id, items=parsed.items, pictures=parsed.pictures
         )
         log.info(
-            "space_subscriber_key.inbound: %d of %d author profile(s) from the "
-            "bundle stored for space %s",
+            "space_subscriber_key.inbound: %d of %d author profile(s) and "
+            "picture(s) from a bundle part stored for space %s",
             stored,
-            len(items),
+            len(parsed.items) + len(parsed.pictures),
             space_id,
         )
 

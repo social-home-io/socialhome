@@ -887,6 +887,37 @@ async def test_schedule_item_publishes_in_the_background(world):
     assert item_type == "reaction_add"
 
 
+async def test_on_published_runs_once_a_server_took_the_item(world):
+    """PR B review I2: the caller records a profile as published only when
+    a server took it."""
+    svc = world["svc"]
+    done: list[bool] = []
+
+    async def _done() -> None:
+        done.append(True)
+
+    assert svc.schedule_item(
+        SPACE_ID, AUTHOR, "reaction_add", {"emoji": "x"}, on_published=_done
+    )
+    await svc.wait_idle()
+    assert done == [True]
+
+
+async def test_on_published_never_runs_when_no_server_took_it(world):
+    svc = world["svc"]
+    svc._writer_certs.scope = "comment"  # our cert cannot carry this type
+    done: list[bool] = []
+
+    async def _done() -> None:
+        done.append(True)
+
+    assert svc.schedule_item(
+        SPACE_ID, AUTHOR, "post_delete", {"x": 1}, on_published=_done
+    )
+    await svc.wait_idle()
+    assert done == []
+
+
 # ── Review: size-bucket padding (the type hides from the payload size) ────
 
 

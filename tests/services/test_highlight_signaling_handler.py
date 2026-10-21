@@ -22,6 +22,8 @@ from PIL import Image
 
 from socialhome.crypto import b64url_encode
 from socialhome.domain.highlight import HighlightAudience, HighlightFrameType
+from socialhome.media import profile_picture as profile_picture_mod
+from socialhome.media.profile_picture import PublicPictureCache
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
@@ -1096,6 +1098,35 @@ async def test_a_viewer_with_a_key_gets_who_shared_it_sealed(
     assert (opened["display_name"], opened["bio"]) == ("Alice", "Bread and bees.")
     pic = base64.b64decode(opened["picture"])
     assert pic[:4] == b"RIFF" and len(pic) <= 24 * 1024
+
+
+async def test_the_public_picture_is_re_encoded_once_not_per_view(
+    repos, published_highlight, db, monkeypatch
+):
+    """M4 (#1081): every public view re-encoded the author's picture (up to
+    three decode + encode passes). It is now cached per source picture."""
+    highlight_id, _f1, _f2 = published_highlight
+    await db.enqueue(
+        "UPDATE users SET picture_hash='0123456789abcdef' WHERE user_id='u1'"
+    )
+    calls: list[bytes] = []
+    real = profile_picture_mod.public_profile_picture
+
+    async def _counting(raw: bytes):
+        calls.append(raw)
+        return await real(raw)
+
+    monkeypatch.setattr(profile_picture_mod, "public_profile_picture", _counting)
+    handler, _ = _make_handler(repos)
+    handler.attach_author_profiles(
+        user_repo=SqliteUserRepo(db),
+        picture_repo=_Pictures(),  # type: ignore[arg-type]
+        picture_cache=PublicPictureCache(),
+    )
+    for _ in range(3):
+        _sk, vk = _viewer_key()
+        await _profile_frames(handler, highlight_id, vk)
+    assert len(calls) == 1
 
 
 async def test_no_key_no_profile_frame(repos, published_highlight, db):

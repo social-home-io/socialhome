@@ -1,88 +1,153 @@
-"""A new GFS follower's author-profile bundle (v_61) — pure, no I/O.
+"""A new GFS follower's author-profile bundle (v_61). Pure, no I/O.
 
-When a household follows a public / global space through a GFS, the space's
-host answers the GFS ``new_subscriber`` notify with the content-key handoff
-and then with ONE bundle of the space's author profiles, delivered to that
-follower only (``POST /gfs/publish`` with ``to``). Before v_61 every member
-household republished its authors' ``author_profile`` items to every
-follower of the space instead.
+When a household follows a public or global space through a GFS, the
+space's host answers the GFS ``new_subscriber`` notify for a NEW seat with
+the content-key handoff, then with this bundle of the space's author
+profiles. Both go to that follower only (``POST /gfs/publish`` with ``to``).
 
-The bundle carries the authors' own signed ``author_profile`` items
-unchanged, so the follower verifies each author's signature and writer cert
-exactly as for a relayed item; the host only chooses which and seals them
-(:func:`~socialhome.federation.keywrap_seal.seal_to_keywrap`, KEM-suite
-tagged) to the follower's key-wrap key. The plaintext is
-``{"space_id", "epoch", "part", "parts", "items": [...]}``.
+**Names first.** Part 0 carries every bundled author's own signed
+``author_profile`` item, unchanged except that the unsigned picture
+sidecar is left out. Each item is about 1–2 KB. The follower verifies each
+author's signature, and their writer cert at the item's OWN epoch, exactly
+as for a relayed item. So a bundle can hold profiles published before the
+current epoch, and a key rotation never forces a republish. Later parts carry
+only pictures: ``{author, hash, picture}``, where ``hash`` is the author's
+SIGNED picture hash. The follower keeps a picture only when its bytes hash
+to it. The host sends picture parts only while its hourly byte budget
+allows, so names never wait behind pictures. The GFS delivers one
+subscriber's frames in publish order, so part 0 lands first; a picture part
+that somehow came first finds no row and is dropped.
 
-Bounded: at most :data:`MAX_BUNDLE_AUTHORS` authors (the most recently
-stamped), :data:`MAX_BUNDLE_BYTES` of items in all, split into parts of at
-most :data:`BUNDLE_PART_MAX_BYTES` so each sealed part fits the GFS's
-publish body cap.
+Plaintext of one part::
+
+    {"space_id", "part", "parts",
+     "items": [{"epoch": int, "item": {...}}],
+     "pictures": [{"author", "hash", "picture"}],
+     "_pad": "000…"}
+
+Every part is padded to a size bucket
+(:data:`~socialhome.domain.space_item.ITEM_SIZE_BUCKETS`), so its length
+tells the GFS only the bucket. The part COUNT still tells it roughly how
+many bundled authors have a picture, and at most 50 authors are bundled.
+
+Bounded: at most :data:`MAX_BUNDLE_AUTHORS` authors, the most recently
+stamped first. Every part is at most :data:`BUNDLE_PART_MAX_BYTES` (the
+largest bucket), so each one, sealed and base64'd, fits the GFS's 256 KiB
+``/gfs/publish`` body cap.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+
+from .space_author_profile import (
+    PROFILE_PICTURE_FIELD,
+    stored_profile_inner,
+    without_picture_sidecar,
+)
+from .space_item import ITEM_SIZE_BUCKETS, pad_json_object
 
 #: The most authors one new follower is sent (the most recently stamped).
 MAX_BUNDLE_AUTHORS: int = 50
 
-#: The most item bytes (compact JSON) one new follower is sent in all.
-MAX_BUNDLE_BYTES: int = 1024 * 1024
+#: The most bytes of one part's plaintext, padding included: the largest
+#: size bucket. Sealed and base64'd that stays under the GFS's 256 KiB cap.
+BUNDLE_PART_MAX_BYTES: int = ITEM_SIZE_BUCKETS[-1]
 
-#: The most item bytes in one sealed part: sealed and base64-encoded it stays
-#: well under the GFS's 256 KiB ``/gfs/publish`` body cap.
-BUNDLE_PART_MAX_BYTES: int = 160 * 1024
-
-
-def _size(item: dict) -> int:
-    return len(json.dumps(item, separators=(",", ":"), ensure_ascii=False).encode())
+#: Room kept for the part's own keys, numbering and padding field.
+_PART_OVERHEAD: int = 256
 
 
-def split_bundle(items: list[dict]) -> list[list[dict]]:
-    """The items as parts, in order, within every bound above. An item too
-    big for a part on its own is left out."""
-    parts: list[list[dict]] = []
-    part: list[dict] = []
-    part_bytes = 0
-    total = 0
-    for item in items[:MAX_BUNDLE_AUTHORS]:
-        size = _size(item)
-        if size > BUNDLE_PART_MAX_BYTES:
+@dataclass(slots=True, frozen=True)
+class BundleEntry:
+    """One author's cached, author-signed profile item, as the host holds it.
+
+    ``item`` may still carry the picture sidecar (the author's original
+    picture bytes). ``picture_hash`` is the hash the author signed."""
+
+    epoch: int
+    item: dict
+    picture_hash: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class ParsedBundlePart:
+    """One opened part: ``items`` as ``(epoch, item)`` and ``pictures`` as
+    ``(author_user_id, signed_hash, base64_webp)``. Nothing is verified yet."""
+
+    space_id: str
+    items: list[tuple[int, dict]]
+    pictures: list[tuple[str, str, str]]
+
+
+def _size(value: object) -> int:
+    return len(json.dumps(value).encode("utf-8"))
+
+
+def build_bundle_parts(space_id: str, entries: list[BundleEntry]) -> list[bytes]:
+    """The bundle's plaintext parts, in order, each padded to a bucket.
+
+    Part 0 has the names (as many of the first :data:`MAX_BUNDLE_AUTHORS` as
+    fit in one part). Then come the pictures of those authors, packed into
+    as few parts as fit; a picture too big for a part on its own is left
+    out. Returns ``[]`` when there is nothing to send."""
+    names: list[dict] = []
+    names_bytes = _PART_OVERHEAD
+    pictures: list[dict] = []
+    for entry in entries[:MAX_BUNDLE_AUTHORS]:
+        item = stored_profile_inner(entry.item)
+        if item is None:
             continue
-        if total + size > MAX_BUNDLE_BYTES:
-            break
-        if part and part_bytes + size > BUNDLE_PART_MAX_BYTES:
-            parts.append(part)
-            part, part_bytes = [], 0
-        part.append(item)
-        part_bytes += size
-        total += size
-    if part:
-        parts.append(part)
-    return parts
+        named = {"epoch": entry.epoch, "item": without_picture_sidecar(item)}
+        size = _size(named) + 2
+        if names_bytes + size > BUNDLE_PART_MAX_BYTES:
+            continue
+        names.append(named)
+        names_bytes += size
+        raw = item.get(PROFILE_PICTURE_FIELD)
+        if entry.picture_hash and isinstance(raw, str) and raw:
+            pictures.append(
+                {
+                    "author": str(entry.item.get("author_user_id") or ""),
+                    "hash": entry.picture_hash,
+                    "picture": raw,
+                }
+            )
+    if not names:
+        return []
+    bodies: list[tuple[list[dict], list[dict]]] = [(names, [])]
+    chunk: list[dict] = []
+    chunk_bytes = _PART_OVERHEAD
+    for picture in pictures:
+        size = _size(picture) + 2
+        if _PART_OVERHEAD + size > BUNDLE_PART_MAX_BYTES:
+            continue
+        if chunk and chunk_bytes + size > BUNDLE_PART_MAX_BYTES:
+            bodies.append(([], chunk))
+            chunk, chunk_bytes = [], _PART_OVERHEAD
+        chunk.append(picture)
+        chunk_bytes += size
+    if chunk:
+        bodies.append(([], chunk))
+    return [
+        pad_json_object(
+            {
+                "space_id": space_id,
+                "part": index,
+                "parts": len(bodies),
+                "items": items,
+                "pictures": pics,
+            }
+        )
+        for index, (items, pics) in enumerate(bodies)
+    ]
 
 
-def bundle_plaintext(
-    *, space_id: str, epoch: int, part: int, parts: int, items: list[dict]
-) -> bytes:
-    """One part's plaintext, before sealing."""
-    return json.dumps(
-        {
-            "space_id": space_id,
-            "epoch": epoch,
-            "part": part,
-            "parts": parts,
-            "items": items,
-        },
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-
-
-def parse_bundle_plaintext(raw: bytes) -> tuple[str, int, list[object]] | None:
-    """``(space_id, epoch, items)`` of an opened part, or ``None`` when it
-    is not a bundle."""
+def parse_bundle_plaintext(raw: bytes) -> ParsedBundlePart | None:
+    """One opened part, or ``None`` when it is not a well-formed bundle
+    part (shape and counts only — every item and picture is verified by
+    the caller)."""
     try:
         body = json.loads(raw)
     except ValueError:
@@ -90,16 +155,45 @@ def parse_bundle_plaintext(raw: bytes) -> tuple[str, int, list[object]] | None:
     if not isinstance(body, dict):
         return None
     space_id = body.get("space_id")
-    epoch = body.get("epoch")
-    items = body.get("items")
+    raw_items = body.get("items")
+    raw_pictures = body.get("pictures")
     if (
         not isinstance(space_id, str)
         or not space_id
-        or not isinstance(epoch, int)
-        or isinstance(epoch, bool)
-        or epoch < 0
-        or not isinstance(items, list)
-        or len(items) > MAX_BUNDLE_AUTHORS
+        or not isinstance(raw_items, list)
+        or not isinstance(raw_pictures, list)
+        or len(raw_items) > MAX_BUNDLE_AUTHORS
+        or len(raw_pictures) > MAX_BUNDLE_AUTHORS
     ):
         return None
-    return space_id, epoch, items
+    items: list[tuple[int, dict]] = []
+    for entry in raw_items:
+        if not isinstance(entry, dict):
+            return None
+        epoch = entry.get("epoch")
+        item = entry.get("item")
+        if (
+            not isinstance(epoch, int)
+            or isinstance(epoch, bool)
+            or epoch < 0
+            or not isinstance(item, dict)
+        ):
+            return None
+        items.append((epoch, item))
+    pictures: list[tuple[str, str, str]] = []
+    for entry in raw_pictures:
+        if not isinstance(entry, dict):
+            return None
+        author, digest, picture = (
+            entry.get("author"),
+            entry.get("hash"),
+            entry.get("picture"),
+        )
+        if not (
+            isinstance(author, str)
+            and isinstance(digest, str)
+            and isinstance(picture, str)
+        ):
+            return None
+        pictures.append((author, digest, picture))
+    return ParsedBundlePart(space_id=space_id, items=items, pictures=pictures)

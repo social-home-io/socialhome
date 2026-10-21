@@ -73,6 +73,7 @@ import functools
 import hashlib
 import json
 import logging
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from cryptography.exceptions import InvalidTag
@@ -638,6 +639,7 @@ class SpacePublicInbound:
         item_type: str,
         inner: dict[str, Any],
         frame_cert: object | None,
+        fresh_epoch: bool = True,
     ) -> tuple[WriterCert, str, str, str] | None:
         """Every check a member-published item gets before it is applied
         (see :meth:`_on_space_item`), shared with the v_61 new-follower
@@ -709,13 +711,28 @@ class SpacePublicInbound:
             author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
         except ValueError:
             return None
-        if not await self._writer_certs.check_item(
-            space,
-            raw_cert,
-            epoch=epoch,
-            author_pk=author_pk,
-            required_scope=required_scope(item_type),
-        ):
+        # A bundled item (``fresh_epoch=False``) is checked at the epoch it
+        # was published at, with no freshness: the bundle is authority-signed
+        # and sealed to us, and its sender, a seed holder, could mint a
+        # current cert anyway. A key rotation then never forces a republish.
+        cert_ok = (
+            await self._writer_certs.check_item(
+                space,
+                raw_cert,
+                epoch=epoch,
+                author_pk=author_pk,
+                required_scope=required_scope(item_type),
+            )
+            if fresh_epoch
+            else self._writer_certs.check_item_cert(
+                space,
+                raw_cert,
+                epoch=epoch,
+                author_pk=author_pk,
+                required_scope=required_scope(item_type),
+            )
+        )
+        if not cert_ok:
             log.warning(
                 "space_public.inbound: writer cert refused for space_item %s (%s) "
                 "in space %s — dropped",
@@ -744,20 +761,29 @@ class SpacePublicInbound:
         return inner_cert, item_id, author_user_id, origin_instance_id
 
     async def apply_bundled_profiles(
-        self, space_id: str, *, epoch: int, items: list[object]
+        self,
+        space_id: str,
+        *,
+        items: list[tuple[int, dict]],
+        pictures: Sequence[tuple[str, str, str]] = (),
     ) -> int:
-        """Apply the author-signed ``author_profile`` items of a v_61
-        new-follower bundle (opened and authority-verified by
-        :class:`~socialhome.services.space_subscriber_key_inbound.SpaceSubscriberKeyInbound`).
-        Each one gets exactly the checks of a relayed item — author
-        signature, author-bound type, origin, writer cert at ``epoch`` with
-        a v2 user binding — and anything but a profile is refused. Returns
-        how many were stored. Never raises."""
+        """Apply one opened part of a v_61 new-follower bundle. The part was
+        opened and authority-verified by
+        :class:`~socialhome.services.space_subscriber_key_inbound.SpaceSubscriberKeyInbound`.
+
+        ``items`` are ``(epoch, author-signed author_profile item)``. Each
+        gets every check a relayed item gets: author signature, author-bound
+        type, origin, and a writer cert with a v2 user binding at ITS OWN
+        epoch, though not a fresh one (see :meth:`_verified_item`). Anything
+        but a profile is refused. ``pictures`` are
+        ``(author, signed hash, base64 WebP)``, kept only when the bytes hash
+        to the held profile's signed hash. Returns how many profiles and
+        pictures were stored. Never raises."""
         space = await self._spaces.get(space_id)
         if space is None or not space.identity_public_key or self._writer_certs is None:
             return 0
         stored = 0
-        for raw in items:
+        for epoch, raw in items:
             if not isinstance(raw, dict):
                 continue
             if raw.get("item_type") != ITEM_TYPE_AUTHOR_PROFILE:
@@ -775,6 +801,7 @@ class SpacePublicInbound:
                     item_type=ITEM_TYPE_AUTHOR_PROFILE,
                     inner=raw,
                     frame_cert=None,
+                    fresh_epoch=False,
                 )
                 if verified is None:
                     continue
@@ -793,6 +820,17 @@ class SpacePublicInbound:
             except Exception:
                 log.exception(
                     "space_public.inbound: a bundled profile for space %s failed",
+                    space_id,
+                )
+        for author, picture_hash, picture in pictures:
+            try:
+                if await self._items.attach_bundled_picture(
+                    space_id, author, picture_hash, picture
+                ):
+                    stored += 1
+            except Exception:
+                log.exception(
+                    "space_public.inbound: a bundled picture for space %s failed",
                     space_id,
                 )
         return stored

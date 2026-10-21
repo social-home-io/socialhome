@@ -16,9 +16,11 @@ from socialhome.domain.space_author_profile import (
     PROFILE_PICTURE_MAX_BYTES,
     PROFILE_PICTURE_MAX_PX,
 )
+from socialhome.media import profile_picture as profile_picture_mod
 from socialhome.media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     PROFILE_PICTURE_MAX_SOURCE_PIXELS,
+    PublicPictureCache,
     normalize_profile_picture,
     public_profile_picture,
     reencode_peer_picture,
@@ -119,3 +121,40 @@ async def test_public_profile_picture_never_keeps_the_input_bytes():
 
 async def test_public_profile_picture_refuses_what_is_not_an_image():
     assert await public_profile_picture(b"<svg onload=alert(1)/>") is None
+
+
+async def test_the_public_picture_cache_re_encodes_a_source_once(monkeypatch):
+    """M4: the public re-encode (up to three decode + encode passes) runs
+    once per source picture, not on every view or publish."""
+    calls: list[bytes] = []
+    real = profile_picture_mod.public_profile_picture
+
+    async def _counting(raw: bytes) -> bytes | None:
+        calls.append(raw)
+        return await real(raw)
+
+    monkeypatch.setattr(profile_picture_mod, "public_profile_picture", _counting)
+    cache = PublicPictureCache(max_entries=2)
+    src = _png(300, 300)
+    first = await cache.get("aaaaaaaaaaaaaaaa", src)
+    again = await cache.get("aaaaaaaaaaaaaaaa", src)
+    assert first is not None and again == first
+    assert len(calls) == 1
+
+
+async def test_the_public_picture_cache_is_bounded_and_remembers_misses(monkeypatch):
+    calls: list[bytes] = []
+
+    async def _fake(raw: bytes) -> bytes | None:
+        calls.append(raw)
+        return None if raw == b"bad" else b"RIFF" + raw
+
+    monkeypatch.setattr(profile_picture_mod, "public_profile_picture", _fake)
+    cache = PublicPictureCache(max_entries=2)
+    assert await cache.get("h-bad", b"bad") is None
+    assert await cache.get("h-bad", b"bad") is None  # a miss is cached too
+    await cache.get("h-1", b"1")
+    await cache.get("h-2", b"2")  # evicts h-bad (least recently used)
+    await cache.get("h-bad", b"bad")
+    assert calls == [b"bad", b"1", b"2", b"bad"]
+    assert len(cache) == 2

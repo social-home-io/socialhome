@@ -38,7 +38,12 @@ from socialhome.domain.gfs_member_publish import (
     SPACE_ITEM_EVENT_TYPE,
     MemberPublishRequest,
 )
-from socialhome.domain.space_author_profile import encode_profile_content
+from socialhome.domain.space_author_profile import (
+    PROFILE_PICTURE_FIELD,
+    encode_picture_sidecar,
+    encode_profile_content,
+    profile_picture_digest,
+)
 from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
 from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
@@ -440,7 +445,7 @@ async def test_an_author_profile_reaches_the_gfs_with_no_name_bio_or_picture(
     content, _rev = encode_profile_content(
         display_name="Noor Haddad",
         bio="Beekeeper on a Höngg rooftop.",
-        picture_webp=picture,
+        picture_hash=profile_picture_digest(picture),
     )
     sent: list[dict] = []
     real_post = gfs.session.post
@@ -466,6 +471,8 @@ async def test_an_author_profile_reaches_the_gfs_with_no_name_bio_or_picture(
         "author_user_id": "noor-user-id",
         "author_username": "noor",
         "content": content,
+        # The picture rides beside the signed content as the sidecar.
+        PROFILE_PICTURE_FIELD: encode_picture_sidecar(picture),
     }
     with caplog.at_level(logging.DEBUG):
         accepted = await svc.publish_item(SPACE_ID, "author_profile", inner, [conn])
@@ -492,5 +499,6 @@ async def test_an_author_profile_reaches_the_gfs_with_no_name_bio_or_picture(
             "display_name",
             "noor-user-id",
             content[:40],
+            encode_picture_sidecar(picture)[:40],
         ):
             assert leak not in blob, f"{where} carries {leak!r}"

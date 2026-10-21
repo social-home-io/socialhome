@@ -181,6 +181,7 @@ from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
 from .infrastructure.user_identity import ensure_user_identities
 from .infrastructure.user_status_expiry_scheduler import UserStatusExpiryScheduler
 from .media.image_processor import ImageProcessor
+from .media.profile_picture import PublicPictureCache
 from .media.video_processor import VideoProcessor
 from .media_signer import MediaUrlSigner, derive_signing_key
 from .outbound_fetch import OutboundFetcher
@@ -3136,6 +3137,10 @@ def create_app(config: Config | None = None) -> web.Application:
     # ``attach_session`` + ``attach_identity`` happen in the startup
     # hook (mirrors ``HighlightPublicationService``); the WS supervisor
     # forwards every ``highlight_signal`` frame here.
+    # One cache of the small public profile pictures (M4): re-encoded once
+    # per source picture, shared by the public highlight page and the
+    # author profiles for a space's followers.
+    public_picture_cache = PublicPictureCache()
     highlight_signaling_handler = HighlightSignalingHandler(
         highlight_repo,
         repos.gfs_connection,
@@ -3143,7 +3148,9 @@ def create_app(config: Config | None = None) -> web.Application:
     )
     # Who shared it: a sealed author_profile frame for the public page.
     highlight_signaling_handler.attach_author_profiles(
-        user_repo=user_repo, picture_repo=profile_picture_repo
+        user_repo=user_repo,
+        picture_repo=profile_picture_repo,
+        picture_cache=public_picture_cache,
     )
     # Author-side signalling answerer for the public-moments live index
     # (§Momentum-public). Same shape as ``highlight_signaling_handler``:
@@ -4348,6 +4355,7 @@ def create_app(config: Config | None = None) -> web.Application:
                 own_instance_id=real_instance_id,
                 own_instance_pk=identity_pk,
                 own_identity_seed=identity_seed,
+                picture_cache=public_picture_cache,
             )
             author_profiles.attach_child_protection(child_protection_service)
             # v_61 — our own authors' signed items go into the cache too,
