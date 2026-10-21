@@ -376,6 +376,7 @@ class GfsConnectionService:
         "_replaces",
         "_repo",
         "_rotation_warned",
+        "_sealed_highlight_stream",
         "_space_repo",
         "_target_warned",
         "_targeted_publish",
@@ -453,6 +454,11 @@ class GfsConnectionService:
         # a targeted item out to every subscriber, so nothing targeted is
         # sent to it.
         self._targeted_publish: dict[str, bool] = {}
+        # …and for ``sealed_highlight_stream``: the GFS's public highlight
+        # viewer page opens the end-to-end sealed stream (``stream_seal`` +
+        # ``sealed`` frames, the ``#k=`` link secret). An older page can't,
+        # so no public highlight link is minted there — it would be dead.
+        self._sealed_highlight_stream: dict[str, bool] = {}
         # Same again for ``member_publish_trusted`` (v_49): whether the GFS
         # carries the identified ``POST /gfs/member-publish`` and the
         # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
@@ -668,6 +674,7 @@ class GfsConnectionService:
             self._invite_links,
             self._place_pin,
             self._targeted_publish,
+            self._sealed_highlight_stream,
             self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
@@ -2058,6 +2065,20 @@ class GfsConnectionService:
             conn,
             "private_channels",
             self._private_channels,
+        )
+
+    async def sealed_highlight_stream_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``sealed_highlight_stream`` on
+        /gfs/info.
+
+        Gates minting a public highlight link
+        (:meth:`HighlightPublicationService.publish`): this household streams
+        only sealed frames, which an older GFS's viewer page cannot open, so a
+        link minted there would never play for anyone."""
+        return await self._signed_capability_supported(
+            conn,
+            "sealed_highlight_stream",
+            self._sealed_highlight_stream,
         )
 
     async def _signed_capability_supported(

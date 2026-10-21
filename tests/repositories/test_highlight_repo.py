@@ -342,6 +342,81 @@ async def test_mark_unpublished_clears_flag(db, repo):
     assert refreshed.public_published_at is None
 
 
+async def _published(db, repo, *, gfs_id: str = "gfs-abc"):
+    await _seed_user(db)
+    await _seed_gfs_connection(db, gfs_id=gfs_id)
+    highlight = await repo.find_or_create_today(
+        author_user_id="u1",
+        audience_kind=HighlightAudience.ALL_PAIRED,
+        audience=(),
+        highlight_date="2026-05-03",
+        expires_at=_expires(),
+    )
+    await repo.mark_published(
+        highlight.id, gfs_id=gfs_id, published_at="2026-05-03T12:00:00+00:00"
+    )
+    return highlight
+
+
+_HASH_A = "a" * 64
+_HASH_B = "b" * 64
+
+
+async def test_a_minted_token_is_live_for_its_highlight(db, repo):
+    highlight = await _published(db, repo)
+    await repo.add_public_token(highlight.id, gfs_id="gfs-abc", token_hash=_HASH_A)
+    assert await repo.is_live_public_token(highlight.id, _HASH_A)
+    assert not await repo.is_live_public_token(highlight.id, _HASH_B)
+    assert not await repo.is_live_public_token("other", _HASH_A)
+
+
+async def test_a_token_from_another_gfs_is_not_live(db, repo):
+    """Re-published on another GFS: the first GFS's tokens end."""
+    highlight = await _published(db, repo)
+    await repo.add_public_token(highlight.id, gfs_id="gfs-abc", token_hash=_HASH_A)
+    await _seed_gfs_connection(db, gfs_id="gfs-xyz")
+    await repo.mark_published(
+        highlight.id, gfs_id="gfs-xyz", published_at="2026-05-04T12:00:00+00:00"
+    )
+    assert not await repo.is_live_public_token(highlight.id, _HASH_A)
+
+
+async def test_a_token_of_an_expired_highlight_is_not_live(db, repo):
+    highlight = await _published(db, repo)
+    await repo.add_public_token(highlight.id, gfs_id="gfs-abc", token_hash=_HASH_A)
+    await db.enqueue(
+        "UPDATE highlights SET expires_at=? WHERE id=?",
+        ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), highlight.id),
+    )
+    assert not await repo.is_live_public_token(highlight.id, _HASH_A)
+
+
+async def test_adding_a_token_twice_is_idempotent(db, repo):
+    highlight = await _published(db, repo)
+    await repo.add_public_token(highlight.id, gfs_id="gfs-abc", token_hash=_HASH_A)
+    await repo.add_public_token(highlight.id, gfs_id="gfs-abc", token_hash=_HASH_A)
+    assert await repo.is_live_public_token(highlight.id, _HASH_A)
+
+
+async def test_a_removed_token_is_no_longer_known(db, repo):
+    highlight = await _published(db, repo)
+    await repo.add_public_token(highlight.id, gfs_id="gfs-abc", token_hash=_HASH_A)
+    await repo.add_public_token(highlight.id, gfs_id="gfs-abc", token_hash=_HASH_B)
+    await repo.remove_public_token(highlight.id, _HASH_A)
+    assert not await repo.is_live_public_token(highlight.id, _HASH_A)
+    assert await repo.is_live_public_token(highlight.id, _HASH_B)
+
+
+async def test_unpublishing_forgets_every_token(db, repo):
+    highlight = await _published(db, repo)
+    await repo.add_public_token(highlight.id, gfs_id="gfs-abc", token_hash=_HASH_A)
+    await repo.mark_unpublished(highlight.id)
+    await repo.mark_published(
+        highlight.id, gfs_id="gfs-abc", published_at="2026-05-04T12:00:00+00:00"
+    )
+    assert not await repo.is_live_public_token(highlight.id, _HASH_A)
+
+
 async def test_list_published_for_filters_to_author_and_published(db, repo):
     await _seed_user(db, user_id="u1", username="alice")
     await _seed_user(db, user_id="u2", username="bob")

@@ -139,8 +139,9 @@ class AbstractHighlightRepo(Protocol):
     async def save_frame(self, frame: HighlightFrame) -> HighlightFrame: ...
     async def list_authors_with_highlights(self) -> builtins.list[str]: ...
 
-    # Public publication state (§highlights_public). The token registry
-    # lives on GFS — SH only knows whether *some* publication exists.
+    # Public publication state (§highlights_public). The GFS mints the share
+    # tokens; this household keeps a SHA-256 of each one it minted (and has
+    # not revoked) so it streams only for its own live links.
     async def mark_published(
         self,
         highlight_id: str,
@@ -153,6 +154,13 @@ class AbstractHighlightRepo(Protocol):
         self,
         author_user_id: str,
     ) -> builtins.list[Highlight]: ...
+    async def add_public_token(
+        self, highlight_id: str, *, gfs_id: str, token_hash: str
+    ) -> None: ...
+    async def remove_public_token(self, highlight_id: str, token_hash: str) -> None: ...
+    async def is_live_public_token(
+        self, highlight_id: str, token_hash: str
+    ) -> bool: ...
 
 
 class SqliteHighlightRepo:
@@ -613,13 +621,49 @@ class SqliteHighlightRepo:
         )
 
     async def mark_unpublished(self, highlight_id: str) -> None:
-        """Clear the publication state. Caller is responsible for the
-        GFS-side DELETE — this method only flips the local flag."""
+        """Clear the publication state and forget every share token of it.
+        Caller is responsible for the GFS-side DELETE — this method only
+        flips the local state."""
+        await self._db.enqueue(
+            "DELETE FROM highlight_public_tokens WHERE highlight_id=?",
+            (highlight_id,),
+        )
         await self._db.enqueue(
             "UPDATE highlights SET public_gfs_id=NULL, public_published_at=NULL "
             "WHERE id=?",
             (highlight_id,),
         )
+
+    async def add_public_token(
+        self, highlight_id: str, *, gfs_id: str, token_hash: str
+    ) -> None:
+        """Remember a share token this household minted (its SHA-256)."""
+        await self._db.enqueue(
+            "INSERT OR IGNORE INTO highlight_public_tokens"
+            "(token_hash, highlight_id, gfs_id) VALUES(?,?,?)",
+            (token_hash, highlight_id, gfs_id),
+        )
+
+    async def remove_public_token(self, highlight_id: str, token_hash: str) -> None:
+        await self._db.enqueue(
+            "DELETE FROM highlight_public_tokens WHERE token_hash=? AND highlight_id=?",
+            (token_hash, highlight_id),
+        )
+
+    async def is_live_public_token(self, highlight_id: str, token_hash: str) -> bool:
+        """Whether *token_hash* is a live share token of *highlight_id*: one
+        this household minted on the GFS the highlight is published on now,
+        not revoked, and the highlight not past its expiry (the retention
+        scheduler may not have pruned it yet)."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM highlight_public_tokens t "
+            "JOIN highlights h ON h.id = t.highlight_id "
+            "WHERE t.token_hash=? AND t.highlight_id=? "
+            "AND h.public_gfs_id = t.gfs_id "
+            "AND datetime(h.expires_at) > datetime('now')",
+            (token_hash, highlight_id),
+        )
+        return row is not None
 
     async def list_published_for(self, author_user_id: str) -> list[Highlight]:
         rows = await self._db.fetchall(

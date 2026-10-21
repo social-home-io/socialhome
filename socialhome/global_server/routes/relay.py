@@ -169,6 +169,13 @@ class GfsInfoView(GfsBaseView):
             # targeted key handoff and the author-profile bundle only to a
             # server that proved it; an older one would fan them out.
             "targeted_publish": True,
+            # This server's public highlight viewer page opens the end-to-end
+            # sealed stream (``stream_seal`` + ``sealed`` frames under the
+            # ``#k=`` link secret) and never shows a plaintext content frame.
+            # Signed: a household mints a public highlight link only on a
+            # server that proved it — an older page can't open the sealed
+            # frames, so a link minted there would be dead for every viewer.
+            "sealed_highlight_stream": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         if cfg.instance_id_aliases:

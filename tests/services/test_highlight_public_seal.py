@@ -8,12 +8,15 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from socialhome.services import highlight_public_framing as framing
 from socialhome.services.highlight_public_seal import (
+    MAX_TOKEN_LEN,
     STREAM_SEAL_SUITE_P256_LINK,
     StreamOpener,
     StreamSealer,
     UnsupportedStreamSealSuite,
     link_secret,
     link_with_secret,
+    token_digest,
+    usable_token,
 )
 
 SEED = bytes(range(32))
@@ -140,3 +143,27 @@ def test_an_unknown_suite_is_refused():
             secret=bytes(32),
             highlight_id="x",
         )
+
+
+# ─── Share-token bounds ─────────────────────────────────────────────────
+
+
+def test_a_usable_token_is_a_bounded_non_empty_string():
+    assert usable_token("tok-1")
+    assert usable_token("x" * MAX_TOKEN_LEN)
+    assert not usable_token("")
+    assert not usable_token("x" * (MAX_TOKEN_LEN + 1))
+    assert not usable_token(None)
+    assert not usable_token(123)
+
+
+def test_no_secret_is_derived_for_an_oversized_token():
+    """The GFS forwards the token: it can't make us HKDF a megabyte."""
+    with pytest.raises(ValueError):
+        link_secret(SEED, highlight_id="hl-1", token="x" * (MAX_TOKEN_LEN + 1))
+
+
+def test_the_token_digest_is_a_sha256_hex():
+    d = token_digest("tok-1")
+    assert len(d) == 64 and d == d.lower()
+    assert d != token_digest("tok-2")

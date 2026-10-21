@@ -27,7 +27,12 @@ from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import highlight_public_framing as framing
 from socialhome.services.highlight_public_profile import open_profile, parse_viewer_key
-from socialhome.services.highlight_public_seal import StreamOpener, link_secret
+from socialhome.services.highlight_public_seal import (
+    MAX_TOKEN_LEN,
+    StreamOpener,
+    link_secret,
+    token_digest,
+)
 from socialhome.services.highlight_signaling_handler import (
     MAX_CONCURRENT_VIEWERS_PER_HIGHLIGHT,
     HighlightSignalingHandler,
@@ -226,6 +231,10 @@ async def published_highlight(repos):
         highlight.id,
         gfs_id="gfs-abc",
         published_at=datetime.now(UTC).isoformat(),
+    )
+    # The share token this household minted for the link.
+    await repos["highlights"].add_public_token(
+        highlight.id, gfs_id="gfs-abc", token_hash=token_digest(TOKEN)
     )
     return highlight.id, f1.id, f2.id
 
@@ -1231,4 +1240,122 @@ async def test_a_relay_without_a_key_or_token_streams_only_an_error(
     [(_url, _headers, body)] = sess.relay_calls
     assert [framing.decode(b).header for b in _split(body)] == [
         {"kind": "error", "error": "unsupported"}
+    ]
+
+
+# ─── Only our own live links are streamed (not any token a GFS forwards) ──
+
+
+def _offer(highlight_id, token):
+    return {
+        "kind": "offer",
+        "session_id": "s-1",
+        "highlight_id": highlight_id,
+        "sdp": "v=0",
+        "token": token,
+        "vk": VK,
+    }
+
+
+def _relay(highlight_id, token):
+    return {
+        "kind": "relay_offer",
+        "relay_id": "r-1",
+        "highlight_id": highlight_id,
+        "token": token,
+        "vk": VK,
+    }
+
+
+async def _relay_headers(handler, frame):
+    sess = _RecordingSession()
+    handler._http_client = sess  # type: ignore[assignment]
+    await handler.handle_signal(frame)
+    await _drain_relay(handler)
+    [(_url, _headers, body)] = sess.relay_calls
+    return [framing.decode(b).header for b in _split(body)]
+
+
+async def _revoke(repos, highlight_id, token=TOKEN):
+    await repos["highlights"].remove_public_token(highlight_id, token_digest(token))
+
+
+@pytest.mark.parametrize("case", ["unknown", "revoked"])
+async def test_an_offer_for_a_token_we_did_not_mint_or_revoked_gets_no_stream(
+    repos, published_highlight, case
+):
+    """Revocation is ours to enforce: a GFS that forwards a token we never
+    minted, or one we revoked, gets no peer and no stream."""
+    highlight_id, *_ = published_highlight
+    handler, peers = _make_handler(repos)
+    token = "tok-forged" if case == "unknown" else TOKEN
+    if case == "revoked":
+        await _revoke(repos, highlight_id)
+    await handler.handle_signal(_offer(highlight_id, token))
+    await _drain(handler)
+    assert peers == []
+
+
+@pytest.mark.parametrize("case", ["unknown", "revoked"])
+async def test_a_relay_for_a_token_we_did_not_mint_or_revoked_gets_only_an_error(
+    repos, published_highlight, case
+):
+    highlight_id, *_ = published_highlight
+    handler, _ = _make_handler(repos)
+    token = "tok-forged" if case == "unknown" else TOKEN
+    if case == "revoked":
+        await _revoke(repos, highlight_id)
+    assert await _relay_headers(handler, _relay(highlight_id, token)) == [
+        {"kind": "error", "error": "expired"}
+    ]
+
+
+async def test_an_oversized_token_is_refused_before_any_lookup(
+    repos, published_highlight
+):
+    highlight_id, *_ = published_highlight
+    handler, peers = _make_handler(repos)
+    huge = "x" * (MAX_TOKEN_LEN + 1)
+    await handler.handle_signal(_offer(highlight_id, huge))
+    await _drain(handler)
+    assert peers == []
+    assert await _relay_headers(handler, _relay(highlight_id, huge)) == [
+        {"kind": "error", "error": "unsupported"}
+    ]
+
+
+async def test_an_expired_highlight_is_not_streamed_even_while_published(
+    repos, published_highlight, db
+):
+    """The retention scheduler may not have pruned it yet."""
+    highlight_id, *_ = published_highlight
+    await db.enqueue(
+        "UPDATE highlights SET expires_at=? WHERE id=?",
+        ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), highlight_id),
+    )
+    handler, peers = _make_handler(repos)
+    await handler.handle_signal(_offer(highlight_id, TOKEN))
+    await _drain(handler)
+    assert peers == []
+    assert await _relay_headers(handler, _relay(highlight_id, TOKEN)) == [
+        {"kind": "error", "error": "expired"}
+    ]
+
+
+async def test_a_token_revoked_mid_stream_setup_is_rechecked_before_streaming(
+    repos, published_highlight
+):
+    """The sealed stream re-checks the token itself, so a revoke between
+    the offer and the open channel still sends nothing."""
+    highlight_id, *_ = published_highlight
+    handler, _ = _make_handler(repos)
+    await _revoke(repos, highlight_id)
+    frames = [
+        f
+        async for f in handler._iter_sealed_stream(
+            highlight_id, token=TOKEN, viewer_key=parse_viewer_key(VK)
+        )
+    ]
+    assert [framing.decode(b).header for b in frames] == [
+        {"kind": "error", "error": "expired"}
     ]

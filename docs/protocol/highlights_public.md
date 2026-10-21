@@ -41,8 +41,8 @@ https://{gfs_host}/highlight/{instance_id}/{highlight_id}/{token}#k={link_secret
   a fragment to a server (nor in ``Referer``), so the GFS never gets it. The
   author's household derives it as ``HKDF-SHA256(identity seed,
   info="sh-highlight-link:v1" ‖ 0 ‖ highlight_id ‖ 0 ‖ token)`` and appends it
-  to the URL the GFS returned — nothing new is stored, and only the author's
-  household can make one.
+  to the URL the GFS returned — the secret itself is never stored, and only
+  the author's household can make one.
 
 ## Wire endpoints
 
@@ -218,12 +218,43 @@ can't read another viewer's stream off the relay. An offer or relay request
 with no `vk` or no token is never streamed (the relay answers one plaintext
 `error: unsupported`).
 
+**Only our own live links are streamed.** The GFS forwards the token
+with every offer / relay request, but the household does not take its word
+for it: it streams only when the token is one it minted itself — it keeps a
+SHA-256 of each token the GFS returned at publish
+(`highlight_public_tokens`, migration 0116), drops it on revoke (before it
+even calls the GFS, so a revoke holds even if that call fails) and drops all
+of them on unpublish or when the GFS connection is removed — for a highlight
+that is still published on that same GFS and not past `expires_at`. Anything
+else gets no stream (a direct offer is refused; the relay answers one
+plaintext `error: expired`). A token longer than 256 characters (the GFS
+mints 43) is refused before any lookup or HKDF (`error: unsupported`).
+Revocation is therefore enforced by the author's household, not by the GFS.
+
 **Links made before this** have no fragment. The page detects that before
 contacting anyone and says *"This link can't be opened … Ask whoever shared
 it for a new link."*; the author makes a new one from the highlight's share
 menu (each publish mints a new token, now with its secret). The old token
 stays valid on the GFS until revoked or the highlight expires, but no
 household streams a highlight in the clear any more, so it opens nothing.
+
+### Rollout: both sides must be new
+
+The sealed stream changes what the household sends and what the GFS's
+viewer page must open, so it only works when both are new:
+
+| Household | GFS viewer page | What happens |
+|---|---|---|
+| new | new | Sealed link (`#k=`) plays. |
+| new | old (can't open `sealed` frames) | **Refused at publish**: the GFS's signed `/gfs/info` capability block must carry `sealed_highlight_stream: true` (verified against the GFS key pinned at pairing, like every other GFS capability — an unsigned or stripped flag counts as "no"). Without it `POST /api/highlights/{id}/publish` answers **409 `GFS_TOO_OLD`** (`params.feature = "public_highlight"`) before anything is sent to that GFS, and the share dialog says, next to the GFS picker, that this GFS can't share encrypted highlight links yet and its operator needs to update it. A dead link is never minted. |
+| old | new | The old household's links carry no `#k`: the new page shows *"This link can't be opened … Ask whoever shared it for a new link."* without contacting anyone. If someone adds a `#k` by hand, the old household's plaintext frames arrive, are never shown, and the page says it couldn't be opened. |
+| old | old | Unchanged (plaintext, as before). |
+
+A household learns the capability from the same `/gfs/info` fetches as the
+others (pairing, reconnect, the hourly refresh, or once on demand at
+publish); a proven `true` sticks for the process. No household↔household
+federation shape changed, so `OURS` is not bumped (the GFS leg has no
+`proto_version`; see [capabilities.md](./capabilities.md#gfs-capabilities)).
 
 **Residual:** the GFS serves the viewer page and its script, so a GFS that
 rewrote that script could read the fragment in the browser. Sealing removes
@@ -286,6 +317,7 @@ sequenceDiagram
     G->>G: store offer in GfsRtcSession
     G->>A: WS push { type:"highlight_signal", kind:"offer", session_id, sdp, token, vk }
     G-->>V: 201 { session_id }
+    A->>A: token one of our live links? (SHA-256 in highlight_public_tokens,<br/>published on this GFS, unexpired) — else no stream
     A->>A: open answerer PeerConnection
     A->>G: POST /gfs/highlight_rtc/answer (signed) {session_id, sdp}
     A->>G: POST /gfs/highlight_rtc/ice/author (signed) (xN)
@@ -304,6 +336,7 @@ sequenceDiagram
         V->>G: GET /gfs/highlight_rtc/relay/{i}/{s}?token={t}&vk={vk}
         G->>G: register transient RelayBridge {relay_id}
         G->>A: WS push { kind:"relay_offer", relay_id, highlight_id, token, vk }
+        A->>A: same live-link check — else one error: expired frame
         A->>G: POST /gfs/highlight_rtc/relay-stream/{relay_id} (header-signed)
         Note over G: GFS pipes byte-identical sealed frames<br/>(no secret, can't open them; stores nothing)
         G-->>V: chunked octet-stream (stream_seal → sealed × N)
@@ -326,14 +359,17 @@ GFS bundle alone, or `pnpm build` for both.
 ## Implementation pointers
 
 - Schema (SH side): `socialhome/migrations/0001_initial.sql` —
-  `highlights.public_gfs_id`, `highlights.public_published_at`.
+  `highlights.public_gfs_id`, `highlights.public_published_at`;
+  `socialhome/migrations/0116_highlight_public_tokens.sql` — the SHA-256 of
+  each live share token this household minted.
 - Schema (GFS side): `socialhome/global_server/migrations/0001_initial.sql`
   — `gfs_highlight_publications`, `gfs_highlight_tokens`.
 - Domain: `socialhome/domain/highlight.py` (`Highlight.public_*` fields);
   `socialhome/global_server/domain.py` (`GfsHighlightPublication`,
   `GfsHighlightToken`).
 - Repos: `socialhome/repositories/highlight_repo.py`
-  (`mark_published` / `mark_unpublished` / `list_published_for`);
+  (`mark_published` / `mark_unpublished` / `list_published_for`,
+  `add_public_token` / `remove_public_token` / `is_live_public_token`);
   `socialhome/global_server/repositories.py`
   (`SqliteGfsHighlightPublicationRepo`, `SqliteGfsHighlightTokenRepo`).
 - Services: `socialhome/services/highlight_publication_service.py` (SH);
@@ -365,7 +401,10 @@ GFS bundle alone, or `pnpm build` for both.
 - Per-IP rate-limit on the public landing path uses the existing
   `build_listing_rate_limit()` middleware (30/min/IP).
 - Author can pull every token instantly via `unpublish`. There's no
-  revoke-key-rotation step — the row's deletion is the revoke.
+  revoke-key-rotation step — the row's deletion is the revoke, and the
+  author's household enforces it itself: it streams only for a token it
+  minted and still holds (see "Only our own live links are streamed"), so a
+  GFS that keeps forwarding a revoked token gets nothing.
 - The GFS-relay carries **only sealed** frames (see "End-to-end sealed
   stream"): the GFS has the token but never the link secret, so it can't
   open them, even by opening the link itself. It is a transient in-memory

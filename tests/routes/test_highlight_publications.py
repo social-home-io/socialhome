@@ -16,6 +16,7 @@ from socialhome.app_keys import (
     highlight_repo_key,
 )
 from socialhome.services.highlight_publication_service import (
+    GfsTooOldError,
     HighlightNotFoundError,
     HighlightPublicationError,
 )
@@ -170,6 +171,25 @@ async def test_publish_gfs_failure_maps_to_502(
     assert r.status == 502
     body = await r.json()
     assert body["error"]["code"] == "GFS_UNAVAILABLE"
+
+
+async def test_publish_to_a_gfs_without_the_sealed_viewer_maps_to_409(
+    client,
+    seeded_highlight,
+    stub_service,
+):
+    """Rollout gate: the SPA gets a coded refusal it translates, not a
+    generic "GFS unavailable"."""
+    stub_service.publish_raises = GfsTooOldError(params={"feature": "public_highlight"})
+    r = await client.post(
+        f"/api/highlights/{seeded_highlight}/publish",
+        json={"gfs_id": "gfs-abc"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 409
+    body = await r.json()
+    assert body["error"]["code"] == "GFS_TOO_OLD"
+    assert body["error"]["params"] == {"feature": "public_highlight"}
 
 
 # ── GET publish ─────────────────────────────────────────────────────────

@@ -28,6 +28,7 @@ either. Content-free ``error`` frames before the seal stay plaintext.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator
 
 from cryptography.hazmat.primitives import hashes
@@ -52,6 +53,11 @@ LINK_SECRET_INFO: bytes = b"sh-highlight-link:v1"
 #: Fragment parameter the link secret rides in.
 LINK_FRAGMENT_PARAM: str = "k"
 
+#: Longest share token this household accepts from a GFS (the GFS mints
+#: ``secrets.token_urlsafe(32)``, 43 characters). Checked before any lookup
+#: or HKDF, so a forwarded token can't make us hash an unbounded string.
+MAX_TOKEN_LEN: int = 256
+
 _NONCE_LEN = 12
 
 
@@ -59,10 +65,23 @@ class UnsupportedStreamSealSuite(ValueError):
     """A ``stream_seal`` frame names a suite we don't support."""
 
 
+def usable_token(token: object) -> bool:
+    """Whether *token* is a share token we'd even look up: a non-empty
+    string of at most :data:`MAX_TOKEN_LEN` characters."""
+    return isinstance(token, str) and 0 < len(token) <= MAX_TOKEN_LEN
+
+
+def token_digest(token: str) -> str:
+    """What the household keeps of a share token: its SHA-256, hex."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 def link_secret(identity_seed: bytes, *, highlight_id: str, token: str) -> bytes:
     """The 32-byte secret for one share link. Deterministic, so the
     household stores nothing new; only the holder of the identity seed can
-    compute it."""
+    compute it. Bound to the identity seed: rotating it ends every link."""
+    if not usable_token(token):
+        raise ValueError("share token is empty or too long")
     info = b"\x00".join((LINK_SECRET_INFO, highlight_id.encode(), token.encode()))
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=b"", info=info).derive(
         identity_seed

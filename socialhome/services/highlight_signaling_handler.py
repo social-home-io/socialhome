@@ -49,7 +49,7 @@ from ..repositories.user_repo import AbstractUserRepo
 from ..webrtc_ice import rtc_configuration
 from . import highlight_public_framing as framing
 from .highlight_public_profile import parse_viewer_key, seal_profile
-from .highlight_public_seal import StreamSealer, link_secret
+from .highlight_public_seal import StreamSealer, link_secret, token_digest, usable_token
 from .inbound_media_store import MEDIA_REF_PREFIX, local_media_ref, media_file_path
 from .protection_gate import ProtectionGateMixin
 
@@ -103,6 +103,14 @@ class _Session:
     token: str = ""
     task: asyncio.Task[None] | None = None
     pending_ice: list[dict] = field(default_factory=list)
+
+
+def _token_of(frame: dict) -> str:
+    """The share token of a signal frame, or ``""`` when it is missing, not
+    a string or longer than :data:`~.highlight_public_seal.MAX_TOKEN_LEN`
+    (checked before any lookup or HKDF)."""
+    token = frame.get("token")
+    return token if isinstance(token, str) and usable_token(token) else ""
 
 
 # ─── Handler ───────────────────────────────────────────────────────────
@@ -232,10 +240,15 @@ class HighlightSignalingHandler(ProtectionGateMixin):
             await self._reject_with_error(session_id, sdp_offer, "expired")
             return
         viewer_key = parse_viewer_key(frame.get("vk"))
-        token = str(frame.get("token") or "")
+        token = _token_of(frame)
         if viewer_key is None or not token:
             # Nothing to seal to — never stream a highlight in the clear.
             await self._reject_with_error(session_id, sdp_offer, "unsupported")
+            return
+        if not await self._is_live_link(highlight_id, token):
+            # A token we never minted, one we revoked, or a highlight past
+            # its expiry: revocation is ours to enforce, not the GFS's.
+            await self._reject_with_error(session_id, sdp_offer, "expired")
             return
 
         peer = self._peer_factory(self._ice_servers)
@@ -306,10 +319,15 @@ class HighlightSignalingHandler(ProtectionGateMixin):
     ) -> AsyncIterator[bytes]:
         """What either transport sends: ``stream_seal``, then every frame of
         :meth:`_iter_highlight_frames` sealed to the viewer's key and the
-        link's secret. Without a key, a token or our identity: one
-        plaintext ``unsupported`` error and nothing else."""
-        if viewer_key is None or not token or self._signing_key is None:
+        link's secret. Without a key, a usable token or our identity: one
+        plaintext ``unsupported`` error and nothing else; for a token that
+        isn't one of our live links (re-checked here, so a revoke after the
+        offer still sends nothing): one ``expired`` error."""
+        if viewer_key is None or not usable_token(token) or self._signing_key is None:
             yield framing.error_frame("unsupported")
+            return
+        if not await self._is_live_link(highlight_id, token):
+            yield framing.error_frame("expired")
             return
         sealer = StreamSealer(
             viewer_key,
@@ -322,6 +340,14 @@ class HighlightSignalingHandler(ProtectionGateMixin):
             self._iter_highlight_frames(highlight_id, viewer_key=viewer_key)
         ):
             yield chunk
+
+    async def _is_live_link(self, highlight_id: str, token: str) -> bool:
+        """Whether *token* is one of this household's own live share links
+        of *highlight_id* (minted here, not revoked, highlight published on
+        that GFS and unexpired) — never just whatever the GFS forwarded."""
+        return await self._highlights.is_live_public_token(
+            highlight_id, token_digest(token)
+        )
 
     async def _iter_highlight_frames(
         self,
@@ -453,7 +479,7 @@ class HighlightSignalingHandler(ProtectionGateMixin):
             self._serve_relay(
                 relay_id,
                 highlight_id,
-                token=str(frame.get("token") or ""),
+                token=_token_of(frame),
                 viewer_key=parse_viewer_key(frame.get("vk")),
             ),
             name=f"highlight-relay[{relay_id}]",

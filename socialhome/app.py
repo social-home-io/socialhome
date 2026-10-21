@@ -3117,6 +3117,9 @@ def create_app(config: Config | None = None) -> web.Application:
     highlight_publication_service = HighlightPublicationService(
         highlight_repo,
         repos.gfs_connection,
+        # Mints a link only on a GFS whose signed capability block proves
+        # its viewer page opens the sealed stream.
+        gfs_capabilities=gfs_connection_service,
     )
     # Author-side signalling answerer for the public-highlight flow.
     # ``attach_session`` + ``attach_identity`` happen in the startup

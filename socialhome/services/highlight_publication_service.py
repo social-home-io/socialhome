@@ -22,14 +22,22 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
+from typing import Protocol
 
 import aiohttp
 
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
+from ..domain.errors import CodedError
+from ..domain.federation import GfsConnection
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.highlight_repo import AbstractHighlightRepo
-from .highlight_public_seal import link_secret, link_with_secret
+from .highlight_public_seal import (
+    link_secret,
+    link_with_secret,
+    token_digest,
+    usable_token,
+)
 from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
@@ -43,6 +51,24 @@ class HighlightPublicationError(Exception):
     """
 
     __slots__ = ()
+
+
+class GfsTooOldError(CodedError, HighlightPublicationError):
+    """The GFS has not proved, under a valid signature, that its public
+    highlight page opens the end-to-end sealed stream
+    (``sealed_highlight_stream`` on ``GET /gfs/info``). This household streams
+    only sealed frames, so a link minted there would be dead for every
+    viewer: nothing is minted until that GFS is updated."""
+
+    status = 409
+    code = "GFS_TOO_OLD"
+    detail = "This GFS needs an update before it can share highlights publicly."
+
+
+class SealedHighlightCapability(Protocol):
+    """The capability check :class:`GfsConnectionService` answers."""
+
+    async def sealed_highlight_stream_supported(self, conn: GfsConnection) -> bool: ...
 
 
 class HighlightNotFoundError(KeyError):
@@ -61,6 +87,7 @@ class HighlightPublicationService(ProtectionGateMixin):
     __slots__ = (
         "_child_protection",
         "_gfs",
+        "_gfs_caps",
         "_highlights",
         "_http_client",
         "_own_instance_id",
@@ -73,9 +100,11 @@ class HighlightPublicationService(ProtectionGateMixin):
         gfs_repo: AbstractGfsConnectionRepo,
         *,
         http_client: aiohttp.ClientSession | None = None,
+        gfs_capabilities: SealedHighlightCapability | None = None,
     ) -> None:
         self._highlights = highlight_repo
         self._gfs = gfs_repo
+        self._gfs_caps = gfs_capabilities
         self._http_client = http_client
         self._signing_key: bytes | None = None
         self._own_instance_id: str = ""
@@ -134,8 +163,10 @@ class HighlightPublicationService(ProtectionGateMixin):
         }
         signed = self._sign_body(body)
         conn = await self._require_active_gfs(gfs_id)
+        client = self._client()
+        await self._require_sealed_viewer(conn)
         try:
-            async with self._client().post(
+            async with client.post(
                 f"{conn.inbox_url}/gfs/highlights/{highlight.id}/publish",
                 allow_redirects=False,
                 json=signed,
@@ -151,10 +182,12 @@ class HighlightPublicationService(ProtectionGateMixin):
                 f"GFS publish request failed: {exc}"
             ) from exc
 
-        token = str(payload.get("token") or "")
+        token = payload.get("token")
         url = str(payload.get("url") or "")
-        if not token or not url:
-            raise HighlightPublicationError("GFS publish response missing token / url.")
+        if not isinstance(token, str) or not usable_token(token) or not url:
+            raise HighlightPublicationError(
+                "GFS publish response missing token / url, or token too long."
+            )
         # Mark the highlight as published *after* the GFS confirms — a network
         # failure should leave the local flag clear so the SPA doesn't
         # show "published" for a publication that never landed.
@@ -162,6 +195,11 @@ class HighlightPublicationService(ProtectionGateMixin):
             highlight.id,
             gfs_id=gfs_id,
             published_at=datetime.now(UTC).isoformat(),
+        )
+        # Only a token we minted (and haven't revoked) is ever streamed —
+        # revocation is ours to enforce, not the GFS's.
+        await self._highlights.add_public_token(
+            highlight.id, gfs_id=gfs_id, token_hash=token_digest(token)
         )
         if self._signing_key is None:
             raise HighlightPublicationError("Instance identity not loaded.")
@@ -186,6 +224,9 @@ class HighlightPublicationService(ProtectionGateMixin):
         gfs_id = highlight.public_gfs_id
         if gfs_id is None:
             raise HighlightPublicationError("Highlight is not currently published.")
+        # Ends the link here first: this household streams only for its own
+        # live tokens, so the revoke holds even if the GFS call below fails.
+        await self._highlights.remove_public_token(highlight.id, token_digest(token))
         conn = await self._require_active_gfs(gfs_id)
 
         body = {"token": token, "instance_id": self._require_instance_id()}
@@ -278,6 +319,16 @@ class HighlightPublicationService(ProtectionGateMixin):
                 f"GFS connection {gfs_id!r} not paired or inactive.",
             )
         return conn
+
+    async def _require_sealed_viewer(self, conn: GfsConnection) -> None:
+        """Refuse a GFS whose viewer page can't open the sealed stream."""
+        if self._gfs_caps is None:
+            raise HighlightPublicationError(
+                "HighlightPublicationService used before its GFS capability "
+                "check was wired",
+            )
+        if not await self._gfs_caps.sealed_highlight_stream_supported(conn):
+            raise GfsTooOldError(params={"feature": "public_highlight"})
 
     def _require_instance_id(self) -> str:
         if not self._own_instance_id:
