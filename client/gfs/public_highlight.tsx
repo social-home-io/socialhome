@@ -619,6 +619,12 @@ async function postJson<T>(gfs: string | undefined, url: string, body: unknown):
 function readBoot(root: HTMLElement): BootPayload | null {
   const bootEl = document.getElementById('boot')
   if (!bootEl) {
+    // The pinned page is never meant to be framed: a framer on the same
+    // origin could read its DOM. (A meta tag can't set frame-ancestors.)
+    if (window.top !== window) {
+      render(<BrokenLink />, root)
+      return null
+    }
     const pinned = pinnedBootFromHash(window.location.hash)
     if (!pinned) render(<BrokenLink />, root)
     return pinned

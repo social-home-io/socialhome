@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
+from socialhome.config import PROJECT_PINNED_VIEWER_URL
 from socialhome.global_server.routes.highlights import _VIEWER_CSS
 from socialhome.pinned_viewer import (
     MANIFEST_PATH,
@@ -18,6 +19,7 @@ from socialhome.pinned_viewer import (
     load_pinned_viewer,
     parse_manifest,
     pinned_link,
+    viewer_base_url,
     viewer_gfs_base,
 )
 
@@ -96,6 +98,10 @@ def test_pinned_page_styles_match_the_gfs_page():
         ("https://[::1", None),
         ("", None),
         ("https://gfs.example.org/" + "a" * 600, None),
+        # Review: anything a browser could parse into another host than ours.
+        ("https://gfs.example.org\\@evil.example", None),
+        ("https://gfs example.org", None),
+        ("https://gfs.example.org%2F@evil", None),
     ],
 )
 def test_viewer_gfs_base_mirrors_the_viewer(url, expected):
@@ -129,3 +135,30 @@ def test_pinned_link_shape():
         "t": "tok-A",
         "k": base64.urlsafe_b64encode(_SECRET).rstrip(b"=").decode(),
     }
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://viewer.social-home.io", "https://viewer.social-home.io"),
+        ("https://viewer.example/socialhome/", "https://viewer.example/socialhome"),
+        ("http://127.0.0.1:18931", "http://127.0.0.1:18931"),
+        # Review: a page served over plain http can be swapped on the
+        # network for one that reads ``#k``.
+        ("http://viewer.example", None),
+        ("https://viewer.example/?a=b", None),
+        ("https://viewer.example/#x", None),
+        ("https://user@viewer.example", None),
+        ("ftp://viewer.example", None),
+        ("", None),
+    ],
+)
+def test_the_viewer_base_must_be_https(url, expected):
+    assert viewer_base_url(url) == expected
+
+
+def test_the_default_viewer_has_its_own_origin():
+    """Review: the github.io origin is shared by every Pages site of the
+    org (and its unclaimed root site could register a service worker over
+    it), so the default is a custom domain of its own."""
+    assert urlsplit(PROJECT_PINNED_VIEWER_URL).hostname == "viewer.social-home.io"

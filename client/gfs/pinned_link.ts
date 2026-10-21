@@ -33,11 +33,17 @@ const SAFE_ID = /^[A-Za-z0-9._~-]+$/
 
 const DEV_HOSTS = new Set(['localhost', '127.0.0.1'])
 
+/** A host both sides read alike: letters, digits, dots, dashes, a port. */
+const PLAIN_HOST = /^[A-Za-z0-9.-]+(:[0-9]{1,5})?$/
+
 /** The GFS base URL from ``g``, normalised (no trailing slash), or null. */
 export function gfsBaseUrl(raw: string): string | null {
   if (!raw || raw.length > MAX_FIELD_LENGTH.g) return null
   // Absolute only: ``new URL`` without a base refuses ``//host`` and ``/path``.
   if (!/^https?:\/\//i.test(raw)) return null
+  // A backslash or whitespace is read differently by URL parsers (the
+  // browser takes "\" for "/"): refuse it rather than guess.
+  if (/[\\\s]/.test(raw)) return null
   let url: URL
   try {
     url = new URL(raw)
@@ -50,6 +56,7 @@ export function gfsBaseUrl(raw: string): string | null {
     return null
   }
   if (url.username || url.password) return null
+  if (!PLAIN_HOST.test(url.host)) return null
   if (url.search || url.hash || raw.includes('#') || raw.includes('?')) return null
   return (url.origin + url.pathname).replace(/\/+$/, '')
 }
@@ -86,5 +93,8 @@ export function pinnedRequestInit(init: RequestInit = {}): RequestInit {
     mode: 'cors',
     credentials: 'omit',
     referrerPolicy: 'no-referrer',
+    // A GFS has no reason to redirect; following one would hand the token,
+    // ``vk`` and SDP to whatever host it names.
+    redirect: 'error',
   }
 }

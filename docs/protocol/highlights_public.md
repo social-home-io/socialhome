@@ -27,7 +27,7 @@ revoking a token (or unpublishing) takes effect on the next request.
   viewer) and the ``/highlight/{instance}/{highlight}/{token}`` landing page
   (older links and the self-hosted fallback only).
 - **Pinned viewer**: static files on an origin no GFS runs — by default the
-  project's GitHub Pages (`https://social-home-io.github.io/socialhome/`),
+  project's GitHub Pages (`https://viewer.social-home.io/`),
   published by `.github/workflows/pinned-viewer.yml`.
 
 ## URL shape
@@ -38,13 +38,13 @@ The household mints (pinned viewer, the default):
 {public_viewer_base_url}/v/{hash}/#g={gfs_base_url}&i={instance_id}&h={highlight_id}&t={token}&k={link_secret}
 ```
 
-e.g. `https://social-home-io.github.io/socialhome/v/0123456789abcdef/#g=https%3A%2F%2Fgfs.social-home.io&i=…&h=…&t=…&k=…`.
+e.g. `https://viewer.social-home.io/v/0123456789abcdef/#g=https%3A%2F%2Fgfs.social-home.io&i=…&h=…&t=…&k=…`.
 Everything after `#` stays in the browser; the page's own URL carries
 nothing about the highlight.
 
 * ``public_viewer_base_url`` — household config `[highlights]
   public_viewer_base_url` / `SH_HIGHLIGHTS_PUBLIC_VIEWER_BASE_URL`, default
-  `https://social-home-io.github.io/socialhome`.
+  `https://viewer.social-home.io`.
 * ``v/{hash}/`` — the viewer version this release links to, from the
   committed `socialhome/pinned_viewer.json` (see "Pinned viewer").
 * ``g`` — the GFS base URL the viewer sends every request to: the address
@@ -362,9 +362,14 @@ manifest differs — a viewer change must regenerate the manifest in the same
 PR.
 
 **Publishing.** `.github/workflows/pinned-viewer.yml` runs on every
-published release (and by hand): it rebuilds, checks the build equals the
-committed manifest, and adds `v/<hash>/` to the `gh-pages` branch of this
-repo (with `.nojekyll`). It only ever **adds** a version — an existing one
+published release (and by hand, from `main` or a tag only). A `build` job
+installs the npm dependencies and rebuilds with a read-only token it does
+not keep, checks the build equals the committed manifest and hands the two
+files on; a separate `publish` job — no dependency code, actions pinned by
+commit SHA — adds `v/<hash>/` to the `gh-pages` branch of this repo (with
+`.nojekyll` and the `viewer.social-home.io` `CNAME`). A ruleset on
+`gh-pages` blocking force-push and deletion keeps published versions
+append-only on GitHub's side too. It only ever **adds** a version — an existing one
 must be byte-identical — so links minted by every earlier release keep
 opening. Anyone can audit a served version: fetch `v/<hash>/viewer.js`,
 compare its sha384 with the `integrity` in the release's
@@ -373,10 +378,15 @@ compare its sha384 with the `integrity` in the release's
 **Bootstrap.** With no `<script id="boot">` block, the viewer reads its
 context from the fragment (`client/gfs/pinned_link.ts`) and refuses a
 missing, overlong or malformed field, or a `g` that isn't `https://`
-(`http://` only to localhost), before contacting anyone (*"This link is
-incomplete or damaged…"*). Every request goes to `g` + the route, absolute,
-`mode: 'cors'`, `credentials: 'omit'`, `referrerPolicy: 'no-referrer'`; the
-secret is never part of one. On the GFS-served page (boot block present)
+(`http://` only to localhost) with a plain host (letters, digits, dots,
+dashes, a port — so the household and the browser read the same host),
+before contacting anyone (*"This link is incomplete or damaged…"*). Every
+request goes to `g` + the route, absolute, `mode: 'cors'`,
+`credentials: 'omit'`, `referrerPolicy: 'no-referrer'`, `redirect: 'error'`
+(a GFS has no reason to redirect the token and SDP elsewhere); the secret
+is never part of one. The household names only an `https://` viewer base
+(`public_viewer_base_url`; a plain-http one falls back to the GFS page with
+a WARNING — a page served over http could be swapped on the network). On the GFS-served page (boot block present)
 everything is as before, relative to the page.
 
 **The fragment stays in the address bar.** The viewer does not
@@ -405,8 +415,27 @@ GFS-served page (less safe).
 - A GFS that ALSO holds the full link can swap `vk` / `epk` for that view
   (see "End-to-end sealed stream", residuals): the link is a bearer secret.
 - `GET /gfs/highlights/ice-servers` now answers any origin, so a web page
-  elsewhere can read the GFS's STUN/TURN list (as any non-browser client
-  always could). Short-lived TURN credentials keep that bounded.
+  elsewhere can read the GFS's STUN/TURN list, including the operator's
+  **static** TURN credentials (`highlight_rtc.py` returns the configured
+  user / password; any non-browser client always could read them). A page
+  could now have its visitors' browsers use that TURN from many addresses.
+  Operators should rate-limit the TURN server; time-limited TURN REST
+  credentials are a follow-up.
+- **Own origin.** The default viewer is a custom domain,
+  `viewer.social-home.io`, not `social-home-io.github.io/socialhome`: the
+  `github.io` origin is shared by every Pages site of the org, and the
+  org's root site (`social-home-io.github.io`, unclaimed) could register a
+  service worker over the whole origin and answer the viewer's navigation.
+  A self-hoster serving the files on a shared origin takes that risk on.
+- **`connect-src https:`.** The page's CSP can't name the GFS (it differs
+  per link), so after a script compromise the page could talk to any https
+  host; SRI and the content-addressed path are what keep the script the
+  released one.
+- **Push access to `gh-pages`.** Anyone who can push it (any workflow with
+  `contents: write`) could change a version's files; browsers only notice a
+  `viewer.js` that fails its SRI, not a changed `index.html`. The ruleset
+  and the audit (rebuild the tag, compare with the served bytes) are the
+  checks.
 
 ## Who shared it (sealed author profile)
 

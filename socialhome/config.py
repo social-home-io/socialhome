@@ -111,7 +111,7 @@ PROJECT_GFS_URL = "https://gfs.social-home.io"
 #: Where the project publishes the pinned public-highlight viewer (GitHub
 #: Pages of this repo, ``.github/workflows/pinned-viewer.yml``) — the shipped
 #: ``[highlights] public_viewer_base_url``.
-PROJECT_PINNED_VIEWER_URL = "https://social-home-io.github.io/socialhome"
+PROJECT_PINNED_VIEWER_URL = "https://viewer.social-home.io"
 
 #: The project GFS's identity, pinned before an open sign-up while the
 #: household uses the shipped :data:`PROJECT_GFS_URL`. The PUBLIC KEY is the

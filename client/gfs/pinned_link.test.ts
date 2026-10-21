@@ -108,6 +108,15 @@ describe('pinned requests', () => {
       mode: 'cors',
       credentials: 'omit',
       referrerPolicy: 'no-referrer',
+      redirect: 'error',
     })
+  })
+})
+
+describe('gfsBaseUrl, review hardening', () => {
+  it('refuses a host the household and the browser could read differently', () => {
+    expect(gfsBaseUrl('https://gfs.example.org%2F@evil')).toBeNull()
+    expect(gfsBaseUrl('https://gfs.example.org\\@evil.example')).toBeNull()
+    expect(gfsBaseUrl('https://[::1]:8443')).toBeNull()
   })
 })

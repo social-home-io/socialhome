@@ -84,14 +84,17 @@ def load_pinned_viewer(path: Path = MANIFEST_PATH) -> PinnedViewer | None:
         return None
 
 
-def viewer_gfs_base(url: str) -> str | None:
-    """The GFS base URL as the pinned viewer will accept it, or ``None``.
+#: A host as both the household and the browser read it: letters, digits,
+#: dots and dashes, an optional port. Anything else (a backslash, a space,
+#: a percent escape) could make the page parse another host than ours.
+_PLAIN_NETLOC_RE = re.compile(r"^[A-Za-z0-9.-]+(:[0-9]{1,5})?$")
 
-    Mirrors ``gfsBaseUrl`` in ``client/gfs/pinned_link.ts``: ``https://``
-    (``http://`` only for localhost / 127.0.0.1), no credentials, query or
-    fragment, at most :data:`MAX_GFS_URL_LEN` characters; trailing slashes
-    dropped. A link the viewer would refuse is never minted.
-    """
+
+def _https_base(url: str) -> str | None:
+    """``url`` as a base the pinned link may name, or ``None``: ``https://``
+    (``http://`` only for localhost / 127.0.0.1), a plain host, no
+    credentials, query or fragment, at most :data:`MAX_GFS_URL_LEN`
+    characters; trailing slashes dropped."""
     if not url or len(url) > MAX_GFS_URL_LEN or "?" in url or "#" in url:
         return None
     try:
@@ -105,9 +108,34 @@ def viewer_gfs_base(url: str) -> str | None:
             return None
     elif parts.scheme != "https":
         return None
-    if not hostname or parts.username is not None or parts.password is not None:
+    if (
+        not hostname
+        or parts.username is not None
+        or parts.password is not None
+        or not _PLAIN_NETLOC_RE.match(parts.netloc)
+    ):
         return None
     return f"{parts.scheme}://{parts.netloc}{parts.path}".rstrip("/")
+
+
+def viewer_base_url(url: str) -> str | None:
+    """The configured ``public_viewer_base_url`` if a pinned link may name
+    it, else ``None``. A plain-http page could be swapped on the network
+    for one that reads ``#k``, so only ``https://`` (and localhost for
+    development) is accepted."""
+    return _https_base(url)
+
+
+def viewer_gfs_base(url: str) -> str | None:
+    """The GFS base URL as the pinned viewer will accept it, or ``None``.
+
+    Mirrors ``gfsBaseUrl`` in ``client/gfs/pinned_link.ts``: ``https://``
+    (``http://`` only for localhost / 127.0.0.1), no credentials, query or
+    fragment, at most :data:`MAX_GFS_URL_LEN` characters; trailing slashes
+    dropped; the host plain, so the household and the browser read the same
+    one. A link the viewer would refuse is never minted.
+    """
+    return _https_base(url)
 
 
 def pinned_link(

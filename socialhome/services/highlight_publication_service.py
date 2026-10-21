@@ -30,7 +30,12 @@ from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
 from ..domain.errors import CodedError
 from ..domain.federation import GfsConnection
-from ..pinned_viewer import PinnedViewer, pinned_link, viewer_gfs_base
+from ..pinned_viewer import (
+    PinnedViewer,
+    pinned_link,
+    viewer_base_url,
+    viewer_gfs_base,
+)
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.highlight_repo import AbstractHighlightRepo
 from .highlight_public_seal import (
@@ -352,10 +357,18 @@ class HighlightPublicationService(ProtectionGateMixin):
         (plain http to a non-localhost host).
         """
         if self._viewer_base_url and self._pinned_viewer is not None:
+            base = viewer_base_url(self._viewer_base_url)
+            if base is None:
+                log.warning(
+                    "highlights.public_viewer_base_url %r is not an https base "
+                    "a pinned link may name; minting the GFS-served link instead",
+                    self._viewer_base_url,
+                )
+                return link_with_secret(gfs_url, secret)
             gfs_base = viewer_gfs_base(conn.inbox_url)
             if gfs_base is not None:
                 return pinned_link(
-                    self._viewer_base_url,
+                    base,
                     self._pinned_viewer,
                     gfs_base=gfs_base,
                     instance_id=self._require_instance_id(),

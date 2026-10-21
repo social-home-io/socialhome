@@ -310,8 +310,9 @@ def test_operator_id_with_shipped_url_keeps_the_shipped_key():
 
 def test_public_viewer_base_url_defaults_to_the_project_pages():
     """Public highlight links open the pinned viewer on the project's
-    GitHub Pages unless the operator says otherwise."""
-    expected = "https://social-home-io.github.io/socialhome"
+    GitHub Pages, on its own custom-domain origin, unless the operator says
+    otherwise."""
+    expected = "https://viewer.social-home.io"
     assert config_mod.PROJECT_PINNED_VIEWER_URL == expected
     assert Config().highlights_public_viewer_base_url == expected
     assert Config.from_env().highlights_public_viewer_base_url == expected

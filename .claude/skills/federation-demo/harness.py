@@ -16302,7 +16302,7 @@ def cmd_gfs_highlight_link() -> None:
     link, token = pub["url"], pub["token"]
     manifest = json.loads((REPO_ROOT / "socialhome" / "pinned_viewer.json").read_text())
     page, _, fragment = link.partition("#")
-    expected_page = f"https://social-home-io.github.io/socialhome/{manifest['path']}"
+    expected_page = f"https://viewer.social-home.io/{manifest['path']}"
     if page != expected_page:
         raise SystemExit(
             f"gfs-highlight-link: link opens {page!r}, expected the pinned "

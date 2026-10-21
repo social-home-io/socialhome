@@ -16,7 +16,7 @@ from socialhome.crypto import b64url_encode
 from socialhome.domain.errors import CodedError
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.highlight import Highlight, HighlightAudience
-from socialhome.pinned_viewer import PinnedViewer
+from socialhome.pinned_viewer import PinnedViewer, load_pinned_viewer
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 from socialhome.services.highlight_public_seal import (
@@ -613,3 +613,25 @@ async def test_publishing_on_another_gfs_pulls_the_first_publication(
     assert (
         await highlights.get_highlight(seeded_highlight.id)
     ).public_gfs_id == "gfs-b"
+
+
+async def test_a_plain_http_viewer_base_falls_back_to_the_gfs_page(
+    repos, seeded_highlight, caplog
+):
+    """Review: an ``http://`` viewer base would let the network swap the
+    page that reads the secret; it is never used."""
+    svc = HighlightPublicationService(
+        repos["highlights"],
+        repos["gfs"],
+        gfs_capabilities=_Caps(),
+        public_viewer_base_url="http://viewer.example",
+        pinned_viewer=load_pinned_viewer(),
+    )
+    svc.attach_session(
+        _StubSession(body={"token": "tok-A", "url": "https://gfs/u/s/A"})
+    )
+    svc.attach_identity(own_instance_id="inst-self", signing_key=b"\x01" * 32)
+    with caplog.at_level("WARNING"):
+        out = await svc.publish(seeded_highlight.id, "u1", gfs_id="gfs-abc")
+    assert out["url"].startswith("https://gfs/u/s/A#k=")
+    assert "viewer.example" in caplog.text
