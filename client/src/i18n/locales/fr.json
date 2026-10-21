@@ -4182,6 +4182,7 @@
   "highlight.publish.created": "Lien public créé",
   "highlight.publish.failed": "Impossible de créer le lien : {error}",
   "highlight.publish.gfs_too_old": "{name} ne peut pas encore partager de liens chiffrés vers des Highlights. Son opérateur doit le mettre à jour. Choisissez un autre GFS ou réessayez plus tard.",
+  "highlight.publish.gfs_too_old_only": "{name} ne peut pas encore partager de liens chiffrés vers des Highlights. Son opérateur doit le mettre à jour. Réessayez ensuite.",
   "highlight.publish.copied": "Lien copié",
   "highlight.publish.copy_failed": "Copie impossible. Appuyez longuement sur le lien pour le copier vous-même.",
   "highlight.publish.removed": "Lien public supprimé",

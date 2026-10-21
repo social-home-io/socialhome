@@ -19430,7 +19430,11 @@ a.sh-btn--ghost:hover {
   color: #fff;
   display: grid;
   grid-template-rows: auto auto 1fr auto;
-  z-index: 1000;
+  /* Above the page chrome, below every dialog and toast: the viewer opens
+   * the publish / report dialogs and shows toasts, all on the shared layer
+   * tokens. At its old 1000 they rendered BEHIND it — "Publish public link"
+   * looked like it did nothing. */
+  z-index: calc(var(--sh-z-modal) - 1);
 }
 .sh-highlight-progress {
   display: flex;

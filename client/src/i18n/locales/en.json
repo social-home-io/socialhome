@@ -4218,6 +4218,7 @@
   "highlight.publish.created": "Public link created",
   "highlight.publish.failed": "Couldn't create the link: {error}",
   "highlight.publish.gfs_too_old": "{name} can’t share encrypted links to highlights yet. Its operator needs to update it. Pick another GFS, or try again later.",
+  "highlight.publish.gfs_too_old_only": "{name} can’t share encrypted links to highlights yet. Its operator needs to update it. Try again once that’s done.",
   "highlight.publish.copied": "Link copied",
   "highlight.publish.copy_failed": "Couldn't copy. Long-press the link to copy it yourself.",
   "highlight.publish.removed": "Public link removed",

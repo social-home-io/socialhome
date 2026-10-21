@@ -4182,6 +4182,7 @@
   "highlight.publish.created": "Openbare link gemaakt",
   "highlight.publish.failed": "Kon de link niet maken: {error}",
   "highlight.publish.gfs_too_old": "{name} kan nog geen versleutelde links naar Highlights delen. De beheerder moet de GFS bijwerken. Kies een andere GFS of probeer het later opnieuw.",
+  "highlight.publish.gfs_too_old_only": "{name} kan nog geen versleutelde links naar Highlights delen. De beheerder moet de GFS bijwerken. Probeer het daarna opnieuw.",
   "highlight.publish.copied": "Link gekopieerd",
   "highlight.publish.copy_failed": "Kopiëren lukte niet. Houd de link ingedrukt om hem zelf te kopiëren.",
   "highlight.publish.removed": "Openbare link verwijderd",
