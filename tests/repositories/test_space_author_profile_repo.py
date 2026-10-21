@@ -194,3 +194,19 @@ async def test_spaces_an_author_has_a_profile_in(db):
         "sp2",
     ]
     assert await repo.list_spaces_for_author("u-noor", "cd" * 32) == []
+
+
+async def test_display_reads_name_a_picture_only_once_its_bytes_are_held(db):
+    """A bundle's names part brings the signed hash before the picture part
+    brings the bytes: until then the display reads give no hash (no URL that
+    would 404); ``get`` still reports the signed hash."""
+    repo = await _repo(db)
+    await repo.upsert_if_newer(P, picture_webp=None)
+    [row] = await repo.list_for("sp", ["u-noor"])
+    assert row.picture_hash is None
+    assert [p.picture_hash for p in await repo.list_for_space("sp")] == [None]
+    held = await repo.get("sp", "u-noor")
+    assert held is not None and held.profile.picture_hash == "0123456789abcdef"
+    await repo.set_picture("sp", "u-noor", "0123456789abcdef", b"RIFFokWEBP")
+    [row] = await repo.list_for("sp", ["u-noor"])
+    assert row.picture_hash == "0123456789abcdef"

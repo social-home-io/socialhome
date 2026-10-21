@@ -131,7 +131,7 @@ async def test_a_bundled_picture_attaches_only_to_its_signed_hash(env, profiles)
     }
     assert await _bundle(env, item) == 1
     assert await profiles.get_picture(SPACE, BOB.user_id) is None
-    held = await _held(profiles, BOB.user_id)
+    held = (await profiles.get(SPACE, BOB.user_id)).profile
     other = base64.b64encode(_webp() + b"x").decode()
     assert await _bundle(env, pictures=[(BOB.user_id, held.picture_hash, other)]) == 0
     assert await profiles.get_picture(SPACE, BOB.user_id) is None

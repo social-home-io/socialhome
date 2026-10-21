@@ -46,6 +46,17 @@ _COLS = (
     "profile_rev, ts"
 )
 
+#: The display reads (:meth:`SqliteSpaceAuthorProfileRepo.list_for`,
+#: :meth:`~SqliteSpaceAuthorProfileRepo.list_for_space`) name a picture only
+#: once its bytes are held: a row from a bundle's names part knows the
+#: signed hash before the picture part arrives, and a picture URL then
+#: would 404.
+_DISPLAY_COLS = (
+    "space_id, author_user_id, author_pk, display_name, bio, "
+    "CASE WHEN picture_webp IS NOT NULL THEN picture_hash END AS picture_hash, "
+    "profile_rev, ts"
+)
+
 
 @runtime_checkable
 class AbstractSpaceAuthorProfileRepo(Protocol):
@@ -231,7 +242,7 @@ class SqliteSpaceAuthorProfileRepo:
             return []
         marks = ",".join("?" for _ in ids)
         rows = await self._db.fetchall(
-            f"SELECT {_COLS} FROM space_author_profiles "
+            f"SELECT {_DISPLAY_COLS} FROM space_author_profiles "
             f"WHERE space_id=? AND author_user_id IN ({marks})",
             (space_id, *ids),
         )
@@ -239,7 +250,7 @@ class SqliteSpaceAuthorProfileRepo:
 
     async def list_for_space(self, space_id: str) -> builtins.list[SpaceAuthorProfile]:
         rows = await self._db.fetchall(
-            f"SELECT {_COLS} FROM space_author_profiles WHERE space_id=? "
+            f"SELECT {_DISPLAY_COLS} FROM space_author_profiles WHERE space_id=? "
             "ORDER BY display_name",
             (space_id,),
         )
