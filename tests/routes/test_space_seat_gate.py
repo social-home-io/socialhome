@@ -13,7 +13,12 @@ import re
 
 import pytest
 
-from socialhome.app_keys import media_signer_key, space_cover_repo_key
+from socialhome.app_keys import (
+    media_signer_key,
+    profile_picture_repo_key,
+    space_cover_repo_key,
+    space_icon_repo_key,
+)
 from socialhome.routes.space_seat_gate import SEATLESS_ROUTES
 
 from .conftest import _auth
@@ -144,3 +149,54 @@ async def test_a_signed_media_url_is_a_capability(seeded):
 @pytest.mark.parametrize(("method", "canonical"), sorted(SEATLESS_ROUTES))
 async def test_seatless_routes_are_real_routes(client, method, canonical):
     assert (method, canonical) in _space_routes(client.app)
+
+
+_WEBP = b"RIFF0000WEBP"
+
+
+async def _seed_space_pictures(client) -> None:
+    """A member picture of the owner, a cover and an icon on the private
+    space."""
+    pic = {"bytes_webp": _WEBP, "hash": "h1", "width": 1, "height": 1}
+    await client.app[profile_picture_repo_key].set_member_picture(
+        _PRIVATE, "uid-olive", **pic
+    )
+    await client.app[space_cover_repo_key].set(_PRIVATE, **pic)
+    await client.app[space_icon_repo_key].set(_PRIVATE, **pic)
+
+
+_PICTURE_PATHS = ("/members/uid-olive/picture", "/cover", "/icon")
+
+
+@pytest.mark.parametrize("path", _PICTURE_PATHS)
+async def test_a_household_admin_without_a_seat_gets_no_space_picture(seeded, path):
+    """Regression: the seat gate lets a household admin through without a
+    seat, so a space's pictures run the read gate themselves — the
+    operator lists every space but sees none of its pictures."""
+    client, _hdr = seeded
+    await _seed_space_pictures(client)
+    r = await client.get(f"/api/spaces/{_PRIVATE}{path}", headers=_auth(client._tok))
+    assert r.status == 403, await r.text()
+    assert (await r.json())["error"] == {
+        "code": "FORBIDDEN",
+        "detail": "Not a space member.",
+    }
+
+
+@pytest.mark.parametrize("path", _PICTURE_PATHS)
+async def test_a_reader_gets_the_space_pictures(seeded, path):
+    client, hdr = seeded
+    await _seed_space_pictures(client)
+    r = await client.get(f"/api/spaces/{_PRIVATE}{path}", headers=hdr["owner"])
+    assert r.status == 200, await r.text()
+    assert await r.read() == _WEBP
+
+
+@pytest.mark.parametrize("path", _PICTURE_PATHS)
+async def test_a_signed_space_picture_url_needs_no_seat(seeded, path):
+    client, _hdr = seeded
+    await _seed_space_pictures(client)
+    signer = client.app[media_signer_key]
+    r = await client.get(signer.sign(f"/api/spaces/{_PRIVATE}{path}"))
+    assert r.status == 200, await r.text()
+    assert await r.read() == _WEBP

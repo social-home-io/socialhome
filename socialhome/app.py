@@ -1188,6 +1188,8 @@ def _build_repos(db: AsyncDatabase):
         peer_space_directory=SqlitePeerSpaceDirectoryRepo(db),
         space_remote_member=SqliteSpaceRemoteMemberRepo(db),
         space_author_profile=SqliteSpaceAuthorProfileRepo(db),
+        moment_public_registration=SqliteMomentPublicRegistrationRepo(db),
+        moment_public_follow=SqliteMomentPublicFollowRepo(db),
         space_proposal=SqliteSpaceProposalRepo(db),
         space_remote_location=SqliteSpaceRemoteLocationRepo(db),
         poll=SqlitePollRepo(db),
@@ -2151,6 +2153,19 @@ def _build_space_timetables(
     return SpaceTimetableService(repos.space_timetable, repos.space, bus)
 
 
+def _build_person_summary(
+    repos: SimpleNamespace, alias_resolver: AliasResolver
+) -> PersonSummaryService:
+    """Who a person is, as a viewer may see them — named from the
+    household's users, the space rosters, the space author profiles (v_60)
+    and the GFS public follows."""
+    people = PersonSummaryService(repos.user, repos.federation, alias_resolver)
+    people.attach_space_rosters(repos.space, repos.space_remote_member)
+    people.attach_author_profiles(repos.space_author_profile)
+    people.attach_public_follows(repos.moment_public_follow)
+    return people
+
+
 def _build_space_summary(repos: SimpleNamespace) -> SpaceSummaryService:
     """Per-section counts of a space (More's section rows) — read-time
     only, from the sections' own repos."""
@@ -2917,11 +2932,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # alias resolution. Aliases never federate.
     alias_service = AliasService(repos.alias, repos.user)
     alias_resolver = AliasResolver(repos.alias)
-    person_summary_service = PersonSummaryService(
-        repos.user, repos.federation, alias_resolver
-    )
-    person_summary_service.attach_space_rosters(repos.space, repos.space_remote_member)
-    person_summary_service.attach_author_profiles(repos.space_author_profile)
+    person_summary_service = _build_person_summary(repos, alias_resolver)
 
     # ── Preferences service (household-wide + per-user toggles) ─────────
     preferences_service = PreferencesService(
@@ -3156,9 +3167,8 @@ def create_app(config: Config | None = None) -> web.Application:
     moment_retention_scheduler = MomentRetentionScheduler(moment_service)
 
     # ── Public Momentum via GFS (§Momentum-public) ─────────────────────
-    moment_public_registration_repo = SqliteMomentPublicRegistrationRepo(db)
-    moment_public_follow_repo = SqliteMomentPublicFollowRepo(db)
-    person_summary_service.attach_public_follows(moment_public_follow_repo)
+    moment_public_registration_repo = repos.moment_public_registration
+    moment_public_follow_repo = repos.moment_public_follow
     moment_public_service = MomentPublicService(
         moment_public_registration_repo,
         moment_public_follow_repo,

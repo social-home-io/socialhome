@@ -95,6 +95,16 @@ async def test_create_app_stores_config(cfg):
     assert app[config_key] is cfg
 
 
+async def test_person_summaries_name_authors_from_the_public_follows(cfg):
+    """``_build_person_summary`` (#1079) hands the person summaries the
+    same public-follow repo the public Momentum service uses."""
+    app = create_app(cfg)
+    people = app[K.person_summary_service_key]
+    follows = app[K.moment_public_follow_repo_key]
+    assert people._public_follows is follows
+    assert app[K.moment_public_service_key]._follows is follows
+
+
 async def test_create_app_pins_client_max_size_to_the_json_cap(cfg):
     """``client_max_size`` is the ceiling for every whole-body read
     (``request.read()/json()/post()`` and, since aiohttp 3.13.3,

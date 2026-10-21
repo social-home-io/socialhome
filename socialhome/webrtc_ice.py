@@ -25,6 +25,23 @@ import aiolibdatachannel as rtc
 
 log = logging.getLogger(__name__)
 
+#: ``(entry index, reason)`` pairs :func:`rtc_configuration` already warned
+#: about. It runs once per peer (every highlight viewer), so a lasting
+#: misconfiguration warns once per process, not once per viewer. Bounded:
+#: past :data:`_ICE_WARNED_MAX` distinct pairs it stops remembering (and
+#: stops warning) — a list that broken has long been reported.
+_ICE_WARNED: set[tuple[int, str]] = set()
+_ICE_WARNED_MAX = 64
+
+
+def _warn_skipped_ice_entry(index: int, reason: str) -> None:
+    """WARNING about a skipped ICE entry, once per ``(index, reason)``."""
+    key = (index, reason)
+    if key in _ICE_WARNED or len(_ICE_WARNED) >= _ICE_WARNED_MAX:
+        return
+    _ICE_WARNED.add(key)
+    log.warning("WebRTC: ICE server entry #%d skipped: %s.", index, reason)
+
 
 def make_turn_credential(
     secret: str,
@@ -174,19 +191,34 @@ def rtc_configuration(ice_servers: list[dict]) -> rtc.RTCConfiguration:
     becomes its own :class:`~aiolibdatachannel.IceServer` with the
     credentials as first-class fields. A malformed entry is skipped rather
     than passed through — libdatachannel refuses the whole configuration
-    (``rtcCreatePeerConnection: invalid argument``) for one bad URL.
+    (``rtcCreatePeerConnection: invalid argument``) for one bad URL — and
+    each skip is a WARNING naming the entry's position and why, never its
+    values (a TURN entry carries credentials), once per process for each
+    distinct ``(position, reason)``.
     """
     servers: list[rtc.IceServer] = []
-    for srv in ice_servers:
+    for index, srv in enumerate(ice_servers):
         if not isinstance(srv, dict):
+            _warn_skipped_ice_entry(index, f"not an object ({type(srv).__name__})")
             continue
         url_field = srv.get("urls", srv.get("url"))
+        if url_field is None or url_field == []:
+            _warn_skipped_ice_entry(index, "no URL ('urls' / 'url')")
+            continue
         raw_urls = url_field if isinstance(url_field, list) else [url_field]
         username = srv.get("username") or None
         credential = srv.get("credential") or None
+        bad: list[str] = []
         for url in raw_urls:
             if isinstance(url, str) and url:
                 servers.append(
                     rtc.IceServer(url=url, username=username, credential=credential)
                 )
+            else:
+                bad.append("empty str" if url == "" else type(url).__name__)
+        if bad:
+            _warn_skipped_ice_entry(
+                index,
+                f"{len(bad)} URL(s) not a non-empty string ({', '.join(bad)})",
+            )
     return rtc.RTCConfiguration(ice_servers=servers)

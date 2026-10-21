@@ -1250,13 +1250,31 @@ class SpaceMemberMePictureView(BaseView):
         return web.Response(status=204)
 
 
+async def _require_picture_reader(view: BaseView, space_id: str) -> None:
+    """The read gate for a space's pictures (member and author pictures,
+    cover, icon): a bearer caller must be able to read the space
+    (``require_reader``) — the seat-gate middleware lets a household admin
+    through without a seat, so each picture route runs the gate itself.
+
+    A signed URL carries no user and passes: it is a per-file capability
+    minted only for someone who could read it when it was minted (a space
+    route behind the read gate, or a pending invite's icon) — signed URLs
+    live up to ~7 h (:data:`~socialhome.media_signer.EXP_BUCKET_SECONDS`
+    plus the default TTL), so a seat lost since then does not revoke one."""
+    ctx = view.user
+    if ctx.auth_method == "signed_url":
+        return
+    await view.svc(space_service_key).require_reader(space_id, ctx.user_id)
+
+
 class SpaceMemberPictureView(BaseView):
-    """``GET /api/spaces/{id}/members/{user_id}/picture`` — stream WebP."""
+    """``GET /api/spaces/{id}/members/{user_id}/picture`` — stream WebP.
+    Anyone who may read the space (:func:`_require_picture_reader`)."""
 
     async def get(self) -> web.Response:
-        self.require_user()
         space_id = self.match("id")
         user_id = self.match("user_id")
+        await _require_picture_reader(self, space_id)
         repo = self.svc(profile_picture_repo_key)
         got = await repo.get_member_picture(space_id, user_id)
         # §CP.F2: none for someone a guardian block separates from the caller.
@@ -1311,12 +1329,16 @@ class SpaceAuthorsView(BaseView):
 
 class SpaceAuthorPictureView(BaseView):
     """``GET /api/spaces/{id}/authors/{user_id}/picture`` — the WebP of a
-    cached author profile (v_60). 404 when none, or across a guardian block."""
+    cached author profile (v_60). 404 when none, or across a guardian block.
+
+    Anyone who may read the space (:func:`_require_picture_reader`, as
+    the author list); a signed URL is the capability
+    :class:`SpaceAuthorsView` and a space route's person summaries mint."""
 
     async def get(self) -> web.Response:
-        self.require_user()
         space_id = self.match("id")
         user_id = self.match("user_id")
+        await _require_picture_reader(self, space_id)
         got = await self.svc(space_author_profile_repo_key).get_picture(
             space_id, user_id
         )
@@ -1344,8 +1366,10 @@ class SpaceCoverView(BaseView):
 
     async def get(self) -> web.Response:
         # Auth enforced upstream by :class:`SignedMediaStrategy` (signed
-        # URL) or :class:`BearerTokenStrategy` (fetch() callers).
+        # URL) or :class:`BearerTokenStrategy` (fetch() callers); a bearer
+        # caller must be able to read the space.
         space_id = self.match("id")
+        await _require_picture_reader(self, space_id)
         repo = self.svc(space_cover_repo_key)
         got = await repo.get(space_id)
         if got is None:
@@ -1413,6 +1437,7 @@ class SpaceIconView(BaseView):
 
     async def get(self) -> web.Response:
         space_id = self.match("id")
+        await _require_picture_reader(self, space_id)
         repo = self.svc(space_icon_repo_key)
         got = await repo.get(space_id)
         if got is None:
