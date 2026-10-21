@@ -8,11 +8,9 @@ and gets exercised end-to-end in :file:`tests/scenarios/`.
 
 from __future__ import annotations
 
-import json
 import logging
 from unittest.mock import MagicMock
 
-from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.domain.events import MomentCreated
 from socialhome.federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
 from socialhome.infrastructure.event_bus import EventBus
@@ -21,6 +19,7 @@ from socialhome.repositories.moment_public_repo import (
     SqliteMomentPublicRegistrationRepo,
 )
 from socialhome.services.moment_public_inbound import MomentPublicInbound
+from tests.moment_public_wire import StubMomentKeys, encrypted_envelope, now_iso
 
 # A 32-byte Ed25519 seed and the matching 32-byte public-key hex
 # derived once for the inbound signature-verify tests.
@@ -38,12 +37,8 @@ def _author_pk_hex() -> str:
 
 
 def _signed_envelope(payload: dict, *, seed: bytes = _AUTHOR_SEED) -> dict:
-    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(
-        "utf-8"
-    )
-    signed = dict(payload)
-    signed["signature"] = b64url_encode(sign_ed25519(seed, canonical))
-    return signed
+    """The author household's envelope: sealed, then signed (v_62)."""
+    return encrypted_envelope(payload, seed)
 
 
 # ── Repos ────────────────────────────────────────────────────────────────
@@ -130,7 +125,10 @@ async def test_inbound_persists_and_publishes_on_valid_signature(db):
         followed_display_name="Bob",
     )
     inbound = MomentPublicInbound(
-        bus=bus, moment_repo=moment_repo, follow_repo=follow_repo
+        key_inbound=StubMomentKeys(),
+        bus=bus,
+        moment_repo=moment_repo,
+        follow_repo=follow_repo,
     )
     envelope = _signed_envelope(
         {
@@ -144,8 +142,8 @@ async def test_inbound_persists_and_publishes_on_valid_signature(db):
             "duration_ms": None,
             "parent_moment_id": None,
             "origin_instance_id": "inst-remote",
-            "created_at": "2026-05-06T12:00:00Z",
-            "expires_at": "2026-05-07T12:00:00Z",
+            "created_at": now_iso(hours=-1),
+            "expires_at": now_iso(hours=23),
         }
     )
     await inbound.handle(
@@ -189,7 +187,10 @@ async def test_inbound_drops_when_signature_does_not_match(db):
         followed_display_name="Bob",
     )
     inbound = MomentPublicInbound(
-        bus=bus, moment_repo=moment_repo, follow_repo=follow_repo
+        key_inbound=StubMomentKeys(),
+        bus=bus,
+        moment_repo=moment_repo,
+        follow_repo=follow_repo,
     )
     forged = _signed_envelope(
         {
@@ -201,8 +202,8 @@ async def test_inbound_drops_when_signature_does_not_match(db):
             "duration_ms": None,
             "parent_moment_id": None,
             "origin_instance_id": "inst-remote",
-            "created_at": "2026-05-06T12:00:00Z",
-            "expires_at": "2026-05-07T12:00:00Z",
+            "created_at": now_iso(hours=-1),
+            "expires_at": now_iso(hours=23),
         },
         seed=b"\x42" * 32,  # different signing seed → bad signature
     )
@@ -227,6 +228,8 @@ async def test_outbound_wire_subscribes_to_bus():
         registration_repo=MagicMock(),
         user_repo=MagicMock(),
         gfs_repo=MagicMock(),
+        key_outbound=MagicMock(),
+        gfs_service=MagicMock(),
     )
     sub.wire()  # should not raise; subscribers are just stored
 
@@ -284,7 +287,10 @@ async def test_inbound_delete_removes_local_row_on_valid_signature(db):
         )
     )
     inbound = MomentPublicInbound(
-        bus=bus, moment_repo=moment_repo, follow_repo=follow_repo
+        key_inbound=StubMomentKeys(),
+        bus=bus,
+        moment_repo=moment_repo,
+        follow_repo=follow_repo,
     )
     envelope = _signed_envelope(
         {
@@ -351,7 +357,10 @@ async def test_inbound_delete_rejects_bad_signature(db):
         )
     )
     inbound = MomentPublicInbound(
-        bus=bus, moment_repo=moment_repo, follow_repo=follow_repo
+        key_inbound=StubMomentKeys(),
+        bus=bus,
+        moment_repo=moment_repo,
+        follow_repo=follow_repo,
     )
     forged = _signed_envelope(
         {"moment_id": "m-9", "author_user_id": "u-remote"},
@@ -373,6 +382,7 @@ async def test_inbound_ignores_unknown_frame_type(db):
 
     bus = EventBus()
     inbound = MomentPublicInbound(
+        key_inbound=StubMomentKeys(),
         bus=bus,
         moment_repo=SqliteMomentRepo(db),
         follow_repo=SqliteMomentPublicFollowRepo(db),
@@ -411,12 +421,15 @@ async def _public_inbound_env(db):
         followed_display_name="Bob",
     )
     inbound = MomentPublicInbound(
-        bus=bus, moment_repo=moment_repo, follow_repo=follow_repo
+        key_inbound=StubMomentKeys(),
+        bus=bus,
+        moment_repo=moment_repo,
+        follow_repo=follow_repo,
     )
     return inbound, moment_repo, created
 
 
-def _public_create(moment_id: str, author: str = "u-remote") -> dict:
+def _public_create(moment_id: str, author: str = "u-remote", **extra) -> dict:
     return _signed_envelope(
         {
             "moment_id": moment_id,
@@ -427,8 +440,9 @@ def _public_create(moment_id: str, author: str = "u-remote") -> dict:
             "duration_ms": None,
             "parent_moment_id": None,
             "origin_instance_id": "inst-remote",
-            "created_at": "2026-05-06T12:00:00Z",
-            "expires_at": "2099-05-07T12:00:00Z",
+            "created_at": now_iso(hours=-1),
+            "expires_at": now_iso(hours=23),
+            **extra,
         }
     )
 
@@ -576,10 +590,17 @@ async def test_inbound_public_delete_naming_another_origin_is_refused(db):
         {"type": "incoming_public_moment", "payload": _public_create("m-d")},
         gfs_id="g1",
     )
-    for instance in ("inst-elsewhere", None):
-        env = {"moment_id": "m-d", "author_user_id": "u-remote"}
-        if instance:
-            env["instance_id"] = instance
+    for env in (
+        # The envelope names another household…
+        {"moment_id": "m-d", "author_user_id": "u-remote", "instance_id": "inst-x"},
+        # …or the sealed delete names another origin.
+        {
+            "moment_id": "m-d",
+            "author_user_id": "u-remote",
+            "instance_id": "inst-remote",
+            "origin_instance_id": "inst-elsewhere",
+        },
+    ):
         await inbound.handle(
             {
                 "type": "incoming_public_moment_delete",
@@ -620,11 +641,7 @@ async def test_inbound_public_moment_drops_a_remote_media_url(db):
         ("m-trk", "https://tracker.example/p.png"),
         ("m-ok", "api/media/a.webp"),
     ):
-        env = _public_create(mid)
-        env = _signed_envelope(
-            {k: v for k, v in env.items() if k not in ("signature", "author_pk")}
-            | {"media_url": url, "media_type": "image"}
-        )
+        env = _public_create(mid, media_url=url, media_type="image")
         await inbound.handle(
             {"type": "incoming_public_moment", "payload": env}, gfs_id="g1"
         )

@@ -20064,6 +20064,23 @@ a.sh-btn--ghost:hover {
 
 /* ─── Momentum (§Momentum) ────────────────────────────────────────── */
 
+/* Public sharing settings: a GFS that can't carry encrypted moments
+   (v_62) gets none — the row says so. */
+.sh-public-sharing-warning {
+  margin: var(--sh-space-xs) 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-sm);
+  border-inline-start: 3px solid var(--sh-warning);
+  background: color-mix(in srgb, var(--sh-warning) 12%, transparent);
+  color: var(--sh-text);
+  overflow-wrap: anywhere;
+}
+
+.sh-public-sharing-note {
+  margin: var(--sh-space-xs) 0;
+  overflow-wrap: anywhere;
+}
+
 .sh-momentum,
 .sh-momentum-archive,
 .sh-momentum-detail,

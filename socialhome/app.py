@@ -52,7 +52,7 @@ from .dashboard.render import DashboardRenderer
 from .dashboard.server import DashboardServer
 from .db import AsyncDatabase
 from .domain.conversation import SystemChatScope
-from .domain.events import PeerProtoVersionRaised
+from .domain.events import PeerProtoVersionRaised, UserBlocked
 from .domain.federation import (
     DELIVERY_ERROR_RELAY_TOO_LARGE,
     FederationEventType,
@@ -233,6 +233,7 @@ from .repositories.media_reference_repo import SqliteMediaReferenceRepo
 from .repositories.media_transcode_repo import SqliteMediaTranscodeRepo
 from .repositories.moment_public_repo import (
     SqliteMomentPublicFollowRepo,
+    SqliteMomentPublicKeyRepo,
     SqliteMomentPublicRegistrationRepo,
 )
 from .repositories.moment_repo import SqliteMomentRepo
@@ -340,6 +341,8 @@ from .services.media_orphan_sweep_service import MediaOrphanSweepService
 from .services.media_transcode_service import MediaTranscodeService
 from .services.moment_federation_outbound import MomentFederationOutbound
 from .services.moment_public_inbound import MomentPublicInbound
+from .services.moment_public_key_inbound import MomentPublicKeyInbound
+from .services.moment_public_key_outbound import MomentPublicKeyOutbound
 from .services.moment_public_outbound import MomentPublicOutbound
 from .services.moment_public_service import MomentPublicService
 from .services.moment_public_signaling_handler import MomentPublicSignalingHandler
@@ -1191,6 +1194,7 @@ def _build_repos(db: AsyncDatabase):
         space_author_profile=SqliteSpaceAuthorProfileRepo(db),
         moment_public_registration=SqliteMomentPublicRegistrationRepo(db),
         moment_public_follow=SqliteMomentPublicFollowRepo(db),
+        moment_public_key=SqliteMomentPublicKeyRepo(db),
         space_proposal=SqliteSpaceProposalRepo(db),
         space_remote_location=SqliteSpaceRemoteLocationRepo(db),
         poll=SqlitePollRepo(db),
@@ -3179,6 +3183,23 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── Public Momentum via GFS (§Momentum-public) ─────────────────────
     moment_public_registration_repo = repos.moment_public_registration
     moment_public_follow_repo = repos.moment_public_follow
+    # v_62 — public moments are encrypted from the GFS under each author's
+    # moment content key: minted + sealed to followers here (author side),
+    # taken in from followed authors there (follower side).
+    moment_public_key_repo = repos.moment_public_key
+    moment_public_key_outbound = MomentPublicKeyOutbound(
+        key_repo=moment_public_key_repo,
+        registration_repo=moment_public_registration_repo,
+        user_repo=user_repo,
+        gfs_repo=repos.gfs_connection,
+        gfs_service=gfs_connection_service,
+    )
+    moment_public_key_inbound = MomentPublicKeyInbound(
+        key_repo=moment_public_key_repo,
+        follow_repo=moment_public_follow_repo,
+        user_repo=user_repo,
+        gfs_repo=repos.gfs_connection,
+    )
     moment_public_service = MomentPublicService(
         moment_public_registration_repo,
         moment_public_follow_repo,
@@ -3192,13 +3213,21 @@ def create_app(config: Config | None = None) -> web.Application:
         registration_repo=moment_public_registration_repo,
         user_repo=user_repo,
         gfs_repo=repos.gfs_connection,
+        key_outbound=moment_public_key_outbound,
+        gfs_service=gfs_connection_service,
     )
     moment_public_outbound.wire()
     moment_public_inbound = MomentPublicInbound(
         bus=bus,
         moment_repo=moment_repo,
         follow_repo=moment_public_follow_repo,
+        key_inbound=moment_public_key_inbound,
     )
+    moment_public_service.attach_key_inbound(moment_public_key_inbound)
+    moment_public_service.attach_key_outbound(moment_public_key_outbound)
+    # A local author blocking someone marks their moment key for rotation.
+    bus.subscribe(UserBlocked, moment_public_key_outbound.on_user_blocked)
+    moment_public_service.attach_capabilities(gfs_connection_service)
     # §CP.R: every service that owns a surface a protected account may not
     # use (bazaar, public spaces, public moments / links, API tokens,
     # calendar feeds) checks it through ChildProtectionService.
@@ -3215,6 +3244,7 @@ def create_app(config: Config | None = None) -> web.Application:
         highlight_signaling_handler,
         moment_public_service,
         moment_public_outbound,
+        moment_public_key_outbound,
         moment_public_signaling_handler,
         dm_service,
         notification_service,
@@ -3746,6 +3776,21 @@ def create_app(config: Config | None = None) -> web.Application:
             own_instance_id=real_instance_id,
             signing_key=identity_seed,
         )
+        moment_public_key_outbound.attach_session(http_session)
+        moment_public_key_outbound.attach_identity(
+            own_instance_id=real_instance_id,
+            signing_key=identity_seed,
+            key_manager=key_manager,
+        )
+        moment_public_key_inbound.attach_session(http_session)
+        moment_public_key_inbound.attach_identity(
+            own_instance_id=real_instance_id,
+            signing_key=identity_seed,
+            key_manager=key_manager,
+            keywrap_private_key=identity.keywrap_private_key,
+        )
+        # Sealed moment keys go to the GFS in batches (v_62).
+        await moment_public_key_outbound.start()
 
         # 3. Replace UserService with one carrying the real public key.
         real_user_service = UserService(
@@ -4583,6 +4628,10 @@ def create_app(config: Config | None = None) -> web.Application:
             # — idempotent (the pin only moves on an owner-certified rotation,
             # v_44) and fail-soft.
             await gfs_connection_service.heal_space_pins(gfs_id)
+            # v_62 — tell this server what we can open, so follows made
+            # before the upgrade get encrypted public moments (fail-soft,
+            # once per process per server).
+            await moment_public_service.declare_suites(gfs_id)
             # And withdraw what must no longer be listed there: a space that
             # left the global tier or was dissolved while this GFS was down.
             try:
@@ -4711,6 +4760,8 @@ def create_app(config: Config | None = None) -> web.Application:
             on_highlight_signal=highlight_signaling_handler.handle_signal,
             on_moment_signal=moment_public_signaling_handler.handle_signal,
             on_moment_public=moment_public_inbound.handle,
+            # v_62 — a follower to seal the author's moment key to.
+            on_follow_changed=moment_public_key_outbound.handle,
             on_new_subscriber=space_subscriber_key_outbound.handle,
             on_envelope=_on_gfs_envelope,
             on_connected=_on_gfs_connected,
@@ -5105,6 +5156,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_reconcile_retry.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
+        # Before the HTTP session closes: queued sealed moment keys ride it.
+        await moment_public_key_outbound.stop()
         # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()
         # Background seat releases ride the HTTP session too.

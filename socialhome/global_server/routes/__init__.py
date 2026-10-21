@@ -104,8 +104,12 @@ from .moment_rtc import (
     MomentRtcViewerIceView,
 )
 from .moments_public import (
+    GfsMomentFollowerStatsView,
+    GfsMomentKeyRequestView,
+    GfsMomentKeysView,
     GfsMomentPublicDeleteView,
     GfsMomentPublicPublishView,
+    GfsMomentSuitesView,
     GfsUserDeregisterView,
     GfsUserDetailHtmlView,
     GfsUserDetailView,
@@ -306,6 +310,15 @@ def register_routes(
     app.router.add_view("/gfs/moments/users/{user_id}/unfollow", GfsUserUnfollowView)
     app.router.add_view("/gfs/moments/publish", GfsMomentPublicPublishView)
     app.router.add_view("/gfs/moments/delete", GfsMomentPublicDeleteView)
+    # v_62 — sealed moment keys, routed to the one follower each names.
+    app.router.add_view("/gfs/moments/keys", GfsMomentKeysView)
+    app.router.add_view("/gfs/moments/suites", GfsMomentSuitesView)
+    app.router.add_view(
+        "/gfs/moments/users/{user_id}/key_request", GfsMomentKeyRequestView
+    )
+    app.router.add_view(
+        "/gfs/moments/users/{user_id}/follower_stats", GfsMomentFollowerStatsView
+    )
     app.router.add_view("/gfs/moments/users/{user_id}/picture", GfsUserPictureView)
     app.router.add_view("/gfs/moments/users", GfsUserDirectoryView)
     app.router.add_view("/gfs/moments/users/{user_id}", GfsUserDetailView)

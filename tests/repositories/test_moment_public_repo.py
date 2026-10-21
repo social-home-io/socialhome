@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from socialhome.repositories.moment_public_repo import SqliteMomentPublicFollowRepo
+from socialhome.domain.moment_public import MomentPublicKey
+from socialhome.repositories.moment_public_repo import (
+    SqliteMomentPublicFollowRepo,
+    SqliteMomentPublicKeyRepo,
+)
 
 
 async def _seed(db) -> SqliteMomentPublicFollowRepo:
@@ -84,3 +88,95 @@ async def test_list_for_followed_reads_many_authors_at_once(db):
         ("u1", "u-sam", "g1"),
     }
     assert await repo.list_for_followed([]) == []
+
+
+# ── Moment content keys (v_62) ────────────────────────────────────────────
+
+
+def _key(
+    author: str, gen: int, *, own: bool, step: int = 0, sealed: str = "s"
+) -> MomentPublicKey:
+    return MomentPublicKey(
+        author_user_id=author, key_gen=gen, key_step=step, is_own=own, key_sealed=sealed
+    )
+
+
+async def test_key_save_get_latest_and_first_write_wins(db):
+    repo = SqliteMomentPublicKeyRepo(db)
+    assert await repo.latest("alice", own=True) is None
+    assert await repo.save(_key("alice", 10, own=True, sealed="k10"))
+    assert await repo.save(_key("alice", 20, own=True, sealed="k20"))
+    # The same generation is never replaced by a save.
+    assert not await repo.save(_key("alice", 20, own=True, sealed="evil"))
+    latest = await repo.latest("alice", own=True)
+    assert (latest.key_gen, latest.key_sealed, latest.is_own) == (20, "k20", True)
+    got = await repo.get("alice", 10, own=True)
+    assert got is not None and got.key_sealed == "k10"
+    assert await repo.get("alice", 30, own=True) is None
+
+
+async def test_advance_moves_a_step_forward_never_back(db):
+    repo = SqliteMomentPublicKeyRepo(db)
+    await repo.save(_key("alice", 10, own=False, step=2, sealed="s2"))
+    assert await repo.advance(_key("alice", 10, own=False, step=5, sealed="s5"))
+    assert not await repo.advance(_key("alice", 10, own=False, step=3, sealed="s3"))
+    assert not await repo.advance(_key("alice", 99, own=False, step=9, sealed="x"))
+    got = await repo.get("alice", 10, own=False)
+    assert (got.key_step, got.key_sealed) == (5, "s5")
+
+
+async def test_own_and_delivered_keys_never_mix(db):
+    """A key delivered for an author id can never become a local author's
+    own key — even under the same id and a newer generation."""
+    repo = SqliteMomentPublicKeyRepo(db)
+    await repo.save(_key("alice", 10, own=True, sealed="mine"))
+    assert await repo.save(_key("alice", 99, own=False, sealed="theirs"))
+    own = await repo.latest("alice", own=True)
+    assert (own.key_gen, own.key_sealed) == (10, "mine")
+    assert (await repo.latest("alice", own=False)).key_sealed == "theirs"
+    assert await repo.get("alice", 99, own=True) is None
+
+
+async def test_prune_keeps_the_newest_generations_of_one_author(db):
+    repo = SqliteMomentPublicKeyRepo(db)
+    for gen in (1, 2, 3, 4):
+        await repo.save(_key("alice", gen, own=False))
+    await repo.save(_key("bob", 1, own=False))
+    await repo.save(_key("alice", 1, own=True))
+    assert await repo.prune("alice", own=False, keep=2) == 2
+    assert await repo.get("alice", 2, own=False) is None
+    assert await repo.get("alice", 3, own=False) is not None
+    assert await repo.get("alice", 4, own=False) is not None
+    assert await repo.get("bob", 1, own=False) is not None
+    assert await repo.get("alice", 1, own=True) is not None
+
+
+async def test_delete_all_drops_one_authors_delivered_keys(db):
+    repo = SqliteMomentPublicKeyRepo(db)
+    await repo.save(_key("alice", 1, own=False))
+    await repo.save(_key("alice", 2, own=False))
+    await repo.save(_key("alice", 1, own=True))
+    assert await repo.delete_all("alice", own=False) == 2
+    assert await repo.latest("alice", own=False) is None
+    assert await repo.latest("alice", own=True) is not None
+
+
+async def test_any_through_tells_whether_a_server_is_followed_through(db):
+    repo = await _seed(db)
+    assert await repo.any_through("g1") is True
+    assert await repo.any_through("g9") is False
+
+
+async def test_mark_rotate_due_flags_only_the_newest_own_generation(db):
+    repo = SqliteMomentPublicKeyRepo(db)
+    assert not await repo.mark_rotate_due("alice")
+    await repo.save(_key("alice", 10, own=True))
+    await repo.save(_key("alice", 20, own=True))
+    await repo.save(_key("alice", 30, own=False))
+    assert await repo.mark_rotate_due("alice")
+    assert (await repo.latest("alice", own=True)).rotate_due
+    assert not (await repo.get("alice", 10, own=True)).rotate_due
+    assert not (await repo.latest("alice", own=False)).rotate_due
+    # A new generation starts unmarked.
+    await repo.save(_key("alice", 40, own=True))
+    assert not (await repo.latest("alice", own=True)).rotate_due

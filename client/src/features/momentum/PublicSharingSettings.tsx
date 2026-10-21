@@ -101,6 +101,13 @@ export default function PublicSharingSettings() {
     registrations.value.some((r) => r.gfs_id === gfsId)
   const defaultShare = (gfsId: string) =>
     registrations.value.find((r) => r.gfs_id === gfsId)?.default_share ?? true
+  // v_62: a server that can't carry encrypted moments gets none at all —
+  // say so instead of letting the author think they're shared.
+  const unsupported = (gfsId: string) =>
+    registrations.value.find((r) => r.gfs_id === gfsId)?.delivery ===
+    'unsupported_server'
+  const unable = (gfsId: string) =>
+    registrations.value.find((r) => r.gfs_id === gfsId)?.followers_unable ?? 0
 
   const onRegister = async (gfsId: string) => {
     try {
@@ -150,6 +157,16 @@ export default function PublicSharingSettings() {
                 <strong>{g.display_name}</strong>
                 <span class="sh-muted"> · {g.inbox_url}</span>
               </div>
+              {reg && unsupported(g.id) && (
+                <p class="sh-public-sharing-warning" role="status">
+                  {t('moment.sharing.unsupported_server')}
+                </p>
+              )}
+              {reg && !unsupported(g.id) && unable(g.id) > 0 && (
+                <p class="sh-public-sharing-note sh-muted" role="status">
+                  {t('moment.sharing.followers_unable', { count: String(unable(g.id)) })}
+                </p>
+              )}
               {reg ? (
                 <>
                   <label class="sh-public-sharing-default">

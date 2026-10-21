@@ -562,3 +562,129 @@ async def test_follow_stores_no_name_for_an_author_named_by_their_id(repos):
     assert f.followed_display_name == ""
     assert f.public_name == "bob"
     assert f.followed_bio is None and f.followed_picture_digest is None
+
+
+# ── Encrypted public moments (v_62) ───────────────────────────────────────
+
+
+class _Forgets:
+    def __init__(self) -> None:
+        self.authors: list[str] = []
+
+    async def forget_if_unfollowed(self, author_user_id: str) -> None:
+        self.authors.append(author_user_id)
+
+
+class _Caps:
+    async def encrypted_moments_supported(self, gfs_id: str) -> bool:
+        return gfs_id == "g1"
+
+
+async def test_unfollow_lets_the_key_store_forget_the_author(repos):
+    svc = _make_service(repos, session=_StubSession(body={}))
+    forgets = _Forgets()
+    svc.attach_key_inbound(forgets)  # type: ignore[arg-type]
+    await svc.unfollow(follower_user_id="u1", gfs_id="g1", followed_user_id="u-remote")
+    assert forgets.authors == ["u-remote"]
+
+
+async def test_encrypted_delivery_reads_the_servers_proof(repos):
+    svc = _make_service(repos, session=_StubSession())
+    # Not wired: fail closed — reported as no delivery.
+    assert await svc.encrypted_delivery("g1") is False
+    svc.attach_capabilities(_Caps())  # type: ignore[arg-type]
+    assert await svc.encrypted_delivery("g1") is True
+    assert await svc.encrypted_delivery("g2") is False
+
+
+async def test_follower_households_unable_reads_the_gfs_count(repos):
+    sess = _StubSession(status=200, body={"households_unable": 3})
+    svc = _make_service(repos, session=sess)
+    assert await svc.follower_households_unable(user_id="u1", gfs_id="g1") == 3
+    url, body = sess.posts[0]
+    assert url == "https://gfs1.example/gfs/moments/users/u1/follower_stats"
+    assert body["instance_id"] == "inst-self" and "signature" in body
+
+
+async def test_follower_households_unable_is_none_when_unknown(repos):
+    for sess in (
+        _StubSession(status=403),
+        _StubSession(status=200, body={"households_unable": "x"}),
+    ):
+        svc = _make_service(repos, session=sess)
+        assert await svc.follower_households_unable(user_id="u1", gfs_id="g1") is None
+    svc = _make_service(repos, session=_StubSession())
+    assert await svc.follower_households_unable(user_id="u1", gfs_id="nope") is None
+
+
+async def test_a_follow_declares_what_the_household_can_open(repos):
+    sess = _StubSession(body=_follow_reply())
+    svc = _make_service(repos, session=sess)
+    await svc.follow(follower_user_id="u1", gfs_id="g1", followed_user_id="u-remote")
+    body = sess.posts[0][1]
+    assert body["moment_suites"] == {"kem": ["x25519"], "seal": ["aesgcm-256"]}
+    assert "signature" in body
+
+
+async def test_suites_are_declared_once_to_a_server_we_follow_through(repos):
+    sess = _StubSession(body={"updated": 1}, status=200)
+    svc = _make_service(repos, session=sess)
+    svc.attach_capabilities(_Caps())  # type: ignore[arg-type]
+    # Nobody here follows anyone through g1 yet: nothing is sent.
+    assert await svc.declare_suites("g1") is False
+    await repos["follows"].upsert(
+        follower_user_id="u1",
+        followed_user_id="u-remote",
+        gfs_id="g1",
+        followed_instance_pk="ab" * 32,
+        followed_username="bob",
+        followed_display_name="Bob",
+    )
+    assert await svc.declare_suites("g1") is True
+    [(url, body)] = sess.posts
+    assert url == "https://gfs1.example/gfs/moments/suites"
+    assert body["instance_id"] == "inst-self" and body["moment_suites"]
+    assert "signature" in body
+    # Once per process per server.
+    assert await svc.declare_suites("g1") is False
+    assert len(sess.posts) == 1
+
+
+async def test_suites_are_not_declared_to_an_unproven_or_refusing_server(repos):
+    await repos["follows"].upsert(
+        follower_user_id="u1",
+        followed_user_id="u-remote",
+        gfs_id="g1",
+        followed_instance_pk="ab" * 32,
+        followed_username="bob",
+        followed_display_name="Bob",
+    )
+    sess = _StubSession(status=422)
+    svc = _make_service(repos, session=sess)
+    assert await svc.declare_suites("g1") is False  # capabilities unwired
+    assert sess.posts == []
+    svc.attach_capabilities(_Caps())  # type: ignore[arg-type]
+    assert await svc.declare_suites("g1") is False  # refused
+    assert len(sess.posts) == 1
+    assert await svc.declare_suites("g1") is False  # retried next time
+    assert len(sess.posts) == 2
+
+
+class _Marks:
+    def __init__(self) -> None:
+        self.marked: list[tuple[str, str]] = []
+
+    async def mark_rotation_due(self, author_user_id: str, *, reason: str) -> bool:
+        self.marked.append((author_user_id, reason))
+        return True
+
+
+async def test_deregister_marks_the_authors_key_for_rotation(repos):
+    """Followers on that server keep their key; the next publish anywhere
+    must start a new generation (lazy rotation)."""
+    await repos["regs"].upsert(user_id="u1", gfs_id="g1", default_share=True)
+    svc = _make_service(repos, session=_StubSession(body={}))
+    marks = _Marks()
+    svc.attach_key_outbound(marks)  # type: ignore[arg-type]
+    await svc.deregister(user_id="u1", gfs_id="g1")
+    assert marks.marked == [("u1", "a registration ended")]

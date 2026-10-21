@@ -16249,6 +16249,11 @@ def cmd_gfs_moment_profile() -> None:
 
     And the GFS learned nothing new: its directory row already held this
     bio and the picture whose digest the envelope names.
+
+    v_62 — **encrypted from the GFS**: a minted its author's moment content
+    key, sealed it to e alone (e holds the delivered epoch a minted), and
+    neither the GFS log nor the GFS database contains the moment's text or
+    id; the GFS logged the sealed key it routed and refused nothing.
     """
     state = _load()
     if not state or not _gfs_alive(state):
@@ -16260,6 +16265,7 @@ def cmd_gfs_moment_profile() -> None:
     a_gfs = state["gfs"]["pairings"]["a"]["id"]
     e_gfs = state["gfs"]["pairings"]["e"]["id"]
     _wait_for_gfs_ws(e["instance_id"])
+    gfs_off = _gfs_log_size()
 
     # A user of its own on a: its first moment is never rate limited (one
     # per 15 min per author), and a's own user stays as earlier steps left it.
@@ -16371,6 +16377,56 @@ def cmd_gfs_moment_profile() -> None:
             f"gfs-moment-profile: the GFS directory row {rows!r} does not already "
             "hold the bio + picture the envelope carried"
         )
+    # v_62 — the key: minted on a, sealed to e alone, never the GFS's.
+    own = _rows(
+        "a",
+        "SELECT key_gen FROM moment_public_keys WHERE author_user_id = ? AND is_own = 1",
+        (author_uid,),
+    )
+    got = _rows(
+        "e",
+        "SELECT key_gen FROM moment_public_keys WHERE author_user_id = ? AND is_own = 0",
+        (author_uid,),
+    )
+    if not own or not got or own[-1][0] != got[-1][0]:
+        raise SystemExit(
+            f"gfs-moment-profile: a minted epochs {own!r} but e holds {got!r}"
+        )
+    print(f"  e holds a's moment key generation {got[-1][0]} (sealed to e alone) ✓")
+    routed = _gfs_log_lines_matching("sealed key(s) delivered", offset=gfs_off)
+    if not routed:
+        raise SystemExit("gfs-moment-profile: the GFS never routed a sealed key")
+    mail = _gfs_rows(
+        "SELECT key_gen, delivered FROM gfs_moment_key_mailbox "
+        "WHERE author_user_id = ? AND follower_instance_id = ?",
+        (author_uid, e["instance_id"]),
+    )
+    if not mail or mail[0][0] != got[-1][0] or mail[0][1] != 1:
+        raise SystemExit(
+            f"gfs-moment-profile: the GFS mailbox row for e is {mail!r} "
+            "(expected the delivered sealed key of that generation)"
+        )
+    refused = _gfs_log_lines_matching("encryption_required", offset=gfs_off)
+    if refused:
+        raise SystemExit(f"gfs-moment-profile: the GFS refused {refused[:2]!r}")
+    # The moment id is a routing field now (bound into the AEAD); the
+    # content never shows.
+    for secret in (content,):
+        if _gfs_log_lines_matching(secret, offset=gfs_off):
+            raise SystemExit(
+                f"gfs-moment-profile: the GFS log shows {secret!r} in the clear"
+            )
+        for db_file in ("gfs.db", "gfs.db-wal"):
+            try:
+                raw = (GFS_DIR / db_file).read_bytes()
+            except OSError:
+                continue
+            if secret.encode() in raw:
+                raise SystemExit(
+                    f"gfs-moment-profile: the GFS's {db_file} holds {secret!r}"
+                )
+    print("  the GFS log and database hold no moment text ✓")
+
     state["gfs_moment_profile"] = {
         "moment_id": moment_id,
         "user_id": author_uid,
@@ -16381,7 +16437,8 @@ def cmd_gfs_moment_profile() -> None:
     _save(state)
     print(
         f"gfs-moment-profile: ok (e names {name!r} with bio + GFS-mirrored "
-        "picture; the GFS directory already held both)"
+        "picture; the GFS directory already held both; the moment reached e "
+        "encrypted from the GFS)"
     )
 
 

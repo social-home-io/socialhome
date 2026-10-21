@@ -5,8 +5,12 @@ from __future__ import annotations
 import orjson
 import pytest
 
-from socialhome.global_server.moment_public_registry import MomentPublicRegistry
+from socialhome.global_server.moment_public_registry import (
+    MomentPublicRegistry,
+    suites_can_open,
+)
 from socialhome.global_server.repositories import (
+    SqliteGfsFederationRepo,
     SqliteGfsMomentFollowRepo,
     SqliteGfsUserRegistrationRepo,
 )
@@ -166,6 +170,7 @@ async def test_fan_out_moment_pushes_to_each_unique_follower_instance(gfs_setup)
         follower_user_id="u-follower",
         follower_instance_id="inst-follower",
         followed_user_id="u-author",
+        moment_suites='{"kem":["x25519"],"seal":["aesgcm-256"]}',
     )
     follower_ws = _StubWs()
     await gfs_setup["ws"].register("inst-follower", follower_ws)  # type: ignore[arg-type]
@@ -173,7 +178,7 @@ async def test_fan_out_moment_pushes_to_each_unique_follower_instance(gfs_setup)
         envelope={
             "moment_id": "m-1",
             "author_user_id": "u-author",
-            "content": "hi",
+            "ciphertext": "c:t",
             "signature": "stub",
         }
     )
@@ -215,6 +220,7 @@ async def test_fan_out_delete_pushes_tombstone(gfs_setup):
         follower_user_id="u-follower",
         follower_instance_id="inst-follower",
         followed_user_id="u-author",
+        moment_suites='{"kem":["x25519"],"seal":["aesgcm-256"]}',
     )
     follower_ws = _StubWs()
     await gfs_setup["ws"].register("inst-follower", follower_ws)  # type: ignore[arg-type]
@@ -241,3 +247,86 @@ async def test_follower_count_reads_repo(gfs_setup):
         followed_user_id="u-author",
     )
     assert await reg.follower_count("u-author") == 1
+
+
+# ── Key routing (v_62) ────────────────────────────────────────────────────
+
+
+async def _with_follow(gfs_setup, *, instances=None) -> MomentPublicRegistry:
+    reg = MomentPublicRegistry(
+        gfs_setup["users"], gfs_setup["follows"], gfs_setup["ws"], instances
+    )
+    await reg.register_user(
+        user_id="u-author",
+        instance_id="inst-author",
+        username="alice",
+        display_name="Alice",
+        home_instance_pk="aa" * 32,
+    )
+    await reg.add_follow(
+        follower_user_id="u-fan",
+        follower_instance_id="inst-follower",
+        followed_user_id="u-author",
+    )
+    return reg
+
+
+async def test_without_an_instance_repo_no_follower_keys_are_named(gfs_setup):
+    """No household directory wired: the follow notice carries no keys and
+    a key request is dropped (nothing to seal to)."""
+    author_ws = _StubWs()
+    await gfs_setup["ws"].register("inst-author", author_ws)  # type: ignore[arg-type]
+    reg = await _with_follow(gfs_setup)
+    assert "follower" not in orjson.loads(author_ws.sent[-1])
+    author_ws.sent.clear()
+    await reg.request_key(
+        follower_instance_id="inst-follower", followed_user_id="u-author", want_gen=0
+    )
+    assert author_ws.sent == []
+
+
+async def test_an_inactive_follower_household_is_never_named(gfs_setup, gfs_db):
+    await gfs_db.enqueue(
+        "UPDATE client_instances SET status='banned' WHERE instance_id='inst-follower'"
+    )
+    author_ws = _StubWs()
+    await gfs_setup["ws"].register("inst-author", author_ws)  # type: ignore[arg-type]
+    await _with_follow(gfs_setup, instances=SqliteGfsFederationRepo(gfs_db))
+    assert "follower" not in orjson.loads(author_ws.sent[-1])
+
+
+async def test_key_request_for_a_suspended_author_is_dropped(gfs_setup, gfs_db):
+    author_ws = _StubWs()
+    await gfs_setup["ws"].register("inst-author", author_ws)  # type: ignore[arg-type]
+    reg = await _with_follow(gfs_setup, instances=SqliteGfsFederationRepo(gfs_db))
+    await gfs_db.enqueue(
+        "UPDATE gfs_user_registrations SET status='suspended' WHERE user_id='u-author'"
+    )
+    author_ws.sent.clear()
+    await reg.request_key(
+        follower_instance_id="inst-follower", followed_user_id="u-author", want_gen=0
+    )
+    assert author_ws.sent == []
+
+
+async def test_deliveries_missing_an_author_or_target_are_skipped(gfs_setup):
+    follower_ws = _StubWs()
+    await gfs_setup["ws"].register("inst-follower", follower_ws)  # type: ignore[arg-type]
+    reg = await _with_follow(gfs_setup)
+    delivered = await reg.deliver_keys(
+        sender_instance_id="inst-author",
+        deliveries=[{"author_user_id": "", "to": "inst-follower"}, {"to": ""}],
+    )
+    assert delivered == 0
+    assert follower_ws.sent == []
+
+
+def test_suites_can_open():
+    assert suites_can_open('{"kem":["x25519"],"seal":["aesgcm-256"]}')
+    for raw in (None, "", "nope", "[]", '{"seal":"aesgcm-256"}', '{"seal":["x"]}'):
+        assert not suites_can_open(raw)
+
+
+async def test_without_a_mailbox_keys_reach_only_online_followers(gfs_setup):
+    reg = await _with_follow(gfs_setup)
+    assert await reg.on_follower_connected("inst-follower") == 0

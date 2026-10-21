@@ -16,12 +16,10 @@ and asserts the contract end-to-end:
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.domain.events import MomentCreated
 from socialhome.domain.federation import FederationEventType, RemoteInstance
 from socialhome.infrastructure.event_bus import EventBus
@@ -33,6 +31,7 @@ from socialhome.services.moment_federation_outbound import (
     MomentFederationOutbound,
 )
 from socialhome.services.moment_public_inbound import MomentPublicInbound
+from tests.moment_public_wire import StubMomentKeys, encrypted_envelope, now_iso
 
 _AUTHOR_SEED = b"\x11" * 32
 
@@ -51,12 +50,8 @@ def _author_pk_hex() -> str:
 
 
 def _signed_envelope(payload: dict) -> dict:
-    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(
-        "utf-8"
-    )
-    signed = dict(payload)
-    signed["signature"] = b64url_encode(sign_ed25519(_AUTHOR_SEED, canonical))
-    return signed
+    """The author household's envelope: sealed, then signed (v_62)."""
+    return encrypted_envelope(payload, _AUTHOR_SEED)
 
 
 def _peer(iid: str) -> RemoteInstance:
@@ -106,7 +101,10 @@ async def env(db):
     )
     out.wire()
     inbound = MomentPublicInbound(
-        bus=bus, moment_repo=moment_repo, follow_repo=follow_repo
+        bus=bus,
+        moment_repo=moment_repo,
+        follow_repo=follow_repo,
+        key_inbound=StubMomentKeys(),
     )
     return {
         "bus": bus,
@@ -136,8 +134,8 @@ async def test_gfs_public_moment_persists_and_does_not_relay(env):
             "duration_ms": None,
             "parent_moment_id": None,
             "origin_instance_id": "inst-remote",
-            "created_at": "2026-05-06T12:00:00Z",
-            "expires_at": "2026-05-07T12:00:00Z",
+            "created_at": now_iso(hours=-1),
+            "expires_at": now_iso(hours=23),
         }
     )
     await env["inbound"].handle(

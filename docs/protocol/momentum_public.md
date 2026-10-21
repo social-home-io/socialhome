@@ -31,24 +31,94 @@ uses.
   `moment.id` (the `moments` PRIMARY KEY makes the second save a
   no-op).
 
-## Encryption posture
+## Encryption posture (v_62)
 
-Per §25.8.21 (encryption-first), the GFS sees the absolute minimum
-needed to route. For public Momentum:
+Per §25.8.21 (encryption-first) **the GFS never reads a public moment.**
+It stays **content-blind — not blind**: it still holds the follow graph,
+author and moment ids, key ids, timing and sizes, and the plaintext author
+directory. Nothing more is claimed.
 
-* The author's instance **signs** the moment envelope (Ed25519 over
-  the canonical JSON of every field except ``signature``).
-* The GFS holds plaintext **only in memory** during fan-out. It is
-  never persisted on the GFS — `gfs_moments` does not exist as a
-  table; the broker reads the envelope, looks up follower instances,
-  pushes the frame to each, and discards.
-* Recipients verify the signature against the author's
-  `home_instance_pk` cached in `moment_public_follows` at follow
-  time. A bad signature drops the frame on the floor.
-* The GFS forwards the envelope **with its `signature`**: the same
-  signature authenticates the publish request to the GFS
-  (`_rtc_authenticate(keep_signature=True)`). An older GFS stripped it,
-  so its followers dropped every public moment as unsigned.
+* **Keys.** Each author's household keeps one random 32-byte root per
+  *generation* (`key_gen` = Unix seconds at mint, never repeats). Step keys
+  ratchet forward once a day — `K(g, s+1) = HKDF(K(g, s),
+  "sh-moment-ratchet:v1")` — and every household keeps only its newest step
+  key (forward secrecy at rest, at zero delivery cost). Each moment is sealed
+  under its own **item key** `HKDF(K(g, s), "sh-moment-item:v1|" +
+  moment_id)`, so one moment's key (a share link, later) opens that moment
+  and nothing else. See [Moment keys](#moment-keys-v_62).
+* **Envelope.** Exactly `{author_user_id, instance_id, moment_id, key_gen,
+  key_step, seal_suite, ciphertext, signature}`
+  (`socialhome/moment_public_seal.py`). `seal_suite: "aesgcm-256"` —
+  AES-256-GCM, fresh 96-bit nonce, associated data binding suite, author,
+  generation, step and moment id. Inside: `op` (create / delete), text,
+  media reference, duration, parent, origin, timestamps, `profile_rev`, and
+  the author's profile only when it changed. The author's household signs
+  the whole envelope (ciphertext + key id + moment id). The same signature
+  authenticates the publish to the GFS and is forwarded intact.
+* **One upload, one ciphertext.** A moment is sealed and signed once; the
+  same bytes go to every registered GFS, and each GFS fans those bytes out
+  to every follower household. Nothing is sealed per follower when a moment
+  is published.
+* **The GFS refuses anything else.** A publish or delete with any field
+  beyond those eight is `422 encryption_required` and is never fanned out;
+  only the household the author registered from may publish as them
+  (`403 instance_mismatch`); ≤ 16 KB of ciphertext.
+* **Only households that can open it.** A follow request declares (signed)
+  what the follower household can open: `moment_suites: {kem, seal}`. The
+  GFS fans a moment out only to households that declared the seal suite,
+  and the author seals keys only to households that declared both the KEM
+  suite of their key-wrap key and the seal suite. A household re-declares
+  its suites on each (re)connect (`POST /gfs/moments/suites`), so follows
+  made before it upgraded start receiving. An older household
+  declared nothing: it is sent nothing, and the author's sharing settings
+  count it ("can't read your public moments yet").
+* **Keys reach each follower household sealed to it alone**, through the
+  GFS, which keeps the latest one per (author, household) in a mailbox it
+  can't open — see [Moment keys](#moment-keys-v_62).
+* **Receivers** verify the signature against the author's
+  `home_instance_pk` cached in `moment_public_follows` at follow time, then
+  open the envelope with the step key for `(key_gen, key_step)`. A bad
+  signature, an unknown suite, a wrong key, or a sealed `op` / author that
+  doesn't match the frame drops it. A **plaintext envelope** (an older
+  author household's) is refused, never stored. A create whose
+  `expires_at` has passed or whose `created_at` is older than a moment can
+  live (7 days) is refused **before** anything is read from it — a replayed
+  old envelope can neither re-store an expired moment nor roll a profile
+  back (review finding M7).
+
+**What stays readable on purpose: the author directory.** An author opts into
+a GFS's public directory — `display_name`, `username`, `bio`, avatar and
+`home_instance_pk` (`gfs_user_registrations`, `gfs_user_pictures`). That is
+the discovery surface strangers find someone to follow by, so the GFS serves
+it to anyone. No moment content, caption or media reference is in it.
+
+**No plaintext fallback.** A household publishes public moments only to a GFS
+whose signed `/gfs/info` capability block proves `encrypted_moments`. Any
+other GFS gets **no public moments at all** — one WARNING per server, and the
+author's sharing settings show it (`GET /api/moments/public/registrations` →
+`delivery: "unsupported_server"`).
+
+**Owner decision 2026-10-20 — who learns what.** The author's household
+learns which households follow it (it already got `follow_changed` with the
+follower's instance id) and seals to each household's key-wrap key directly.
+An opaque-handle alternative (the author never learning follower ids) was
+weighed: without an identity the author can verify, a GFS could substitute
+its own key-wrap key for every follower and read silently — strictly weaker.
+
+**Residuals.**
+
+* *Public means anyone may follow* — the GFS operator too, from a registered
+  household; that follow is visible to the author. What the GFS cannot do is
+  read moments *without* following.
+* *Trust on first use of the author key* at follow time (unchanged).
+* *Metadata* — the follow graph, which author posts when, moment ids, key
+  ids, sizes, timing, when keys are delivered.
+* *Media bytes* — only the media *reference* rides the envelope (inside the
+  ciphertext); followers don't receive media bytes through the GFS yet
+  (encrypted, content-addressed media is a follow-up).
+* *The live public-moments index* (`/moments/{user_id}`) still streams
+  moments to guests — owner decision 2026-10-20: that page becomes profile +
+  Follow only, and moments open through per-moment share links (follow-up).
 
 ## Event types
 
@@ -63,11 +133,13 @@ verifies the author's signature directly.
 
 | WS frame type | Direction | Carries |
 |---|---|---|
-| `moment_public` | author SH → GFS (HTTP `POST /gfs/moments/publish`) | Signed moment envelope. |
-| `moment_public_delete` | author SH → GFS (HTTP `POST /gfs/moments/delete`) | Signed tombstone. |
-| `incoming_public_moment` | GFS → follower SH | Forwarded envelope, signature intact. |
+| `moment_public` | author SH → GFS (HTTP `POST /gfs/moments/publish`) | Signed, encrypted moment envelope. |
+| `moment_public_delete` | author SH → GFS (HTTP `POST /gfs/moments/delete`) | Signed, encrypted tombstone. |
+| `incoming_public_moment` | GFS → follower SH | Forwarded envelope, signature intact — only to households that declared the seal suite. |
 | `incoming_public_moment_delete` | GFS → follower SH | Forwarded tombstone. |
-| `follow_changed` | GFS → author SH | Notifies the author about follower count change. |
+| `follow_changed` | GFS → author SH | A follower came or went. `action: "add"` (v_62) carries `follower: {instance_id, identity_public_key, keywrap_public_key, kem_suite, keywrap_sig, moment_suites}`; `action: "remove"` carries `follower_instance_id` and `household_still_follows`. |
+| `moment_key_request` | GFS → author SH (v_62) | A follower household lacks the key for `want_gen` and the mailbox had none: `{followed_user_id, want_gen, follower_user_ids, follower}`. Only for a household that follows; ≤ 2 a minute per (household, author). |
+| `moment_key` | GFS → follower SH (v_62) | One sealed key `{author_user_id, instance_id, to, key_gen, key_step, key_suite, sealed: {kem_suite, eph_pk, ciphertext}, signature}`, pushed to the `to` household only — at once, or from the mailbox when it reconnects. |
 
 ## Wire endpoints
 
@@ -77,11 +149,15 @@ verifies the author's signature directly.
 |---|---|---|
 | POST   | `/gfs/moments/users/register` | Signed body — register a user. |
 | POST   | `/gfs/moments/users/{user_id}/deregister` | Signed body — drop a registration. |
-| POST   | `/gfs/moments/users/{user_id}/follow` | Signed body — record a follower. |
+| POST   | `/gfs/moments/users/{user_id}/follow` | Signed body — record a follower; v_62 optional `moment_suites: {kem: [...], seal: [...]}` (≤ 8 names of ≤ 64 chars each; 422 otherwise). |
 | POST   | `/gfs/moments/users/{user_id}/unfollow` | Signed body — drop a follower. |
 | POST   | `/gfs/moments/users/{user_id}/picture` | Signed body — push avatar bytes. |
-| POST   | `/gfs/moments/publish` | Signed envelope — fan out to followers. |
-| POST   | `/gfs/moments/delete` | Signed tombstone — fan out the delete. |
+| POST   | `/gfs/moments/publish` | Signed, encrypted envelope — fan out. Anything but the eight envelope fields: `422 encryption_required`. |
+| POST   | `/gfs/moments/delete` | Signed, encrypted tombstone — fan out the delete. Same shape rule. |
+| POST   | `/gfs/moments/suites` | v_62. Signed by a follower household: `{instance_id, moment_suites: {kem, seal}}` — what it can open, recorded on every follow it holds here (a follow made before it upgraded declared nothing). Sent once per process per server on (re)connect, only when a local user follows someone there. Returns `{updated}`. |
+| POST   | `/gfs/moments/keys` | v_62. Signed by the author's household: `{instance_id, deliveries: [≤ 100 sealed keys]}`. Each is kept (latest per author + household) and pushed to its `to` household only while it follows the author. |
+| POST   | `/gfs/moments/users/{user_id}/key_request` | v_62. Signed by a follower household: `{instance_id, want_gen}`. Always `202`; answered from the mailbox, or forwarded to the author, only for a follower, throttled. |
+| POST   | `/gfs/moments/users/{user_id}/follower_stats` | v_62. Signed by the author's household: `{followers, households, households_unable}` — counts only. |
 | GET    | `/gfs/moments/users` | Public JSON directory. |
 | GET    | `/gfs/moments/users/{user_id}` | Public JSON per-user detail. |
 | GET    | `/gfs/moments/users/{user_id}/picture` | Public avatar bytes. |
@@ -92,7 +168,7 @@ verifies the author's signature directly.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET    | `/api/moments/public/registrations` | Caller's registrations. |
+| GET    | `/api/moments/public/registrations` | Caller's registrations, each with `delivery` (`"encrypted"` / `"unsupported_server"`) and `followers_unable` (follower households on an older Social Home, sent none; `null` when unknown). |
 | POST   | `/api/moments/public/registrations` | Register on a GFS. |
 | DELETE | `/api/moments/public/registrations/{gfs_id}` | Deregister. |
 | PATCH  | `/api/moments/public/registrations/{gfs_id}` | Toggle `default_share`. |
@@ -101,7 +177,7 @@ verifies the author's signature directly.
 | DELETE | `/api/moments/public/follows/{gfs_id}/{user_id}` | Unfollow. |
 | GET    | `/api/gfs/{gfs_id}/moments/users` | Proxy the GFS directory. |
 
-## Sequence: discover + follow
+## Sequence: discover + follow (+ the key, v_62)
 
 ```mermaid
 sequenceDiagram
@@ -111,12 +187,21 @@ sequenceDiagram
 
   B->>G: GET /gfs/moments/users (anonymous)
   G-->>B: directory listing (incl. home_instance_pk per user)
-  B->>G: POST /gfs/moments/users/{user_id}/follow (signed by B's instance)
-  G->>G: persist gfs_moment_follows row
-  G->>B: response carries the author's directory entry (name, bio, picture_digest, home_instance_pk)
-  B->>B: cache row in moment_public_follows (with home_instance_pk + public profile)
-  G->>A: WS push follow_changed (action="add")
-  A->>A: composer follower count ticks up
+  B->>G: POST /gfs/moments/users/{user_id}/follow {…, moment_suites} (signed by B)
+  G->>G: persist gfs_moment_follows row (+ moment_suites)
+  G->>B: response carries the author's directory entry
+  B->>B: cache row in moment_public_follows
+  G->>A: WS follow_changed (add, follower = B's identity + key-wrap key + suites)
+  A->>A: suites match? verify_keywrap_binding? (else seal nothing)
+  A->>A: seal current step key to B's key-wrap key, sign the delivery
+  A->>G: POST /gfs/moments/keys {deliveries:[…]} (batched, signed)
+  G->>G: B follows the author? keep it in the mailbox (latest per author + B)
+  alt B online
+    G->>B: WS moment_key (to B only)
+  else B offline
+    Note over G: pushed when B's socket comes back (undelivered only)
+  end
+  B->>B: verify author signature (pinned pk), open_keywrap, store KEK-sealed
 ```
 
 ## Sequence: publish + fan-out
@@ -131,16 +216,17 @@ sequenceDiagram
   A->>A: User posts moment (is_public=1)
   par Household path (existing federation)
     A->>P: MOMENT_CREATED via paired-instance relay
-  and GFS path (new)
-    A->>G: POST /gfs/moments/publish (signed envelope)
-    G->>G: lookup followers_of(author)
-    loop per unique follower_instance_id
-      G->>B: WS push incoming_public_moment
+  and GFS path (encrypted, v_62)
+    A->>A: step key for today → item key(moment_id) → seal {op, moment, profile_rev[, profile]} ONCE
+    A->>G: POST /gfs/moments/publish {author_user_id, instance_id, moment_id, key_gen, key_step, seal_suite, ciphertext, signature}
+    G->>G: shape = the eight fields? signer = author's household? (else 422 / 403)
+    loop per follower household that declared the seal suite
+      G->>B: WS incoming_public_moment (the same ciphertext)
     end
-    B->>B: verify Ed25519 signature against cached followed_instance_pk
-    B->>B: new moment → refresh author's name / bio / picture digest on moment_public_follows
-    B->>B: persist moment (received_via='gfs', received_via_gfs_id={gfs})
-    B->>B: re-publish MomentCreated on bus → realtime + notifications
+    B->>B: verify signature · step key (ratchet forward) · open (op + author must match)
+    B->>B: expired / older than 7 days? → refuse before reading anything
+    B->>B: profile included? → refresh name / bio / picture digest
+    B->>B: persist moment (received_via='gfs') · MomentCreated on the bus
     Note right of B: relay_inbound() short-circuits on received_via=='gfs'
   end
 ```
@@ -150,9 +236,109 @@ pair), B receives the same ``moment_id`` twice — once via federation,
 once via GFS. The recipient dedupes on the row's PRIMARY KEY; the
 second save is a no-op.
 
-A received public moment keeps `media_url` only when it is a local media
-reference (`api/media/<name>`); a third-party URL is dropped with its
-`media_type` so followers' browsers never load it.
+## Moment keys (v_62)
+
+* **Generation + ratchet.** `MomentPublicKeyOutbound.current_key` mints a
+  generation root on first use (32 random bytes, KEK-sealed with `own |
+  author | key_gen` as associated data) and ratchets the step key to today
+  in place — the household keeps no older step. A generation older than
+  400 steps starts a new one. Two generations are kept.
+* **Delivery is targeted and kept.** A sealed key is `{author_user_id,
+  instance_id, to, key_gen, key_step, key_suite, sealed, signature}`:
+  `sealed` is `seal_to_keywrap` to the `to` household's key-wrap key (fresh
+  ephemeral X25519 per seal, `kem_suite` tagged), its plaintext `{author_user_id,
+  key_gen, key_step, to, key_suite, key}` repeats the routing fields so a
+  sealed blob can't be lifted into another delivery, `key_suite` is the
+  space content-key tag `aesgcm-256`, and the author's household signs the
+  whole delivery. The GFS keeps the latest delivery per (author, follower
+  household) in `gfs_moment_key_mailbox` — ciphertext it can't open — and
+  pushes it at once or when that household reconnects (undelivered rows
+  only, ≤ 500 per connect).
+* **Anti-substitution.** The follower's key-wrap key comes from the GFS.
+  The author seals only after `verify_keywrap_binding`: the instance id
+  derives from the identity key, and the key-wrap key is self-signed by it.
+* **The follower takes a key only** when a local user follows that author
+  through that GFS, the delivery is signed by the author key that follow
+  pinned and names the household that key derives from, `key_suite` is
+  known, it opens with its own key-wrap key, the sealed plaintext matches
+  the delivery, the author is not a local user, and it moves forward (a new
+  generation, or a later step — never back, never a swap). Keys go when
+  nobody here follows the author any more.
+* **Three ways to get a key.** Pushed when the GFS names a new follower;
+  kept in the GFS mailbox for a household that was offline; and pulled
+  when a moment arrives under a generation the follower has no key for —
+  the envelope is held (≤ 16 per author-generation, ≤ 256 in all, ≤ 10 min)
+  and the follower asks (≤ 1 a minute per author); the GFS answers from the
+  mailbox when it holds that generation, else forwards to the author (≤ 2
+  a minute per household and author); the author seals at most once per
+  household per key id per 30 s. Held envelopes open in order once the key
+  lands.
+* **Lazy rotation (a follower leaves, is blocked, a registration ends).**
+  The key is per *household*, so a user unfollowing while another user of
+  that household still follows changes nothing (the GFS's `follow_changed`
+  `remove` says `household_still_follows`; an older GFS doesn't, and then
+  none is assumed). Otherwise — and on a block by the author, or a
+  deregistration — the author's current generation is only **marked**
+  (`moment_public_keys.rotate_due`). The next **publish** starts a new
+  generation, at most once per 6 h (`ROTATE_AT_MOST_EVERY_S`); sealing to a
+  newcomer never rotates, and a mark with no new moment costs nothing
+  (moments live a day). Many leaves between two publishes are one rotation.
+  The remaining follower households then fetch the new key once each by the
+  pull path (mailbox misses the new generation, so the author seals, ≤ 100
+  per batch). What a household already holds stays readable to it; the
+  next generation is not. The author also refuses to seal to a household
+  whose following users (as the GFS names them) are all blocked. Routine
+  forward secrecy needs no rotation: the daily ratchet is free.
+* **Batched.** Sealed keys queue per GFS and go out in batches of ≤ 100
+  half a second after the first — never one POST per follower, never
+  blocking the GFS socket.
+
+### Sequence: a follower without the key asks for it
+
+```mermaid
+sequenceDiagram
+  participant B as Follower SH
+  participant G as GFS
+  participant A as Author SH
+
+  G->>B: incoming_public_moment (key_gen = g)
+  B->>B: no key for (author, g) → hold the envelope (bounded)
+  B->>G: POST /gfs/moments/users/{author}/key_request {want_gen: g} (signed)
+  G->>G: B follows? throttle (2/min per household + author)
+  alt mailbox holds g (or newer) for B
+    G->>B: moment_key (from the mailbox — the author isn't asked)
+  else
+    G->>A: moment_key_request {follower: B's keys + suites}
+    A->>A: verify binding · throttle · seal
+    A->>G: POST /gfs/moments/keys (batched)
+    G->>B: moment_key
+  end
+  B->>B: import → open the held envelope(s) → store
+```
+
+### Traffic (worst realistic case: an author with 10,000 follower households)
+
+Sizes: encrypted envelope ≈ 1.2 KB without the profile (≈ 1.5 KB with it),
+sealed key delivery ≈ 0.7 KB, mailbox row ≈ 0.7 KB, key request ≈ 0.3 KB,
+forwarded notice ≈ 0.6 KB.
+
+| Trigger | Before (plaintext) | v_62 |
+|---|---|---|
+| A moment | 1 upload per GFS + 10,000 × ~1.2 KB ≈ 12 MB from the GFS | 1 upload per GFS + 10,000 × ~1.2 KB ≈ 12 MB — the same bytes to everyone; profile (+0.3 KB) only on change or once a day |
+| A new follower | 1 notice | 1 notice (+0.6 KB keys) + 1 sealed key to that household ≈ 2 KB; 0.7 KB kept on the GFS |
+| A follower reconnects | — | only its undelivered sealed keys (0 when nothing changed) |
+| Every pre-v_62 follow | — | one `POST /gfs/moments/suites` per upgraded household per server (≈ 0.3 KB, once per process); then one key per household on its first encrypted moment (pull, ≈ 1.6 KB, ≤ 100 per batch from the author) — 10,000 × 1.9 KB ≈ 19 MB once, in 100 author POSTs. A household not yet upgraded is sent nothing |
+| A follower without the key (lost mailbox, restore) | — | ≈ 1.6 KB, answered from the mailbox without the author when it can |
+| GFS storage | — | ≤ 1 sealed key per (author, follower household): 10,000 × 0.7 KB ≈ 7 MB |
+| Daily ratchet step | — | 0 bytes — every holder derives it |
+| A household leaves / is blocked (lazy rotation) | — | 0 bytes at the leave; at the next publish ≥ 6 h later one new generation, then each remaining household pulls one key: 10,000 × ~1.6 KB ≈ 16 MB in 100 author POSTs — at most 4 rounds a day (≤ 64 MB/day worst case), however many households left. Re-sealing to every follower on every unfollow would be 10,000 × 1.6 KB per unfollow |
+
+No trigger makes N households send to M: one follower is one sealed key, a
+reconnect sends only what changed, and publishing seals nothing per
+follower. Bounds, enforced by sender and receiver: envelope ≤ 16 KB
+ciphertext; ≤ 100 deliveries / 128 KB per keys request; ≤ 1 KB per sealed
+key; held envelopes ≤ 16 per author-generation, ≤ 256 total; ≤ 10,000
+queued keys per GFS; ≤ 500 mailbox pushes per connect.
 
 ## Author profile: name, picture and bio
 
@@ -164,21 +350,23 @@ the GFS learns nothing new:
 * **At follow time** the `POST /gfs/moments/users/{user_id}/follow`
   response carries the directory entry: `display_name`, `bio` and
   `picture_digest` (plus `home_instance_pk`).
-* **On every moment** the signed envelope carries `author_display_name`,
-  `author_username`, `author_bio` (only when it fits the directory's
-  280-character cap) and `author_picture_digest` — the author's current
-  picture hash, and only to a GFS whose `last_picture_digest` is that
-  hash (that server mirrors exactly those bytes; a removed or not yet
-  pushed picture sends `null`). The envelope is built per GFS for that
-  reason. Both keys sit under the author's signature, so a GFS cannot
-  rename anyone.
+* **Inside moments, on change** (v_62): every sealed body names the
+  author's `profile_rev` (a 16-hex digest of name, username, bio and
+  picture digest); the `profile` itself — `display_name`, `username`, `bio`
+  (only when it fits the directory's 280-character cap) and
+  `picture_digest` — rides only the first moment after it changed, and at
+  least once a day. `picture_digest` is the author's current picture hash
+  only for a GFS whose `last_picture_digest` is that hash (that server
+  mirrors exactly those bytes; otherwise `null`); a moment is sealed once
+  per distinct digest — normally once for every GFS. All of it is inside
+  the ciphertext and under the author's signature, so a GFS can neither
+  read nor rename anyone.
 
 The follower stores them on `moment_public_follows`
 (`followed_display_name`, `followed_bio`, `followed_picture_digest`) —
-refreshed only by a verified envelope for a moment it has not seen, so a
-replayed older envelope cannot roll a newer profile back. An envelope
-from an older author build has no `author_bio` / `author_picture_digest`
-keys; the held values stay. Names are checked on the way in: blank,
+refreshed only by a verified, live moment it has not seen, so a replayed
+older envelope cannot roll a newer profile back. A moment without a
+profile keeps the held values. Names are checked on the way in: blank,
 overlong, or equal to the author's user id (the directory's fallback)
 counts as no name, and the SPA shows "Someone" — never an id. A picture
 digest must be 16 hex characters (the household's form) or the GFS's
@@ -191,10 +379,6 @@ which fetches the bytes from the GFS the household is already connected
 to — the browser never contacts the GFS. A guardian block (§CP.F2) still
 withholds the picture and the bio. A protected (child) account never publishes
 public moments, so it never reaches this path (§CP.R).
-
-Wire-compatible: the new keys are additive and the signature covers
-whatever keys arrive, so an older follower verifies and ignores them —
-no protocol version bump.
 
 ## Protected accounts never see them
 
@@ -281,6 +465,14 @@ identical bytes-for-bytes to the sender's canonical encoding.
 * `moment_public_follows` (SH) — follower-side cache, including the
   followed user's `home_instance_pk` for signature verification and
   (0112) their public `followed_bio` / `followed_picture_digest`.
+* `moment_public_keys` (SH, 0118, v_62) — moment keys, KEK-sealed, one
+  row per (author, role, generation) with the step key advanced in place:
+  `is_own = 1` minted here for local authors, `is_own = 0` delivered by
+  followed authors. Never backed up or exported.
+* `gfs_moment_follows.moment_suites` (GFS 0021, v_62) — what the follower
+  household declared it can open; `gfs_moment_key_mailbox` (GFS 0021) —
+  the latest sealed key per (author, follower household), which the GFS
+  can't open.
 * `moments.is_public` / `moments.received_via` /
   `moments.received_via_gfs_id` — provenance on every row so the
   inbox UI can render a "via {gfs}" chip and so the federation
@@ -323,7 +515,15 @@ shared verbatim with Highlights; see
 for the bridge details rather than repeating them here.
 
 Access is gated by the user's **active public-directory registration** —
-no token. Only moments with `is_public = 1` that have not expired are
+no token. **Not encrypted from the GFS yet:** this page has no secret, so on
+the relay fallback the GFS pipes the framed moments in the clear, and the GFS
+can open the page like any guest. Owner decision 2026-10-20: this page becomes
+the person's profile (name, picture, bio) and a Follow button only; a moment
+opens through a share link carrying that one moment's item key in the URL
+fragment (`#k=`), served by a pinned, hash-verified viewer — follow-ups. Until
+then this is the one place public moment content can cross the GFS readable.
+
+Only moments with `is_public = 1` that have not expired are
 ever streamed; the filter is enforced in
 `moment_repo.list_public_for` (the privacy invariant). The GFS stores
 **zero** moment bytes — like the highlight relay, the bridge is a
@@ -430,6 +630,13 @@ live from that household can't hide this.
   `socialhome/services/moment_public_outbound.py`.
 * SH recipient:
   `socialhome/services/moment_public_inbound.py`.
+* Wire crypto (envelope + sealed-key shapes, suites, signatures):
+  `socialhome/moment_public_seal.py`.
+* Moment content keys — author side (mint, seal to followers, batched
+  delivery): `socialhome/services/moment_public_key_outbound.py`;
+  follower side (import, ask): `socialhome/services/moment_public_key_inbound.py`;
+  storage: `socialhome/repositories/moment_public_repo.py`
+  (`SqliteMomentPublicKeyRepo`, migration `0118_moment_public_keys.sql`).
 * GFS broker:
   `socialhome/global_server/moment_public_registry.py`.
 * GFS routes:

@@ -180,6 +180,13 @@ class GfsInfoView(GfsBaseView):
             # server that proved it — an older page can't open the sealed
             # frames, so a link minted there would be dead for every viewer.
             "sealed_highlight_stream": True,
+            # v_62 — public moments are encrypted from this server: it
+            # refuses a plaintext ``/gfs/moments/publish``, names a new
+            # follower's key-wrap key to the author (``follow_changed``) and
+            # routes sealed moment keys (``/gfs/moments/keys``, key
+            # requests). A household publishes public moments only to a
+            # server that proved this; an older one gets none at all.
+            "encrypted_moments": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         if cfg.instance_id_aliases:

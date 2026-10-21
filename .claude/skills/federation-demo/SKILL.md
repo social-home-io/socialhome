@@ -1667,6 +1667,13 @@ and the picture whose digest the signed envelope named — the GFS learned
 nothing new. ``verify`` (13z) re-checks the author on e and e's
 ``moment_public_follows`` profile columns.
 
+**Encrypted from the GFS (v_62).** The same step asserts that a minted its
+author's moment content key (``moment_public_keys``, ``is_own = 1``), that e
+holds that same epoch as a delivered key (``is_own = 0``) — the GFS logged
+``sealed key(s) delivered`` and refused nothing (``encryption_required``) —
+and that neither the GFS log nor ``gfs.db`` / ``gfs.db-wal`` contains the
+moment's text or id.
+
 ### Bazaar over GFS (TODO)
 
 Still to wire end-to-end:

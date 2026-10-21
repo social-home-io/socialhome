@@ -102,8 +102,25 @@ bios and pictures from the authors' own `author_profile` items (v_60): inside
 the space payload, encrypted under the space content key and signed by the
 author's household — the GFS relays ciphertext it cannot read and learns
 nothing it did not already. A protected (child) account's profile carries
-its name only. The one plaintext exception remains public Momentum, whose
-author opted into a public directory on that GFS.
+its name only.
+
+**Public moments are encrypted from the GFS too (v_62, owner decision
+2026-10-20).** The former "public Momentum is the one plaintext exception"
+is gone: a public moment — text, media reference, and the author's name,
+bio and picture digest — is sealed once under a per-moment key derived from
+the author's ratcheted step key, and that key reaches each follower
+household sealed to that household alone
+([`protocol/momentum_public.md`](protocol/momentum_public.md#encryption-posture-v_62)).
+The GFS refuses a plaintext envelope and an older GFS gets no public moments
+at all — never a fallback. What stays readable is what the author opted to
+list: the public directory entry (name, username, bio, avatar), the surface
+strangers discover them by. The GFS is content-blind, not blind: it still
+holds the follow graph, author and moment ids, key ids, timing and sizes.
+"Public" still means anyone may follow — the GFS operator too, from a
+registered household, visibly to the author; what the GFS cannot do is read
+without following. The live public-moments index page
+(`/moments/{user_id}`) is not encrypted from the GFS yet; a share link that
+carries its own secret replaces it.
 
 ## Fail closed on crypto
 

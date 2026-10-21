@@ -326,6 +326,27 @@ class GfsMomentFollow:
     follower_instance_id: str
     followed_user_id: str
     created_at: int
+    #: v_62 — what the follower household said it can open, as JSON
+    #: ``{"kem": [...], "seal": [...]}``; ``None`` for a follow from an
+    #: older household (it can't open encrypted moments).
+    moment_suites: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class GfsMomentKeyMail:
+    """The latest sealed moment key for one follower household (v_62).
+
+    ``delivery`` is the author-signed delivery JSON, sealed to the
+    follower's key-wrap key — the GFS can't open it. Kept so a household
+    that was offline gets it when it reconnects.
+    """
+
+    author_user_id: str
+    follower_instance_id: str
+    key_gen: int
+    key_step: int
+    delivery: str
+    delivered: bool = False
 
 
 @dataclass(slots=True, frozen=True)

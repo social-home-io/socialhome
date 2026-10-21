@@ -8,7 +8,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 61
+    assert fc.OURS == 62
 
 
 def test_local_community_area_capability_threshold():
@@ -24,13 +24,19 @@ def test_local_community_area_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert fc.features_missing_below(59) == [
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
-    assert fc.features_missing_below(60) == ["Names for new followers right away"]
-    assert fc.features_missing_below(61) == []
+    assert fc.features_missing_below(60) == [
+        "Names for new followers right away",
+        "Public moments encrypted from the GFS",
+    ]
+    assert fc.features_missing_below(61) == ["Public moments encrypted from the GFS"]
+    assert fc.features_missing_below(62) == []
     assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
 
 
@@ -49,11 +55,13 @@ def test_member_picture_reset_sync_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert fc.features_missing_below(58) == [
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
 
@@ -73,6 +81,7 @@ def test_multi_gfs_publish_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert "Posting to every GFS a space is listed on" not in (
         fc.features_missing_below(57)
@@ -96,6 +105,7 @@ def test_sync_series_rows_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
 
@@ -114,6 +124,7 @@ def test_space_chat_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
@@ -122,6 +133,7 @@ def test_space_chat_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert fc.space_features_missing_below(54) == [
         "Chat in spaces",
@@ -151,6 +163,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
@@ -160,6 +173,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
 
 
@@ -181,6 +195,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
@@ -191,6 +206,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
 
 
@@ -211,6 +227,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
 
 
@@ -250,6 +267,7 @@ def test_space_authority_rotation_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -267,6 +285,7 @@ def test_space_authority_rotation_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
 
 
@@ -302,6 +321,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
 
 
@@ -823,6 +843,7 @@ def test_forwarded_role_change_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
 
 
@@ -853,6 +874,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
 
 
@@ -877,6 +899,7 @@ def test_member_gfs_publish_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
 
 
@@ -900,6 +923,7 @@ def test_strict_member_publish_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
 
 
@@ -923,6 +947,7 @@ def test_private_channels_capability_threshold():
         "Local communities",
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
 
 
@@ -989,6 +1014,7 @@ _PINNED_FEATURE_KEYS = {
     59: "local_communities",
     60: "follower_author_names",
     61: "follower_names_on_join",
+    62: "encrypted_public_moments",
 }
 
 
@@ -1036,6 +1062,7 @@ def test_space_author_profile_capability_threshold():
     assert fc.features_missing_below(59) == [
         "Names for a space's followers",
         "Names for new followers right away",
+        "Public moments encrypted from the GFS",
     ]
     assert fc.space_feature_keys_missing_below(59) == ["follower_author_names"]
     assert fc.CAPABILITY_FEATURE_KEYS[60] == "follower_author_names"
@@ -1050,5 +1077,21 @@ def test_follower_profile_bundle_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.features_missing_below(60) == ["Names for new followers right away"]
+    assert fc.features_missing_below(60) == [
+        "Names for new followers right away",
+        "Public moments encrypted from the GFS",
+    ]
     assert fc.CAPABILITY_FEATURE_KEYS[61] == "follower_names_on_join"
+
+
+def test_encrypted_public_moments_capability_threshold():
+    """v_62 — public moments encrypted from the GFS (author → GFS →
+    follower, no household-to-household event). Labelled, not
+    space-scoped."""
+    assert fc.FederationCapability.MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS == 62
+    assert fc.FederationCapability.MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(61) == ["Public moments encrypted from the GFS"]
+    assert fc.CAPABILITY_FEATURE_KEYS[62] == "encrypted_public_moments"

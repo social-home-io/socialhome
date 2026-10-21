@@ -30,6 +30,7 @@ from socialhome.repositories.moment_repo import SqliteMomentRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.moment_public_inbound import MomentPublicInbound
 from socialhome.services.moment_public_service import MomentPublicService
+from tests.moment_public_wire import StubMomentKeys, encrypted_envelope, now_iso
 
 
 class _ToTestClient:
@@ -160,6 +161,7 @@ async def test_a_published_moment_reaches_the_follower_signed_and_named(
                 "instance_id": "inst-follower",
                 "follower_user_id": "u1",
                 "follower_instance_id": "inst-follower",
+                "moment_suites": {"kem": ["x25519"], "seal": ["aesgcm-256"]},
             },
         ),
     )
@@ -173,10 +175,12 @@ async def test_a_published_moment_reaches_the_follower_signed_and_named(
     envelope = {
         "moment_id": "m-1",
         "author_user_id": "u-noor",
-        "author_username": "noor",
-        "author_display_name": "Noor Haddad",
-        "author_bio": "Beekeeper.",
-        "author_picture_digest": None,
+        "profile": {
+            "username": "noor",
+            "display_name": "Noor Haddad",
+            "bio": "Beekeeper.",
+            "picture_digest": None,
+        },
         "content": "bees",
         "media_url": None,
         "media_type": None,
@@ -184,10 +188,12 @@ async def test_a_published_moment_reaches_the_follower_signed_and_named(
         "parent_moment_id": None,
         "origin_instance_id": "inst-author",
         "instance_id": "inst-author",
-        "created_at": "2026-10-20T08:00:00+00:00",
-        "expires_at": "2099-10-21T08:00:00+00:00",
+        "created_at": now_iso(hours=-1),
+        "expires_at": now_iso(hours=23),
     }
-    r = await gfs.post("/gfs/moments/publish", json=_sign(author, envelope))
+    r = await gfs.post(
+        "/gfs/moments/publish", json=encrypted_envelope(envelope, author.private_key)
+    )
     assert (await r.json()) == {"delivered": 1}
     [(to, frame)] = frames
     assert to == "inst-follower"
@@ -213,7 +219,10 @@ async def test_a_published_moment_reaches_the_follower_signed_and_named(
     )
     moments = SqliteMomentRepo(db)
     inbound = MomentPublicInbound(
-        bus=EventBus(), moment_repo=moments, follow_repo=follows
+        bus=EventBus(),
+        moment_repo=moments,
+        follow_repo=follows,
+        key_inbound=StubMomentKeys(),
     )
     await inbound.handle(frame, gfs_id="g1")
     assert await moments.get("m-1") is not None

@@ -8,7 +8,12 @@ method calls.
 Routes:
 
 * ``GET    /api/moments/public/registrations`` — list GFSes the
-  caller is currently registered on.
+  caller is currently registered on, each with ``delivery``:
+  ``"encrypted"`` (public moments go through it, encrypted) or
+  ``"unsupported_server"`` (the server has not proved v_62
+  ``encrypted_moments``, so none are sent through it), and
+  ``followers_unable`` — follower households there on an older Social
+  Home, sent no public moments (``null`` when unknown).
 * ``POST   /api/moments/public/registrations`` — body
   ``{gfs_id, default_share?}``; signs + posts to the GFS.
 * ``DELETE /api/moments/public/registrations/{gfs_id}`` — deregister.
@@ -33,21 +38,36 @@ from ..services.moment_public_service import MomentPublicError
 from .base import BaseView
 
 
+async def _delivery(svc, gfs_id: str) -> str:
+    """How public moments reach followers through *gfs_id* (v_62)."""
+    if await svc.encrypted_delivery(gfs_id):
+        return "encrypted"
+    return "unsupported_server"
+
+
+async def _registration(svc, r) -> dict:
+    delivery = await _delivery(svc, r.gfs_id)
+    return {
+        "user_id": r.user_id,
+        "gfs_id": r.gfs_id,
+        "registered_at": r.registered_at,
+        "default_share": r.default_share,
+        "delivery": delivery,
+        # Follower households on an older Social Home: sent no public
+        # moments (they can't open them). ``None`` when unknown.
+        "followers_unable": (
+            await svc.follower_households_unable(user_id=r.user_id, gfs_id=r.gfs_id)
+            if delivery == "encrypted"
+            else None
+        ),
+    }
+
+
 class MomentPublicRegistrationCollectionView(BaseView):
     async def get(self) -> web.Response:
         svc = self.svc(moment_public_service_key)
         regs = await svc.list_registrations(self.user.user_id)
-        return self._json(
-            [
-                {
-                    "user_id": r.user_id,
-                    "gfs_id": r.gfs_id,
-                    "registered_at": r.registered_at,
-                    "default_share": r.default_share,
-                }
-                for r in regs
-            ]
-        )
+        return self._json([await _registration(svc, r) for r in regs])
 
     async def post(self) -> web.Response:
         svc = self.svc(moment_public_service_key)
@@ -64,15 +84,7 @@ class MomentPublicRegistrationCollectionView(BaseView):
             )
         except MomentPublicError as exc:
             raise web.HTTPBadGateway(text=f'{{"error":"{exc!s}"}}') from exc
-        return self._json(
-            {
-                "user_id": reg.user_id,
-                "gfs_id": reg.gfs_id,
-                "registered_at": reg.registered_at,
-                "default_share": reg.default_share,
-            },
-            status=201,
-        )
+        return self._json(await _registration(svc, reg), status=201)
 
 
 class MomentPublicRegistrationDetailView(BaseView):

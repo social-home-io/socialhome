@@ -2,32 +2,44 @@
 
 Wired as a callback on the persistent SH↔GFS WebSocket. The GFS pushes
 ``incoming_public_moment`` and ``incoming_public_moment_delete`` frames
-when an author the local user follows posts or deletes. This handler:
+when an author the local user follows posts or deletes, and ``moment_key``
+frames carrying the author's sealed moment content key (v_62). This
+handler:
 
-1. Verifies the envelope's Ed25519 signature against the cached
+1. Takes only an ENCRYPTED envelope (exactly
+   :data:`~socialhome.moment_public_seal.ENVELOPE_FIELDS`): a plaintext one
+   — an older author household's — is refused, never stored, so nothing
+   that crossed a GFS in the clear lands here.
+2. Verifies the envelope's Ed25519 signature against the cached
    ``followed_instance_pk`` for the (viewer, author, gfs) triple in
    :class:`MomentPublicFollow`. A bad signature is dropped silently
    (with a warning) — we never persist unauthenticated content.
-2. Refreshes the author's public profile (name, bio, picture digest)
+3. Opens it with the author's key for that epoch
+   (:class:`~socialhome.services.moment_public_key_inbound
+   .MomentPublicKeyInbound`). Without the key the envelope is held
+   briefly (bounded) and the key is asked for; when it arrives the held
+   envelopes are opened in order.
+4. Refreshes the author's public profile (name, bio, picture digest)
    on every local follow of them through that GFS — the envelope is
    signed by the author's household, so a GFS cannot rename anyone.
-3. Persists the moment with ``received_via='gfs'`` and
+5. Persists the moment with ``received_via='gfs'`` and
    ``received_via_gfs_id={gfs_id}`` so the inbox can render the chip
    AND so the federation outbound's relay path will skip it (no
    redistribute rule).
-4. Re-publishes :class:`MomentCreated` on the bus so the existing
+6. Re-publishes :class:`MomentCreated` on the bus so the existing
    realtime + notification surfaces light up exactly as for a
    household-relayed moment.
 """
 
 from __future__ import annotations
 
-import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from ..crypto import b64url_decode, verify_ed25519
+from cryptography.exceptions import InvalidTag
+
 from ..domain.events import MomentCreated, MomentDeleted
 from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..domain.moment_public import (
@@ -38,6 +50,13 @@ from ..domain.moment_public import (
 )
 from ..federation.owner_bound_id import MOMENT_KIND, owner_bound_id_refused
 from ..infrastructure.event_bus import EventBus
+from ..moment_public_seal import (
+    ENVELOPE_FIELDS,
+    UnsupportedMomentSealSuite,
+    is_wire_int,
+    open_body,
+    verify_wire,
+)
 from .inbound_media_store import verbatim_local_media_ref
 
 if TYPE_CHECKING:
@@ -45,12 +64,28 @@ if TYPE_CHECKING:
         AbstractMomentPublicFollowRepo,
     )
     from ..repositories.moment_repo import AbstractMomentRepo
+    from .moment_public_key_inbound import MomentPublicKeyInbound
 
 log = logging.getLogger(__name__)
 
+#: Envelopes held for one (author, generation) while its key is asked for.
+MAX_HELD_PER_EPOCH: int = 16
+
+#: Envelopes held in all — past it, the oldest go.
+MAX_HELD: int = 256
+
+#: How long a held envelope waits for its key.
+HOLD_FOR_S: float = 600.0
+
+#: The frame type an envelope arrives in → the ``op`` its sealed body names.
+_OPS: dict[str, str] = {
+    "incoming_public_moment": "create",
+    "incoming_public_moment_delete": "delete",
+}
+
 
 class MomentPublicInbound:
-    __slots__ = ("_bus", "_follows", "_moments")
+    __slots__ = ("_bus", "_follows", "_held", "_keys", "_moments")
 
     def __init__(
         self,
@@ -58,29 +93,131 @@ class MomentPublicInbound:
         bus: EventBus,
         moment_repo: AbstractMomentRepo,
         follow_repo: AbstractMomentPublicFollowRepo,
+        key_inbound: MomentPublicKeyInbound,
     ) -> None:
         self._bus = bus
         self._moments = moment_repo
         self._follows = follow_repo
+        self._keys = key_inbound
+        #: ``(author, generation)`` → ``[(monotonic time, op, envelope,
+        #: gfs_id)]`` waiting for that generation's key, oldest first.
+        self._held: dict[tuple[str, int], list[tuple[float, str, dict, str]]] = {}
 
     async def handle(self, frame: dict[str, Any], *, gfs_id: str) -> None:
         """Dispatch a single WS frame from the GFS this handler is bound to."""
-        ftype = frame.get("type")
+        ftype = str(frame.get("type") or "")
         payload = frame.get("payload") or {}
-        if ftype == "incoming_public_moment":
-            await self._on_create(payload, gfs_id=gfs_id)
-        elif ftype == "incoming_public_moment_delete":
-            await self._on_delete(payload, gfs_id=gfs_id)
+        if ftype in _OPS:
+            await self._on_envelope(payload, op=_OPS[ftype], gfs_id=gfs_id)
+        elif ftype == "moment_key":
+            gen = await self._keys.import_delivery(payload, gfs_id=gfs_id)
+            if gen is not None:
+                await self._release(str(payload.get("author_user_id") or ""), gen)
         else:
             log.debug("moment_public.inbound: ignoring frame type=%r", ftype)
 
-    async def _on_create(self, env: dict, *, gfs_id: str) -> None:
+    # ── Envelopes ───────────────────────────────────────────────────────
+
+    async def _on_envelope(self, env: Any, *, op: str, gfs_id: str) -> None:
+        if not isinstance(env, dict) or set(env) != ENVELOPE_FIELDS:
+            # An older author household's plaintext envelope (or junk): a
+            # public moment that crossed the GFS in the clear never lands.
+            log.info(
+                "moment_public.inbound: %s refused — not an encrypted envelope",
+                op,
+            )
+            return
+        author = str(env.get("author_user_id") or "")
+        gen, step = env.get("key_gen"), env.get("key_step")
+        if not is_wire_int(gen) or not is_wire_int(step):
+            return
+        assert isinstance(gen, int) and isinstance(step, int)
         follow = await self._follow_of(env, gfs_id=gfs_id)
-        if not _verify(env, follow.followed_instance_pk if follow else None):
+        if not verify_wire(env, follow.followed_instance_pk if follow else None):
             log.warning(
-                "moment_public.inbound: signature failed moment=%s author=%s",
+                "moment_public.inbound: signature failed for a %s by author %s",
+                op,
+                author,
+            )
+            return
+        key = await self._keys.key_for(author, gen, step)
+        if key is None:
+            self._hold(author, gen, op, env, gfs_id)
+            await self._keys.request_key(author, gfs_id=gfs_id, want_gen=gen)
+            return
+        try:
+            body = open_body(step_key=key, envelope=env)
+        except (InvalidTag, ValueError, TypeError, UnsupportedMomentSealSuite) as exc:
+            log.warning(
+                "moment_public.inbound: a %s by author %s doesn't open: %s",
+                op,
+                author,
+                type(exc).__name__,
+            )
+            return
+        if body.get("op") != op or body.get("author_user_id") != author:
+            log.warning(
+                "moment_public.inbound: sealed %s by author %s names another "
+                "operation or author — dropped",
+                op,
+                author,
+            )
+            return
+        # The moment id is the envelope's (bound into the AEAD).
+        body["moment_id"] = env["moment_id"]
+        if op == "create":
+            await self._on_create(body, follow, gfs_id=gfs_id)
+        else:
+            await self._on_delete(body, outer_instance_id=str(env["instance_id"]))
+
+    def _hold(self, author: str, gen: int, op: str, env: dict, gfs_id: str) -> None:
+        """Keep *env* until its key arrives — bounded per generation and in
+        all."""
+        now = time.monotonic()
+        for k in list(self._held):
+            self._held[k] = [h for h in self._held[k] if now - h[0] < HOLD_FOR_S]
+            if not self._held[k]:
+                del self._held[k]
+        held = self._held.setdefault((author, gen), [])
+        if len(held) >= MAX_HELD_PER_EPOCH:
+            log.info(
+                "moment_public.inbound: %d moments of author %s already wait "
+                "for their key — dropping one",
+                len(held),
+                author,
+            )
+            return
+        held.append((now, op, env, gfs_id))
+        total = sum(len(v) for v in self._held.values())
+        while total > MAX_HELD:
+            oldest = min(self._held, key=lambda k: self._held[k][0][0])
+            self._held[oldest].pop(0)
+            if not self._held[oldest]:
+                del self._held[oldest]
+            total -= 1
+
+    async def _release(self, author: str, gen: int) -> None:
+        """Open what was held for (*author*, *gen*) now its key is here."""
+        now = time.monotonic()
+        for at, op, env, gfs_id in self._held.pop((author, gen), []):
+            if now - at < HOLD_FOR_S:
+                await self._on_envelope(env, op=op, gfs_id=gfs_id)
+
+    async def _on_create(
+        self, env: dict, follow: MomentPublicFollow | None, *, gfs_id: str
+    ) -> None:
+        if not all(
+            isinstance(env.get(k), str) and env.get(k)
+            for k in ("moment_id", "created_at", "expires_at")
+        ):
+            log.warning("moment_public.inbound: sealed create is malformed — dropped")
+            return
+        if not _still_live(env):
+            # A replayed old envelope: never re-stored, never a profile
+            # refresh (M7) — whatever the store holds.
+            log.info(
+                "moment_public.inbound: create for expired moment %s refused",
                 env.get("moment_id"),
-                env.get("author_user_id"),
             )
             return
         if _moment_id_refused(env, "create"):
@@ -112,10 +249,14 @@ class MomentPublicInbound:
                 env.get("moment_id"),
             )
             return
-        if stored is None and follow is not None:
-            # Only a moment we have not seen refreshes the profile, so a
+        if (
+            stored is None
+            and follow is not None
+            and isinstance(env.get("profile"), dict)
+        ):
+            # Only a live moment we have not seen refreshes the profile, so a
             # replay of an old envelope cannot roll a newer one back.
-            await self._refresh_profile(env, follow, gfs_id=gfs_id)
+            await self._refresh_profile(env["profile"], follow, gfs_id=gfs_id)
         media_url = verbatim_local_media_ref(env.get("media_url"))
         moment = Moment(
             id=str(env["moment_id"]),
@@ -154,24 +295,15 @@ class MomentPublicInbound:
             )
         )
 
-    async def _on_delete(self, env: dict, *, gfs_id: str) -> None:
-        # Deletes still need a signature check so a malicious peer
-        # can't take down a moment they don't own.
-        author_pk = await self._lookup_pk(env, gfs_id=gfs_id)
-        if not _verify(env, author_pk):
-            log.warning(
-                "moment_public.inbound: delete signature failed for %s",
-                env.get("moment_id"),
-            )
-            return
+    async def _on_delete(self, env: dict, *, outer_instance_id: str) -> None:
+        # The signature (checked on the envelope) is what keeps a malicious
+        # peer from taking down a moment it doesn't own.
         moment_id = str(env.get("moment_id") or "")
         if not moment_id:
             return
         author_user_id = str(env.get("author_user_id") or "")
-        # The outbound names its household as ``instance_id`` on a delete.
-        origin_instance_id = str(
-            env.get("origin_instance_id") or env.get("instance_id") or ""
-        )
+        # The author household names itself on the signed envelope.
+        origin_instance_id = str(env.get("origin_instance_id") or outer_instance_id)
         if _moment_id_refused(env, "delete"):
             return  # never tombstoned: it would refuse the real moment
         stored = await self._moments.get(moment_id, include_deleted=True)
@@ -205,10 +337,6 @@ class MomentPublicInbound:
             )
         )
 
-    async def _lookup_pk(self, env: dict, *, gfs_id: str) -> str | None:
-        follow = await self._follow_of(env, gfs_id=gfs_id)
-        return follow.followed_instance_pk if follow else None
-
     async def _follow_of(self, env: dict, *, gfs_id: str) -> MomentPublicFollow | None:
         author = str(env.get("author_user_id") or "")
         if not author:
@@ -221,27 +349,18 @@ class MomentPublicInbound:
         return None
 
     async def _refresh_profile(
-        self, env: dict, follow: MomentPublicFollow, *, gfs_id: str
+        self, profile: dict, follow: MomentPublicFollow, *, gfs_id: str
     ) -> None:
-        """Take the author's name, bio and picture digest from a verified
-        envelope. An author on an older build sends no bio / picture
-        keys — then the ones the follow already holds stay."""
+        """Take the author's name, bio and picture digest from the profile a
+        verified moment carried (it rides only when it changed, or daily)."""
         author = follow.followed_user_id
         name = (
-            public_author_name(env.get("author_display_name"), user_id=author)
-            or public_author_name(env.get("author_username"), user_id=author)
+            public_author_name(profile.get("display_name"), user_id=author)
+            or public_author_name(profile.get("username"), user_id=author)
             or follow.followed_display_name
         )
-        bio = (
-            public_author_bio(env.get("author_bio"))
-            if "author_bio" in env
-            else follow.followed_bio
-        )
-        digest = (
-            public_picture_digest(env.get("author_picture_digest"))
-            if "author_picture_digest" in env
-            else follow.followed_picture_digest
-        )
+        bio = public_author_bio(profile.get("bio"))
+        digest = public_picture_digest(profile.get("picture_digest"))
         if (name, bio, digest) == (
             follow.followed_display_name,
             follow.followed_bio,
@@ -255,6 +374,23 @@ class MomentPublicInbound:
             bio=bio,
             picture_digest=digest,
         )
+
+
+def _still_live(body: dict) -> bool:
+    """A create whose moment hasn't expired and isn't older than a moment can
+    live — else it is a replay (or junk), refused before anything is read
+    from it."""
+    try:
+        created = datetime.fromisoformat(str(body["created_at"]))
+        expires = datetime.fromisoformat(str(body["expires_at"]))
+    except KeyError, ValueError:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=UTC)
+    now = datetime.now(UTC)
+    return expires > now and created > now - timedelta(days=MOMENT_RETENTION_DAYS)
 
 
 def _row_binds(
@@ -295,17 +431,3 @@ def _moment_id_refused(envelope: dict, what: str) -> bool:
         owner_user_id=str(envelope.get("author_user_id") or ""),
         context=f"moment_public.inbound {what}",
     )
-
-
-def _verify(envelope: dict, pubkey_hex: str | None) -> bool:
-    sig = envelope.get("signature")
-    if not sig or not pubkey_hex:
-        return False
-    body = {k: v for k, v in envelope.items() if k != "signature"}
-    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    try:
-        return verify_ed25519(
-            bytes.fromhex(pubkey_hex), canonical, b64url_decode(str(sig))
-        )
-    except ValueError, TypeError:
-        return False

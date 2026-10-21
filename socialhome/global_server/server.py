@@ -79,6 +79,7 @@ from .repositories import (
     SqliteGfsHighlightTokenRepo,
     SqliteGfsInviteRepo,
     SqliteGfsMomentFollowRepo,
+    SqliteGfsMomentKeyMailboxRepo,
     SqliteGfsSpaceEpochRepo,
     SqliteGfsUserPictureRepo,
     SqliteGfsUserRegistrationRepo,
@@ -294,6 +295,7 @@ class GfsApp:
             highlight_tokens=SqliteGfsHighlightTokenRepo(db),
             moment_public_users=SqliteGfsUserRegistrationRepo(db),
             moment_public_follows=SqliteGfsMomentFollowRepo(db),
+            moment_key_mailbox=SqliteGfsMomentKeyMailboxRepo(db),
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
             space_epochs=SqliteGfsSpaceEpochRepo(db),
@@ -373,6 +375,8 @@ class GfsApp:
             repos.moment_public_users,
             repos.moment_public_follows,
             ws_registry,
+            instances=repos.federation,
+            mailbox=repos.moment_key_mailbox,
         )
         # Opaque household-to-household envelope relay (§D2b): pushes a
         # sealed blob to the addressed household's live socket, or queues it
