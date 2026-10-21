@@ -906,9 +906,13 @@ from __future__ import annotations
 #:   without one. Not space-scoped; labelled "Local communities".
 #: * **v_60** (2026-10-20) — author profiles for a space's GFS followers: a
 #:   member household publishes each of its authors' public profile (name,
-#:   bio, a ≤ 24 KB picture; a protected account's name only) as the
-#:   ``author_profile`` ``space_item``, author-signed and encrypted under the
-#:   space content key, so a follower without a roster names them. A
+#:   bio and the hash of a ≤ 24 KB picture, the picture itself as an
+#:   unsigned sidecar checked against that hash and sent only when it
+#:   changed; a protected account's name only) as the ``author_profile``
+#:   ``space_item``, author-signed and encrypted under the space content
+#:   key, so a follower without a roster names them — on the author's first
+#:   post and then only on a real change (persisted dedupe: a rotation or a
+#:   restart sends nothing; redefined in place before release). A
 #:   receiver below v_60 drops the unknown item type with a WARNING, and
 #:   followers are anonymous, so the **gate** is the space's known member
 #:   households: none below v_60, or nothing is published (followers keep
