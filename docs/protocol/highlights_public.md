@@ -113,7 +113,7 @@ the landing page and every other GFS route send no CORS header
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/gfs/highlights/ice-servers` | Anonymous list of STUN/TURN URLs the browser bootstrap feeds into `RTCPeerConnection`. |
+| GET | `/gfs/highlights/ice-servers` | Anonymous STUN list plus, when the operator configured `turn_url` + `turn_secret`, a TURN entry with a credential minted for this answer (TURN REST API, valid `turn_ttl_seconds`, default 10 min) — never a static one. 30/min per IP. |
 | POST | `/gfs/highlight_rtc/offer` | Anonymous. Body: `{instance_id, highlight_id, token, sdp, vk}` (`vk`: the viewer's ephemeral P-256 key the stream is sealed to, see "End-to-end sealed stream"; forwarded to the author with the token only when shaped like one, never stored or logged — without it the author streams nothing). GFS verifies the token, stores the offer in :class:`GfsRtcSession`, and pushes a `highlight_signal` WS frame to the author's instance. Returns `201 {session_id}`. Every non-success state (unknown / revoked / expired token, URL mismatch, unpublished, author offline) gets the one uniform `503 {"error":"unavailable"}`. |
 | GET | `/gfs/highlight_rtc/session/{session_id}` | Anonymous. Browser polls until `answer_sdp` and any author-side ICE candidates land. |
 | POST | `/gfs/highlight_rtc/ice/viewer` | Anonymous. Body: `{session_id, candidate}`. Forwards to the author's WS as a `highlight_signal kind=ice` frame. |
@@ -418,13 +418,16 @@ GFS-served page (less safe).
 - The fragment sits in the address bar and the browser history (see above).
 - A GFS that ALSO holds the full link can swap `vk` / `epk` for that view
   (see "End-to-end sealed stream", residuals): the link is a bearer secret.
-- `GET /gfs/highlights/ice-servers` now answers any origin, so a web page
-  elsewhere can read the GFS's STUN/TURN list, including the operator's
-  **static** TURN credentials (`highlight_rtc.py` returns the configured
-  user / password; any non-browser client always could read them). A page
-  could now have its visitors' browsers use that TURN from many addresses.
-  Operators should rate-limit the TURN server; time-limited TURN REST
-  credentials are a follow-up.
+- `GET /gfs/highlights/ice-servers` answers any origin, so a web page
+  elsewhere can read the GFS's STUN/TURN list. It never holds a static TURN
+  credential: each answer carries one minted for it (TURN REST API,
+  `[webrtc] turn_secret` = coturn's `static-auth-secret`, which never leaves
+  the GFS), valid `turn_ttl_seconds` (default 10 minutes), under a random
+  per-answer user id. A page can still have its visitors' browsers collect
+  fresh credentials — bounded by 30 answers / min per address, and each one
+  dies at its expiry (coturn refuses every request, allocation refreshes
+  included, after it). Operators should still rate-limit the TURN server
+  itself (coturn `user-quota` / `total-quota`).
 - **Own origin.** The default viewer is a custom domain,
   `viewer.social-home.io`, not `social-home-io.github.io/socialhome`: the
   `github.io` origin is shared by every Pages site of the org, and the

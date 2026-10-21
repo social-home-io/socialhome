@@ -1571,7 +1571,7 @@ header. Rate limits are unchanged.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/gfs/highlights/ice-servers` | Anon STUN/TURN list for the browser bootstrap. |
+| GET | `/gfs/highlights/ice-servers` | Anon (rate-limited 30/min per IP; `Cache-Control: no-store`). `{servers: [{urls}…], ttl?}` for the browser bootstrap: one entry per `[webrtc] stun_urls`, plus — only when the operator set **both** `turn_url` and `turn_secret` — one TURN entry `{urls, username, credential}` with a credential minted for this answer (TURN REST API / coturn `use-auth-secret`: `username = "<expiry>:gfs-viewer-<random>"`, `credential = base64(HMAC-SHA1(turn_secret, username))`), and `ttl` = its lifetime in seconds (`turn_ttl_seconds`, default 600). The secret never leaves the server and no static TURN user / password is ever served; a `turn_url` without a secret is left out (WARNING at startup). The viewer fetches it right before each connection, so nothing needs refreshing. |
 | POST | `/gfs/highlight_rtc/offer` | Anon (rate-limited 20/min per IP). Body `{instance_id, highlight_id, token, sdp}`; pushes a `highlight_signal kind=offer` WS frame to the author. Returns `201 {session_id}`; any failure (unknown/revoked/expired token, URL mismatch, author offline) → uniform `503 unavailable`. |
 | GET | `/gfs/highlight_rtc/session/{session_id}` | Anon poll for `answer_sdp` + author ICE. |
 | POST | `/gfs/highlight_rtc/ice/viewer` | Anon. Trickle the viewer's ICE candidate. |
@@ -1720,6 +1720,7 @@ These pages are server-rendered HTML and require no auth.
 | `GET /api/invite-links/{token}/code` | 30 / min / IP — the endpoint is unauthenticated (the token IS the credential), so the client address is the only handle. Not brute-force protection: a token is a uuid4 hex and is not guessable. It is ordinary anonymous-endpoint shedding, and one visitor legitimately hits it once per link they open. Live and dead tokens answer identically apart from the status code. |
 | `POST /gfs/spaces/{id}/invite` | 20 / min / **instance** — the mint is signature-authenticated, so the accountable identity is known before anything is written and the limiter keys on the household rather than on an address it could rotate. Far above a human minting invites, while bounding how many rows one household can park on a server per minute. |
 | `POST /gfs/{highlight,moment}_rtc/offer` + the anon `/relay/*` GETs | 20 / min / IP — bounds the WS-push amplification from the anonymous RTC entry points |
+| `GET /gfs/highlights/ice-servers` | 30 / min / IP — each answer mints a short-lived TURN credential, so this bounds how many one address can collect |
 | `POST /gfs/register` | 10 / min / IP — a household registers once per pairing; sheds token-guessing floods before the token lookup. |
 | `POST /gfs/proof` | 20 / min / IP — a household asks once at pairing and at most once per 5 minutes per connection on GFS-WebSocket (re)connects. Per-IP only: one Ed25519 signature is cheap, and a server-wide cap would let one flooder stop every household from proving the server. |
 | `POST /gfs/signup-token` | 5 / min / IP **and** 30 / min across all addresses (the global window is the sybil brake that does not depend on believing a client address), shed before any database work; on top, the token service hands one token per address per 30 s. |

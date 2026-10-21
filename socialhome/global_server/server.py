@@ -62,6 +62,7 @@ from .public import (
     ClientIpResolver,
     PairingTokenService,
     SlidingWindowCounter,
+    build_ice_servers_rate_limit,
     build_listing_rate_limit,
     build_proof_rate_limit,
     build_public_rtc_rate_limit,
@@ -244,6 +245,7 @@ class GfsApp:
         # is logged at ERROR (not refused — that would break existing
         # deployments).
         config.check_cluster_identity()
+        config.check_turn()
         self.config = config
         # The data dir is wherever the SQLite DB lives — the identity seed is
         # stored beside it, so a test/override db path keeps both together.
@@ -468,6 +470,7 @@ class GfsApp:
             build_admin_middleware(self.services.admin_auth),
             build_listing_rate_limit(self.client_ip),
             build_public_rtc_rate_limit(self.client_ip),
+            build_ice_servers_rate_limit(self.client_ip),
             build_publish_rate_limit(self.client_ip),
             build_signup_rate_limit(self.client_ip),
             build_register_rate_limit(self.client_ip),

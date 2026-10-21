@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
+import hashlib
+import hmac
 import json
 import time
 
@@ -31,7 +34,6 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
-from tests.app_overrides import override_app_on_startup
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -475,32 +477,96 @@ async def test_author_ice_wrong_instance_returns_403(client):
     assert r.status == 403
 
 
-async def test_ice_servers_includes_turn_when_configured(tmp_dir):
-    """The /gfs/highlights/ice-servers helper passes a TURN server through
-    when the operator set it on the GFS config — GfsConfig is a frozen
-    dataclass so we swap in a tiny ``SimpleNamespace`` that satisfies
-    the same ``getattr``-based shape the route expects."""
-    from types import SimpleNamespace
-
-    from socialhome.global_server.app_keys import gfs_config_key
-
-    app = create_gfs_app(_config(tmp_dir))
-    override_app_on_startup(
-        app,
-        {
-            gfs_config_key: SimpleNamespace(
-                ice_stun_url="stun:stun.l.google.com:19302",
-                ice_turn_url="turn:turn.example:3478",
-                ice_turn_user="alice",
-                ice_turn_credential="secret",
-            )
-        },
+def _turn_config(tmp_dir, **kw) -> GfsConfig:
+    return dataclasses.replace(
+        _config(tmp_dir),
+        stun_urls=("stun:stun.example:3478", "stun:stun2.example:3478"),
+        turn_url="turns:turn.example:5349",
+        **kw,
     )
-    async with TestClient(TestServer(app)) as client:
+
+
+async def _ice(config: GfsConfig) -> tuple[int, dict, dict]:
+    async with TestClient(TestServer(create_gfs_app(config))) as client:
         resp = await client.get("/gfs/highlights/ice-servers")
-        data = await resp.json()
-    urls = [s["urls"][0] for s in data["servers"]]
-    assert any("turn:" in u for u in urls)
+        return resp.status, await resp.json(), dict(resp.headers)
+
+
+@pytest.mark.security
+async def test_ice_servers_mint_a_short_lived_turn_credential(tmp_dir):
+    """SECURITY: the anonymous, CORS-readable answer carries a TURN REST
+    credential minted for it (``expiry:id`` + base64 HMAC-SHA1 under the
+    secret, valid ``turn_ttl_seconds``) — never the secret, never a static
+    user/password."""
+    secret = "coturn-static-auth-secret"
+    before = int(time.time())
+    status, body, headers = await _ice(
+        _turn_config(tmp_dir, turn_secret=secret, turn_ttl_seconds=600)
+    )
+    assert status == 200
+    assert headers["Cache-Control"] == "no-store"
+    stun, stun2, turn = body["servers"]
+    assert stun == {"urls": ["stun:stun.example:3478"]}
+    assert stun2 == {"urls": ["stun:stun2.example:3478"]}
+    assert turn["urls"] == ["turns:turn.example:5349"]
+    expiry, _, user_id = turn["username"].partition(":")
+    assert before + 600 <= int(expiry) <= int(time.time()) + 600
+    assert user_id.startswith("gfs-viewer-")
+    expected = base64.b64encode(
+        hmac.new(secret.encode(), turn["username"].encode(), hashlib.sha1).digest()
+    ).decode()
+    assert turn["credential"] == expected
+    assert body["ttl"] == 600
+    assert secret not in json.dumps(body)
+
+
+@pytest.mark.security
+async def test_each_answer_gets_its_own_unlinkable_turn_user(tmp_dir):
+    config = _turn_config(tmp_dir, turn_secret="s")
+    async with TestClient(TestServer(create_gfs_app(config))) as client:
+        users = set()
+        for _ in range(3):
+            resp = await client.get("/gfs/highlights/ice-servers")
+            users.add((await resp.json())["servers"][-1]["username"].split(":")[1])
+    assert len(users) == 3
+
+
+@pytest.mark.security
+async def test_a_turn_url_without_a_secret_is_never_served(tmp_dir, caplog):
+    """Fail closed: TURN without a minted credential would be an open relay
+    (or a coturn 401) — so it is left out, and the operator is warned."""
+    with caplog.at_level("WARNING"):
+        status, body, _headers = await _ice(_turn_config(tmp_dir))
+    assert status == 200
+    assert body == {
+        "servers": [
+            {"urls": ["stun:stun.example:3478"]},
+            {"urls": ["stun:stun2.example:3478"]},
+        ]
+    }
+    assert "turn_secret is empty" in caplog.text
+
+
+async def test_ice_servers_without_turn_has_no_ttl(tmp_dir):
+    status, body, _headers = await _ice(_config(tmp_dir))
+    assert status == 200
+    assert "ttl" not in body
+    assert body["servers"] == [{"urls": ["stun:stun.l.google.com:19302"]}]
+
+
+async def test_ice_servers_are_rate_limited_per_ip(tmp_dir, monkeypatch):
+    from socialhome.global_server import public
+
+    monkeypatch.setattr(public, "ICE_SERVERS_MAX_PER_MINUTE", 2)
+    origin = {"Origin": "https://viewer.example"}
+    async with TestClient(TestServer(create_gfs_app(_config(tmp_dir)))) as client:
+        answers = [
+            await client.get("/gfs/highlights/ice-servers", headers=origin)
+            for _ in range(3)
+        ]
+    assert [r.status for r in answers] == [200, 200, 429]
+    # The pinned viewer can read the 429 (and tell its visitor to wait).
+    assert answers[-1].headers["Access-Control-Allow-Origin"] == "*"
 
 
 # ─── GFS-relay fallback ──────────────────────────────────────────────────

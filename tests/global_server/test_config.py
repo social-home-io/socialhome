@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
 from socialhome.global_server.config import (
+    DEFAULT_TURN_TTL_SECONDS,
     EXAMPLE_TOML,
     GfsConfig,
     set_password_in_toml,
@@ -535,3 +536,70 @@ def test_example_toml_documents_the_shared_public_identity():
     assert "instance_id_aliases" in EXAMPLE_TOML
     assert "MUST be identical on every node" in EXAMPLE_TOML
     assert "GFS_INSTANCE_ID_ALIASES" in EXAMPLE_TOML
+
+
+# ─── [webrtc] short-lived TURN credentials ───────────────────────────────
+
+
+def _webrtc_toml(tmp_dir, webrtc: str) -> Path:
+    p = tmp_dir / "global_server.toml"
+    p.write_text(f'[server]\nbase_url = "https://g.example"\n[webrtc]\n{webrtc}')
+    return p
+
+
+def test_turn_ttl_defaults_to_ten_minutes(tmp_dir):
+    assert GfsConfig().turn_ttl_seconds == DEFAULT_TURN_TTL_SECONDS == 600
+    p = _webrtc_toml(tmp_dir, 'turn_url = "turn:t.example:3478"\n')
+    assert GfsConfig.from_toml(p).turn_ttl_seconds == 600
+
+
+def test_turn_settings_load_from_toml(tmp_dir):
+    p = _webrtc_toml(
+        tmp_dir,
+        'turn_url = "turn:t.example:3478"\nturn_secret = "s3"\n'
+        "turn_ttl_seconds = 900\n",
+    )
+    cfg = GfsConfig.from_toml(p)
+    assert (cfg.turn_url, cfg.turn_secret, cfg.turn_ttl_seconds) == (
+        "turn:t.example:3478",
+        "s3",
+        900,
+    )
+
+
+@pytest.mark.parametrize("ttl", [0, 59, 86_401])
+def test_out_of_range_turn_ttl_is_rejected(tmp_dir, ttl):
+    p = _webrtc_toml(tmp_dir, f"turn_ttl_seconds = {ttl}\n")
+    with pytest.raises(ValueError, match="turn_ttl_seconds"):
+        GfsConfig.from_toml(p)
+
+
+def test_turn_env_overrides_the_file(tmp_dir, monkeypatch):
+    """A vault injects the secret: ``GFS_TURN_*`` win over the file."""
+    p = _webrtc_toml(
+        tmp_dir, 'turn_url = "turn:file:3478"\nturn_secret = "file-secret"\n'
+    )
+    monkeypatch.setenv("GFS_TURN_URL", "turns:env:5349")
+    monkeypatch.setenv("GFS_TURN_SECRET", "env-secret")
+    monkeypatch.setenv("GFS_TURN_TTL_SECONDS", "120")
+    cfg = GfsConfig.load(p)
+    assert (cfg.turn_url, cfg.turn_secret, cfg.turn_ttl_seconds) == (
+        "turns:env:5349",
+        "env-secret",
+        120,
+    )
+
+
+def test_check_turn_warns_only_for_a_url_without_a_secret(caplog):
+    with caplog.at_level("WARNING"):
+        GfsConfig().check_turn()
+        GfsConfig(turn_url="turn:t:3478", turn_secret="s").check_turn()
+    assert caplog.text == ""
+    with caplog.at_level("WARNING"):
+        GfsConfig(turn_url="turn:t:3478").check_turn()
+    assert "turn_secret is empty" in caplog.text
+
+
+def test_example_toml_documents_turn_ttl():
+    assert "turn_ttl_seconds = 600\n" in EXAMPLE_TOML
+    assert "GFS_TURN_SECRET" in EXAMPLE_TOML

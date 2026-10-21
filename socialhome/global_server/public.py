@@ -60,6 +60,16 @@ LISTING_MAX_PER_MINUTE: int = 30
 #: gated here — the viewer polls them ~1/s by design.
 PUBLIC_RTC_MAX_PER_MINUTE: int = 20
 
+#: Route of the anonymous ICE-server answer (STUN + a fresh TURN credential).
+ICE_SERVERS_ROUTE: str = "/gfs/highlights/ice-servers"
+
+#: Per-IP/minute cap on :data:`ICE_SERVERS_ROUTE`. A viewer fetches it once
+#: per connection attempt; each answer mints a TURN credential, so the cap
+#: bounds how many usable relay credentials one address can collect. Above
+#: :data:`PUBLIC_RTC_MAX_PER_MINUTE` so a household behind CGNAT whose
+#: viewers share one address hits the offer cap first.
+ICE_SERVERS_MAX_PER_MINUTE: int = 30
+
 #: Per-IP/minute cap on ``POST /gfs/publish``. Since the relay is authorized by
 #: the space-authority signature alone, the request carries no household
 #: identity — the client IP is the only handle left for shedding a flood, so
@@ -442,6 +452,16 @@ def build_public_rtc_rate_limit(resolver: ClientIpResolver):
         resolver,
         PUBLIC_RTC_MAX_PER_MINUTE,
         _is_public_rtc_entry,
+    )
+
+
+def build_ice_servers_rate_limit(resolver: ClientIpResolver):
+    """Per-IP rate limiter for ``GET /gfs/highlights/ice-servers``
+    (:data:`ICE_SERVERS_MAX_PER_MINUTE`)."""
+    return build_window_limiter(
+        resolver,
+        ICE_SERVERS_MAX_PER_MINUTE,
+        lambda path: path == ICE_SERVERS_ROUTE,
     )
 
 
