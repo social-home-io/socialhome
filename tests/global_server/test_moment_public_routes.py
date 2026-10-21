@@ -797,3 +797,36 @@ async def test_malformed_suites_declarations_are_refused(client, follower, suite
         body["moment_suites"] = suites
     r = await client.post("/gfs/moments/suites", json=_sign(follower, body))
     assert r.status == 422
+
+
+@pytest.mark.parametrize("user_id", ["u" * 129, "u-line\nbreak"])
+async def test_register_refuses_an_unusable_user_id(client, author, user_id):
+    """A user id a cluster node would refuse as an audience key (too long,
+    unprintable) is refused at registration — it would otherwise register
+    and never reach a follower on another node."""
+    body = _sign(
+        author,
+        {
+            "user_id": user_id,
+            "instance_id": "inst-author",
+            "username": "alice",
+            "home_instance_pk": "ab" * 32,
+        },
+    )
+    resp = await client.post("/gfs/moments/users/register", json=body)
+    assert resp.status == 422
+    assert await resp.json() == {"error": "invalid_user_id"}
+
+
+async def test_register_accepts_a_user_id_at_the_cap(client, author):
+    body = _sign(
+        author,
+        {
+            "user_id": "u" * 128,
+            "instance_id": "inst-author",
+            "username": "alice",
+            "home_instance_pk": "ab" * 32,
+        },
+    )
+    resp = await client.post("/gfs/moments/users/register", json=body)
+    assert resp.status == 201

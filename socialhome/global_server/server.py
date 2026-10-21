@@ -431,6 +431,7 @@ class GfsApp:
         cluster.attach_forwarded_relays(cluster_fan_out.apply)
         envelope_relay.attach_fan_out(cluster_fan_out)
         federation.attach_fan_out(cluster_fan_out)
+        admin.attach_fan_out(cluster_fan_out)
         cluster_fan_out.register_audience(AUDIENCE_SPACE, federation.audience_targets)
         cluster_fan_out.register_audience(
             AUDIENCE_FOLLOWERS, moment_public.audience_targets

@@ -99,13 +99,25 @@ log = logging.getLogger(__name__)
 #: follower households of a public-Momentum author that can open its moments
 #: (key: the author's user id). ``instance``: one household (key: its
 #: instance id) — a single-recipient push the origin had no socket for.
+#: ``all``: every household connected to the receiving node (key:
+#: :data:`AUDIENCE_ALL_KEY`) — a GFS-wide notice such as a rename.
 AUDIENCE_SPACE: str = "space"
 AUDIENCE_CHANNEL: str = "channel"
 AUDIENCE_FOLLOWERS: str = "followers"
 AUDIENCE_INSTANCE: str = "instance"
+AUDIENCE_ALL: str = "all"
 AUDIENCE_KINDS: frozenset[str] = frozenset(
-    {AUDIENCE_SPACE, AUDIENCE_CHANNEL, AUDIENCE_FOLLOWERS, AUDIENCE_INSTANCE}
+    {
+        AUDIENCE_SPACE,
+        AUDIENCE_CHANNEL,
+        AUDIENCE_FOLLOWERS,
+        AUDIENCE_INSTANCE,
+        AUDIENCE_ALL,
+    }
 )
+
+#: The one key of the ``all`` audience.
+AUDIENCE_ALL_KEY: str = "*"
 
 #: Socket frame types an item of a TYPED audience kind may be pushed as.
 #: Its frame is ``{"event_type": <socket frame type>, …fields}`` and goes out
@@ -115,14 +127,17 @@ AUDIENCE_KINDS: frozenset[str] = frozenset(
 TYPED_FRAME_TYPES: dict[str, frozenset[str]] = {
     AUDIENCE_FOLLOWERS: MOMENT_FRAME_TYPES,
     AUDIENCE_INSTANCE: frozenset({"follow_changed", "moment_key_request"}),
+    AUDIENCE_ALL: frozenset({"server_info_updated"}),
 }
 
 #: Kinds whose items are remembered by digest (:data:`RELAY_FORWARD_SEEN_TTL_S`)
 #: so one node never pushes the same bytes twice. A single-recipient push is
 #: forwarded only after the origin found no socket for it, so no node pushes
 #: it twice — and a legitimate repeat (the same ``moment_key_request`` a
-#: minute later) must not be muted.
-DEDUPED_KINDS: frozenset[str] = AUDIENCE_KINDS - {AUDIENCE_INSTANCE}
+#: minute later) must not be muted. A GFS-wide notice is forwarded once by
+#: the node that made it, and the same notice again (renamed back within ten
+#: minutes) must arrive too.
+DEDUPED_KINDS: frozenset[str] = AUDIENCE_KINDS - {AUDIENCE_INSTANCE, AUDIENCE_ALL}
 
 #: Longest audience key (a space or channel id) a forwarded item may carry —
 #: the relay routes' own bound on identifier-shaped fields.
@@ -347,7 +362,8 @@ class ClusterRelayFanOut:
         self._clock = clock
         self._cluster: ClusterService | None = None
         self._audiences: dict[str, AudienceResolver] = {
-            AUDIENCE_INSTANCE: _one_household
+            AUDIENCE_INSTANCE: _one_household,
+            AUDIENCE_ALL: self._connected_here,
         }
         self._seen = SeenPayloadCache(
             ttl_s=RELAY_FORWARD_SEEN_TTL_S, cap=RELAY_FORWARD_SEEN_MAX
@@ -359,6 +375,12 @@ class ClusterRelayFanOut:
         #: Inbound frames refused at saturation since the last WARNING.
         self._dropped = 0
         self._warned_at = -math.inf
+
+    async def _connected_here(self, key: str) -> list[str]:
+        """The ``all`` audience: every household with a socket on this node."""
+        if key != AUDIENCE_ALL_KEY:
+            return []
+        return sorted(self._ws_registry.connected_instances())
 
     def attach_cluster(self, cluster: ClusterService) -> None:
         """Forward through *cluster* (a setter: the cluster calls back into
@@ -429,6 +451,19 @@ class ClusterRelayFanOut:
         return self.forward(
             kind=AUDIENCE_INSTANCE,
             key=instance_id,
+            frame=typed_frame(str(push.get("type")), fields),
+        )
+
+    def forward_to_all(self, push: dict) -> bool:
+        """:meth:`forward` a GFS-wide socket frame *push* (one of
+        :data:`TYPED_FRAME_TYPES` for ``all``) that this node already pushed
+        to its own sockets, so every other node pushes it to theirs. Nothing
+        is queued: a household connected nowhere refreshes on its next
+        hello, as on one node."""
+        fields = {k: v for k, v in push.items() if k != "type"}
+        return self.forward(
+            kind=AUDIENCE_ALL,
+            key=AUDIENCE_ALL_KEY,
             frame=typed_frame(str(push.get("type")), fields),
         )
 

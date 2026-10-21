@@ -151,7 +151,7 @@ verifies the author's signature directly.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST   | `/gfs/moments/users/register` | Signed body — register a user. |
+| POST   | `/gfs/moments/users/register` | Signed body — register a user. `user_id` ≤ 128 printable chars (the cluster `followers` audience key bound). |
 | POST   | `/gfs/moments/users/{user_id}/deregister` | Signed body — drop a registration. |
 | POST   | `/gfs/moments/users/{user_id}/follow` | Signed body — record a follower; v_62 optional `moment_suites: {kem: [...], seal: [...]}` (≤ 8 names of ≤ 64 chars each; 422 otherwise). |
 | POST   | `/gfs/moments/users/{user_id}/unfollow` | Signed body — drop a follower. |
