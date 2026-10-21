@@ -433,6 +433,8 @@
   "settings.profile.avatar_failed": "Avatar-Upload fehlgeschlagen",
   "settings.privacy.title": "Privatsphäre",
   "settings.privacy.online_status": "Online-Status anderen Haushaltsmitgliedern zeigen",
+  "settings.privacy.profile_followers": "Mein Bild und meine Bio Followern globaler Spaces zeigen",
+  "settings.privacy.profile_followers_hint": "Leute, die einem globalen Space folgen, in dem du postest. Ist es aus, sehen sie nur deinen Namen.",
   "settings.privacy.updated": "Privatsphäre aktualisiert",
   "settings.notifications.title": "Benachrichtigungen",
   "settings.notifications.push": "Push-Benachrichtigungen",

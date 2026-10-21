@@ -19,10 +19,12 @@ from socialhome.domain.events import (
     SpaceMemberLeft,
     SpaceMemberProfileUpdated,
     SpacePostCreated,
+    UserPreferencesChanged,
     UserProfileUpdated,
 )
 from socialhome.domain.picture_hash import compute_picture_hash
 from socialhome.domain.post import Post, PostType
+from socialhome.domain.preferences import UserPreferences
 from socialhome.domain.space import SpaceType
 from socialhome.domain.space_author_profile import (
     PROFILE_PICTURE_FIELD,
@@ -199,6 +201,18 @@ class _Cache:
         self.rows.pop((space_id, author_user_id), None)
 
 
+class _Prefs:
+    """The per-user preferences, in memory."""
+
+    def __init__(self, hidden: set[str] | None = None) -> None:
+        self.hidden = hidden if hidden is not None else set()
+
+    async def get_user(self, user_id):
+        return UserPreferences(
+            user_id=user_id, hide_profile_from_followers=user_id in self.hidden
+        )
+
+
 class _Certs:
     def __init__(self, cert=None) -> None:
         self.cert = cert
@@ -229,6 +243,7 @@ def _svc(**kw):
         own_instance_pk=KP.public_key,
         own_identity_seed=KP.private_key,
         picture_cache=kw.pop("picture_cache", None),
+        preferences_repo=kw.pop("prefs", _Prefs()),  # type: ignore[arg-type]
     )
     svc.attach_profile_cache(cache, writer_certs=kw.pop("certs", _Certs(_Cert())))  # type: ignore[arg-type]
     return svc, gfs
@@ -289,6 +304,79 @@ async def test_a_protected_account_sends_its_name_only():
     p = _profile(gfs)
     assert (p.display_name, p.bio, p.picture_hash) == ("Noor Haddad", None, None)
     assert PROFILE_PICTURE_FIELD not in _sent(gfs)
+
+
+async def test_a_person_who_hides_their_profile_sends_their_name_only():
+    """M6: "Show my picture and bio to followers of global spaces" off —
+    the item carries the name only, like a protected account."""
+    svc, gfs = _svc(prefs=_Prefs({NOOR}))
+    assert await _pub(svc, "sp", NOOR)
+    p = _profile(gfs)
+    assert (p.display_name, p.bio, p.picture_hash) == ("Noor Haddad", None, None)
+    assert PROFILE_PICTURE_FIELD not in _sent(gfs)
+
+
+async def test_hiding_the_profile_republishes_name_only_and_back_on_the_full():
+    """M6: flipping the switch replaces the published profile in every
+    space it went to; flipping it back republishes the full profile (with
+    the picture bytes, which the follower no longer holds)."""
+    bus = EventBus()
+    prefs = _Prefs()
+    cache = _Cache()
+    svc, gfs = _svc(bus=bus, prefs=prefs, cache=cache)
+    svc.wire()
+    assert await _pub(svc, "sp", NOOR)
+    assert await _pub(svc, "sp2", NOOR)
+    assert len(gfs.items) == 2
+    prefs.hidden.add(NOOR)
+    await bus.publish(
+        UserPreferencesChanged(
+            user_id=NOOR, changed={"hide_profile_from_followers": True}
+        )
+    )
+    await gfs.flush()
+    assert len(gfs.items) == 4
+    spaces = set()
+    for _space, _author, _type, inner in gfs.items[2:]:
+        spaces.add(_space)
+        p = decode_profile_content(inner["content"])
+        assert (p.bio, p.picture_hash) == (None, None)
+        assert PROFILE_PICTURE_FIELD not in inner
+    assert spaces == {"sp", "sp2"}
+    assert cache.rows[("sp", NOOR)][1] is None  # the bundle forgets the picture
+    prefs.hidden.clear()
+    await bus.publish(
+        UserPreferencesChanged(
+            user_id=NOOR, changed={"hide_profile_from_followers": False}
+        )
+    )
+    await gfs.flush()
+    assert len(gfs.items) == 6
+    for _space, _author, _type, inner in gfs.items[4:]:
+        p = decode_profile_content(inner["content"])
+        assert p.bio == "Beekeeper."
+        assert p.picture_hash is not None
+        assert PROFILE_PICTURE_FIELD in inner
+
+
+async def test_another_preference_change_republishes_nothing():
+    bus = EventBus()
+    prefs = _Prefs()
+    svc, gfs = _svc(bus=bus, prefs=prefs)
+    svc.wire()
+    assert await _pub(svc, "sp", NOOR)
+    await bus.publish(
+        UserPreferencesChanged(user_id=NOOR, changed={"hide_bazaar": True})
+    )
+    await gfs.flush()
+    # The same switch reported again with nothing to change: deduped.
+    await bus.publish(
+        UserPreferencesChanged(
+            user_id=NOOR, changed={"hide_profile_from_followers": False}
+        )
+    )
+    await gfs.flush()
+    assert len(gfs.items) == 1
 
 
 async def test_a_content_key_rotation_sends_nothing():
@@ -482,8 +570,15 @@ async def test_without_the_cache_nothing_is_published():
         own_instance_id=OWN,
         own_instance_pk=KP.public_key,
         own_identity_seed=KP.private_key,
+        preferences_repo=_Prefs(),  # type: ignore[arg-type]
     )
     assert not await _pub(svc, "sp", NOOR)
+    svc.wire()
+    await svc._on_preferences(
+        UserPreferencesChanged(
+            user_id=NOOR, changed={"hide_profile_from_followers": True}
+        )
+    )
 
 
 # ── The host's copy for a new follower's bundle (v_61) ──────────────

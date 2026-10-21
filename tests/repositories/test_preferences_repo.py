@@ -73,6 +73,17 @@ async def test_get_user_returns_defaults_when_no_row(repo):
     assert prefs.hide_highlights is False
     assert prefs.hide_momentum is False
     assert prefs.hide_bazaar is False
+    assert prefs.hide_profile_from_followers is False
+
+
+async def test_hide_profile_from_followers_round_trips(repo):
+    await repo.ensure_row("alice")
+    assert (await repo.get_user("alice")).hide_profile_from_followers is False
+    await repo.set_user_value("alice", "hide_profile_from_followers", 1)
+    assert (await repo.get_user("alice")).hide_profile_from_followers is True
+    assert (await repo.get_user("bob")).hide_profile_from_followers is False
+    await repo.set_user_value("alice", "hide_profile_from_followers", 0)
+    assert (await repo.get_user("alice")).hide_profile_from_followers is False
 
 
 async def test_get_user_returns_row_values_after_ensure_and_set(repo):

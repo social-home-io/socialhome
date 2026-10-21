@@ -19,6 +19,7 @@ async def test_get_returns_defaults_for_new_user(client):
     assert body["hide_highlights"] is False
     assert body["hide_momentum"] is False
     assert body["hide_bazaar"] is False
+    assert body["hide_profile_from_followers"] is False
     assert "user_id" in body
 
 
@@ -55,6 +56,27 @@ async def test_patch_persists_hide_bazaar(client):
     )
     assert r.status == 200
     assert (await r.json())["hide_bazaar"] is True
+
+
+async def test_patch_persists_hide_profile_from_followers(client):
+    r = await client.patch(
+        "/api/me/preferences",
+        json={"hide_profile_from_followers": True},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert (await r.json())["hide_profile_from_followers"] is True
+    r2 = await client.get("/api/me/preferences", headers=_auth(client._tok))
+    assert (await r2.json())["hide_profile_from_followers"] is True
+
+
+async def test_patch_invalid_type_hide_profile_from_followers(client):
+    r = await client.patch(
+        "/api/me/preferences",
+        json={"hide_profile_from_followers": "no"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 400
 
 
 async def test_patch_rejects_household_scope_key(client):

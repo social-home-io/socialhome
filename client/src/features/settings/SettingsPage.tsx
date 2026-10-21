@@ -292,6 +292,21 @@ function PrivacyTab() {
         />
         {t('settings.privacy.online_status')}
       </label>
+      <label class="sh-toggle-row" id="profile-followers-toggle">
+        <input
+          type="checkbox"
+          checked={!userPreferences.value.hide_profile_from_followers}
+          onChange={() => void toggleUserPreference(
+            'hide_profile_from_followers', 'settings.privacy.update_failed',
+          )}
+        />
+        <span class="sh-toggle-row__text">
+          {t('settings.privacy.profile_followers')}
+          <span class="sh-toggle-row__sub">
+            {t('settings.privacy.profile_followers_hint')}
+          </span>
+        </span>
+      </label>
       <SidebarVisibilityPanel />
       <SpaceLocationSharingPanel />
       <HighlightsPreferencesPanel />
@@ -302,6 +317,25 @@ function PrivacyTab() {
   )
 }
 
+type UserPreferenceToggle =
+  | 'hide_highlights' | 'hide_momentum' | 'hide_bazaar' | 'hide_profile_from_followers'
+
+/**
+ * Flip one per-user ``hide_*`` switch: optimistic, then PATCH
+ * /api/me/preferences; a failure reverts the signal and shows the
+ * server's message (else ``failKey``) as a toast.
+ */
+async function toggleUserPreference(field: UserPreferenceToggle, failKey: string) {
+  const prev = userPreferences.value[field]
+  const next = !prev
+  userPreferences.value = { ...userPreferences.value, [field]: next }
+  try {
+    await api.patch('/api/me/preferences', { [field]: next })
+  } catch (e: unknown) {
+    userPreferences.value = { ...userPreferences.value, [field]: prev }
+    showToast((e as Error).message || t(failKey), 'error')
+  }
+}
 
 /**
  * SidebarVisibilityPanel — lets the signed-in user show or hide the three
@@ -316,19 +350,8 @@ function PrivacyTab() {
 function SidebarVisibilityPanel() {
   const prefs = userPreferences.value
 
-  const toggle = async (field: 'hide_highlights' | 'hide_momentum' | 'hide_bazaar') => {
-    const prev = userPreferences.value[field]
-    const next = !prev
-    // Optimistic update
-    userPreferences.value = { ...userPreferences.value, [field]: next }
-    try {
-      await api.patch('/api/me/preferences', { [field]: next })
-    } catch (e: unknown) {
-      // Revert on error
-      userPreferences.value = { ...userPreferences.value, [field]: prev }
-      showToast((e as Error).message || t('settings.sidebar.update_failed'), 'error')
-    }
-  }
+  const toggle = (field: UserPreferenceToggle) =>
+    toggleUserPreference(field, 'settings.sidebar.update_failed')
 
   return (
     <div class="sh-settings-subcard sh-sidebar-visibility-panel" id="sidebar-visibility">

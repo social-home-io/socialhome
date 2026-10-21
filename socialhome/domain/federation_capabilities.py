@@ -908,7 +908,10 @@ from __future__ import annotations
 #:   member household publishes each of its authors' public profile (name,
 #:   bio and the hash of a ≤ 24 KB picture, the picture itself as an
 #:   unsigned sidecar checked against that hash and sent only when it
-#:   changed; a protected account's name only) as the ``author_profile``
+#:   changed; a protected account's name only, and so is a person's who
+#:   turned off "Show my picture and bio to followers of global spaces" —
+#:   flipping it republishes, name only or full, where the profile went;
+#:   no wire change) as the ``author_profile``
 #:   ``space_item``, author-signed and encrypted under the space content
 #:   key, so a follower without a roster names them — on the author's first
 #:   post and then only on a real change (persisted dedupe: a rotation or a

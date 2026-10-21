@@ -8,6 +8,14 @@ from ..app_keys import preferences_service_key
 from ..security import error_response
 from .base import BaseView
 
+#: The per-user switches ``PATCH`` accepts (all booleans).
+_USER_TOGGLES = (
+    "hide_highlights",
+    "hide_momentum",
+    "hide_bazaar",
+    "hide_profile_from_followers",
+)
+
 
 class MePreferencesView(BaseView):
     """``GET /api/me/preferences`` + ``PATCH /api/me/preferences``."""
@@ -21,6 +29,7 @@ class MePreferencesView(BaseView):
                 "hide_highlights": prefs.hide_highlights,
                 "hide_momentum": prefs.hide_momentum,
                 "hide_bazaar": prefs.hide_bazaar,
+                "hide_profile_from_followers": prefs.hide_profile_from_followers,
             }
         )
 
@@ -28,7 +37,7 @@ class MePreferencesView(BaseView):
         user = self.user
         body = await self.body()
         toggles: dict[str, bool] = {}
-        for key in ("hide_highlights", "hide_momentum", "hide_bazaar"):
+        for key in _USER_TOGGLES:
             if key in body:
                 value = body[key]
                 if not isinstance(value, bool):
@@ -46,5 +55,6 @@ class MePreferencesView(BaseView):
                 "hide_highlights": prefs.hide_highlights,
                 "hide_momentum": prefs.hide_momentum,
                 "hide_bazaar": prefs.hide_bazaar,
+                "hide_profile_from_followers": prefs.hide_profile_from_followers,
             }
         )

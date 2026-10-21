@@ -61,6 +61,7 @@ beforeEach(() => {
     hide_highlights: false,
     hide_momentum: false,
     hide_bazaar: false,
+    hide_profile_from_followers: false,
   }
   // Default to standalone for tests that don't care about platform
   // mode; the no-identity-strip test walks every mode.
@@ -406,6 +407,7 @@ describe('SideNav', () => {
       hide_highlights: false,
       hide_momentum: false,
       hide_bazaar: false,
+      hide_profile_from_followers: false,
     }
     const { queryByText } = renderAt('/')
     expect(queryByText('Highlights')).toBeTruthy()

@@ -4355,6 +4355,7 @@ def create_app(config: Config | None = None) -> web.Application:
                 own_instance_id=real_instance_id,
                 own_instance_pk=identity_pk,
                 own_identity_seed=identity_seed,
+                preferences_repo=repos.preferences,
                 picture_cache=public_picture_cache,
             )
             author_profiles.attach_child_protection(child_protection_service)

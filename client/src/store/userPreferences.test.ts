@@ -36,6 +36,7 @@ describe('wireUserPreferencesWs', () => {
       hide_highlights: false,
       hide_momentum: false,
       hide_bazaar: false,
+      hide_profile_from_followers: false,
     }
     Object.keys(handlers).forEach(k => delete handlers[k])
     wireUserPreferencesWs()
@@ -82,12 +83,13 @@ describe('loadUserPreferences', () => {
       hide_highlights: false,
       hide_momentum: false,
       hide_bazaar: false,
+      hide_profile_from_followers: false,
     }
     mockGet.mockReset()
   })
 
   it('populates the signal from the API response', async () => {
-    const prefs = { user_id: 'u1', hide_highlights: true, hide_momentum: false, hide_bazaar: true }
+    const prefs = { user_id: 'u1', hide_highlights: true, hide_momentum: false, hide_bazaar: true, hide_profile_from_followers: true }
     mockGet.mockResolvedValueOnce(prefs)
     await loadUserPreferences()
     expect(userPreferences.value).toEqual(prefs)

@@ -1549,6 +1549,17 @@ relay as every other item:
   by the existing generic author signature — no new signing domain. A
   **protected** account (§CP.R) sends its name only: `bio` and
   `picture_hash` are `null`.
+- **Opt-out.** A person's picture and bio are shown to followers by
+  default. Turning off "Show my picture and bio to followers of global
+  spaces" (`hide_profile_from_followers` on `PATCH /api/me/preferences`,
+  migration 0117) makes their items name only, like a protected account's.
+  Flipping the switch republishes the profile — name only, or full again
+  with the picture bytes — in every space it was published in, as a newer
+  item that replaces the follower's copy (and the host's bundle copy). A
+  name-only profile is an existing valid shape, so there is no wire change
+  and no version bump. The public highlight page is not affected: that
+  page is shared on purpose, through a link the person hands out, not to a
+  space's followers.
 - **Picture sidecar.** The picture itself (base64 WebP, ≤ 256 px and
   ≤ 24 KB, re-encoded by the sender — once per source picture, cached; the
   per-space picture, else the household one) rides beside the signed

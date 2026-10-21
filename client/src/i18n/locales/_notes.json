@@ -515,5 +515,7 @@
   "local_area.consent.no_home": "Shown instead of the consent when this household has no home location. The menu path is Home Assistant's: Settings → System → General.",
   "join_requests.near_edge": "Chip in the admins' join-request queue: the asking household's home is close to the edge of the local community's area, so an admin decides.",
   "highlight.publish.gfs_too_old": "Inline error in the share-a-highlight dialog: the chosen GFS runs an older version whose page can’t open encrypted highlight links. {name} is the GFS’s name. “Highlights” stays untranslated.",
-  "error.gfs_too_old": "Generic error when a GFS is too old for the requested action; its operator has to update it."
+  "error.gfs_too_old": "Generic error when a GFS is too old for the requested action; its operator has to update it.",
+  "settings.privacy.profile_followers": "Privacy switch, on by default. Checked = the person's picture and bio are shown to followers of global spaces they post in (people outside their households who follow that space). Off = followers see the name only. 'global' is the space scope (de: global, nl: wereldwijd, fr: global, es: global); follower per the glossary (de: Follower, nl: volger, fr: abonné, es: seguidor).",
+  "settings.privacy.profile_followers_hint": "Helper line under the switch above: who the followers are, and what they see when it is off."
 }

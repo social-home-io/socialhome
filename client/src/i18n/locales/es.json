@@ -445,6 +445,8 @@
   "settings.profile.avatar_failed": "Error al subir el avatar",
   "settings.privacy.title": "Privacidad",
   "settings.privacy.online_status": "Mostrar estado en l\u00ednea a otros miembros del hogar",
+  "settings.privacy.profile_followers": "Mostrar mi foto y mi biografía a los seguidores de espacios globales",
+  "settings.privacy.profile_followers_hint": "Personas que siguen un espacio global en el que publicas. Si está desactivado, solo ven tu nombre.",
   "settings.privacy.updated": "Privacidad actualizada",
   "settings.notifications.title": "Notificaciones",
   "settings.notifications.push": "Notificaciones push",
