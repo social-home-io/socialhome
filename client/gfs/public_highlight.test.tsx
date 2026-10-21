@@ -44,3 +44,27 @@ describe('public highlight bootstrap', () => {
     }
   })
 })
+
+describe('a stream that closes early', () => {
+  it('says part of the highlight did not arrive when there is no stream_end', async () => {
+    const { closedStreamVerdict } = await import('./public_highlight')
+    expect(closedStreamVerdict({ sawSeal: true, sawEnd: false, failed: false, frames: 3 }))
+      .toBe('incomplete')
+  })
+
+  it('is complete once stream_end came, or an error is already shown', async () => {
+    const { closedStreamVerdict } = await import('./public_highlight')
+    expect(closedStreamVerdict({ sawSeal: true, sawEnd: true, failed: false, frames: 3 }))
+      .toBe('complete')
+    expect(closedStreamVerdict({ sawSeal: true, sawEnd: false, failed: true, frames: 0 }))
+      .toBe('complete')
+  })
+
+  it('cannot open a stream that never sent its seal, and says when nothing came', async () => {
+    const { closedStreamVerdict } = await import('./public_highlight')
+    expect(closedStreamVerdict({ sawSeal: false, sawEnd: false, failed: false, frames: 0 }))
+      .toBe('cant_open')
+    expect(closedStreamVerdict({ sawSeal: true, sawEnd: false, failed: false, frames: 0 }))
+      .toBe('nothing_arrived')
+  })
+})

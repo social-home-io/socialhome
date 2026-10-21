@@ -74,7 +74,29 @@ interface ViewerState {
   /** Who shared it — opened from the sealed ``author_profile`` frame. */
   author: AuthorProfile | null
   authorPicture: string | null
+  /** The channel closed before ``stream_end``: some frames never came. */
+  incomplete: boolean
 }
+
+/** What a viewer shows when the channel or relay closes:
+ *  ``complete`` — ``stream_end`` came (or an error is already shown);
+ *  ``cant_open`` — nothing sealed for this link ever arrived;
+ *  ``nothing_arrived`` — sealed, but no highlight before the close;
+ *  ``incomplete`` — some frames came, the rest didn't (no ``stream_end``). */
+export function closedStreamVerdict(s: {
+  sawSeal: boolean
+  sawEnd: boolean
+  failed: boolean
+  frames: number
+}): 'complete' | 'cant_open' | 'nothing_arrived' | 'incomplete' {
+  if (s.sawEnd || s.failed) return 'complete'
+  if (!s.sawSeal) return 'cant_open'
+  if (s.frames === 0) return 'nothing_arrived'
+  return 'incomplete'
+}
+
+/** Shown when the stream can't be opened: not sealed for this link. */
+const CANT_OPEN = 'This highlight couldn’t be opened. Ask for a new link.'
 
 interface FramingHeader extends SealedHeader {
   kind:
@@ -135,6 +157,7 @@ function PublicHighlightViewer(
     currentIndex: 0,
     author: null,
     authorPicture: null,
+    incomplete: false,
   })
 
   // Per-frame chunk buffer — kept in a ref-like store so the message
@@ -153,10 +176,35 @@ function PublicHighlightViewer(
     let manifest: FrameMeta[] = []
     // Sealed frames must open in arrival order: one promise chain.
     let queue: Promise<void> = Promise.resolve()
+    // How far the stream got — for a channel that closes early.
+    let sawSeal = false
+    let sawEnd = false
+    let failed = false
 
     function setStatus(status: ViewerState['status'], message: string | null = null) {
       if (cancelled) return
+      if (status === 'error') failed = true
       setState((s) => ({ ...s, status, message }))
+    }
+
+    // The channel or relay closed. Once every frame that did arrive is
+    // opened: nothing sealed for this link came at all → can't be opened;
+    // no highlight yet → error; otherwise show what came, and say the rest
+    // didn't (a stream cut short has no ``stream_end``).
+    function onTransportClosed() {
+      queue = queue.then(() => {
+        if (cancelled) return
+        const verdict = closedStreamVerdict({
+          sawSeal, sawEnd, failed, frames: manifest.length,
+        })
+        if (verdict === 'cant_open') {
+          setStatus('error', CANT_OPEN)
+        } else if (verdict === 'nothing_arrived') {
+          setStatus('error', 'The connection closed before the highlight arrived.')
+        } else if (verdict === 'incomplete') {
+          setState((s) => ({ ...s, incomplete: true }))
+        }
+      })
     }
 
     function appendChunk(frameId: string, payload: Uint8Array, isLast: boolean, contentType: string) {
@@ -179,7 +227,7 @@ function PublicHighlightViewer(
       queue = queue.then(() => openWireFrame(header, bytes)).catch(() => {
         // A frame that doesn't open: tampered, reordered or not ours.
         opener = null
-        setStatus('error', 'This highlight couldn’t be opened. Ask for a new link.')
+        setStatus('error', CANT_OPEN)
       })
     }
 
@@ -189,7 +237,8 @@ function PublicHighlightViewer(
         setStatus('error', humanizeError(header.error ?? 'unknown'))
       } else if (header.kind === 'stream_seal' && viewerKey && !opener) {
         opener = await makeStreamOpener(viewerKey.privateKey, header, secret, boot.highlightId)
-        if (!opener) setStatus('error', 'This highlight couldn’t be opened. Ask for a new link.')
+        if (opener) sawSeal = true
+        else setStatus('error', CANT_OPEN)
       } else if (header.kind === 'sealed' && opener) {
         const inner = decodeFrame(await opener.open(payload))
         if (inner && inner.header.kind !== 'stream_seal' && inner.header.kind !== 'sealed') {
@@ -221,6 +270,7 @@ function PublicHighlightViewer(
         appendChunk(header.frame_id, payload, !!header.is_last_chunk, ct)
       } else if (header.kind === 'stream_end') {
         // Streaming complete. Playback continues from already-buffered urls.
+        sawEnd = true
       } else if (header.kind === 'error') {
         setStatus('error', humanizeError(header.error ?? 'unknown'))
       }
@@ -266,6 +316,7 @@ function PublicHighlightViewer(
             onWireFrame(taken.header, taken.payload)
           }
         }
+        onTransportClosed()
       } catch (err) {
         setStatus('error', humanizeError((err as Error)?.message))
       }
@@ -307,6 +358,7 @@ function PublicHighlightViewer(
         const ch = pc.createDataChannel(CHANNEL_LABEL, { ordered: true })
         ch.binaryType = 'arraybuffer'
         ch.onopen = () => { channelOpened = true; setStatus('loading', 'Loading highlight…') }
+        ch.onclose = () => { if (channelOpened) onTransportClosed() }
         ch.onmessage = (ev) => {
           const buf = new Uint8Array(ev.data instanceof ArrayBuffer ? ev.data : new ArrayBuffer(0))
           const decoded = decodeFrame(buf)
@@ -400,8 +452,20 @@ function PublicHighlightViewer(
     )
   }
 
+  const incomplete = state.incomplete && (
+    <div class="highlight-incomplete" role="status">
+      <p>Part of this highlight didn’t arrive.</p>
+      <button type="button" class="viewer-retry" onClick={retry.manual}>Try again</button>
+    </div>
+  )
+
   if (state.status === 'ended') {
-    return <div class="highlight-end">Highlight finished.</div>
+    return (
+      <div class="highlight-end">
+        <p>Highlight finished.</p>
+        {incomplete}
+      </div>
+    )
   }
 
   const total = state.manifest.length
@@ -429,11 +493,16 @@ function PublicHighlightViewer(
         {url && cur && !cur.content_type.startsWith('video/') && (
           <img src={url} alt="" />
         )}
-        {!url && <div class="status">{state.message ?? 'Buffering…'}</div>}
+        {!url && (
+          <div class="status">
+            {state.incomplete ? 'This part didn’t arrive.' : state.message ?? 'Buffering…'}
+          </div>
+        )}
         {cur?.caption_text && (
           <div class="caption">{cur.caption_text}</div>
         )}
       </div>
+      {incomplete}
     </div>
   )
 }

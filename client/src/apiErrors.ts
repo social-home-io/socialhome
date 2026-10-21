@@ -142,6 +142,8 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   ALREADY_CONNECTED: () => t('error.gfs_already_connected'),
   // Server-side outages the user can act on or wait out.
   GFS_UNAVAILABLE: () => t('error.gfs_unavailable'),
+  // The GFS can't serve this yet (``params.feature``): its operator updates it.
+  GFS_TOO_OLD: () => t('error.gfs_too_old'),
   STORAGE_FULL: () => t('error.storage_full'),
   // Household dashboard (Admin › Dashboard). ``params`` carry the port /
   // length limits (``domain/household_dashboard.py``).
