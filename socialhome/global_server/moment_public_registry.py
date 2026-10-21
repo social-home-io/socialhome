@@ -12,10 +12,12 @@ Four responsibilities:
 3. **Fan-out** — given a signed envelope from the author's instance,
    look up the followers and push an ``incoming_public_moment`` WS
    frame to each unique follower household that can open it. The
-   registry holds zero moment bytes — the fan-out is in-memory only,
-   then forgotten — and since v_62 every envelope is ciphertext the GFS
-   cannot open (the routes refuse any other shape). ONE ciphertext per
-   moment, the same bytes to every follower.
+   registry keeps no moment bytes; the only copies at rest are the
+   offline ones — the same frame queued (24 h, deleted on delivery) for a
+   recently seen follower household no node holds a socket for. Since
+   v_62 every envelope is ciphertext the GFS cannot open (the routes
+   refuse any other shape). ONE ciphertext per moment, the same bytes to
+   every follower.
 4. **Key routing (v_62)** — the author's household seals its moment key
    to each follower household. The GFS only *routes* and *keeps*: it tells
    the author who followed (with the follower household's published
@@ -24,6 +26,22 @@ Four responsibilities:
    once or when that household next connects, answers a follower's key
    request from the mailbox when it can, and forwards it to the author
    only when it can't.
+
+**Cluster (§24.10).** Each GFS node holds only its own ``/gfs/ws`` sockets,
+behind a round-robin balancer on one shared database, so every push here
+reaches households on EVERY node:
+
+* a moment / tombstone is pushed to the followers connected here, then
+  forwarded ONCE per peer node (``ClusterRelayFanOut``, audience
+  ``followers`` + the author's user id); each node resolves the followers
+  from the shared database and pushes to the sockets it holds. A recently
+  seen follower household no node holds gets the frame queued in the shared
+  relay queue (24 h — a moment's life) and drained when it reconnects;
+* a sealed key whose household has no socket here stays in the shared
+  mailbox and rides the coalesced drain hint (``ClusterService.hint_drain``)
+  to the node that holds it, which pushes the undelivered keys;
+* ``follow_changed`` / ``moment_key_request`` to the author's household are
+  forwarded (audience ``instance``) when its socket is on another node.
 
 This module *only* wires the data model + push primitives. The HTTP
 routes live in ``routes/moments_public.py`` and the WS frame handler
@@ -36,15 +54,27 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..moment_public_seal import MOMENT_SEAL_SUITE_AESGCM256
+from ..moment_public_seal import (
+    FRAME_MOMENT,
+    FRAME_MOMENT_DELETE,
+    MOMENT_SEAL_SUITE_AESGCM256,
+)
+from .cluster_relay import (
+    AUDIENCE_FOLLOWERS,
+    RELAY_FORWARD_SEEN_MAX,
+    RELAY_FORWARD_SEEN_TTL_S,
+    typed_frame,
+)
 from .domain import (
     ClientInstance,
     GfsMomentFollow,
     GfsMomentKeyMail,
     GfsUserRegistration,
 )
+from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
+from .federation import SeenPayloadCache
 from .public import SlidingWindowCounter
 from .repositories import (
     AbstractGfsFederationRepo,
@@ -53,6 +83,11 @@ from .repositories import (
     AbstractGfsUserRegistrationRepo,
 )
 from .ws_registry import GfsWebSocketRegistry
+
+if TYPE_CHECKING:
+    from .cluster import ClusterService
+    from .cluster_relay import ClusterRelayFanOut
+    from .envelope_relay import GfsEnvelopeRelay
 
 log = logging.getLogger(__name__)
 
@@ -90,10 +125,14 @@ class MomentPublicRegistry:
     """Per-GFS facade over registrations + follows + fan-out + key routing."""
 
     __slots__ = (
+        "_cluster",
+        "_fan_out_fwd",
         "_follows",
         "_instances",
         "_key_requests",
         "_mailbox",
+        "_relay",
+        "_seen",
         "_tasks",
         "_users",
         "_ws_registry",
@@ -106,6 +145,10 @@ class MomentPublicRegistry:
         ws_registry: GfsWebSocketRegistry,
         instances: AbstractGfsFederationRepo | None = None,
         mailbox: AbstractGfsMomentKeyMailboxRepo | None = None,
+        *,
+        relay: GfsEnvelopeRelay | None = None,
+        fan_out: ClusterRelayFanOut | None = None,
+        cluster: ClusterService | None = None,
     ) -> None:
         self._users = users
         self._follows = follows
@@ -117,6 +160,20 @@ class MomentPublicRegistry:
         #: The latest sealed key per (author, follower household) (v_62).
         #: Without it a key reaches only a follower that is online.
         self._mailbox = mailbox
+        #: The shared relay queue: a moment for a recently-seen follower
+        #: household no node holds a socket for waits there (24 h).
+        self._relay = relay
+        #: Forwards a moment to the other cluster nodes, and a push for the
+        #: author's household to the node holding its socket.
+        self._fan_out_fwd = fan_out
+        #: Wakes the node holding a follower's socket for a sealed key that
+        #: waits in the shared mailbox (``NODE_DRAIN_HINT``).
+        self._cluster = cluster
+        #: Envelopes fanned out here (a re-POST of the same bytes is a no-op;
+        #: one forwarded from another node is in ``fan_out.seen_frame``).
+        self._seen = SeenPayloadCache(
+            ttl_s=RELAY_FORWARD_SEEN_TTL_S, cap=RELAY_FORWARD_SEEN_MAX
+        )
         self._key_requests = SlidingWindowCounter(KEY_REQUESTS_PER_MINUTE)
         self._tasks: set[asyncio.Task] = set()
 
@@ -289,40 +346,85 @@ class MomentPublicRegistry:
         ``incoming_public_moment`` frame so the recipient verifies the
         author's signature directly.
         """
-        return await self._fan_out(envelope, frame_type="incoming_public_moment")
+        return await self._fan_out(envelope, frame_type=FRAME_MOMENT)
 
     async def fan_out_delete(
         self,
         *,
         envelope: dict[str, Any],
     ) -> int:
-        return await self._fan_out(envelope, frame_type="incoming_public_moment_delete")
+        return await self._fan_out(envelope, frame_type=FRAME_MOMENT_DELETE)
 
-    async def _fan_out(self, envelope: dict[str, Any], *, frame_type: str) -> int:
-        author = envelope.get("author_user_id")
-        if not author:
-            log.warning("moment_public: envelope missing author_user_id")
-            return 0
-        followers = await self._follows.followers_of(str(author))
+    async def audience_targets(self, author_user_id: str) -> list[str]:
+        """The follower households of *author_user_id* that can open its
+        moments — what a forwarded moment reaches (the cluster audience
+        resolver for ``followers``, :mod:`.cluster_relay`)."""
         able: dict[str, bool] = {}
-        for f in followers:
+        for f in await self._follows.followers_of(author_user_id):
             # A household that declared the suite on any of its follows.
             able[f.follower_instance_id] = able.get(
                 f.follower_instance_id, False
             ) or suites_can_open(f.moment_suites)
+        return [instance_id for instance_id, can_open in able.items() if can_open]
+
+    async def _fan_out(self, envelope: dict[str, Any], *, frame_type: str) -> int:
+        """Push *envelope* to the able followers connected HERE, forward it
+        once to every other node, and queue it for the recently-seen ones no
+        node holds. Returns how many were pushed here."""
+        author = envelope.get("author_user_id")
+        if not author:
+            log.warning("moment_public: envelope missing author_user_id")
+            return 0
+        author = str(author)
+        forwarded = typed_frame(frame_type, {"payload": envelope})
+        digest = SeenPayloadCache.digest(forwarded)
+        if self._seen.seen(digest) or (
+            self._fan_out_fwd is not None and self._fan_out_fwd.seen_frame(forwarded)
+        ):
+            # The same bytes again (a retried publish, here or on another
+            # node): every follower already got them once.
+            log.debug("moment_public.fanout: suppressing a replayed %s", frame_type)
+            return 0
+        self._seen.record(digest)
+        able = await self.audience_targets(author)
+        push = {"type": frame_type, "payload": envelope}
         delivered = 0
-        frame = {"type": frame_type, "payload": envelope}
-        for instance_id, can_open in able.items():
-            if can_open and await self._ws_registry.send(instance_id, frame):
+        missed: list[str] = []
+        for instance_id in able:
+            if await self._ws_registry.send(instance_id, push):
                 delivered += 1
+            else:
+                missed.append(instance_id)
+        queue_for = await self._offline_candidates(author, missed)
+        # The other nodes push to the sockets they hold; the candidates none
+        # of them holds are queued once their answers are in. Not forwarded
+        # (one node, or the forward buffer is full): queue them now.
+        forwarded_ok = self._fan_out_fwd is not None and self._fan_out_fwd.forward(
+            kind=AUDIENCE_FOLLOWERS, key=author, frame=forwarded, queue_for=queue_for
+        )
+        queued = 0
+        if queue_for and not forwarded_ok and self._relay is not None:
+            queued = await self._relay.queue_relay_many(queue_for, push)
         log.info(
-            "moment_public.fanout: author=%s households=%d able=%d delivered=%d",
+            "moment_public.fanout: author=%s able=%d delivered_here=%d queued_now=%d",
             author,
             len(able),
-            sum(able.values()),
             delivered,
+            queued,
         )
         return delivered
+
+    async def _offline_candidates(self, author: str, missed: list[str]) -> list[str]:
+        """The *missed* households that get an offline copy if no node holds
+        them: only those seen within the queue TTL (a household that never
+        connected, or vanished long ago, would only hold rows until they
+        expire — and a bare hello must not earn disk)."""
+        if not missed or self._relay is None:
+            return []
+        recent = await self._follows.recently_seen_households(
+            author, within_s=ENVELOPE_QUEUE_TTL_SECONDS
+        )
+        return [instance_id for instance_id in missed if instance_id in recent]
 
     # ── Key routing (v_62) ──────────────────────────────────────────────
 
@@ -371,7 +473,12 @@ class MomentPublicRegistry:
         )
         return delivered
 
-    async def _push(self, mail: GfsMomentKeyMail) -> bool:
+    async def _push(self, mail: GfsMomentKeyMail, *, wake: bool = True) -> bool:
+        """Push *mail* to its household's socket on THIS node. With *wake*,
+        a household with no socket here gets the kept key from the node that
+        holds its socket: the key is (again) marked undelivered in the shared
+        mailbox and the household id rides the next drain hint. Never with
+        *wake* from a push the hint itself started — that would loop."""
         try:
             payload = json.loads(mail.delivery)
         except ValueError:  # pragma: no cover - we wrote it
@@ -379,11 +486,28 @@ class MomentPublicRegistry:
         ok = await self._ws_registry.send(
             mail.follower_instance_id, {"type": "moment_key", "payload": payload}
         )
-        if ok and self._mailbox is not None:
+        if self._mailbox is None:
+            return ok
+        if ok:
             await self._mailbox.mark_delivered(
                 mail.author_user_id, mail.follower_instance_id, mail.key_gen
             )
+        elif wake and self._cluster is not None:
+            if mail.delivered:
+                await self._mailbox.mark_undelivered(
+                    mail.author_user_id, mail.follower_instance_id, mail.key_gen
+                )
+            self._cluster.hint_drain(mail.follower_instance_id)
         return ok
+
+    async def _send_to_household(self, instance_id: str, frame: dict) -> bool:
+        """Push *frame* to *instance_id*'s socket here, or forward it once to
+        the other nodes (one of them may hold it). ``True`` iff pushed here."""
+        if await self._ws_registry.send(instance_id, frame):
+            return True
+        if self._fan_out_fwd is not None:
+            self._fan_out_fwd.forward_to_household(instance_id, frame)
+        return False
 
     def schedule_follower_connected(self, instance_id: str) -> None:
         """Fire-and-forget :meth:`on_follower_connected` — the WebSocket
@@ -395,7 +519,9 @@ class MomentPublicRegistry:
     async def on_follower_connected(self, instance_id: str) -> int:
         """Push the sealed keys this household missed while offline (only
         the undelivered ones — a reconnect re-sends nothing it already
-        got). Never raises; returns how many went out."""
+        got). Run on the hello, and on a ``NODE_DRAIN_HINT`` naming a
+        household whose socket is on this node (a key kept by another node).
+        Never raises; returns how many went out."""
         if self._mailbox is None:
             return 0
         sent = 0
@@ -403,7 +529,7 @@ class MomentPublicRegistry:
             for mail in await self._mailbox.undelivered_for(
                 instance_id, limit=MAX_MAILBOX_PUSH_ON_CONNECT
             ):
-                if not await self._push(mail):
+                if not await self._push(mail, wake=False):
                     break
                 sent += 1
         except Exception:  # defensive — never fail a connect on this
@@ -441,7 +567,7 @@ class MomentPublicRegistry:
         follower = await self._follower_keys(followed_user_id, follower_instance_id)
         if follower is None:
             return
-        await self._ws_registry.send(
+        await self._send_to_household(
             reg.instance_id,
             {
                 "type": "moment_key_request",
@@ -507,4 +633,4 @@ class MomentPublicRegistry:
             # v_62: the author rotates only when no user of that household
             # follows any more (the key is per household).
             frame["household_still_follows"] = bool(household_still_follows)
-        await self._ws_registry.send(author_instance_id, frame)
+        await self._send_to_household(author_instance_id, frame)

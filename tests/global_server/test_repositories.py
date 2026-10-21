@@ -14,7 +14,10 @@ from socialhome.global_server.domain import (
     ClusterNode,
     GfsAppeal,
     GfsFraudReport,
+    GfsMomentFollow,
+    GfsMomentKeyMail,
     GfsSubscriberWithKeys,
+    GfsUserRegistration,
     GlobalSpace,
 )
 from socialhome.global_server.repositories import (
@@ -24,7 +27,10 @@ from socialhome.global_server.repositories import (
     SqliteGfsEnvelopeQueueRepo,
     SqliteGfsFederationRepo,
     SqliteGfsInviteRepo,
+    SqliteGfsMomentFollowRepo,
+    SqliteGfsMomentKeyMailboxRepo,
     SqliteGfsSpaceEpochRepo,
+    SqliteGfsUserRegistrationRepo,
 )
 
 
@@ -1121,6 +1127,98 @@ async def test_recently_seen_subscribers_need_a_held_ws_session(gfs_db):
     # A bare hello (rtc_connections) earns nothing.
     await repo.upsert_rtc_connection("never", transport="websocket")
     assert await repo.list_recently_seen_subscribers("sp", within_s=86400) == {"seen"}
+
+
+async def test_recently_seen_follower_households_need_a_held_ws_session(gfs_db):
+    """Only active follower households seen within the window get a public
+    moment queued; a household with two following users counts once."""
+    fed = SqliteGfsFederationRepo(gfs_db)
+    users = SqliteGfsUserRegistrationRepo(gfs_db)
+    follows = SqliteGfsMomentFollowRepo(gfs_db)
+    for iid, status in (
+        ("author", "active"),
+        ("seen", "active"),
+        ("never", "active"),
+        ("old", "active"),
+        ("banned", "banned"),
+        ("other", "active"),
+    ):
+        await fed.upsert_instance(
+            ClientInstance(
+                instance_id=iid, display_name=iid, public_key="ab" * 32, status=status
+            )
+        )
+    for user in ("u-a", "u-b"):
+        await users.upsert(
+            GfsUserRegistration(
+                user_id=user,
+                instance_id="author",
+                username=user,
+                display_name=user,
+                picture_url=None,
+                home_instance_pk="aa" * 32,
+                registered_at=0,
+            )
+        )
+    for fan, iid, followed in (
+        ("f1", "seen", "u-a"),
+        ("f2", "seen", "u-a"),
+        ("f3", "never", "u-a"),
+        ("f4", "old", "u-a"),
+        ("f5", "banned", "u-a"),
+        ("f6", "other", "u-b"),
+    ):
+        await follows.upsert(
+            GfsMomentFollow(
+                follower_user_id=fan,
+                follower_instance_id=iid,
+                followed_user_id=followed,
+                created_at=0,
+            )
+        )
+    now = int(time.time())
+    for iid in ("seen", "banned", "other"):
+        await fed.mark_relay_seen(iid, at=now)
+    await fed.mark_relay_seen("old", at=now - 2 * 86400)
+    assert await follows.recently_seen_households("u-a", within_s=86400) == {"seen"}
+
+
+async def test_a_kept_key_can_be_handed_back_undelivered(gfs_db):
+    """``mark_undelivered`` flips only the generation it names — a newer key
+    that replaced it meanwhile is left as it is."""
+    fed = SqliteGfsFederationRepo(gfs_db)
+    for iid in ("author", "fan"):
+        await fed.upsert_instance(
+            ClientInstance(
+                instance_id=iid, display_name=iid, public_key="ab" * 32, status="active"
+            )
+        )
+    await SqliteGfsUserRegistrationRepo(gfs_db).upsert(
+        GfsUserRegistration(
+            user_id="u-a",
+            instance_id="author",
+            username="a",
+            display_name="a",
+            picture_url=None,
+            home_instance_pk="aa" * 32,
+            registered_at=0,
+        )
+    )
+    mailbox = SqliteGfsMomentKeyMailboxRepo(gfs_db)
+    mail = GfsMomentKeyMail(
+        author_user_id="u-a",
+        follower_instance_id="fan",
+        key_gen=7,
+        key_step=0,
+        delivery="{}",
+        delivered=True,
+    )
+    await mailbox.put(mail)
+    await mailbox.mark_undelivered("u-a", "fan", 6)
+    got = await mailbox.get("u-a", "fan")
+    assert got is not None and got.delivered
+    await mailbox.mark_undelivered("u-a", "fan", 7)
+    assert [m.key_gen for m in await mailbox.undelivered_for("fan", limit=5)] == [7]
 
 
 async def _relay(queue, to, body, *, now=0, rows=10, per=10**6, total=10**6):

@@ -16,6 +16,8 @@ import pytest
 from socialhome.global_server import cluster_relay as mod
 from socialhome.global_server.cluster_relay import (
     AUDIENCE_CHANNEL,
+    AUDIENCE_FOLLOWERS,
+    AUDIENCE_INSTANCE,
     AUDIENCE_SPACE,
     ClusterRelayFanOut,
     ForwardedRelay,
@@ -386,3 +388,124 @@ async def test_an_item_only_the_publisher_holds_here_is_pushed_to_nobody():
     assert await svc.apply([_item(skip=_B, queue=True)]) == {"space:sp": [_B]}
     await _settle(svc)
     assert registry.sent == []
+
+
+# ─── Typed kinds: public moments + single-household pushes ──────────────
+
+_ENVELOPE = {"author_user_id": "u-a", "moment_id": "m", "ciphertext": "c"}
+_MOMENT = {"event_type": "incoming_public_moment", "payload": _ENVELOPE}
+_MOMENT_PUSH = {"type": "incoming_public_moment", "payload": _ENVELOPE}
+_NOTICE = {"event_type": "follow_changed", "action": "add", "followed_user_id": "u"}
+
+
+def test_typed_items_round_trip_and_push_as_their_own_type():
+    moment = _item(_MOMENT, kind=AUDIENCE_FOLLOWERS, key="u-a", queue=True)
+    assert ForwardedRelay.from_wire(moment.to_wire()) == moment
+    assert moment.push_frame() == _MOMENT_PUSH
+    # Queued as the socket frame itself: the drain sends it unchanged.
+    assert moment.queued_frame() == _MOMENT_PUSH
+    notice = _item(_NOTICE, kind=AUDIENCE_INSTANCE, key=_A)
+    assert ForwardedRelay.from_wire(notice.to_wire()) == notice
+    assert notice.push_frame() == {
+        "type": "follow_changed",
+        "action": "add",
+        "followed_user_id": "u",
+    }
+    # A space item keeps its relay shape.
+    assert _item().push_frame() == {"type": "relay", **_FRAME}
+    assert _item().queued_frame() == _FRAME
+
+
+@pytest.mark.parametrize(
+    ("kind", "frame"),
+    [
+        # A typed kind is pushed only as one of its own frame types.
+        (AUDIENCE_FOLLOWERS, {"event_type": "envelope", "sealed": {}}),
+        (AUDIENCE_FOLLOWERS, {"event_type": "follow_changed"}),
+        (AUDIENCE_FOLLOWERS, {"payload": _ENVELOPE}),
+        (AUDIENCE_INSTANCE, {"event_type": "moment_key", "payload": {}}),
+        (AUDIENCE_INSTANCE, {"event_type": "relay", "space_id": "sp"}),
+        (AUDIENCE_INSTANCE, {**_NOTICE, "type": "envelope"}),
+    ],
+)
+def test_a_typed_item_with_a_foreign_frame_type_is_refused(kind, frame):
+    wire = _item(frame, kind=kind, key=_A).to_wire()
+    assert ForwardedRelay.from_wire(wire) is None
+
+
+def test_a_single_household_push_is_forwarded_but_never_remembered():
+    """``forward_to_household`` strips the socket ``type`` into the frame;
+    the item is not remembered, so the same request a minute later is
+    forwarded (and pushed) again."""
+    cluster = _Cluster()
+    svc = _fan_out(cluster=cluster)
+    push = {"type": "moment_key_request", "want_gen": 3}
+    assert svc.forward_to_household(_A, push) is True
+    assert svc.forward_to_household(_A, push) is True
+    items = [item for item, _cb in cluster.items]
+    assert (
+        items
+        == [
+            _item(
+                {"want_gen": 3, "event_type": "moment_key_request"},
+                kind=AUDIENCE_INSTANCE,
+                key=_A,
+            )
+        ]
+        * 2
+    )
+    assert not svc.seen_frame(items[0].frame)
+
+
+async def test_a_single_household_push_reaches_it_each_time_if_held_here():
+    svc, registry, _relay, _l = _receiver(online={_A})
+    notice = _item(_NOTICE, kind=AUDIENCE_INSTANCE, key=_A)
+    assert await svc.apply([notice]) == {}
+    await _settle(svc)
+    assert (
+        await svc.apply([notice, _item(_NOTICE, kind=AUDIENCE_INSTANCE, key=_B)]) == {}
+    )
+    await _settle(svc)
+    want = {"type": "follow_changed", "action": "add", "followed_user_id": "u"}
+    assert registry.sent == [(_A, want), (_A, want)]
+
+
+async def test_an_instance_audience_names_a_well_formed_household_only():
+    svc, registry, _relay, _l = _receiver(online={"not-an-id"})
+    await svc.apply([_item(_NOTICE, kind=AUDIENCE_INSTANCE, key="not-an-id")])
+    await _settle(svc)
+    assert registry.sent == []
+
+
+async def test_a_moment_push_that_fails_is_queued_as_its_socket_frame():
+    """A follower reported held whose socket then failed gets the moment
+    queued by the receiver — as the typed frame, not a ``relay``."""
+    registry, relay = _Registry({_A, _B}, failing={_B}), _Relay()
+    svc = _fan_out(registry=registry, relay=relay)
+
+    async def _followers(key: str) -> list[str]:
+        assert key == "u-a"
+        return [_A, _B]
+
+    svc.register_audience(AUDIENCE_FOLLOWERS, _followers)
+    moment = _item(_MOMENT, kind=AUDIENCE_FOLLOWERS, key="u-a", queue=True)
+    assert await svc.apply([moment]) == {"followers:u-a": [_A, _B]}
+    await _settle(svc)
+    assert registry.sent == [(_A, _MOMENT_PUSH)]
+    assert relay.queued == [([_B], _MOMENT_PUSH)]
+    # Deduped like any broadcast: the same bytes again push nothing.
+    await svc.apply([moment])
+    await _settle(svc)
+    assert registry.sent == [(_A, _MOMENT_PUSH)]
+
+
+async def test_the_origin_queues_a_moment_no_peer_holds_as_its_socket_frame():
+    cluster, relay = _Cluster(), _Relay()
+    svc = _fan_out(relay=relay, cluster=cluster)
+    assert svc.forward(
+        kind=AUDIENCE_FOLLOWERS, key="u-a", frame=_MOMENT, queue_for=[_A, _B]
+    )
+    ((_item_sent, on_settled),) = cluster.items
+    on_settled(frozenset({_A}))
+    await _settle(svc)
+    assert relay.queued == [([_B], _MOMENT_PUSH)]

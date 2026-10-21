@@ -649,6 +649,29 @@ async def test_relay_frame_is_queued_offline_and_drained_as_a_relay_frame(wiring
     ]
 
 
+async def test_a_queued_public_moment_drains_as_its_own_frame(wiring):
+    """A public moment queued for an offline follower household keeps its
+    socket ``type``; any other row is a ``relay`` — whatever it carries."""
+    _fed, _queue_repo, registry, relay = wiring
+    target = "recipient2home2222222222222222aa"
+    moment = {"type": "incoming_public_moment", "payload": {"moment_id": "m"}}
+    tombstone = {"type": "incoming_public_moment_delete", "payload": {"m": 1}}
+    stray = {**_item("x"), "type": "envelope"}
+    assert await relay.queue_relay_many([target], moment) == 1
+    assert await relay.queue_relay_many([target], tombstone) == 1
+    assert await relay.queue_relay_many([target], stray) == 1
+    registry.online.add(target)
+    assert await relay.drain(target) == 3
+    assert [frame for _t, frame in registry.sent] == [
+        moment,
+        tombstone,
+        {**_item("x"), "type": RELAY_FRAME_TYPE},
+    ]
+    # Rolling upgrade: an older node drains a row as ``{"type": "relay",
+    # **row}`` — the row's own type wins, so it sends the very same frame.
+    assert {"type": RELAY_FRAME_TYPE, **moment} == moment
+
+
 async def test_relay_items_have_their_own_cap_and_never_crowd_out_envelopes(
     wiring,
 ):

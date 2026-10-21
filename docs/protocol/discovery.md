@@ -418,6 +418,22 @@ The Social Home ↔ GFS link is split by direction:
   `reconnect` dedupe (`RECONNECT_NOTIFY_DEDUPE_S`), because only it sees the
   hello and the seat re-takes that a round-robin balancer spread over
   different nodes. An older node ignores `notices` — the behaviour before.
+- **Public moments reach followers on any cluster node.** The same
+  `relays` path carries a public moment and its tombstone (audience
+  `followers` + the author's user id; the frame is `{event_type:
+  "incoming_public_moment" | "incoming_public_moment_delete", payload}` and
+  goes out as `{type: <event_type>, payload}`), and the two pushes for an
+  author's household that found no socket on the node that built them
+  (audience `instance` + its instance id: `follow_changed`,
+  `moment_key_request`). A receiver pushes a typed item only as one of its
+  audience's allowed frame types; an `instance` item is not deduped (it is
+  forwarded only after the origin found no socket, and a repeat a minute
+  later must arrive). A sealed moment key whose household has no socket on
+  the node that took `POST /gfs/moments/keys` stays undelivered in the
+  shared mailbox and the household id rides the drain hint; the node holding
+  its socket pushes its undelivered keys (a key request answered from the
+  mailbox marks the kept key undelivered first). See
+  [momentum_public.md](momentum_public.md#cluster-delivery).
 - **One public identity per GFS, however many nodes.** `[server] instance_id`
   is the GFS's PUBLIC identity: `/gfs/info` serves it, the capability block
   is signed over it, and households pin it at pairing and sign it as the

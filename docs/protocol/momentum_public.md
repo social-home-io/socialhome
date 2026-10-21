@@ -243,6 +243,86 @@ pair), B receives the same ``moment_id`` twice — once via federation,
 once via GFS. The recipient dedupes on the row's PRIMARY KEY; the
 second save is a no-op.
 
+## Cluster delivery
+
+A GFS may run as several nodes on one shared database behind a round-robin
+balancer, and each node holds only its own `/gfs/ws` sockets. Every push
+above therefore reaches households on **every** node
+(`MomentPublicRegistry`, `global_server/cluster_relay.py`):
+
+* **Moments and tombstones.** The node that took `POST /gfs/moments/publish`
+  (or `/delete`) pushes to the able followers connected to it, then forwards
+  the envelope **once per peer node** inside the next coalesced
+  `NODE_DRAIN_HINT` (`relays`, audience `followers` + the author's user id).
+  Each node resolves the author's able follower households from the shared
+  database and pushes to the sockets it holds; it remembers the frame (its
+  own digest, 10 min), so no node pushes it twice and a retried publish to
+  any node is a no-op. Each socket lives on one node: each follower
+  household gets the moment once.
+* **Offline followers.** A follower household that held a socket in the last
+  24 h (`relay_seen_at`) but has none on any node gets the moment queued in
+  the shared relay queue — the same ciphertext, as its own
+  `incoming_public_moment[_delete]` frame — and gets it when it reconnects,
+  to any node (24 h = a moment's life; deleted on delivery; the per-household
+  relay caps of 250 items / 4 MiB apply). The peers answer the hint with
+  `held` (the followers whose socket they hold), so the accepting node
+  queues only for the ones nobody holds. A household not seen in 24 h is
+  sent nothing at rest. Before this, an offline follower never got the
+  moment at all.
+* **Sealed keys.** A key whose household has no socket on the node that took
+  `POST /gfs/moments/keys` stays undelivered in the shared mailbox, and the
+  household id rides the next drain hint; the node holding its socket pushes
+  its undelivered keys and marks them delivered. A key request answered from
+  the mailbox for a household elsewhere marks the kept key undelivered
+  first, so the same path delivers it.
+* **Author notices.** `follow_changed` and `moment_key_request` for an
+  author household whose socket is on another node ride the drain hint as
+  `instance` items; only the node holding that socket pushes them, as the
+  same frame. They are not deduped — a repeat request a minute later
+  arrives.
+
+```mermaid
+sequenceDiagram
+  participant A as Author SH
+  participant N1 as GFS node 1
+  participant N2 as GFS node 2
+  participant B as Follower SH (on node 2)
+  participant C as Follower SH (offline)
+
+  A->>N1: POST /gfs/moments/publish (encrypted envelope)
+  N1->>N1: push to followers on node 1
+  N1->>N2: NODE_DRAIN_HINT relays:[{aud:[followers, author], q, frame}] (once per peer)
+  N2->>N2: resolve followers from the shared DB
+  N2->>B: incoming_public_moment (same ciphertext)
+  N2-->>N1: held:{followers:author: [B, …]}
+  N1->>N1: queue for recently-seen followers nobody holds (C)
+  Note over C: reconnects to any node → drained as incoming_public_moment
+```
+
+**Rolling upgrade.** An older node ignores the `followers` / `instance`
+items and answers without `held` for them: the accepting node queues the
+moment for every recently-seen follower it did not hear about, and the older
+node drains those rows on the hint (an older drain sends a queued row as
+`{type: "relay", **row}`, in which the row's own `type` wins — the same
+frame). An older accepting node pushes only to its own sockets, as before.
+No household change: the frames are the ones households already get.
+
+**What the GFS learns.** Nothing new — the forwarded frame is the moment
+ciphertext the node already holds, the audience is an author id the shared
+database already holds, and `held` lists the cluster's own sockets. The only
+new copy at rest is the offline one: ciphertext the GFS can't open, for a
+household that already follows the author, for at most a day.
+
+**Traffic** (N nodes, F able follower households, envelope ≈ 1.2 KB):
+
+| Trigger | Cost |
+|---|---|
+| A moment | (N−1) forwards of ≈ 1.2 KB in coalesced hint frames (≤ 40 / min per peer); each peer: 1 follower read per author per frame + its ≈ F/N pushes; each peer's `held` reply ≈ F/N × 35 B. Queue rows: only the seen followers no node holds |
+| Worst case: 10,000 follower households, 4 nodes, 200 moments / min | per peer ≈ 200 × 1.2 KB ≈ 240 KB of forwards and ≈ 40 frames, each answered with ≤ 87 KB of `held` per author in it; 0 queue rows for connected followers. Before: 7,500 followers missed each moment |
+| An offline follower | ≤ 1 queue row (≈ 1.2 KB) per moment, only if seen in 24 h; bounded by 250 rows / 4 MiB per household and 256 MiB per server |
+| A sealed key for a household on another node | 1 instance id (≈ 35 B) in the hint to each peer; 1 indexed mailbox read on the node holding it |
+| A notice for an author on another node | (N−1) × ≈ 0.6 KB in the hint; 1 push |
+
 ## Moment keys (v_62)
 
 * **Generation + ratchet.** `MomentPublicKeyOutbound.current_key` mints a
@@ -333,7 +413,7 @@ forwarded notice ≈ 0.6 KB.
 |---|---|---|
 | A moment | 1 upload per GFS + 10,000 × ~1.2 KB ≈ 12 MB from the GFS | 1 upload per GFS + 10,000 × ~1.2 KB ≈ 12 MB — the same bytes to everyone; profile (+0.3 KB) only on change or once a day |
 | A new follower | 1 notice | 1 notice (+0.6 KB keys) + 1 sealed key to that household ≈ 2 KB; 0.7 KB kept on the GFS |
-| A follower reconnects | — | only its undelivered sealed keys (0 when nothing changed) |
+| A follower reconnects | — | only its undelivered sealed keys (0 when nothing changed), plus the moments queued for it while it was away (see [Cluster delivery](#cluster-delivery)) |
 | Every pre-v_62 follow | — | one `POST /gfs/moments/suites` per upgraded household per server (≈ 0.3 KB, once per process); then one key per household on its first encrypted moment (pull, ≈ 1.6 KB, ≤ 100 per batch from the author) — 10,000 × 1.9 KB ≈ 19 MB once, in 100 author POSTs. A household not yet upgraded is sent nothing |
 | A follower without the key (lost mailbox, restore) | — | ≈ 1.6 KB, answered from the mailbox without the author when it can |
 | GFS storage | — | ≤ 1 sealed key per (author, follower household): 10,000 × 0.7 KB ≈ 7 MB |

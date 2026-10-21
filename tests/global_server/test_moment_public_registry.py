@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import time
+
 import orjson
 import pytest
 
+from socialhome.global_server.domain import GfsMomentKeyMail
 from socialhome.global_server.moment_public_registry import (
     MomentPublicRegistry,
     suites_can_open,
@@ -12,6 +15,7 @@ from socialhome.global_server.moment_public_registry import (
 from socialhome.global_server.repositories import (
     SqliteGfsFederationRepo,
     SqliteGfsMomentFollowRepo,
+    SqliteGfsMomentKeyMailboxRepo,
     SqliteGfsUserRegistrationRepo,
 )
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
@@ -330,3 +334,246 @@ def test_suites_can_open():
 async def test_without_a_mailbox_keys_reach_only_online_followers(gfs_setup):
     reg = await _with_follow(gfs_setup)
     assert await reg.on_follower_connected("inst-follower") == 0
+    follower_ws = _StubWs()
+    await gfs_setup["ws"].register("inst-follower", follower_ws)  # type: ignore[arg-type]
+    delivered = await reg.deliver_keys(
+        sender_instance_id="inst-author",
+        deliveries=[{"author_user_id": "u-author", "to": "inst-follower"}],
+    )
+    assert delivered == 1
+    assert _sent_field(follower_ws, "type") == ["moment_key"]
+
+
+# ── Cluster + offline delivery (§24.10) ───────────────────────────────────
+#
+# The real three-node path lives in ``test_cluster_fanout.py``; these pin
+# each branch with in-memory fakes.
+
+_SUITES = '{"kem":["x25519"],"seal":["aesgcm-256"]}'
+_ENVELOPE = {"moment_id": "m-1", "author_user_id": "u-author", "ciphertext": "c:t"}
+_PUSH = {"type": "incoming_public_moment", "payload": _ENVELOPE}
+_FORWARDED = {"event_type": "incoming_public_moment", "payload": _ENVELOPE}
+
+
+class _FanOut:
+    """``ClusterRelayFanOut`` stand-in."""
+
+    def __init__(self, *, accept: bool = True, seen=()) -> None:
+        self.accept = accept
+        self.seen = [dict(s) for s in seen]
+        self.forwarded: list[dict] = []
+        self.households: list[tuple[str, dict]] = []
+
+    def seen_frame(self, frame: dict) -> bool:
+        return frame in self.seen
+
+    def forward(self, **kwargs) -> bool:
+        self.forwarded.append(kwargs)
+        return self.accept
+
+    def forward_to_household(self, instance_id: str, push: dict) -> bool:
+        self.households.append((instance_id, push))
+        return True
+
+
+class _Cluster:
+    def __init__(self) -> None:
+        self.hints: list[str] = []
+
+    def hint_drain(self, instance_id: str) -> None:
+        self.hints.append(instance_id)
+
+
+class _Relay:
+    def __init__(self) -> None:
+        self.queued: list[tuple[list[str], dict]] = []
+
+    async def queue_relay_many(self, targets, frame) -> int:
+        self.queued.append((list(targets), frame))
+        return len(targets)
+
+
+async def _cluster_world(gfs_setup, gfs_db, *, fan_out=None, seen: bool = True):
+    """An author with one able follower household (offline) and the
+    registry wired to fakes. *seen*: the follower held a session lately."""
+    relay, cluster = _Relay(), _Cluster()
+    mailbox = SqliteGfsMomentKeyMailboxRepo(gfs_db)
+    reg = MomentPublicRegistry(
+        gfs_setup["users"],
+        gfs_setup["follows"],
+        gfs_setup["ws"],
+        SqliteGfsFederationRepo(gfs_db),
+        mailbox,
+        relay=relay,  # type: ignore[arg-type]
+        fan_out=fan_out,
+        cluster=cluster,  # type: ignore[arg-type]
+    )
+    await reg.register_user(
+        user_id="u-author",
+        instance_id="inst-author",
+        username="alice",
+        display_name="Alice",
+        home_instance_pk="aa" * 32,
+    )
+    await reg.add_follow(
+        follower_user_id="u-fan",
+        follower_instance_id="inst-follower",
+        followed_user_id="u-author",
+        moment_suites=_SUITES,
+    )
+    if seen:
+        await SqliteGfsFederationRepo(gfs_db).mark_relay_seen(
+            "inst-follower", at=int(time.time())
+        )
+    return reg, relay, cluster, mailbox
+
+
+async def test_on_one_node_a_moment_is_queued_for_a_seen_offline_follower(
+    gfs_setup, gfs_db
+):
+    """No cluster to forward to: the recently-seen follower no socket here
+    holds gets the moment queued at once, as its own typed frame."""
+    fan_out = _FanOut(accept=False)
+    reg, relay, _cluster, _mb = await _cluster_world(gfs_setup, gfs_db, fan_out=fan_out)
+    assert await reg.fan_out_moment(envelope=dict(_ENVELOPE)) == 0
+    assert relay.queued == [(["inst-follower"], _PUSH)]
+    assert fan_out.forwarded == [
+        {
+            "kind": "followers",
+            "key": "u-author",
+            "frame": _FORWARDED,
+            "queue_for": ["inst-follower"],
+        }
+    ]
+
+
+async def test_a_forwarded_moment_leaves_the_offline_copy_to_the_settle(
+    gfs_setup, gfs_db
+):
+    """Forwarded: the origin queues nothing itself — ``ClusterRelayFanOut``
+    queues the candidates no peer holds once their answers are in."""
+    fan_out = _FanOut()
+    reg, relay, _cluster, _mb = await _cluster_world(gfs_setup, gfs_db, fan_out=fan_out)
+    await reg.fan_out_moment(envelope=dict(_ENVELOPE))
+    assert relay.queued == []
+    assert [f["queue_for"] for f in fan_out.forwarded] == [["inst-follower"]]
+
+
+async def test_a_follower_not_seen_lately_gets_no_offline_copy(gfs_setup, gfs_db):
+    fan_out = _FanOut(accept=False)
+    reg, relay, _cluster, _mb = await _cluster_world(
+        gfs_setup, gfs_db, fan_out=fan_out, seen=False
+    )
+    await reg.fan_out_moment(envelope=dict(_ENVELOPE))
+    assert relay.queued == []
+    assert [f["queue_for"] for f in fan_out.forwarded] == [[]]
+
+
+async def test_a_replayed_moment_is_fanned_out_once(gfs_setup, gfs_db):
+    """The same bytes again — here, or after another node forwarded them —
+    go nowhere."""
+    fan_out = _FanOut()
+    reg, _relay, _cluster, _mb = await _cluster_world(
+        gfs_setup, gfs_db, fan_out=fan_out
+    )
+    follower_ws = _StubWs()
+    await gfs_setup["ws"].register("inst-follower", follower_ws)  # type: ignore[arg-type]
+    assert await reg.fan_out_moment(envelope=dict(_ENVELOPE)) == 1
+    assert await reg.fan_out_moment(envelope=dict(_ENVELOPE)) == 0
+    assert len(follower_ws.sent) == 1
+    assert len(fan_out.forwarded) == 1
+    other = _FanOut(
+        seen=[{**_FORWARDED, "event_type": "incoming_public_moment_delete"}]
+    )
+    reg2, *_rest = await _cluster_world(gfs_setup, gfs_db, fan_out=other)
+    assert await reg2.fan_out_delete(envelope=dict(_ENVELOPE)) == 0
+    assert other.forwarded == []
+
+
+async def test_a_key_for_a_household_elsewhere_wakes_the_node_holding_it(
+    gfs_setup, gfs_db
+):
+    """No socket here: the key stays undelivered in the shared mailbox and
+    the household rides the next drain hint."""
+    reg, _relay, cluster, mailbox = await _cluster_world(gfs_setup, gfs_db)
+    delivered = await reg.deliver_keys(
+        sender_instance_id="inst-author",
+        deliveries=[
+            {"author_user_id": "u-author", "to": "inst-follower", "key_gen": 7}
+        ],
+    )
+    assert delivered == 0
+    assert cluster.hints == ["inst-follower"]
+    mail = await mailbox.get("u-author", "inst-follower")
+    assert mail is not None and not mail.delivered
+
+
+async def test_a_hinted_mailbox_push_that_fails_never_hints_again(gfs_setup, gfs_db):
+    """The drain hint itself runs ``on_follower_connected``: a push that
+    finds no socket must not hint once more (two nodes would ping-pong)."""
+    reg, _relay, cluster, mailbox = await _cluster_world(gfs_setup, gfs_db)
+    await mailbox.put(
+        GfsMomentKeyMail(
+            author_user_id="u-author",
+            follower_instance_id="inst-follower",
+            key_gen=7,
+            key_step=0,
+            delivery="{}",
+        )
+    )
+    assert await reg.on_follower_connected("inst-follower") == 0
+    assert cluster.hints == []
+
+
+async def test_a_key_request_answered_elsewhere_hands_the_kept_key_back(
+    gfs_setup, gfs_db
+):
+    """The mailbox holds the key, already delivered once, and the follower's
+    socket is on another node: the row is marked undelivered for that node
+    to push, and the author is not asked."""
+    fan_out = _FanOut()
+    reg, _relay, cluster, mailbox = await _cluster_world(
+        gfs_setup, gfs_db, fan_out=fan_out
+    )
+    await mailbox.put(
+        GfsMomentKeyMail(
+            author_user_id="u-author",
+            follower_instance_id="inst-follower",
+            key_gen=7,
+            key_step=0,
+            delivery="{}",
+            delivered=True,
+        )
+    )
+    await reg.request_key(
+        follower_instance_id="inst-follower", followed_user_id="u-author", want_gen=7
+    )
+    assert cluster.hints == ["inst-follower"]
+    mail = await mailbox.get("u-author", "inst-follower")
+    assert mail is not None and not mail.delivered
+    # Only the follow notice from ``_cluster_world`` — no key request.
+    assert [f["type"] for _iid, f in fan_out.households] == ["follow_changed"]
+
+
+async def test_author_frames_go_to_the_node_holding_the_authors_socket(
+    gfs_setup, gfs_db
+):
+    """``follow_changed`` (here: the add in ``_cluster_world``) and
+    ``moment_key_request`` find no author socket here, so each is forwarded
+    once; with the author connected here, nothing is forwarded."""
+    fan_out = _FanOut()
+    reg, _relay, _cluster, _mb = await _cluster_world(
+        gfs_setup, gfs_db, fan_out=fan_out
+    )
+    await reg.request_key(
+        follower_instance_id="inst-follower", followed_user_id="u-author", want_gen=9
+    )
+    assert [(iid, f["type"]) for iid, f in fan_out.households] == [
+        ("inst-author", "follow_changed"),
+        ("inst-author", "moment_key_request"),
+    ]
+    author_ws = _StubWs()
+    await gfs_setup["ws"].register("inst-author", author_ws)  # type: ignore[arg-type]
+    await reg.remove_follow(follower_user_id="u-fan", followed_user_id="u-author")
+    assert len(fan_out.households) == 2
+    assert _sent_field(author_ws, "type") == ["follow_changed"]

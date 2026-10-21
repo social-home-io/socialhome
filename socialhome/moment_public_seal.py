@@ -91,6 +91,13 @@ ENVELOPE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+#: WebSocket frame types the GFS pushes a public moment and its tombstone
+#: under (``{"type": ..., "payload": <envelope>}``), to every follower
+#: household that can open them.
+FRAME_MOMENT: str = "incoming_public_moment"
+FRAME_MOMENT_DELETE: str = "incoming_public_moment_delete"
+MOMENT_FRAME_TYPES: frozenset[str] = frozenset({FRAME_MOMENT, FRAME_MOMENT_DELETE})
+
 #: The fields of a key delivery (``moment_key`` frame / ``POST
 #: /gfs/moments/keys`` item).
 DELIVERY_FIELDS: frozenset[str] = frozenset(

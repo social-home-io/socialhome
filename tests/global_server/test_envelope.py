@@ -27,6 +27,7 @@ from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
     gfs_envelope_relay_key,
     gfs_fed_repo_key,
+    gfs_moment_public_registry_key,
     gfs_ws_registry_key,
 )
 from socialhome.global_server.config import GfsConfig
@@ -255,11 +256,29 @@ async def test_a_saturated_relay_still_answers_the_uniform_202(gfs, monkeypatch)
     assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
 
 
-async def test_the_relay_and_the_cluster_are_wired_both_ways(gfs):
+async def test_the_relay_and_the_cluster_are_wired_both_ways(gfs, monkeypatch):
     relay = gfs._app[gfs_envelope_relay_key]
     cluster = gfs._app[gfs_cluster_key]
     assert relay._cluster is cluster
-    assert cluster._drain_cb == relay.drain
+    # A hinted drain runs the relay's queue drain, then the household's
+    # undelivered sealed moment keys (kept in the shared mailbox).
+    calls: list[tuple[str, str]] = []
+
+    async def _drain(_self, instance_id: str) -> int:
+        calls.append(("queue", instance_id))
+        return 2
+
+    async def _keys(_self, instance_id: str) -> int:
+        calls.append(("keys", instance_id))
+        return 1
+
+    monkeypatch.setattr(type(relay), "drain", _drain)
+    monkeypatch.setattr(
+        type(gfs._app[gfs_moment_public_registry_key]), "on_follower_connected", _keys
+    )
+    assert cluster._drain_cb is not None
+    assert await cluster._drain_cb("h") == 3
+    assert calls == [("queue", "h"), ("keys", "h")]
 
 
 async def test_shutdown_settles_in_flight_envelope_work(tmp_dir, monkeypatch):

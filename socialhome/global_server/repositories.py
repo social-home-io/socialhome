@@ -1956,6 +1956,9 @@ class AbstractGfsMomentFollowRepo(Protocol):
     async def set_household_suites(
         self, follower_instance_id: str, moment_suites: str
     ) -> int: ...
+    async def recently_seen_households(
+        self, followed_user_id: str, *, within_s: int
+    ) -> set[str]: ...
 
 
 class SqliteGfsMomentFollowRepo:
@@ -2032,6 +2035,22 @@ class SqliteGfsMomentFollowRepo:
             (followed_user_id, follower_instance_id, limit),
         )
         return [str(r["follower_user_id"]) for r in rows]
+
+    async def recently_seen_households(
+        self, followed_user_id: str, *, within_s: int
+    ) -> set[str]:
+        """Active follower households of *followed_user_id* that held a
+        ``/gfs/ws`` session long enough within the last *within_s* seconds
+        (``client_instances.relay_seen_at``) — only they get a public moment
+        queued while offline, as for a member-published space item."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT f.follower_instance_id FROM gfs_moment_follows f"
+            " JOIN client_instances ci ON ci.instance_id = f.follower_instance_id"
+            " WHERE f.followed_user_id=? AND ci.status='active'"
+            " AND ci.relay_seen_at IS NOT NULL AND ci.relay_seen_at >= ?",
+            (followed_user_id, int(time.time()) - int(within_s)),
+        )
+        return {str(r["follower_instance_id"]) for r in rows}
 
     async def suites_at(
         self, followed_user_id: str, follower_instance_id: str
@@ -2189,6 +2208,9 @@ class AbstractGfsMomentKeyMailboxRepo(Protocol):
     async def mark_delivered(
         self, author_user_id: str, follower_instance_id: str, key_gen: int
     ) -> None: ...
+    async def mark_undelivered(
+        self, author_user_id: str, follower_instance_id: str, key_gen: int
+    ) -> None: ...
     async def delete(self, author_user_id: str, follower_instance_id: str) -> int: ...
 
 
@@ -2244,6 +2266,18 @@ class SqliteGfsMomentKeyMailboxRepo:
     ) -> None:
         await self._db.enqueue(
             "UPDATE gfs_moment_key_mailbox SET delivered=1 "
+            "WHERE author_user_id=? AND follower_instance_id=? AND key_gen=?",
+            (author_user_id, follower_instance_id, key_gen),
+        )
+
+    async def mark_undelivered(
+        self, author_user_id: str, follower_instance_id: str, key_gen: int
+    ) -> None:
+        """Hand the kept key of generation *key_gen* (and only that one — a
+        newer key that landed meanwhile stays as it is) to whichever node
+        next pushes this household's undelivered keys."""
+        await self._db.enqueue(
+            "UPDATE gfs_moment_key_mailbox SET delivered=0 "
             "WHERE author_user_id=? AND follower_instance_id=? AND key_gen=?",
             (author_user_id, follower_instance_id, key_gen),
         )

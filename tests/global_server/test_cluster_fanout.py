@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -42,6 +43,8 @@ from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
     gfs_member_publish_key,
+    gfs_moment_public_follow_repo_key,
+    gfs_moment_public_registry_key,
     gfs_ws_registry_key,
 )
 from socialhome.global_server.cluster import (
@@ -57,9 +60,12 @@ from socialhome.global_server.domain import (
     ClientInstance,
     ClusterNode,
     GfsFraudReport,
+    GfsMomentFollow,
+    GfsMomentKeyMail,
     GlobalSpace,
 )
 from socialhome.global_server.server import create_gfs_app
+from socialhome.moment_public_seal import MOMENT_SEAL_SUITE_AESGCM256, seal_body
 
 #: Every node advertises this as its own URL in its HELLO, so each also learns
 #: a peer row it can never reach (see ``fast_sync_retry``). A closed loopback
@@ -1366,3 +1372,289 @@ async def test_a_channel_item_reaches_seats_on_every_node_once(three_shared_node
             await ws.close()
     want = {"type": "relay", **frame}
     assert got == {on_a: [want], on_b: [want], on_c: [want]}
+
+
+# ─── Public moments across THREE real nodes on ONE DB ─────────────────────
+#
+# Before the fix ``MomentPublicRegistry`` pushed every moment, tombstone,
+# sealed key and author notice to the sockets of the node that took the
+# request only: a follower connected to another node missed it, and an
+# offline follower got no moment at all.
+
+_AUTHOR_USER = "u-author"
+_CAN_OPEN = json.dumps(
+    {"kem": ["x25519"], "seal": [MOMENT_SEAL_SUITE_AESGCM256]},
+    separators=(",", ":"),
+    sort_keys=True,
+)
+#: A follower household on an older Social Home: declared no suites, so it
+#: is sent no moments.
+_UNABLE_ID = "unablehome2222222222222222222222"
+
+
+async def _seed_moment_world(app, follower_ids) -> dict[str, bytes]:
+    """The author's household (``_PUBLISHER_ID``) registers ``u-author``;
+    every *follower_ids* household follows it and can open its moments,
+    ``_UNABLE_ID`` follows it and can't. Returns instance id → seed."""
+    ids = (_PUBLISHER_ID, *follower_ids, _UNABLE_ID)
+    _space_seed, seeds = await _seed_space_with_followers(app, ids)
+    registry = app[gfs_moment_public_registry_key]
+    await registry.register_user(
+        user_id=_AUTHOR_USER,
+        instance_id=_PUBLISHER_ID,
+        username="alice",
+        display_name="Alice",
+        home_instance_pk="aa" * 32,
+    )
+    follows = app[gfs_moment_public_follow_repo_key]
+    for iid in (*follower_ids, _UNABLE_ID):
+        await follows.upsert(
+            GfsMomentFollow(
+                follower_user_id=f"fan-{iid}",
+                follower_instance_id=iid,
+                followed_user_id=_AUTHOR_USER,
+                created_at=int(time.time()),
+                moment_suites=None if iid == _UNABLE_ID else _CAN_OPEN,
+            )
+        )
+    return seeds
+
+
+def _signed_body(seed: bytes, body: dict) -> dict:
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    return {**body, "signature": b64url_encode(sign_ed25519(seed, canonical))}
+
+
+def _moment_envelope(author_seed: bytes, *, op: str = "create") -> dict:
+    return _signed_body(
+        author_seed,
+        {
+            "instance_id": _PUBLISHER_ID,
+            "author_user_id": _AUTHOR_USER,
+            **seal_body(
+                step_key=os.urandom(32),
+                author_user_id=_AUTHOR_USER,
+                key_gen=1_700_000_000,
+                key_step=0,
+                moment_id="m-cluster",
+                body={"op": op, "content": "hi"},
+            ),
+        },
+    )
+
+
+async def _frames_within(ws, seconds: float, frame_type: str) -> list[dict]:
+    """Every *frame_type* frame *ws* receives within *seconds*."""
+    frames: list[dict] = []
+    deadline = time.monotonic() + seconds
+    while (left := deadline - time.monotonic()) > 0:
+        try:
+            msg = await ws.receive(timeout=left)
+        except TimeoutError:
+            break
+        if msg.type != aiohttp.WSMsgType.TEXT:
+            break
+        frame = json.loads(msg.data)
+        if frame.get("type") == frame_type:
+            frames.append(frame)
+    return frames
+
+
+async def test_a_moment_on_one_node_reaches_followers_on_every_node_once(
+    three_shared_nodes, monkeypatch
+):
+    """A moment published via node A reaches the able followers on A, B and
+    C exactly once, never the household that can't open it; the ONE
+    recently-seen follower no node holds gets the only queue row, and gets
+    the moment from it when it connects (to node B). Before, the followers
+    on B and C got nothing and the offline one never got it."""
+    a, b, c = three_shared_nodes
+    on_b, on_c, on_a = _FOLLOWER_IDS
+    seeds = await _seed_moment_world(a.app, (*_FOLLOWER_IDS, _OFFLINE_ID))
+    fed = a.app[gfs_fed_repo_key]
+    now = int(time.time())
+    for iid in (*_FOLLOWER_IDS, _OFFLINE_ID, _UNABLE_ID):
+        await fed.mark_relay_seen(iid, at=now)
+    queue = a.app[gfs_envelope_queue_repo_key]
+    rows_for: list[str] = []
+    real_enqueue = type(queue).enqueue_relay
+
+    async def _recording_enqueue(self, target, *args, **kwargs):
+        rows_for.append(target)
+        return await real_enqueue(self, target, *args, **kwargs)
+
+    monkeypatch.setattr(type(queue), "enqueue_relay", _recording_enqueue)
+    envelope = _moment_envelope(seeds[_PUBLISHER_ID])
+    want = {"type": "incoming_public_moment", "payload": envelope}
+    async with aiohttp.ClientSession() as http:
+        sockets = await _connect_all(
+            http, ((on_a, a), (on_b, b), (on_c, c), (_UNABLE_ID, b)), seeds
+        )
+        async with http.post(a.make_url("/gfs/moments/publish"), json=envelope) as r:
+            assert r.status == 200
+            assert await r.json() == {"delivered": 1}  # the one on node A
+        got = {
+            iid: await _frames_within(ws, 1.5, "incoming_public_moment")
+            for iid, ws in sockets.items()
+        }
+        assert got == {on_a: [want], on_b: [want], on_c: [want], _UNABLE_ID: []}
+        assert await _wait_for(lambda: _async_eq(queue.count_for(_OFFLINE_ID), 1))
+        assert rows_for == [_OFFLINE_ID], "one row, for the household no node holds"
+        # The offline household comes back — on node B, not the publisher's.
+        late = await http.ws_connect(b.make_url("/gfs/ws"))
+        await _ws_hello(late, _OFFLINE_ID, seeds[_OFFLINE_ID])
+        drained = await _frames_within(late, 1.5, "incoming_public_moment")
+        for ws in (*sockets.values(), late):
+            await ws.close()
+    assert drained == [want], "the queued copy drains as the very same frame"
+    assert await queue.count_for(_OFFLINE_ID) == 0
+
+
+async def test_a_moment_delete_on_another_node_reaches_every_follower_once(
+    three_shared_nodes,
+):
+    """The tombstone, published via node B, reaches the followers on all
+    three nodes exactly once — and a retry of the same bytes via node C is
+    a no-op (node C remembers the forwarded frame)."""
+    a, b, c = three_shared_nodes
+    on_b, on_c, on_a = _FOLLOWER_IDS
+    seeds = await _seed_moment_world(a.app, _FOLLOWER_IDS)
+    tombstone = _moment_envelope(seeds[_PUBLISHER_ID], op="delete")
+    async with aiohttp.ClientSession() as http:
+        sockets = await _connect_all(http, ((on_a, a), (on_b, b), (on_c, c)), seeds)
+        async with http.post(b.make_url("/gfs/moments/delete"), json=tombstone) as r:
+            assert r.status == 200
+        got = {
+            iid: await _frames_within(ws, 1.5, "incoming_public_moment_delete")
+            for iid, ws in sockets.items()
+        }
+        async with http.post(c.make_url("/gfs/moments/delete"), json=tombstone) as r:
+            assert r.status == 200
+            assert await r.json() == {"delivered": 0}
+        again = {
+            iid: await _frames_within(ws, 1.0, "incoming_public_moment_delete")
+            for iid, ws in sockets.items()
+        }
+        for ws in sockets.values():
+            await ws.close()
+    want = {"type": "incoming_public_moment_delete", "payload": tombstone}
+    assert got == {on_a: [want], on_b: [want], on_c: [want]}
+    assert again == {on_a: [], on_b: [], on_c: []}
+
+
+async def test_a_sealed_key_kept_by_one_node_reaches_the_follower_on_another(
+    three_shared_nodes,
+):
+    """The author's household posts a sealed key via node A while the
+    follower's socket is on node C: node A keeps it in the shared mailbox and
+    the drain hint has node C push it, once, and mark it delivered. Before,
+    the key waited for the follower's next reconnect."""
+    a, _b, c = three_shared_nodes
+    on_c = _FOLLOWER_IDS[1]
+    seeds = await _seed_moment_world(a.app, _FOLLOWER_IDS)
+    delivery = {
+        "author_user_id": _AUTHOR_USER,
+        "instance_id": _PUBLISHER_ID,
+        "to": on_c,
+        "key_gen": 1_700_000_000,
+        "key_step": 0,
+        "key_suite": "aesgcm-256",
+        "sealed": {"kem_suite": "x25519", "eph_pk": "e", "ciphertext": "c:t"},
+        "signature": "s",
+    }
+    mailbox = a.app[gfs_moment_public_registry_key]._mailbox
+    async with aiohttp.ClientSession() as http:
+        (ws,) = (await _connect_all(http, ((on_c, c),), seeds)).values()
+        async with http.post(
+            a.make_url("/gfs/moments/keys"),
+            json=_signed_body(
+                seeds[_PUBLISHER_ID],
+                {"instance_id": _PUBLISHER_ID, "deliveries": [delivery]},
+            ),
+        ) as r:
+            assert r.status == 200
+            assert await r.json() == {"delivered": 0}  # no socket on node A
+        got = await _frames_within(ws, 1.5, "moment_key")
+        await ws.close()
+    assert got == [{"type": "moment_key", "payload": delivery}]
+    mail = await mailbox.get(_AUTHOR_USER, on_c)
+    assert mail is not None and mail.delivered
+
+
+async def test_author_notices_reach_the_authors_socket_on_another_node(
+    three_shared_nodes,
+):
+    """A follow taken by node B and a key request taken by node C both reach
+    the author's household, whose socket is on node A — and a follower that
+    asks for a key the mailbox already delivered gets it again from the node
+    holding its socket. Before, each needed the balancer to pick the right
+    node."""
+    a, b, c = three_shared_nodes
+    on_b, newcomer, _on_a = _FOLLOWER_IDS
+    seeds = await _seed_moment_world(a.app, (on_b,))
+    _space_seed, more = await _seed_space_with_followers(a.app, (newcomer,))
+    seeds |= more
+    mailbox = a.app[gfs_moment_public_registry_key]._mailbox
+    await mailbox.put(
+        GfsMomentKeyMail(
+            author_user_id=_AUTHOR_USER,
+            follower_instance_id=on_b,
+            key_gen=1_700_000_000,
+            key_step=0,
+            delivery=json.dumps({"to": on_b, "key_gen": 1_700_000_000}),
+            delivered=True,
+        )
+    )
+    async with aiohttp.ClientSession() as http:
+        sockets = await _connect_all(http, ((_PUBLISHER_ID, a), (on_b, b)), seeds)
+        follow = {
+            "instance_id": newcomer,
+            "follower_instance_id": newcomer,
+            "follower_user_id": "u-newcomer",
+            "moment_suites": json.loads(_CAN_OPEN),
+        }
+        async with http.post(
+            b.make_url(f"/gfs/moments/users/{_AUTHOR_USER}/follow"),
+            json=_signed_body(seeds[newcomer], follow),
+        ) as r:
+            assert r.status == 201
+        notices = await _frames_within(sockets[_PUBLISHER_ID], 1.5, "follow_changed")
+        # The newcomer asks via node C for a generation nobody holds: the
+        # request goes to the author, on node A.
+        async with http.post(
+            c.make_url(f"/gfs/moments/users/{_AUTHOR_USER}/key_request"),
+            json=_signed_body(
+                seeds[newcomer], {"instance_id": newcomer, "want_gen": 5}
+            ),
+        ) as r:
+            assert r.status == 202
+        requests = await _frames_within(
+            sockets[_PUBLISHER_ID], 1.5, "moment_key_request"
+        )
+        # The follower on node B lost its key and asks via node C: the
+        # mailbox holds it, so node B pushes it — the author isn't asked.
+        async with http.post(
+            c.make_url(f"/gfs/moments/users/{_AUTHOR_USER}/key_request"),
+            json=_signed_body(
+                seeds[on_b], {"instance_id": on_b, "want_gen": 1_700_000_000}
+            ),
+        ) as r:
+            assert r.status == 202
+        keys = await _frames_within(sockets[on_b], 1.5, "moment_key")
+        author_rest = await _frames_within(
+            sockets[_PUBLISHER_ID], 0.5, "moment_key_request"
+        )
+        for ws in sockets.values():
+            await ws.close()
+    assert [(n["action"], n["follower_instance_id"]) for n in notices] == [
+        ("add", newcomer)
+    ]
+    assert [(q["want_gen"], q["follower"]["instance_id"]) for q in requests] == [
+        (5, newcomer)
+    ]
+    assert keys == [
+        {"type": "moment_key", "payload": {"to": on_b, "key_gen": 1_700_000_000}}
+    ]
+    assert author_rest == []
+    mail = await mailbox.get(_AUTHOR_USER, on_b)
+    assert mail is not None and mail.delivered
