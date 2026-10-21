@@ -97,6 +97,7 @@ class SqlitePreferencesRepo:
             hide_highlights=bool(row["hide_highlights"]),
             hide_momentum=bool(row["hide_momentum"]),
             hide_bazaar=bool(row["hide_bazaar"]),
+            hide_profile_from_followers=bool(row["hide_profile_from_followers"]),
         )
 
     async def ensure_row(self, row_id: str) -> None:

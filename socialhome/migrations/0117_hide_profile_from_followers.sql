@@ -1,0 +1,41 @@
+-- 0117 — a person can hide their picture and bio from the followers of
+-- global spaces they post in. Follows 0114 (the author-profile cache keeps
+-- the signed item). 0115 / 0116 are claimed by open branches; whichever of
+-- these merges later renumbers if needed (the runner applies only versions
+-- above the highest one stamped, so a gap filled later is never applied).
+--
+-- ``preferences.hide_profile_from_followers`` — the per-user switch behind
+-- "Show my picture and bio to followers of global spaces" (owner decision
+-- M6: shown by default). When on, the person's ``author_profile`` items
+-- carry the name only, like a protected account's, and flipping it
+-- republishes the profile wherever it was published.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path that touches an author's public profile or a
+--       per-user switch: ``SpaceAuthorProfileOutbound`` (publishes the
+--       items and dedupes on the cached ``profile_rev``),
+--       ``space_author_profiles`` (0113 / 0114: what we and others
+--       published, per space — a cache of the wire, not a setting),
+--       ``SpaceSubscriberKeyOutbound`` (the host's new-follower bundle,
+--       forwards those cached items), ``ProtectionGateMixin`` (the §CP.R
+--       protected-account gate — set by a guardian, not the person),
+--       ``PreferencesService.update_user`` / ``PATCH /api/me/preferences``
+--       (the per-user switches: ``hide_highlights`` / ``hide_momentum`` /
+--       ``hide_bazaar``, all ``preferences`` columns since 0007), and
+--       ``users`` (profile fields, federated to paired households).
+--   (2) Alternatives rejected: deriving it from the protected flag would
+--       let only a guardian choose it; a ``users`` column would sit beside
+--       the profile fields that ``USER_UPDATED`` federates to paired
+--       households, which this switch must not change; a row in the
+--       ``space_author_profiles`` cache is per space and is pruned, so it
+--       cannot hold a person's standing choice; keeping it in the SPA
+--       (local storage) would not reach the server that publishes. The
+--       per-user ``preferences`` row is where every other per-person
+--       visibility switch already lives, read and written by the existing
+--       service, route and SPA store.
+--   (3) Smallest change: one ``ADD COLUMN`` with a constant default (0 =
+--       shown, today's behaviour) — no backfill, no rewrite, no new table
+--       or index.
+
+ALTER TABLE preferences ADD COLUMN hide_profile_from_followers INTEGER NOT NULL
+    DEFAULT 0 CHECK(hide_profile_from_followers IN (0, 1));

@@ -23,7 +23,11 @@ key and sent over the existing member-publish path
 * **What:** the per-space name, else the household name; the household bio;
   the per-space picture, else the household one, re-encoded to at most
   256 px and 24 KB (``None`` when it can't fit). A **protected** account
-  (§CP.R) sends its name only — no bio, no picture.
+  (§CP.R) sends its name only — no bio, no picture. So does a person who
+  turned off "Show my picture and bio to followers of global spaces"
+  (``UserPreferences.hide_profile_from_followers``, owner decision M6).
+  Flipping that switch (``UserPreferencesChanged``) republishes the
+  profile, name only or full, in every space it was published in.
 * **Version gate:** an older follower drops an unknown ``space_item`` type
   with a WARNING, and followers are anonymous, so their versions are
   unknown. The profile is published only while every member household
@@ -52,6 +56,7 @@ from ..domain.events import (
     SpaceMemberLeft,
     SpaceMemberProfileUpdated,
     SpacePostCreated,
+    UserPreferencesChanged,
     UserProfileUpdated,
 )
 from ..domain.federation_capabilities import FederationCapability
@@ -74,6 +79,7 @@ from .space_writer_cert_service import WRITER_CERT_FIELD
 
 if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
+    from ..repositories.preferences_repo import AbstractPreferencesRepo
     from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
     from ..repositories.space_author_profile_repo import (
         AbstractSpaceAuthorProfileRepo,
@@ -101,6 +107,7 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         "_own_seed",
         "_picture_cache",
         "_pictures",
+        "_preferences",
         "_profile_cache",
         "_spaces",
         "_users",
@@ -120,6 +127,7 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         own_instance_id: str,
         own_instance_pk: bytes,
         own_identity_seed: bytes,
+        preferences_repo: AbstractPreferencesRepo,
         picture_cache: PublicPictureCache | None = None,
     ) -> None:
         self._bus = bus
@@ -129,6 +137,7 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         self._federation_repo = federation_repo
         self._crypto = space_crypto
         self._member_gfs = member_gfs
+        self._preferences = preferences_repo
         self._own_instance_id = own_instance_id
         self._own_instance_pk = own_instance_pk
         self._own_seed = own_identity_seed
@@ -159,6 +168,7 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         self._bus.subscribe(UserProfileUpdated, self._on_profile)
         self._bus.subscribe(SpaceMemberProfileUpdated, self._on_space_profile)
         self._bus.subscribe(SpaceMemberLeft, self._on_left)
+        self._bus.subscribe(UserPreferencesChanged, self._on_preferences)
 
     # ── Triggers ──────────────────────────────────────────────────────
 
@@ -169,10 +179,20 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         await self.publish(event.space_id, event.post.author)
 
     async def _on_profile(self, event: UserProfileUpdated) -> None:
+        await self._republish(event.user_id)
+
+    async def _on_preferences(self, event: UserPreferencesChanged) -> None:
+        # The "show my picture and bio" switch: name only, or full again,
+        # wherever the profile went. The rev dedupe skips a no-op.
+        if "hide_profile_from_followers" in event.changed:
+            await self._republish(event.user_id)
+
+    async def _republish(self, user_id: str) -> None:
+        """Re-check ``user_id``'s profile in every space it was published in."""
         if self._profile_cache is None:
             return
-        for space_id in await self._profile_cache.list_spaces_for_author(event.user_id):
-            await self.publish(space_id, event.user_id)
+        for space_id in await self._profile_cache.list_spaces_for_author(user_id):
+            await self.publish(space_id, user_id)
 
     async def _on_space_profile(self, event: SpaceMemberProfileUpdated) -> None:
         if event.origin_instance_id is not None or self._profile_cache is None:
@@ -233,7 +253,12 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             or user.display_name
             or user.username
         )[:PROFILE_NAME_MAX_LENGTH]
-        protected = await self._is_protected(user_id)
+        # Name only for a protected account (§CP.R) or a person who hides
+        # their picture and bio from followers (M6).
+        protected = (
+            await self._is_protected(user_id)
+            or (await self._preferences.get_user(user_id)).hide_profile_from_followers
+        )
         bio = None if protected else (user.bio or None)
         if bio is not None:
             bio = bio[:PROFILE_BIO_MAX_LENGTH]

@@ -50,6 +50,7 @@ PREFERENCE_SCOPE: dict[str, str] = {
     "hide_highlights": "user",
     "hide_momentum": "user",
     "hide_bazaar": "user",
+    "hide_profile_from_followers": "user",
 }
 
 #: Feature sections (one per toggleable UI surface).
@@ -192,3 +193,10 @@ class UserPreferences:
     hide_highlights: bool = False
     hide_momentum: bool = False
     hide_bazaar: bool = False
+    #: "Show my picture and bio to followers of global spaces" — off when
+    #: ``True``. The person's ``author_profile`` items for a space's GFS
+    #: followers then carry the name only, like a protected account's
+    #: (``services.space_author_profile_outbound``). Shown by default
+    #: (owner decision M6). Column from migration
+    #: ``0117_hide_profile_from_followers.sql``.
+    hide_profile_from_followers: bool = False
