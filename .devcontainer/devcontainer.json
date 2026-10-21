@@ -71,26 +71,17 @@
 		"CHROME_PATH": "/usr/bin/chromium"
 	},
 
-	// 8099 = aiohttp backend (``python -m socialhome``).
-	// 5173 = Vite dev server (``pnpm run dev`` in ``client/``).
-	"forwardPorts": [8099, 5173],
-	"portsAttributes": {
-		"8099": {
-			"label": "socialhome backend",
-			"onAutoForward": "silent"
-		},
-		"5173": {
-			"label": "vite dev",
-			"onAutoForward": "silent"
-		}
-	},
-	// Vite's HMR / probe ports get forwarded too; keep them out of
-	// the Ports view so they don't spawn browser tabs of their own.
+	// No port forwarding: dev servers, test instances and headless Chromium
+	// debug ports (agents start many of them) must never be forwarded to the
+	// host automatically. Forward one by hand from the Ports view when you
+	// need it (8099 = aiohttp backend, 5173 = Vite dev server).
 	"otherPortsAttributes": { "onAutoForward": "ignore" },
 
 	"customizations": {
 		"vscode": {
 			"settings": {
+				"remote.autoForwardPorts": false,
+				"remote.restoreForwardedPorts": false,
 				"python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
 				"python.testing.pytestEnabled": true,
 				"python.testing.pytestArgs": ["tests"],

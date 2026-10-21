@@ -22,7 +22,9 @@ pnpm, and the frontend deps under `client/`.
    launch **Dev: backend + frontend** — the backend boots in
    standalone mode against `/tmp/sh-dev`, and Vite starts at
    <http://localhost:5173> with `/api` + `/ws` proxied to the
-   backend on `:8099`. Both ports are auto-forwarded.
+   backend on `:8099`. Nothing is forwarded automatically: open the
+   **Ports** view and forward `5173` (and `8099` if you need the API
+   directly) when you want to reach them from your host browser.
 4. The first request lands on `/setup`, where you pick the admin
    username + password.
 
