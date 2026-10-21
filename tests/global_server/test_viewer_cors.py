@@ -24,6 +24,10 @@ VIEWER_PATHS = [
     "/gfs/highlight_rtc/session/abc",
     "/gfs/highlight_rtc/ice/viewer",
     "/gfs/highlight_rtc/relay/inst/s-1",
+    # The public pages the viewer renders.
+    "/gfs/pages/spaces/sp-1",
+    "/gfs/pages/invite",
+    "/gfs/pages/people/u-1",
 ]
 
 OTHER_PATHS = [
@@ -39,6 +43,18 @@ OTHER_PATHS = [
     "/highlight/inst/s-1/tok",
     "/gfs/info",
     "/gfs/register",
+    # The pages themselves (a 302 or this server's HTML), the household
+    # JSON they mirror, and anything past the page routes.
+    "/spaces/sp-1",
+    "/join/tok",
+    "/moments/u-1",
+    "/gfs/spaces/sp-1",
+    "/gfs/moments/users/u-1",
+    "/gfs/moments/users/u-1/picture",
+    "/gfs/pages/spaces/",
+    "/gfs/pages/spaces/sp-1/x",
+    "/gfs/pages/people/u-1/picture",
+    "/gfs/pages/invite/x",
     "/gfs/publish",
     "/gfs/rtc/offer",
     "/gfs/moment_rtc/offer",

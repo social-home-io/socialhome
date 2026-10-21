@@ -1,6 +1,7 @@
 """CORS for the anonymous public-highlight viewer routes (§highlights_public).
 
-A public highlight link opens the PINNED viewer: a static page on an
+A public highlight link — and, with ``public_viewer_base_url`` set, a
+space page, an invite link or a person's profile — opens the PINNED viewer: a static page on an
 origin no GFS runs (see ``socialhome/pinned_viewer.py``). Its requests to
 this GFS are therefore cross-origin, and only these routes answer them:
 
@@ -10,7 +11,13 @@ this GFS are therefore cross-origin, and only these routes answer them:
 * ``POST /gfs/highlight_rtc/ice/viewer``
 * ``GET  /gfs/highlight_rtc/relay/{instance_id}/{highlight_id}``
 
-They are anonymous and token-gated already: anyone could call them from a
+and the JSON of the public pages it renders (:mod:`.routes.viewer_pages`):
+
+* ``GET  /gfs/pages/spaces/{space_id}``
+* ``POST /gfs/pages/invite``
+* ``GET  /gfs/pages/people/{user_id}``
+
+They are anonymous (the RTC ones token-gated) already: anyone could call them from a
 script outside a browser. ``Access-Control-Allow-Origin: *`` only lets a
 browser page read the answers too. Never credentials (no
 ``Allow-Credentials``, and ``*`` forbids them anyway), never on a signed
@@ -29,6 +36,7 @@ _EXACT: frozenset[str] = frozenset(
         "/gfs/highlights/ice-servers",
         "/gfs/highlight_rtc/offer",
         "/gfs/highlight_rtc/ice/viewer",
+        "/gfs/pages/invite",
     }
 )
 
@@ -37,6 +45,8 @@ _EXACT: frozenset[str] = frozenset(
 _PREFIXES: tuple[tuple[str, int], ...] = (
     ("/gfs/highlight_rtc/session/", 1),
     ("/gfs/highlight_rtc/relay/", 2),
+    ("/gfs/pages/spaces/", 1),
+    ("/gfs/pages/people/", 1),
 )
 
 #: The preflight answer: the JSON POSTs need ``content-type``; nothing else.

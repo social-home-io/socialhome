@@ -21,6 +21,7 @@ from socialhome.pinned_viewer import (
     pinned_link,
     viewer_base_url,
     viewer_gfs_base,
+    viewer_page_link,
 )
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -162,3 +163,21 @@ def test_the_default_viewer_has_its_own_origin():
     org (and its unclaimed root site could register a service worker over
     it), so the default is a custom domain of its own."""
     assert urlsplit(PROJECT_PINNED_VIEWER_URL).hostname == "viewer.social-home.io"
+
+
+def test_a_page_link_carries_the_view_and_its_ids_in_the_fragment():
+    link = viewer_page_link(
+        "https://viewer.example.org/",
+        _VIEWER,
+        gfs_base="https://gfs.example.org",
+        view="join",
+        params=[("t", "tok&x=1#y")],
+    )
+    page, _, fragment = link.partition("#")
+    assert page == "https://viewer.example.org/v/0123456789abcdef/"
+    # URL-encoded: a value can never add a field or end the fragment.
+    assert dict(parse_qsl(fragment)) == {
+        "v": "join",
+        "g": "https://gfs.example.org",
+        "t": "tok&x=1#y",
+    }
