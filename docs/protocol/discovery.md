@@ -1292,8 +1292,12 @@ to re-seal is the only content-blind repair. It is idempotent (the subscriber's
 dispatched as a background task so the WebSocket handshake never waits on it,
 fail-soft at every step (missing space, owner with no socket, repo/send error →
 logged and skipped), skips a space the connecting instance itself owns, and is
-capped at `MAX_RECONNECT_NOTIFIES` (50) spaces per connect — beyond the cap the
-5b-c reconcile still backstops, so the cap costs latency, never correctness.
+capped at `MAX_RECONNECT_NOTIFIES` (50) spaces per connect. The follower
+re-subscribes every seat right after its hello (the reconnect self-heal);
+re-taking a held seat sends the same `reason:"reconnect"` notify unless that
+seat was notified in the last 120 s (`RECONNECT_NOTIFY_DEDUPE_S`, in memory),
+so the seats past the cap get their key repair too and the first 50 are not
+repaired twice. The 5b-c reconcile still backstops an offline owner.
 
 WebRTC is **not** used for the SH↔GFS leg — the GFS is publicly
 reachable, so NAT traversal buys nothing while DTLS plus per-connection
@@ -1609,8 +1613,9 @@ migration 0114), so the host can forward it unchanged:
 - **Never on a reconnect.** The GFS re-sends `new_subscriber` for every
   subscribed space on each reconnect of the follower's socket, tagged
   `reason:"reconnect"`: the host re-seals the key and sends **no** bundle.
-  The follower re-subscribes every seat on each GFS-WS reconnect too, but a
-  seat it already holds earns no frame at all. So neither a GFS nor a host
+  The follower re-subscribes every seat on each GFS-WS reconnect too; a
+  seat it already holds earns at most that same `reason:"reconnect"` key
+  repair (none when the hello just notified it). So neither a GFS nor a host
   restart makes the followers download their bundles again — the decision
   needs no host-side memory. A frame with no or an unknown `reason` (a GFS
   without this rule) earns no bundle either: fail-safe, which is why
@@ -1620,7 +1625,8 @@ migration 0114), so the host can forward it unchanged:
   short labels (`[a-z0-9_]`, ≤ 16 × ≤ 48 chars) the follower sends **next
   to** the signed `/gfs/subscribe` bytes — the signed canonical is
   unchanged, so an older GFS still verifies the subscribe and ignores the
-  field. The GFS validates it (malformed → 400), stores nothing and forwards
+  field. The GFS keeps only well-formed labels (a malformed one is dropped,
+  never a 400: it is a hint), stores nothing and forwards
   it only in the `reason:"subscribe"` frame. Every subscribe carries the
   same list, member seats included, so it never tells the GFS which seats
   are writers'. An older follower lists nothing and is sent no ≤ 1 MB
@@ -1633,9 +1639,23 @@ migration 0114), so the host can forward it unchanged:
   "subscribe"` frame, so a hostile one cannot make the host upload a bundle
   per name (it could never read one — each is sealed to the named
   household's verified key-wrap key).
-- **Lost on an offline follower.** Delivery is WebSocket-only: a follower
-  whose socket is down at subscribe time gets the key on its reconnect,
-  but not the bundle — names then arrive with each author's next post.
+- **Churn earns no second bundle.** An unsubscribe → subscribe makes a new
+  seat, so two guards stop a loop: the GFS forwards no `accepts` for a seat
+  of the same `(follower, space)` that was new within the hour
+  (`SEAT_CHURN_WINDOW_S`), and the host bundles one follower of a space at
+  most once an hour (`BUNDLE_PER_FOLLOWER_EVERY_S`, an LRU of ≤ 10 000) —
+  so one follower's loop cannot use up the space's per-minute cap and leave
+  real newcomers without names. The key is re-sealed every time.
+- **One-time and best effort.** The bundle is sent for the subscribe
+  notify only, and that notify reaches the owner only while the owner's
+  socket is up **on the same GFS node** (`ws_registry.send` is local; a
+  cluster does not forward `new_subscriber`). So the bundle is lost when the
+  follower's socket is down at subscribe time, when the owner is offline,
+  and in a cluster whenever the owner's socket is on another node (behind a
+  4-node round robin, about 3 subscribes in 4). The key is not lost: the
+  follower's reconnect and the owner's 5b-c reconcile both re-seal it. The
+  names then arrive with each author's next real profile change. (Follow-up:
+  forward `new_subscriber` across cluster nodes.)
 - **The host cannot vouch.** The follower authority-verifies the envelope,
   opens it, and runs **every** check of a relayed item on each bundled item
   (author signature + self-cert, author-bound type, origin is the author's
@@ -1666,6 +1686,14 @@ notify per follower-space, answered by one ~1–2 KB targeted key handoff
 (≈ 10–20 MB in all) and **no** bundle, each publish a single primary-key
 lookup.
 
+Seat churn (one follower looping unsubscribe → subscribe on one space):
+before this fix, every loop was a new seat and a ≤ 1 MB bundle, limited only
+by the 30-per-space-a-minute cap ≈ 30 MB/min ≈ 43 GB/day of host upload,
+starving real newcomers; now one bundle per follower per hour (≤ 24 MB/day),
+every other loop a ~1–2 KB key handoff. A follower with more than 50 seats:
+before this fix seats 51+ got no key repair on a reconnect until an owner's
+own reconnect; now one ~1–2 KB handoff for each of them, once per reconnect.
+
 ```mermaid
 sequenceDiagram
   autonumber
@@ -1675,7 +1703,7 @@ sequenceDiagram
   participant O as Other followers
 
   F->>G: subscribe (signed) + accepts: [author_profiles_bundle]
-  G->>G: new seat? (re-take of a held seat: stop, no notify)
+  G->>G: new seat? (re-take: key repair only, unless just notified)
   G->>H: WS new_subscriber {reason: subscribe, subscriber: instance_id, identity + key-wrap key, accepts}
   H->>H: verify key-wrap binding (anti-substitution)
   H->>G: POST /gfs/publish {space_key_handoff (sealed to F), to: F}

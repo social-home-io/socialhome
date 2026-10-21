@@ -66,7 +66,9 @@ re-download their bundles; a frame with no / an unknown ``reason`` (an
 older GFS) or a follower that lists no ``accepts`` gets no bundle either —
 fail-safe, the follower learns names on each author's next post. Since a
 GFS can still name any household as a new subscriber, bundles are capped
-per space (:data:`MAX_BUNDLES_PER_SPACE_PER_MINUTE`).
+per space (:data:`MAX_BUNDLES_PER_SPACE_PER_MINUTE`), and a follower that
+churns its seat (unsubscribe → subscribe) is bundled at most once an hour
+(:data:`BUNDLE_PER_FOLLOWER_EVERY_S`).
 
 Phase 5b-c adds the owner-offline RECONCILE (:meth:`reconcile`): on each GFS-WS
 (re)connect, a seed-holder pulls the GFS subscriber list for every local

@@ -917,7 +917,9 @@ from __future__ import annotations
 #: * **v_61** (2026-10-20, redefined before release) — a new GFS follower's
 #:   **author-profile bundle**: when the GFS tells the host a follower took
 #:   a NEW seat (``new_subscriber`` with ``reason: "subscribe"``; a reconnect
-#:   is ``"reconnect"``, a re-subscribe of a held seat sends nothing) and the
+#:   is ``"reconnect"``, as is a re-subscribe of a held seat the hello did not
+#:   just notify; a seat re-created within the hour forwards no ``accepts``)
+#:   and the
 #:   follower's subscribe listed ``author_profiles_bundle`` in ``accepts``
 #:   (next to the signed bytes, forwarded only in that frame), the host
 #:   sends the content-key handoff and then ONE

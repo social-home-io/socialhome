@@ -9,7 +9,8 @@ the labels in the ``new_subscriber`` frame it sends the space's host for a
 NEW seat. The host sends a delivery only to a follower that lists it — so an
 older follower, which would drop the unknown relay type, is never sent the
 up-to-~1 MB author-profiles bundle. A GFS could add or strip labels; the
-host's per-space rate backstop bounds what that costs.
+host's per-space and per-follower backstops bound what that costs. A
+malformed label is dropped, never an error: it is a hint.
 
 Pure, no I/O.
 """
