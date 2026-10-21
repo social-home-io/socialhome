@@ -646,8 +646,10 @@ identical bytes-for-bytes to the sender's canonical encoding.
   (per-user detail) — the directory rendered by the GFS itself; the JS at
   `/static/users_directory.js` fetches `GET /gfs/moments/users` and
   renders cards with avatar + name + bio + handle. The per-user page
-  (profile + Follow) is a `302` to the pinned viewer when the GFS has
-  `public_viewer_base_url` set, which renders it from
+  (profile + Follow) is a hand-off page to the pinned viewer when the GFS
+  has `public_viewer_base_url` set — its link-preview tags carry the
+  display name, bio and picture of an ACTIVE registration only
+  (`global_server/link_preview.py`) — and the viewer renders it from
   `GET /gfs/pages/people/{user_id}` (picture inline as a `data:` URI) —
   see [the public pages](highlights_public.md#the-public-pages-one-viewer-for-the-outside-world).
 * **Per-user detail JSON** at `GET /gfs/moments/users/{user_id}` —

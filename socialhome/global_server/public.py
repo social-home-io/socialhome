@@ -9,8 +9,9 @@ Server-side-rendered HTML. No JS framework, no build step. Three routes:
   their OWN Social Home. A pure read — see :func:`handle_invite_page`.
 
 With ``[server] public_viewer_base_url`` set, the space page and the invite
-landing answer a ``302`` to the pinned viewer instead
-(:mod:`.public_viewer`), which renders them from ``/gfs/pages/…``; the
+landing answer a hand-off page (link-preview tags + a refresh,
+:mod:`.link_preview`) to the pinned viewer instead (:mod:`.public_viewer`),
+which renders them from ``/gfs/pages/…``; the
 renderers here stay the fallback for a GFS without a viewer. The landing
 (``/``) is the operator's own page and always renders here.
 
@@ -41,6 +42,7 @@ from ..rate_limiter import client_bucket
 from . import app_keys as K
 from .config import DEFAULT_TRUSTED_PROXIES
 from .html_page import css_color, html_response
+from .link_preview import invite_handoff, space_handoff
 from .markdown_lite import render_markdown
 from .page_models import load_invite_page, load_space_page, server_name
 from .repositories import PAIR_TOKEN_TTL_SECONDS as REPO_PAIR_TOKEN_TTL_SECONDS
@@ -1256,21 +1258,14 @@ async def handle_landing(request: web.Request) -> web.Response:
     return html_response(html, inline_styles=[css])
 
 
-def viewer_redirect(link: str | None) -> None:
-    """Hand the page to the pinned viewer: ``302`` to *link* when one was
-    built (:mod:`.public_viewer` — the target comes from configuration
-    only; the request's id rides URL-encoded in the fragment). The
-    ``Location`` may carry an invite token, so no cache keeps the answer."""
-    if link is not None:
-        raise web.HTTPFound(link, headers={"Cache-Control": "no-store"})
-
-
 async def handle_space_page(request: web.Request) -> web.Response:
-    """GET /spaces/{slug} — per-space public page (or a 302 to the viewer)."""
+    """GET /spaces/{slug} — per-space public page (or the hand-off to the
+    viewer, :mod:`.link_preview`)."""
     slug = request.match_info["slug"]
     viewer = request.app[K.gfs_public_viewer_key]
-    if viewer is not None:
-        viewer_redirect(viewer.space(slug))
+    target = viewer.space(slug) if viewer is not None else None
+    if viewer is not None and target is not None:
+        return await space_handoff(request.app, viewer, slug, target)
     space = await load_space_page(request.app, slug)
     if space is None:
         raise web.HTTPNotFound(reason="Space not found or not published")
@@ -1309,14 +1304,16 @@ async def handle_invite_page(request: web.Request) -> web.Response:
     of those: distinguishing them would tell an anonymous prober which tokens
     once existed.
 
-    With a viewer configured it answers a ``302`` to it BEFORE looking the
-    token up — every token gets the same redirect, so the redirect says
+    With a viewer configured it answers the hand-off page
+    (:mod:`.link_preview`) BEFORE looking the token up — generic preview
+    tags and a refresh to the viewer, the same for every token, so it says
     nothing either; the viewer asks ``POST /gfs/pages/invite``.
     """
     token = request.match_info["gfs_token"]
     viewer = request.app[K.gfs_public_viewer_key]
-    if viewer is not None:
-        viewer_redirect(viewer.invite(token))
+    target = viewer.invite(token) if viewer is not None else None
+    if target is not None:
+        return await invite_handoff(request.app, target)
     space = await load_invite_page(request.app, token)
     invite_code = space["invite_code"] if space else ""
     qr_data = await _render_qr_png_data_uri(invite_code) if space else ""

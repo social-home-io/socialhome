@@ -34,6 +34,7 @@ from ...domain.gfs_channel import (
 )
 from ...gfs_proof import PROOF_ROUTE
 from .. import admin as admin_mod
+from ..link_preview import SPACE_IMAGE_ROUTE
 from ..public import handle_invite_page, handle_landing, handle_space_page
 from .admin import (
     AdminAppealCollectionView,
@@ -141,6 +142,7 @@ from .viewer_pages import (
     InvitePageDataView,
     PersonPageDataView,
     SpacePageDataView,
+    SpacePageImageView,
 )
 from .ws import GfsWebSocketView
 
@@ -231,6 +233,7 @@ def register_routes(
     # the pages above redirect to when one is configured. Anonymous,
     # cross-origin (``..viewer_cors``), rate limited with the pages.
     app.router.add_view("/gfs/pages/spaces/{space_id}", SpacePageDataView)
+    app.router.add_view(SPACE_IMAGE_ROUTE, SpacePageImageView)
     app.router.add_view("/gfs/pages/invite", InvitePageDataView)
     app.router.add_view("/gfs/pages/people/{user_id}", PersonPageDataView)
 

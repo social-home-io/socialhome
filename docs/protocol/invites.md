@@ -318,7 +318,7 @@ parks it, a visitor's browser picks it up.
 | | |
 |---|---|
 | `POST /gfs/spaces/{id}/invite` | Owner parks a blob. Body `{owning_instance, blob, expires_at, ts, signature}`, signed over canonical `{action:"mint_invite", owning_instance, space_id, ts}` and verified against the household's registered instance key (±300 s). Returns `201 {gfs_token, url}`. |
-| `GET /join/{gfs_token}` | Public page. Shows the space's already-public directory metadata and the `socialhome://invite#<blob>` code — copyable text **and** a QR of the same string. With `[server] public_viewer_base_url` set (the default) it is a `302` to the pinned viewer, which renders it (below); empty, this server renders it. |
+| `GET /join/{gfs_token}` | Public page. Shows the space's already-public directory metadata and the `socialhome://invite#<blob>` code — copyable text **and** a QR of the same string. With `[server] public_viewer_base_url` set (the default) it is a hand-off page (generic link-preview tags + a refresh) to the pinned viewer, which renders it (below); empty, this server renders it. |
 | `POST /gfs/pages/invite` | The same page's content for the viewer: body `{token}`, answer `{server_name, space: {name, accent_color, icon}, invite_code, qr}` or one `404 {server_name}` for every dead link. Cross-origin, no credentials, the same 30 / min / IP window as `/join/`. |
 | `DELETE\|POST /gfs/spaces/{id}/invite/{gfs_token}` | Owner takes it down. Signed over `{action:"revoke_invite", gfs_token, owning_instance, space_id, ts}`. `204`, idempotent. |
 
@@ -368,9 +368,14 @@ access-log retention short; Social Home itself never needs them.
 **In the pinned viewer.** The page a visitor sees is the same static,
 content-addressed page a public highlight link opens
 ([highlights_public.md](highlights_public.md#pinned-viewer), "The
-public pages"): `GET /join/{token}` answers `302` to
+public pages"): `GET /join/{token}` answers a hand-off page whose
+`<meta http-equiv="refresh">` opens
 `{viewer}/v/<hash>/#v=join&g=<this GFS>&t=<token>` without looking the
-token up, so the redirect is the same for every token. The token rides
+token up, so the answer is the same for every token. Its link-preview tags
+are generic ("You're invited to a space", the server's name) — a chat
+app's unfurl says nothing about the space, the inviter or whether the
+token is live; `Referrer-Policy: no-referrer`, `no-store`,
+`default-src 'none'`. The token rides
 only in the fragment — the viewer's host never receives it, and no
 `Referer` carries it — and the viewer hands it to this server in a POST
 body, so it is never in a request line either. The page keeps every
@@ -418,7 +423,7 @@ sequenceDiagram
     O-->>B: shares {gfs}/join/{gfs_token} (chat, email, paper)
 
     B->>G: GET /join/{gfs_token}
-    G-->>B: 302 {viewer}/v/<hash>/#v=join&g=…&t={gfs_token}
+    G-->>B: 200 hand-off page (generic og: tags) + refresh to {viewer}/v/<hash>/#v=join&g=…&t={gfs_token}
     B->>V: GET /v/<hash>/ (the fragment stays in the browser)
     V-->>B: index.html + viewer.js (SRI)
     B->>G: POST /gfs/pages/invite {token} (CORS, no credentials)

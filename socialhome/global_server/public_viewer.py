@@ -3,9 +3,10 @@ outside world", owner decision 2026-10-21).
 
 A space's page (``/spaces/{id}``), an invite link (``/join/{token}``) and a
 person's Momentum profile (``/moments/{user}``) are what a non-member
-opens. With ``[server] public_viewer_base_url`` set they answer a ``302``
-to the same static, content-addressed page the public highlight and moment
-links open (:mod:`socialhome.pinned_viewer`)::
+opens. With ``[server] public_viewer_base_url`` set they hand off — a
+link-preview page that refreshes, :mod:`.link_preview` — to the same
+static, content-addressed page the public highlight and moment links open
+(:mod:`socialhome.pinned_viewer`)::
 
     {viewer}/v/<hash>/#v=space&g=<this GFS>&s=<space id>
     {viewer}/v/<hash>/#v=join&g=<this GFS>&t=<invite token>
