@@ -639,3 +639,46 @@ async def test_a_delete_withdraws_the_media(outbound_setup):
         )
     )
     assert ("withdraw", "m-1") in media.calls
+
+
+async def test_a_public_moment_keeps_its_link_material(outbound_setup):
+    """the item key, and the media descriptor per GFS that holds the file,
+    that a later share link needs."""
+    s = outbound_setup
+    recorded: list = []
+
+    class _Shares:
+        async def record(self, moment, *, item_key, media_by_gfs):
+            recorded.append((moment.id, item_key, media_by_gfs))
+
+    s["sub"].attach_shares(_Shares())
+    s["sub"].attach_media(_Media())
+    await s["moments"].save(_with_media("api/media/x.webp", "image"))
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event())
+    [(mid, key, media_by_gfs)] = recorded
+    assert (mid, key) == ("m-1", item_key(KEY, "m-1"))
+    assert list(media_by_gfs) == ["g1"]
+    assert media_by_gfs["g1"]["blob_id"] == "b" * 64
+
+
+async def test_a_gfs_that_refused_the_file_is_not_recorded_as_holding_it(
+    outbound_setup,
+):
+    s = outbound_setup
+    recorded: list = []
+
+    class _Shares:
+        async def record(self, moment, *, item_key, media_by_gfs):
+            recorded.append(media_by_gfs)
+
+    class _Refusing(_Media):
+        async def upload(self, gfs_id, prepared, *, author_user_id, expires_at):
+            return False
+
+    s["sub"].attach_shares(_Shares())
+    s["sub"].attach_media(_Refusing())
+    await s["moments"].save(_with_media("api/media/x.webp", "image"))
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event())
+    assert recorded == [{}]

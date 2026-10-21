@@ -191,7 +191,7 @@ async def test_an_oversized_body_is_refused(client, author):
 
 
 async def test_an_authors_storage_is_capped(client, author, monkeypatch):
-    monkeypatch.setattr(gmm, "MAX_AUTHOR_LIVE_BYTES", 100_000)
+    monkeypatch.setattr(gmm, "MAX_AUTHOR_LIVE_BYTES", 5_000)
     first = _blob()
     r = await client.put(
         f"/gfs/moments/media/{blob_id_of(first)}",

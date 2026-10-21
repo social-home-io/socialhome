@@ -31,3 +31,4 @@ html,body{margin:0;padding:0;background:#111;color:#eee;font-family:system-ui,sa
 .highlight-incomplete{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px 12px;margin:12px;padding:8px 12px;border-radius:8px;background:rgba(255,255,255,.08);color:#ddd;font-size:.9em;text-align:center;}
 .highlight-incomplete p{margin:0;}
 .highlight-end>p{margin:0;}
+.moment-text{margin:12px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5;}

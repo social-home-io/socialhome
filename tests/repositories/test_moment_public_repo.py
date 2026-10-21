@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from socialhome.domain.moment_public import MomentPublicKey
+import dataclasses
+
+from socialhome.domain.moment_public import MomentPublicKey, MomentPublicShare
 from socialhome.repositories.moment_public_repo import (
     SqliteMomentPublicFollowRepo,
     SqliteMomentPublicKeyRepo,
+    SqliteMomentPublicShareRepo,
 )
 
 
@@ -180,3 +183,47 @@ async def test_mark_rotate_due_flags_only_the_newest_own_generation(db):
     # A new generation starts unmarked.
     await repo.save(_key("alice", 40, own=True))
     assert not (await repo.latest("alice", own=True)).rotate_due
+
+
+# ── Share links ────────────────────────────────────────────────────
+
+
+async def _moment_row(db, moment_id: str = "m-1") -> None:
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name, state)"
+        " VALUES('u-share', 'sh', 'Sh', 'active')"
+    )
+    await db.enqueue(
+        "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+        " created_at, expires_at) VALUES(?, 'u-share', 'x', 'i',"
+        " '2026-10-21T08:00:00+00:00', '2099-10-22T08:00:00+00:00')",
+        (moment_id,),
+    )
+
+
+async def test_share_material_is_kept_once_and_goes_with_its_moment(db):
+    await _moment_row(db)
+    repo = SqliteMomentPublicShareRepo(db)
+    share = MomentPublicShare(
+        moment_id="m-1",
+        author_user_id="u-share",
+        item_key_sealed="sealed",
+        media_by_gfs='{"g1": {"blob_id": "b"}}',
+    )
+    assert await repo.save(share)
+    assert not await repo.save(dataclasses.replace(share, item_key_sealed="other"))
+    got = await repo.get("m-1")
+    assert (got.item_key_sealed, got.media_by_gfs, got.share_blob_id) == (
+        "sealed",
+        '{"g1": {"blob_id": "b"}}',
+        None,
+    )
+    assert await repo.set_media("m-1", '{"g1": {}, "g3": {}}')
+    assert (await repo.get("m-1")).media_by_gfs == '{"g1": {}, "g3": {}}'
+    assert not await repo.set_media("m-x", "{}")
+    assert await repo.set_share_copy("m-1", blob_id="c" * 64, gfs_id="g1")
+    got = await repo.get("m-1")
+    assert (got.share_blob_id, got.share_gfs_id) == ("c" * 64, "g1")
+    assert not await repo.set_share_copy("m-x", blob_id="c" * 64, gfs_id="g1")
+    await db.enqueue("DELETE FROM moments WHERE id='m-1'")
+    assert await repo.get("m-1") is None

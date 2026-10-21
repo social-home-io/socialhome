@@ -236,6 +236,7 @@ from .repositories.moment_public_repo import (
     SqliteMomentPublicFollowRepo,
     SqliteMomentPublicKeyRepo,
     SqliteMomentPublicRegistrationRepo,
+    SqliteMomentPublicShareRepo,
 )
 from .repositories.moment_repo import SqliteMomentRepo
 from .repositories.pairing_relay_repo import SqlitePairingRelayRepo
@@ -348,7 +349,7 @@ from .services.moment_public_media_inbound import MomentPublicMediaInbound
 from .services.moment_public_media_outbound import MomentPublicMediaOutbound
 from .services.moment_public_outbound import MomentPublicOutbound
 from .services.moment_public_service import MomentPublicService
-from .services.moment_public_signaling_handler import MomentPublicSignalingHandler
+from .services.moment_public_share_service import MomentPublicShareService
 from .services.moment_service import MomentService
 from .services.online_status_service import OnlineStatusService
 from .services.page_conflict_service import PageConflictService
@@ -1198,6 +1199,7 @@ def _build_repos(db: AsyncDatabase):
         moment_public_registration=SqliteMomentPublicRegistrationRepo(db),
         moment_public_follow=SqliteMomentPublicFollowRepo(db),
         moment_public_key=SqliteMomentPublicKeyRepo(db),
+        moment_public_share=SqliteMomentPublicShareRepo(db),
         space_proposal=SqliteSpaceProposalRepo(db),
         space_remote_location=SqliteSpaceRemoteLocationRepo(db),
         poll=SqlitePollRepo(db),
@@ -3163,16 +3165,6 @@ def create_app(config: Config | None = None) -> web.Application:
         picture_repo=profile_picture_repo,
         picture_cache=public_picture_cache,
     )
-    # Author-side signalling answerer for the public-moments live index
-    # (§Momentum-public). Same shape as ``highlight_signaling_handler``:
-    # ``attach_session`` + ``attach_identity`` happen in the startup hook,
-    # and the WS supervisor forwards every ``moment_signal`` frame here.
-    moment_public_signaling_handler = MomentPublicSignalingHandler(
-        moment_repo,
-        repos.gfs_connection,
-        media_dir=str(config.media_path),
-    )
-
     # ── Momentum (§Momentum) ───────────────────────────────────────────
     # ``own_instance_id`` is bound after federation identity is loaded
     # in the startup hook (see ``moment_service.attach_instance_id``).
@@ -3238,6 +3230,20 @@ def create_app(config: Config | None = None) -> web.Application:
         media_dir=pathlib.Path(config.media_path),
     )
     moment_public_outbound.attach_media(moment_public_media_outbound)
+    # per-moment share links on the pinned viewer.
+    moment_public_share_service = MomentPublicShareService(
+        share_repo=repos.moment_public_share,
+        moment_repo=moment_repo,
+        user_repo=user_repo,
+        registration_repo=moment_public_registration_repo,
+        gfs_repo=repos.gfs_connection,
+        media_outbound=moment_public_media_outbound,
+    )
+    moment_public_share_service.attach_viewer(
+        base_url=config.highlights_public_viewer_base_url,
+        viewer=load_pinned_viewer(),
+    )
+    moment_public_outbound.attach_shares(moment_public_share_service)
     moment_public_media_inbound = MomentPublicMediaInbound(
         gfs_repo=repos.gfs_connection, media_dir=pathlib.Path(config.media_path)
     )
@@ -3264,7 +3270,6 @@ def create_app(config: Config | None = None) -> web.Application:
         moment_public_service,
         moment_public_outbound,
         moment_public_key_outbound,
-        moment_public_signaling_handler,
         dm_service,
         notification_service,
         person_summary_service,
@@ -3623,6 +3628,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.moment_public_registration_repo_key] = moment_public_registration_repo
     app[K.moment_public_follow_repo_key] = moment_public_follow_repo
     app[K.moment_public_service_key] = moment_public_service
+    app[K.moment_public_share_service_key] = moment_public_share_service
     app[K.moment_public_outbound_key] = moment_public_outbound
     app[K.moment_public_inbound_key] = moment_public_inbound
 
@@ -3770,18 +3776,6 @@ def create_app(config: Config | None = None) -> web.Application:
             signing_key=identity_seed,
         )
         highlight_signaling_handler.attach_ice_servers(public_ice_servers)
-        # Matching wiring for the public-moments answerer side.
-        moment_public_signaling_handler.attach_session(http_session)
-        moment_public_signaling_handler.attach_identity(
-            own_instance_id=real_instance_id,
-            signing_key=identity_seed,
-        )
-        moment_public_signaling_handler.attach_ice_servers(public_ice_servers)
-        # An unbound frame's server id may be one the server signed it
-        # replaces (a rename): match those too.
-        moment_public_signaling_handler.attach_known_ids(
-            gfs_connection_service.known_instance_ids
-        )
         # Public-Momentum service + outbound subscriber. Same shape as
         # ``highlight_publication_service``: shared session + signing
         # key wired up after federation identity loads.
@@ -3816,6 +3810,7 @@ def create_app(config: Config | None = None) -> web.Application:
             signing_key=identity_seed,
         )
         moment_public_media_inbound.attach_session(http_session)
+        moment_public_share_service.attach_identity(key_manager=key_manager)
         await moment_public_media_inbound.start()
 
         # 3. Replace UserService with one carrying the real public key.
@@ -4784,7 +4779,6 @@ def create_app(config: Config | None = None) -> web.Application:
             # server still seats us — unsubscribe there (and only there).
             on_relay_seen=gfs_space_mirror.on_relay_frame,
             on_highlight_signal=highlight_signaling_handler.handle_signal,
-            on_moment_signal=moment_public_signaling_handler.handle_signal,
             on_moment_public=moment_public_inbound.handle,
             # v_62 — a follower to seal the author's moment key to.
             on_follow_changed=moment_public_key_outbound.handle,
@@ -5199,7 +5193,6 @@ def create_app(config: Config | None = None) -> web.Application:
         # Wind down any in-flight public-viewer sessions before
         # closing the shared aiohttp client below.
         await highlight_signaling_handler.stop()
-        await moment_public_signaling_handler.stop()
         if replay_cache_scheduler is not None:
             await replay_cache_scheduler.stop()
         if gfs_route_discovery_scheduler is not None:

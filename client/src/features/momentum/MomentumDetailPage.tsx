@@ -118,6 +118,24 @@ export default function MomentumDetailPage() {
 
   const report = () => openReport('moment', m.id)
 
+  // a link that opens THIS moment for anyone who has it — the key is
+  // in the link's fragment, the GFS only holds ciphertext.
+  const copyShareLink = async () => {
+    let url: string
+    try {
+      url = (await api.post<{ url: string }>(`/api/moments/${m.id}/share-link`, {})).url
+    } catch (err: unknown) {
+      showToast(t('moment.share.failed', { error: String((err as Error)?.message ?? err) }), 'error')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(url)
+      showToast(t('moment.share.copied'), 'success')
+    } catch {
+      showToast(url, 'info')
+    }
+  }
+
   const myReaction = detail.value.reactions.find(
     r => r.reactor_user_id === me,
   )?.emoji
@@ -330,6 +348,15 @@ export default function MomentumDetailPage() {
         </Button>
         {!isAuthor && (
           <Button variant="ghost" onClick={report}>🚩 {t('report.action')}</Button>
+        )}
+        {isAuthor && m.is_public && (
+          <Button
+            variant="secondary"
+            onClick={() => void copyShareLink()}
+            title={t('moment.share.title')}
+          >
+            🔗 {t('moment.share.copy')}
+          </Button>
         )}
         {isAuthor && (
           // Ghost (not filled-danger) so the destructive action doesn't

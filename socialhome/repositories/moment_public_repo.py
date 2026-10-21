@@ -29,6 +29,7 @@ from ..domain.moment_public import (
     MomentPublicFollow,
     MomentPublicKey,
     MomentPublicRegistration,
+    MomentPublicShare,
 )
 from .base import rows_to_dicts
 
@@ -472,3 +473,79 @@ def _to_key(row: dict) -> MomentPublicKey:
         created_at=row["created_at"],
         rotate_due=bool(row["rotate_due"]),
     )
+
+
+# ── Share links ────────────────────────────────────────────────────
+
+
+_SHARE_COLS = (
+    "moment_id, author_user_id, item_key_sealed, media_by_gfs, share_blob_id, "
+    "share_gfs_id, created_at"
+)
+
+
+@runtime_checkable
+class AbstractMomentPublicShareRepo(Protocol):
+    async def save(self, share: MomentPublicShare) -> bool: ...
+    async def get(self, moment_id: str) -> MomentPublicShare | None: ...
+    async def set_share_copy(
+        self, moment_id: str, *, blob_id: str, gfs_id: str
+    ) -> bool: ...
+    async def set_media(self, moment_id: str, media_by_gfs: str) -> bool: ...
+
+
+class SqliteMomentPublicShareRepo:
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def save(self, share: MomentPublicShare) -> bool:
+        """Keep a public moment's link material — once (``False`` when the
+        moment already has it)."""
+        changed = await self._db.enqueue_rowcount(
+            "INSERT OR IGNORE INTO moment_public_shares(moment_id, author_user_id,"
+            " item_key_sealed, media_by_gfs) VALUES(?, ?, ?, ?)",
+            (
+                share.moment_id,
+                share.author_user_id,
+                share.item_key_sealed,
+                share.media_by_gfs,
+            ),
+        )
+        return changed > 0
+
+    async def get(self, moment_id: str) -> MomentPublicShare | None:
+        row = await self._db.fetchone(
+            f"SELECT {_SHARE_COLS} FROM moment_public_shares WHERE moment_id=?",
+            (moment_id,),
+        )
+        if row is None:
+            return None
+        d = dict(row)
+        return MomentPublicShare(
+            moment_id=d["moment_id"],
+            author_user_id=d["author_user_id"],
+            item_key_sealed=d["item_key_sealed"],
+            media_by_gfs=d["media_by_gfs"],
+            share_blob_id=d["share_blob_id"],
+            share_gfs_id=d["share_gfs_id"],
+            created_at=d["created_at"],
+        )
+
+    async def set_share_copy(
+        self, moment_id: str, *, blob_id: str, gfs_id: str
+    ) -> bool:
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE moment_public_shares SET share_blob_id=?, share_gfs_id=?"
+            " WHERE moment_id=?",
+            (blob_id, gfs_id, moment_id),
+        )
+        return changed > 0
+
+    async def set_media(self, moment_id: str, media_by_gfs: str) -> bool:
+        """Replace the per-GFS media descriptors (a link added a GFS that
+        now holds the file)."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE moment_public_shares SET media_by_gfs=? WHERE moment_id=?",
+            (media_by_gfs, moment_id),
+        )
+        return changed > 0

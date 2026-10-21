@@ -22,16 +22,14 @@ anonymous relay) not even which household relayed a public/global space
 event: `/gfs/publish` is authorized purely by the space-authority
 signature inside the opaque payload.
 
-For public-content delivery (public highlights and the public moments
-index) the GFS adds a **lazy-relay fallback tier**: a guest browser
+For public highlights the GFS adds a **lazy-relay fallback tier**: a guest browser
 always tries a direct WebRTC DataChannel to the author's SH first, and
 only when that can't connect does the GFS proxy the framed stream over
 HTTP — pushing a `relay_offer` to the still-online author, who streams
 the byte-identical frames back through the GFS to the guest. The fallback
 is author-online only; an offline author still yields "unavailable". One
-framing module and one transient in-memory `RelayBridge` serve both
-highlights and moments, and **the GFS stores zero highlight/moment
-content bytes** — the bridge is a pure pipe, never an at-rest copy.
+framing module and one transient in-memory `RelayBridge` serve them, and
+**the GFS stores zero highlight content bytes** — the bridge is a pure pipe, never an at-rest copy.
 A public highlight link opens the **pinned viewer** — a static,
 content-addressed page pinned by SRI on an origin no GFS runs (default:
 the project's GitHub Pages, `[highlights] public_viewer_base_url`) — which
@@ -47,6 +45,11 @@ key-wrap key; the GFS routes the one ciphertext by author, and each sealed
 key to the one household it names (keeping the latest for a household that
 is offline)
 ([`protocol/momentum_public.md`](protocol/momentum_public.md#encryption-posture-v_62)).
+A stranger sees a public moment only through its **share link**: the pinned
+viewer fetches the moment's sealed share copy and file from the GFS and opens
+them with that moment's item key from the URL fragment; the GFS's
+`/moments/{user}` page shows the profile and a Follow button only
+([`protocol/momentum_public.md`](protocol/momentum_public.md#share-links)).
 
 ```mermaid
 flowchart LR

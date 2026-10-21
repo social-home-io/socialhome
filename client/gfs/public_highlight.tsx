@@ -41,6 +41,8 @@ import {
 } from './sealed_profile'
 import { linkSecretFromHash, makeStreamOpener, type StreamOpener } from './stream_seal'
 import { pinnedBootFromHash, pinnedEndpoint, pinnedRequestInit } from './pinned_link'
+import { isMomentHash, momentBootFromHash } from './moment_link'
+import { PublicMomentViewer } from './public_moment'
 
 const CHANNEL_LABEL = 'highlight-public-v1'
 const FRAME_DURATION_MS = 6000
@@ -649,6 +651,19 @@ function readBoot(root: HTMLElement): BootPayload | null {
 (function bootstrap(): void {
   const root = document.getElementById('root')
   if (!root) return
+  // A per-moment link on the pinned page: everything — the GFS, the
+  // ids, the moment's item key — is in the fragment. The GFS-served page
+  // (with a boot block) never opens one.
+  if (!document.getElementById('boot') && isMomentHash(window.location.hash)) {
+    const moment = momentBootFromHash(window.location.hash)
+    if (window.top !== window || !moment) {
+      render(<BrokenLink />, root)
+      return
+    }
+    document.title = 'Moment'
+    render(<PublicMomentViewer boot={moment} />, root)
+    return
+  }
   const boot = readBoot(root)
   if (!boot) return
   const secret = linkSecretFromHash(window.location.hash)

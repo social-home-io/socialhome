@@ -550,91 +550,6 @@ async def test_client_drops_new_subscriber_when_no_handler(fake_gfs, http_sessio
         await client.stop()
 
 
-async def test_client_dispatches_moment_signal_frames(fake_gfs, http_session):
-    """``moment_signal`` frames (the §Momentum-public answerer) go to the
-    dedicated handler, mirroring the highlight_signal branch."""
-    seed, _pub = _gen_keypair()
-    signals: list[dict] = []
-
-    async def on_relay(frame: dict) -> None:
-        pass
-
-    async def on_moment_signal(frame: dict) -> None:
-        signals.append(frame)
-
-    client = GfsWebSocketClient(
-        gfs_url=fake_gfs.url,
-        instance_id="sh-ms",
-        signing_key=seed,
-        session_factory=lambda: http_session,
-        on_relay=on_relay,
-        on_moment_signal=on_moment_signal,
-    )
-    await client.start()
-    try:
-        for _ in range(100):
-            if client.connected:
-                break
-            await asyncio.sleep(0.02)
-        await fake_gfs.outbound.put(
-            {
-                "type": "moment_signal",
-                "kind": "offer",
-                "session_id": "s-1",
-                "user_id": "u-1",
-                "gfs_id": "gfs-1",
-                "sdp": "v=0",
-            },
-        )
-        for _ in range(100):
-            if signals:
-                break
-            await asyncio.sleep(0.02)
-        assert len(signals) == 1
-        assert signals[0]["type"] == "moment_signal"
-        assert signals[0]["kind"] == "offer"
-        assert signals[0]["user_id"] == "u-1"
-    finally:
-        await client.stop()
-
-
-async def test_client_attach_moment_signal_handler_late_binds(fake_gfs, http_session):
-    """``attach_moment_signal_handler`` wires the answerer after construction."""
-    seed, _pub = _gen_keypair()
-    signals: list[dict] = []
-
-    async def on_relay(frame: dict) -> None:
-        pass
-
-    async def handler(frame: dict) -> None:
-        signals.append(frame)
-
-    client = GfsWebSocketClient(
-        gfs_url=fake_gfs.url,
-        instance_id="sh-ms2",
-        signing_key=seed,
-        session_factory=lambda: http_session,
-        on_relay=on_relay,
-    )
-    client.attach_moment_signal_handler(handler)
-    await client.start()
-    try:
-        for _ in range(100):
-            if client.connected:
-                break
-            await asyncio.sleep(0.02)
-        await fake_gfs.outbound.put(
-            {"type": "moment_signal", "kind": "ice", "session_id": "s"},
-        )
-        for _ in range(100):
-            if signals:
-                break
-            await asyncio.sleep(0.02)
-        assert len(signals) == 1
-    finally:
-        await client.stop()
-
-
 async def test_client_drops_moment_signal_when_no_handler(fake_gfs, http_session):
     """No-handler path is a debug log, not a crash."""
     seed, _pub = _gen_keypair()
@@ -796,7 +711,6 @@ async def test_on_text_dispatch_covers_every_frame_type():
     got: dict[str, list[dict]] = {
         "relay": [],
         "highlight": [],
-        "moment": [],
         "moment_public": [],
         "follow": [],
     }
@@ -814,12 +728,12 @@ async def test_on_text_dispatch_covers_every_frame_type():
         session_factory=lambda: None,  # never started
         on_relay=_sink("relay"),
         on_highlight_signal=_sink("highlight"),
-        on_moment_signal=_sink("moment"),
         on_moment_public=_sink("moment_public"),
         on_follow_changed=_sink("follow"),
     )
 
     await client._on_text(json.dumps({"type": "highlight_signal", "kind": "offer"}))
+    # The retired public-moments index frame is ignored.
     await client._on_text(json.dumps({"type": "moment_signal", "kind": "offer"}))
     await client._on_text(json.dumps({"type": "incoming_public_moment", "payload": {}}))
     await client._on_text(
@@ -836,7 +750,6 @@ async def test_on_text_dispatch_covers_every_frame_type():
     await client._on_text("{not json")
 
     assert len(got["highlight"]) == 1
-    assert len(got["moment"]) == 1
     assert len(got["moment_public"]) == 3
     assert len(got["follow"]) == 2
 
@@ -876,7 +789,6 @@ async def test_on_text_swallows_handler_exception():
         session_factory=lambda: None,
         on_relay=_sink_noop,
         on_highlight_signal=_boom,
-        on_moment_signal=_boom,
         on_moment_public=_boom,
         on_follow_changed=_boom,
     )

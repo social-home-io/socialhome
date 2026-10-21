@@ -34,7 +34,6 @@ export default defineConfig({
       // pages that ship them.
       input: {
         highlight_public_viewer: resolve(__dirname, 'gfs/public_highlight.tsx'),
-        moment_public_viewer: resolve(__dirname, 'gfs/public_moments.tsx'),
         admin:               resolve(__dirname, 'gfs/admin/main.tsx'),
       },
       output: {

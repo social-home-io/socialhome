@@ -223,6 +223,7 @@ from .moments import (
     MomentHashtagsView,
     MomentReactionView,
     MomentReportView,
+    MomentShareLinkView,
 )
 from .moments_public import (
     GfsUserDirectoryProxyView,
@@ -1080,6 +1081,10 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view(
         "/api/moments/{id}/report",
         MomentReportView,
+    )
+    app.router.add_view(
+        "/api/moments/{id}/share-link",
+        MomentShareLinkView,
     )
 
     # ── Public Momentum (§Momentum-public) ─────────────────────────────

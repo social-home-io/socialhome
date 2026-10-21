@@ -1675,6 +1675,17 @@ holds that same epoch as a delivered key (``is_own = 0``) — the GFS logged
 and that neither the GFS log nor ``gfs.db`` / ``gfs.db-wal`` contains the
 moment's text or id. **v_63:** the moment carries a picture; e must keep it (`api/media/gm-…`, WebP bytes) from one encrypted blob, and no blob under the GFS's `media/moments/` may contain a readable WebP.
 
+**Share link.** a's user asks for the moment's share link
+(``POST /api/moments/{id}/share-link``). It must name the pinned viewer
+(``…/v/<hash>/``) with ``#g=<the GFS>&a=<author>&m=<moment>&b=<64-hex share
+copy>&k=<43-char item key>``. The step fetches the share copy from
+``GET /gfs/moments/media/{b}`` (ciphertext — the moment text is not in it),
+opens it with ``k`` through ``moment_public_media.open_share`` (what the
+viewer does in WebCrypto) and expects the moment's text, the author's name
+and a media descriptor whose picture blob the GFS serves. The GFS log since
+the request must not contain ``k``, and the GFS's ``/moments/{user}`` page
+shows the profile only — not the moment's text.
+
 ### ``gfs-highlight-link`` — a public highlight link opens the pinned viewer
 
 Part of ``all`` (after ``gfs-moment-profile``). Prereqs when run on its own:
