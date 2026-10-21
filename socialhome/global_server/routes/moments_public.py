@@ -8,8 +8,14 @@ Three surfaces:
   - ``POST /gfs/moments/users/{user_id}/picture`` — push avatar bytes.
   - ``POST /gfs/moments/users/{user_id}/follow`` — record a follower.
   - ``POST /gfs/moments/users/{user_id}/unfollow`` — drop a follower.
-  - ``POST /gfs/moments/publish`` — fan out a signed moment envelope.
-  - ``POST /gfs/moments/delete`` — fan out a tombstone.
+  - ``POST /gfs/moments/publish`` — fan out a signed, ENCRYPTED moment
+    envelope (v_62; any other shape is refused — the GFS never carries a
+    public moment in plaintext).
+  - ``POST /gfs/moments/delete`` — fan out an encrypted tombstone.
+  - ``POST /gfs/moments/keys`` — deliver sealed moment keys, each to the
+    one follower household it names (v_62).
+  - ``POST /gfs/moments/users/{user_id}/key_request`` — a follower
+    household asks the author's household for its current key (v_62).
 * **Public discovery** ``GET /gfs/moments/users`` (JSON, w/ ``?q=``),
   ``GET /gfs/moments/users/{user_id}`` (per-user JSON),
   ``GET /gfs/moments/users/{user_id}/picture`` (avatar bytes).
@@ -24,11 +30,19 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 
 from aiohttp import web
 
 from ...csp import media_response_headers
+from ...moment_public_seal import (
+    DELIVERY_FIELDS,
+    ENVELOPE_FIELDS,
+    MAX_CIPHERTEXT_CHARS,
+    MAX_MOMENT_ID_CHARS,
+    is_wire_int,
+)
 from .. import app_keys as K
 from ..domain import GfsUserPicture
 from ..html_page import html_response
@@ -47,6 +61,46 @@ _PICTURE_MIME_ALLOWED = frozenset({"image/jpeg", "image/png", "image/webp"})
 
 #: Bio length cap. Twitter-shaped — short enough to render in a card.
 _MAX_BIO_LEN = 280
+
+#: Body cap for an encrypted publish / delete: the ciphertext cap plus the
+#: routing fields and signature.
+_MAX_ENVELOPE_BYTES = MAX_CIPHERTEXT_CHARS + 2048
+
+#: Sealed keys one ``POST /gfs/moments/keys`` may carry, and its body cap
+#: (a sealed key is ~0.6 KB).
+MAX_KEY_DELIVERIES = 100
+_MAX_KEYS_BYTES = 128 * 1024
+
+#: Longest ``sealed.ciphertext`` of one delivery (a sealed 32-byte key in
+#: its JSON wrapper is ~300 chars).
+_MAX_SEALED_KEY_CHARS = 1024
+
+#: A follower's declared ``moment_suites``: at most this many suite names
+#: per kind, each at most this long.
+_MAX_SUITES = 8
+_MAX_SUITE_CHARS = 64
+
+
+def _suites_json(raw: object) -> str | None | web.Response:
+    """The follow body's ``moment_suites`` (v_62) as canonical JSON —
+    ``None`` when absent (an older household), a 422 when malformed."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"kem", "seal"}:
+        return web.json_response({"error": "moment_suites_invalid"}, status=422)
+    out: dict[str, list[str]] = {}
+    for kind in ("kem", "seal"):
+        names = raw.get(kind, [])
+        if (
+            not isinstance(names, list)
+            or len(names) > _MAX_SUITES
+            or not all(
+                isinstance(n, str) and 0 < len(n) <= _MAX_SUITE_CHARS for n in names
+            )
+        ):
+            return web.json_response({"error": "moment_suites_invalid"}, status=422)
+        out[kind] = sorted(set(names))
+    return json.dumps(out, separators=(",", ":"), sort_keys=True)
 
 
 # ─── Signed wire endpoints ─────────────────────────────────────────────────
@@ -138,11 +192,15 @@ class GfsUserFollowView(GfsBaseView):
             return web.json_response({"error": "instance_mismatch"}, status=403)
         if not follower_user_id:
             return web.json_response({"error": "follower_user_id_required"}, status=422)
+        suites = _suites_json(body.get("moment_suites"))
+        if isinstance(suites, web.Response):
+            return suites
         try:
             follow = await registry.add_follow(
                 follower_user_id=follower_user_id,
                 follower_instance_id=follower_instance_id,
                 followed_user_id=followed_user_id,
+                moment_suites=suites,
             )
         except LookupError:
             return web.json_response({"error": "author_not_found"}, status=404)
@@ -197,30 +255,172 @@ class GfsUserUnfollowView(GfsBaseView):
         return web.json_response({"unfollowed": ok})
 
 
+async def _encrypted_envelope(view: GfsBaseView) -> dict | web.Response:
+    """The verified body of a publish / delete — only when it is an
+    encrypted envelope from the author's own household (v_62).
+
+    Exactly the routing fields + ciphertext (:data:`ENVELOPE_FIELDS`):
+    anything else — a plaintext ``content``, an author name, an older
+    household's envelope — is refused ``422 encryption_required`` and
+    never fanned out, so a public moment never crosses this server in the
+    clear. The signer must be the household the author registered from.
+    """
+    result = await _rtc_authenticate(
+        view, keep_signature=True, max_bytes=_MAX_ENVELOPE_BYTES
+    )
+    if isinstance(result, web.Response):
+        return result
+    body, sender = result
+    moment_id = body.get("moment_id")
+    if (
+        set(body) != ENVELOPE_FIELDS
+        or not isinstance(body.get("ciphertext"), str)
+        or not isinstance(body.get("seal_suite"), str)
+        or not isinstance(moment_id, str)
+        or not 0 < len(moment_id) <= MAX_MOMENT_ID_CHARS
+        or not is_wire_int(body.get("key_gen"))
+        or not is_wire_int(body.get("key_step"))
+    ):
+        return web.json_response({"error": "encryption_required"}, status=422)
+    registry = view.svc(K.gfs_moment_public_registry_key)
+    if not await registry.is_author_household(
+        str(body.get("author_user_id") or ""), sender
+    ):
+        return web.json_response({"error": "instance_mismatch"}, status=403)
+    return body
+
+
 class GfsMomentPublicPublishView(GfsBaseView):
-    """``POST /gfs/moments/publish`` — fan a signed moment to followers."""
+    """``POST /gfs/moments/publish`` — fan an encrypted moment to followers."""
 
     async def post(self) -> web.Response:
-        result = await _rtc_authenticate(self, keep_signature=True)
-        if isinstance(result, web.Response):
-            return result
-        body, _sender = result
+        body = await _encrypted_envelope(self)
+        if isinstance(body, web.Response):
+            return body
         registry = self.svc(K.gfs_moment_public_registry_key)
         delivered = await registry.fan_out_moment(envelope=body)
         return web.json_response({"delivered": delivered})
 
 
 class GfsMomentPublicDeleteView(GfsBaseView):
-    """``POST /gfs/moments/delete`` — fan a tombstone."""
+    """``POST /gfs/moments/delete`` — fan an encrypted tombstone."""
 
     async def post(self) -> web.Response:
-        result = await _rtc_authenticate(self, keep_signature=True)
-        if isinstance(result, web.Response):
-            return result
-        body, _sender = result
+        body = await _encrypted_envelope(self)
+        if isinstance(body, web.Response):
+            return body
         registry = self.svc(K.gfs_moment_public_registry_key)
         delivered = await registry.fan_out_delete(envelope=body)
         return web.json_response({"delivered": delivered})
+
+
+def _delivery_ok(item: object, sender: str) -> bool:
+    """One sealed key in the shape a follower opens — nothing else rides."""
+    if not isinstance(item, dict) or set(item) != DELIVERY_FIELDS:
+        return False
+    sealed = item.get("sealed")
+    return (
+        item.get("instance_id") == sender
+        and isinstance(item.get("to"), str)
+        and isinstance(item.get("key_suite"), str)
+        and is_wire_int(item.get("key_gen"))
+        and is_wire_int(item.get("key_step"))
+        and isinstance(sealed, dict)
+        and set(sealed) == {"kem_suite", "eph_pk", "ciphertext"}
+        and all(isinstance(v, str) for v in sealed.values())
+        and len(str(sealed.get("ciphertext"))) <= _MAX_SEALED_KEY_CHARS
+    )
+
+
+class GfsMomentSuitesView(GfsBaseView):
+    """``POST /gfs/moments/suites`` — a household declares what it can open
+    (v_62) for every follow it holds here. Signed by that household:
+    ``{instance_id, moment_suites: {kem, seal}}``."""
+
+    async def post(self) -> web.Response:
+        result = await _rtc_authenticate(self, max_bytes=4096)
+        if isinstance(result, web.Response):
+            return result
+        body, sender = result
+        suites = _suites_json(body.get("moment_suites"))
+        if isinstance(suites, web.Response):
+            return suites
+        if suites is None:
+            return web.json_response({"error": "moment_suites_invalid"}, status=422)
+        registry = self.svc(K.gfs_moment_public_registry_key)
+        changed = await registry.declare_suites(
+            follower_instance_id=sender, moment_suites=suites
+        )
+        return web.json_response({"updated": changed})
+
+
+class GfsMomentKeysView(GfsBaseView):
+    """``POST /gfs/moments/keys`` — deliver sealed moment keys (v_62).
+
+    Signed by the author's household. Each item is a delivery the
+    follower verifies itself (the author's signature) and opens with its
+    own key-wrap key; this server only routes it to the ``to`` household,
+    and only while that household follows the author."""
+
+    async def post(self) -> web.Response:
+        result = await _rtc_authenticate(self, max_bytes=_MAX_KEYS_BYTES)
+        if isinstance(result, web.Response):
+            return result
+        body, sender = result
+        deliveries = body.get("deliveries")
+        if (
+            not isinstance(deliveries, list)
+            or not deliveries
+            or len(deliveries) > MAX_KEY_DELIVERIES
+            or not all(_delivery_ok(d, sender) for d in deliveries)
+        ):
+            return web.json_response({"error": "invalid_deliveries"}, status=422)
+        registry = self.svc(K.gfs_moment_public_registry_key)
+        delivered = await registry.deliver_keys(
+            sender_instance_id=sender, deliveries=deliveries
+        )
+        return web.json_response({"delivered": delivered})
+
+
+class GfsMomentKeyRequestView(GfsBaseView):
+    """``POST /gfs/moments/users/{user_id}/key_request`` — a follower
+    household asks for the author's current moment key (v_62).
+
+    Signed by the follower household. Always ``202``: whether the author
+    is known, followed, online or throttled is not told back."""
+
+    async def post(self) -> web.Response:
+        result = await _rtc_authenticate(self, max_bytes=4096)
+        if isinstance(result, web.Response):
+            return result
+        body, sender = result
+        want = body.get("want_gen")
+        registry = self.svc(K.gfs_moment_public_registry_key)
+        await registry.request_key(
+            follower_instance_id=sender,
+            followed_user_id=self.match("user_id"),
+            want_gen=want if is_wire_int(want) else 0,
+        )
+        return web.json_response({"queued": True}, status=202)
+
+
+class GfsMomentFollowerStatsView(GfsBaseView):
+    """``POST /gfs/moments/users/{user_id}/follower_stats`` — counts for the
+    author's own sharing settings (v_62): followers, follower households,
+    and the households that can't open encrypted moments (sent none).
+
+    Signed by the author's household; any other signer gets 403."""
+
+    async def post(self) -> web.Response:
+        result = await _rtc_authenticate(self, max_bytes=4096)
+        if isinstance(result, web.Response):
+            return result
+        _body, sender = result
+        registry = self.svc(K.gfs_moment_public_registry_key)
+        user_id = self.match("user_id")
+        if not await registry.is_author_household(user_id, sender):
+            return web.json_response({"error": "instance_mismatch"}, status=403)
+        return web.json_response(await registry.follower_stats(user_id))
 
 
 # ─── Public discovery ──────────────────────────────────────────────────────

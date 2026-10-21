@@ -10,21 +10,20 @@ adds an opt-in *public* layer brokered by a GFS:
   then their users **follow** specific authors
   (:class:`MomentPublicFollow`).
 * When a registered author posts, the moment fans out (a) via the
-  existing household federation AND (b) as a signed
-  :class:`MomentPublicEnvelope` over the persistent SH↔GFS WebSocket.
-  The GFS pushes the same envelope to every follower instance.
+  existing household federation AND (b) as a signed envelope ENCRYPTED
+  under the author's moment content key (:class:`MomentPublicKey`,
+  :mod:`socialhome.federation.moment_public_seal`). The GFS pushes the
+  ciphertext to every follower instance; it never reads a moment.
 * Recipients verify the envelope's Ed25519 signature against the
-  ``followed_instance_pk`` they cached at follow-time, persist the
-  moment with ``received_via='gfs'``, and — critically — **do not
-  re-relay** it to their own paired peers.
-
-The encryption-first rule (§25.8.21) is preserved by the GFS holding
-plaintext only in memory during fan-out (never on disk) and by the
-recipient's signature check ensuring authorship can't be forged.
+  ``followed_instance_pk`` they cached at follow-time, open it with the
+  key the author's household sealed to them, persist the moment with
+  ``received_via='gfs'``, and — critically — **do not re-relay** it to
+  their own paired peers.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from urllib.parse import quote
@@ -90,6 +89,27 @@ def public_picture_digest(value: object) -> str | None:
     return clean_picture_hash(value)
 
 
+def public_profile_rev(
+    *,
+    display_name: str | None,
+    username: str | None,
+    bio: str | None,
+    picture_digest: str | None,
+) -> str:
+    """A short digest of an author's public profile — every public moment
+    names it, so a follower can tell whether the profile it holds is
+    current without the profile riding every moment."""
+    canonical = "\x1f".join(
+        v or "" for v in (display_name, username, bio, picture_digest)
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def is_path_safe_id(value: object) -> bool:
+    """Whether *value* may go verbatim into a URL path as one segment."""
+    return isinstance(value, str) and _PATH_SAFE_ID.match(value) is not None
+
+
 def gfs_picture_proxy_url(gfs_id: str, user_id: str, digest: str | None) -> str | None:
     """Our own proxy URL for a GFS-mirrored public picture, unsigned.
 
@@ -100,7 +120,7 @@ def gfs_picture_proxy_url(gfs_id: str, user_id: str, digest: str | None) -> str 
     """
     if not (isinstance(digest, str) and digest):
         return None
-    if not (_PATH_SAFE_ID.match(gfs_id) and _PATH_SAFE_ID.match(user_id)):
+    if not (is_path_safe_id(gfs_id) and is_path_safe_id(user_id)):
         return None
     return (
         f"api/gfs/{gfs_id}/moments/users/{user_id}/picture?v={quote(digest, safe='')}"
@@ -157,27 +177,22 @@ class MomentPublicFollow:
 
 
 @dataclass(slots=True, frozen=True)
-class MomentPublicEnvelope:
-    """Signed wire envelope for a public-moment fan-out frame.
+class MomentPublicKey:
+    """One moment key generation (``moment_public_keys`` row).
 
-    Sent by the author's instance over its persistent WS to each GFS
-    on which the author is registered, and forwarded verbatim by the
-    GFS to every follower instance. The recipient validates
-    ``signature`` over the canonical-JSON of every other field using
-    the cached ``followed_instance_pk``.
+    ``key_sealed`` is the KEK-encrypted step key at ``key_step`` of
+    generation ``key_gen`` — services open it. ``is_own`` keys were minted
+    by this household for a local author; the others were delivered by a
+    followed author's household.
     """
 
-    moment_id: str
     author_user_id: str
-    author_username: str
-    author_display_name: str
-    content: str
-    media_url: str | None
-    media_type: str | None
-    duration_ms: int | None
-    parent_moment_id: str | None
-    origin_instance_id: str
-    created_at: str
-    expires_at: str
-    #: Hex-encoded Ed25519 over the canonical-JSON of all other fields.
-    signature: str
+    key_gen: int
+    key_step: int
+    is_own: bool
+    key_sealed: str
+    created_at: str = ""
+    #: Own keys only: a follower household left (or was blocked, or a
+    #: registration ended) since this generation was minted — the next
+    #: publish after :data:`ROTATE_AT_MOST_EVERY_S` starts a new one.
+    rotate_due: bool = False

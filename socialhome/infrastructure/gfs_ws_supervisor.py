@@ -69,7 +69,7 @@ class GfsWebSocketSupervisor:
         on_highlight_signal: Callable[[dict], Awaitable[None]] | None = None,
         on_moment_signal: Callable[..., Awaitable[None]] | None = None,
         on_moment_public: Callable[..., Awaitable[None]] | None = None,
-        on_follow_changed: Callable[[dict], Awaitable[None]] | None = None,
+        on_follow_changed: Callable[..., Awaitable[object]] | None = None,
         on_new_subscriber: Callable[..., Awaitable[None]] | None = None,
         on_envelope: Callable[..., Awaitable[None]] | None = None,
         on_connected: Callable[[str], Awaitable[None]] | None = None,
@@ -126,11 +126,15 @@ class GfsWebSocketSupervisor:
 
     def attach_follow_changed_handler(
         self,
-        handler: Callable[[dict], Awaitable[None]],
+        handler: Callable[..., Awaitable[object]],
     ) -> None:
+        """Late-bound — the author-side public-moment notices
+        (``follow_changed``, ``moment_key_request``), each told the
+        connection it came on (``gfs_id``): the sealed key goes back
+        through it."""
         self._on_follow_changed = handler
-        for client in list(self._clients.values()):
-            client.attach_follow_changed_handler(handler)
+        for conn_id, client in list(self._clients.items()):
+            client.attach_follow_changed_handler(_bind_gfs_id(handler, conn_id))
 
     def attach_new_subscriber_handler(
         self,
@@ -288,7 +292,13 @@ class GfsWebSocketSupervisor:
                 else None
             ),
             on_moment_public=wrapped_moment_public,
-            on_follow_changed=self._on_follow_changed,
+            # The follower lives on THIS connection: the sealed moment key
+            # (v_62) goes back through it.
+            on_follow_changed=(
+                _bind_gfs_id(self._on_follow_changed, conn.id)
+                if self._on_follow_changed is not None
+                else None
+            ),
             # The subscriber lives on THIS connection: a targeted handoff and
             # the profiles bundle (v_61) go back through it.
             on_new_subscriber=(
@@ -366,7 +376,7 @@ def _bind_gfs_url(
 
 
 def _bind_gfs_id(
-    handler: Callable[..., Awaitable[None]],
+    handler: Callable[..., Awaitable[object]],
     gfs_id: str,
 ) -> Callable[[dict], Awaitable[None]]:
     """Return a per-frame wrapper that injects ``gfs_id`` into the call.

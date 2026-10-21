@@ -346,6 +346,7 @@ class GfsConnectionService:
         "_caps_warned",
         "_change_lock",
         "_cover_repo",
+        "_encrypted_moments",
         "_envelope_relay",
         "_http_client",
         "_icon_repo",
@@ -460,6 +461,10 @@ class GfsConnectionService:
         # ``sealed`` frames, the ``#k=`` link secret). An older page can't,
         # so no public highlight link is minted there — it would be dead.
         self._sealed_highlight_stream: dict[str, bool] = {}
+        # …and for ``encrypted_moments`` (v_62): the GFS refuses plaintext
+        # public moments and routes sealed moment keys. Nothing of a public
+        # moment is sent to a server that has not proved it.
+        self._encrypted_moments: dict[str, bool] = {}
         # Same again for ``member_publish_trusted`` (v_49): whether the GFS
         # carries the identified ``POST /gfs/member-publish`` and the
         # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
@@ -676,6 +681,7 @@ class GfsConnectionService:
             self._place_pin,
             self._targeted_publish,
             self._sealed_highlight_stream,
+            self._encrypted_moments,
             self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
@@ -3100,6 +3106,18 @@ class GfsConnectionService:
             elif outcome.kind == "transient":
                 self._queue_publish_retry(conn, item, outcome.retry_after_s)
         return delivered
+
+    async def encrypted_moments_supported(self, gfs_id: str) -> bool:
+        """Whether the GFS *gfs_id* proved ``encrypted_moments`` (v_62)
+        under a valid signature: it refuses plaintext public moments and
+        routes sealed moment keys. A household sends public moments — and
+        their keys — only to such a server; to any other, nothing."""
+        conn = await self._repo.get(gfs_id)
+        if conn is None or conn.status != "active" or not conn.inbox_url:
+            return False
+        return await self._signed_capability_supported(
+            conn, "encrypted_moments", self._encrypted_moments
+        )
 
     async def publish_space_event_to(
         self,

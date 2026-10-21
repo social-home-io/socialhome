@@ -37,6 +37,14 @@ class _StubService:
         self.follow_raises: Exception | None = None
         self.directory_raises: Exception | None = None
         self.picture_raises: Exception | None = None
+        #: GFS ids that proved ``encrypted_moments`` (v_62).
+        self.encrypted: set[str] = {"g1"}
+
+    async def encrypted_delivery(self, gfs_id):
+        return gfs_id in self.encrypted
+
+    async def follower_households_unable(self, *, user_id, gfs_id):
+        return 2
 
     async def list_registrations(self, user_id):
         return [r for r in self.regs if r.user_id == user_id]
@@ -121,6 +129,7 @@ async def test_register_returns_201(client, stub):
     assert r.status == 201
     body = await r.json()
     assert body["gfs_id"] == "g1" and body["default_share"] is True
+    assert body["delivery"] == "encrypted"
 
 
 async def test_register_missing_gfs_id_returns_400(client, stub):
@@ -150,6 +159,20 @@ async def test_list_registrations_returns_caller_only(client, stub):
     assert r.status == 200
     rows = await r.json()
     assert len(rows) == 1 and rows[0]["gfs_id"] == "g1"
+    assert rows[0]["delivery"] == "encrypted"
+    assert rows[0]["followers_unable"] == 2
+
+
+async def test_a_server_without_encrypted_moments_reads_unsupported(client, stub):
+    """v_62: the author is told a server gets no public moments until it
+    proves ``encrypted_moments`` — never a silent plaintext fallback."""
+    await stub.register(user_id=client._uid, gfs_id="g-old")
+    r = await client.get(
+        "/api/moments/public/registrations", headers=_auth(client._tok)
+    )
+    [row] = await r.json()
+    assert row["delivery"] == "unsupported_server"
+    assert row["followers_unable"] is None
 
 
 async def test_deregister_returns_204(client, stub):

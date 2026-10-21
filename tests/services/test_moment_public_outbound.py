@@ -1,17 +1,26 @@
 """Tests for :class:`MomentPublicOutbound`.
 
 Verifies the bus subscriber path: a local public moment fires the
-signed POST per registered GFS, while non-public / GFS-received /
-remote-author events are skipped.
+signed, encrypted POST per registered GFS that proved
+``encrypted_moments`` (v_62), while non-public / GFS-received /
+remote-author events are skipped — and an unproven GFS gets nothing.
 """
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
-from socialhome.domain.events import MomentCreated, MomentDeleted
+from socialhome.domain.events import (
+    MomentCreated,
+    MomentDeleted,
+    UserDeprovisioned,
+    UserProvisioned,
+)
 from socialhome.domain.moment import Moment
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.moment_public_seal import ENVELOPE_FIELDS, open_body
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.moment_public_repo import (
     SqliteMomentPublicRegistrationRepo,
@@ -46,6 +55,34 @@ class _StubSession:
         return _StubResp(self.status)
 
 
+KEY = os.urandom(32)
+GEN = 1_700_000_000
+
+
+class _Keys:
+    """The author's moment content key (``MomentPublicKeyOutbound``)."""
+
+    async def publish_key(self, author_user_id: str) -> tuple[int, int, bytes]:
+        """What a publish seals under (rotating first when one is due)."""
+        return GEN, 3, KEY
+
+
+class _Gfs:
+    """Which connections proved ``encrypted_moments``."""
+
+    def __init__(self, proven: set[str]) -> None:
+        self.proven = proven
+
+    async def encrypted_moments_supported(self, gfs_id: str) -> bool:
+        return gfs_id in self.proven
+
+
+def _opened(envelope: dict) -> dict:
+    """The sealed body of an envelope, opened with the author's key."""
+    assert set(envelope) == ENVELOPE_FIELDS
+    return open_body(step_key=KEY, envelope=envelope)
+
+
 @pytest.fixture
 async def outbound_setup(db):
     await db.enqueue(
@@ -71,6 +108,8 @@ async def outbound_setup(db):
         registration_repo=reg_repo,
         user_repo=user_repo,
         gfs_repo=gfs_repo,
+        key_outbound=_Keys(),
+        gfs_service=_Gfs({"g1", "g2"}),
     )
     sess = _StubSession()
     sub.attach_session(sess)
@@ -82,6 +121,7 @@ async def outbound_setup(db):
         "regs": reg_repo,
         "session": sess,
         "sub": sub,
+        "gfs": sub._gfs_service,
     }
 
 
@@ -135,10 +175,57 @@ async def test_public_local_moment_fans_to_each_registered_gfs(outbound_setup):
     assert len(s["session"].posts) == 2
     urls = {p[0] for p in s["session"].posts}
     assert any(u.endswith("/gfs/moments/publish") for u in urls)
-    body = s["session"].posts[0][1]
-    assert body["moment_id"] == "m-1"
+    envelope = s["session"].posts[0][1]
+    assert envelope["author_user_id"] == "u1"
+    assert (envelope["moment_id"], envelope["key_gen"], envelope["key_step"]) == (
+        "m-1",
+        GEN,
+        3,
+    )
+    assert "signature" in envelope
+    # Nothing of the moment's content in the clear — routing fields only.
+    assert "hello" not in str(envelope) and "Alice" not in str(envelope)
+    body = _opened(envelope)
+    assert (body["op"], body["content"]) == ("create", "hello")
     assert body["author_user_id"] == "u1"
-    assert "signature" in body
+    # ONE ciphertext: both servers get the same bytes.
+    assert s["session"].posts[1][1] == envelope
+
+
+async def test_the_profile_rides_only_when_it_changed(outbound_setup, db):
+    """Every moment names the profile_rev; the profile itself rides the
+    first moment and then only when it changed."""
+    s = outbound_setup
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    for mid in ("m-1", "m-2"):
+        await s["moments"].save(_moment(moment_id=mid))
+        await s["bus"].publish(_created_event(mid))
+    await db.enqueue("UPDATE users SET bio='Beekeeper.' WHERE user_id='u1'")
+    await s["moments"].save(_moment(moment_id="m-3"))
+    await s["bus"].publish(_created_event("m-3"))
+    first, second, third = [_opened(b) for _u, b in s["session"].posts]
+    assert first["profile"]["display_name"] == "Alice"
+    assert "profile" not in second
+    assert first["profile_rev"] == second["profile_rev"]
+    assert third["profile"]["bio"] == "Beekeeper."
+    assert third["profile_rev"] != second["profile_rev"]
+
+
+async def test_a_gfs_without_encrypted_moments_gets_nothing(outbound_setup, caplog):
+    """No plaintext fallback: an unproven server is sent no public moment,
+    with one WARNING per server."""
+    s = outbound_setup
+    s["gfs"].proven = {"g1"}
+    await s["moments"].save(_moment())
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["regs"].upsert(user_id="u1", gfs_id="g2")
+    await s["bus"].publish(_created_event())
+    await s["bus"].publish(_created_event())
+    assert {u for u, _ in s["session"].posts} == {
+        "https://gfs1.example/gfs/moments/publish"
+    }
+    warned = [r for r in caplog.records if "encrypted_moments" in r.getMessage()]
+    assert len(warned) == 1
 
 
 async def test_non_public_moment_does_not_fan(outbound_setup):
@@ -212,6 +299,13 @@ async def test_delete_event_fans_tombstone_to_each_registered_gfs(outbound_setup
     await s["bus"].publish(delete)
     assert len(s["session"].posts) == 2
     assert all(p[0].endswith("/gfs/moments/delete") for p in s["session"].posts)
+    envelope = s["session"].posts[0][1]
+    assert envelope["moment_id"] == "m-1"
+    assert _opened(envelope) == {
+        "op": "delete",
+        "author_user_id": "u1",
+        "origin_instance_id": "inst-self",
+    }
 
 
 async def test_outbound_used_before_attach_skips_silently(db):
@@ -223,6 +317,8 @@ async def test_outbound_used_before_attach_skips_silently(db):
         registration_repo=SqliteMomentPublicRegistrationRepo(db),
         user_repo=SqliteUserRepo(db),
         gfs_repo=SqliteGfsConnectionRepo(db),
+        key_outbound=_Keys(),
+        gfs_service=_Gfs({"g1"}),
     )
     sub.wire()
     # No session attached — should be a no-op even if the moment exists.
@@ -311,13 +407,14 @@ async def test_envelope_carries_the_directory_bio_and_mirrored_picture(
     )
     await s["bus"].publish(_created_event())
     bodies = {
-        url.split("//")[1].split(".")[0]: body for url, body in s["session"].posts
+        url.split("//")[1].split(".")[0]: _opened(body)
+        for url, body in s["session"].posts
     }
-    assert bodies["gfs1"]["author_bio"] == "Beekeeper."
-    assert bodies["gfs1"]["author_picture_digest"] == "0123456789abcdef"
+    assert bodies["gfs1"]["profile"]["bio"] == "Beekeeper."
+    assert bodies["gfs1"]["profile"]["picture_digest"] == "0123456789abcdef"
     # g2 mirrors an older picture: no digest, so no stale picture shows.
-    assert bodies["gfs2"]["author_picture_digest"] is None
-    assert bodies["gfs1"]["author_display_name"] == "Alice"
+    assert bodies["gfs2"]["profile"]["picture_digest"] is None
+    assert bodies["gfs1"]["profile"]["display_name"] == "Alice"
 
 
 async def test_a_bio_longer_than_a_directory_holds_is_not_sent(outbound_setup, db):
@@ -326,9 +423,10 @@ async def test_a_bio_longer_than_a_directory_holds_is_not_sent(outbound_setup, d
     await s["moments"].save(_moment())
     await s["regs"].upsert(user_id="u1", gfs_id="g1")
     await s["bus"].publish(_created_event())
-    [(_url, body)] = s["session"].posts
-    assert body["author_bio"] is None
-    assert body["author_picture_digest"] is None
+    [(_url, envelope)] = s["session"].posts
+    body = _opened(envelope)
+    assert body["profile"]["bio"] is None
+    assert body["profile"]["picture_digest"] is None
 
 
 async def test_a_user_added_after_the_first_moment_still_publishes(outbound_setup, db):
@@ -343,6 +441,10 @@ async def test_a_user_added_after_the_first_moment_still_publishes(outbound_setu
     await db.enqueue(
         "INSERT INTO users(user_id, username, display_name, state) "
         "VALUES('u2','noor','Noor','active')"
+    )
+    # Provisioning announces the new member (UserService does).
+    await s["bus"].publish(
+        UserProvisioned(user_id="u2", username="noor", is_admin=False)
     )
     await s["moments"].save(
         Moment(
@@ -376,3 +478,28 @@ async def test_a_user_added_after_the_first_moment_still_publishes(outbound_setu
     )
     assert len(s["session"].posts) == 2
     assert s["session"].posts[1][1]["author_user_id"] == "u2"
+
+
+async def test_a_remote_authors_moment_reads_the_users_once_a_minute(outbound_setup):
+    """Finding 10: a non-local author's moment no longer re-reads every
+    local user each time — at most once a minute, and provisioning keeps
+    the set current."""
+    s = outbound_setup
+    calls = []
+    real = s["sub"]._users.list_all
+
+    async def counting():
+        calls.append(1)
+        return await real()
+
+    s["sub"]._users.list_all = counting  # type: ignore[method-assign]
+    for _ in range(5):
+        assert not await s["sub"]._is_local("u-remote")
+    assert len(calls) == 1
+    await s["bus"].publish(
+        UserProvisioned(user_id="u-new", username="n", is_admin=False)
+    )
+    assert await s["sub"]._is_local("u-new")
+    await s["bus"].publish(UserDeprovisioned(user_id="u-new", username="n"))
+    assert not await s["sub"]._is_local("u-new")
+    assert len(calls) == 1

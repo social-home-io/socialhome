@@ -679,3 +679,57 @@ async def test_supervisor_tells_new_subscriber_which_connection(http_session):
             assert seen == [("a", "g1"), ("b", "g2"), ("c", "g2")]
         finally:
             await supervisor.stop()
+
+
+async def test_supervisor_tells_follow_notices_which_connection(http_session):
+    """v_62: a ``follow_changed`` / ``moment_key_request`` names a follower
+    on the connection it arrived on — the sealed moment key goes back there.
+    Bound at start and on a late attach alike."""
+    repo = _FakeRepo(
+        [_make_conn("g1", "http://gfs1.test"), _make_conn("g2", "http://gfs2.test")]
+    )
+    seen: list[tuple[str, str]] = []
+
+    async def on_follow(frame: dict, *, gfs_id: str | None = None) -> None:
+        seen.append((frame["type"], gfs_id or ""))
+
+    captured: dict[str, object] = {}
+
+    class _StubClient:
+        def __init__(self, *, gfs_url, on_follow_changed=None, **_kwargs):
+            self.url = gfs_url
+            captured[gfs_url] = on_follow_changed
+
+        def attach_follow_changed_handler(self, handler):
+            captured[self.url] = handler
+
+        def is_alive(self) -> bool:
+            return True
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return None
+
+    with patch(
+        "socialhome.infrastructure.gfs_ws_supervisor.GfsWebSocketClient",
+        _StubClient,
+    ):
+        supervisor = GfsWebSocketSupervisor(
+            repo=repo,
+            instance_id="sh-1",
+            signing_key=b"\x00" * 32,
+            session_factory=lambda: http_session,
+            on_relay=AsyncMock(),
+            on_follow_changed=on_follow,
+            reconcile_interval_seconds=0.05,
+        )
+        await supervisor.start()
+        try:
+            await captured["http://gfs1.test"]({"type": "follow_changed"})
+            supervisor.attach_follow_changed_handler(on_follow)
+            await captured["http://gfs2.test"]({"type": "moment_key_request"})
+            assert seen == [("follow_changed", "g1"), ("moment_key_request", "g2")]
+        finally:
+            await supervisor.stop()

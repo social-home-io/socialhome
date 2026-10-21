@@ -945,7 +945,23 @@ from __future__ import annotations
 #:   author's next post, as with v_60. Not space-scoped; labelled "Names for
 #:   new followers right away" — the version a household's followers code
 #:   reads bundles at.
-OURS: int = 61
+#: * **v_62** (2026-10-20) — **public moments are encrypted from the GFS.**
+#:   A public moment's text, media reference, id and author profile are
+#:   sealed under the author's per-author, per-epoch MOMENT CONTENT KEY
+#:   (AES-256-GCM, ``seal_suite: "aesgcm-256"``, author-signed envelope); the
+#:   GFS sees only ``{author_user_id, instance_id, key_epoch, seal_suite,
+#:   ciphertext, signature}`` and refuses anything else. The author's
+#:   household seals the key to each follower household's key-wrap key
+#:   (``kem_suite``-tagged) and the GFS routes it to that household alone
+#:   (``follow_changed`` names a new follower's keys; ``moment_key_request``
+#:   asks again; ``POST /gfs/moments/keys`` delivers), gated on the GFS's
+#:   signed ``encrypted_moments`` capability. **Fallback**: none in the
+#:   clear — an older GFS gets no public moments at all (the author's
+#:   sharing settings say so), and an older follower household can't open
+#:   them. No household-to-household event, so nothing is
+#:   ``peer_supports``-gated; labelled "Public moments encrypted from the
+#:   GFS".
+OURS: int = 62
 
 
 class FederationCapability:
@@ -1443,6 +1459,12 @@ class FederationCapability:
     #: through the GFS); it names the version that reads bundles.
     MIN_FOR_FOLLOWER_PROFILE_BUNDLE = 61
 
+    #: v_62 — public moments encrypted from the GFS under the author's
+    #: moment content key, sealed to each follower household. Nothing is
+    #: gated on it between households (author → GFS → follower); it names
+    #: the version that opens encrypted public moments.
+    MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS = 62
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1672,6 +1694,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE,
         "Names for new followers right away",
     ),
+    (
+        FederationCapability.MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS,
+        "Public moments encrypted from the GFS",
+    ),
 ]
 
 
@@ -1744,6 +1770,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA: "local_communities",
     FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE: "follower_author_names",
     FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE: "follower_names_on_join",
+    FederationCapability.MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS: "encrypted_public_moments",
 }
 
 

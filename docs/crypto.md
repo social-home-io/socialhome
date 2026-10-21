@@ -66,6 +66,7 @@ addresses. See the last section of this document.
 | Key agreement (ECIES, browser) | P-256 ECDH + HKDF-SHA256 + AES-256-GCM | 256-bit | Who shared a public highlight, sealed to the viewer's ephemeral WebCrypto key (suite `p256-hkdf-sha256-aes256gcm`, info `sh-highlight-public-profile:v1`, AAD the highlight id). P-256 because X25519 is not in every supported browser's WebCrypto yet; the PQ lever is the same as for every ECDH here (a hybrid suite on this tag) | `socialhome/services/highlight_public_profile.py`, `client/gfs/sealed_profile.ts` |
 | Key agreement (browser, link-bound) | P-256 ECDH + link secret → HKDF-SHA256 → AES-256-GCM | 256-bit | The whole public highlight stream, sealed to the viewer's ephemeral WebCrypto key and the per-link secret in the URL fragment (suite `p256+link-hkdf-sha256-aes256gcm`, info `sh-highlight-public-stream:v1`, salt the link secret, nonce a 96-bit frame counter, AAD the highlight id). The link secret is `HKDF-SHA256(identity seed, info "sh-highlight-link:v1" ‖ highlight ‖ token)` — never sent to a server, so the GFS that minted the token can't open the stream | `socialhome/services/highlight_public_seal.py`, `client/gfs/stream_seal.ts` |
 | Symmetric AEAD | AES-256-GCM | 256-bit | Federation payloads, space content, KEK wrap | `cryptography.hazmat.primitives.ciphers.aead.AESGCM` |
+| Symmetric AEAD (public moments, v_62) | AES-256-GCM, 96-bit random nonce; HKDF-SHA256 ratchet + item keys | 256-bit | A public moment sealed before it reaches a GFS under its **item key** `HKDF(step key, "sh-moment-item:v1|" + moment_id)`; the step key ratchets daily `K(g, s+1) = HKDF(K(g, s), "sh-moment-ratchet:v1")` from a random per-author generation root (holders keep only the newest step). Suite `seal_suite: "aesgcm-256"`, AAD `socialhome/moment-public/v2\|suite\|author\|key_gen\|key_step\|moment_id`; the author's household signs the envelope (ciphertext + key id + moment id). The step key reaches each follower household through the static key-wrap seal (`kem_suite: "x25519"`) with `key_suite: "aesgcm-256"` (the space content-key tag). Unknown suites refused (`UnsupportedMomentSealSuite`) | `socialhome/moment_public_seal.py`, `socialhome/services/moment_public_key_outbound.py`, `socialhome/services/moment_public_key_inbound.py` |
 | KDF | HKDF-SHA256 | 32-byte output | Session-key derivation, KEK derivation | `cryptography.hazmat.primitives.kdf.hkdf` |
 | Hash | SHA-256 | 256-bit | Instance/space/user ID derivation, token hashing, space-page version hashes (`sha256:` suite-prefixed over title + content + cover — they recognise versions, never order them; receivers reject any other prefix, v_48) | `hashlib.sha256`, `socialhome/domain/page_version.py` |
 | MAC | HMAC-SHA256 | 256-bit | Relay path selection (`keyed_hash`) | `socialhome/crypto.py` |
@@ -335,6 +336,24 @@ key to an unpaired GFS subscriber, GFS-blind: the seed-holder seals the
 `{space_content_key:{…}}` meta to the subscriber's key-wrap pubkey and
 authority-signs the sealed envelope so the content-blind GFS relays it
 without learning the key.
+
+The same seal carries a **public-moment step key** (v_62,
+`services/moment_public_key_outbound.py` → `moment_public_key_inbound.py`):
+the author's household seals
+`{author_user_id, key_gen, key_step, to, key_suite: "aesgcm-256", key}` to
+one follower household's key-wrap key — only after `verify_keywrap_binding`
+on the GFS-served key, and only to a household that declared (signed, in its
+follow) the KEM and seal suites — and signs the delivery
+`{author_user_id, instance_id, to, key_gen, key_step, key_suite, sealed,
+signature}` with its identity key. The follower checks the signature against
+the author key its follow pinned and that the sealed plaintext repeats the
+delivery's routing fields, so a GFS can neither read a key nor plant or
+re-address one; it takes a key only when it moves forward. Each public moment
+is sealed ONCE under its item key, the envelope `{author_user_id,
+instance_id, moment_id, key_gen, key_step, seal_suite, ciphertext,
+signature}` signed the same way; the GFS refuses any other shape and keeps
+only the latest sealed key per (author, follower household), which it can't
+open.
 
 **Moment origin signature (v_35)** (`federation/moment_origin.py`) — a
 moment travels up to three hops, and each relay re-sends it under its own
@@ -1045,6 +1064,7 @@ hex>$<hash hex>`. Parameters can be bumped without a schema change.
 | `remote_instances` | `remote_pq_identity_pk` | Peer ML-DSA-65 public key (hex) | no | — |
 | `remote_instances` | `sig_suite` | Negotiated per-peer suite | no | — |
 | `space_keys` | `content_key_hex` | 32-byte space content key | KEK AES-256-GCM | `space_id` |
+| `moment_public_keys` | `key_sealed` | 32-byte public-moment step key at `key_step` of generation `key_gen` (own or delivered, v_62), advanced in place | KEK AES-256-GCM | `moment-public-key\|own\|delivered\|author\|key_gen` |
 | `pending_pairings` | `own_dh_sk` | X25519 ephemeral secret | KEK AES-256-GCM | — |
 | `platform_users` | `password_hash` | `scrypt$N$r$p$salt$hash` | self-contained (params + salt embedded) | — |
 | `api_tokens` | `token_hash` | `sha256(token)` | no | — |

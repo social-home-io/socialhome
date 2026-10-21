@@ -37,6 +37,7 @@ from .domain import (
     GfsHighlightToken,
     GfsInviteToken,
     GfsMomentFollow,
+    GfsMomentKeyMail,
     GfsQueuedEnvelope,
     GfsSpaceEpoch,
     GfsSpaceStrictState,
@@ -1944,6 +1945,16 @@ class AbstractGfsMomentFollowRepo(Protocol):
     async def followers_of(self, followed_user_id: str) -> list[GfsMomentFollow]: ...
     async def following_of(self, follower_user_id: str) -> list[GfsMomentFollow]: ...
     async def follower_count(self, followed_user_id: str) -> int: ...
+    async def follower_user_ids_at(
+        self, followed_user_id: str, follower_instance_id: str, *, limit: int = 50
+    ) -> list[str]: ...
+    async def suites_at(
+        self, followed_user_id: str, follower_instance_id: str
+    ) -> str | None: ...
+    async def household_counts(self, followed_user_id: str) -> tuple[int, int]: ...
+    async def set_household_suites(
+        self, follower_instance_id: str, moment_suites: str
+    ) -> int: ...
 
 
 class SqliteGfsMomentFollowRepo:
@@ -1953,15 +1964,17 @@ class SqliteGfsMomentFollowRepo:
     async def upsert(self, follow: GfsMomentFollow) -> None:
         await self._db.enqueue(
             "INSERT INTO gfs_moment_follows("
-            "follower_user_id, follower_instance_id, followed_user_id, created_at) "
-            "VALUES(?,?,?,?) "
+            "follower_user_id, follower_instance_id, followed_user_id, created_at,"
+            " moment_suites) VALUES(?,?,?,?,?) "
             "ON CONFLICT(follower_user_id, followed_user_id) DO UPDATE SET "
-            "follower_instance_id=excluded.follower_instance_id",
+            "follower_instance_id=excluded.follower_instance_id, "
+            "moment_suites=excluded.moment_suites",
             (
                 follow.follower_user_id,
                 follow.follower_instance_id,
                 follow.followed_user_id,
                 follow.created_at,
+                follow.moment_suites,
             ),
         )
 
@@ -1978,7 +1991,8 @@ class SqliteGfsMomentFollowRepo:
 
     async def followers_of(self, followed_user_id: str) -> list[GfsMomentFollow]:
         rows = await self._db.fetchall(
-            "SELECT follower_user_id, follower_instance_id, followed_user_id, created_at "
+            "SELECT follower_user_id, follower_instance_id, followed_user_id, "
+            "created_at, moment_suites "
             "FROM gfs_moment_follows WHERE followed_user_id=? "
             "ORDER BY created_at DESC",
             (followed_user_id,),
@@ -1988,7 +2002,8 @@ class SqliteGfsMomentFollowRepo:
 
     async def following_of(self, follower_user_id: str) -> list[GfsMomentFollow]:
         rows = await self._db.fetchall(
-            "SELECT follower_user_id, follower_instance_id, followed_user_id, created_at "
+            "SELECT follower_user_id, follower_instance_id, followed_user_id, "
+            "created_at, moment_suites "
             "FROM gfs_moment_follows WHERE follower_user_id=? "
             "ORDER BY created_at DESC",
             (follower_user_id,),
@@ -2004,6 +2019,61 @@ class SqliteGfsMomentFollowRepo:
         d = _dict(row) or {}
         return int(d.get("c") or 0)
 
+    async def follower_user_ids_at(
+        self, followed_user_id: str, follower_instance_id: str, *, limit: int = 50
+    ) -> list[str]:
+        """The users of one household who follow *followed_user_id* (at
+        most *limit*) — empty when that household follows them not at all."""
+        rows = await self._db.fetchall(
+            "SELECT follower_user_id FROM gfs_moment_follows "
+            "WHERE followed_user_id=? AND follower_instance_id=? "
+            "ORDER BY follower_user_id LIMIT ?",
+            (followed_user_id, follower_instance_id, limit),
+        )
+        return [str(r["follower_user_id"]) for r in rows]
+
+    async def suites_at(
+        self, followed_user_id: str, follower_instance_id: str
+    ) -> str | None:
+        """The suites the household declared on its newest follow of the
+        author (``None``: none declared, or no follow)."""
+        row = await self._db.fetchone(
+            "SELECT moment_suites FROM gfs_moment_follows "
+            "WHERE followed_user_id=? AND follower_instance_id=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (followed_user_id, follower_instance_id),
+        )
+        return row["moment_suites"] if row is not None else None
+
+    async def set_household_suites(
+        self, follower_instance_id: str, moment_suites: str
+    ) -> int:
+        """Record what one household can open on every follow it holds here;
+        returns how many follows changed."""
+
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "UPDATE gfs_moment_follows SET moment_suites=? "
+                "WHERE follower_instance_id=? AND moment_suites IS NOT ?",
+                (moment_suites, follower_instance_id, moment_suites),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def household_counts(self, followed_user_id: str) -> tuple[int, int]:
+        """``(follower households, of them with no suites declared)``."""
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS households, "
+            "SUM(CASE WHEN suites IS NULL THEN 1 ELSE 0 END) AS unable FROM ("
+            "SELECT follower_instance_id, MAX(moment_suites) AS suites "
+            "FROM gfs_moment_follows WHERE followed_user_id=? "
+            "GROUP BY follower_instance_id)",
+            (followed_user_id,),
+        )
+        d = _dict(row) or {}
+        return int(d.get("households") or 0), int(d.get("unable") or 0)
+
 
 def _row_to_follow(row: dict | None) -> GfsMomentFollow | None:
     if row is None:
@@ -2013,6 +2083,102 @@ def _row_to_follow(row: dict | None) -> GfsMomentFollow | None:
         follower_instance_id=row["follower_instance_id"],
         followed_user_id=row["followed_user_id"],
         created_at=int(row["created_at"]),
+        moment_suites=row.get("moment_suites"),
+    )
+
+
+# ─── Sealed moment key mailbox (v_62) ────────────────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsMomentKeyMailboxRepo(Protocol):
+    async def put(self, mail: GfsMomentKeyMail) -> None: ...
+    async def get(
+        self, author_user_id: str, follower_instance_id: str
+    ) -> GfsMomentKeyMail | None: ...
+    async def undelivered_for(
+        self, follower_instance_id: str, *, limit: int
+    ) -> list[GfsMomentKeyMail]: ...
+    async def mark_delivered(
+        self, author_user_id: str, follower_instance_id: str, key_gen: int
+    ) -> None: ...
+    async def delete(self, author_user_id: str, follower_instance_id: str) -> int: ...
+
+
+class SqliteGfsMomentKeyMailboxRepo:
+    """At most the LATEST sealed key per (author, follower household)."""
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def put(self, mail: GfsMomentKeyMail) -> None:
+        await self._db.enqueue(
+            "INSERT INTO gfs_moment_key_mailbox(author_user_id,"
+            " follower_instance_id, key_gen, key_step, delivery, delivered,"
+            " updated_at) VALUES(?,?,?,?,?,?,strftime('%s','now')) "
+            "ON CONFLICT(author_user_id, follower_instance_id) DO UPDATE SET "
+            "key_gen=excluded.key_gen, key_step=excluded.key_step, "
+            "delivery=excluded.delivery, delivered=excluded.delivered, "
+            "updated_at=excluded.updated_at",
+            (
+                mail.author_user_id,
+                mail.follower_instance_id,
+                mail.key_gen,
+                mail.key_step,
+                mail.delivery,
+                int(mail.delivered),
+            ),
+        )
+
+    async def get(
+        self, author_user_id: str, follower_instance_id: str
+    ) -> GfsMomentKeyMail | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM gfs_moment_key_mailbox "
+            "WHERE author_user_id=? AND follower_instance_id=?",
+            (author_user_id, follower_instance_id),
+        )
+        return _row_to_mail(_dict(row))
+
+    async def undelivered_for(
+        self, follower_instance_id: str, *, limit: int
+    ) -> list[GfsMomentKeyMail]:
+        rows = await self._db.fetchall(
+            "SELECT * FROM gfs_moment_key_mailbox "
+            "WHERE follower_instance_id=? AND delivered=0 "
+            "ORDER BY updated_at LIMIT ?",
+            (follower_instance_id, limit),
+        )
+        out = [_row_to_mail(_dict(r)) for r in rows]
+        return [m for m in out if m is not None]
+
+    async def mark_delivered(
+        self, author_user_id: str, follower_instance_id: str, key_gen: int
+    ) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_moment_key_mailbox SET delivered=1 "
+            "WHERE author_user_id=? AND follower_instance_id=? AND key_gen=?",
+            (author_user_id, follower_instance_id, key_gen),
+        )
+
+    async def delete(self, author_user_id: str, follower_instance_id: str) -> int:
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_moment_key_mailbox "
+            "WHERE author_user_id=? AND follower_instance_id=?",
+            (author_user_id, follower_instance_id),
+        )
+
+
+def _row_to_mail(row: dict | None) -> GfsMomentKeyMail | None:
+    if row is None:
+        return None
+    return GfsMomentKeyMail(
+        author_user_id=row["author_user_id"],
+        follower_instance_id=row["follower_instance_id"],
+        key_gen=int(row["key_gen"]),
+        key_step=int(row["key_step"]),
+        delivery=row["delivery"],
+        delivered=bool(row["delivered"]),
     )
 
 

@@ -114,6 +114,11 @@ class GfsWebSocketView(web.View):
         self.request.app[K.gfs_federation_key].schedule_subscriber_connected(
             instance_id
         )
+        # v_62 — sealed moment keys that went out while this household was
+        # offline (the latest per followed author, only the undelivered).
+        self.request.app[K.gfs_moment_public_registry_key].schedule_follower_connected(
+            instance_id
+        )
 
         # §D2b — flush any sealed envelopes that arrived while this household
         # was offline, oldest first, deleting each row only after its frame

@@ -32,7 +32,10 @@ RELAY_AUTH_MAX_SKEW_SECONDS: int = 300
 
 
 async def _rtc_authenticate(
-    view: GfsBaseView, *, keep_signature: bool = False
+    view: GfsBaseView,
+    *,
+    keep_signature: bool = False,
+    max_bytes: int | None = None,
 ) -> tuple[dict, str] | web.Response:
     """Shared signature check for ``/gfs/rtc/*`` POST bodies.
 
@@ -40,10 +43,15 @@ async def _rtc_authenticate(
     success, or a ready-to-return error Response. The returned body has
     no ``signature`` unless ``keep_signature`` — a body the GFS forwards
     verbatim (a public moment envelope) keeps it, because the receiver
-    verifies that same signature itself.
+    verifies that same signature itself. With *max_bytes* the body is
+    read bounded (413 past it) before anything is parsed.
     """
     fed_repo = view.svc(K.gfs_fed_repo_key)
-    body = await view.body_or_400()
+    body = (
+        await view.bounded_json(max_bytes)
+        if max_bytes is not None
+        else await view.body_or_400()
+    )
     instance_id = str(body.get("instance_id") or "")
     if not instance_id:
         return web.json_response(

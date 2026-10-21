@@ -268,6 +268,13 @@ export interface MomentPublicRegistration {
   gfs_id:         string
   registered_at:  string
   default_share:  boolean
+  /** v_62 — ``encrypted``: public moments go through this GFS, encrypted.
+   *  ``unsupported_server``: it can't carry encrypted moments yet, so none
+   *  are sent through it (never in plaintext). */
+  delivery?:      'encrypted' | 'unsupported_server'
+  /** v_62 — follower households there on an older Social Home: they are
+   *  sent no public moments. ``null`` when the server can't say. */
+  followers_unable?: number | null
 }
 
 /** Follower-side public-Momentum follow row, surfaces the cached

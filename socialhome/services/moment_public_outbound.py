@@ -2,9 +2,25 @@
 
 Bus subscriber on :class:`MomentCreated` and :class:`MomentDeleted`.
 For each event whose author is local on this instance AND has at
-least one :class:`MomentPublicRegistration`, build a signed envelope
-and POST it to every registered GFS so the broker can fan it out to
-each follower's instance.
+least one :class:`MomentPublicRegistration`, build a signed, ENCRYPTED
+envelope and POST it to every registered GFS so the broker can fan it
+out to each follower's instance.
+
+**Encrypted from the GFS (v_62).** Everything but the routing fields —
+the text, the media reference and the author's profile — is sealed under
+the moment's item key (derived from the author's current step key,
+:class:`~socialhome.services.moment_public_key_outbound
+.MomentPublicKeyOutbound`, :mod:`socialhome.moment_public_seal`); the GFS
+sees ``{author_user_id, instance_id, moment_id, key_gen, key_step,
+seal_suite, ciphertext, signature}`` and nothing else. A moment is sealed
+and signed ONCE and the same bytes go to every registered GFS, which fans
+the same ciphertext out to every follower household — nothing per
+follower. The author's profile (name, username, bio, picture digest) rides
+inside only when it changed since the author's last moment (or once a
+day); every moment carries its ``profile_rev``. A GFS that has not proved the
+signed ``encrypted_moments`` capability gets **no public moments at
+all** — never a plaintext fallback — and the author's sharing settings
+say so (``GET /api/moments/public/registrations`` → ``delivery``).
 
 Runs alongside :class:`MomentFederationOutbound`: the original
 moment also still goes to paired households via the existing relay,
@@ -14,17 +30,22 @@ receives the same moment twice. Receivers dedupe by ``moment.id``.
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import TYPE_CHECKING
+import time
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
-from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
-from ..domain.events import MomentCreated, MomentDeleted
-from ..domain.moment_public import public_author_bio
+from ..domain.events import (
+    MomentCreated,
+    MomentDeleted,
+    UserDeprovisioned,
+    UserProvisioned,
+)
+from ..domain.moment_public import public_author_bio, public_profile_rev
 from ..infrastructure.event_bus import EventBus
+from ..moment_public_seal import seal_body, sign_wire
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
@@ -34,8 +55,17 @@ if TYPE_CHECKING:
     )
     from ..repositories.moment_repo import AbstractMomentRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .gfs_connection_service import GfsConnectionService
+    from .moment_public_key_outbound import MomentPublicKeyOutbound
 
 log = logging.getLogger(__name__)
+
+#: A remote author's moment re-reads the local user list at most this often.
+LOCAL_USERS_REREAD_S: float = 60.0
+
+#: The author's profile rides a moment at least this often even unchanged,
+#: so a follower that missed a change catches up within a day.
+PROFILE_RESEND_S: float = 86_400.0
 
 
 class MomentPublicOutbound(ProtectionGateMixin):
@@ -43,12 +73,17 @@ class MomentPublicOutbound(ProtectionGateMixin):
         "_bus",
         "_child_protection",
         "_gfs",
+        "_gfs_service",
         "_http_client",
+        "_keys",
         "_moments",
         "_own_instance_id",
         "_own_users",
+        "_own_users_read_at",
+        "_profile_sent",
         "_regs",
         "_signing_key",
+        "_unsupported_warned",
         "_users",
     )
 
@@ -60,9 +95,16 @@ class MomentPublicOutbound(ProtectionGateMixin):
         registration_repo: AbstractMomentPublicRegistrationRepo,
         user_repo: AbstractUserRepo,
         gfs_repo: AbstractGfsConnectionRepo,
+        key_outbound: MomentPublicKeyOutbound,
+        gfs_service: GfsConnectionService,
         http_client: aiohttp.ClientSession | None = None,
     ) -> None:
         self._bus = bus
+        self._keys = key_outbound
+        self._gfs_service = gfs_service
+        #: GFS ids already warned about (no ``encrypted_moments``) — one
+        #: WARNING per server per process.
+        self._unsupported_warned: set[str] = set()
         self._moments = moment_repo
         self._regs = registration_repo
         self._users = user_repo
@@ -74,6 +116,11 @@ class MomentPublicOutbound(ProtectionGateMixin):
         # added since) so we don't fan out for events whose author lives
         # on another instance.
         self._own_users: set[str] | None = None
+        #: Monotonic time of the last full read of local users — a miss
+        #: (a remote author's moment) re-reads at most once a minute.
+        self._own_users_read_at: float = 0.0
+        #: author → (profile_rev, monotonic time) last sent inside a moment.
+        self._profile_sent: dict[str, tuple[str, float]] = {}
         self._child_protection = None
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:
@@ -87,6 +134,16 @@ class MomentPublicOutbound(ProtectionGateMixin):
     def wire(self) -> None:
         self._bus.subscribe(MomentCreated, self._on_created)
         self._bus.subscribe(MomentDeleted, self._on_deleted)
+        self._bus.subscribe(UserProvisioned, self._on_user_provisioned)
+        self._bus.subscribe(UserDeprovisioned, self._on_user_deprovisioned)
+
+    async def _on_user_provisioned(self, event: UserProvisioned) -> None:
+        if self._own_users is not None:
+            self._own_users.add(event.user_id)
+
+    async def _on_user_deprovisioned(self, event: UserDeprovisioned) -> None:
+        if self._own_users is not None:
+            self._own_users.discard(event.user_id)
 
     # ── Subscribers ─────────────────────────────────────────────────────
 
@@ -116,67 +173,154 @@ class MomentPublicOutbound(ProtectionGateMixin):
         author = await self._users.get_by_user_id(event.author_user_id)
         if author is None:
             return
-        envelope = {
-            "moment_id": moment.id,
+        regs = [r for r in regs if await self._delivers_to(r.gfs_id)]
+        if not regs:
+            return
+        gen, step, key = await self._keys.publish_key(event.author_user_id)
+        # Sealed under the moment's item key — the GFS reads none of it.
+        body: dict[str, Any] = {
+            "op": "create",
             "author_user_id": moment.author_user_id,
-            "author_username": author.username,
-            "author_display_name": author.display_name,
-            # The bio the author published in the GFS directory — never
-            # longer than a directory holds.
-            "author_bio": public_author_bio(author.bio),
             "content": moment.content,
             "media_url": moment.media_url,
             "media_type": moment.media_type,
             "duration_ms": moment.duration_ms,
             "parent_moment_id": moment.parent_moment_id,
             "origin_instance_id": moment.origin_instance_id,
-            # ``instance_id`` is the field the GFS-side
-            # ``_rtc_authenticate`` middleware reads to look up the
-            # sender's pubkey. Carries the same value as
-            # ``origin_instance_id`` for outbound author posts.
-            "instance_id": self._own_instance_id,
             "created_at": moment.created_at,
             "expires_at": moment.expires_at,
         }
+        # One ciphertext per picture the servers mirror — normally exactly
+        # one for every GFS. A follower's picture proxy fetches by digest
+        # from its own GFS, so a GFS that doesn't mirror the current picture
+        # is told none (a removed or not yet pushed picture is not shown).
+        variants: dict[str | None, list[str]] = {}
         for reg in regs:
-            # Per GFS: the author's current picture, and only when THAT
-            # server mirrors it — a follower's proxy fetch there returns
-            # exactly these bytes, the server learns nothing it does not
-            # already hold, and a removed picture is not shown.
             digest = (
                 author.picture_hash
                 if author.picture_hash
                 and author.picture_hash == reg.last_picture_digest
                 else None
             )
-            signed = self._sign_envelope({**envelope, "author_picture_digest": digest})
-            await self._post_to_gfs(reg.gfs_id, signed, kind="publish")
+            variants.setdefault(digest, []).append(reg.gfs_id)
+        sent_rev: str | None = None
+        for digest, gfs_ids in variants.items():
+            profile = {
+                "display_name": author.display_name,
+                "username": author.username,
+                # The bio the author published in the GFS directory — never
+                # longer than a directory holds.
+                "bio": public_author_bio(author.bio),
+                "picture_digest": digest,
+            }
+            rev = public_profile_rev(**profile)
+            sealed = {**body, "profile_rev": rev}
+            if self._profile_due(event.author_user_id, rev):
+                sealed["profile"] = profile
+                sent_rev = rev
+            envelope = self._envelope(
+                event.author_user_id, moment.id, gen, step, key, sealed
+            )
+            for gfs_id in gfs_ids:
+                await self._post_to_gfs(gfs_id, envelope, kind="publish")
+        if sent_rev is not None:
+            self._profile_sent[event.author_user_id] = (sent_rev, time.monotonic())
 
     async def _on_deleted(self, event: MomentDeleted) -> None:
         if not await self._is_local(event.author_user_id):
             return
         regs = await self._regs.list_for_user(event.author_user_id)
+        regs = [r for r in regs if await self._delivers_to(r.gfs_id)]
         if not regs:
             return
-        envelope = {
-            "moment_id": event.moment_id,
-            "author_user_id": event.author_user_id,
-            "instance_id": self._own_instance_id,
-        }
-        signed = self._sign_envelope(envelope)
+        gen, step, key = await self._keys.publish_key(event.author_user_id)
+        envelope = self._envelope(
+            event.author_user_id,
+            event.moment_id,
+            gen,
+            step,
+            key,
+            {
+                "op": "delete",
+                "author_user_id": event.author_user_id,
+                "origin_instance_id": self._own_instance_id,
+            },
+        )
         for reg in regs:
-            await self._post_to_gfs(reg.gfs_id, signed, kind="delete")
+            await self._post_to_gfs(reg.gfs_id, envelope, kind="delete")
 
     # ── Helpers ─────────────────────────────────────────────────────────
 
     async def _is_local(self, user_id: str) -> bool:
-        if self._own_users is not None and user_id in self._own_users:
-            return True
-        # Not cached (first call, or a user added since): read once more,
-        # so a newly provisioned member's public moments are published.
+        """Whether *user_id* lives on this household. The set is read once
+        and kept current from ``UserProvisioned`` / ``UserDeprovisioned``; a
+        miss (every remote author's moment) re-reads at most once a minute,
+        for a user added by a path that publishes no event."""
+        if self._own_users is not None:
+            if user_id in self._own_users:
+                return True
+            if time.monotonic() - self._own_users_read_at < LOCAL_USERS_REREAD_S:
+                return False
         users = await self._users.list_all()
         self._own_users = {u.user_id for u in users}
+        self._own_users_read_at = time.monotonic()
         return user_id in self._own_users
+
+    def _profile_due(self, author_user_id: str, rev: str) -> bool:
+        """Send the profile inside this moment: it changed since the last
+        moment that carried it, or that was a day ago."""
+        last = self._profile_sent.get(author_user_id)
+        return (
+            last is None
+            or last[0] != rev
+            or time.monotonic() - last[1] >= PROFILE_RESEND_S
+        )
+
+    async def _delivers_to(self, gfs_id: str) -> bool:
+        """Only a GFS that proved ``encrypted_moments`` gets public moments.
+        Any other server gets nothing (no plaintext fallback), with one
+        WARNING."""
+        if await self._gfs_service.encrypted_moments_supported(gfs_id):
+            return True
+        if gfs_id not in self._unsupported_warned:
+            self._unsupported_warned.add(gfs_id)
+            log.warning(
+                "moment_public.outbound: GFS %s has not proved encrypted_moments "
+                "— public moments are NOT delivered through it (never in "
+                "plaintext) until it upgrades",
+                gfs_id,
+            )
+        return False
+
+    def _envelope(
+        self,
+        author_user_id: str,
+        moment_id: str,
+        gen: int,
+        step: int,
+        key: bytes,
+        body: dict,
+    ) -> dict:
+        if self._signing_key is None:
+            raise RuntimeError("MomentPublicOutbound used before attach_identity")
+        return sign_wire(
+            self._signing_key,
+            {
+                "author_user_id": author_user_id,
+                # ``instance_id`` is the field the GFS-side
+                # ``_rtc_authenticate`` middleware reads to look up the
+                # sender's pubkey.
+                "instance_id": self._own_instance_id,
+                **seal_body(
+                    step_key=key,
+                    author_user_id=author_user_id,
+                    key_gen=gen,
+                    key_step=step,
+                    moment_id=moment_id,
+                    body=body,
+                ),
+            },
+        )
 
     async def _post_to_gfs(self, gfs_id: str, signed: dict, *, kind: str) -> None:
         if self._http_client is None or self._signing_key is None:
@@ -206,13 +350,3 @@ class MomentPublicOutbound(ProtectionGateMixin):
                 kind,
                 exc,
             )
-
-    def _sign_envelope(self, envelope: dict) -> dict:
-        if self._signing_key is None:
-            raise RuntimeError("MomentPublicOutbound used before attach_identity")
-        canonical = json.dumps(envelope, separators=(",", ":"), sort_keys=True).encode(
-            "utf-8"
-        )
-        signed = dict(envelope)
-        signed["signature"] = b64url_encode(sign_ed25519(self._signing_key, canonical))
-        return signed

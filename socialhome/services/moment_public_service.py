@@ -16,6 +16,7 @@ import base64
 import json
 import logging
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -37,7 +38,13 @@ from ..repositories.moment_public_repo import (
 )
 from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .moment_public_key_inbound import OWN_MOMENT_SUITES
 from .protection_gate import ProtectionGateMixin
+
+if TYPE_CHECKING:
+    from .gfs_connection_service import GfsConnectionService
+    from .moment_public_key_inbound import MomentPublicKeyInbound
+    from .moment_public_key_outbound import MomentPublicKeyOutbound
 
 log = logging.getLogger(__name__)
 
@@ -52,14 +59,18 @@ class MomentPublicService(ProtectionGateMixin):
     """Author/follower bookkeeping + GFS round-trips."""
 
     __slots__ = (
+        "_capabilities",
         "_child_protection",
         "_follows",
         "_gfs",
         "_http_client",
+        "_key_inbound",
+        "_key_outbound",
         "_own_instance_id",
         "_pictures",
         "_regs",
         "_signing_key",
+        "_suites_declared",
         "_users",
     )
 
@@ -82,6 +93,100 @@ class MomentPublicService(ProtectionGateMixin):
         self._signing_key: bytes | None = None
         self._own_instance_id: str = ""
         self._child_protection = None
+        #: Follower-side moment keys (v_62) — dropped for an author once
+        #: nobody here follows them any more.
+        self._key_inbound: MomentPublicKeyInbound | None = None
+        #: Author-side moment keys (v_62) — a registration ending marks the
+        #: author's key for rotation at the next publish.
+        self._key_outbound: MomentPublicKeyOutbound | None = None
+        #: The GFS capability proofs (v_62 ``encrypted_moments``) the
+        #: sharing settings report per server.
+        self._capabilities: GfsConnectionService | None = None
+        #: GFS ids this process already declared its moment suites to.
+        self._suites_declared: set[str] = set()
+
+    def attach_capabilities(self, gfs_service: GfsConnectionService) -> None:
+        self._capabilities = gfs_service
+
+    async def encrypted_delivery(self, gfs_id: str) -> bool:
+        """Whether this household delivers public moments through *gfs_id*:
+        only to a server that proved ``encrypted_moments`` (v_62) — any
+        other gets none, never plaintext. ``False`` until wired."""
+        if self._capabilities is None:
+            return False
+        return await self._capabilities.encrypted_moments_supported(gfs_id)
+
+    async def follower_households_unable(
+        self, *, user_id: str, gfs_id: str
+    ) -> int | None:
+        """How many of *user_id*'s follower households on *gfs_id* can't
+        open encrypted moments (an older Social Home — they are sent none),
+        from the GFS's counts. ``None`` when the server can't say."""
+        try:
+            conn = await self._require_active_gfs(gfs_id)
+            signed = self._sign_body({"instance_id": self._require_instance_id()})
+            async with self._client().post(
+                f"{conn.inbox_url}/gfs/moments/users/{user_id}/follower_stats",
+                allow_redirects=False,
+                json=signed,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status >= 300:
+                    return None
+                body = await resp.json()
+        except (MomentPublicError, aiohttp.ClientError, ValueError) as exc:
+            log.info("moment_public follower stats from %s: %s", gfs_id, exc)
+            return None
+        unable = body.get("households_unable") if isinstance(body, dict) else None
+        return unable if isinstance(unable, int) and unable >= 0 else None
+
+    async def declare_suites(self, gfs_id: str) -> bool:
+        """Tell *gfs_id* what this household can open (v_62), once per
+        process and only when a local user follows someone through it:
+        follows made before the upgrade declared nothing, so the GFS sent
+        them no public moments. One small signed request per connection;
+        missing keys are then asked for when moments arrive. ``True`` when
+        the GFS took it. Never raises."""
+        if gfs_id in self._suites_declared or self._signing_key is None:
+            return False
+        if not await self._follows.any_through(gfs_id):
+            return False
+        if not await self.encrypted_delivery(gfs_id):
+            return False
+        conn = await self._gfs.get(gfs_id)
+        if conn is None or conn.status != "active" or self._http_client is None:
+            return False
+        signed = self._sign_body(
+            {
+                "instance_id": self._require_instance_id(),
+                "moment_suites": OWN_MOMENT_SUITES,
+            }
+        )
+        try:
+            async with self._http_client.post(
+                f"{conn.inbox_url}/gfs/moments/suites",
+                allow_redirects=False,
+                json=signed,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status >= 300:
+                    log.warning(
+                        "moment_public: GFS %s refused our moment suites — HTTP %d",
+                        gfs_id,
+                        resp.status,
+                    )
+                    return False
+        except aiohttp.ClientError as exc:
+            log.warning("moment_public: declaring suites to %s failed: %s", gfs_id, exc)
+            return False
+        self._suites_declared.add(gfs_id)
+        return True
+
+    def attach_key_outbound(self, key_outbound: MomentPublicKeyOutbound) -> None:
+        self._key_outbound = key_outbound
+
+    def attach_key_inbound(self, key_inbound: MomentPublicKeyInbound) -> None:
+        self._key_inbound = key_inbound
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:
         if self._http_client is None:
@@ -171,6 +276,12 @@ class MomentPublicService(ProtectionGateMixin):
             log.warning("moment_public deregister: %s", exc)
         finally:
             await self._regs.delete(user_id=user_id, gfs_id=gfs_id)
+            # Followers on that server keep the key they hold; a later
+            # registration (here or anywhere) must not let them read on.
+            if self._key_outbound is not None:
+                await self._key_outbound.mark_rotation_due(
+                    user_id, reason="a registration ended"
+                )
 
     async def list_registrations(self, user_id: str) -> list[MomentPublicRegistration]:
         return await self._regs.list_for_user(user_id)
@@ -211,6 +322,9 @@ class MomentPublicService(ProtectionGateMixin):
             # (``_rtc_authenticate``) — without it the follow is refused 422.
             "instance_id": self._require_instance_id(),
             "followed_user_id": followed_user_id,
+            # v_62: what this household can open — an author seals its
+            # moment key only to a household that declared it.
+            "moment_suites": OWN_MOMENT_SUITES,
         }
         signed = self._sign_body(body)
         try:
@@ -282,6 +396,8 @@ class MomentPublicService(ProtectionGateMixin):
                 followed_user_id=followed_user_id,
                 gfs_id=gfs_id,
             )
+            if self._key_inbound is not None:
+                await self._key_inbound.forget_if_unfollowed(followed_user_id)
 
     async def list_follows(self, follower_user_id: str) -> list[MomentPublicFollow]:
         return await self._follows.list_for_follower(follower_user_id)

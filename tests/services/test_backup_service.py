@@ -62,6 +62,12 @@ def test_user_data_tables_in_exportable():
     """Common user-content tables must be in the export."""
     assert "users" in EXPORTABLE_TABLES
     assert "feed_posts" in EXPORTABLE_TABLES
+
+
+def test_moment_keys_are_never_exported():
+    """v_62: public-moment content keys stay on the household."""
+    assert "moment_public_keys" in NEVER_EXPORT
+    assert "moment_public_keys" not in EXPORTABLE_TABLES
     assert "spaces" in EXPORTABLE_TABLES
     assert "conversations" in EXPORTABLE_TABLES
     assert "timetables" in EXPORTABLE_TABLES

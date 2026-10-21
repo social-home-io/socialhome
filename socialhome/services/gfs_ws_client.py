@@ -182,8 +182,10 @@ class GfsWebSocketClient:
 
         Receives ``incoming_public_moment`` and
         ``incoming_public_moment_delete`` frames pushed by the GFS
-        broker. The handler verifies the envelope's signature and
-        persists the moment locally with ``received_via='gfs'``.
+        broker, and ``moment_key`` (v_62 — a followed author's sealed
+        moment content key). The handler verifies the envelope's
+        signature, opens it, and persists the moment locally with
+        ``received_via='gfs'``.
         """
         self._on_moment_public = handler
 
@@ -191,8 +193,11 @@ class GfsWebSocketClient:
         self,
         handler: Callable[[dict], Awaitable[None]],
     ) -> None:
-        """Receive ``follow_changed`` frames from the GFS — the
-        author's UI uses these to keep follower counts live."""
+        """Receive the author-side public-moment notices from the GFS:
+        ``follow_changed`` (someone followed or unfollowed a local author)
+        and ``moment_key_request`` (v_62 — a follower household needs the
+        author's moment key). The author's household answers both by
+        sealing its key to the follower."""
         self._on_follow_changed = handler
 
     def attach_new_subscriber_handler(
@@ -437,7 +442,11 @@ class GfsWebSocketClient:
                     exc_info=True,
                 )
             return
-        if frame_type in ("incoming_public_moment", "incoming_public_moment_delete"):
+        if frame_type in (
+            "incoming_public_moment",
+            "incoming_public_moment_delete",
+            "moment_key",
+        ):
             if self._on_moment_public is None:
                 log.debug(
                     "gfs.ws.client: dropping %s — no handler attached on %s",
@@ -455,7 +464,7 @@ class GfsWebSocketClient:
                     exc_info=True,
                 )
             return
-        if frame_type == "follow_changed":
+        if frame_type in ("follow_changed", "moment_key_request"):
             if self._on_follow_changed is None:
                 return
             try:

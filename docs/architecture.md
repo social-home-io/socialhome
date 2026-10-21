@@ -33,6 +33,15 @@ framing module and one transient in-memory `RelayBridge` serve both
 highlights and moments, and **the GFS stores zero highlight/moment
 content bytes** — the bridge is a pure pipe, never an at-rest copy.
 
+Public moments that fan out to **followers** are encrypted from the GFS
+(v_62): each author's household holds a random per-author generation root
+ratcheted daily, seals every public moment once under a per-moment key
+derived from it, and seals the current step key to each follower household's
+key-wrap key; the GFS routes the one ciphertext by author, and each sealed
+key to the one household it names (keeping the latest for a household that
+is offline)
+([`protocol/momentum_public.md`](protocol/momentum_public.md#encryption-posture-v_62)).
+
 ```mermaid
 flowchart LR
     subgraph HFS_A["HFS (household A)"]
