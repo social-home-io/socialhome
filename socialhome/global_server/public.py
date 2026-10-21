@@ -323,12 +323,15 @@ class SlidingWindowCounter:
         self._max_keys = max_keys
         self._hits: dict[str, list[float]] = {}
 
-    def allow(self, key: str, *, now: float | None = None) -> bool:
-        """Record a hit for *key* and return whether it is within the window."""
+    def allow(
+        self, key: str, *, now: float | None = None, limit: int | None = None
+    ) -> bool:
+        """Record a hit for *key* and return whether it is within the window
+        (*limit* overrides the constructor's for this call)."""
         stamp = time.monotonic() if now is None else now
         previous = self._hits.pop(key, ())
         hits = [t for t in previous if stamp - t < RATE_LIMIT_WINDOW_SECONDS]
-        if len(hits) >= self._limit:
+        if len(hits) >= (self._limit if limit is None else limit):
             self._hits[key] = hits
             return False
         hits.append(stamp)
@@ -396,10 +399,30 @@ class PairingTokenService:
 # ─── Per-IP rate-limit middlewares ─────────────────────────────────────
 
 
+def node_share(limit: int, nodes: int) -> int:
+    """This node's share of a cluster-wide per-IP *limit* over *nodes* live
+    nodes (rounded up, never below one).
+
+    The counters live in each node's memory. Behind the production
+    round-robin balancer a client's requests spread over every live node,
+    so a per-node limit of *limit* would give it *nodes* × *limit* in all;
+    each node allowing its share keeps the cluster-wide budget at about
+    *limit* (rounding up adds at most *nodes* − 1). A balancer that pins a
+    client to one node (IP hash) makes the share the whole budget — stricter,
+    never looser. Sharing the counters through the database instead would
+    put a write on every anonymous request into the one SQLite file the
+    nodes share (and their lock), which is the flood the limit exists to
+    absorb.
+    """
+    return max(1, -(-limit // max(1, nodes)))
+
+
 def build_window_limiter(
     resolver: ClientIpResolver,
     limit: int,
     applies: Callable[[str], bool],
+    *,
+    nodes: Callable[[], int] | None = None,
 ):
     """Build a middleware that sheds >*limit* hits/minute per client IP.
 
@@ -407,7 +430,9 @@ def build_window_limiter(
     below, ``envelope_relay`` and ``member_publish``): they differ only in
     which paths they gate (*applies*) and the *limit*. The client address comes from
     *resolver*, which is the only component allowed to look at
-    ``X-Forwarded-For`` (see :class:`ClientIpResolver`).
+    ``X-Forwarded-For`` (see :class:`ClientIpResolver`). With *nodes* (the
+    cluster's live node count) the limit is cluster-wide: each node allows
+    its :func:`node_share`.
     """
     counter = SlidingWindowCounter(limit)
 
@@ -415,7 +440,8 @@ def build_window_limiter(
     async def _rate_limit(request: web.Request, handler):
         if not applies(request.rel_url.path):
             return await handler(request)
-        if not counter.allow(resolver.bucket(request)):
+        share = limit if nodes is None else node_share(limit, nodes())
+        if not counter.allow(resolver.bucket(request), limit=share):
             resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = "60"
             return resp
@@ -446,32 +472,44 @@ def _is_public_rtc_entry(path: str) -> bool:
     )
 
 
-def build_listing_rate_limit(resolver: ClientIpResolver):
+def build_listing_rate_limit(
+    resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
+):
     """Simple in-memory per-IP rate limiter for the public listing.
 
-    Spec §24.7.3: 30 GETs per minute on ``/`` and ``/spaces/{id}``.
+    Spec §24.7.3: 30 GETs per minute on ``/`` and ``/spaces/{id}`` —
+    cluster-wide with *nodes* (:func:`node_share`).
     """
-    return build_window_limiter(resolver, LISTING_MAX_PER_MINUTE, _is_public_listing)
+    return build_window_limiter(
+        resolver, LISTING_MAX_PER_MINUTE, _is_public_listing, nodes=nodes
+    )
 
 
-def build_public_rtc_rate_limit(resolver: ClientIpResolver):
+def build_public_rtc_rate_limit(
+    resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
+):
     """Per-IP rate limiter for the anonymous public-content RTC entry
     points. Each offer/relay request pushes a WS frame to the author, so a
-    flood is an amplification vector; cap it per IP."""
+    flood is an amplification vector; cap it per IP (cluster-wide with
+    *nodes*)."""
     return build_window_limiter(
         resolver,
         PUBLIC_RTC_MAX_PER_MINUTE,
         _is_public_rtc_entry,
+        nodes=nodes,
     )
 
 
-def build_ice_servers_rate_limit(resolver: ClientIpResolver):
+def build_ice_servers_rate_limit(
+    resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
+):
     """Per-IP rate limiter for ``GET /gfs/highlights/ice-servers``
-    (:data:`ICE_SERVERS_MAX_PER_MINUTE`)."""
+    (:data:`ICE_SERVERS_MAX_PER_MINUTE`, cluster-wide with *nodes*)."""
     return build_window_limiter(
         resolver,
         ICE_SERVERS_MAX_PER_MINUTE,
         lambda path: path == ICE_SERVERS_ROUTE,
+        nodes=nodes,
     )
 
 

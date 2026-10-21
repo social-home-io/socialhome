@@ -211,7 +211,17 @@ sticks to that node:
 
 Bounds: at most 1024 live sessions and 256 live relays per node (past them
 the uniform 503), 32 ICE candidates per side per session (`429`), and one
-upload per relay (`409 already_streaming`). Sessions older than 120 s and
+upload per relay (`409 already_streaming`). So that no one source can fill
+those slots, a node also refuses — with the same uniform 503, never by
+evicting someone else's session — an offer past **4 live sessions per
+client address** (IPv6 by /64, as the rate limiters bucket it) or **64 per
+author household**, and a relay GET past **2 live relays per client
+address** or **32 per author**; anonymous offers together hold at most
+**768** of the 1024 session slots, the rest staying for the signed
+household signalling of `/gfs/rtc/*` (`rtc_transport.py`,
+`relay_bridge.py`). An attacker with many addresses still needs a valid
+link to an online author per 64 sessions, and fills one node's anonymous
+pool at most. Sessions older than 120 s and
 relays the author never connected to within 120 s are swept when the next
 one is created.
 

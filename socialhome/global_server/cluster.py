@@ -617,6 +617,7 @@ class ClusterService:
         "_notice_dropped",
         "_notice_pending",
         "_notice_tasks",
+        "_online_peers",
         "_own_pk_hex",
         "_partition_gaps",
         "_peers",
@@ -690,6 +691,10 @@ class ClusterService:
         self._announce_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._fail_counts: dict[str, int] = {}
+        #: Member peers that answered the last heartbeat round (a peer that
+        #: misses fewer than :data:`HEARTBEAT_FAIL_THRESHOLD` pings still
+        #: counts) — :meth:`live_node_count`.
+        self._online_peers = 0
         #: 10-minute TTL dedup for relayed message ids.
         self._seen_relays: dict[str, float] = {}
         #: Spec §24.10.7 — local view of each node's active sync-signaling
@@ -956,6 +961,14 @@ class ClusterService:
 
     async def list_nodes(self) -> list[ClusterNode]:
         return await self._repo.list_nodes()
+
+    def live_node_count(self) -> int:
+        """Nodes serving this GFS right now: this one plus the member peers
+        that answered the last heartbeat round (``1`` when clustering is
+        off, or before the first round). The anonymous per-IP limits divide
+        their budget by it (:func:`.public.node_share`), so a round-robin
+        balancer doesn't hand a client one budget per node."""
+        return 1 + self._online_peers if self._enabled else 1
 
     async def member_peers(self) -> list[ClusterNode]:
         """Every OTHER node that is a cluster member (:func:`is_member`) —
@@ -2496,12 +2509,14 @@ class ClusterService:
         :data:`CLUSTER_STALE_SIBLING_S` (never an approved row).
         """
         await self._collect_stale_siblings()
+        online = 0
         for r in await self.member_peers():
             url = member_url(r)
             if r.status == "offline":
                 # Probe offline peers too — coming back triggers
                 # a partition-catchup handshake (spec §4.4.6).
                 if await self._ping_peer(url):
+                    online += 1
                     self._fail_counts[url] = 0
                     await self._repo.touch_node(
                         r.node_id, status="online", last_seen=_now_iso()
@@ -2510,6 +2525,8 @@ class ClusterService:
                 continue
             ok = await self._ping_peer(url)
             fails = self._fail_counts.get(url, 0)
+            if ok or fails + 1 < HEARTBEAT_FAIL_THRESHOLD:
+                online += 1
             if ok:
                 self._fail_counts[url] = 0
                 await self._repo.touch_node(
@@ -2553,6 +2570,7 @@ class ClusterService:
                     await self._repo.touch_node(
                         r.node_id, status="offline", last_seen=r.last_seen
                     )
+        self._online_peers = online
 
     async def _collect_stale_siblings(self) -> None:
         """Delete shared-seed sibling rows (no approval, our own key) whose

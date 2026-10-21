@@ -142,7 +142,7 @@ class HighlightRtcOfferView(GfsBaseView):
             return await _refuse(self)
 
         rtc = self.svc(K.gfs_rtc_key)
-        session_id = await rtc.offer(instance_id, sdp)
+        session_id = await rtc.offer(instance_id, sdp, client=self.client_bucket())
         if session_id is None:
             return unavailable_response()
         # Push the signalling offer to the author's WS so its
@@ -244,7 +244,11 @@ class HighlightRelayStreamView(GfsBaseView):
             return await _refuse(self)
 
         bridge = self.svc(K.gfs_relay_bridge_key)
-        relay_id = bridge.create(target_instance_id=instance_id, scope=highlight_id)
+        relay_id = bridge.create(
+            target_instance_id=instance_id,
+            scope=highlight_id,
+            client=self.client_bucket(),
+        )
         if relay_id is None:
             return unavailable_response()
         channel = bridge.get(relay_id)

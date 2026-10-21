@@ -28,6 +28,7 @@ from socialhome.global_server.cluster import (
     CLUSTER_SIG_SUITE_ED25519,
     CLUSTER_TS_SKEW_S,
     CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
+    HEARTBEAT_FAIL_THRESHOLD,
     MAX_SIGNALING_SESSIONS,
     NODE_DRAIN_HINT,
     NODE_HEARTBEAT,
@@ -2515,3 +2516,47 @@ async def test_stop_releases_the_hint_round_waiters(gfs_db, monkeypatch):
     await asyncio.sleep(0.01)
     await svc.stop()
     assert round_done.done() and sent == []
+
+
+# ─── Live node count (per-node share of the public rate limits) ──────────
+
+
+async def test_a_lone_or_disabled_node_counts_itself(gfs_db, enabled_cluster):
+    disabled = ClusterService(
+        SqliteClusterRepo(gfs_db),
+        node_id="solo",
+        self_url="https://solo.gfs.test",
+        peers=(),
+        own_public_key_hex=_OWN,
+        enabled=False,
+    )
+    assert disabled.live_node_count() == 1
+    assert enabled_cluster.live_node_count() == 1
+
+
+async def test_the_live_node_count_follows_the_heartbeat(enabled_cluster, monkeypatch):
+    up = {"https://c.gfs.test": True, "https://d.gfs.test": True}
+
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
+        return None
+
+    async def fake_ping(self, url):
+        return up.get(url, False)
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+    monkeypatch.setattr(ClusterService, "_ping_peer", fake_ping)
+    for node in ("node-c", "node-d"):
+        await enabled_cluster.handle_hello(
+            from_node_id=node,
+            url=f"https://{node[-1]}.gfs.test",
+            public_key_hex=_OWN,
+        )
+    await enabled_cluster._heartbeat_tick()
+    assert enabled_cluster.live_node_count() == 3
+    # A peer that stops answering counts until it is marked offline.
+    up["https://d.gfs.test"] = False
+    for _ in range(HEARTBEAT_FAIL_THRESHOLD - 1):
+        await enabled_cluster._heartbeat_tick()
+        assert enabled_cluster.live_node_count() == 3
+    await enabled_cluster._heartbeat_tick()
+    assert enabled_cluster.live_node_count() == 2

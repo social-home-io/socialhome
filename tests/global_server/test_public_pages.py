@@ -14,13 +14,16 @@ from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_fed_repo_key,
 )
+from socialhome.global_server.cluster import ClusterService
 from socialhome.global_server.config import DEFAULT_TRUSTED_PROXIES, GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.public import (
+    LISTING_MAX_PER_MINUTE,
     PUBLISH_MAX_PER_MINUTE,
     RATE_LIMIT_MAX_TRACKED_IPS,
     ClientIpResolver,
     SlidingWindowCounter,
+    node_share,
 )
 from socialhome.global_server.server import create_gfs_app
 
@@ -960,3 +963,43 @@ async def test_landing_header_image_is_same_origin(client):
     assert 'src="/media/hero.webp"' in text
     assert "http://gfs.test/media/" not in text
     assert_strict_public_page(resp, text)
+
+
+# ─── Cluster share of the public limits (#1107 residual) ─────────────
+
+
+def test_rate_limit_counter_takes_a_per_call_limit():
+    counter = SlidingWindowCounter(limit=10)
+    assert counter.allow("a", now=1000.0, limit=2)
+    assert counter.allow("a", now=1000.1, limit=2)
+    assert not counter.allow("a", now=1000.2, limit=2)
+    assert counter.allow("a", now=1000.3)  # the constructor's 10
+
+
+@pytest.mark.parametrize(
+    ("limit", "nodes", "share"),
+    [(30, 1, 30), (30, 4, 8), (20, 4, 5), (30, 0, 30), (1, 4, 1), (20, 3, 7)],
+)
+def test_node_share_splits_a_cluster_wide_budget(limit, nodes, share):
+    """Round-robin spreads a client's requests over the live nodes, so each
+    node allows its share: the cluster-wide budget stays ~*limit*."""
+    assert node_share(limit, nodes) == share
+
+
+async def test_the_listing_limit_is_shared_across_live_nodes(tmp_dir, monkeypatch):
+    """With four live nodes a client gets a quarter of the budget here."""
+    monkeypatch.setattr(ClusterService, "live_node_count", lambda self: 4)
+    app = create_gfs_app(
+        GfsConfig(host="127.0.0.1", port=0, base_url="", data_dir=str(tmp_dir))
+    )
+    tc = TestClient(TestServer(app))
+    await tc.start_server()
+    try:
+        share = node_share(LISTING_MAX_PER_MINUTE, 4)
+        statuses = [
+            (await tc.get("/gfs/pages/spaces/nope")).status for _ in range(share + 1)
+        ]
+        assert statuses[:share] == [404] * share
+        assert statuses[share] == 429
+    finally:
+        await tc.close()

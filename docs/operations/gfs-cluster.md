@@ -92,6 +92,26 @@ Other balancers need the same two things: route by the text before the first
 `.` of the id in those five places, and fall back to normal balancing when it
 names no node.
 
+## Not routed: `/gfs/rtc/*`
+
+`/gfs/rtc/offer`, `/answer`, `/ice` and `/session/<id>` (the signed
+household-to-household signalling rendezvous) keep their sessions in the
+same per-node memory, but no Social Home build calls them today — households
+reach each other over their own transports — so the balancer needs no rule
+for them. If a client ever uses them, add their ids to the table above
+(`/gfs/rtc/session/<id>` in the path, `/gfs/rtc/answer` and `/gfs/rtc/ice`
+in the body's `session_id`).
+
+## Rate limits across nodes
+
+The anonymous per-IP limits on the public pages, the highlight offer /
+relay entry points and `/gfs/highlights/ice-servers` count in each node's
+memory, so each node allows its share — the limit divided by the live
+nodes, rounded up (`public.node_share`). Behind round-robin, a client gets
+about one budget across the cluster. When a node goes away its peers mark
+it offline after three missed heartbeats and the share grows back.
+Before the first heartbeat round after a start, a node counts only itself.
+
 ## Rollout
 
 Both orders are safe; this one never routes a tagged id nowhere:

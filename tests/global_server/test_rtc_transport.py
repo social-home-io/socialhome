@@ -360,3 +360,48 @@ async def test_rtc_ice_past_the_cap_is_429(rtc_client, monkeypatch):
     )
     resp = await rtc_client.post("/gfs/rtc/ice", json=ice)
     assert resp.status == 429
+
+
+# ─── Anonymous slots (#1107 residual: one source can't fill them) ─────────
+
+
+@pytest.mark.security
+async def test_one_client_holds_a_bounded_number_of_public_sessions(rtc):
+    for _ in range(rtc_transport.MAX_SESSIONS_PER_CLIENT):
+        assert await rtc.offer("author", "sdp", client="1.2.3.4") is not None
+    assert await rtc.offer("author", "sdp", client="1.2.3.4") is None
+    # Another address still gets one.
+    assert await rtc.offer("author", "sdp", client="5.6.7.8") is not None
+
+
+@pytest.mark.security
+async def test_one_link_holds_a_bounded_number_of_public_sessions(rtc):
+    for i in range(rtc_transport.MAX_SESSIONS_PER_AUTHOR):
+        assert await rtc.offer("author", "sdp", client=f"10.0.{i}.1") is not None
+    assert await rtc.offer("author", "sdp", client="10.9.9.9") is None
+    assert await rtc.offer("other-author", "sdp", client="10.9.9.9") is not None
+
+
+@pytest.mark.security
+async def test_anonymous_sessions_leave_room_for_household_signalling(rtc, monkeypatch):
+    monkeypatch.setattr(rtc_transport, "MAX_LIVE_SESSIONS", 4)
+    monkeypatch.setattr(rtc_transport, "MAX_PUBLIC_SESSIONS", 2)
+    assert await rtc.offer("a1", "sdp", client="1.1.1.1") is not None
+    assert await rtc.offer("a2", "sdp", client="2.2.2.2") is not None
+    assert await rtc.offer("a3", "sdp", client="3.3.3.3") is None
+    # A signed household offer (no client) still finds a slot.
+    assert await rtc.offer("household", "sdp") is not None
+
+
+async def test_an_expired_public_session_frees_its_clients_slot(rtc):
+    for _ in range(rtc_transport.MAX_SESSIONS_PER_CLIENT):
+        await rtc.offer("author", "sdp", client="1.2.3.4")
+    for session in list(rtc._sessions.values()):  # type: ignore[attr-defined]
+        session.created_at -= rtc_transport.SESSION_TTL_SECONDS + 1
+    assert await rtc.offer("author", "sdp", client="1.2.3.4") is not None
+
+
+def test_the_public_pool_is_below_the_whole_pool():
+    assert rtc_transport.MAX_PUBLIC_SESSIONS < rtc_transport.MAX_LIVE_SESSIONS
+    assert rtc_transport.MAX_SESSIONS_PER_CLIENT < rtc_transport.MAX_SESSIONS_PER_AUTHOR
+    assert rtc_transport.MAX_SESSIONS_PER_AUTHOR < rtc_transport.MAX_PUBLIC_SESSIONS

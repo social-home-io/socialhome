@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from socialhome.global_server import relay_bridge
 from socialhome.global_server.relay_bridge import RelayBridge
 
 
@@ -165,3 +166,31 @@ async def test_only_one_upload_claims_a_channel():
     assert bridge.claim(relay_id) is True
     assert bridge.claim(relay_id) is False
     assert bridge.claim("missing") is False
+
+
+@pytest.mark.security
+async def test_one_client_holds_a_bounded_number_of_relays():
+    bridge = RelayBridge()
+    for _ in range(relay_bridge.MAX_CHANNELS_PER_CLIENT):
+        assert bridge.create(target_instance_id="a", client="1.2.3.4") is not None
+    assert bridge.create(target_instance_id="a", client="1.2.3.4") is None
+    assert bridge.create(target_instance_id="a", client="5.6.7.8") is not None
+
+
+@pytest.mark.security
+async def test_one_author_holds_a_bounded_number_of_relays():
+    bridge = RelayBridge()
+    for i in range(relay_bridge.MAX_CHANNELS_PER_AUTHOR):
+        assert bridge.create(target_instance_id="a", client=f"10.0.{i}.1")
+    assert bridge.create(target_instance_id="a", client="10.9.9.9") is None
+    assert bridge.create(target_instance_id="b", client="10.9.9.9") is not None
+
+
+async def test_a_closed_relay_frees_its_clients_slot():
+    bridge = RelayBridge()
+    ids = [
+        bridge.create(target_instance_id="a", client="1.2.3.4")
+        for _ in range(relay_bridge.MAX_CHANNELS_PER_CLIENT)
+    ]
+    bridge.close(ids[0])
+    assert bridge.create(target_instance_id="a", client="1.2.3.4") is not None
