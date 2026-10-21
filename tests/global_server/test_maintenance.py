@@ -188,3 +188,38 @@ async def test_channel_sweep_failure_does_not_skip_the_others():
     )
     await sched._maintain_once()
     assert len(admin.purge_calls) == 1
+
+
+class _StubMomentMedia:
+    def __init__(self, *, boom: bool = False) -> None:
+        self.boom = boom
+        self.prune_calls: list[int | None] = []
+
+    async def prune_expired(self, now: int | None = None) -> int:
+        self.prune_calls.append(now)
+        if self.boom:
+            raise RuntimeError("disk gone")
+        return 4
+
+
+async def test_maintain_once_sweeps_expired_moment_media():
+    """v_63: encrypted moment blobs go once their moment's life is over."""
+    media = _StubMomentMedia()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=_StubAdminRepo(),
+        highlight_repo=_StubHighlightRepo(),
+        moment_media=media,  # type: ignore[arg-type]
+    )
+    await sched._maintain_once()
+    assert len(media.prune_calls) == 1
+
+
+async def test_a_moment_media_sweep_failure_is_contained():
+    admin = _StubAdminRepo()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=admin,
+        highlight_repo=_StubHighlightRepo(),
+        moment_media=_StubMomentMedia(boom=True),  # type: ignore[arg-type]
+    )
+    await sched._maintain_once()
+    assert len(admin.purge_calls) == 1

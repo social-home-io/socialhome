@@ -106,7 +106,8 @@ its name only.
 
 **Public moments are encrypted from the GFS too (v_62, owner decision
 2026-10-20).** The former "public Momentum is the one plaintext exception"
-is gone: a public moment — text, media reference, and the author's name,
+is gone: a public moment — text, its photo or video (v_63: padded
+ciphertext the GFS stores but can't open), and the author's name,
 bio and picture digest — is sealed once under a per-moment key derived from
 the author's ratcheted step key, and that key reaches each follower
 household sealed to that household alone

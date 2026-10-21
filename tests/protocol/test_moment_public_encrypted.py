@@ -28,6 +28,7 @@ from socialhome.moment_public_seal import key_plaintext, seal_body, sign_wire
 from tests.moment_public_wire import now_iso
 from tests.scenarios.test_moment_public_encrypted_e2e import (
     MOMENT_ID,
+    PICTURE,
     SECRET_TEXT,
     _assert_gfs_saw_no_content,
     _post_moment,
@@ -183,3 +184,46 @@ async def test_end_to_end_the_gfs_sees_no_moment_content(world):
         if path.exists():
             raw = path.read_bytes()
             assert SECRET_TEXT.encode() not in raw
+
+
+# ── Encrypted media (v_63) ────────────────────────────────────────────────
+
+
+def _gfs_files(w) -> list:
+    media = w["gfs_dir"] / "media" / "moments"
+    return [p for p in media.iterdir() if p.is_file()] if media.exists() else []
+
+
+async def test_the_gfs_never_holds_a_moments_file_readable(world):
+    w = world
+    await _follow(w)
+    await _post_moment(w)
+    await w["pump"]()
+    files = _gfs_files(w)
+    assert len(files) == 1
+    for path in files:
+        raw = path.read_bytes()
+        assert b"plum-tree-pixels" not in raw and b"WEBP" not in raw
+    got = await w["follower_moments"].get(MOMENT_ID)
+    kept = w["follower_media"] / got.media_url.removeprefix("api/media/")
+    assert kept.read_bytes() == PICTURE
+
+
+async def test_a_file_the_gfs_swapped_is_never_kept(world):
+    """The GFS serves other bytes under the moment's blob address (here:
+    another moment's genuine blob): the follower checks the address and
+    stores the moment without a file — never a foreign one."""
+    w = world
+    await _follow(w)
+    await _post_moment(w, "m-first")
+    await w["pump"]()
+    [first] = _gfs_files(w)
+    swapped = first.read_bytes()
+    await _post_moment(w, "m-second")
+    second = [f for f in _gfs_files(w) if f != first]
+    [target] = second
+    target.write_bytes(swapped)
+    await w["pump"]()
+    got = await w["follower_moments"].get("m-second")
+    assert got is not None and got.content == SECRET_TEXT
+    assert got.media_url is None

@@ -24,6 +24,7 @@ from .domain import CHANNEL_IDLE_TTL_SECONDS, CHANNEL_UNUSED_TTL_SECONDS
 from .repositories import PAIR_TOKEN_RETENTION_SECONDS
 
 if TYPE_CHECKING:
+    from .moment_media import GfsMomentMediaStore
     from .repositories import (
         AbstractGfsAdminRepo,
         AbstractGfsChannelRepo,
@@ -45,6 +46,7 @@ class GfsMaintenanceScheduler:
         "_highlight_repo",
         "_interval",
         "_invite_repo",
+        "_moment_media",
         "_stop",
         "_task",
     )
@@ -57,8 +59,11 @@ class GfsMaintenanceScheduler:
         envelope_queue_repo: AbstractGfsEnvelopeQueueRepo | None = None,
         invite_repo: AbstractGfsInviteRepo | None = None,
         channel_repo: AbstractGfsChannelRepo | None = None,
+        moment_media: GfsMomentMediaStore | None = None,
         interval_seconds: float = 3600.0,  # once per hour
     ) -> None:
+        #: Encrypted moment media (v_63): blobs past their moment's life.
+        self._moment_media = moment_media
         self._admin_repo = admin_repo
         self._highlight_repo = highlight_repo
         # Optional so an existing test/embedder that builds the scheduler with
@@ -166,6 +171,17 @@ class GfsMaintenanceScheduler:
                 )
         if channels:
             log.debug("gfs maintenance: dropped %d idle channels", channels)
+        if self._moment_media is not None:
+            try:
+                media = await self._moment_media.prune_expired(now)
+                if media:
+                    log.debug("gfs maintenance: dropped %d expired moment blobs", media)
+            except Exception as exc:
+                log.warning(
+                    "gfs maintenance: prune moment media failed: %s",
+                    exc,
+                    exc_info=True,
+                )
         if highlights or tokens or envelopes or invites:
             log.debug(
                 "gfs maintenance: pruned %d highlight publications, %d pair "

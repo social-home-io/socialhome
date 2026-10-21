@@ -32,10 +32,12 @@ import base64
 import hashlib
 import json
 import logging
+import time
 
 from aiohttp import web
 
 from ...csp import media_response_headers
+from ...moment_public_media import MAX_BLOB_BYTES
 from ...moment_public_seal import (
     DELIVERY_FIELDS,
     ENVELOPE_FIELDS,
@@ -44,11 +46,13 @@ from ...moment_public_seal import (
     is_wire_int,
 )
 from .. import app_keys as K
+from ..admin_service import verify_report_signature
 from ..domain import GfsUserPicture
 from ..html_page import html_response
+from ..moment_media import MediaRefused
 from ..safe_embed import script_json
 from .base import GfsBaseView
-from .rtc import _rtc_authenticate
+from .rtc import RELAY_AUTH_MAX_SKEW_SECONDS, _rtc_authenticate
 
 log = logging.getLogger(__name__)
 
@@ -173,6 +177,8 @@ class GfsUserDeregisterView(GfsBaseView):
         if existing.instance_id != sender_instance_id:
             return web.json_response({"error": "instance_mismatch"}, status=403)
         ok = await registry.deregister_user(user_id)
+        # v_63: the author's encrypted moment media goes with them.
+        await self.svc(K.gfs_moment_media_store_key).purge_author(user_id)
         return web.json_response({"deregistered": ok})
 
 
@@ -656,3 +662,115 @@ def _html_escape(text: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+# ─── Encrypted moment media (v_63) ─────────────────────────────────────────
+
+
+#: Headers a browser on another origin (the pinned share-link viewer) may
+#: read a blob with: anonymous, no credentials, cacheable forever (the
+#: address is the content's hash).
+_MEDIA_HEADERS = {
+    "Content-Type": "application/octet-stream",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "public, max-age=604800, immutable",
+    "Access-Control-Allow-Origin": "*",
+    "Cross-Origin-Resource-Policy": "cross-origin",
+}
+
+
+async def _media_uploader(
+    view: GfsBaseView, blob_id: str
+) -> tuple[str, int] | web.Response:
+    """Header-signed upload: ``X-SH-Instance`` / ``-Author`` / ``-Expires`` /
+    ``-Timestamp`` / ``-Signature`` over the canonical
+    ``{instance_id, blob_id, author_user_id, expires_at, ts}`` — the body is
+    the raw blob, so the signature can't ride inside it (same scheme as the
+    relay stream). The signer must be the household the author registered
+    from. Returns ``(author_user_id, expires_at)``."""
+    h = view.request.headers
+    instance_id = h.get("X-SH-Instance", "")
+    author = h.get("X-SH-Author", "")
+    signature = h.get("X-SH-Signature", "")
+    try:
+        ts = int(h.get("X-SH-Timestamp", ""))
+        expires_at = int(h.get("X-SH-Expires", ""))
+    except ValueError:
+        return web.json_response({"error": "missing_auth_headers"}, status=422)
+    if not instance_id or not author or not signature:
+        return web.json_response({"error": "missing_auth_headers"}, status=422)
+    if abs(int(time.time()) - ts) > RELAY_AUTH_MAX_SKEW_SECONDS:
+        return web.json_response({"error": "stale_timestamp"}, status=401)
+    sender = await view.svc(K.gfs_fed_repo_key).get_instance(instance_id)
+    if sender is None or sender.status != "active":
+        return web.json_response({"error": "forbidden"}, status=403)
+    body = {
+        "instance_id": instance_id,
+        "blob_id": blob_id,
+        "author_user_id": author,
+        "expires_at": expires_at,
+        "ts": ts,
+    }
+    if not verify_report_signature(body, signature, sender.public_key):
+        return web.json_response({"error": "invalid_signature"}, status=401)
+    registry = view.svc(K.gfs_moment_public_registry_key)
+    if not await registry.is_author_household(author, instance_id):
+        return web.json_response({"error": "instance_mismatch"}, status=403)
+    return author, expires_at
+
+
+class GfsMomentMediaView(GfsBaseView):
+    """``/gfs/moments/media/{blob_id}`` — encrypted moment media (v_63).
+
+    * ``PUT`` — the author's household uploads one blob (header-signed).
+    * ``GET`` — anyone fetches it by address: ciphertext only, readable
+      cross-origin without credentials (the share-link viewer)."""
+
+    async def put(self) -> web.Response:
+        blob_id = self.match("blob_id")
+        who = await _media_uploader(self, blob_id)
+        if isinstance(who, web.Response):
+            return who
+        author, expires_at = who
+        data = await self.bounded_raw(MAX_BLOB_BYTES)
+        try:
+            stored = await self.svc(K.gfs_moment_media_store_key).put(
+                blob_id=blob_id,
+                author_user_id=author,
+                data=data,
+                expires_at=expires_at,
+            )
+        except MediaRefused as exc:
+            return web.json_response({"error": exc.reason}, status=exc.status)
+        return web.json_response({"stored": stored}, status=201 if stored else 200)
+
+    async def get(self) -> web.Response:
+        data = await self.svc(K.gfs_moment_media_store_key).read(self.match("blob_id"))
+        if data is None:
+            return web.Response(
+                status=404, headers={"Access-Control-Allow-Origin": "*"}
+            )
+        return web.Response(body=data, headers=_MEDIA_HEADERS)
+
+
+class GfsMomentMediaDeleteView(GfsBaseView):
+    """``POST /gfs/moments/media/{blob_id}/delete`` — the author's household
+    withdraws a blob (the moment was deleted). Signed JSON body
+    ``{instance_id, author_user_id, blob_id}``."""
+
+    async def post(self) -> web.Response:
+        result = await _rtc_authenticate(self, max_bytes=4096)
+        if isinstance(result, web.Response):
+            return result
+        body, sender = result
+        blob_id = self.match("blob_id")
+        author = str(body.get("author_user_id") or "")
+        if body.get("blob_id") != blob_id:
+            return web.json_response({"error": "blob_id_mismatch"}, status=422)
+        registry = self.svc(K.gfs_moment_public_registry_key)
+        if not await registry.is_author_household(author, sender):
+            return web.json_response({"error": "instance_mismatch"}, status=403)
+        deleted = await self.svc(K.gfs_moment_media_store_key).delete(
+            blob_id, author_user_id=author
+        )
+        return web.json_response({"deleted": deleted})

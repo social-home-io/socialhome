@@ -54,10 +54,11 @@ from ..moment_public_seal import (
     ENVELOPE_FIELDS,
     UnsupportedMomentSealSuite,
     is_wire_int,
+    item_key,
     open_body,
     verify_wire,
 )
-from .inbound_media_store import verbatim_local_media_ref
+from .moment_public_media_inbound import MediaJob
 
 if TYPE_CHECKING:
     from ..repositories.moment_public_repo import (
@@ -65,6 +66,7 @@ if TYPE_CHECKING:
     )
     from ..repositories.moment_repo import AbstractMomentRepo
     from .moment_public_key_inbound import MomentPublicKeyInbound
+    from .moment_public_media_inbound import MomentPublicMediaInbound
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +87,7 @@ _OPS: dict[str, str] = {
 
 
 class MomentPublicInbound:
-    __slots__ = ("_bus", "_follows", "_held", "_keys", "_moments")
+    __slots__ = ("_bus", "_follows", "_held", "_keys", "_media", "_moments")
 
     def __init__(
         self,
@@ -99,9 +101,14 @@ class MomentPublicInbound:
         self._moments = moment_repo
         self._follows = follow_repo
         self._keys = key_inbound
+        #: Encrypted media (v_63). Unwired: moments are kept without files.
+        self._media: MomentPublicMediaInbound | None = None
         #: ``(author, generation)`` → ``[(monotonic time, op, envelope,
         #: gfs_id)]`` waiting for that generation's key, oldest first.
         self._held: dict[tuple[str, int], list[tuple[float, str, dict, str]]] = {}
+
+    def attach_media(self, media: MomentPublicMediaInbound) -> None:
+        self._media = media
 
     async def handle(self, frame: dict[str, Any], *, gfs_id: str) -> None:
         """Dispatch a single WS frame from the GFS this handler is bound to."""
@@ -166,7 +173,12 @@ class MomentPublicInbound:
         # The moment id is the envelope's (bound into the AEAD).
         body["moment_id"] = env["moment_id"]
         if op == "create":
-            await self._on_create(body, follow, gfs_id=gfs_id)
+            await self._on_create(
+                body,
+                follow,
+                gfs_id=gfs_id,
+                item=item_key(key, str(env["moment_id"])),
+            )
         else:
             await self._on_delete(body, outer_instance_id=str(env["instance_id"]))
 
@@ -204,7 +216,12 @@ class MomentPublicInbound:
                 await self._on_envelope(env, op=op, gfs_id=gfs_id)
 
     async def _on_create(
-        self, env: dict, follow: MomentPublicFollow | None, *, gfs_id: str
+        self,
+        env: dict,
+        follow: MomentPublicFollow | None,
+        *,
+        gfs_id: str,
+        item: bytes,
     ) -> None:
         if not all(
             isinstance(env.get(k), str) and env.get(k)
@@ -257,16 +274,41 @@ class MomentPublicInbound:
             # Only a live moment we have not seen refreshes the profile, so a
             # replay of an old envelope cannot roll a newer one back.
             await self._refresh_profile(env["profile"], follow, gfs_id=gfs_id)
-        media_url = verbatim_local_media_ref(env.get("media_url"))
+        media = env.get("media")
+        if isinstance(media, dict) and self._media is not None:
+            # v_63: kept once its file is here (fetched off the GFS socket).
+            async def _then(media_url: str | None, media_type: str | None) -> None:
+                await self._store(env, gfs_id, media_url, media_type)
+
+            if self._media.submit(
+                MediaJob(
+                    gfs_id=gfs_id,
+                    author_user_id=str(env["author_user_id"]),
+                    moment_id=str(env["moment_id"]),
+                    item_key=item,
+                    media=media,
+                    then=_then,
+                )
+            ):
+                return
+        # No file to keep: an author's own ``media_url`` (an older body)
+        # names a file on THEIR household, never one here.
+        await self._store(env, gfs_id, None, None)
+
+    async def _store(
+        self,
+        env: dict,
+        gfs_id: str,
+        media_url: str | None,
+        media_type: str | None,
+    ) -> None:
         moment = Moment(
             id=str(env["moment_id"]),
             author_user_id=str(env["author_user_id"]),
             content=str(env.get("content") or ""),
-            # Only a local media reference — a third-party URL would load
-            # from every follower's browser (IP leak).
             media_url=media_url,
-            media_type=env.get("media_type") if media_url is not None else None,
-            duration_ms=env.get("duration_ms"),
+            media_type=media_type if media_url is not None else None,
+            duration_ms=env.get("duration_ms") if media_url is not None else None,
             parent_moment_id=env.get("parent_moment_id"),
             origin_instance_id=str(env.get("origin_instance_id") or ""),
             created_at=str(env["created_at"]),
@@ -329,6 +371,8 @@ class MomentPublicInbound:
         )
         if existing is None:
             return
+        if self._media is not None:
+            await self._media.forget(existing.media_url)
         await self._bus.publish(
             MomentDeleted(
                 moment_id=moment_id,

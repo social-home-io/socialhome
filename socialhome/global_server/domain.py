@@ -333,6 +333,18 @@ class GfsMomentFollow:
 
 
 @dataclass(slots=True, frozen=True)
+class GfsMomentMedia:
+    """One encrypted public-moment media blob (v_63). The bytes are a file
+    named ``blob_id`` under the media dir; this server can't open them."""
+
+    blob_id: str
+    author_user_id: str
+    size: int
+    expires_at: int
+    created_at: int = 0
+
+
+@dataclass(slots=True, frozen=True)
 class GfsMomentKeyMail:
     """The latest sealed moment key for one follower household (v_62).
 

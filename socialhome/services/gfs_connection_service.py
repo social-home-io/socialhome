@@ -346,6 +346,7 @@ class GfsConnectionService:
         "_caps_warned",
         "_change_lock",
         "_cover_repo",
+        "_encrypted_moment_media",
         "_encrypted_moments",
         "_envelope_relay",
         "_http_client",
@@ -465,6 +466,9 @@ class GfsConnectionService:
         # public moments and routes sealed moment keys. Nothing of a public
         # moment is sent to a server that has not proved it.
         self._encrypted_moments: dict[str, bool] = {}
+        # …and ``encrypted_moment_media`` (v_63): the GFS keeps encrypted
+        # moment blobs (``/gfs/moments/media``).
+        self._encrypted_moment_media: dict[str, bool] = {}
         # Same again for ``member_publish_trusted`` (v_49): whether the GFS
         # carries the identified ``POST /gfs/member-publish`` and the
         # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
@@ -682,6 +686,7 @@ class GfsConnectionService:
             self._targeted_publish,
             self._sealed_highlight_stream,
             self._encrypted_moments,
+            self._encrypted_moment_media,
             self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
@@ -3117,6 +3122,17 @@ class GfsConnectionService:
             return False
         return await self._signed_capability_supported(
             conn, "encrypted_moments", self._encrypted_moments
+        )
+
+    async def encrypted_moment_media_supported(self, gfs_id: str) -> bool:
+        """Whether the GFS *gfs_id* proved ``encrypted_moment_media`` (v_63)
+        under a valid signature: it keeps encrypted moment blobs. Moment
+        media is uploaded only to such a server."""
+        conn = await self._repo.get(gfs_id)
+        if conn is None or conn.status != "active" or not conn.inbox_url:
+            return False
+        return await self._signed_capability_supported(
+            conn, "encrypted_moment_media", self._encrypted_moment_media
         )
 
     async def publish_space_event_to(

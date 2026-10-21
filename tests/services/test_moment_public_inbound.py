@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.domain.events import MomentCreated
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.moment_public_seal import seal_body, sign_wire
+from socialhome.moment_public_seal import item_key, seal_body, sign_wire
 from socialhome.repositories.moment_public_repo import SqliteMomentPublicFollowRepo
 from socialhome.repositories.moment_repo import SqliteMomentRepo
 from socialhome.services import moment_public_inbound
@@ -409,3 +409,98 @@ async def test_a_held_moment_past_its_wait_is_not_opened(db, monkeypatch):
         {"type": "moment_key", "payload": {"author_user_id": "u-noor"}}, gfs_id="g1"
     )
     assert await _stored(db, "m-old") is None
+
+
+# ── Encrypted media (v_63) ────────────────────────────────────────────────
+
+
+class _MediaIn:
+    def __init__(self, *, accept: bool = True) -> None:
+        self.accept = accept
+        self.jobs: list = []
+
+    def submit(self, job) -> bool:
+        self.jobs.append(job)
+        return self.accept
+
+
+_MEDIA = {
+    "blob_id": "c" * 64,
+    "media_suite": "aesgcm-256-pad",
+    "content_type": "image/webp",
+}
+
+
+async def test_a_moment_with_media_is_stored_once_its_file_is_kept(db):
+    inbound, _ = await _env(db)
+    media = _MediaIn()
+    inbound.attach_media(media)
+    await _create(inbound, _moment("m-pic", media=_MEDIA, media_type="image"))
+    # Nothing stored until the file is here.
+    assert await _stored(db, "m-pic") is None
+    [job] = media.jobs
+    assert (job.moment_id, job.author_user_id, job.gfs_id) == ("m-pic", "u-noor", "g1")
+    assert job.item_key == item_key(TEST_KEY, "m-pic")
+    assert job.media == _MEDIA
+    await job.then("api/media/gm-abc.webp", "image")
+    got = await _stored(db, "m-pic")
+    assert (got.media_url, got.media_type) == ("api/media/gm-abc.webp", "image")
+
+
+async def test_a_moment_whose_file_couldnt_be_kept_is_stored_without_it(db):
+    inbound, _ = await _env(db)
+    media = _MediaIn()
+    inbound.attach_media(media)
+    await _create(inbound, _moment("m-pic", media=_MEDIA, media_type="image"))
+    await media.jobs[0].then(None, None)
+    got = await _stored(db, "m-pic")
+    assert got is not None and got.media_url is None and got.media_type is None
+    assert got.content == "bees"
+
+
+async def test_a_full_fetch_queue_stores_the_moment_without_its_file(db):
+    inbound, _ = await _env(db)
+    inbound.attach_media(_MediaIn(accept=False))
+    await _create(inbound, _moment("m-pic", media=_MEDIA, media_type="image"))
+    got = await _stored(db, "m-pic")
+    assert got is not None and got.media_url is None
+
+
+async def test_an_authors_local_reference_is_never_stored(db):
+    """A body naming ``media_url`` (the author's own file) points at
+    nothing here — it is not kept."""
+    inbound, _ = await _env(db)
+    await _create(
+        inbound, _moment("m-ref", media_url="api/media/a.webp", media_type="image")
+    )
+    got = await _stored(db, "m-ref")
+    assert got is not None and got.media_url is None and got.media_type is None
+
+
+async def test_deleting_a_moment_forgets_its_fetched_file(db):
+    inbound, _ = await _env(db)
+    media = _MediaIn()
+    forgotten: list = []
+
+    async def _forget(url):
+        forgotten.append(url)
+
+    media.forget = _forget  # type: ignore[attr-defined]
+    inbound.attach_media(media)
+    await _create(inbound, _moment("m-pic", media=_MEDIA, media_type="image"))
+    await media.jobs[0].then("api/media/gm-abc.webp", "image")
+    await inbound.handle(
+        {
+            "type": "incoming_public_moment_delete",
+            "payload": _signed(
+                {
+                    "moment_id": "m-pic",
+                    "author_user_id": "u-noor",
+                    "instance_id": "inst-noor",
+                    "origin_instance_id": "inst-noor",
+                }
+            ),
+        },
+        gfs_id="g1",
+    )
+    assert forgotten == ["api/media/gm-abc.webp"]

@@ -39,3 +39,16 @@ async def test_forgetting_a_listing_drops_the_proof(env):
     svc._encrypted_moments["g1"] = True
     svc._forget_listing("g1")
     assert "g1" not in svc._encrypted_moments
+
+
+async def test_encrypted_moment_media_needs_its_own_proof(env):
+    """v_63: a server that proved ``encrypted_moments`` but not
+    ``encrypted_moment_media`` gets no blobs."""
+    svc = await _svc(env)
+    svc._encrypted_moments["g1"] = True
+    assert await svc.encrypted_moment_media_supported("g1") is False
+    svc._encrypted_moment_media["g1"] = True
+    assert await svc.encrypted_moment_media_supported("g1") is True
+    assert await svc.encrypted_moment_media_supported("nope") is False
+    svc._forget_listing("g1")
+    assert "g1" not in svc._encrypted_moment_media

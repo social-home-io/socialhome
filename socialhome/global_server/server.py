@@ -56,6 +56,7 @@ from .highlight_publications import HighlightPublicationRegistry
 from .invites import INVITE_MINT_MAX_PER_MINUTE, GfsInviteService
 from .maintenance import GfsMaintenanceScheduler
 from .member_publish import GfsMemberPublishService, build_member_publish_rate_limit
+from .moment_media import GfsMomentMediaStore
 from .moment_public_registry import MomentPublicRegistry
 from .public import (
     ClientIpResolver,
@@ -80,6 +81,7 @@ from .repositories import (
     SqliteGfsInviteRepo,
     SqliteGfsMomentFollowRepo,
     SqliteGfsMomentKeyMailboxRepo,
+    SqliteGfsMomentMediaRepo,
     SqliteGfsSpaceEpochRepo,
     SqliteGfsUserPictureRepo,
     SqliteGfsUserRegistrationRepo,
@@ -296,6 +298,7 @@ class GfsApp:
             moment_public_users=SqliteGfsUserRegistrationRepo(db),
             moment_public_follows=SqliteGfsMomentFollowRepo(db),
             moment_key_mailbox=SqliteGfsMomentKeyMailboxRepo(db),
+            moment_media=SqliteGfsMomentMediaRepo(db),
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
             space_epochs=SqliteGfsSpaceEpochRepo(db),
@@ -423,7 +426,9 @@ class GfsApp:
         # highlight publications, aged pair tokens, and envelopes whose TTL
         # ran out (the GFS otherwise has no recurring cleanup loop; these
         # tables would grow without bound).
+        moment_media = GfsMomentMediaStore(repos.moment_media, config.media_dir)
         maintenance = GfsMaintenanceScheduler(
+            moment_media=moment_media,
             admin_repo=repos.admin,
             highlight_repo=repos.highlight_pubs,
             envelope_queue_repo=repos.envelope_queue,
@@ -434,6 +439,7 @@ class GfsApp:
             federation=federation,
             cluster=cluster,
             maintenance=maintenance,
+            moment_media=moment_media,
             admin_auth=AdminAuth(repos.admin),
             admin=admin,
             tokens=PairingTokenService(repos.admin),
@@ -496,6 +502,7 @@ class GfsApp:
         a[K.gfs_moment_public_follow_repo_key] = self.repos.moment_public_follows
         a[K.gfs_moment_public_registry_key] = self.services.moment_public
         a[K.gfs_user_picture_repo_key] = self.repos.moment_public_pictures
+        a[K.gfs_moment_media_store_key] = self.services.moment_media
         a[K.gfs_envelope_queue_repo_key] = self.repos.envelope_queue
         a[K.gfs_envelope_relay_key] = self.services.envelope_relay
         a[K.gfs_space_epoch_repo_key] = self.repos.space_epochs

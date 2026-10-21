@@ -343,6 +343,8 @@ from .services.moment_federation_outbound import MomentFederationOutbound
 from .services.moment_public_inbound import MomentPublicInbound
 from .services.moment_public_key_inbound import MomentPublicKeyInbound
 from .services.moment_public_key_outbound import MomentPublicKeyOutbound
+from .services.moment_public_media_inbound import MomentPublicMediaInbound
+from .services.moment_public_media_outbound import MomentPublicMediaOutbound
 from .services.moment_public_outbound import MomentPublicOutbound
 from .services.moment_public_service import MomentPublicService
 from .services.moment_public_signaling_handler import MomentPublicSignalingHandler
@@ -3223,6 +3225,18 @@ def create_app(config: Config | None = None) -> web.Application:
         follow_repo=moment_public_follow_repo,
         key_inbound=moment_public_key_inbound,
     )
+    # v_63 — a public moment's file, sealed once and uploaded per GFS
+    # (author side); fetched, checked and kept (follower side).
+    moment_public_media_outbound = MomentPublicMediaOutbound(
+        gfs_repo=repos.gfs_connection,
+        gfs_service=gfs_connection_service,
+        media_dir=pathlib.Path(config.media_path),
+    )
+    moment_public_outbound.attach_media(moment_public_media_outbound)
+    moment_public_media_inbound = MomentPublicMediaInbound(
+        gfs_repo=repos.gfs_connection, media_dir=pathlib.Path(config.media_path)
+    )
+    moment_public_inbound.attach_media(moment_public_media_inbound)
     moment_public_service.attach_key_inbound(moment_public_key_inbound)
     moment_public_service.attach_key_outbound(moment_public_key_outbound)
     # A local author blocking someone marks their moment key for rotation.
@@ -3791,6 +3805,13 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         # Sealed moment keys go to the GFS in batches (v_62).
         await moment_public_key_outbound.start()
+        moment_public_media_outbound.attach_session(http_session)
+        moment_public_media_outbound.attach_identity(
+            own_instance_id=real_instance_id,
+            signing_key=identity_seed,
+        )
+        moment_public_media_inbound.attach_session(http_session)
+        await moment_public_media_inbound.start()
 
         # 3. Replace UserService with one carrying the real public key.
         real_user_service = UserService(
@@ -5158,6 +5179,7 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_ws_supervisor.stop()
         # Before the HTTP session closes: queued sealed moment keys ride it.
         await moment_public_key_outbound.stop()
+        await moment_public_media_inbound.stop()
         # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()
         # Background seat releases ride the HTTP session too.

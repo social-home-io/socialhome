@@ -107,6 +107,8 @@ from .moments_public import (
     GfsMomentFollowerStatsView,
     GfsMomentKeyRequestView,
     GfsMomentKeysView,
+    GfsMomentMediaDeleteView,
+    GfsMomentMediaView,
     GfsMomentPublicDeleteView,
     GfsMomentPublicPublishView,
     GfsMomentSuitesView,
@@ -312,6 +314,9 @@ def register_routes(
     app.router.add_view("/gfs/moments/delete", GfsMomentPublicDeleteView)
     # v_62 — sealed moment keys, routed to the one follower each names.
     app.router.add_view("/gfs/moments/keys", GfsMomentKeysView)
+    # v_63 — encrypted moment media, content-addressed.
+    app.router.add_view("/gfs/moments/media/{blob_id}", GfsMomentMediaView)
+    app.router.add_view("/gfs/moments/media/{blob_id}/delete", GfsMomentMediaDeleteView)
     app.router.add_view("/gfs/moments/suites", GfsMomentSuitesView)
     app.router.add_view(
         "/gfs/moments/users/{user_id}/key_request", GfsMomentKeyRequestView

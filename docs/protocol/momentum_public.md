@@ -113,9 +113,9 @@ its own key-wrap key for every follower and read silently — strictly weaker.
 * *Trust on first use of the author key* at follow time (unchanged).
 * *Metadata* — the follow graph, which author posts when, moment ids, key
   ids, sizes, timing, when keys are delivered.
-* *Media bytes* — only the media *reference* rides the envelope (inside the
-  ciphertext); followers don't receive media bytes through the GFS yet
-  (encrypted, content-addressed media is a follow-up).
+* *Media* (v_63) — the GFS stores each moment file as padded ciphertext it
+  can't open: it learns a size bucket, the blob's address and who fetches
+  it when. See [Encrypted media](#encrypted-media-v_63).
 * *The live public-moments index* (`/moments/{user_id}`) still streams
   moments to guests — owner decision 2026-10-20: that page becomes profile +
   Follow only, and moments open through per-moment share links (follow-up).
@@ -154,6 +154,8 @@ verifies the author's signature directly.
 | POST   | `/gfs/moments/users/{user_id}/picture` | Signed body — push avatar bytes. |
 | POST   | `/gfs/moments/publish` | Signed, encrypted envelope — fan out. Anything but the eight envelope fields: `422 encryption_required`. |
 | POST   | `/gfs/moments/delete` | Signed, encrypted tombstone — fan out the delete. Same shape rule. |
+| PUT / GET | `/gfs/moments/media/{blob_id}` | v_63. `PUT` header-signed by the author's household: one encrypted, padded blob addressed by its SHA-256 (≤ 8 MB + overhead; 422 for a wrong address / size / expiry, 429 over the author's quota). `GET` anonymous, immutable, CORS `*`: the ciphertext. |
+| POST   | `/gfs/moments/media/{blob_id}/delete` | v_63. Signed by the author's household: withdraw a blob (its moment was deleted). |
 | POST   | `/gfs/moments/suites` | v_62. Signed by a follower household: `{instance_id, moment_suites: {kem, seal}}` — what it can open, recorded on every follow it holds here (a follow made before it upgraded declared nothing). Sent once per process per server on (re)connect, only when a local user follows someone there. Returns `{updated}`. |
 | POST   | `/gfs/moments/keys` | v_62. Signed by the author's household: `{instance_id, deliveries: [≤ 100 sealed keys]}`. Each is kept (latest per author + household) and pushed to its `to` household only while it follows the author. |
 | POST   | `/gfs/moments/users/{user_id}/key_request` | v_62. Signed by a follower household: `{instance_id, want_gen}`. Always `202`; answered from the mailbox, or forwarded to the author, only for a follower, throttled. |
@@ -339,6 +341,76 @@ follower. Bounds, enforced by sender and receiver: envelope ≤ 16 KB
 ciphertext; ≤ 100 deliveries / 128 KB per keys request; ≤ 1 KB per sealed
 key; held envelopes ≤ 16 per author-generation, ≤ 256 total; ≤ 10,000
 queued keys per GFS; ≤ 500 mailbox pushes per connect.
+
+## Encrypted media (v_63)
+
+Before v_63 a follower never got a public moment's photo or video: only the
+author's `api/media/<name>` reference travelled, which names a file on the
+author's household. Now the file itself travels — encrypted, once:
+
+* **Seal once** (`socialhome/moment_public_media.py`,
+  `MomentPublicMediaOutbound`). Key `HKDF(item_key, "sh-moment-media:v1|" +
+  role)` — derived from the moment's item key, so whoever can open the
+  moment can open its file and nobody else; `role` is `media` or `poster`
+  (a video's still). Plaintext `u32 length ‖ file ‖ zeros` padded to the
+  next bucket of 64 KB, 256 KB, 1 MB, 2 MB, 4 MB, 8 MB — the GFS learns a
+  size bucket, not the size; files over **8 MB** are not sent (the moment
+  goes without). AES-256-GCM, fresh nonce, AAD binding suite, author,
+  moment id and role. `media_suite: "aesgcm-256-pad"` (unknown suites
+  refused).
+* **Address = SHA-256 of the blob.** The sealed moment names it:
+  `media: {blob_id, media_suite, content_type, poster_blob_id?}`
+  (`content_type` from an allow-list: WebP, JPEG, PNG, GIF, WebM, MP4). The
+  author's own `media_url` no longer travels.
+* **Upload once per GFS, before the moment.** `PUT
+  /gfs/moments/media/{blob_id}`, header-signed by the author's household
+  (`X-SH-Instance` / `-Author` / `-Expires` / `-Timestamp` / `-Signature` over
+  `{instance_id, blob_id, author_user_id, expires_at, ts}`, ±300 s). Only to
+  a GFS whose signed `/gfs/info` proves `encrypted_moment_media`. The GFS
+  checks the signer is the author's registered household, the body's
+  SHA-256 is the address, the size is a padded bucket, and the expiry is no
+  later than 8 days out; it caps each author at 256 MB live and 60 blobs an
+  hour, and drops blobs when they expire, when the author deletes the moment
+  (`POST /gfs/moments/media/{id}/delete`, signed) or deregisters.
+* **A video still transcoding** is held by the author's household until
+  `MediaTranscodeReady` (or sent without its file on `MediaTranscodeFailed`).
+* **Fetch off the socket** (`MomentPublicMediaInbound`). A follower that
+  opens a moment naming a blob queues a fetch (≤ 64 waiting) from the GFS
+  the moment came through (`GET /gfs/moments/media/{id}` — anonymous,
+  immutable, CORS `*` for a future share-link viewer), checks the SHA-256,
+  opens it (AEAD bound to author, moment and role), keeps it as
+  `gm-<id>.<ext>` (a poster as `gm-<id>.webp`, the name a video's poster is
+  derived by) and only then stores the moment. Anything that doesn't check
+  out stores the moment **without** a file — never a broken or foreign one.
+  A delete removes the kept file; retention sweeps it with the moment.
+
+```mermaid
+sequenceDiagram
+  participant A as Author SH
+  participant G as GFS
+  participant B as Follower SH
+
+  A->>A: item key(moment) → media key → pad + seal the file ONCE → blob, sha256
+  loop per GFS that proved encrypted_moment_media
+    A->>G: PUT /gfs/moments/media/{sha256} (header-signed, ≤ 8 MB + overhead)
+    G->>G: signer = author's household? sha256 matches? bucket size? quota? → keep (expires with the moment)
+  end
+  A->>G: POST /gfs/moments/publish (sealed body names media.blob_id)
+  G->>B: incoming_public_moment
+  B->>B: open the moment → queue the fetch (off the socket)
+  B->>G: GET /gfs/moments/media/{sha256}
+  G-->>B: ciphertext
+  B->>B: sha256 ok · open (author, moment, role) · keep gm-<id>.webp → store the moment
+```
+
+**Traffic (N = 10,000 follower households, a 2 MB photo → 2 MB bucket):**
+the author's uplink carries **2 MB once per GFS** (before: nothing reached
+followers at all; a "stream it from home" design would be N × 2 MB = 20 GB
+from the household). The GFS serves N × 2 MB = 20 GB to followers that open
+it — fetched once per household, not per user, and only by households that
+can open it; it stores 2 MB until the moment expires. The moment frame
+itself grows by ~0.2 KB. Worst case per author: 256 MB live on a GFS,
+60 blobs/hour.
 
 ## Author profile: name, picture and bio
 
@@ -632,6 +704,11 @@ live from that household can't hide this.
   `socialhome/services/moment_public_inbound.py`.
 * Wire crypto (envelope + sealed-key shapes, suites, signatures):
   `socialhome/moment_public_seal.py`.
+* Encrypted media (v_63): `socialhome/moment_public_media.py` (seal, pad,
+  address), `socialhome/services/moment_public_media_outbound.py` (author:
+  seal once, upload per GFS, withdraw), `socialhome/services/moment_public_media_inbound.py`
+  (follower: fetch, check, open, keep), `socialhome/global_server/moment_media.py`
+  (GFS store, quotas, expiry).
 * Moment content keys — author side (mint, seal to followers, batched
   delivery): `socialhome/services/moment_public_key_outbound.py`;
   follower side (import, ask): `socialhome/services/moment_public_key_inbound.py`;

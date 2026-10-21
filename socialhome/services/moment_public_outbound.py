@@ -32,12 +32,15 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
 from ..domain.child_protection import ProtectedCapability
 from ..domain.events import (
+    MediaTranscodeFailed,
+    MediaTranscodeReady,
     MomentCreated,
     MomentDeleted,
     UserDeprovisioned,
@@ -45,7 +48,7 @@ from ..domain.events import (
 )
 from ..domain.moment_public import public_author_bio, public_profile_rev
 from ..infrastructure.event_bus import EventBus
-from ..moment_public_seal import seal_body, sign_wire
+from ..moment_public_seal import item_key, seal_body, sign_wire
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
@@ -57,11 +60,18 @@ if TYPE_CHECKING:
     from ..repositories.user_repo import AbstractUserRepo
     from .gfs_connection_service import GfsConnectionService
     from .moment_public_key_outbound import MomentPublicKeyOutbound
+    from .moment_public_media_outbound import MomentPublicMediaOutbound
 
 log = logging.getLogger(__name__)
 
 #: A remote author's moment re-reads the local user list at most this often.
 LOCAL_USERS_REREAD_S: float = 60.0
+
+#: Longest a moment's media blob is kept on a GFS (a moment lives ≤ 7 days).
+MEDIA_KEEP_AT_MOST_S: int = 7 * 86_400
+
+#: Public moments held for a video still transcoding, at most.
+MAX_WAITING_FOR_MEDIA: int = 200
 
 #: The author's profile rides a moment at least this often even unchanged,
 #: so a follower that missed a change catches up within a day.
@@ -76,6 +86,7 @@ class MomentPublicOutbound(ProtectionGateMixin):
         "_gfs_service",
         "_http_client",
         "_keys",
+        "_media",
         "_moments",
         "_own_instance_id",
         "_own_users",
@@ -85,6 +96,7 @@ class MomentPublicOutbound(ProtectionGateMixin):
         "_signing_key",
         "_unsupported_warned",
         "_users",
+        "_waiting_media",
     )
 
     def __init__(
@@ -122,6 +134,13 @@ class MomentPublicOutbound(ProtectionGateMixin):
         #: author → (profile_rev, monotonic time) last sent inside a moment.
         self._profile_sent: dict[str, tuple[str, float]] = {}
         self._child_protection = None
+        #: Encrypted media (v_63). Unwired: moments go without their file.
+        self._media: MomentPublicMediaOutbound | None = None
+        #: media file name → the moment waiting for its transcode.
+        self._waiting_media: dict[str, MomentCreated] = {}
+
+    def attach_media(self, media: MomentPublicMediaOutbound) -> None:
+        self._media = media
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:
         if self._http_client is None:
@@ -136,6 +155,18 @@ class MomentPublicOutbound(ProtectionGateMixin):
         self._bus.subscribe(MomentDeleted, self._on_deleted)
         self._bus.subscribe(UserProvisioned, self._on_user_provisioned)
         self._bus.subscribe(UserDeprovisioned, self._on_user_deprovisioned)
+        self._bus.subscribe(MediaTranscodeReady, self._on_transcode_ready)
+        self._bus.subscribe(MediaTranscodeFailed, self._on_transcode_failed)
+
+    async def _on_transcode_ready(self, event: MediaTranscodeReady) -> None:
+        waiting = self._waiting_media.pop(event.output_filename, None)
+        if waiting is not None:
+            await self._on_created(waiting)
+
+    async def _on_transcode_failed(self, event: MediaTranscodeFailed) -> None:
+        waiting = self._waiting_media.pop(event.output_filename, None)
+        if waiting is not None:
+            await self._on_created(waiting, without_media=True)
 
     async def _on_user_provisioned(self, event: UserProvisioned) -> None:
         if self._own_users is not None:
@@ -147,7 +178,9 @@ class MomentPublicOutbound(ProtectionGateMixin):
 
     # ── Subscribers ─────────────────────────────────────────────────────
 
-    async def _on_created(self, event: MomentCreated) -> None:
+    async def _on_created(
+        self, event: MomentCreated, *, without_media: bool = False
+    ) -> None:
         if not await self._is_local(event.author_user_id):
             return
         moment = await self._moments.get(event.moment_id)
@@ -177,14 +210,26 @@ class MomentPublicOutbound(ProtectionGateMixin):
         if not regs:
             return
         gen, step, key = await self._keys.publish_key(event.author_user_id)
+        # v_63: the file sealed ONCE under a key derived from the moment's
+        # item key; the same blob goes to every GFS. The author's local
+        # ``api/media/…`` reference never travels — it names nothing on a
+        # follower's side.
+        prepared = None
+        if self._media is not None and moment.media_url and not without_media:
+            prepared = await self._media.prepare(
+                moment, item_key=item_key(key, moment.id)
+            )
+            if prepared is not None and not prepared.ready:
+                self._hold_for_media(moment.media_url, event)
+                return
+        has_media = prepared is not None
         # Sealed under the moment's item key — the GFS reads none of it.
         body: dict[str, Any] = {
             "op": "create",
             "author_user_id": moment.author_user_id,
             "content": moment.content,
-            "media_url": moment.media_url,
-            "media_type": moment.media_type,
-            "duration_ms": moment.duration_ms,
+            "media_type": moment.media_type if has_media else None,
+            "duration_ms": moment.duration_ms if has_media else None,
             "parent_moment_id": moment.parent_moment_id,
             "origin_instance_id": moment.origin_instance_id,
             "created_at": moment.created_at,
@@ -203,6 +248,25 @@ class MomentPublicOutbound(ProtectionGateMixin):
                 else None
             )
             variants.setdefault(digest, []).append(reg.gfs_id)
+        if prepared is not None:
+            body["media"] = prepared.body
+            assert self._media is not None
+            # A blob lives as long as its moment — never past the longest a
+            # moment lives (a GFS refuses more).
+            expires = min(
+                _unix(moment.expires_at), int(time.time()) + MEDIA_KEEP_AT_MOST_S
+            )
+            for reg in regs:
+                # Uploaded before the moment, so followers can fetch at once.
+                if await self._media.upload(
+                    reg.gfs_id,
+                    prepared,
+                    author_user_id=event.author_user_id,
+                    expires_at=expires,
+                ):
+                    self._media.remember(
+                        event.author_user_id, moment.id, reg.gfs_id, prepared
+                    )
         sent_rev: str | None = None
         for digest, gfs_ids in variants.items():
             profile = {
@@ -248,6 +312,19 @@ class MomentPublicOutbound(ProtectionGateMixin):
         )
         for reg in regs:
             await self._post_to_gfs(reg.gfs_id, envelope, kind="delete")
+        if self._media is not None:
+            await self._media.withdraw(event.author_user_id, event.moment_id)
+
+    def _hold_for_media(self, media_url: str, event: MomentCreated) -> None:
+        """Publish *event* once its video's transcode finishes (bounded)."""
+        name = media_url.rsplit("/", 1)[-1]
+        if len(self._waiting_media) >= MAX_WAITING_FOR_MEDIA:
+            self._waiting_media.pop(next(iter(self._waiting_media)))
+        self._waiting_media[name] = event
+        log.info(
+            "moment_public.outbound: moment %s waits for its video to finish",
+            event.moment_id,
+        )
 
     # ── Helpers ─────────────────────────────────────────────────────────
 
@@ -350,3 +427,11 @@ class MomentPublicOutbound(ProtectionGateMixin):
                 kind,
                 exc,
             )
+
+
+def _unix(iso: str) -> int:
+    """Unix seconds of an ISO 8601 time (``Z`` or an offset; naive = UTC)."""
+    when = datetime.fromisoformat(iso)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return int(when.timestamp())
