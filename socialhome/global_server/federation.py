@@ -8,6 +8,18 @@ instance has an open ``/gfs/ws`` WebSocket, the event is pushed over that
 connection; otherwise it is not delivered and waits for the household to
 reconnect. The GFS holds no household address (migration 0018 dropped
 ``inbox_url`` with the HTTPS-inbox fallback that could never succeed).
+
+**Cluster.** Each node knows only its OWN sockets, and a load balancer
+spreads a household's requests over every node. Two single-recipient
+pushes therefore reach the household's socket wherever it is:
+
+* a ``new_subscriber`` notice whose owner has no socket here is handed to
+  :meth:`ClusterService.hint_subscriber_notice` (ids only, coalesced into
+  the next ``NODE_DRAIN_HINT``); the node that holds the owner's socket
+  rebuilds the notice from the shared DB (:meth:`deliver_forwarded_notice`);
+* a targeted (``to``) relay whose target has no socket here is put in the
+  shared queue (:meth:`GfsEnvelopeRelay.queue_relay`), whose drain hint
+  makes the node holding the target's socket push it.
 """
 
 from __future__ import annotations
@@ -56,6 +68,8 @@ from .domain import (
 from .repositories import AbstractGfsFederationRepo
 
 if TYPE_CHECKING:
+    from .cluster import ClusterService
+    from .envelope_relay import GfsEnvelopeRelay
     from .repositories import AbstractGfsInviteRepo, AbstractGfsSpaceEpochRepo
     from .ws_registry import GfsWebSocketRegistry
 
@@ -178,6 +192,11 @@ SEAT_CHURN_WINDOW_S: float = 3600.0
 
 #: Bound on each of the two in-memory ``(subscriber, space)`` sets above.
 SEAT_NOTIFY_CACHE_MAX: int = 100_000
+
+#: The ``new_subscriber.reason`` values a forwarded cluster notice may carry.
+NEW_SUBSCRIBER_REASONS: frozenset[str] = frozenset(
+    {NEW_SUBSCRIBER_REASON_SUBSCRIBE, NEW_SUBSCRIBER_REASON_RECONNECT}
+)
 
 
 def _seat_key(instance_id: str, space_id: str) -> bytes:
@@ -371,11 +390,13 @@ class GfsFederationService:
     """
 
     __slots__ = (
+        "_cluster",
         "_epoch_repo",
         "_hello_seats",
         "_invite_repo",
         "_notified_seats",
         "_reconnect_tasks",
+        "_relay",
         "_repo",
         "_seat_churn",
         "_seen_payloads",
@@ -419,6 +440,18 @@ class GfsFederationService:
         # Strong refs to in-flight reconnect-notify tasks — an asyncio task
         # with no reference can be garbage-collected mid-await.
         self._reconnect_tasks: set[asyncio.Task[None]] = set()
+        # Set by ``attach_cluster`` / ``attach_relay`` (each needs this
+        # service too). ``None`` on a single node built without them.
+        self._cluster: ClusterService | None = None
+        self._relay: GfsEnvelopeRelay | None = None
+
+    def attach_cluster(self, cluster: ClusterService) -> None:
+        """Hand owner notices this node cannot deliver to the cluster."""
+        self._cluster = cluster
+
+    def attach_relay(self, relay: GfsEnvelopeRelay) -> None:
+        """Queue targeted relays whose target has no socket on this node."""
+        self._relay = relay
 
     async def register_instance(
         self,
@@ -470,8 +503,11 @@ class GfsFederationService:
         With *to* (``targeted_publish``, v_61) the event goes to that ONE
         subscriber's socket only — the instance id this server itself named
         in its ``new_subscriber`` notify, so it learns nothing new. A *to*
-        that is not a subscriber of the space reaches nobody. An event type
-        in ``AUTHORITY_TARGET_ONLY_EVENT_TYPES`` is refused without *to*.
+        that is not a subscriber of the space reaches nobody. A *to* whose
+        socket is not on this node (another cluster node, or down) gets the
+        frame through the shared queue (:meth:`GfsEnvelopeRelay.queue_relay`).
+        An event type in ``AUTHORITY_TARGET_ONLY_EVENT_TYPES`` is refused
+        without *to*.
 
         The canonical request body is ``{space_id, event_type, payload}``: the
         relaying identity is not part of the contract, so the GFS does not
@@ -588,6 +624,17 @@ class GfsFederationService:
         )
 
         reached = await self._fan_out(subscribers, event_body)
+        # The target's socket is on another cluster node (or down): the
+        # shared queue + its drain hint reach it there, or on its next hello.
+        # One row for one seat — never the space's other seats.
+        if (
+            to
+            and subscribers
+            and not reached
+            and self._relay is not None
+            and await self._relay.queue_relay(to, event_body)
+        ):
+            reached = [to]
         if to:
             # Never the target's id: what to whom is the household's business.
             log.info(
@@ -1028,9 +1075,44 @@ class GfsFederationService:
         subscriber's WS hello; the owner sends the one-time author-profiles
         bundle only for ``"subscribe"``. Never raises — a missing socket or
         a send error is logged and swallowed (the 5b-c reconcile backstops
-        an offline owner)."""
+        an offline owner).
+
+        In a cluster the owner's socket is usually on ANOTHER node: when it
+        is not here, the notice is handed to the cluster as ids only
+        (:meth:`ClusterService.hint_subscriber_notice`) and the node holding
+        the socket rebuilds it (:meth:`deliver_forwarded_notice`)."""
         if self._ws_registry is None:
             return
+        # Recorded BEFORE the send, so a concurrent re-take of the same seat
+        # sees it. An owner that was offline then gets its repair from the
+        # next re-take after the window, or from its own 5b-c reconcile.
+        self._notified_seats.record(_seat_key(subscriber.instance_id, space_id))
+        if await self._send_owner_notice(
+            owning_instance, space_id, subscriber, reason=reason, accepts=accepts
+        ):
+            return
+        if self._cluster is not None:
+            self._cluster.hint_subscriber_notice(
+                owning_instance,
+                space_id,
+                subscriber.instance_id,
+                reason=reason,
+                accepts=accepts,
+            )
+
+    async def _send_owner_notice(
+        self,
+        owning_instance: str,
+        space_id: str,
+        subscriber: ClientInstance,
+        *,
+        reason: str,
+        accepts: tuple[str, ...],
+    ) -> bool:
+        """Build the ``new_subscriber`` frame and push it to the owner's
+        socket on THIS node. ``True`` iff it went out; never raises."""
+        if self._ws_registry is None:
+            return False
         sub: dict[str, object] = {
             "instance_id": subscriber.instance_id,
             "identity_public_key": subscriber.public_key,
@@ -1040,12 +1122,8 @@ class GfsFederationService:
         }
         if reason == NEW_SUBSCRIBER_REASON_SUBSCRIBE:
             sub["accepts"] = list(accepts)
-        # Recorded BEFORE the send, so a concurrent re-take of the same seat
-        # sees it. An owner that was offline then gets its repair from the
-        # next re-take after the window, or from its own 5b-c reconcile.
-        self._notified_seats.record(_seat_key(subscriber.instance_id, space_id))
         try:
-            await self._ws_registry.send(
+            return await self._ws_registry.send(
                 owning_instance,
                 {
                     "type": "new_subscriber",
@@ -1062,6 +1140,64 @@ class GfsFederationService:
                 exc,
                 exc_info=True,
             )
+            return False
+
+    async def deliver_forwarded_notice(
+        self,
+        owner: str,
+        space_id: str,
+        subscriber_id: str,
+        *,
+        reason: str,
+        accepts: tuple[str, ...] = (),
+    ) -> bool:
+        """Deliver a sibling node's owner notice to the owner's socket HERE.
+
+        The hint names ids only, so the frame is rebuilt from the shared DB —
+        and the hint is believed only as far as the DB agrees: *owner* must
+        own *space_id* and *subscriber_id* must hold an active seat in it. A
+        hint for an owner with no socket here is dropped — never forwarded
+        again (no loops; the node that holds the socket got the same hint).
+
+        This node sees every notice for the owners it holds, wherever the
+        subscribe or hello landed, so the ``reconnect`` dedupe is applied here
+        too: one key repair per seat per :data:`RECONNECT_NOTIFY_DEDUPE_S`.
+        A NEW seat (``subscribe``) is always delivered. ``True`` iff sent;
+        never raises."""
+        if self._ws_registry is None or reason not in NEW_SUBSCRIBER_REASONS:
+            return False
+        if not self._ws_registry.is_connected(owner):
+            return False
+        seat = _seat_key(subscriber_id, space_id)
+        if reason == NEW_SUBSCRIBER_REASON_RECONNECT and self._notified_seats.seen(
+            seat
+        ):
+            return False
+        try:
+            space = await self._repo.get_space(space_id)
+            if space is None or space.owning_instance != owner:
+                return False
+            if await self._repo.get_subscriber(space_id, subscriber_id) is None:
+                return False
+            subscriber = await self._repo.get_instance(subscriber_id)
+        except Exception as exc:  # defensive — a sync POST must not fail on it
+            log.warning(
+                "GFS: forwarded new_subscriber lookup for space %s failed: %s",
+                space_id,
+                exc,
+                exc_info=True,
+            )
+            return False
+        if subscriber is None:
+            return False
+        self._notified_seats.record(seat)
+        return await self._send_owner_notice(
+            owner,
+            space_id,
+            subscriber,
+            reason=reason,
+            accepts=accepts if reason == NEW_SUBSCRIBER_REASON_SUBSCRIBE else (),
+        )
 
     def schedule_subscriber_connected(
         self,

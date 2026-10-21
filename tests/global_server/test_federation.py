@@ -3534,3 +3534,266 @@ async def test_a_flapping_socket_does_not_re_notify_within_the_window(gfs_db):
     await restarted.on_subscriber_connected("sub-r")
     await restarted.on_subscriber_connected("sub-r")
     assert [f["reason"] for f in _notifies(ws)] == ["reconnect"]
+
+
+# ─── Cluster: the owner's or the target's socket is on ANOTHER node ──────
+
+
+class _PartialWsRegistry:
+    """A ws-registry stub where only *online* instances have a socket on THIS
+    node — every other ``send`` fails, as on a cluster node that does not
+    hold that household's socket."""
+
+    def __init__(self, online: set[str] | None = None) -> None:
+        self.online = set(online or ())
+        self.sent: list[tuple[str, dict]] = []
+
+    def is_connected(self, instance_id: str) -> bool:
+        return instance_id in self.online
+
+    async def send(self, instance_id: str, frame: dict) -> bool:
+        if instance_id not in self.online:
+            return False
+        self.sent.append((instance_id, frame))
+        return True
+
+
+class _RecordingCluster:
+    """``ClusterService`` stand-in: records the owner-notice hints."""
+
+    def __init__(self) -> None:
+        self.notices: list[tuple[str, str, str, str, tuple[str, ...]]] = []
+
+    def hint_subscriber_notice(
+        self,
+        owner: str,
+        space_id: str,
+        subscriber: str,
+        *,
+        reason: str,
+        accepts: tuple[str, ...] = (),
+    ) -> None:
+        self.notices.append((owner, space_id, subscriber, reason, accepts))
+
+
+class _RecordingRelay:
+    """``GfsEnvelopeRelay`` stand-in: records queued targeted frames."""
+
+    def __init__(self, *, accept: bool = True) -> None:
+        self.accept = accept
+        self.queued: list[tuple[str, dict]] = []
+
+    async def queue_relay(self, target: str, frame: dict) -> bool:
+        self.queued.append((target, frame))
+        return self.accept
+
+
+async def test_a_notice_for_an_owner_on_another_node_is_hinted_to_the_cluster(
+    gfs_db,
+):
+    """REGRESSION: in a cluster the subscribe lands on whichever node the
+    load balancer picked; the owner's socket is usually on another one. The
+    notice used to be dropped there (3 in 4 new followers on 4 nodes got no
+    key handoff and no bundle) — now it is handed to the cluster."""
+    ws = _PartialWsRegistry()
+    cluster = _RecordingCluster()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    svc.attach_cluster(cluster)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-cl1")
+    await _signed_subscribe(
+        svc, sub_seed, "sp-cl1", accepts=("author_profiles_bundle",)
+    )
+    assert ws.sent == []
+    assert cluster.notices == [
+        ("owner-r", "sp-cl1", "sub-r", "subscribe", ("author_profiles_bundle",))
+    ]
+
+
+async def test_a_notice_delivered_locally_is_not_hinted(gfs_db):
+    ws = _PartialWsRegistry({"owner-r"})
+    cluster = _RecordingCluster()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    svc.attach_cluster(cluster)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-cl2")
+    await _signed_subscribe(svc, sub_seed, "sp-cl2")
+    assert [f["reason"] for f in _notifies(ws)] == ["subscribe"]
+    assert cluster.notices == []
+
+
+async def test_a_forwarded_notice_reaches_the_local_owner(gfs_db):
+    """The node holding the owner's socket builds the notice itself from the
+    shared DB — the forwarded hint carries ids only, never key material."""
+    repo = SqliteGfsFederationRepo(gfs_db)
+    origin = GfsFederationService(repo, ws_registry=_PartialWsRegistry())
+    origin.attach_cluster(_RecordingCluster())
+    sub_seed = await _owner_and_keywrap_sub(origin, space_id="sp-cl3")
+    await _signed_subscribe(origin, sub_seed, "sp-cl3")
+
+    ws = _PartialWsRegistry({"owner-r"})
+    holder = GfsFederationService(repo, ws_registry=ws)
+    delivered = await holder.deliver_forwarded_notice(
+        "owner-r",
+        "sp-cl3",
+        "sub-r",
+        reason="subscribe",
+        accepts=("author_profiles_bundle",),
+    )
+    assert delivered is True
+    [(inst, frame)] = ws.sent
+    assert inst == "owner-r"
+    assert frame["type"] == "new_subscriber"
+    assert frame["reason"] == "subscribe"
+    assert frame["space_id"] == "sp-cl3"
+    assert frame["subscriber"]["instance_id"] == "sub-r"
+    assert frame["subscriber"]["keywrap_public_key"] == "cc" * 32
+    assert frame["subscriber"]["accepts"] == ["author_profiles_bundle"]
+
+
+async def test_a_forwarded_notice_is_never_forwarded_again(gfs_db):
+    """No loops: a node without the owner's socket drops a forwarded hint."""
+    repo = SqliteGfsFederationRepo(gfs_db)
+    cluster = _RecordingCluster()
+    svc = GfsFederationService(repo, ws_registry=_PartialWsRegistry())
+    svc.attach_cluster(cluster)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-cl4")
+    await _signed_subscribe(svc, sub_seed, "sp-cl4")
+    cluster.notices.clear()
+    assert (
+        await svc.deliver_forwarded_notice(
+            "owner-r", "sp-cl4", "sub-r", reason="reconnect"
+        )
+        is False
+    )
+    assert cluster.notices == []
+
+
+async def test_a_forwarded_notice_is_checked_against_the_shared_db(gfs_db):
+    """Fail closed: the hint names an owner, a space and a seat — each must
+    match the shared DB, or nothing is sent."""
+    repo = SqliteGfsFederationRepo(gfs_db)
+    seeder = GfsFederationService(repo, ws_registry=_PartialWsRegistry())
+    sub_seed = await _owner_and_keywrap_sub(seeder, space_id="sp-cl5")
+    ws = _PartialWsRegistry({"owner-r", "sub-r"})
+    svc = GfsFederationService(repo, ws_registry=ws)
+    # No seat yet: sub-r never subscribed.
+    assert not await svc.deliver_forwarded_notice(
+        "owner-r", "sp-cl5", "sub-r", reason="subscribe"
+    )
+    await _signed_subscribe(seeder, sub_seed, "sp-cl5")
+    # The named owner does not own the space.
+    assert not await svc.deliver_forwarded_notice(
+        "sub-r", "sp-cl5", "sub-r", reason="subscribe"
+    )
+    # Unknown space; unknown reason.
+    assert not await svc.deliver_forwarded_notice(
+        "owner-r", "sp-nope", "sub-r", reason="subscribe"
+    )
+    assert not await svc.deliver_forwarded_notice(
+        "owner-r", "sp-cl5", "sub-r", reason="bogus"
+    )
+    assert ws.sent == []
+
+
+async def test_forwarded_reconnect_notices_are_deduped_where_the_owner_is(gfs_db):
+    """A follower's WS hello and its seat re-takes land on different nodes
+    (each with its own dedupe cache). The node holding the owner's socket
+    sees them all, so it sends one ``reconnect`` per seat per window."""
+    repo = SqliteGfsFederationRepo(gfs_db)
+    seeder = GfsFederationService(repo, ws_registry=_PartialWsRegistry())
+    sub_seed = await _owner_and_keywrap_sub(seeder, space_id="sp-cl6")
+    await _signed_subscribe(seeder, sub_seed, "sp-cl6")
+    ws = _PartialWsRegistry({"owner-r"})
+    svc = GfsFederationService(repo, ws_registry=ws)
+    for _ in range(3):
+        await svc.deliver_forwarded_notice(
+            "owner-r", "sp-cl6", "sub-r", reason="reconnect"
+        )
+    assert [f["reason"] for f in _notifies(ws)] == ["reconnect"]
+    # A NEW seat is never swallowed by that dedupe.
+    await svc.deliver_forwarded_notice("owner-r", "sp-cl6", "sub-r", reason="subscribe")
+    assert [f["reason"] for f in _notifies(ws)] == ["reconnect", "subscribe"]
+
+
+async def test_a_targeted_frame_for_a_socket_on_another_node_is_queued(gfs_db):
+    """REGRESSION: a targeted ``to`` publish lands on any node; the target's
+    socket is usually on another. It is now queued in the shared queue
+    (whose drain hint reaches the node that holds the socket) instead of
+    being lost."""
+    relay = _RecordingRelay()
+    ws = _PartialWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    svc.attach_relay(relay)
+    seed = await _two_subscribers(svc, "sp-q1")
+    payload = _targeted_payload(seed, "space_author_profiles_bundle", "sp-q1")
+    delivered = await svc.publish_event(
+        "sp-q1", "space_author_profiles_bundle", payload, to="sub-b"
+    )
+    assert delivered == ["sub-b"]
+    assert relay.queued == [
+        (
+            "sub-b",
+            {
+                "space_id": "sp-q1",
+                "event_type": "space_author_profiles_bundle",
+                "payload": payload,
+            },
+        )
+    ]
+
+
+async def test_a_targeted_frame_delivered_locally_is_not_queued(gfs_db):
+    relay = _RecordingRelay()
+    ws = _PartialWsRegistry({"sub-b"})
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    svc.attach_relay(relay)
+    seed = await _two_subscribers(svc, "sp-q2")
+    payload = _targeted_payload(seed, "space_subscriber_key_handoff", "sp-q2")
+    assert await svc.publish_event(
+        "sp-q2", "space_subscriber_key_handoff", payload, to="sub-b"
+    ) == ["sub-b"]
+    assert relay.queued == []
+
+
+async def test_a_targeted_frame_for_a_non_subscriber_is_never_queued(gfs_db):
+    relay = _RecordingRelay()
+    svc = GfsFederationService(
+        SqliteGfsFederationRepo(gfs_db), ws_registry=_PartialWsRegistry()
+    )
+    svc.attach_relay(relay)
+    seed = await _two_subscribers(svc, "sp-q3")
+    payload = _targeted_payload(seed, "space_author_profiles_bundle", "sp-q3")
+    assert (
+        await svc.publish_event(
+            "sp-q3", "space_author_profiles_bundle", payload, to="someone-else"
+        )
+        == []
+    )
+    assert relay.queued == []
+
+
+async def test_a_broadcast_publish_never_queues(gfs_db):
+    relay = _RecordingRelay()
+    svc = GfsFederationService(
+        SqliteGfsFederationRepo(gfs_db), ws_registry=_PartialWsRegistry()
+    )
+    svc.attach_relay(relay)
+    seed = await _two_subscribers(svc, "sp-q4")
+    payload = _targeted_payload(seed, "space_subscriber_key_handoff", "sp-q4")
+    await svc.publish_event("sp-q4", "space_subscriber_key_handoff", payload)
+    assert relay.queued == []
+
+
+async def test_a_targeted_frame_the_queue_refuses_reaches_nobody(gfs_db):
+    relay = _RecordingRelay(accept=False)
+    svc = GfsFederationService(
+        SqliteGfsFederationRepo(gfs_db), ws_registry=_PartialWsRegistry()
+    )
+    svc.attach_relay(relay)
+    seed = await _two_subscribers(svc, "sp-q5")
+    payload = _targeted_payload(seed, "space_author_profiles_bundle", "sp-q5")
+    assert (
+        await svc.publish_event(
+            "sp-q5", "space_author_profiles_bundle", payload, to="sub-b"
+        )
+        == []
+    )

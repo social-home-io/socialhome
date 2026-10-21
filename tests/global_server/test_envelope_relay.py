@@ -1145,3 +1145,39 @@ async def test_a_recipient_that_connected_during_the_enqueue_is_drained(wiring):
 
     assert [f["sealed"]["ciphertext"] for _t, f in registry.sent] == ["raced"]
     assert await queue_repo.count_for(RECIPIENT) == 0
+
+
+# ── queue_relay: a targeted relay whose socket is on another node ────────
+
+
+async def test_queue_relay_queues_a_relay_row_and_hints_the_cluster(wiring):
+    _fed, queue_repo, registry, relay = wiring
+    cluster = _FakeCluster()
+    relay.attach_cluster(cluster)
+    frame = {
+        "space_id": "sp-1",
+        "event_type": "space_subscriber_key_handoff",
+        "payload": {"sealed": "x"},
+    }
+
+    assert await relay.queue_relay(RECIPIENT, frame) is True
+
+    [queued] = await queue_repo.list_for(RECIPIENT, now=0)
+    assert queued.frame_type == QUEUE_KIND_RELAY
+    assert cluster.hinted == [RECIPIENT]
+    # Drained as the same relay push a live socket would have got.
+    registry.online.add(RECIPIENT)
+    assert await relay.drain(RECIPIENT) == 1
+    assert registry.sent == [(RECIPIENT, {"type": RELAY_FRAME_TYPE, **frame})]
+
+
+async def test_queue_relay_refuses_a_frame_over_the_cap(wiring, monkeypatch, caplog):
+    _fed, queue_repo, _registry, relay = wiring
+    cluster = _FakeCluster()
+    relay.attach_cluster(cluster)
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT", 10)
+    with caplog.at_level(logging.WARNING):
+        assert await relay.queue_relay(RECIPIENT, _item("x" * 64)) is False
+    assert await queue_repo.count_for(RECIPIENT) == 0
+    assert cluster.hinted == []
+    assert "exceeds the relay queue caps" in caplog.text

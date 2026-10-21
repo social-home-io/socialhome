@@ -395,6 +395,13 @@ class GfsApp:
         # setters because each needs the other.
         envelope_relay.attach_cluster(cluster)
         cluster.attach_drain(envelope_relay.drain)
+        # The same for the two single-recipient pushes of the federation
+        # service: an owner's ``new_subscriber`` notice rides the drain hint
+        # to the node holding the owner's socket, and a targeted ``to`` relay
+        # whose target is not on this node goes through the shared queue.
+        federation.attach_cluster(cluster)
+        federation.attach_relay(envelope_relay)
+        cluster.attach_subscriber_notice(federation.deliver_forwarded_notice)
         # Trusted-mode member publish (v_49): writer-cert-authorized items
         # fanned out through the same push-or-queue path as envelopes.
         # What households pin from ``/gfs/info`` and sign into each request

@@ -12,21 +12,31 @@ dedup, ``_gc_seen``, disabled fan-out no-ops).
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.authority_cert import sign_authority_cert
-from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.authority_sig import sign_authority_event
+from socialhome.crypto import (
+    b64url_encode,
+    derive_instance_id,
+    generate_identity_keypair,
+    sign_ed25519,
+)
 from socialhome.global_server import cluster as cluster_mod
 from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_cluster_key,
     gfs_cluster_repo_key,
+    gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
+    gfs_ws_registry_key,
 )
 from socialhome.global_server.cluster import (
     NODE_HEARTBEAT,
@@ -874,3 +884,209 @@ async def test_fan_out_with_recipients_converges_across_three_nodes(
     finally:
         for node in nodes.values():
             await _stop_node(node)
+
+
+# ─── Owner notices + targeted relays across two real nodes on ONE DB ──────
+#
+# The production topology: N GFS processes share one SQLite file and one
+# identity seed behind a round-robin balancer, so a household's socket and
+# its next HTTP request usually land on DIFFERENT nodes. Before the fix a
+# ``new_subscriber`` notice reached the owner only if the subscribe hit the
+# node holding the owner's socket, and a targeted ``to`` relay only if the
+# publish hit the node holding the target's socket.
+
+_OWNER_ID = "ownerhome222222222222222222222aa"
+_FOLLOWER_ID = "followerhome2222222222222222222a"
+_SPACE_ID = "sp-cluster-notice"
+
+
+def _shared_config(data_dir, node_id: str) -> GfsConfig:
+    return GfsConfig(
+        host="127.0.0.1",
+        port=0,
+        base_url=_UNREACHABLE_SELF_URL,
+        data_dir=str(data_dir),
+        instance_id="gfs-shared",
+        cluster_enabled=True,
+        cluster_node_id=node_id,
+        cluster_peers=(),
+    )
+
+
+async def _ws_hello(ws, instance_id: str, seed: bytes) -> None:
+    ts = int(time.time())
+    await ws.send_json(
+        {
+            "type": "hello",
+            "instance_id": instance_id,
+            "ts": ts,
+            "sig": b64url_encode(sign_ed25519(seed, f"{instance_id}|{ts}".encode())),
+        }
+    )
+
+
+async def _await_connected(app, instance_id: str) -> None:
+    registry = app[gfs_ws_registry_key]
+    assert await _wait_for(lambda: _async_true(registry.is_connected(instance_id)))
+
+
+async def _next_frame(ws, frame_type: str, *, timeout: float = 5.0) -> dict:
+    """The next frame of *frame_type* (others — e.g. a reconnect notice — are
+    skipped)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        left = deadline - time.monotonic()
+        assert left > 0, f"no {frame_type} frame within {timeout}s"
+        frame = await asyncio.wait_for(ws.receive_json(), timeout=left)
+        if frame.get("type") == frame_type:
+            return frame
+
+
+@pytest.fixture
+async def shared_db_nodes(tmp_path_factory, monkeypatch):
+    """Two cluster nodes A and B on one data dir (one DB, one seed)."""
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    shared = tmp_path_factory.mktemp("gfs-shared")
+    a = TestServer(create_gfs_app(_shared_config(shared, "node-a")))
+    await a.start_server()
+    # B attaches to the DB A already migrated.
+    b = TestServer(create_gfs_app(_shared_config(shared, "node-b")))
+    await b.start_server()
+    own_key = a.app[gfs_cluster_key].own_public_key_hex
+    assert b.app[gfs_cluster_key].own_public_key_hex == own_key
+    repo = a.app[gfs_cluster_repo_key]
+    for node_id, server in (("node-a", a), ("node-b", b)):
+        # Shared-seed siblings: members by our own key, no approval needed.
+        await repo.insert_node(
+            ClusterNode(
+                node_id=node_id,
+                url=str(server.make_url("")).rstrip("/"),
+                public_key=own_key,
+                status="online",
+            )
+        )
+    try:
+        yield a, b
+    finally:
+        await b.close()
+        await a.close()
+
+
+async def _seed_households(app) -> tuple[bytes, bytes, bytes]:
+    """Owner + follower registered, the owner's space published with
+    followers on. Returns (owner seed, follower seed, space seed)."""
+    owner = generate_identity_keypair()
+    follower = generate_identity_keypair()
+    space = generate_identity_keypair()
+    fed_repo = app[gfs_fed_repo_key]
+    for iid, kp in ((_OWNER_ID, owner), (_FOLLOWER_ID, follower)):
+        await fed_repo.upsert_instance(
+            ClientInstance(
+                instance_id=iid,
+                display_name=iid,
+                public_key=kp.public_key.hex(),
+                status="active",
+                keywrap_public_key="cc" * 32,
+                kem_suite="x25519",
+                keywrap_sig="a2V5d3JhcHNpZw",
+            )
+        )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id=_SPACE_ID,
+            owning_instance=_OWNER_ID,
+            name="Cluster",
+            status="active",
+            allow_subscribers=True,
+            identity_public_key=space.public_key.hex(),
+        )
+    )
+    return owner.private_key, follower.private_key, space.private_key
+
+
+def _signed_subscribe_body(seed: bytes) -> dict:
+    ts = datetime.now(UTC).isoformat()
+    signed = {
+        "action": "subscribe",
+        "instance_id": _FOLLOWER_ID,
+        "space_id": _SPACE_ID,
+        "ts": ts,
+    }
+    canonical = json.dumps(signed, separators=(",", ":"), sort_keys=True).encode()
+    return {
+        **signed,
+        "signature": b64url_encode(sign_ed25519(seed, canonical)),
+        "accepts": ["author_profiles_bundle"],
+    }
+
+
+async def test_a_subscribe_on_one_node_notifies_the_owner_on_another(
+    shared_db_nodes,
+):
+    a, b = shared_db_nodes
+    owner_seed, follower_seed, _space_seed = await _seed_households(a.app)
+    async with (
+        aiohttp.ClientSession() as http,
+        http.ws_connect(a.make_url("/gfs/ws")) as owner_ws,
+    ):
+        await _ws_hello(owner_ws, _OWNER_ID, owner_seed)
+        await _await_connected(a.app, _OWNER_ID)
+        # The balancer sent the follower's subscribe to node B.
+        async with http.post(
+            b.make_url("/gfs/subscribe"), json=_signed_subscribe_body(follower_seed)
+        ) as resp:
+            assert resp.status == 200
+        frame = await _next_frame(owner_ws, "new_subscriber")
+    assert frame["reason"] == "subscribe"
+    assert frame["space_id"] == _SPACE_ID
+    assert frame["subscriber"]["instance_id"] == _FOLLOWER_ID
+    assert frame["subscriber"]["keywrap_public_key"] == "cc" * 32
+    assert frame["subscriber"]["accepts"] == ["author_profiles_bundle"]
+
+
+async def test_a_targeted_relay_on_one_node_reaches_a_socket_on_another(
+    shared_db_nodes,
+):
+    a, b = shared_db_nodes
+    _owner_seed, follower_seed, space_seed = await _seed_households(a.app)
+    await a.app[gfs_fed_repo_key].add_subscriber(
+        space_id=_SPACE_ID, instance_id=_FOLLOWER_ID
+    )
+    payload: dict = {"space_id": _SPACE_ID, "sealed": {"ciphertext": "for-you"}}
+    payload.update(
+        sign_authority_event(
+            event_type="space_subscriber_key_handoff",
+            space_id=_SPACE_ID,
+            payload=payload,
+            space_seed=space_seed,
+        )
+    )
+    async with (
+        aiohttp.ClientSession() as http,
+        http.ws_connect(b.make_url("/gfs/ws")) as follower_ws,
+    ):
+        await _ws_hello(follower_ws, _FOLLOWER_ID, follower_seed)
+        await _await_connected(b.app, _FOLLOWER_ID)
+        # The owner's targeted handoff landed on node A.
+        async with http.post(
+            a.make_url("/gfs/publish"),
+            json={
+                "space_id": _SPACE_ID,
+                "event_type": "space_subscriber_key_handoff",
+                "payload": payload,
+                "to": _FOLLOWER_ID,
+            },
+        ) as resp:
+            assert resp.status == 200
+            assert (await resp.json())["delivered_to"] == 1
+        frame = await _next_frame(follower_ws, "relay")
+    assert frame == {
+        "type": "relay",
+        "space_id": _SPACE_ID,
+        "event_type": "space_subscriber_key_handoff",
+        "payload": payload,
+    }
+    queue = a.app[gfs_envelope_queue_repo_key]
+    assert await _wait_for(lambda: _async_eq(queue.count_for(_FOLLOWER_ID), 0)), (
+        "the drained row must leave the shared queue"
+    )

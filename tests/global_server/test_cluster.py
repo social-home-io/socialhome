@@ -1953,3 +1953,187 @@ def test_a_cluster_node_without_a_node_id_still_starts(tmp_dir):
     )
     app = create_gfs_app(cfg)
     assert app[gfs_cluster_key].node_id == "gfs-shared"
+
+
+# ─── Owner notices for a socket on another node (NODE_DRAIN_HINT.notices) ──
+
+_OWNER = "owner2222222222222222222222222aa"
+_SUB = "subsc2222222222222222222222222aa"
+
+
+def _notice(owner=_OWNER, space="sp-1", sub=_SUB, reason="subscribe", accepts=()):
+    return {
+        "owner": owner,
+        "space_id": space,
+        "subscriber": sub,
+        "reason": reason,
+        "accepts": list(accepts),
+    }
+
+
+async def test_a_subscriber_notice_rides_the_next_drain_hint(gfs_db, monkeypatch):
+    """Ids only, coalesced into the drain-hint frame — no frame of its own,
+    so it spends none of a peer's per-minute sync budget beyond the hint."""
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    sent = _record_broadcasts(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    svc.hint_drain(_HOME_A)
+    svc.hint_subscriber_notice(
+        _OWNER, "sp-1", _SUB, reason="subscribe", accepts=("author_profiles_bundle",)
+    )
+    await _flushed(svc)
+    assert sent == [
+        (
+            NODE_DRAIN_HINT,
+            {
+                "instances": [_HOME_A],
+                "notices": [_notice(accepts=("author_profiles_bundle",))],
+            },
+            True,
+        )
+    ]
+    await svc.stop()
+
+
+async def test_subscriber_notices_coalesce_and_a_new_seat_wins(gfs_db, monkeypatch):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    sent = _record_broadcasts(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    svc.hint_subscriber_notice(_OWNER, "sp-1", _SUB, reason="reconnect")
+    svc.hint_subscriber_notice(
+        _OWNER, "sp-1", _SUB, reason="subscribe", accepts=("author_profiles_bundle",)
+    )
+    svc.hint_subscriber_notice(_OWNER, "sp-1", _SUB, reason="reconnect")
+    await _flushed(svc)
+    assert [p for _t, p, _i in sent] == [
+        {
+            "instances": [],
+            "notices": [_notice(accepts=("author_profiles_bundle",))],
+        }
+    ]
+    await svc.stop()
+
+
+async def test_subscriber_notices_are_capped_per_frame(gfs_db, monkeypatch):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    monkeypatch.setattr(cluster_mod, "SUBSCRIBER_NOTICE_MAX_PER_FRAME", 2)
+    sent = _record_broadcasts(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    for space in ("sp-1", "sp-2", "sp-3"):
+        svc.hint_subscriber_notice(_OWNER, space, _SUB, reason="reconnect")
+    await _flushed(svc)
+    assert [[n["space_id"] for n in p["notices"]] for _t, p, _i in sent] == [
+        ["sp-1", "sp-2"],
+        ["sp-3"],
+    ]
+    await svc.stop()
+
+
+async def test_pending_subscriber_notices_are_bounded(gfs_db, monkeypatch, caplog):
+    monkeypatch.setattr(cluster_mod, "SUBSCRIBER_NOTICE_MAX_PENDING", 2)
+    sent = _record_broadcasts(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    with caplog.at_level("WARNING"):
+        for space in ("sp-1", "sp-2", "sp-3", "sp-4"):
+            svc.hint_subscriber_notice(_OWNER, space, _SUB, reason="reconnect")
+    assert len(svc._notice_pending) == 2
+    assert caplog.text.count("subscriber notice") == 1
+    await svc.stop()
+    assert sent == []
+
+
+async def test_a_subscriber_notice_is_a_no_op_when_the_cluster_is_disabled(
+    gfs_db, monkeypatch
+):
+    sent = _record_broadcasts(monkeypatch)
+    svc = _drain_cluster(gfs_db, enabled=False)
+    svc.hint_subscriber_notice(_OWNER, "sp-1", _SUB, reason="subscribe")
+    assert svc._drain_hint_task is None
+    assert sent == []
+    await svc.stop()
+
+
+async def test_apply_subscriber_notices_delivers_only_to_local_owners(gfs_db):
+    svc = _drain_cluster(gfs_db, online={_OWNER})
+    delivered: list[tuple] = []
+
+    async def _deliver(owner, space_id, subscriber, *, reason, accepts=()):
+        delivered.append((owner, space_id, subscriber, reason, accepts))
+        return True
+
+    svc.attach_subscriber_notice(_deliver)
+    scheduled = await svc.apply_subscriber_notices(
+        [
+            _notice(accepts=("author_profiles_bundle", "Bad Label")),
+            _notice(owner=_HOME_B),  # owner's socket is not on this node
+            _notice(reason="bogus"),
+            _notice(owner="not-an-instance-id"),
+            _notice(sub=_SUB + "\nforged"),
+            _notice(space=""),
+            _notice(space="x" * 200),
+            _notice(space="sp\n2"),
+            {"owner": _OWNER},
+            "junk",
+            None,
+        ]
+    )
+    assert scheduled == 1
+    await svc.stop()
+    assert delivered == [
+        (_OWNER, "sp-1", _SUB, "subscribe", ("author_profiles_bundle",))
+    ]
+
+
+@pytest.mark.parametrize("notices", [None, "x", {"a": 1}, 7])
+async def test_apply_subscriber_notices_ignores_a_malformed_payload(gfs_db, notices):
+    svc = _drain_cluster(gfs_db, online={_OWNER})
+
+    async def _deliver(*_a, **_k):
+        raise AssertionError("must not deliver")
+
+    svc.attach_subscriber_notice(_deliver)
+    assert await svc.apply_subscriber_notices(notices) == 0
+    await svc.stop()
+
+
+async def test_apply_subscriber_notices_without_a_callback_is_a_no_op(gfs_db):
+    svc = _drain_cluster(gfs_db, online={_OWNER})
+    assert await svc.apply_subscriber_notices([_notice()]) == 0
+
+
+async def test_apply_subscriber_notices_caps_what_it_reads(gfs_db, monkeypatch):
+    monkeypatch.setattr(cluster_mod, "SUBSCRIBER_NOTICE_MAX_PER_FRAME", 1)
+    svc = _drain_cluster(gfs_db, online={_OWNER})
+    delivered: list[str] = []
+
+    async def _deliver(owner, space_id, subscriber, *, reason, accepts=()):
+        delivered.append(space_id)
+        return True
+
+    svc.attach_subscriber_notice(_deliver)
+    assert (
+        await svc.apply_subscriber_notices([_notice(space="a"), _notice(space="b")])
+        == 1
+    )
+    await svc.stop()
+    assert delivered == ["a"]
+
+
+async def test_a_failing_notice_delivery_is_logged_and_the_rest_still_go(
+    gfs_db, caplog
+):
+    svc = _drain_cluster(gfs_db, online={_OWNER})
+    delivered: list[str] = []
+
+    async def _deliver(owner, space_id, subscriber, *, reason, accepts=()):
+        if space_id == "a":
+            raise RuntimeError("db gone")
+        delivered.append(space_id)
+        return True
+
+    svc.attach_subscriber_notice(_deliver)
+    with caplog.at_level("WARNING"):
+        await svc.apply_subscriber_notices([_notice(space="a"), _notice(space="b")])
+        await svc.stop()
+    assert delivered == ["b"]
+    assert "subscriber notice delivery failed" in caplog.text

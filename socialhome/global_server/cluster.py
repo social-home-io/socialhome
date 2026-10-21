@@ -43,6 +43,7 @@ from ..crypto import (
 )
 from ..domain.space import normalize_category, normalize_join_mode
 from ..domain.space_place import PlacePin, parse_place_pin_wire, place_pin_wire
+from ..domain.subscriber_accepts import parse_accepts
 from ..gfs_proof import sign_possession_proof
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
 from .envelope_relay import ENVELOPE_INSTANCE_ID_RE
@@ -227,6 +228,16 @@ NODE_PARTITION_GAP = "NODE_PARTITION_GAP"
 #: sockets may live on a sibling node (each node only knows its own), so every
 #: receiver drains the listed ids it holds a socket for. Payload:
 #: ``{"instances": [<instance id>, ...]}`` — ids only, never content.
+#:
+#: The same frame carries the optional ``notices`` list: ``new_subscriber``
+#: notices whose space OWNER had no socket on the sending node, as
+#: ``{owner, space_id, subscriber, reason, accepts}`` — ids and labels the
+#: sender read from the shared DB, never key material. The node holding the
+#: owner's socket rebuilds the frame from the shared DB
+#: (``GfsFederationService.deliver_forwarded_notice``). Riding the drain hint
+#: (rather than a frame of its own) keeps it inside the same coalesced send,
+#: so it costs a peer's per-minute sync budget nothing extra; an older node
+#: ignores the key, which is exactly how it behaved before.
 NODE_DRAIN_HINT = "NODE_DRAIN_HINT"
 
 #: How long :meth:`ClusterService.hint_drain` gathers ids before it sends one
@@ -237,6 +248,39 @@ DRAIN_HINT_DELAY_S: float = 0.5
 #: Max instance ids in one ``NODE_DRAIN_HINT`` frame (a bigger batch is split),
 #: and the most a receiver reads from one frame.
 DRAIN_HINT_MAX_IDS: int = 256
+
+#: Max owner notices in one ``NODE_DRAIN_HINT`` frame, and the most a receiver
+#: reads from one. ~250 bytes each, so a full frame stays near 64 KiB.
+SUBSCRIBER_NOTICE_MAX_PER_FRAME: int = 256
+
+#: Max owner notices waiting for the next flush. Past it a notice is dropped
+#: (WARNING once per flush window): the owner's 5b-c reconcile and the
+#: follower's next reconnect still repair the key.
+SUBSCRIBER_NOTICE_MAX_PENDING: int = 4096
+
+#: Longest ``space_id`` a forwarded notice may name — the relay routes' own
+#: bound on identifier-shaped wire fields.
+SUBSCRIBER_NOTICE_SPACE_ID_MAX_LEN: int = 128
+
+#: The ``new_subscriber.reason`` values a forwarded notice may carry (mirrors
+#: ``federation.NEW_SUBSCRIBER_REASONS``; the receiver re-checks).
+_NOTICE_REASONS: frozenset[str] = frozenset({"subscribe", "reconnect"})
+
+
+@dataclass(slots=True, frozen=True)
+class SubscriberNotice:
+    """One forwarded ``new_subscriber`` notice, validated off the wire."""
+
+    owner: str
+    space_id: str
+    subscriber: str
+    reason: str
+    accepts: tuple[str, ...]
+
+
+#: ``GfsFederationService.deliver_forwarded_notice`` — set by
+#: :meth:`ClusterService.attach_subscriber_notice`.
+NoticeDelivery = Callable[..., Awaitable[bool]]
 
 
 #: Longest ``node_id`` the admin API accepts for a peer.
@@ -529,6 +573,10 @@ class ClusterService:
         "_instance_id_aliases",
         "_local_last_relay_ts",
         "_node_id",
+        "_notice_cb",
+        "_notice_dropped",
+        "_notice_pending",
+        "_notice_tasks",
         "_own_pk_hex",
         "_partition_gaps",
         "_peers",
@@ -669,6 +717,17 @@ class ClusterService:
         self._hint_drains: dict[str, asyncio.Task] = {}
         #: Households hinted again while their drain ran — drained once more.
         self._hint_rerun: set[str] = set()
+        #: Owner notices waiting for the next ``NODE_DRAIN_HINT`` flush, keyed
+        #: by ``(owner, space_id, subscriber)`` → ``(reason, accepts)``.
+        self._notice_pending: dict[
+            tuple[str, str, str], tuple[str, tuple[str, ...]]
+        ] = {}
+        #: Notices dropped at the pending cap since the last flush.
+        self._notice_dropped = 0
+        #: ``deliver_forwarded_notice``, set by :meth:`attach_subscriber_notice`.
+        self._notice_cb: NoticeDelivery | None = None
+        #: Running inbound notice deliveries, awaited / cancelled in ``stop``.
+        self._notice_tasks: set[asyncio.Task] = set()
 
     # ─── /cluster/sync budgets ───────────────────────────────────────
 
@@ -892,7 +951,14 @@ class ClusterService:
                     log.debug("cluster: %s ended with an error", attr, exc_info=True)
                 setattr(self, attr, None)
         self._drain_hint_pending.clear()
+        self._notice_pending.clear()
         self._hint_rerun.clear()
+        if self._notice_tasks:
+            tasks = set(self._notice_tasks)
+            _done, still = await asyncio.wait(tasks, timeout=5.0)
+            for task in still:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         if self._hint_drains:
             pending = set(self._hint_drains.values())
             _done, still = await asyncio.wait(pending, timeout=5.0)
@@ -1176,15 +1242,76 @@ class ClusterService:
         if not self._enabled:
             return
         self._drain_hint_pending.add(instance_id)
+        self._schedule_hint_flush()
+
+    def hint_subscriber_notice(
+        self,
+        owner: str,
+        space_id: str,
+        subscriber: str,
+        *,
+        reason: str,
+        accepts: tuple[str, ...] = (),
+    ) -> None:
+        """Note a ``new_subscriber`` notice for an *owner* with no socket here.
+
+        Synchronous and cheap — called from the subscribe / hello path. Rides
+        the next coalesced ``NODE_DRAIN_HINT`` as ids only; the node holding
+        the owner's socket rebuilds the notice from the shared DB. Repeats for
+        one seat collapse, a NEW seat (``subscribe``) winning over a key
+        repair. No-op when cluster mode is off (a single node has nobody to
+        tell); past :data:`SUBSCRIBER_NOTICE_MAX_PENDING` the notice is
+        dropped (the 5b-c reconcile and the next reconnect still repair it).
+        """
+        if not self._enabled:
+            return
+        key = (owner, space_id, subscriber)
+        held = self._notice_pending.get(key)
+        if held is None and len(self._notice_pending) >= SUBSCRIBER_NOTICE_MAX_PENDING:
+            if not self._notice_dropped:
+                log.warning(
+                    "cluster: %d subscriber notices already wait for the next "
+                    "drain hint — dropping more (the owners' reconcile repairs "
+                    "them)",
+                    len(self._notice_pending),
+                )
+            self._notice_dropped += 1
+            return
+        if held is None or reason == "subscribe":
+            self._notice_pending[key] = (reason, tuple(accepts))
+        self._schedule_hint_flush()
+
+    def _schedule_hint_flush(self) -> None:
         if self._drain_hint_task is None or self._drain_hint_task.done():
             self._drain_hint_task = asyncio.get_running_loop().create_task(
                 self._flush_drain_hints(), name="gfs-cluster-drain-hint"
             )
 
+    def _take_pending_notices(self) -> list[dict]:
+        notices = [
+            {
+                "owner": owner,
+                "space_id": space_id,
+                "subscriber": subscriber,
+                "reason": reason,
+                "accepts": list(accepts),
+            }
+            for (owner, space_id, subscriber), (
+                reason,
+                accepts,
+            ) in self._notice_pending.items()
+        ]
+        self._notice_pending.clear()
+        self._notice_dropped = 0
+        return notices
+
     async def _flush_drain_hints(self) -> None:
-        """Send pending ids after the coalescing delay; repeat while new ids
-        arrived during a send. Ends on ``stop`` (the ``_stop`` event)."""
-        while self._drain_hint_pending and not self._stop.is_set():
+        """Send pending ids and owner notices after the coalescing delay;
+        repeat while new ones arrived during a send. Ends on ``stop`` (the
+        ``_stop`` event)."""
+        while (self._drain_hint_pending or self._notice_pending) and (
+            not self._stop.is_set()
+        ):
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=DRAIN_HINT_DELAY_S)
             except TimeoutError:
@@ -1193,18 +1320,30 @@ class ClusterService:
                 return
             batch = sorted(self._drain_hint_pending)
             self._drain_hint_pending.clear()
-            for start in range(0, len(batch), DRAIN_HINT_MAX_IDS):
-                chunk = batch[start : start + DRAIN_HINT_MAX_IDS]
+            notices = self._take_pending_notices()
+            frames = max(
+                math.ceil(len(batch) / DRAIN_HINT_MAX_IDS),
+                math.ceil(len(notices) / SUBSCRIBER_NOTICE_MAX_PER_FRAME),
+            )
+            for index in range(frames):
+                ids = batch[index * DRAIN_HINT_MAX_IDS :][:DRAIN_HINT_MAX_IDS]
+                notes = notices[index * SUBSCRIBER_NOTICE_MAX_PER_FRAME :][
+                    :SUBSCRIBER_NOTICE_MAX_PER_FRAME
+                ]
+                payload: dict = {"instances": ids}
+                if notes:
+                    payload["notices"] = notes
                 try:
-                    await self._broadcast(
-                        NODE_DRAIN_HINT, {"instances": chunk}, ignore_errors=True
-                    )
+                    await self._broadcast(NODE_DRAIN_HINT, payload, ignore_errors=True)
                 except Exception as exc:
                     # Best effort: the household still gets the rows on its
-                    # next hello. Logged so a broken roster read is visible.
+                    # next hello, an owner its notice from its reconcile.
+                    # Logged so a broken roster read is visible.
                     log.warning(
-                        "cluster: drain hint for %d household(s) not sent: %r",
-                        len(chunk),
+                        "cluster: drain hint for %d household(s) and %d "
+                        "subscriber notice(s) not sent: %r",
+                        len(ids),
+                        len(notes),
                         exc,
                         exc_info=True,
                     )
@@ -1249,6 +1388,67 @@ class ClusterService:
             task.add_done_callback(partial(self._forget_hint_drain, raw))
             started += 1
         return started
+
+    def attach_subscriber_notice(self, deliver: NoticeDelivery) -> None:
+        """Register ``GfsFederationService.deliver_forwarded_notice`` — what
+        an inbound notice runs for an owner whose socket is on THIS node."""
+        self._notice_cb = deliver
+
+    async def apply_subscriber_notices(self, notices: object) -> int:
+        """Inbound ``NODE_DRAIN_HINT.notices`` — deliver the ones whose owner
+        has a socket on THIS node.
+
+        Every field is validated before use: owner and subscriber must be
+        well-formed instance ids, the space id a short printable string, the
+        reason a known one; ``accepts`` is filtered like a subscribe's. At
+        most :data:`SUBSCRIBER_NOTICE_MAX_PER_FRAME` are read. A notice for an
+        owner without a socket here is ignored — its node got the same hint.
+        Deliveries run as ONE background task so the sender's
+        ``/cluster/sync`` POST is answered at once. Returns how many were
+        scheduled."""
+        if self._notice_cb is None or self._ws_registry is None:
+            return 0
+        if not isinstance(notices, list):
+            return 0
+        accepted: list[SubscriberNotice] = []
+        for raw in notices[:SUBSCRIBER_NOTICE_MAX_PER_FRAME]:
+            notice = _parse_notice(raw)
+            if notice is None or not self._ws_registry.is_connected(notice.owner):
+                continue
+            accepted.append(notice)
+        if not accepted:
+            return 0
+        task = asyncio.get_running_loop().create_task(
+            self._deliver_notices(self._notice_cb, accepted),
+            name="gfs-cluster-subscriber-notices",
+        )
+        self._notice_tasks.add(task)
+        task.add_done_callback(self._notice_tasks.discard)
+        return len(accepted)
+
+    async def _deliver_notices(
+        self, deliver: NoticeDelivery, notices: list[SubscriberNotice]
+    ) -> None:
+        # Bounded (≤ SUBSCRIBER_NOTICE_MAX_PER_FRAME); ``stop`` awaits it like
+        # a hinted drain, cancelling past its 5 s grace.
+        for notice in notices:
+            try:
+                await deliver(
+                    notice.owner,
+                    notice.space_id,
+                    notice.subscriber,
+                    reason=notice.reason,
+                    accepts=notice.accepts,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(
+                    "cluster: subscriber notice delivery failed for space %s: %r",
+                    notice.space_id,
+                    exc,
+                    exc_info=True,
+                )
 
     def _forget_hint_drain(self, instance_id: str, task: asyncio.Task) -> None:
         if self._hint_drains.get(instance_id) is task:
@@ -2303,6 +2503,33 @@ def _key_view(row: ClusterNode, own_key_lower: str) -> dict:
     if own_key_lower and row.public_key.lower() == own_key_lower:
         return {"public_key": own_key_lower, "key_source": "own"}
     return {"public_key": "", "key_source": "none"}
+
+
+def _parse_notice(raw: object) -> SubscriberNotice | None:
+    """A forwarded owner notice off the wire, or ``None`` if malformed."""
+    if not isinstance(raw, dict):
+        return None
+    owner, space_id = raw.get("owner"), raw.get("space_id")
+    subscriber, reason = raw.get("subscriber"), raw.get("reason")
+    if not (
+        isinstance(owner, str)
+        and ENVELOPE_INSTANCE_ID_RE.fullmatch(owner)
+        and isinstance(subscriber, str)
+        and ENVELOPE_INSTANCE_ID_RE.fullmatch(subscriber)
+        and isinstance(space_id, str)
+        and 0 < len(space_id) <= SUBSCRIBER_NOTICE_SPACE_ID_MAX_LEN
+        and space_id.isprintable()
+        and isinstance(reason, str)
+        and reason in _NOTICE_REASONS
+    ):
+        return None
+    return SubscriberNotice(
+        owner=owner,
+        space_id=space_id,
+        subscriber=subscriber,
+        reason=reason,
+        accepts=parse_accepts(raw.get("accepts")),
+    )
 
 
 def _node_address_key(node_id: str, client_ip: str) -> str:
