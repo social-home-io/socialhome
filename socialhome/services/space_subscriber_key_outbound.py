@@ -83,7 +83,7 @@ import base64
 import json
 import logging
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -123,9 +123,20 @@ log = logging.getLogger(__name__)
 #: could otherwise make the host upload a bundle per name.
 MAX_BUNDLES_PER_SPACE_PER_MINUTE: int = 30
 
-#: Past this many spaces in the rate backstop, the ones with no bundle in the
-#: last minute are forgotten.
+#: The most spaces the rate backstop tracks; past it, the least recently
+#: bundled space is forgotten (O(1)).
 _MAX_TRACKED_SPACES: int = 1024
+
+#: One bundle per ``(space, follower)`` at most this often — a follower that
+#: unsubscribes and subscribes again gets a NEW seat (``reason:
+#: "subscribe"``) each time; this keeps one follower's loop from eating the
+#: space's backstop and starving real newcomers. Reconnects never bundle,
+#: so this holds only seats actually bundled.
+BUNDLE_PER_FOLLOWER_EVERY_S: float = 3600.0
+
+#: The most ``(space, follower)`` pairs remembered for
+#: :data:`BUNDLE_PER_FOLLOWER_EVERY_S`; past it the oldest is forgotten.
+_MAX_TRACKED_FOLLOWERS: int = 10_000
 
 #: The ``new_subscriber.reason`` of a NEW seat — the only one that earns a
 #: bundle. ``"reconnect"``, a missing or an unknown reason: key handoff only.
@@ -147,6 +158,7 @@ class SpaceSubscriberKeyOutbound:
 
     __slots__ = (
         "_bundle_times",
+        "_bundled",
         "_crypto",
         "_gfs",
         "_gfs_conn_repo",
@@ -177,7 +189,10 @@ class SpaceSubscriberKeyOutbound:
         self._profiles: AbstractSpaceAuthorProfileRepo | None = None
         #: ``space_id`` → monotonic times of its bundles in the last minute
         #: (the per-space rate backstop; bounded by the limit per space).
-        self._bundle_times: dict[str, deque[float]] = {}
+        self._bundle_times: OrderedDict[str, deque[float]] = OrderedDict()
+        #: ``(space_id, follower)`` → monotonic time of its last bundle, in
+        #: bundle order (oldest first) — the per-follower churn guard.
+        self._bundled: OrderedDict[tuple[str, str], float] = OrderedDict()
 
     def attach_author_profiles(self, repo: AbstractSpaceAuthorProfileRepo) -> None:
         """Wire the author-profile cache the v_61 new-follower bundle is
@@ -294,6 +309,15 @@ class SpaceSubscriberKeyOutbound:
         if self._profiles is None:
             return 0
         now = _clock()
+        follower = (space_id, target_instance_id)
+        last = self._bundled.get(follower)
+        if last is not None and now - last < BUNDLE_PER_FOLLOWER_EVERY_S:
+            log.info(
+                "space_subscriber_key.outbound: a follower of space %s was "
+                "bundled within the hour — key only this time",
+                space_id,
+            )
+            return 0
         times = self._bundle_times.get(space_id)
         if times is not None:
             while times and now - times[0] >= 60.0:
@@ -313,7 +337,7 @@ class SpaceSubscriberKeyOutbound:
         parts = split_bundle(items)
         if not parts:
             return 0
-        self._note_bundle(space_id, now)
+        self._note_bundle(space_id, target_instance_id, now)
         sent = 0
         for index, part in enumerate(parts):
             sealed = seal_to_keywrap(
@@ -353,19 +377,31 @@ class SpaceSubscriberKeyOutbound:
         )
         return sent
 
-    def _note_bundle(self, space_id: str, now: float) -> None:
-        """Count one bundle against *space_id*'s rate backstop."""
+    def _note_bundle(self, space_id: str, follower: str, now: float) -> None:
+        """Count one bundle against *space_id*'s rate backstop and remember
+        *follower* for :data:`BUNDLE_PER_FOLLOWER_EVERY_S`. Both maps are
+        LRU-bounded with O(1) eviction."""
         times = self._bundle_times.get(space_id)
         if times is None:
-            if len(self._bundle_times) >= _MAX_TRACKED_SPACES:
-                self._bundle_times = {
-                    space: kept
-                    for space, kept in self._bundle_times.items()
-                    if kept and now - kept[-1] < 60.0
-                }
             times = deque(maxlen=max(1, MAX_BUNDLES_PER_SPACE_PER_MINUTE))
             self._bundle_times[space_id] = times
+            if len(self._bundle_times) > _MAX_TRACKED_SPACES:
+                self._bundle_times.popitem(last=False)
+        else:
+            self._bundle_times.move_to_end(space_id)
         times.append(now)
+        key = (space_id, follower)
+        self._bundled.pop(key, None)
+        self._bundled[key] = now
+        while self._bundled:
+            oldest_key, at = next(iter(self._bundled.items()))
+            if (
+                len(self._bundled) > _MAX_TRACKED_FOLLOWERS
+                or now - at >= BUNDLE_PER_FOLLOWER_EVERY_S
+            ):
+                del self._bundled[oldest_key]
+                continue
+            break
 
     async def _seal_and_relay(
         self,

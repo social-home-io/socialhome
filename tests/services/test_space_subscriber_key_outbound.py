@@ -940,14 +940,15 @@ async def test_an_older_gfs_gets_the_fanned_out_handoff_and_no_bundle(env):
     assert env["gfs"].targeted == [] and profiles.asked == []
 
 
-async def test_a_reconnecting_follower_gets_the_key_but_never_the_bundle(env):
-    """REGRESSION (H1): the GFS re-notifies on every reconnect of the
-    follower (``reason: "reconnect"``) — and restarts forget any in-memory
-    dedupe — so only the NEW seat (``reason: "subscribe"``) earns a bundle;
-    every reconnect re-seals the key alone."""
+async def test_a_restarted_host_sends_reconnecting_followers_no_bundle(env):
+    """REGRESSION (H1): after a host restart (a FRESH service: any in-memory
+    dedupe is gone) every follower's reconnect notify re-seals the key
+    alone — only the NEW seat (``reason: "subscribe"``) ever earned a
+    bundle. On main the restarted host re-sent every follower its bundle."""
     await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
     env["gfs"].targeted_answer = True
-    env["svc"].attach_author_profiles(_Profiles([_signed_profile("Erin")]))  # type: ignore[arg-type]
+    profiles = _Profiles([_signed_profile("Erin")])
+    env["svc"].attach_author_profiles(profiles)  # type: ignore[arg-type]
     id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
     keys = (sub_iid, id_kp.public_key, kw_kp.public_key, keywrap_sig)
     await env["svc"].handle(
@@ -956,9 +957,18 @@ async def test_a_reconnecting_follower_gets_the_key_but_never_the_bundle(env):
         ),
         gfs_id="gfs-1",
     )
+    restarted = SpaceSubscriberKeyOutbound(
+        space_repo=env["space_repo"],
+        space_crypto=env["crypto"],
+        gfs_service=env["gfs"],
+    )
+    restarted.attach_identity(own_instance_id="alpha.home")
+    restarted.attach_author_profiles(profiles)  # type: ignore[arg-type]
     for _ in range(3):
-        await env["svc"].handle(
-            _new_subscriber_frame("sp-pub", *keys, reason="reconnect"),
+        await restarted.handle(
+            _new_subscriber_frame(
+                "sp-pub", *keys, reason="reconnect", accepts=_OPENS_BUNDLE
+            ),
             gfs_id="gfs-1",
         )
     assert _kinds(env) == [
@@ -968,6 +978,38 @@ async def test_a_reconnecting_follower_gets_the_key_but_never_the_bundle(env):
         AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
         AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
     ]
+
+
+async def test_one_followers_seat_churn_earns_one_bundle_an_hour(env, monkeypatch):
+    """REGRESSION (review I1): unsubscribe → subscribe makes a NEW seat each
+    time; one follower looping must get one bundle per hour, not eat the
+    space's backstop and starve real newcomers."""
+    clock = [1000.0]
+    monkeypatch.setattr(
+        "socialhome.services.space_subscriber_key_outbound._clock",
+        lambda: clock[0],
+    )
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    env["svc"].attach_author_profiles(_Profiles([_signed_profile("Erin")]))  # type: ignore[arg-type]
+    id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
+    frame = _new_subscriber_frame(
+        "sp-pub",
+        sub_iid,
+        id_kp.public_key,
+        kw_kp.public_key,
+        keywrap_sig,
+        reason="subscribe",
+        accepts=_OPENS_BUNDLE,
+    )
+    for _ in range(5):
+        await env["svc"].handle(frame, gfs_id="gfs-1")
+    await _subscribe(env)  # a real newcomer still gets one
+    assert _kinds(env).count(AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE) == 2
+    assert _kinds(env).count(AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF) == 6
+    clock[0] += 3601.0
+    await env["svc"].handle(frame, gfs_id="gfs-1")
+    assert _kinds(env).count(AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE) == 3
 
 
 @pytest.mark.parametrize("reason", ["reconnect", None, "", "resubscribe", 7])
@@ -1094,18 +1136,23 @@ async def test_the_per_space_cap_frees_up_after_a_minute(env, monkeypatch):
     assert _kinds(env).count(AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE) == 2
 
 
-async def test_the_tracked_spaces_are_bounded(env, monkeypatch):
-    """Low 1: the rate backstop keeps one bounded deque per space and drops
-    the stale ones once too many spaces are tracked."""
+async def test_the_tracked_spaces_and_followers_are_bounded(env, monkeypatch):
+    """Review M3: both backstop maps are LRU-bounded with O(1) eviction —
+    the least recently bundled entry goes first."""
     monkeypatch.setattr(
         "socialhome.services.space_subscriber_key_outbound._MAX_TRACKED_SPACES",
         1,
     )
+    monkeypatch.setattr(
+        "socialhome.services.space_subscriber_key_outbound._MAX_TRACKED_FOLLOWERS",
+        2,
+    )
     await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
     env["gfs"].targeted_answer = True
     env["svc"].attach_author_profiles(_Profiles([_signed_profile("Erin")]))  # type: ignore[arg-type]
-    env["svc"]._bundle_times["sp-old"] = deque([-1e9])
-    env["svc"]._bundle_times["sp-older"] = deque([-1e9])
-    await _subscribe(env)
-    assert set(env["svc"]._bundle_times) == {"sp-pub"}
-    assert len(env["svc"]._bundle_times["sp-pub"]) == 1
+    env["svc"]._bundle_times["sp-old"] = deque([1e18])
+    for _ in range(3):
+        await _subscribe(env)
+    assert list(env["svc"]._bundle_times) == ["sp-pub"]
+    assert len(env["svc"]._bundle_times["sp-pub"]) == 3
+    assert len(env["svc"]._bundled) == 2
