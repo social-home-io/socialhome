@@ -144,6 +144,9 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   GFS_UNAVAILABLE: () => t('error.gfs_unavailable'),
   // The GFS can't serve this yet (``params.feature``): its operator updates it.
   GFS_TOO_OLD: () => t('error.gfs_too_old'),
+  // A per-moment share link can't be made (no pinned viewer / no GFS
+  // that keeps encrypted media).
+  SHARE_LINK_UNAVAILABLE: () => t('error.share_link_unavailable'),
   STORAGE_FULL: () => t('error.storage_full'),
   // Household dashboard (Admin › Dashboard). ``params`` carry the port /
   // length limits (``domain/household_dashboard.py``).

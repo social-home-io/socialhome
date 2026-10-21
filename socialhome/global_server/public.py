@@ -421,10 +421,9 @@ def _is_public_rtc_entry(path: str) -> bool:
     """The anonymous, WS-amplifying RTC entry points: the offers and the
     relay-stream GETs (not the signed author uploads at ``/relay-stream/``,
     not the high-frequency session/ICE polls)."""
-    return path in (
-        "/gfs/highlight_rtc/offer",
-        "/gfs/moment_rtc/offer",
-    ) or path.startswith(("/gfs/highlight_rtc/relay/", "/gfs/moment_rtc/relay/"))
+    return path in ("/gfs/highlight_rtc/offer",) or path.startswith(
+        "/gfs/highlight_rtc/relay/"
+    )
 
 
 def build_listing_rate_limit(resolver: ClientIpResolver):

@@ -639,3 +639,22 @@ async def test_a_delete_withdraws_the_media(outbound_setup):
         )
     )
     assert ("withdraw", "m-1") in media.calls
+
+
+async def test_a_public_moment_keeps_its_link_material(outbound_setup):
+    """the item key (and media descriptor) a later share link needs."""
+    s = outbound_setup
+    recorded: list = []
+
+    class _Shares:
+        async def record(self, moment, *, item_key, media):
+            recorded.append((moment.id, item_key, media))
+
+    s["sub"].attach_shares(_Shares())
+    s["sub"].attach_media(_Media())
+    await s["moments"].save(_with_media("api/media/x.webp", "image"))
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event())
+    [(mid, key, media)] = recorded
+    assert (mid, key) == ("m-1", item_key(KEY, "m-1"))
+    assert media["blob_id"] == "b" * 64

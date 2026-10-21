@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import os
+from pathlib import Path
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -19,9 +22,11 @@ from socialhome.moment_public_media import (
     blob_id_of,
     is_blob_id,
     open_media,
+    open_share,
     padded_size,
     require_known_media_suite,
     seal_media,
+    seal_share,
 )
 
 ITEM = os.urandom(32)
@@ -67,7 +72,7 @@ def test_sizes_pad_to_buckets(size, bucket):
 
 
 def test_two_files_in_one_bucket_have_the_same_blob_size():
-    assert len(_seal(b"a" * 10)) == len(_seal(b"b" * 50_000))
+    assert len(_seal(b"a" * 5_000)) == len(_seal(b"b" * 50_000))
 
 
 def test_too_large_is_refused():
@@ -147,3 +152,62 @@ def test_unknown_roles_and_suites_are_refused():
 @pytest.mark.parametrize("value", ["", "ab", "g" * 64, "A" * 64, None, 5])
 def test_blob_ids_are_64_lowercase_hex(value):
     assert not is_blob_id(value)
+
+
+# ── Share copy (per-moment link) ────────────────────────────────────
+
+
+def test_a_share_copy_round_trips_in_the_smallest_bucket():
+    body = {"content": "Sunset", "media": None}
+    blob = seal_share(
+        item_key=ITEM, author_user_id="u-author", moment_id="m1", body=body
+    )
+    assert len(blob) == PAD_BUCKETS[0] + 12 + 16 == 4096 + 28
+    assert b"Sunset" not in blob
+    assert (
+        open_share(blob=blob, item_key=ITEM, author_user_id="u-author", moment_id="m1")
+        == body
+    )
+
+
+def test_a_share_copy_is_not_a_media_file():
+    blob = seal_share(item_key=ITEM, author_user_id="a", moment_id="m1", body={})
+    with pytest.raises(InvalidTag):
+        open_media(
+            blob=blob, item_key=ITEM, author_user_id="a", moment_id="m1", role="media"
+        )
+
+
+def test_a_share_copy_must_be_an_object():
+    blob = seal_media(
+        item_key=ITEM, author_user_id="a", moment_id="m1", role="share", data=b"[1]"
+    )
+    with pytest.raises(TypeError):
+        open_share(blob=blob, item_key=ITEM, author_user_id="a", moment_id="m1")
+
+
+def test_the_shared_golden_vector_opens_here_too():
+    """``tests/fixtures/moment_share_vector.json`` is what
+    ``client/gfs/moment_seal.test.ts`` opens in the browser code — it must
+    stay a valid Python seal, so the two sides can't drift."""
+    vec = json.loads(
+        (Path(__file__).parent / "fixtures" / "moment_share_vector.json").read_text()
+    )
+    key = base64.urlsafe_b64decode(vec["item_key_b64url"] + "=")
+    share = base64.b64decode(vec["share_b64"])
+    media = base64.b64decode(vec["media_b64"])
+    assert blob_id_of(share) == vec["share_id"]
+    assert blob_id_of(media) == vec["media_id"]
+    assert (
+        open_share(
+            blob=share, item_key=key, author_user_id="u-noor", moment_id="m-golden"
+        )
+        == vec["body"]
+    )
+    assert open_media(
+        blob=media,
+        item_key=key,
+        author_user_id="u-noor",
+        moment_id="m-golden",
+        role="media",
+    ) == base64.b64decode(vec["media_plain_b64"])

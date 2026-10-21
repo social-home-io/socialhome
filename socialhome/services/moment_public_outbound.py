@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from .gfs_connection_service import GfsConnectionService
     from .moment_public_key_outbound import MomentPublicKeyOutbound
     from .moment_public_media_outbound import MomentPublicMediaOutbound
+    from .moment_public_share_service import MomentPublicShareService
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ class MomentPublicOutbound(ProtectionGateMixin):
         "_own_users_read_at",
         "_profile_sent",
         "_regs",
+        "_shares",
         "_signing_key",
         "_unsupported_warned",
         "_users",
@@ -136,8 +138,13 @@ class MomentPublicOutbound(ProtectionGateMixin):
         self._child_protection = None
         #: Encrypted media (v_63). Unwired: moments go without their file.
         self._media: MomentPublicMediaOutbound | None = None
+        #: Per-moment share links. Unwired: no link material kept.
+        self._shares: MomentPublicShareService | None = None
         #: media file name → the moment waiting for its transcode.
         self._waiting_media: dict[str, MomentCreated] = {}
+
+    def attach_shares(self, shares: MomentPublicShareService) -> None:
+        self._shares = shares
 
     def attach_media(self, media: MomentPublicMediaOutbound) -> None:
         self._media = media
@@ -223,6 +230,14 @@ class MomentPublicOutbound(ProtectionGateMixin):
                 self._hold_for_media(moment.media_url, event)
                 return
         has_media = prepared is not None
+        if self._shares is not None:
+            # What a per-moment link needs later (the item key is gone from
+            # the ratchet by tomorrow).
+            await self._shares.record(
+                moment,
+                item_key=item_key(key, moment.id),
+                media=prepared.body if prepared is not None else None,
+            )
         # Sealed under the moment's item key — the GFS reads none of it.
         body: dict[str, Any] = {
             "op": "create",

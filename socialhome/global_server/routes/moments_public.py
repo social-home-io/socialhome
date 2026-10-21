@@ -50,7 +50,6 @@ from ..admin_service import verify_report_signature
 from ..domain import GfsUserPicture
 from ..html_page import html_response
 from ..moment_media import MediaRefused
-from ..safe_embed import script_json
 from .base import GfsBaseView
 from .rtc import RELAY_AUTH_MAX_SKEW_SECONDS, _rtc_authenticate
 
@@ -588,13 +587,7 @@ _USER_DETAIL_HTML = """<!doctype html>
     Follow on your Social Home
   </a>
 </article>
-<section class="moments-index" aria-label="Current moments">
-  <h2>Current moments</h2>
-  <div id="moments-root"></div>
-</section>
 </main>
-<script id="moments-boot" type="application/json">{boot_json}</script>
-<script type="module" src="/static/moment_public_viewer.js"></script>
 </body>
 </html>"""
 
@@ -633,10 +626,6 @@ class GfsUserDetailHtmlView(GfsBaseView):
             bio=_html_escape(bio),
             follower_count=int(followers),
             gfs_id=_html_escape(str(gfs_id)),
-            # ``script_json`` so a registration's user_id / instance_id
-            # containing ``</script>`` can't break out of the inline
-            # <script> block — stored XSS on this anonymous page.
-            boot_json=script_json({"userId": user_id, "instanceId": reg.instance_id}),
         )
         return html_response(body)
 

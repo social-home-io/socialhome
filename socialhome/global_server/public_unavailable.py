@@ -2,7 +2,7 @@
 streaming routes (§highlights_public, §Momentum-public).
 
 The anonymous viewer routes (``/gfs/highlight_rtc/{offer,relay}``,
-``/gfs/moment_rtc/{offer,relay}``) answer every failure with the SAME
+(the public moments index used to share it)) answer every failure with the SAME
 response: same status, same body, same headers. That covers an unknown
 author, an unknown or withdrawn item, an author's household that is not
 connected, a stream that could not be brokered, and an author that never

@@ -265,7 +265,6 @@ _PEER_HTTP_MODULES = (
     "socialhome/services/highlight_signaling_handler.py",
     "socialhome/services/moment_public_service.py",
     "socialhome/services/moment_public_outbound.py",
-    "socialhome/services/moment_public_signaling_handler.py",
 )
 
 #: ``app._download_bytes`` fetches an app bundle from the operator-configured

@@ -76,7 +76,7 @@ def test_gfs_vite_entry_bundles_are_ignored_and_in_wheel_artifacts() -> None:
     the release build — ``pnpm run build`` then ``python -m build`` — ships
     it to the GFS image)."""
     entries = _gfs_vite_entries()
-    assert {"highlight_public_viewer", "moment_public_viewer", "admin"} <= set(entries)
+    assert {"highlight_public_viewer", "admin"} <= set(entries)
     artifacts = _build_artifacts()
     ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     for name in entries:

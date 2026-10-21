@@ -212,6 +212,8 @@ moment_retention_scheduler_key: AppKey = AppKey("moment_retention_scheduler")
 moment_public_registration_repo_key: AppKey = AppKey("moment_public_registration_repo")
 moment_public_follow_repo_key: AppKey = AppKey("moment_public_follow_repo")
 moment_public_service_key: AppKey = AppKey("moment_public_service")
+#: Per-moment share links for public moments.
+moment_public_share_service_key: AppKey = AppKey("moment_public_share_service")
 moment_public_outbound_key: AppKey = AppKey("moment_public_outbound")
 moment_public_inbound_key: AppKey = AppKey("moment_public_inbound")
 household_instance_ban_repo_key: AppKey = AppKey("household_instance_ban_repo")

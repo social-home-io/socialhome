@@ -12,6 +12,8 @@ vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 vi.mock('@/ws', () => ({ ws: { on: () => () => undefined } }))
 
 import { api } from '@/api'
+import { showToast } from '@/components/Toast'
+import { currentUser } from '@/store/auth'
 import type { Moment, MomentDetail } from '@/types'
 import MomentumDetailPage from './MomentumDetailPage'
 
@@ -92,5 +94,49 @@ describe('MomentumDetailPage authors', () => {
     const { container } = render(<MomentumDetailPage />)
     await waitFor(() => expect(container.textContent).toContain('Amaka Okafor'))
     expect(container.querySelector('[data-testid="moment-author-bio"]')).toBeNull()
+  })
+})
+
+describe('MomentumDetailPage share link', () => {
+  function asAuthor(extra: Partial<Moment>) {
+    currentUser.value = { user_id: 'u-me' } as never
+    const detail: MomentDetail = {
+      moment: moment('m-amaka', 'u-me', extra),
+      replies: [],
+      reactions: [],
+    }
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments/m-amaka' ? detail : [])
+  }
+
+  it('the author of a public moment copies its share link', async () => {
+    asAuthor({ is_public: true })
+    vi.mocked(api.post).mockResolvedValue({ url: 'https://viewer.example/v/x/#m=m-amaka' })
+    const writeText = vi.fn(async () => undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const { container, findByText } = render(<MomentumDetailPage />)
+    const button = await findByText(/Copy share link/)
+    button.click()
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://viewer.example/v/x/#m=m-amaka'))
+    expect(api.post).toHaveBeenCalledWith('/api/moments/m-amaka/share-link', {})
+    expect(container.textContent).toContain('Copy share link')
+  })
+
+  it('a household-only moment has no share link', async () => {
+    asAuthor({ is_public: false })
+    const { container } = render(<MomentumDetailPage />)
+    await waitFor(() => expect(container.textContent).toContain('hello from m-amaka'))
+    expect(container.textContent).not.toContain('Copy share link')
+  })
+
+  it('a failed request says so and copies nothing', async () => {
+    asAuthor({ is_public: true })
+    vi.mocked(api.post).mockRejectedValue(new Error('nope'))
+    const writeText = vi.fn(async () => undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const { findByText } = render(<MomentumDetailPage />)
+    ;(await findByText(/Copy share link/)).click()
+    await waitFor(() => expect(showToast).toHaveBeenCalled())
+    expect(writeText).not.toHaveBeenCalled()
   })
 })

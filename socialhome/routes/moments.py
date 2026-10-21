@@ -29,6 +29,7 @@ from aiohttp import web
 from ..app_keys import (
     media_signer_key,
     media_transcode_repo_key,
+    moment_public_share_service_key,
     moment_repo_key,
     moment_service_key,
     person_summary_service_key,
@@ -387,6 +388,26 @@ class MomentReportView(BaseView):
             },
             status=201,
         )
+
+
+class MomentShareLinkView(BaseView):
+    """``POST /api/moments/{id}/share-link`` — the author's link to
+    one of their public moments. Optional body ``{gfs_id}``. The link opens
+    the pinned viewer with the moment's item key in its fragment; a moment
+    that isn't the caller's live public moment is the unknown-id 404."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        if ctx is None:
+            return error_response(401, "UNAUTHENTICATED", "Login required.")
+        body = await self.body() if self.request.can_read_body else {}
+        gfs_id = body.get("gfs_id") if isinstance(body, dict) else None
+        if gfs_id is not None and not isinstance(gfs_id, str):
+            return error_response(400, "BAD_REQUEST", "gfs_id must be a string.")
+        url = await self.svc(moment_public_share_service_key).link(
+            user_id=ctx.user_id, moment_id=self.match("id"), gfs_id=gfs_id or None
+        )
+        return self._json({"url": url})
 
 
 # ─── Follows ──────────────────────────────────────────────────────────────

@@ -160,8 +160,10 @@ async def test_user_detail_html_renders_with_follow_cta(client, author):
 
 
 async def test_user_detail_html_escapes_boot_payload_xss(client):
-    """A registration whose instance_id carries ``</script>`` must not
-    break out of the inline boot <script> block (stored XSS guard)."""
+    """A registration whose instance_id carries ``</script>`` is escaped
+    on the profile page (stored XSS guard) — and the page carries no
+    script block or moments any more (owner decision 2026-10-20: profile
+    + Follow only)."""
     evil = "inst</script><script>alert(1)</script>"
     kp = generate_identity_keypair()
     await client._app[gfs_fed_repo_key].upsert_instance(
@@ -185,10 +187,9 @@ async def test_user_detail_html_escapes_boot_payload_xss(client):
     resp = await client.post("/gfs/moments/users/register", json=body)
     assert resp.status == 201, await resp.text()
     page = await (await client.get("/moments/u-evil")).text()
-    # The raw breakout must NOT appear; the boot payload carries the
-    # escaped unicode form instead.
     assert "</script><script>alert(1)</script>" not in page
-    assert "\\u003c/script\\u003e" in page
+    assert "&lt;/script&gt;" in page
+    assert "moments-root" not in page and "moment_public_viewer" not in page
 
 
 # ── picture upload + fetch ────────────────────────────────────────────

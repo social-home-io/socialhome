@@ -88,7 +88,6 @@ class GfsWebSocketClient:
         "_on_follow_changed",
         "_on_highlight_signal",
         "_on_moment_public",
-        "_on_moment_signal",
         "_on_new_subscriber",
         "_on_relay",
         "_reconnect_delays",
@@ -109,7 +108,6 @@ class GfsWebSocketClient:
         session_factory: Callable[[], aiohttp.ClientSession],
         on_relay: Callable[[dict], Awaitable[None]],
         on_highlight_signal: Callable[[dict], Awaitable[None]] | None = None,
-        on_moment_signal: Callable[[dict], Awaitable[None]] | None = None,
         on_moment_public: Callable[[dict], Awaitable[None]] | None = None,
         on_follow_changed: Callable[[dict], Awaitable[None]] | None = None,
         on_new_subscriber: Callable[[dict], Awaitable[None]] | None = None,
@@ -123,7 +121,6 @@ class GfsWebSocketClient:
         self._session_factory = session_factory
         self._on_relay = on_relay
         self._on_highlight_signal = on_highlight_signal
-        self._on_moment_signal = on_moment_signal
         self._on_moment_public = on_moment_public
         self._on_follow_changed = on_follow_changed
         self._on_new_subscriber = on_new_subscriber
@@ -159,20 +156,6 @@ class GfsWebSocketClient:
         client.
         """
         self._on_highlight_signal = handler
-
-    def attach_moment_signal_handler(
-        self,
-        handler: Callable[[dict], Awaitable[None]],
-    ) -> None:
-        """Late-bound wiring for the §Momentum-public answerer.
-
-        Mirrors :meth:`attach_highlight_signal_handler`: the
-        :class:`MomentPublicSignalingHandler` is constructed after the WS
-        client and attached during startup. Receives ``moment_signal``
-        frames (``offer`` / ``ice`` / ``relay_offer``) the GFS pushes when
-        a guest reads the author's public-moment index.
-        """
-        self._on_moment_signal = handler
 
     def attach_moment_public_handler(
         self,
@@ -420,23 +403,6 @@ class GfsWebSocketClient:
             except Exception as exc:  # defensive
                 log.warning(
                     "gfs.ws.client: on_highlight_signal handler raised for %s: %s",
-                    self._gfs_url,
-                    exc,
-                    exc_info=True,
-                )
-            return
-        if frame_type == "moment_signal":
-            if self._on_moment_signal is None:
-                log.debug(
-                    "gfs.ws.client: dropping moment_signal — no handler attached on %s",
-                    self._gfs_url,
-                )
-                return
-            try:
-                await self._on_moment_signal(frame)
-            except Exception as exc:  # defensive
-                log.warning(
-                    "gfs.ws.client: on_moment_signal handler raised for %s: %s",
                     self._gfs_url,
                     exc,
                     exc_info=True,

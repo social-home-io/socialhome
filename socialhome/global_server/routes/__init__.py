@@ -94,15 +94,6 @@ from .member_publish import (
     MemberPublishView,
     SpaceEpochNoticeView,
 )
-from .moment_rtc import (
-    MomentRelayStreamView,
-    MomentRelayUploadView,
-    MomentRtcAnswerView,
-    MomentRtcAuthorIceView,
-    MomentRtcOfferView,
-    MomentRtcSessionView,
-    MomentRtcViewerIceView,
-)
 from .moments_public import (
     GfsMomentFollowerStatsView,
     GfsMomentKeyRequestView,
@@ -329,31 +320,6 @@ def register_routes(
     app.router.add_view("/gfs/moments/users/{user_id}", GfsUserDetailView)
     app.router.add_view("/moments", GfsUserDirectoryHtmlView)
     app.router.add_view("/moments/{user_id}", GfsUserDetailHtmlView)
-
-    # Public-viewer signalling for the public-moments live index
-    # (§Momentum-public). The offer endpoint is anonymous (gated by the
-    # user's live directory registration); the answer endpoints are
-    # Ed25519-signed by the author SH like the rest of /gfs/rtc/*. The
-    # GFS stores zero moment bytes — it brokers signalling and, on the
-    # fallback path, pipes the framed bytes straight through.
-    app.router.add_view("/gfs/moment_rtc/offer", MomentRtcOfferView)
-    app.router.add_view(
-        "/gfs/moment_rtc/session/{session_id}",
-        MomentRtcSessionView,
-    )
-    app.router.add_view("/gfs/moment_rtc/ice/viewer", MomentRtcViewerIceView)
-    app.router.add_view("/gfs/moment_rtc/answer", MomentRtcAnswerView)
-    app.router.add_view("/gfs/moment_rtc/ice/author", MomentRtcAuthorIceView)
-    # GFS-relay fallback: anon guest stream (registration-gated) + signed
-    # author upload.
-    app.router.add_view(
-        "/gfs/moment_rtc/relay/{user_id}",
-        MomentRelayStreamView,
-    )
-    app.router.add_view(
-        "/gfs/moment_rtc/relay-stream/{relay_id}",
-        MomentRelayUploadView,
-    )
 
     # Admin portal — login/logout stay as module-level functions in
     # ``global_server.admin`` since they wire cookie lifecycle.

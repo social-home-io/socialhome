@@ -29,6 +29,7 @@ GFS process can import the size bounds.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 
@@ -41,7 +42,9 @@ MEDIA_SUITE_AESGCM256_PADDED: str = "aesgcm-256-pad"
 SUPPORTED_MEDIA_SUITES: frozenset[str] = frozenset({MEDIA_SUITE_AESGCM256_PADDED})
 
 #: The roles a blob can play for one moment.
-MEDIA_ROLES: frozenset[str] = frozenset({"media", "poster"})
+#: ``share`` is a moment's share copy: its text and media
+#: descriptor, for a per-moment link's viewer.
+MEDIA_ROLES: frozenset[str] = frozenset({"media", "poster", "share"})
 
 #: Content types a moment's file may have → (file extension, moment
 #: ``media_type``). Anything else is never sent, and never stored.
@@ -66,9 +69,10 @@ CONTENT_TYPE_BY_EXT: dict[str, str] = {
 }
 
 #: Padded plaintext sizes (length prefix included). A file goes in the
-#: smallest that holds it — at most 4× its size for the tiniest files, about
-#: 1.3× on average across the larger buckets.
+#: smallest that holds it — about 1.3× its size on average across the larger
+#: buckets; the 4 KB bucket holds a share copy.
 PAD_BUCKETS: tuple[int, ...] = (
+    4 * 1024,
     64 * 1024,
     256 * 1024,
     1024 * 1024,
@@ -175,6 +179,41 @@ def open_media(
     return plaintext[_LEN : _LEN + size]
 
 
+def seal_share(
+    *, item_key: bytes, author_user_id: str, moment_id: str, body: dict
+) -> bytes:
+    """A moment's share copy: *body* (text, timestamps, the media
+    descriptor) as a ``share`` blob — what a per-moment link's viewer opens
+    with the moment's item key. Normally the 4 KB bucket."""
+    data = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    return seal_media(
+        item_key=item_key,
+        author_user_id=author_user_id,
+        moment_id=moment_id,
+        role="share",
+        data=data,
+    )
+
+
+def open_share(
+    *, blob: bytes, item_key: bytes, author_user_id: str, moment_id: str
+) -> dict:
+    """The body of a share copy. Raises like :func:`open_media`, and
+    :class:`TypeError` when it is not a JSON object."""
+    body = json.loads(
+        open_media(
+            blob=blob,
+            item_key=item_key,
+            author_user_id=author_user_id,
+            moment_id=moment_id,
+            role="share",
+        )
+    )
+    if not isinstance(body, dict):
+        raise TypeError("share copy is not a JSON object")
+    return body
+
+
 __all__ = [
     "CONTENT_TYPE_BY_EXT",
     "MAX_BLOB_BYTES",
@@ -188,7 +227,9 @@ __all__ = [
     "blob_id_of",
     "is_blob_id",
     "open_media",
+    "open_share",
     "padded_size",
     "require_known_media_suite",
     "seal_media",
+    "seal_share",
 ]

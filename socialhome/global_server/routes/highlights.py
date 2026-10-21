@@ -245,4 +245,5 @@ _VIEWER_CSS = (
     "font-size:.9em;text-align:center;}"
     ".highlight-incomplete p{margin:0;}"
     ".highlight-end>p{margin:0;}"
+    ".moment-text{margin:12px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5;}"
 )
