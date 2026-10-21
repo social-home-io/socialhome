@@ -6395,6 +6395,19 @@ _LOOPBACK_IS_PUBLIC_PRELUDE = (
 )
 
 
+#: ``gfs-moment-profile``: open a moment's share copy (stdin) the way the
+#: pinned viewer does — with the link's item key ``argv[1]`` for author
+#: ``argv[2]`` and moment ``argv[3]`` — and print its JSON body.
+_OPEN_SHARE_SNIPPET = (
+    "import json, sys; "
+    "from socialhome.crypto import b64url_decode; "
+    "from socialhome.moment_public_media import open_share; "
+    "print(json.dumps(open_share(blob=sys.stdin.buffer.read(), "
+    "item_key=b64url_decode(sys.argv[1]), author_user_id=sys.argv[2], "
+    "moment_id=sys.argv[3])))"
+)
+
+
 def _spawn_loopback_public(label: str, port: int) -> int:
     """:func:`_spawn` with :data:`_LOOPBACK_IS_PUBLIC_PRELUDE`."""
     d = _instance_dir(label)
@@ -16584,6 +16597,66 @@ def cmd_gfs_moment_profile() -> None:
             raise SystemExit("gfs-moment-profile: a GFS blob holds a readable WebP")
     print(
         f"  e keeps the picture from one encrypted GFS blob ({len(blobs)} on the GFS, none readable) ✓"
+    )
+
+    # Share link — a stranger opens this one moment from GFS ciphertext
+    # with the item key in the fragment; the GFS never sees that key.
+    link_off = _gfs_log_size()
+    s, share = _request(
+        f"{a_url}/api/moments/{moment_id}/share-link",
+        token=tok,
+        method="POST",
+        body={"gfs_id": a_gfs},
+    )
+    _must("gfs-moment-profile: share link", s, share)
+    url = share.get("url") or ""
+    base, _, fragment = url.partition("#")
+    frag = dict(urllib.parse.parse_qsl(fragment))
+    if (
+        "/v/" not in base
+        or frag.get("a") != author_uid
+        or frag.get("m") != moment_id
+        or len(frag.get("k") or "") != 43
+        or len(frag.get("b") or "") != 64
+        or frag.get("g") != f"http://127.0.0.1:{GFS_PORT}"
+    ):
+        raise SystemExit(f"gfs-moment-profile: share link has the wrong shape: {url!r}")
+    s, blob = _http_get_bytes(
+        f"http://127.0.0.1:{GFS_PORT}/gfs/moments/media/{frag['b']}"
+    )
+    if s != 200 or content.encode() in blob:
+        raise SystemExit(f"gfs-moment-profile: share copy → HTTP {s} (or readable)")
+    opened = subprocess.run(
+        [sys.executable, "-c", _OPEN_SHARE_SNIPPET, frag["k"], author_uid, moment_id],
+        input=blob,
+        capture_output=True,
+        cwd=REPO_ROOT,
+        timeout=30,
+    )
+    if opened.returncode != 0:
+        raise SystemExit(
+            f"gfs-moment-profile: the share copy doesn't open with k: "
+            f"{opened.stderr.decode()[-400:]}"
+        )
+    body = json.loads(opened.stdout)
+    if body.get("content") != content or body.get("author_name") != name:
+        raise SystemExit(f"gfs-moment-profile: the share copy opened to {body!r}")
+    media_blob = ((body.get("media") or {}).get("blob_id")) or ""
+    s, _ = _http_get_bytes(
+        f"http://127.0.0.1:{GFS_PORT}/gfs/moments/media/{media_blob}"
+    )
+    if not media_blob or s != 200:
+        raise SystemExit(f"gfs-moment-profile: the shared picture blob → HTTP {s}")
+    if _gfs_log_lines_matching(frag["k"], offset=link_off):
+        raise SystemExit("gfs-moment-profile: the GFS log shows the link's key")
+    s, page = _http_get_bytes(f"http://127.0.0.1:{GFS_PORT}/moments/{author_uid}")
+    if s != 200 or content.encode() in page or b"moment_rtc" in page:
+        raise SystemExit(
+            f"gfs-moment-profile: /moments/{author_uid} → HTTP {s} shows moments"
+        )
+    print(
+        "  the share link opens the moment from GFS ciphertext with its item key; "
+        "the GFS never logged the key, and the profile page shows no moments ✓"
     )
 
     state["gfs_moment_profile"] = {

@@ -75,6 +75,12 @@ def test_moment_keys_are_never_exported():
     assert "household_zones" in EXPORTABLE_TABLES
 
 
+def test_moment_share_keys_are_never_exported():
+    """A public moment's item key (its share link's key) stays here."""
+    assert "moment_public_shares" in NEVER_EXPORT
+    assert "moment_public_shares" not in EXPORTABLE_TABLES
+
+
 def test_no_table_in_both_lists():
     """No table is ever both exportable and forbidden."""
     overlap = set(EXPORTABLE_TABLES) & NEVER_EXPORT

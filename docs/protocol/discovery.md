@@ -422,10 +422,7 @@ The Social Home ↔ GFS link is split by direction:
     bound to server id + pinned key + address) move to the new id in the
     same step — only seats bound to the connection's pinned key AND address
     — and the reconnect reconcile repeats the move before reading seats, so
-    a crash in between heals. Moment signalling (`moment_signal` frames) is
-    answered through the connection the frame arrived on, never by matching
-    the frame's `gfs_id` (the server's public id) against local connection
-    ids.
+    a crash in between heals.
   - **Key binding (`gfs_key`).** An alias such as `gfs-0` may be ANOTHER
     operator's real id, so the id alone no longer rules out replaying a
     request captured there. Every household- or channel-signed request

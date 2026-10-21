@@ -1071,6 +1071,7 @@ bell for it reads "{sender} in Household chat" and opens `/?tab=chat`.
 | DELETE / PATCH | `/api/moments/public/registrations/{gfs_id}` | Deregister / flip `default_share`. |
 | GET / POST | `/api/moments/public/follows` | List / follow public author. |
 | DELETE | `/api/moments/public/follows/{gfs_id}/{user_id}` | Unfollow. |
+| POST | `/api/moments/{id}/share-link` | The author's per-moment share link for their own public moment. Optional body `{gfs_id}` (a string; `400` otherwise). Uploads the 4 KB sealed share copy to that GFS on first use and returns `{url}` — `{viewer}/v/<hash>/#g=<GFS>&a=<author>&m=<moment>&b=<share blob>&k=<item key>`, the key in the fragment only. `404` for an unknown, someone else's or non-public moment; `409 SHARE_LINK_UNAVAILABLE` when no viewer address is set or no registered GFS keeps encrypted media. See `docs/protocol/momentum_public.md`, "Share links". |
 | GET | `/api/gfs/{gfs_id}/moments/users` | Proxy GFS directory; passes `?q=<substr>` through. Each row's `picture_url` is replaced with our own signed picture-proxy URL (or `null` without a mirrored picture) — the household's self-reported URL never reaches the browser. |
 | GET | `/api/gfs/{gfs_id}/moments/users/{user_id}/picture` | Proxy GFS-mirrored avatar bytes (used by Discover cards). Accepts the `?exp=&sig=` signed URL from the directory response. |
 
@@ -1540,12 +1541,14 @@ Every page loads `/static/dashboard.js`, which reloads a page restored from the 
 | GET | `/gfs/moments/users/{user_id}` | Single-user JSON detail incl. `follower_count`. |
 | GET | `/gfs/moments/users/{user_id}/picture` | Anon avatar fetch with `Cache-Control: public, max-age=86400, immutable` and ETag = digest. |
 
-**Public-content RTC + relay fallback** (highlights §highlights_public, moments §Momentum-public)
+**Public-content RTC + relay fallback** (highlights §highlights_public)
 
-Public highlights and the public moments index both stream live from the
-author's SH — a direct WebRTC DataChannel first, with a GFS-relay HTTP
-fallback when WebRTC can't connect. The GFS stores **zero** content bytes
-for either; the relay is a transient in-memory pipe of the byte-identical
+Public highlights stream live from the author's SH — a direct WebRTC
+DataChannel first, with a GFS-relay HTTP fallback when WebRTC can't
+connect. (Public moments no longer stream: a stranger opens one through its
+per-moment share link, from encrypted blobs on the GFS — see
+`docs/protocol/momentum_public.md`, "Share links".) The GFS stores **zero**
+content bytes for a highlight; the relay is a transient in-memory pipe of the byte-identical
 framed stream. Every non-success state (unknown author, unknown / revoked /
 unpublished item, author offline, relay capacity, author never streams)
 gets one response, the uniform `503 {"error":"unavailable"}` (`Cache-Control: no-store`), so these anonymous
@@ -1576,13 +1579,6 @@ header. Rate limits are unchanged.
 | POST | `/gfs/highlight_rtc/ice/author` | Author SH (signed). Same guard. |
 | GET | `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token=...` | Anon, token-gated (rate-limited 20/min per IP). Chunked `application/octet-stream`; pushes a `highlight_signal kind=relay_offer` and pipes the author's framed bytes. Any failure (bad/expired token, URL mismatch, author offline, relay capacity, author never streams) → uniform `503 unavailable`, sent at once (only the never-streams branch waits its 30 s connect budget); `422` missing token. |
 | POST | `/gfs/highlight_rtc/relay-stream/{relay_id}` | Author SH. Header-auth `X-SH-Instance` + `X-SH-Timestamp` (±300 s) + `X-SH-Signature` (Ed25519 over canonical `{"instance_id","relay_id","ts"}`); body is the raw framed stream. `403` target != signer, `404` unknown relay, `401` bad sig / stale ts, `422` missing headers. |
-| POST | `/gfs/moment_rtc/offer` | Anon (rate-limited 20/min per IP). Body `{user_id, sdp}`; pushes a `moment_signal kind=offer` (carries `user_id` + `gfs_id`) to the author. Returns `201 {session_id}`; any failure (unregistered/suspended, author offline) → uniform `503 unavailable`. |
-| GET | `/gfs/moment_rtc/session/{session_id}` | Anon poll for `answer_sdp` + author ICE. |
-| POST | `/gfs/moment_rtc/ice/viewer` | Anon. Trickle the viewer's ICE candidate. |
-| POST | `/gfs/moment_rtc/answer` | Author SH (signed). Authority guard: `session.initiator_id` == signer. |
-| POST | `/gfs/moment_rtc/ice/author` | Author SH (signed). Same guard. |
-| GET | `/gfs/moment_rtc/relay/{user_id}` | Anon chunked relay fallback (registration-gated, rate-limited 20/min per IP). Any failure (unregistered, author offline, relay capacity, author never streams) → uniform `503 unavailable`, sent at once (only the never-streams branch waits its 30 s connect budget). |
-| POST | `/gfs/moment_rtc/relay-stream/{relay_id}` | Author SH. Header-auth (same `X-SH-Instance`/`X-SH-Timestamp`/`X-SH-Signature` scheme as the highlight relay-stream); body is the raw framed stream. |
 
 ### GFS — Opaque channels for private spaces (v_51)
 
@@ -1611,7 +1607,7 @@ Wire shapes: `socialhome/domain/gfs_channel.py`; rationale:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET (Upgrade) | `/gfs/ws` | Persistent push channel. SH opens this once paired; the GFS pushes `{type:"relay", space_id, event_type, payload}` frames as space events fan out — the frame is identity-free (the GFS never learns which household relayed the event, so it forwards no `from_instance`). It also pushes `{type:"envelope", sealed:{kem_suite, eph_pk, ciphertext}}` — one sealed household-to-household blob relayed via `POST /gfs/envelope` (§D2b invite bootstrap). That frame carries those two fields and nothing else: the GFS cannot open the box and does not know who sealed it. Envelopes that arrived while the household was offline are drained, oldest first, immediately after the hello verifies — together with any queued member-published items, which drain as the same `{type:"relay", space_id, event_type:"space_item", epoch, writer_cert, payload}` frame a live subscriber gets from `POST /gfs/member-publish` (v_49; identity-free — the publisher is authenticated by the cert and the author signature inside, never by an outer field). It also pushes public-content RTC signalling to the author: `{type:"highlight_signal", kind}` with `kind` ∈ `offer` / `ice` / `relay_offer` (the `relay_offer` carries `{relay_id, highlight_id, token}` for the GFS-relay fallback), and `{type:"moment_signal", kind}` with `kind` ∈ `offer` / `ice` / `relay_offer` (the `offer` carries `user_id` + `gfs_id`). On an operator rename it pushes `{type:"server_info_updated", server_name}` to every connected client, which re-fetches `GET /gfs/info` to update the cached server name in real time (the reconnect-refresh path is the fallback). First client frame must be a signed hello `{type:"hello", instance_id, ts, sig}` within 5 s — see spec §24.12. WebSocket close codes: 4400 protocol violation, 4401 auth failure, 4408 hello timeout, 4409 replaced. An unknown / inactive instance and a bad signature both close 4401 with the one reason `auth-failed` after the same Ed25519 verify work (older GFS builds sent `unknown-instance` / `bad-signature`), so the hello is no registration oracle. Heartbeat is the WS-protocol-level ping (30 s). |
+| GET (Upgrade) | `/gfs/ws` | Persistent push channel. SH opens this once paired; the GFS pushes `{type:"relay", space_id, event_type, payload}` frames as space events fan out — the frame is identity-free (the GFS never learns which household relayed the event, so it forwards no `from_instance`). It also pushes `{type:"envelope", sealed:{kem_suite, eph_pk, ciphertext}}` — one sealed household-to-household blob relayed via `POST /gfs/envelope` (§D2b invite bootstrap). That frame carries those two fields and nothing else: the GFS cannot open the box and does not know who sealed it. Envelopes that arrived while the household was offline are drained, oldest first, immediately after the hello verifies — together with any queued member-published items, which drain as the same `{type:"relay", space_id, event_type:"space_item", epoch, writer_cert, payload}` frame a live subscriber gets from `POST /gfs/member-publish` (v_49; identity-free — the publisher is authenticated by the cert and the author signature inside, never by an outer field). It also pushes public-content RTC signalling to the author: `{type:"highlight_signal", kind}` with `kind` ∈ `offer` / `ice` / `relay_offer` (the `relay_offer` carries `{relay_id, highlight_id, token}` for the GFS-relay fallback). On an operator rename it pushes `{type:"server_info_updated", server_name}` to every connected client, which re-fetches `GET /gfs/info` to update the cached server name in real time (the reconnect-refresh path is the fallback). First client frame must be a signed hello `{type:"hello", instance_id, ts, sig}` within 5 s — see spec §24.12. WebSocket close codes: 4400 protocol violation, 4401 auth failure, 4408 hello timeout, 4409 replaced. An unknown / inactive instance and a bad signature both close 4401 with the one reason `auth-failed` after the same Ed25519 verify work (older GFS builds sent `unknown-instance` / `bad-signature`), so the hello is no registration oracle. Heartbeat is the WS-protocol-level ping (30 s). |
 
 ## GFS — SH↔SH RTC signalling rendezvous (§4.2.3)
 

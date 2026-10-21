@@ -44,8 +44,8 @@ directory. Nothing more is claimed.
   "sh-moment-ratchet:v1")` — and every household keeps only its newest step
   key (forward secrecy at rest, at zero delivery cost). Each moment is sealed
   under its own **item key** `HKDF(K(g, s), "sh-moment-item:v1|" +
-  moment_id)`, so one moment's key (a share link, later) opens that moment
-  and nothing else. See [Moment keys](#moment-keys-v_62).
+  moment_id)`, so one moment's key (a [share link](#share-links)) opens
+  that moment and nothing else. See [Moment keys](#moment-keys-v_62).
 * **Envelope.** Exactly `{author_user_id, instance_id, moment_id, key_gen,
   key_step, seal_suite, ciphertext, signature}`
   (`socialhome/moment_public_seal.py`). `seal_suite: "aesgcm-256"` —
@@ -116,9 +116,13 @@ its own key-wrap key for every follower and read silently — strictly weaker.
 * *Media* (v_63) — the GFS stores each moment file as padded ciphertext it
   can't open: it learns a size bucket, the blob's address and who fetches
   it when. See [Encrypted media](#encrypted-media-v_63).
-* *The live public-moments index* (`/moments/{user_id}`) still streams
-  moments to guests — owner decision 2026-10-20: that page becomes profile +
-  Follow only, and moments open through per-moment share links (follow-up).
+* *Share links* — a moment opened through its share link is fetched from
+  the GFS by the viewer: the GFS learns that blob was fetched, from which
+  address, when. It never sees the key (URL fragment). Whoever holds a link
+  can open that one moment until it expires; a link can't be revoked short of
+  deleting the moment. The pinned viewer's host is trusted to serve the page
+  whose hash the link names (SRI-pinned bundle, see
+  [highlights_public.md](highlights_public.md)). See [Share links](#share-links).
 
 ## Event types
 
@@ -164,7 +168,7 @@ verifies the author's signature directly.
 | GET    | `/gfs/moments/users/{user_id}` | Public JSON per-user detail. |
 | GET    | `/gfs/moments/users/{user_id}/picture` | Public avatar bytes. |
 | GET    | `/moments` | Public HTML directory. |
-| GET    | `/moments/{user_id}` | Per-user public HTML landing; mounts the live public-moments index viewer (see "Public moments index"). |
+| GET    | `/moments/{user_id}` | Per-user public HTML landing: the person's profile and a Follow button — **no moments** (owner decision 2026-10-20; a moment opens only through its [share link](#share-links)). |
 
 ### SH-side (auth-gated)
 
@@ -178,6 +182,7 @@ verifies the author's signature directly.
 | POST   | `/api/moments/public/follows` | Follow another author. |
 | DELETE | `/api/moments/public/follows/{gfs_id}/{user_id}` | Unfollow. |
 | GET    | `/api/gfs/{gfs_id}/moments/users` | Proxy the GFS directory. |
+| POST   | `/api/moments/{moment_id}/share-link` | The author's own public moment only. Optional body `{gfs_id}`. Uploads the 4 KB share copy on first use (per GFS) and returns `{url}` — the [share link](#share-links). `404` for someone else's / unknown / non-public moment, `409 SHARE_LINK_UNAVAILABLE` without a viewer address or a GFS that keeps encrypted media. |
 
 ## Sequence: discover + follow (+ the key, v_62)
 
@@ -537,6 +542,11 @@ identical bytes-for-bytes to the sender's canonical encoding.
 * `moment_public_follows` (SH) — follower-side cache, including the
   followed user's `home_instance_pk` for signature verification and
   (0112) their public `followed_bio` / `followed_picture_digest`.
+* `moment_public_shares` (SH, 0119) — one row per public moment this
+  household authored: the moment's item key (KEK-sealed, associated data
+  the moment id), its media descriptor, and — once a link was asked for —
+  the share copy's blob address and GFS. Cascades with the moment, so it is
+  gone when the moment expires or is deleted. Never backed up or exported.
 * `moment_public_keys` (SH, 0118, v_62) — moment keys, KEK-sealed, one
   row per (author, role, generation) with the step key advanced in place:
   `is_own = 1` minted here for local authors, `is_own = 0` delivered by
@@ -576,124 +586,89 @@ identical bytes-for-bytes to the sender's canonical encoding.
   in v1. What's in `users.{display_name, bio, picture_hash}` is
   what every paired GFS sees.
 
-## Public moments index
+## Share links
 
-A guest visiting `GET /moments/{user_id}` on the GFS sees the author's
-**current public moments**, streamed live from the author's SH the same
-way a public highlight is — a direct WebRTC DataChannel first, with the
-GFS-relay fallback when WebRTC can't connect. The transport mechanism is
-shared verbatim with Highlights; see
-[highlights_public.md → GFS-relay fallback](highlights_public.md#gfs-relay-fallback)
-for the bridge details rather than repeating them here.
+Owner decision 2026-10-20: the GFS's `/moments/{user_id}` page shows the
+person's profile (name, picture, bio) and a Follow button — **no moments**.
+A stranger sees a public moment only through a link its author shares. The
+old live moments index (WebRTC stream + GFS relay of plaintext moments,
+`/gfs/moment_rtc/*`) is gone; an old `/moments/{user_id}` link now shows the
+profile, and the person can ask the author for a link to a moment.
 
-Access is gated by the user's **active public-directory registration** —
-no token. **Not encrypted from the GFS yet:** this page has no secret, so on
-the relay fallback the GFS pipes the framed moments in the clear, and the GFS
-can open the page like any guest. Owner decision 2026-10-20: this page becomes
-the person's profile (name, picture, bio) and a Follow button only; a moment
-opens through a share link carrying that one moment's item key in the URL
-fragment (`#k=`), served by a pinned, hash-verified viewer — follow-ups. Until
-then this is the one place public moment content can cross the GFS readable.
+A share link opens the **pinned viewer** — the same static, SRI-pinned page
+public highlights use (see [highlights_public.md](highlights_public.md)), not
+served by any GFS — with everything in the URL fragment, which the browser
+never sends to a server:
 
-Only moments with `is_public = 1` that have not expired are
-ever streamed; the filter is enforced in
-`moment_repo.list_public_for` (the privacy invariant). The GFS stores
-**zero** moment bytes — like the highlight relay, the bridge is a
-transient in-memory pipe.
+```
+{viewer}/v/<hash>/#g=<GFS>&a=<author>&m=<moment>&b=<share copy>&k=<item key>
+```
 
-### Framing
+* **`k` is the moment's item key**, never the generation or step key — it
+  opens exactly that moment (its share copy and its file) and nothing else
+  the author published.
+* **`b` is a share copy** — the moment's text, timestamps, the author's
+  display name and the media descriptor, sealed under the item key
+  (`moment_public_media.seal_share`, role `share`, `media_suite:
+  "aesgcm-256-pad"`, padded to the 4 KB bucket) and stored on the GFS like any
+  moment file (`PUT /gfs/moments/media/{blob_id}`, header-signed, expires with
+  the moment). It is uploaded **only when the author asks for a link**, once
+  per GFS — a moment nobody shares never has one.
+* **The viewer** fetches the share copy and the moment's file from the GFS
+  (`GET /gfs/moments/media/{blob_id}`, anonymous, CORS), checks each
+  SHA-256 address, and opens them in the browser with WebCrypto
+  (`client/gfs/moment_seal.ts`; a golden vector,
+  `tests/fixtures/moment_share_vector.json`, pins the TypeScript and Python
+  shapes together). A missing blob reads "no longer available"; anything that
+  doesn't open reads "incomplete or damaged". Nothing is shown in the clear.
+* **The author's household is never contacted** — it can be offline, and
+  its uplink never carries a viewer's copy.
+* **Keeping the key.** The item key comes from the day's ratchet step, which
+  the household overwrites daily, so the household keeps it per public
+  moment at publish (`moment_public_shares`, KEK-sealed), gone with the
+  moment.
 
-The moments index reuses the highlights framing module
-(`highlight_public_framing.py`) — same `[u32 header_len][header][u32
-payload_len][payload]` shape, label `moment-public-v1`:
+No protocol version bump: share links touch only the author's own household,
+the GFS media store (v_63) and the pinned viewer.
 
-| `kind` | Direction | Header fields | Payload |
-|---|---|---|---|
-| `moment_index_meta` | author → viewer (first frame) | `moments` (manifest: `[{id, content, created_at, media_type, has_media, media_frame_id, byte_length?, content_type?}, …]`) | empty |
-| `frame_chunk` | author → viewer | `frame_id`, `chunk_index`, `is_last_chunk`, `byte_length` | up to `CHUNK_SIZE` bytes — one stream per moment that has media |
-| `stream_end` | author → viewer (terminator) | `kind` only | empty |
-
-### Wire endpoints (GFS)
-
-These mirror the public-highlight `/gfs/highlight_rtc/*` endpoints.
-
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/gfs/moment_rtc/offer` | Anonymous. Body `{user_id, sdp}`. Every non-success state (unregistered / suspended user, author offline) gets the one uniform `503 {"error":"unavailable"}` (see "Not a presence oracle" below). Otherwise pushes a `moment_signal` WS frame (`kind:"offer"`, carrying `user_id` + `gfs_id`) to the author. Returns `201 {session_id}`. |
-| GET | `/gfs/moment_rtc/session/{session_id}` | Anonymous poll for `answer_sdp` + author ICE. |
-| POST | `/gfs/moment_rtc/ice/viewer` | Anonymous. Trickle the viewer's ICE candidate. |
-| POST | `/gfs/moment_rtc/answer` | Author SH only (Ed25519-signed). Authority guard: `session.initiator_id` must match the signer. |
-| POST | `/gfs/moment_rtc/ice/author` | Author SH only (signed). Same authority guard. |
-| GET | `/gfs/moment_rtc/relay/{user_id}` | Anonymous chunked relay fallback (registration-gated). Every non-success state (unregistered, author offline, relay capacity, author never connects) gets the uniform `503 {"error":"unavailable"}`, sent at once (only the never-connects branch waits its 30 s budget). |
-| POST | `/gfs/moment_rtc/relay-stream/{relay_id}` | Author SH only. Header-auth (`X-SH-Instance` + `X-SH-Signature` over canonical `{"instance_id","relay_id"}`) — same scheme as the highlight relay-stream. Body is the raw framed byte stream. |
-
-The author SH handles a new `moment_signal` WS frame with `kind` ∈
-`offer` / `ice` / `relay_offer`, dispatched in
-`moment_public_signaling_handler.py`. The viewer DataChannel label is
-`moment-public-v1`; the bundle is `moment_public_viewer.js` (built from
-`client/gfs/public_moments.tsx`) and mounts into `#moments-root` on the
-per-user landing page.
-
-### Sequence: guest reads a user's public moments
+### Sequence: a stranger opens a shared moment
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant V as Viewer<br/>(browser)
-  participant G as GFS
+  participant U as Author (SPA)
   participant A as Author SH
+  participant G as GFS
+  participant P as Pinned viewer host
+  participant V as Stranger (browser)
 
-  V->>G: GET /moments/{user_id}
-  G->>G: check active registration
-  G-->>V: 200 SSR landing + moment_public_viewer.js
-  V->>G: POST /gfs/moment_rtc/offer {user_id, sdp}
-  G->>G: active registration + author connected (both, every request)
-  Note over G,V: any failure → uniform 503 {"error":"unavailable"}
-  G->>A: WS push { type:"moment_signal", kind:"offer", session_id, user_id, gfs_id }
-  G-->>V: 201 { session_id }
-  A->>G: POST /gfs/moment_rtc/answer (signed)
-  A->>G: POST /gfs/moment_rtc/ice/author (signed) (xN)
-  V->>G: POST /gfs/moment_rtc/ice/viewer (xN)
-  V->>G: GET /gfs/moment_rtc/session/{id} (poll)
-  G-->>V: { answer_sdp, ice_candidates }
-  alt direct DataChannel connects
-    V-->>A: DataChannel "moment-public-v1" opens (direct, no GFS)
-    A->>V: moment_index_meta → frame_chunk × N → stream_end
-  else WebRTC fails — GFS-relay fallback
-    V->>G: GET /gfs/moment_rtc/relay/{user_id}
-    G->>A: WS push { kind:"relay_offer", relay_id }
-    A->>G: POST /gfs/moment_rtc/relay-stream/{relay_id} (header-signed)
-    Note over G: GFS pipes byte-identical frames<br/>(stores nothing)
-    G-->>V: chunked octet-stream (same framing)
+  U->>A: POST /api/moments/{id}/share-link
+  A->>A: own public moment? unseal item key (KEK)
+  opt no share copy on this GFS yet
+    A->>A: seal_share(item key) → 4 KB blob
+    A->>G: PUT /gfs/moments/media/{blob_id} (header-signed)
+  end
+  A-->>U: { url: viewer/v/<hash>/#g&a&m&b&k }
+  U-->>V: shares the link (any channel)
+  V->>P: GET /v/<hash>/ (fragment stays in the browser)
+  P-->>V: pinned page (SRI-checked bundle)
+  V->>G: GET /gfs/moments/media/{share blob}
+  G-->>V: ciphertext
+  V->>V: sha256 = b? open with k
+  opt the moment has a photo or video
+    V->>G: GET /gfs/moments/media/{media blob}
+    G-->>V: ciphertext
+    V->>V: sha256 check, open with k
   end
 ```
 
-Only `is_public = 1`, non-expired moments cross the wire — a stranger
-visiting the page sees exactly the author's current public set, never a
-private or expired moment, and the GFS never holds a copy.
+### Traffic
 
-### Not a presence oracle
-
-The streaming routes must not tell an outsider whether the author's
-household is connected
-([`principles.md`](../principles.md#the-gfs-is-not-an-author-presence-oracle)).
-`routes/moment_rtc.py:_servable_author` does the registration lookup and
-the connection check on every request and folds both into one answer. Every
-failure gets `global_server/public_unavailable.py`'s uniform
-`503 {"error":"unavailable"}` + `Cache-Control: no-store`, so unknown,
-deregistered and offline can't be told apart. Failures are answered at once, with no added delay. A delay would hide
-nothing, because the matching offer already answers `201` or `503`
-immediately, and it would let anonymous callers hold a socket open for
-30 s. Only the relay's never-streams branch waits, for its 30 s connect
-budget. The viewer shows
-"This isn't available right now." in a `role="alert"` region and moves focus
-to a *Try again* button. It retries on its own after 10 s, 30 s and 60 s,
-then stops.
-
-Whether a user is *registered* is public anyway (the directory lists them).
-The **residual** is success: a `201` offer (answered or not) or a relay
-that streams bytes shows that the author's household is online. Content served
-live from that household can't hide this.
+Per link: one 4 KB upload per (moment, GFS), only when the author asks.
+Per view: the stranger's browser fetches 4 KB + the moment's file (at most
+the 8 MB bucket) from the GFS; the author's household sends nothing. A
+moment shared widely and viewed 10,000 times costs the author 4 KB once;
+the GFS serves immutable, cacheable ciphertext.
 
 ## Implementation pointers
 
@@ -722,12 +697,11 @@ live from that household can't hide this.
   `socialhome/routes/moments_public.py`.
 * Relay guard:
   `socialhome/services/moment_federation_outbound.py:relay_inbound`.
-* Public moments index (author-side answerer / relay):
-  `socialhome/services/moment_public_signaling_handler.py`.
-* Public moments index (GFS RTC + relay routes):
-  `socialhome/global_server/routes/moment_rtc.py`.
-* Public moments index viewer bundle:
-  `client/gfs/public_moments.tsx` → `moment_public_viewer.js`.
+* Share links: `socialhome/services/moment_public_share_service.py`
+  (route `MomentShareLinkView`), storage `SqliteMomentPublicShareRepo`
+  (migration `0119_moment_public_shares.sql`); viewer
+  `client/gfs/public_moment.tsx`, `client/gfs/moment_link.ts`,
+  `client/gfs/moment_seal.ts` in the pinned viewer bundle.
 * Privacy filter:
   `socialhome/repositories/moment_repo.py:list_public_for`.
 

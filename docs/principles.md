@@ -119,9 +119,11 @@ strangers discover them by. The GFS is content-blind, not blind: it still
 holds the follow graph, author and moment ids, key ids, timing and sizes.
 "Public" still means anyone may follow — the GFS operator too, from a
 registered household, visibly to the author; what the GFS cannot do is read
-without following. The live public-moments index page
-(`/moments/{user_id}`) is not encrypted from the GFS yet; a share link that
-carries its own secret replaces it.
+without following. The GFS's `/moments/{user_id}` page shows the profile and
+a Follow button only; a stranger opens a public moment only through a
+per-moment share link whose key — that one moment's item key — rides in the
+URL fragment, so the GFS serves only ciphertext it can't open
+([`protocol/momentum_public.md`](protocol/momentum_public.md#share-links)).
 
 ## Fail closed on crypto
 
@@ -224,8 +226,7 @@ viewer routes** follow the same rule:
   check the author's connection, so a live, revoked, expired, never-issued or
   offline-author link all render the same page.
 - **The streaming entry points** — `POST /gfs/highlight_rtc/offer`,
-  `GET /gfs/highlight_rtc/relay/…`, `POST /gfs/moment_rtc/offer`,
-  `GET /gfs/moment_rtc/relay/{user_id}` — answer every non-success state
+  `GET /gfs/highlight_rtc/relay/…` — answer every non-success state
   (unknown author, unknown / revoked / unpublished / expired item, deregistered
   user, author's household not connected, relay capacity full, author never
   started streaming) with one response: `503 {"error":"unavailable"}`,
@@ -249,8 +250,9 @@ online.** The content is streamed live from the author's household, and the
 GFS only pushes an offer to a household that is connected. So an offer
 accepted with `201` shows that the author's household is connected at that
 moment, even if the offer is never answered. A relay that delivers bytes
-shows the same. Anyone who holds a valid share link, or visits a registered
-public-moments user, can learn this. It is inherent to serving live content
+shows the same. Anyone who holds a valid highlight share link can learn this
+(public moments no longer stream from the household — a moment's share link
+opens encrypted blobs on the GFS, so it reveals nothing about presence). It is inherent to serving live content
 from the author's household instead of storing it on the GFS, and no other
 public route reveals more. The public-moments directory lists opted-in users
 by design, so whether a user is *registered* is public. Whether they are
