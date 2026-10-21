@@ -964,8 +964,12 @@ async def test_a_new_follower_gets_one_sealed_bundle_of_the_cached_profiles(env)
     assert bundle["event_type"] == AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE
     assert bundle["to"] == sub_iid and bundle["gfs_id"] == "gfs-1"
     envelope = bundle["payload"]
-    # Content-blind on the wire: no name, no bio, no item, no target.
-    wire = json.dumps(envelope)
+    # Content-blind on the wire: no name, no bio, no item, no target outside
+    # the sealed blob (it opens only with the follower's key-wrap key, below).
+    # The blob's random base64 is left out of the substring check: it can
+    # contain "bio" by chance.
+    clear_fields = {k: v for k, v in envelope.items() if k != "sealed"}
+    wire = json.dumps(clear_fields)
     for clear in ("Erin", "Noor", "bio", "author_sig", sub_iid):
         assert clear not in wire
     assert verify_authority_event(
