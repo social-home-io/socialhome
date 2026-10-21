@@ -179,13 +179,14 @@ class MomentPublicFollow:
 @dataclass(slots=True, frozen=True)
 class MomentPublicShare:
     """What a household keeps to mint a per-moment share link:
-    the moment's item key (KEK-sealed), its media descriptor, and — once a
-    link was asked for — the share copy's blob address and GFS."""
+    the moment's item key (KEK-sealed), its media descriptor per GFS that
+    holds the file (JSON ``{gfs_id: descriptor}``), and — once a link was
+    asked for — the share copy's blob address and GFS."""
 
     moment_id: str
     author_user_id: str
     item_key_sealed: str
-    media_json: str | None = None
+    media_by_gfs: str | None = None
     share_blob_id: str | None = None
     share_gfs_id: str | None = None
     created_at: str = ""

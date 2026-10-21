@@ -479,7 +479,7 @@ def _to_key(row: dict) -> MomentPublicKey:
 
 
 _SHARE_COLS = (
-    "moment_id, author_user_id, item_key_sealed, media_json, share_blob_id, "
+    "moment_id, author_user_id, item_key_sealed, media_by_gfs, share_blob_id, "
     "share_gfs_id, created_at"
 )
 
@@ -491,6 +491,7 @@ class AbstractMomentPublicShareRepo(Protocol):
     async def set_share_copy(
         self, moment_id: str, *, blob_id: str, gfs_id: str
     ) -> bool: ...
+    async def set_media(self, moment_id: str, media_by_gfs: str) -> bool: ...
 
 
 class SqliteMomentPublicShareRepo:
@@ -502,12 +503,12 @@ class SqliteMomentPublicShareRepo:
         moment already has it)."""
         changed = await self._db.enqueue_rowcount(
             "INSERT OR IGNORE INTO moment_public_shares(moment_id, author_user_id,"
-            " item_key_sealed, media_json) VALUES(?, ?, ?, ?)",
+            " item_key_sealed, media_by_gfs) VALUES(?, ?, ?, ?)",
             (
                 share.moment_id,
                 share.author_user_id,
                 share.item_key_sealed,
-                share.media_json,
+                share.media_by_gfs,
             ),
         )
         return changed > 0
@@ -524,7 +525,7 @@ class SqliteMomentPublicShareRepo:
             moment_id=d["moment_id"],
             author_user_id=d["author_user_id"],
             item_key_sealed=d["item_key_sealed"],
-            media_json=d["media_json"],
+            media_by_gfs=d["media_by_gfs"],
             share_blob_id=d["share_blob_id"],
             share_gfs_id=d["share_gfs_id"],
             created_at=d["created_at"],
@@ -537,5 +538,14 @@ class SqliteMomentPublicShareRepo:
             "UPDATE moment_public_shares SET share_blob_id=?, share_gfs_id=?"
             " WHERE moment_id=?",
             (blob_id, gfs_id, moment_id),
+        )
+        return changed > 0
+
+    async def set_media(self, moment_id: str, media_by_gfs: str) -> bool:
+        """Replace the per-GFS media descriptors (a link added a GFS that
+        now holds the file)."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE moment_public_shares SET media_by_gfs=? WHERE moment_id=?",
+            (media_by_gfs, moment_id),
         )
         return changed > 0

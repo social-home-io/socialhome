@@ -115,10 +115,11 @@ class MomentPublicShareService:
         self._viewer = viewer
 
     async def record(
-        self, moment: Moment, *, item_key: bytes, media: dict | None
+        self, moment: Moment, *, item_key: bytes, media_by_gfs: dict[str, dict]
     ) -> None:
         """Keep what a later link needs — called once when a public moment
-        is published. The item key is KEK-sealed, bound to the moment id."""
+        is published: the item key (KEK-sealed, bound to the moment id) and
+        the media descriptor for each GFS that took the moment's file."""
         if self._kek is None:
             return
         await self._shares.save(
@@ -128,7 +129,9 @@ class MomentPublicShareService:
                 item_key_sealed=self._kek.encrypt(
                     item_key, associated_data=_context(moment.id)
                 ),
-                media_json=json.dumps(media, sort_keys=True) if media else None,
+                media_by_gfs=(
+                    json.dumps(media_by_gfs, sort_keys=True) if media_by_gfs else None
+                ),
             )
         )
 
@@ -199,7 +202,8 @@ class MomentPublicShareService:
         self, moment: Moment, share: MomentPublicShare, item_key: bytes, gfs_id: str
     ) -> str:
         author = await self._users.get_by_user_id(moment.author_user_id)
-        media = json.loads(share.media_json) if share.media_json else None
+        expires = min(_unix(moment.expires_at), int(time.time()) + SHARE_KEEP_AT_MOST_S)
+        media = await self._media_on(gfs_id, moment, share, item_key, expires)
         body = {
             "v": 1,
             "content": moment.content,
@@ -219,7 +223,6 @@ class MomentPublicShareService:
         )
         blob_id = blob_id_of(blob)
         prepared = PreparedMedia(blobs={blob_id: blob})
-        expires = min(_unix(moment.expires_at), int(time.time()) + SHARE_KEEP_AT_MOST_S)
         if not await self._media.upload(
             gfs_id, prepared, author_user_id=moment.author_user_id, expires_at=expires
         ):
@@ -230,6 +233,49 @@ class MomentPublicShareService:
             "moment_public.share: share copy of moment %s on %s", moment.id, gfs_id
         )
         return blob_id
+
+    async def _media_on(
+        self,
+        gfs_id: str,
+        moment: Moment,
+        share: MomentPublicShare,
+        item_key: bytes,
+        expires: int,
+    ) -> dict | None:
+        """The moment's media descriptor on *gfs_id* — the GFS a link names
+        must hold the file, or its viewer reads "no longer available" for a
+        live moment. A GFS that didn't take it at publish (registered later,
+        or refused it then) gets it now: sealed again under the same item key
+        (a new blob — the GFS is only ever handed ciphertext) and uploaded
+        once; the descriptor is kept for later share copies. ``None`` when
+        the moment has no file this build sends.
+
+        :raises ShareLinkUnavailableError: the file is still processing, or
+            the GFS refused it.
+        """
+        by_gfs: dict[str, dict] = (
+            json.loads(share.media_by_gfs) if share.media_by_gfs else {}
+        )
+        if gfs_id in by_gfs:
+            return by_gfs[gfs_id]
+        if not moment.media_url:
+            return None
+        prepared = await self._media.prepare(moment, item_key=item_key)
+        if prepared is None:
+            return None
+        if not prepared.ready or not await self._media.upload(
+            gfs_id, prepared, author_user_id=moment.author_user_id, expires_at=expires
+        ):
+            raise ShareLinkUnavailableError()
+        self._media.remember(moment.author_user_id, moment.id, gfs_id, prepared)
+        by_gfs[gfs_id] = prepared.body
+        await self._shares.set_media(moment.id, json.dumps(by_gfs, sort_keys=True))
+        log.info(
+            "moment_public.share: moment %s's file sealed again for %s",
+            moment.id,
+            gfs_id,
+        )
+        return prepared.body
 
 
 def _context(moment_id: str) -> bytes:

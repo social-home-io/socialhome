@@ -208,16 +208,19 @@ async def test_share_material_is_kept_once_and_goes_with_its_moment(db):
         moment_id="m-1",
         author_user_id="u-share",
         item_key_sealed="sealed",
-        media_json='{"blob_id": "b"}',
+        media_by_gfs='{"g1": {"blob_id": "b"}}',
     )
     assert await repo.save(share)
     assert not await repo.save(dataclasses.replace(share, item_key_sealed="other"))
     got = await repo.get("m-1")
-    assert (got.item_key_sealed, got.media_json, got.share_blob_id) == (
+    assert (got.item_key_sealed, got.media_by_gfs, got.share_blob_id) == (
         "sealed",
-        '{"blob_id": "b"}',
+        '{"g1": {"blob_id": "b"}}',
         None,
     )
+    assert await repo.set_media("m-1", '{"g1": {}, "g3": {}}')
+    assert (await repo.get("m-1")).media_by_gfs == '{"g1": {}, "g3": {}}'
+    assert not await repo.set_media("m-x", "{}")
     assert await repo.set_share_copy("m-1", blob_id="c" * 64, gfs_id="g1")
     got = await repo.get("m-1")
     assert (got.share_blob_id, got.share_gfs_id) == ("c" * 64, "g1")

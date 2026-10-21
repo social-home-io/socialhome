@@ -544,7 +544,7 @@ identical bytes-for-bytes to the sender's canonical encoding.
   (0112) their public `followed_bio` / `followed_picture_digest`.
 * `moment_public_shares` (SH, 0119) — one row per public moment this
   household authored: the moment's item key (KEK-sealed, associated data
-  the moment id), its media descriptor, and — once a link was asked for —
+  the moment id), its media descriptor per GFS holding the file, and — once a link was asked for —
   the share copy's blob address and GFS. Cascades with the moment, so it is
   gone when the moment expires or is deleted. Never backed up or exported.
 * `moment_public_keys` (SH, 0118, v_62) — moment keys, KEK-sealed, one
@@ -621,6 +621,13 @@ never sends to a server:
   `tests/fixtures/moment_share_vector.json`, pins the TypeScript and Python
   shapes together). A missing blob reads "no longer available"; anything that
   doesn't open reads "incomplete or damaged". Nothing is shown in the clear.
+* **The GFS a link names always holds the moment's file.** A GFS that
+  didn't take it at publish (registered later, or refused it then) gets it
+  when the link is made: sealed again under the same item key — a new blob,
+  ciphertext only — and uploaded once; the share copy names that blob. A
+  file still processing mints no link yet (`409`); a file this build
+  doesn't send (missing, over 8 MB) leaves the share copy without it, as for
+  followers.
 * **The author's household is never contacted** — it can be offline, and
   its uplink never carries a viewer's copy.
 * **Keeping the key.** The item key comes from the day's ratchet step, which
@@ -664,7 +671,9 @@ sequenceDiagram
 
 ### Traffic
 
-Per link: one 4 KB upload per (moment, GFS), only when the author asks.
+Per link: one 4 KB upload per (moment, GFS), only when the author asks —
+plus, once, the moment's file (≤ 8 MB bucket) to a GFS that didn't take it
+at publish.
 Per view: the stranger's browser fetches 4 KB + the moment's file (at most
 the 8 MB bucket) from the GFS; the author's household sends nothing. A
 moment shared widely and viewed 10,000 times costs the author 4 KB once;

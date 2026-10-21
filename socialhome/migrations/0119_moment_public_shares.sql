@@ -31,8 +31,10 @@ CREATE TABLE IF NOT EXISTS moment_public_shares (
     author_user_id   TEXT NOT NULL,
     -- KEK-encrypted 32-byte item key (``KeyManager.encrypt``, AAD = id).
     item_key_sealed  TEXT NOT NULL,
-    -- The sealed moment's ``media`` descriptor (JSON) — NULL without one.
-    media_json       TEXT,
+    -- The moment's ``media`` descriptor per GFS holding its file (JSON
+    -- ``{gfs_id: descriptor}``) — a link names a GFS, which must hold it.
+    -- NULL / empty without one.
+    media_by_gfs     TEXT,
     -- The share copy, once a link was asked for: its blob address and the
     -- GFS it was uploaded to.
     share_blob_id    TEXT,

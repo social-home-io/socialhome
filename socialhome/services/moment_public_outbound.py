@@ -230,14 +230,6 @@ class MomentPublicOutbound(ProtectionGateMixin):
                 self._hold_for_media(moment.media_url, event)
                 return
         has_media = prepared is not None
-        if self._shares is not None:
-            # What a per-moment link needs later (the item key is gone from
-            # the ratchet by tomorrow).
-            await self._shares.record(
-                moment,
-                item_key=item_key(key, moment.id),
-                media=prepared.body if prepared is not None else None,
-            )
         # Sealed under the moment's item key — the GFS reads none of it.
         body: dict[str, Any] = {
             "op": "create",
@@ -263,6 +255,7 @@ class MomentPublicOutbound(ProtectionGateMixin):
                 else None
             )
             variants.setdefault(digest, []).append(reg.gfs_id)
+        holding: dict[str, dict] = {}
         if prepared is not None:
             body["media"] = prepared.body
             assert self._media is not None
@@ -282,6 +275,13 @@ class MomentPublicOutbound(ProtectionGateMixin):
                     self._media.remember(
                         event.author_user_id, moment.id, reg.gfs_id, prepared
                     )
+                    holding[reg.gfs_id] = prepared.body
+        if self._shares is not None:
+            # What a per-moment link needs later (the item key is gone from
+            # the ratchet by tomorrow), and which GFSs hold the file.
+            await self._shares.record(
+                moment, item_key=item_key(key, moment.id), media_by_gfs=holding
+            )
         sent_rev: str | None = None
         for digest, gfs_ids in variants.items():
             profile = {
