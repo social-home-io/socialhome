@@ -17342,6 +17342,13 @@ def cmd_gfs_public_pages() -> None:
     gfs = f"http://127.0.0.1:{GFS_PORT}"
 
     space_id = state.get("gfs_space_id")
+    if not space_id:
+        # ``gfs-traffic`` lists one without recording it: take the directory's.
+        s, listing = _request(f"{gfs}/gfs/spaces")
+        rows = (
+            listing if isinstance(listing, list) else (listing or {}).get("spaces", [])
+        )
+        space_id = next((r.get("space_id") for r in rows if r.get("space_id")), None)
     if space_id:
         s, page = _open_through_viewer(
             f"{gfs}/spaces/{space_id}",
