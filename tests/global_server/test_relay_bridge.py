@@ -130,3 +130,38 @@ async def test_backpressure_does_not_drop_chunks(n):
     got = await _drain(bridge, relay_id)
     await feed_task
     assert got == payloads
+
+
+async def test_a_relay_id_names_the_node_holding_the_channel():
+    """The balancer routes the author's upload by the tag in the id, so it
+    reaches the node holding the guest's GET."""
+    bridge = RelayBridge(route_tag="tag-a")
+    relay_id = bridge.create(target_instance_id="inst-a")
+    assert relay_id is not None and relay_id.startswith("tag-a.")
+
+
+async def test_a_streaming_channel_outlives_the_ttl():
+    """GC drops only channels the author never connected to: a long stream
+    (a video) must not be cut at the TTL."""
+    bridge = RelayBridge()
+    streaming = bridge.create(target_instance_id="inst-a")
+    await bridge.feed(streaming, b"x")
+    bridge.get(streaming).created_at = 0.0
+    assert bridge.gc_expired(now=10_000.0) == 0
+    assert bridge.get(streaming) is not None
+
+
+async def test_create_sweeps_abandoned_channels():
+    bridge = RelayBridge()
+    abandoned = bridge.create(target_instance_id="inst-a")
+    bridge.get(abandoned).created_at = 0.0
+    bridge.create(target_instance_id="inst-b")
+    assert bridge.get(abandoned) is None
+
+
+async def test_only_one_upload_claims_a_channel():
+    bridge = RelayBridge()
+    relay_id = bridge.create(target_instance_id="inst-a")
+    assert bridge.claim(relay_id) is True
+    assert bridge.claim(relay_id) is False
+    assert bridge.claim("missing") is False

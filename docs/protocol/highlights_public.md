@@ -154,12 +154,15 @@ probe ([`principles.md`](../principles.md#the-gfs-is-not-an-author-presence-orac
 
 * The landing page is the same shell for every URL. It does no token lookup
   and no `is_connected` check.
-* The offer and the relay GET fold token resolution and the author's
-  connection into one boolean
-  (`routes/highlight_rtc.py:_servable`). Both checks run on every branch,
-  and every failure gets `global_server/public_unavailable.py`'s uniform
-  `503 {"error":"unavailable"}` + `Cache-Control: no-store`. Unknown,
-  revoked and offline can't be told apart.
+* The offer and the relay GET resolve the token
+  (`routes/highlight_rtc.py:_token_matches`), then learn whether the
+  author's household is connected by delivering the signal to it
+  (`_signal_author`). Every failure gets `global_server/public_unavailable.py`'s
+  uniform `503 {"error":"unavailable"}` + `Cache-Control: no-store`.
+  Unknown, revoked and offline can't be told apart — on a cluster not by
+  time either: a link that does not resolve waits for the same one cluster
+  round an author connected nowhere costs (`_refuse`, see "In a GFS
+  cluster").
   Failures are answered at once, with no added delay. A delay would hide
   nothing, because the matching offer already answers `201` or `503`
   immediately, and it would let anonymous callers hold a socket open for
@@ -175,6 +178,57 @@ probe ([`principles.md`](../principles.md#the-gfs-is-not-an-author-presence-orac
 **Residual:** success shows that the author's household was connected at
 that moment. That means a `201` offer (answered or not), or a relay that
 streams bytes. Live content from the author's household can't hide this.
+
+## In a GFS cluster
+
+A GFS may run as several nodes on one database behind a round-robin load
+balancer ([operations/gfs-cluster.md](../operations/gfs-cluster.md)). A
+viewing session is NOT shared: its `GfsRtcSession` entry and its
+`RelayBridge` pipe live only in the memory of the node that took the offer
+or the relay GET, and no highlight byte crosses nodes. Instead the session
+sticks to that node:
+
+* The node mints every session id and relay id as `<route_tag>.<random>`
+  (`global_server/node_route.py`, `[cluster] route_tag`). Viewer and author
+  treat the id as opaque, so neither changed.
+* The load balancer sends every request naming the id — the poll and the
+  relay upload (id in the path), the answer and both ICE posts (JSON
+  `session_id`) — to the node the tag names.
+* The author's household may hold its socket on another node. The
+  `highlight_signal` pushes (`offer`, viewer `ice`, `relay_offer`) go to the
+  socket on this node, or are forwarded once to the others in the coalesced
+  `NODE_DRAIN_HINT` (`relays`, audience `instance`). For the offer and the
+  relay request the node waits to hear whether any node held the socket
+  (`held`, ≤ 8 s): none → the uniform 503 and the session is dropped. A
+  highlight signal is never queued as an offline copy.
+* A link that does not resolve is refused after the same one cluster round
+  (`ClusterRelayFanOut.wait_like_undelivered`), so a refusal takes as long
+  for a dead link as for an offline author.
+* A request for a session the node does not hold (it expired, the node
+  restarted, or the balancer did not route by the tag) answers `404`; the
+  pinned viewer then falls back to the relay at once (a `5xx` from the
+  balancer too). The node WARNs once a minute when the id names another node.
+
+Bounds: at most 1024 live sessions and 256 live relays per node (past them
+the uniform 503), 32 ICE candidates per side per session (`429`), and one
+upload per relay (`409 already_streaming`). Sessions older than 120 s and
+relays the author never connected to within 120 s are swept when the next
+one is created.
+
+**Cost** per viewing session whose author's socket is on another node: the
+offer (~2–6 KiB SDP + token + viewer key), ≤ 32 viewer ICE candidates
+(~300 B each) and one `relay_offer` (~400 B), each forwarded once to each
+other node inside the existing drain-hint frames (≤ one per peer per
+1.5 s, however many sessions) — worst case with 4 nodes ≈ 3 × 16 KiB per
+session. Zero when the author's socket is on the node that took the request.
+No highlight byte between nodes. **What the GFS learns:** nothing new — the
+forwarded frame is the one the author's socket gets anyway, and the route
+tag names a process, not a person.
+
+**Rolling upgrade:** an older node does not know the `highlight_signal`
+item, drops it and reports nothing held — the offer that needed it is
+refused, as before this change. An older node mints untagged ids, which the
+balancer spreads as before.
 
 ## GFS-relay fallback
 
@@ -496,11 +550,12 @@ sequenceDiagram
     G-->>V: { servers: [...] }
     V->>V: ephemeral P-256 key pair (vk)
     V->>G: POST /gfs/highlight_rtc/offer {sdp, vk}
-    G->>G: resolve_token + author_online (both, every request)
-    Note over G,V: any failure → uniform 503 {"error":"unavailable"}
-    G->>G: store offer in GfsRtcSession
-    G->>A: WS push { type:"highlight_signal", kind:"offer", session_id, sdp, token, vk }
+    G->>G: resolve_token (every request)
+    G->>G: store offer in GfsRtcSession (id = route_tag.random)
+    G->>A: WS push { type:"highlight_signal", kind:"offer", session_id, sdp, token, vk }<br/>(cluster: via the node holding A's socket)
+    Note over G,V: any failure (bad link, A connected to no node) → uniform 503 {"error":"unavailable"}
     G-->>V: 201 { session_id }
+    Note over V,G: cluster: every request naming session_id is routed<br/>by its route tag to the node that holds it
     A->>A: token one of our live links? (SHA-256 in highlight_public_tokens,<br/>published on this GFS, unexpired) — else no stream
     A->>A: open answerer PeerConnection
     A->>G: POST /gfs/highlight_rtc/answer (signed) {session_id, sdp}
@@ -574,6 +629,10 @@ GFS bundle alone, or `pnpm build` for both.
   `socialhome/pinned_viewer.py` / `socialhome/pinned_viewer.json`, its
   publishing: the [`social-home-io/viewer`](https://github.com/social-home-io/viewer) repo's workflow.
 - CORS on the anonymous viewer routes: `socialhome/global_server/viewer_cors.py`.
+- Cluster: `socialhome/global_server/node_route.py` (route-tagged ids,
+  misroute WARNING), `ClusterRelayFanOut.deliver_to_household` /
+  `wait_like_undelivered` in `socialhome/global_server/cluster_relay.py`,
+  `docs/operations/gfs-cluster.md` (balancer rules).
 
 ## Security notes
 

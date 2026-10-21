@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from socialhome.crypto import b64url_encode, sign_ed25519
+from socialhome.global_server import rtc_transport
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
     gfs_rtc_key,
@@ -298,3 +299,64 @@ async def test_rtc_offer_missing_instance_id_422(rtc_client):
     # No instance_id + no signature: caller can't be authenticated.
     resp = await rtc_client.post("/gfs/rtc/offer", json={"sdp": "x"})
     assert resp.status == 422
+
+
+async def test_a_session_id_names_the_node_holding_it():
+    rtc = GfsRtcSession(route_tag="tag-a")
+    session_id = await rtc.offer("inst-a", "sdp")
+    assert session_id is not None and session_id.startswith("tag-a.")
+
+
+async def test_offer_sweeps_expired_sessions(rtc):
+    stale = await rtc.offer("inst-a", "sdp")
+    rtc.get_session(stale).created_at = 0.0
+    await rtc.offer("inst-a", "sdp")
+    assert rtc.get_session(stale) is None
+    assert rtc.session_count() == 1
+
+
+async def test_offer_sheds_past_the_live_cap(rtc, monkeypatch):
+    monkeypatch.setattr(rtc_transport, "MAX_LIVE_SESSIONS", 2)
+    assert await rtc.offer("inst-a", "sdp") is not None
+    kept = await rtc.offer("inst-a", "sdp")
+    assert await rtc.offer("inst-a", "sdp") is None
+    rtc.drop(kept)
+    assert await rtc.offer("inst-a", "sdp") is not None
+
+
+async def test_each_side_has_a_bounded_number_of_candidates(rtc, monkeypatch):
+    monkeypatch.setattr(rtc_transport, "MAX_ICE_CANDIDATES_PER_SIDE", 2)
+    sid = await rtc.offer("inst-a", "sdp")
+    assert await rtc.ice_candidate(sid, {"candidate": "1"}) is True
+    assert await rtc.ice_candidate(sid, {"candidate": "2"}) is True
+    assert await rtc.ice_candidate(sid, {"candidate": "3"}) is False
+    assert rtc.count_viewer_ice(sid) is True
+    assert rtc.count_viewer_ice(sid) is True
+    assert rtc.count_viewer_ice(sid) is False
+    assert len(rtc.get_session(sid).ice_candidates) == 2
+
+
+async def test_counting_viewer_ice_of_an_unknown_session_raises(rtc):
+    with pytest.raises(KeyError):
+        rtc.count_viewer_ice("missing")
+
+
+async def test_rtc_offer_is_shed_with_503_past_the_cap(rtc_client, monkeypatch):
+    monkeypatch.setattr(rtc_transport, "MAX_LIVE_SESSIONS", 0)
+    body = _sign({"instance_id": "peer.home", "sdp": "o"}, rtc_client._seed)
+    resp = await rtc_client.post("/gfs/rtc/offer", json=body)
+    assert resp.status == 503
+
+
+async def test_rtc_ice_past_the_cap_is_429(rtc_client, monkeypatch):
+    monkeypatch.setattr(rtc_transport, "MAX_ICE_CANDIDATES_PER_SIDE", 0)
+    body = _sign({"instance_id": "peer.home", "sdp": "o"}, rtc_client._seed)
+    session_id = (await (await rtc_client.post("/gfs/rtc/offer", json=body)).json())[
+        "session_id"
+    ]
+    ice = _sign(
+        {"instance_id": "peer.home", "session_id": session_id, "candidate": {}},
+        rtc_client._seed,
+    )
+    resp = await rtc_client.post("/gfs/rtc/ice", json=ice)
+    assert resp.status == 429

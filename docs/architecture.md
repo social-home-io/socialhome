@@ -811,9 +811,14 @@ an edit.
 
 ### GFS cluster membership
 
-A GFS can run as several symmetric nodes (§24.10) — in production several
-processes share one `gfs.db` and one identity seed behind a load balancer —
-that gossip state over `POST /cluster/sync`. Each node announces
+A GFS can run as several symmetric nodes (§24.10). The one state they do not
+share is a public-highlight viewing session: it stays in the memory of the
+node that started it, its ids carry that node's `[cluster] route_tag`, and
+the load balancer routes the rest of the session there
+([`operations/gfs-cluster.md`](operations/gfs-cluster.md)). Otherwise the
+nodes are symmetric: in production several processes share one `gfs.db` and
+one identity seed behind a load balancer and gossip state over
+`POST /cluster/sync`. Each node announces
 `[cluster] advertise_url` (falling back to `[server] base_url`) as the
 address its peers reach it at; behind a shared load balancer every node must
 advertise its own address (node IP + port), or frames reach a random node

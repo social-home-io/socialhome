@@ -441,6 +441,23 @@ The Social Home ↔ GFS link is split by direction:
   it is not deduped, so renaming back within ten minutes arrives too). Each
   node pushes it to every socket it holds. An older node drops the unknown
   audience; its households refresh on their next reconnect, as before.
+- **A public-highlight session stays on the node that started it.** Its
+  signalling state and relay pipe live in that node's memory only — no
+  shared session state, no highlight byte between nodes. The node names
+  itself in every session and relay id it mints (`<route_tag>.<random>`,
+  `[cluster] route_tag`), and the load balancer sends every later request
+  of the session there by that tag (path segment or JSON `session_id`; see
+  [operations/gfs-cluster.md](../operations/gfs-cluster.md)). The pushes to
+  the author (`highlight_signal`: `offer`, viewer `ice`, `relay_offer`)
+  ride the `relays` path as `instance` items when the author's socket is on
+  another node; the offer and the relay request ask for `held`, so the
+  accepting node knows whether any node delivered it (no node → the uniform
+  503, and no session is kept). A highlight signal is never queued as an
+  offline copy. A request for a session the node does not hold answers 404
+  (WARNING once a minute when its tag names another node). An older node
+  drops a `highlight_signal` item (not in its allow-list) and reports
+  nothing held — during a rolling upgrade such an offer is refused, as it
+  was before. See [highlights_public.md](highlights_public.md#in-a-gfs-cluster).
 - **One public identity per GFS, however many nodes.** `[server] instance_id`
   is the GFS's PUBLIC identity: `/gfs/info` serves it, the capability block
   is signed over it, and households pin it at pairing and sign it as the

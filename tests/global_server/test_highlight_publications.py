@@ -15,7 +15,6 @@ from socialhome.global_server.repositories import (
     SqliteGfsHighlightPublicationRepo,
     SqliteGfsHighlightTokenRepo,
 )
-from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 
 
 async def _seed_instance(gfs_db, instance_id: str = "inst-author") -> None:
@@ -36,16 +35,10 @@ async def repos(gfs_db):
 
 
 @pytest.fixture
-def ws_registry():
-    return GfsWebSocketRegistry()
-
-
-@pytest.fixture
-def registry(repos, ws_registry):
+def registry(repos):
     return HighlightPublicationRegistry(
         repos["pubs"],
         repos["tokens"],
-        ws_registry,
         base_url="https://gfs.example",
     )
 
@@ -279,16 +272,3 @@ async def test_remove_publish_cascades_tokens(registry):
     removed = await registry.remove_publish("s-1", "inst-author")
     assert removed is True
     assert await registry.resolve_token(tok.token) is None
-
-
-async def test_author_online_reads_ws_registry(registry, ws_registry):
-    # Author is offline by default — the WS registry has nothing.
-    assert await registry.author_online("inst-author") is False
-
-    # Stub a "live" connection by injecting into the registry's internal
-    # store. ``GfsWebSocketRegistry.is_connected`` is a thin set check.
-    class _StubWs:
-        closed = False
-
-    ws_registry._by_instance["inst-author"] = _StubWs()  # type: ignore[assignment]
-    assert await registry.author_online("inst-author") is True

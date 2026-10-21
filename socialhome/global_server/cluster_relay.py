@@ -18,7 +18,10 @@ names the AUDIENCE, not the recipients: ``("space", space_id)``,
 ``("channel", channel_id)``, ``("followers", author_user_id)`` (a public
 moment or its tombstone) or ``("instance", instance_id)`` (a push for one
 household the origin had no socket for — ``follow_changed`` /
-``moment_key_request`` to an author). The last two are TYPED: their frame
+``moment_key_request`` to an author, and the public-highlight
+``highlight_signal`` that :meth:`ClusterRelayFanOut.deliver_to_household`
+forwards and waits on: it asks for ``held`` and is never queued).
+The last two are TYPED: their frame
 names the socket frame type it is pushed as, from a fixed allow-list
 (:data:`TYPED_FRAME_TYPES`). Every receiving node resolves that audience
 from the shared database and pushes to the members whose socket it holds
@@ -119,6 +122,10 @@ AUDIENCE_KINDS: frozenset[str] = frozenset(
 #: The one key of the ``all`` audience.
 AUDIENCE_ALL_KEY: str = "*"
 
+#: The socket frame that carries public-highlight signalling to the author's
+#: household (an ``offer``, a viewer's ``ice``, a ``relay_offer``).
+HIGHLIGHT_SIGNAL_FRAME_TYPE: str = "highlight_signal"
+
 #: Socket frame types an item of a TYPED audience kind may be pushed as.
 #: Its frame is ``{"event_type": <socket frame type>, …fields}`` and goes out
 #: as ``{"type": <event_type>, …fields}``; the receiver refuses any other
@@ -126,9 +133,23 @@ AUDIENCE_ALL_KEY: str = "*"
 #: The other kinds are space items, pushed as ``{"type": "relay", …frame}``.
 TYPED_FRAME_TYPES: dict[str, frozenset[str]] = {
     AUDIENCE_FOLLOWERS: MOMENT_FRAME_TYPES,
-    AUDIENCE_INSTANCE: frozenset({"follow_changed", "moment_key_request"}),
+    AUDIENCE_INSTANCE: frozenset(
+        {"follow_changed", "moment_key_request", HIGHLIGHT_SIGNAL_FRAME_TYPE}
+    ),
     AUDIENCE_ALL: frozenset({"server_info_updated"}),
 }
+
+#: Socket frame types that are live or useless: never queued as an offline
+#: copy, by the origin or a receiver. A public-highlight signal belongs to a
+#: viewer waiting right now; replayed on the author's next hello it would
+#: only answer a session long gone.
+EPHEMERAL_FRAME_TYPES: frozenset[str] = frozenset({HIGHLIGHT_SIGNAL_FRAME_TYPE})
+
+#: How long :meth:`ClusterRelayFanOut.deliver_to_household` waits to hear
+#: whether another node holds the household's socket: the coalescing delay
+#: and pacing gap of the drain hint plus a peer's 5 s reply budget, with
+#: margin. Past it the household counts as unreached.
+DELIVER_SETTLE_TIMEOUT_S: float = 8.0
 
 #: Kinds whose items are remembered by digest (:data:`RELAY_FORWARD_SEEN_TTL_S`)
 #: so one node never pushes the same bytes twice. A single-recipient push is
@@ -272,6 +293,14 @@ class ForwardedRelay:
         """What a socket receives: a space item as ``{"type": "relay", …}``,
         an item of a typed kind (:data:`TYPED_FRAME_TYPES`) as its own type."""
         return typed_push(self.kind, self.frame)
+
+    @property
+    def queueable(self) -> bool:
+        """Whether a missed push of this item may be queued as an offline
+        copy (:data:`EPHEMERAL_FRAME_TYPES` never are)."""
+        return self.queue and self.frame.get("event_type") not in (
+            EPHEMERAL_FRAME_TYPES
+        )
 
     def queued_frame(self) -> dict:
         """What an offline copy is queued as (``GfsEnvelopeRelay.drain``
@@ -467,6 +496,84 @@ class ClusterRelayFanOut:
             frame=typed_frame(str(push.get("type")), fields),
         )
 
+    async def push_to_household(self, instance_id: str, push: dict) -> bool:
+        """Push *push* to *instance_id*'s socket here, or forward it once to
+        the node that holds it (fire-and-forget). ``True`` iff pushed here or
+        handed to the cluster."""
+        if await self._ws_registry.send(instance_id, push):
+            return True
+        return self.forward_to_household(instance_id, push)
+
+    async def deliver_to_household(
+        self,
+        instance_id: str,
+        push: dict,
+        *,
+        timeout: float = DELIVER_SETTLE_TIMEOUT_S,
+    ) -> bool:
+        """Push *push* (an :data:`EPHEMERAL_FRAME_TYPES` socket frame) to
+        *instance_id*'s socket wherever it is, and say whether it got there.
+
+        ``True`` at once when the socket is HERE. Otherwise the frame is
+        forwarded once to the other nodes, which report whether they hold the
+        socket (``held``, as for an offline candidate), and this waits up to
+        *timeout* for that: ``True`` iff one does. Nothing is ever queued — a
+        household connected nowhere simply misses it. ``False`` too without
+        a cluster, at the pending caps, or for an older peer that does not
+        know the frame type (it reports nothing held)."""
+        if await self._ws_registry.send(instance_id, push):
+            return True
+        if self._cluster is None:
+            return False
+        loop = asyncio.get_running_loop()
+        reached: asyncio.Future[bool] = loop.create_future()
+
+        def _settled(held: frozenset[str]) -> None:
+            if not reached.done():
+                reached.set_result(instance_id in held)
+
+        fields = {k: v for k, v in push.items() if k != "type"}
+        item = ForwardedRelay(
+            kind=AUDIENCE_INSTANCE,
+            key=instance_id,
+            skip="",
+            # ``q`` asks the receivers to report the socket they hold; the
+            # frame type is ephemeral, so none of them queues a copy.
+            queue=True,
+            frame=typed_frame(str(push.get("type")), fields),
+        )
+        if not self._cluster.forward_relay(item, on_settled=_settled):
+            return False
+        try:
+            return await asyncio.wait_for(reached, timeout=timeout)
+        except TimeoutError:
+            return False
+
+    async def wait_like_undelivered(
+        self, *, timeout: float = DELIVER_SETTLE_TIMEOUT_S
+    ) -> None:
+        """Take as long as :meth:`deliver_to_household` takes to find a
+        household connected nowhere — without forwarding anything.
+
+        Until the next coalesced ``NODE_DRAIN_HINT`` round went out
+        (:meth:`~socialhome.global_server.cluster.ClusterService.next_hint_round`),
+        which is what a forwarded delivery waits for; at once without a
+        cluster (a delivery answers at once there too). The anonymous
+        public-highlight routes call it for a link that does not resolve, so
+        a refusal takes the same time whether the link was never valid,
+        revoked, or its author is offline. It never looks at whose socket is
+        on this node: a dead link answered faster when the named household is
+        connected HERE would tell any outsider that it is online."""
+        if self._cluster is None:
+            return
+        round_done = self._cluster.next_hint_round()
+        if round_done is None:
+            return
+        try:
+            await asyncio.wait_for(round_done, timeout=timeout)
+        except TimeoutError:
+            pass
+
     def _queue_unheld(
         self, targets: list[str], frame: dict, held: frozenset[str]
     ) -> None:
@@ -548,7 +655,7 @@ class ClusterRelayFanOut:
                         failed.append(target)
 
             await asyncio.gather(*(_one(t) for t in targets))
-            if item.queue and failed:
+            if item.queueable and failed:
                 # Reported held, so the origin will not queue these: the
                 # socket dropped between the report and the push.
                 await self._queue(failed, item.queued_frame())

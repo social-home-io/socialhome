@@ -104,6 +104,9 @@ Run the test suite with `pytest` (backend) and `pnpm exec vitest run`
 - [`docs/operations/household-dashboard.md`](docs/operations/household-dashboard.md)
   — the wall-tablet household dashboard: enabling it, ports, LAN-only
   guidance, and ESPHome wall panels (firmware, web installer, pairing).
+- [`docs/operations/gfs-cluster.md`](docs/operations/gfs-cluster.md)
+  — running a GFS as a cluster behind a load balancer (route tags,
+  HAProxy rules for public-highlight sessions).
 - [`docs/display-api/`](docs/display-api/README.md) — the wall-panel
   JSON API: versioning, JSON Schemas, fixtures.
 - [`spec_work.md`](../../spec_work.md) — authoritative specification.

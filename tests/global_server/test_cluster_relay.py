@@ -550,3 +550,132 @@ async def test_a_gfs_wide_notice_with_another_key_or_type_reaches_nobody():
         {"event_type": "envelope", "sealed": {}}, kind=mod.AUDIENCE_ALL, key="*"
     ).to_wire()
     assert ForwardedRelay.from_wire(wire) is None
+
+
+# ─── Public-highlight signals (delivered, never queued) ───────────────────
+
+_SIGNAL_PUSH = {"type": "highlight_signal", "kind": "offer", "session_id": "t.1"}
+_SIGNAL = {"kind": "offer", "session_id": "t.1", "event_type": "highlight_signal"}
+
+
+async def test_a_signal_to_a_socket_here_is_delivered_at_once():
+    registry, cluster = _Registry({_A}), _Cluster()
+    svc = _fan_out(registry=registry, cluster=cluster)
+    assert await svc.deliver_to_household(_A, _SIGNAL_PUSH) is True
+    assert registry.sent == [(_A, _SIGNAL_PUSH)]
+    assert cluster.items == []
+
+
+async def test_a_signal_on_a_single_node_reaches_only_a_socket_here():
+    svc = _fan_out()
+    assert await svc.deliver_to_household(_A, _SIGNAL_PUSH) is False
+
+
+@pytest.mark.parametrize(
+    ("held", "reached"), [({_A}, True), ({_B}, False), (set(), False)]
+)
+async def test_a_signal_is_delivered_iff_another_node_holds_the_socket(held, reached):
+    """Forwarded once, as an ``instance`` item that asks for ``held`` —
+    the answer is whether one of the peers holds the author's socket."""
+    cluster = _Cluster()
+    svc = _fan_out(cluster=cluster)
+    pending = asyncio.ensure_future(svc.deliver_to_household(_A, _SIGNAL_PUSH))
+    while not cluster.items:
+        await asyncio.sleep(0)
+    ((item, on_settled),) = cluster.items
+    assert item == _item(_SIGNAL, kind=AUDIENCE_INSTANCE, key=_A, queue=True)
+    on_settled(frozenset(held))
+    on_settled(frozenset({_A}))  # a late second settle changes nothing
+    assert await pending is reached
+    assert not svc.seen_frame(item.frame)
+
+
+async def test_a_signal_the_cluster_cannot_take_is_not_delivered():
+    svc = _fan_out(cluster=_Cluster(accept=False))
+    assert await svc.deliver_to_household(_A, _SIGNAL_PUSH) is False
+
+
+async def test_a_signal_nobody_answers_for_is_not_delivered_after_the_timeout():
+    svc = _fan_out(cluster=_Cluster())
+    assert await svc.deliver_to_household(_A, _SIGNAL_PUSH, timeout=0.01) is False
+
+
+async def test_a_push_goes_to_a_socket_here_or_is_handed_to_the_cluster():
+    registry, cluster = _Registry({_A}), _Cluster()
+    svc = _fan_out(registry=registry, cluster=cluster)
+    assert await svc.push_to_household(_A, _SIGNAL_PUSH) is True
+    assert cluster.items == []
+    assert await svc.push_to_household(_B, _SIGNAL_PUSH) is True
+    ((item, _cb),) = cluster.items
+    assert (item.key, item.queue) == (_B, False)
+    assert await _fan_out().push_to_household(_B, _SIGNAL_PUSH) is False
+
+
+async def test_a_held_signal_whose_push_fails_is_never_queued():
+    """Reported held, then the socket dropped: a highlight signal belongs to
+    a viewer waiting now — never an offline copy."""
+    registry, relay = _Registry({_A}, failing={_A}), _Relay()
+    svc = _fan_out(registry=registry, relay=relay)
+    signal = _item(_SIGNAL, kind=AUDIENCE_INSTANCE, key=_A, queue=True)
+    assert ForwardedRelay.from_wire(signal.to_wire()) == signal
+    assert not signal.queueable
+    assert await svc.apply([signal]) == {f"instance:{_A}": [_A]}
+    await _settle(svc)
+    assert relay.queued == []
+
+
+class _RoundCluster(_Cluster):
+    """A cluster whose next hint round the test completes by hand."""
+
+    def __init__(self, *, full: bool = False) -> None:
+        super().__init__()
+        self.full = full
+        self.rounds: list[asyncio.Future[None]] = []
+
+    def next_hint_round(self):
+        if self.full:
+            return None
+        fut = asyncio.get_running_loop().create_future()
+        self.rounds.append(fut)
+        return fut
+
+
+async def test_waiting_like_an_undelivered_signal_takes_one_cluster_round():
+    cluster = _RoundCluster()
+    svc = _fan_out(cluster=cluster)
+    waiting = asyncio.ensure_future(svc.wait_like_undelivered())
+    while not cluster.rounds:
+        await asyncio.sleep(0)
+    assert not waiting.done()
+    cluster.rounds[0].set_result(None)
+    await waiting
+    # Nothing was forwarded: no frame for anybody.
+    assert cluster.items == []
+
+
+@pytest.mark.security
+async def test_waiting_like_an_undelivered_signal_ignores_the_sockets_here():
+    """A dead link naming a household connected HERE must not be refused
+    faster — that would tell an outsider the household is online."""
+    cluster = _RoundCluster()
+    svc = _fan_out(registry=_Registry({_A}), cluster=cluster)
+    waiting = asyncio.ensure_future(svc.wait_like_undelivered())
+    while not cluster.rounds:
+        await asyncio.sleep(0)
+    assert not waiting.done()
+    cluster.rounds[0].set_result(None)
+    await waiting
+
+
+@pytest.mark.parametrize("setup", ["single_node", "waiters_full"])
+async def test_waiting_like_an_undelivered_signal_is_immediate_without_a_round(
+    setup,
+):
+    cluster = None if setup == "single_node" else _RoundCluster(full=True)
+    svc = _fan_out(cluster=cluster)
+    await asyncio.wait_for(svc.wait_like_undelivered(), timeout=1)
+
+
+async def test_waiting_like_an_undelivered_signal_ends_at_the_timeout():
+    svc = _fan_out(cluster=_RoundCluster())
+    await asyncio.wait_for(svc.wait_like_undelivered(timeout=0.01), timeout=1)

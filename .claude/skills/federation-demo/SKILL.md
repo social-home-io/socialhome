@@ -1126,6 +1126,19 @@ WS pushes across allocs. The step:
    ``incoming_public_moment_delete`` (audience ``followers`` on the same
    ``relays`` path). Before, the moment fan-out was node-local and the step
    fails with "the follower on node 1 got 0 incoming_public_moment frame(s)".
+   Then a **public-highlight link through a balancer** (step 3g): every
+   node has a ``[cluster] route_tag`` (its node id), and a balancer on
+   18779 round-robins — except a request naming a session or relay id,
+   which goes to the node the id's tag names (the production HAProxy rules,
+   ``docs/operations/gfs-cluster.md``; set ``GFS_DEMO_HAPROXY`` to an
+   ``haproxy`` binary to run the real thing, otherwise an in-process
+   stand-in applies the same rules). With the author's socket on node 0,
+   one WebRTC signalling session per node (offer → the forwarded offer on
+   the author's socket → answer + ICE both ways → polls) and one relayed
+   stream per node (relay GET → forwarded ``relay_offer`` → upload →
+   bytes) must all succeed. Before, the offer on a node without the
+   author's socket answered 503 and the polls, answers and uploads reached
+   nodes that did not hold the session.
 6. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 

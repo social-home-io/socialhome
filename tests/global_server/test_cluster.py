@@ -2468,3 +2468,50 @@ async def test_a_flush_cancelled_mid_send_leaves_its_items_for_stop(
     assert len(svc._relay_pending) == 1 and settled == []
     await svc.stop()
     assert settled == [frozenset()]
+
+
+# ─── next_hint_round (a forward's latency, without an item) ───────────────
+
+
+async def test_a_hint_round_waits_for_the_next_frame_even_an_empty_one(
+    gfs_db, monkeypatch
+):
+    sent = _record_collects(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    round_done = svc.next_hint_round()
+    assert round_done is not None and not round_done.done()
+    await asyncio.wait_for(round_done, timeout=2)
+    assert sent == [{"instances": []}]
+    await svc.stop()
+
+
+async def test_a_hint_round_rides_the_frame_of_pending_items(gfs_db, monkeypatch):
+    sent = _record_collects(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    settled: list[frozenset[str]] = []
+    svc.forward_relay(_relay_item(queue=True), on_settled=settled.append)
+    round_done = svc.next_hint_round()
+    await asyncio.wait_for(round_done, timeout=2)
+    # One frame for both: the waiter adds no frame of its own.
+    assert len(sent) == 1 and settled == [frozenset()]
+    await svc.stop()
+
+
+async def test_no_hint_round_when_disabled_or_too_many_wait(gfs_db, monkeypatch):
+    assert _drain_cluster(gfs_db, enabled=False).next_hint_round() is None
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 30.0)
+    monkeypatch.setattr(cluster_mod, "FLUSH_WAITERS_MAX", 1)
+    svc = _drain_cluster(gfs_db)
+    assert svc.next_hint_round() is not None
+    assert svc.next_hint_round() is None
+    await svc.stop()
+
+
+async def test_stop_releases_the_hint_round_waiters(gfs_db, monkeypatch):
+    sent = _record_collects(monkeypatch)
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 30.0)
+    svc = _drain_cluster(gfs_db)
+    round_done = svc.next_hint_round()
+    await asyncio.sleep(0.01)
+    await svc.stop()
+    assert round_done.done() and sent == []

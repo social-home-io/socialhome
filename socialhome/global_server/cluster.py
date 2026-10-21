@@ -283,6 +283,10 @@ DRAIN_HINT_REPLY_MAX_BYTES: int = 8 * 1024 * 1024
 #: and the most a receiver reads from one frame.
 DRAIN_HINT_MAX_IDS: int = 256
 
+#: Most callers waiting at once for the next ``NODE_DRAIN_HINT`` frame
+#: (:meth:`ClusterService.next_hint_round`). Past it a caller does not wait.
+FLUSH_WAITERS_MAX: int = 1024
+
 #: Max owner notices in one ``NODE_DRAIN_HINT`` frame, and the most a receiver
 #: reads from one. ~250 bytes each, so a full frame stays near 64 KiB.
 SUBSCRIBER_NOTICE_MAX_PER_FRAME: int = 256
@@ -598,6 +602,7 @@ class ClusterService:
         "_enabled",
         "_fail_counts",
         "_fed_repo",
+        "_flush_waiters",
         "_heartbeat_task",
         "_hint_drains",
         "_hint_rerun",
@@ -774,6 +779,9 @@ class ClusterService:
             tuple[ForwardedRelay, dict, int, SettleCallback | None]
         ] = []
         self._relay_pending_bytes = 0
+        #: Callers waiting for the next ``NODE_DRAIN_HINT`` frame to go out
+        #: (:meth:`next_hint_round`), at most :data:`FLUSH_WAITERS_MAX`.
+        self._flush_waiters: list[asyncio.Future[None]] = []
         #: Items refused at the pending caps since the last WARNING.
         self._relay_dropped = 0
         self._relay_warned_at = -math.inf
@@ -1015,6 +1023,8 @@ class ClusterService:
         for _item, _wire, _size, on_settled in unsent:
             if on_settled is not None:
                 on_settled(frozenset())
+        waiters, self._flush_waiters = self._flush_waiters, []
+        self._release_flush_waiters(waiters)
         if self._notice_tasks:
             tasks = set(self._notice_tasks)
             _done, still = await asyncio.wait(tasks, timeout=5.0)
@@ -1336,6 +1346,31 @@ class ClusterService:
         self._schedule_hint_flush()
         return True
 
+    def next_hint_round(self) -> asyncio.Future[None] | None:
+        """A future done once the next coalesced ``NODE_DRAIN_HINT`` frame —
+        one taken after this call — went to every member peer (or the
+        cluster stopped).
+
+        What a forwarded item's settle waits for, without an item: a caller
+        whose answer must take as long as a forward that found nobody (the
+        public-highlight offer for a link that does not resolve, see
+        ``routes/highlight_rtc.py``) waits on this. If nothing else is
+        pending the frame goes out empty — still inside the frame pacing
+        (:data:`DRAIN_HINT_MIN_GAP_S`), so waiters never add frames beyond
+        it. ``None`` when cluster mode is off or
+        :data:`FLUSH_WAITERS_MAX` callers already wait."""
+        if not self._enabled or len(self._flush_waiters) >= FLUSH_WAITERS_MAX:
+            return None
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._flush_waiters.append(waiter)
+        self._schedule_hint_flush()
+        return waiter
+
+    def _release_flush_waiters(self, waiters: list[asyncio.Future[None]]) -> None:
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
     def _note_relay_dropped(self) -> None:
         self._relay_dropped += 1
         now = self._clock()
@@ -1484,10 +1519,14 @@ class ClusterService:
         frames; repeat while new ones arrived during a send. Ends on ``stop``
         (the ``_stop`` event), which settles relay items still unsent."""
         while (
-            self._drain_hint_pending or self._notice_pending or self._relay_pending
+            self._drain_hint_pending
+            or self._notice_pending
+            or self._relay_pending
+            or self._flush_waiters
         ) and not self._stop.is_set():
             if not await self._hint_wait(min_delay=DRAIN_HINT_DELAY_S):
                 return
+            waiters, self._flush_waiters = self._flush_waiters, []
             batch = sorted(self._drain_hint_pending)
             self._drain_hint_pending.clear()
             notices = self._take_pending_notices()
@@ -1496,6 +1535,8 @@ class ClusterService:
                 math.ceil(len(batch) / DRAIN_HINT_MAX_IDS),
                 math.ceil(len(notices) / SUBSCRIBER_NOTICE_MAX_PER_FRAME),
                 len(chunks),
+                # Waiters alone still send one (empty) frame.
+                1,
             )
             for index in range(frames):
                 if index and not await self._hint_wait(min_delay=0.0):
@@ -1520,6 +1561,8 @@ class ClusterService:
                     # ``stop`` gave up waiting: it settles these after us.
                     for unsent in chunks[index:]:
                         self._relay_pending.extend(unsent)
+                    if index == 0:
+                        self._flush_waiters.extend(waiters)
                     raise
                 except Exception as exc:
                     # Best effort: the household still gets the rows on its
@@ -1539,6 +1582,8 @@ class ClusterService:
                 for item, _wire, _size, on_settled in chunk:
                     if on_settled is not None:
                         on_settled(held_from_replies(replies, item.audience))
+                if index == 0:
+                    self._release_flush_waiters(waiters)
 
     async def apply_drain_hint(self, instances: object) -> int:
         """Inbound ``NODE_DRAIN_HINT`` — drain the listed households whose

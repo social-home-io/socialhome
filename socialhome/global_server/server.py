@@ -64,6 +64,7 @@ from .maintenance import GfsMaintenanceScheduler
 from .member_publish import GfsMemberPublishService, build_member_publish_rate_limit
 from .moment_media import GfsMomentMediaStore
 from .moment_public_registry import MomentPublicRegistry
+from .node_route import MisrouteWarning
 from .public import (
     ClientIpResolver,
     PairingTokenService,
@@ -251,6 +252,7 @@ class GfsApp:
         # is logged at ERROR (not refused — that would break existing
         # deployments).
         config.check_cluster_identity()
+        config.check_cluster_routing()
         config.check_turn()
         self.config = config
         # The data dir is wherever the SQLite DB lives — the identity seed is
@@ -380,7 +382,6 @@ class GfsApp:
         highlight_pubs = HighlightPublicationRegistry(
             repos.highlight_pubs,
             repos.highlight_tokens,
-            ws_registry,
             base_url=config.base_url,
         )
         # Opaque household-to-household envelope relay (§D2b): pushes a
@@ -486,8 +487,11 @@ class GfsApp:
             admin_auth=AdminAuth(repos.admin),
             admin=admin,
             tokens=PairingTokenService(repos.admin),
-            rtc=GfsRtcSession(),
-            relay_bridge=RelayBridge(),
+            # Both mint ids naming this node, so the balancer can route the
+            # rest of a session here (session-sticky routing, ``node_route``).
+            rtc=GfsRtcSession(route_tag=config.cluster_route_tag),
+            relay_bridge=RelayBridge(route_tag=config.cluster_route_tag),
+            misroutes=MisrouteWarning(config.cluster_route_tag),
             ws_registry=ws_registry,
             highlight_pubs=highlight_pubs,
             moment_public=moment_public,
@@ -543,6 +547,8 @@ class GfsApp:
         a[K.gfs_admin_service_key] = self.services.admin
         a[K.gfs_rtc_key] = self.services.rtc
         a[K.gfs_relay_bridge_key] = self.services.relay_bridge
+        a[K.gfs_misroute_key] = self.services.misroutes
+        a[K.gfs_cluster_fan_out_key] = self.services.cluster_fan_out
         a[K.gfs_ws_registry_key] = self.services.ws_registry
         a[K.gfs_highlight_pub_repo_key] = self.repos.highlight_pubs
         a[K.gfs_highlight_token_repo_key] = self.repos.highlight_tokens

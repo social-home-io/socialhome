@@ -12,6 +12,16 @@ the author's SH over the existing GFS↔SH WebSocket as a
 ``highlight_signal`` frame. The author's SH replies with an SDP answer
 via the signed :class:`HighlightRtcAnswerView`; the browser polls
 :class:`HighlightRtcSessionView` until the answer + ICE list arrive.
+
+**In a cluster** (spec §24.10) a session lives in the memory of the node
+that took the offer (or the relay GET), and nowhere else. Its id names that
+node (:mod:`..node_route`), so the load balancer routes every later request
+of the session there — no shared session state, no media byte crossing
+nodes. The author's household may hold its socket on another node: the
+pushes to it go through :class:`..cluster_relay.ClusterRelayFanOut`, which
+forwards them once to the other nodes when this one has no socket for the
+author. A request naming a session this node does not hold answers 404 (the
+viewer then falls back to the relay; see ``docs/protocol/highlights_public.md``).
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ from aiohttp import web
 
 from ...webrtc_ice import make_turn_credential
 from .. import app_keys as K
+from ..cluster_relay import HIGHLIGHT_SIGNAL_FRAME_TYPE
 from ..public_unavailable import unavailable_response
 from .base import GfsBaseView
 from .rtc import _rtc_authenticate, authenticate_relay_stream
@@ -55,27 +66,53 @@ def _viewer_key(value: object) -> str | None:
     return None
 
 
-async def _servable(
+async def _token_matches(
     view: GfsBaseView, instance_id: str, highlight_id: str, token: str
 ) -> bool:
     """True iff ``token`` resolves to a live publication of exactly
-    ``(instance_id, highlight_id)`` AND the author's household is connected.
+    ``(instance_id, highlight_id)``.
 
-    ``False`` folds every non-success state — unknown / revoked / expired
-    token, unpublished highlight, URL mixing a valid token with another
-    id, author offline — into one answer the callers map to the uniform
-    reply. The token lookup AND the connection check run on every branch,
-    so no branch skips work the others do.
+    ``False`` folds unknown / revoked / expired tokens, an unpublished
+    highlight and a URL mixing a valid token with another id into one
+    answer the callers map to the uniform reply (:func:`_refuse`). Whether
+    the author's household is connected is decided by delivering the signal
+    to it (:func:`_signal_author`), which maps "no node holds its socket" to
+    the same uniform reply after the same cluster round.
     """
     registry = view.svc(K.gfs_highlight_pub_service_key)
     resolved = await registry.resolve_token(token)
-    matches = (
+    return (
         resolved is not None
         and resolved.publication.instance_id == instance_id
         and resolved.publication.highlight_id == highlight_id
     )
-    online = await registry.author_online(instance_id)
-    return matches and online
+
+
+async def _refuse(view: GfsBaseView) -> web.Response:
+    """The uniform reply for a link that does not resolve, sent after the
+    same cluster round a delivery to an author connected nowhere waits for
+    (:meth:`..cluster_relay.ClusterRelayFanOut.wait_like_undelivered`) — so
+    in a cluster too, never-valid, revoked and offline take the same time."""
+    await view.svc(K.gfs_cluster_fan_out_key).wait_like_undelivered()
+    return unavailable_response()
+
+
+async def _signal_author(view: GfsBaseView, instance_id: str, fields: dict) -> bool:
+    """Push a ``highlight_signal`` to the author's household and say whether
+    a socket took it — the one on this node, or (in a cluster) one another
+    node holds (:meth:`..cluster_relay.ClusterRelayFanOut.deliver_to_household`)."""
+    fan_out = view.svc(K.gfs_cluster_fan_out_key)
+    return await fan_out.deliver_to_household(
+        instance_id, {"type": HIGHLIGHT_SIGNAL_FRAME_TYPE, **fields}
+    )
+
+
+def _not_here(view: GfsBaseView, scoped_id: str) -> web.Response:
+    """The 404 for a session or relay this node does not hold — logged (once
+    a minute) when its id names another node, i.e. the balancer did not
+    route by it (:class:`..node_route.MisrouteWarning`)."""
+    view.svc(K.gfs_misroute_key).check(scoped_id)
+    return web.json_response({"error": "not_found"}, status=404)
 
 
 # ─── Public viewer surface (anonymous) ───────────────────────────────────
@@ -101,18 +138,21 @@ class HighlightRtcOfferView(GfsBaseView):
                 {"error": "missing_fields"},
                 status=422,
             )
-        if not await _servable(self, instance_id, highlight_id, token):
-            return unavailable_response()
+        if not await _token_matches(self, instance_id, highlight_id, token):
+            return await _refuse(self)
 
         rtc = self.svc(K.gfs_rtc_key)
         session_id = await rtc.offer(instance_id, sdp)
+        if session_id is None:
+            return unavailable_response()
         # Push the signalling offer to the author's WS so its
-        # ``HighlightSignalingHandler`` can spin up an answerer peer.
-        ws_registry = self.svc(K.gfs_ws_registry_key)
-        await ws_registry.send(
+        # ``HighlightSignalingHandler`` can spin up an answerer peer. No
+        # socket on any node → the author is offline: no session, the
+        # uniform reply.
+        delivered = await _signal_author(
+            self,
             instance_id,
             {
-                "type": "highlight_signal",
                 "kind": "offer",
                 "session_id": session_id,
                 "highlight_id": highlight_id,
@@ -123,6 +163,9 @@ class HighlightRtcOfferView(GfsBaseView):
                 "vk": _viewer_key(body.get("vk")),
             },
         )
+        if not delivered:
+            rtc.drop(session_id)
+            return unavailable_response()
         return web.json_response({"session_id": session_id}, status=201)
 
 
@@ -134,7 +177,7 @@ class HighlightRtcSessionView(GfsBaseView):
         rtc = self.svc(K.gfs_rtc_key)
         session = rtc.get_session(session_id)
         if session is None:
-            return web.json_response({"error": "not_found"}, status=404)
+            return _not_here(self, session_id)
         return web.json_response(
             {
                 "session_id": session.session_id,
@@ -154,24 +197,25 @@ class HighlightRtcViewerIceView(GfsBaseView):
         if not session_id or not isinstance(candidate, dict):
             return web.json_response({"error": "invalid"}, status=422)
         rtc = self.svc(K.gfs_rtc_key)
-        try:
-            await rtc.ice_candidate(session_id, candidate)
-        except KeyError:
-            return web.json_response({"error": "not_found"}, status=404)
-        # Forward to the author so the answerer peer learns the
-        # remote ICE list as it streams in.
         session = rtc.get_session(session_id)
-        if session is not None:
-            ws_registry = self.svc(K.gfs_ws_registry_key)
-            await ws_registry.send(
-                session.initiator_id,
-                {
-                    "type": "highlight_signal",
-                    "kind": "ice",
-                    "session_id": session_id,
-                    "candidate": candidate,
-                },
-            )
+        if session is None:
+            return _not_here(self, session_id)
+        # Not stored: the viewer polls the AUTHOR's candidates. Counted, so
+        # one session cannot make us push without bound.
+        if not rtc.count_viewer_ice(session_id):
+            return web.json_response({"error": "too_many_candidates"}, status=429)
+        # Forward to the author so the answerer peer learns the remote ICE
+        # list as it streams in — via the cluster when its socket is on
+        # another node (fire-and-forget, like the push it replaces).
+        await self.svc(K.gfs_cluster_fan_out_key).push_to_household(
+            session.initiator_id,
+            {
+                "type": HIGHLIGHT_SIGNAL_FRAME_TYPE,
+                "kind": "ice",
+                "session_id": session_id,
+                "candidate": candidate,
+            },
+        )
         return web.json_response({"status": "ok"})
 
 
@@ -196,8 +240,8 @@ class HighlightRelayStreamView(GfsBaseView):
         if not token:
             return web.json_response({"error": "missing_token"}, status=422)
 
-        if not await _servable(self, instance_id, highlight_id, token):
-            return unavailable_response()
+        if not await _token_matches(self, instance_id, highlight_id, token):
+            return await _refuse(self)
 
         bridge = self.svc(K.gfs_relay_bridge_key)
         relay_id = bridge.create(target_instance_id=instance_id, scope=highlight_id)
@@ -206,11 +250,12 @@ class HighlightRelayStreamView(GfsBaseView):
         channel = bridge.get(relay_id)
         assert channel is not None  # just created
 
-        ws_registry = self.svc(K.gfs_ws_registry_key)
-        await ws_registry.send(
+        # The relay id names THIS node, so the author's upload is routed to
+        # the node holding this GET — the bytes never cross nodes.
+        delivered = await _signal_author(
+            self,
             instance_id,
             {
-                "type": "highlight_signal",
                 "kind": "relay_offer",
                 "relay_id": relay_id,
                 "highlight_id": highlight_id,
@@ -218,6 +263,9 @@ class HighlightRelayStreamView(GfsBaseView):
                 "vk": _viewer_key(self.request.query.get("vk")),
             },
         )
+        if not delivered:
+            bridge.close(relay_id)
+            return unavailable_response()
 
         # Hold the request until the author actually starts streaming, so a
         # stalled author yields a clean 503 rather than an empty 200 body.
@@ -265,9 +313,13 @@ class HighlightRelayUploadView(GfsBaseView):
         bridge = self.svc(K.gfs_relay_bridge_key)
         channel = bridge.get(relay_id)
         if channel is None:
-            return web.json_response({"error": "not_found"}, status=404)
+            return _not_here(self, relay_id)
         if channel.target_instance_id != instance_id:
             return web.json_response({"error": "forbidden"}, status=403)
+        if not bridge.claim(relay_id):
+            # A second upload (a duplicated relay_offer) would interleave
+            # its bytes into the guest's stream.
+            return web.json_response({"error": "already_streaming"}, status=409)
         try:
             async for chunk in self.request.content.iter_chunked(
                 RELAY_READ_CHUNK_BYTES
@@ -303,7 +355,7 @@ class HighlightRtcAnswerView(GfsBaseView):
         rtc = self.svc(K.gfs_rtc_key)
         session = rtc.get_session(session_id)
         if session is None:
-            return web.json_response({"error": "not_found"}, status=404)
+            return _not_here(self, session_id)
         # Authority guard: only the instance the offer was pushed to
         # may answer this session.
         if session.initiator_id != instance_id:
@@ -328,10 +380,11 @@ class HighlightRtcAuthorIceView(GfsBaseView):
         rtc = self.svc(K.gfs_rtc_key)
         session = rtc.get_session(session_id)
         if session is None:
-            return web.json_response({"error": "not_found"}, status=404)
+            return _not_here(self, session_id)
         if session.initiator_id != instance_id:
             return web.json_response({"error": "forbidden"}, status=403)
-        await rtc.ice_candidate(session_id, candidate)
+        if not await rtc.ice_candidate(session_id, candidate):
+            return web.json_response({"error": "too_many_candidates"}, status=429)
         return web.json_response({"status": "ok"})
 
 
