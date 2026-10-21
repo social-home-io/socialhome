@@ -69,7 +69,8 @@ def test_ids_are_bounded(method, limit):
 
 @pytest.mark.security
 @pytest.mark.parametrize(
-    "value", ["a b", "a#g=https://evil", "a&g=x", "../x", "a/b", "<s>", "é", "a\n"]
+    "value",
+    ["a b", "a#g=https://evil", "a&g=x", "../x", "a/b", "<s>", "é", "a\n", "..", "."],
 )
 def test_an_id_outside_the_viewers_alphabet_builds_no_link(value):
     links = _links()

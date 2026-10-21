@@ -56,7 +56,8 @@ VIEW_PERSON: str = "person"
 
 #: What the viewer accepts as an id or token: the URL-safe characters the
 #: households and this server mint (``pinned_link.ts`` ``SAFE_ID``).
-_SAFE_ID_RE = re.compile(r"[A-Za-z0-9._~-]+")
+#: Never only dots: ``..`` would climb the viewer's request path.
+_SAFE_ID_RE = re.compile(r"(?!\.+$)[A-Za-z0-9._~-]+")
 
 #: Longest value per fragment field the viewer accepts (``page_link.ts``):
 #: space ids and user ids are wire ids (128), invite tokens 32 chars today.

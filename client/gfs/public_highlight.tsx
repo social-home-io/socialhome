@@ -43,6 +43,9 @@ import { linkSecretFromHash, makeStreamOpener, type StreamOpener } from './strea
 import { pinnedBootFromHash, pinnedEndpoint, pinnedRequestInit } from './pinned_link'
 import { isMomentHash, momentBootFromHash } from './moment_link'
 import { PublicMomentViewer } from './public_moment'
+import { isPageHash, pageBootFromHash } from './page_link'
+import { PublicPage } from './public_pages'
+import { locale, t } from './viewer_i18n'
 
 const CHANNEL_LABEL = 'highlight-public-v1'
 const FRAME_DURATION_MS = 6000
@@ -118,7 +121,7 @@ export function closedStreamVerdict(s: {
 }
 
 /** Shown when the stream can't be opened: not sealed for this link. */
-const CANT_OPEN = 'This highlight couldn’t be opened. Ask for a new link.'
+const cantOpen = (): string => t('hl.cant_open')
 
 interface FramingHeader extends SealedHeader {
   kind:
@@ -172,7 +175,7 @@ function PublicHighlightViewer(
 ) {
   const [state, setState] = useState<ViewerState>({
     status: 'connecting',
-    message: 'Connecting…',
+    message: t('hl.connecting'),
     manifest: [],
     highlight: null,
     frameUrls: {},
@@ -220,9 +223,9 @@ function PublicHighlightViewer(
           sawSeal, sawEnd, failed, frames: manifest.length,
         })
         if (verdict === 'cant_open') {
-          setStatus('error', CANT_OPEN)
+          setStatus('error', cantOpen())
         } else if (verdict === 'nothing_arrived') {
-          setStatus('error', 'The connection closed before the highlight arrived.')
+          setStatus('error', t('hl.closed_early'))
         } else if (verdict === 'incomplete') {
           setState((s) => ({ ...s, incomplete: true }))
         }
@@ -249,7 +252,7 @@ function PublicHighlightViewer(
       queue = queue.then(() => openWireFrame(header, bytes)).catch(() => {
         // A frame that doesn't open: tampered, reordered or not ours.
         opener = null
-        setStatus('error', CANT_OPEN)
+        setStatus('error', cantOpen())
       })
     }
 
@@ -260,7 +263,7 @@ function PublicHighlightViewer(
       } else if (header.kind === 'stream_seal' && viewerKey && !opener) {
         opener = await makeStreamOpener(viewerKey.privateKey, header, secret, boot.highlightId)
         if (opener) sawSeal = true
-        else setStatus('error', CANT_OPEN)
+        else setStatus('error', cantOpen())
       } else if (header.kind === 'sealed' && opener) {
         const inner = decodeFrame(await opener.open(payload))
         if (inner && inner.header.kind !== 'stream_seal' && inner.header.kind !== 'sealed') {
@@ -309,7 +312,7 @@ function PublicHighlightViewer(
       relayStarted = true
       if (pollTimer) clearInterval(pollTimer)
       if (pc) { try { pc.close() } catch { /* tolerated */ } }
-      setStatus('loading', 'Connecting via server…')
+      setStatus('loading', t('hl.via_server'))
       try {
         const url =
           `/gfs/highlight_rtc/relay/${encodeURIComponent(boot.instanceId)}` +
@@ -349,7 +352,7 @@ function PublicHighlightViewer(
         viewerKey = await makeViewerKey()
         if (!viewerKey) {
           // No WebCrypto: nothing could open the sealed stream, so don't ask.
-          setStatus('error', 'This browser can’t open encrypted highlights. Try another browser.')
+          setStatus('error', t('hl.no_crypto'))
           return
         }
         const ice = await fetchJson<{ servers: IceServer[] }>(boot.gfs, '/gfs/highlights/ice-servers')
@@ -379,7 +382,7 @@ function PublicHighlightViewer(
 
         const ch = pc.createDataChannel(CHANNEL_LABEL, { ordered: true })
         ch.binaryType = 'arraybuffer'
-        ch.onopen = () => { channelOpened = true; setStatus('loading', 'Loading highlight…') }
+        ch.onopen = () => { channelOpened = true; setStatus('loading', t('hl.loading')) }
         ch.onclose = () => { if (channelOpened) onTransportClosed() }
         ch.onmessage = (ev) => {
           const buf = new Uint8Array(ev.data instanceof ArrayBuffer ? ev.data : new ArrayBuffer(0))
@@ -483,7 +486,7 @@ function PublicHighlightViewer(
     return (
       <ViewerError
         class="highlight-error"
-        message={state.message || 'Couldn’t connect.'}
+        message={state.message || t('error.connect')}
         retry={retry}
       />
     )
@@ -491,15 +494,15 @@ function PublicHighlightViewer(
 
   const incomplete = state.incomplete && (
     <div class="highlight-incomplete" role="status">
-      <p>Part of this highlight didn’t arrive.</p>
-      <button type="button" class="viewer-retry" onClick={retry.manual}>Try again</button>
+      <p>{t('hl.part_missing')}</p>
+      <button type="button" class="viewer-retry" onClick={retry.manual}>{t('retry')}</button>
     </div>
   )
 
   if (state.status === 'ended') {
     return (
       <div class="highlight-end">
-        <p>Highlight finished.</p>
+        <p>{t('hl.finished')}</p>
         {incomplete}
       </div>
     )
@@ -532,7 +535,7 @@ function PublicHighlightViewer(
         )}
         {!url && (
           <div class="status">
-            {state.incomplete ? 'This part didn’t arrive.' : state.message ?? 'Buffering…'}
+            {state.incomplete ? t('hl.this_part') : state.message ?? t('hl.buffering')}
           </div>
         )}
         {cur?.caption_text && (
@@ -550,7 +553,7 @@ function AuthorHeader({ author, picture }: { author: AuthorProfile; picture: str
   const initials = author.display_name
     .split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]!.toUpperCase()).join('')
   return (
-    <header class="highlight-author" aria-label={`Shared by ${author.display_name}`}>
+    <header class="highlight-author" aria-label={t('hl.shared_by', { name: author.display_name })}>
       {picture
         ? <img class="highlight-author-pic" src={picture} alt="" width={48} height={48} />
         : <span class="highlight-author-pic highlight-author-initials" aria-hidden="true">{initials}</span>}
@@ -568,8 +571,8 @@ function AuthorHeader({ author, picture }: { author: AuthorProfile; picture: str
 export function BrokenLink() {
   return (
     <div class="highlight-error" role="alert">
-      <p>This link can’t be opened.</p>
-      <p>This link is incomplete or damaged. Ask whoever shared it for a new link.</p>
+      <p>{t('link.broken')}</p>
+      <p>{t('link.broken_body')}</p>
     </div>
   )
 }
@@ -579,11 +582,8 @@ export function BrokenLink() {
 export function OutdatedLink() {
   return (
     <div class="highlight-error" role="alert">
-      <p>This link can’t be opened.</p>
-      <p>
-        Highlight links are now end-to-end encrypted, and this one is from
-        before that or is missing its end. Ask whoever shared it for a new link.
-      </p>
+      <p>{t('link.broken')}</p>
+      <p>{t('link.outdated_body')}</p>
     </div>
   )
 }
@@ -592,9 +592,9 @@ export function OutdatedLink() {
 function humanizeError(msg: string | null | undefined): string {
   // ``expired`` only arrives inside a stream the author's own household
   // sent — the GFS itself never says it (see ``viewer_errors.ts``).
-  if (msg && /expired/i.test(msg)) return 'This highlight has ended.'
+  if (msg && /expired/i.test(msg)) return t('hl.ended')
   if (msg && /unsupported/i.test(msg)) {
-    return 'This page is out of date. Reload it, or ask for a new link.'
+    return t('hl.outdated_page')
   }
   return humanizeViewerError(msg)
 }
@@ -673,6 +673,20 @@ function readBoot(root: HTMLElement): BootPayload | null {
 (function bootstrap(): void {
   const root = document.getElementById('root')
   if (!root) return
+  document.documentElement.lang = locale()
+  // A GFS's public page (space, invite, profile): the GFS redirected its
+  // own page here, everything in the fragment (``page_link.ts``). Only on
+  // the pinned page — the GFS-served one (boot block) never opens one.
+  if (!document.getElementById('boot') && isPageHash(window.location.hash)) {
+    const page = pageBootFromHash(window.location.hash)
+    document.documentElement.dataset.page = 'doc'
+    if (window.top !== window || !page) {
+      render(<div class="page"><main class="page-main"><BrokenLink /></main></div>, root)
+      return
+    }
+    render(<PublicPage boot={page} />, root)
+    return
+  }
   // A per-moment link on the pinned page: everything — the GFS, the
   // ids, the moment's item key — is in the fragment. The GFS-served page
   // (with a boot block) never opens one.
@@ -682,12 +696,15 @@ function readBoot(root: HTMLElement): BootPayload | null {
       render(<BrokenLink />, root)
       return
     }
-    document.title = 'Moment'
+    document.title = t('title.moment')
     render(<PublicMomentViewer boot={moment} />, root)
     return
   }
   const boot = readBoot(root)
   if (!boot) return
+  // The pinned page's static title names no page; the GFS page's says
+  // "Highlight" already.
+  if (boot.gfs) document.title = t('title.highlight')
   const secret = linkSecretFromHash(window.location.hash)
   if (!secret) {
     // Contact nobody: nothing could open the stream anyway. On the GFS
