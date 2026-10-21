@@ -235,6 +235,11 @@ else gets no stream (a direct offer is refused; the relay answers one
 plaintext `error: expired`). A token longer than 256 characters (the GFS
 mints 43) is refused before any lookup or HKDF (`error: unsupported`).
 Revocation is therefore enforced by the author's household, not by the GFS.
+Unpublish clears all of them even when the GFS connection is suspended or
+gone. A highlight has one publication: publishing it on another GFS first
+pulls the previous one and its tokens, so no earlier link can come back.
+Relay uploads in flight are capped like the WebRTC viewers (50 per
+household).
 
 **Links made before this** have no fragment. The page detects that before
 contacting anyone and says *"This link can't be opened … Ask whoever shared
@@ -261,10 +266,18 @@ publish); a proven `true` sticks for the process. No household↔household
 federation shape changed, so `OURS` is not bumped (the GFS leg has no
 `proto_version`; see [capabilities.md](./capabilities.md#gfs-capabilities)).
 
-**Residual:** the GFS serves the viewer page and its script, so a GFS that
-rewrote that script could read the fragment in the browser. Sealing removes
-everything the GFS sees on the wire and at rest; it cannot remove trust in
-the code a web page is served with. Reference:
+**Residuals:**
+
+- The GFS serves the viewer page and its script, so a GFS that rewrote
+  that script could read the fragment in the browser. Sealing removes
+  everything the GFS sees on the wire and at rest; it cannot remove trust in
+  the code a web page is served with (a pinned viewer is the follow-up).
+- The stream's integrity rests on the link secret alone; frames are not
+  signed by the household. A GFS that ALSO holds the full link (say, it was
+  posted publicly where the GFS saw it) can swap `vk` and `epk` and read or
+  rewrite that view's stream, or show a highlight under the author's name.
+  Treat a link as a bearer secret: whoever has it, and runs the relay, is
+  trusted for that link. Reference:
 `socialhome/services/highlight_public_seal.py`,
 `client/gfs/stream_seal.ts` (interop test with a Python-sealed golden
 vector).

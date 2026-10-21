@@ -476,3 +476,59 @@ def test_highlight_dataclass_carries_publication_fields():
     # Reusing the unused import so flake8 doesn't complain (GfsConnection
     # is checked indirectly via the repo fixture).
     assert GfsConnection.__name__ == "GfsConnection"
+
+
+async def test_unpublish_ends_the_tokens_even_when_the_gfs_is_inactive(
+    repos, seeded_highlight
+):
+    """REGRESSION (#1087 review): a suspended GFS used to make unpublish
+    raise before clearing anything, so the household's tokens stayed live
+    and would stream again once that GFS came back."""
+    svc = _make_service(repos, session=_StubSession())
+    await svc.publish(seeded_highlight.id, "u1", gfs_id="gfs-abc")
+    await repos["gfs"]._db.enqueue(
+        "UPDATE gfs_connections SET status='suspended' WHERE id='gfs-abc'"
+    )
+    with pytest.raises(HighlightPublicationError):
+        await svc.unpublish(seeded_highlight.id, "u1")
+    refreshed = await repos["highlights"].get_highlight(seeded_highlight.id)
+    assert refreshed.public_gfs_id is None
+    assert not await repos["highlights"].is_live_public_token(
+        seeded_highlight.id, token_digest("tok-A")
+    )
+
+
+async def test_publishing_on_another_gfs_pulls_the_first_publication(
+    repos, seeded_highlight
+):
+    """REGRESSION (#1087 review): one publication per highlight. Publishing
+    on GFS B used to leave GFS A's links silently dead, and a later publish
+    on A brought them back. Now A's publication is pulled first."""
+    await repos["gfs"]._db.enqueue(
+        """
+        INSERT INTO gfs_connections(
+            id, gfs_instance_id, display_name, public_key, inbox_url,
+            status, paired_at
+        ) VALUES('gfs-b','gfs-b','GFS B','ee','https://gfs-b.example',
+                 'active', datetime('now'))
+        """,
+    )
+    sess = _StubSession()
+    svc = _make_service(repos, session=sess)
+    await svc.publish(seeded_highlight.id, "u1", gfs_id="gfs-abc")
+    sess._body = {"token": "tok-B", "url": "https://gfs-b/u/s/B"}
+    await svc.publish(seeded_highlight.id, "u1", gfs_id="gfs-b")
+    urls = [u for u, _b in sess.posts]
+    assert (
+        urls[1] == f"https://gfs.example/gfs/highlights/{seeded_highlight.id}/unpublish"
+    )
+    highlights = repos["highlights"]
+    assert not await highlights.is_live_public_token(
+        seeded_highlight.id, token_digest("tok-A")
+    )
+    assert await highlights.is_live_public_token(
+        seeded_highlight.id, token_digest("tok-B")
+    )
+    assert (
+        await highlights.get_highlight(seeded_highlight.id)
+    ).public_gfs_id == "gfs-b"

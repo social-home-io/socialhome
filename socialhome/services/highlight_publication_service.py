@@ -165,6 +165,18 @@ class HighlightPublicationService(ProtectionGateMixin):
         conn = await self._require_active_gfs(gfs_id)
         client = self._client()
         await self._require_sealed_viewer(conn)
+        if highlight.public_gfs_id is not None and highlight.public_gfs_id != gfs_id:
+            # One publication per highlight: the other GFS's links would
+            # otherwise go dead here and come back on a later publish there.
+            # Pull it (its tokens end here at once, whatever that GFS says).
+            try:
+                await self.unpublish(highlight.id, author_user_id)
+            except HighlightPublicationError as exc:
+                log.warning(
+                    "highlight %s: pulling the publication on another GFS failed: %s",
+                    highlight.id,
+                    exc,
+                )
         try:
             async with client.post(
                 f"{conn.inbox_url}/gfs/highlights/{highlight.id}/publish",
@@ -255,13 +267,16 @@ class HighlightPublicationService(ProtectionGateMixin):
         gfs_id = highlight.public_gfs_id
         if gfs_id is None:
             return  # Idempotent — already unpublished.
-        conn = await self._require_active_gfs(gfs_id)
-        body = {
-            "highlight_id": highlight.id,
-            "instance_id": self._require_instance_id(),
-        }
-        signed = self._sign_body(body)
         try:
+            # Inside the ``try``: an inactive or vanished GFS connection must
+            # not leave the tokens live here (they would stream again if it
+            # came back).
+            conn = await self._require_active_gfs(gfs_id)
+            body = {
+                "highlight_id": highlight.id,
+                "instance_id": self._require_instance_id(),
+            }
+            signed = self._sign_body(body)
             async with self._client().post(
                 f"{conn.inbox_url}/gfs/highlights/{highlight.id}/unpublish",
                 allow_redirects=False,

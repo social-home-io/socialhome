@@ -441,6 +441,40 @@ async def test_relay_offer_signature_verifies_against_instance_key(
     )
 
 
+async def test_relay_offers_beyond_the_cap_are_dropped(
+    repos, published_highlight, monkeypatch
+):
+    """#1087 review: the GFS can ask for relays at will; the uploads in
+    flight are bounded like the WebRTC viewers."""
+    highlight_id, *_ = published_highlight
+    monkeypatch.setattr(
+        "socialhome.services.highlight_signaling_handler."
+        "MAX_CONCURRENT_VIEWERS_PER_INSTANCE",
+        1,
+    )
+    handler, _ = _make_handler(repos)
+    handler._http_client = _RecordingSession()  # type: ignore[assignment]
+    gate = asyncio.Event()
+
+    async def _slow(*_a, **_kw):
+        await gate.wait()
+
+    monkeypatch.setattr(HighlightSignalingHandler, "_serve_relay", _slow)
+    for n in range(3):
+        await handler.handle_signal(
+            {
+                "kind": "relay_offer",
+                "relay_id": f"r-{n}",
+                "highlight_id": highlight_id,
+                "token": TOKEN,
+                "vk": VK,
+            }
+        )
+    assert len(handler._relay_tasks) == 1
+    gate.set()
+    await _drain_relay(handler)
+
+
 async def test_relay_offer_unpublished_highlight_posts_nothing(repos):
     handler, _ = _make_handler(repos)
     sess = _RecordingSession()

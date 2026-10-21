@@ -475,6 +475,14 @@ class HighlightSignalingHandler(ProtectionGateMixin):
                 highlight_id,
             )
             return
+        # The GFS can ask for relays at will: bound the uploads in flight
+        # like the WebRTC viewers (each relay is one outbound POST).
+        if len(self._relay_tasks) >= MAX_CONCURRENT_VIEWERS_PER_INSTANCE:
+            log.info(
+                "highlight_signal relay_offer: %d relays in flight — dropped",
+                len(self._relay_tasks),
+            )
+            return
         task = asyncio.create_task(
             self._serve_relay(
                 relay_id,
