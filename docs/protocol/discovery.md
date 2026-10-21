@@ -3195,7 +3195,13 @@ contest a ban.
 
 - `socialhome/services/public_space_service.py` — client side.
 - `socialhome/global_server/public.py`,
-  `socialhome/global_server/federation.py` — GFS directory.
+  `socialhome/global_server/federation.py` — GFS directory. A listed
+  space's public page (`/spaces/{id}`) is a `302` to the pinned viewer when
+  `[server] public_viewer_base_url` is set (default), rendered there from
+  `GET /gfs/pages/spaces/{id}` in the visitor's language
+  (`global_server/public_viewer.py`, `page_models.py`,
+  `routes/viewer_pages.py`; see
+  [the public pages](highlights_public.md#the-public-pages-one-viewer-for-the-outside-world)).
 - `socialhome/federation/peer_directory_handler.py` — peer
   directory sync on HFS.
 - `socialhome/services/space_public_outbound.py`,

@@ -499,6 +499,58 @@ GFS-served page (less safe).
   and the audit (rebuild the tag, compare with the served bytes) are the
   checks.
 
+### The public pages (one viewer for the outside world)
+
+Owner decision 2026-10-21: everything a non-member opens from a GFS opens
+in this same viewer. Besides highlight and moment links that is a global
+space's page, an invite landing and a person's Momentum profile. The GFS
+keeps its own `/` landing (the operator's page); the other three answer a
+`302` when `[server] public_viewer_base_url` is set (default
+`https://viewer.social-home.io`, `GFS_PUBLIC_VIEWER_BASE_URL`;
+`socialhome/global_server/public_viewer.py`):
+
+| GFS page | Viewer link (all in the fragment) | The viewer reads |
+|---|---|---|
+| `/spaces/{id}` | `#v=space&g=<GFS>&s=<space id>` | `GET /gfs/pages/spaces/{id}` |
+| `/join/{token}` | `#v=join&g=<GFS>&t=<token>` | `POST /gfs/pages/invite {token}` |
+| `/moments/{user}` | `#v=person&g=<GFS>&u=<user id>` | `GET /gfs/pages/people/{user}` |
+
+- **Fragment, not path.** Nothing about which page — and never an invite
+  token — reaches the viewer's host or a `Referer`.
+- **Not an open redirect.** The target is the configured base, the
+  committed manifest's `v/<hash>/` and the GFS's own `base_url`; the one
+  request-derived value is URL-encoded after the `#`, and only when it is
+  an id the viewer accepts (`A-Za-z0-9._~-`, bounded, never only dots) —
+  otherwise the GFS renders the page itself. `/join/` redirects before the
+  token is looked up, so every token gets the same answer.
+- **Fallback.** An empty base (a self-hosted GFS without a viewer), one
+  that isn't `https://` (localhost aside), a `base_url` the viewer would
+  refuse or no usable manifest keeps the GFS-rendered pages, with a
+  WARNING for a setting that can't be used. Old links work either way.
+- **The viewer** (`client/gfs/page_link.ts`, `public_pages.tsx`) accepts
+  exactly `v`, `g` and the view's id (each once, fragment ≤ 1024 chars),
+  fetches with the same `cors` / `credentials: 'omit'` / `no-referrer` /
+  `redirect: 'error'` rules, and shape-checks the answer: colours plain
+  hex, images raster `data:` URIs only (the CSP admits nothing else
+  either), every string bounded. A space's About text is rendered by a
+  small Markdown subset into nodes (`markdown_lite.tsx`), never as HTML;
+  links only `http(s)` / `mailto`. The invite QR is rendered by the GFS
+  and delivered as a `data:` PNG — no QR encoder in the bundle.
+- **Language and colour.** The whole viewer speaks en, de, nl, fr and es
+  from bundled tables (`viewer_i18n.ts`; the first of
+  `navigator.languages` it has, else English; no string is ever fetched)
+  and the public pages follow `prefers-color-scheme`
+  (`client/gfs/viewer_pages.css`, inlined after the stage's styles under
+  the same hashed `<style>`; the highlight / moment stage stays dark).
+- **Cost.** Opening a page through the viewer is one redirect plus one
+  JSON read on the GFS (both in the pages' 30 / min / IP window) and the
+  static page from the viewer's host — the same work the GFS-rendered page
+  was, minus the HTML. No fan-out, nothing stored.
+- **Lost: link previews.** A chat app that unfurls `/spaces/{id}` follows
+  the 302 to a static page with no `og:` tags, so the preview shows the
+  generic page title instead of the space's name and description (the
+  cover never unfurled: it is a `data:` URI).
+
 ## Who shared it (sealed author profile)
 
 The page names the author above the highlight: display name, bio and a

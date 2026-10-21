@@ -214,6 +214,14 @@ for households that set `public_viewer_base_url` empty (less safe: that GFS
 serves the script). See
 [`protocol/highlights_public.md`](./protocol/highlights_public.md#pinned-viewer).
 
+The same viewer renders a GFS's public pages for non-members — a space's
+page, an invite landing, a person's profile — from that GFS's JSON
+(GFS `public_viewer_base_url`, owner decision 2026-10-21). Those pages hold
+no secret, so the gain there is one page, in the visitor's language, that no
+GFS can script; the cost is the same page-host trust as above, now also for
+what an invite landing shows (a host serving a different build could show a
+different invite code). A GFS with the setting empty renders them itself.
+
 ### The GFS is not an author-presence oracle
 
 An outsider must not be able to ask the GFS whether a household is

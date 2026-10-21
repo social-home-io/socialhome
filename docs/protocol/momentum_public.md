@@ -643,9 +643,13 @@ identical bytes-for-bytes to the sender's canonical encoding.
 ## Public directory + profile sync
 
 * **Anon landing** at `/moments` (SPA shell) and `/moments/{user_id}`
-  (per-user detail) — both rendered by the GFS itself; the JS at
+  (per-user detail) — the directory rendered by the GFS itself; the JS at
   `/static/users_directory.js` fetches `GET /gfs/moments/users` and
-  renders cards with avatar + name + bio + handle.
+  renders cards with avatar + name + bio + handle. The per-user page
+  (profile + Follow) is a `302` to the pinned viewer when the GFS has
+  `public_viewer_base_url` set, which renders it from
+  `GET /gfs/pages/people/{user_id}` (picture inline as a `data:` URI) —
+  see [the public pages](highlights_public.md#the-public-pages-one-viewer-for-the-outside-world).
 * **Per-user detail JSON** at `GET /gfs/moments/users/{user_id}` —
   adds `follower_count` to the registration shape so the detail
   page can show social proof.

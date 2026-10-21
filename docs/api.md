@@ -1558,17 +1558,19 @@ cluster round, see [principles.md](./principles.md#the-gfs-is-not-an-author-pres
 (a `201` offer means it is online). That residual is in
 [`principles.md`](./principles.md#the-gfs-is-not-an-author-presence-oracle).
 
-**CORS (public highlight viewer only).** The pinned viewer runs on another
+**CORS (the pinned viewer only).** The pinned viewer runs on another
 origin (`docs/protocol/highlights_public.md`, "Pinned viewer"), so the
 anonymous highlight viewer routes — `GET /gfs/highlights/ice-servers`,
 `POST /gfs/highlight_rtc/offer`, `GET /gfs/highlight_rtc/session/{id}`,
 `POST /gfs/highlight_rtc/ice/viewer`, `GET /gfs/highlight_rtc/relay/{i}/{h}`
-— send `Access-Control-Allow-Origin: *` on every response (`503`, `429`
+— and the public pages' JSON it renders (`GET /gfs/pages/spaces/{id}`,
+`POST /gfs/pages/invite`, `GET /gfs/pages/people/{id}`, see the public pages
+table) — send `Access-Control-Allow-Origin: *` on every response (`503`, `429`
 and the streamed relay included) and answer the `OPTIONS` preflight with
 `204` (`Allow-Methods: GET, POST, OPTIONS`, `Allow-Headers: content-type`,
 `Max-Age: 600`). Never `Allow-Credentials`. No other GFS route — the signed
-author routes, the landing page, household, admin, moments — sends a CORS
-header. Rate limits are unchanged.
+author routes, the HTML pages, `/gfs/info`, household, admin, the household
+`/gfs/spaces` and `/gfs/moments` JSON — sends a CORS header. Rate limits are unchanged.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -1673,11 +1675,14 @@ sync. The GFS holds no PeerConnection.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/` | Operator landing page. |
-| GET | `/spaces/{slug}` | Public space detail. |
-| GET | `/join/{gfs_token}` | **Invite-link landing.** Renders the space's already-public directory metadata (name, icon, accent) next to the `socialhome://invite#<blob>` code — as copyable text **and** as a QR of the same string — which the visitor pastes into their OWN Social Home (Spaces → Join with invite code). There is deliberately no clickable deep link: the redeem has to happen on the visitor's household, and a link can only ever open the issuer's. **The page writes nothing to the database** — no use counter, no fetch row, and the handler adds no log line of its own; the connection server must never become a durable record of who redeemed what (the `uses` / `max_uses` columns on `gfs_invite_tokens` are dead by design). The residual is the HTTP access log, which records `GET /join/<token>` with the visitor's IP — signed off in [`principles.md`](principles.md); operators who care should redact the `/join/` path at the front end and keep retention short. 404 — with the same styled "expired or revoked" page — when the token is unknown, expired, revoked, or its space is no longer publicly listed; one answer for all of them, so the page is not an existence oracle. |
+| GET | `/spaces/{slug}` | Public space detail. With `[server] public_viewer_base_url` set (default `https://viewer.social-home.io`) a `302` to the pinned viewer, `{viewer}/v/<hash>/#v=space&g=<base_url>&s=<id>` (`Cache-Control: no-store`), which renders it from `GET /gfs/pages/spaces/{id}`; an id the viewer would refuse (outside `A-Za-z0-9._~-`, over 128 chars, only dots) is never forwarded and renders here. Empty / unusable setting: rendered here as before. |
+| GET | `/join/{gfs_token}` | **Invite-link landing.** Renders the space's already-public directory metadata (name, icon, accent) next to the `socialhome://invite#<blob>` code — as copyable text **and** as a QR of the same string — which the visitor pastes into their OWN Social Home (Spaces → Join with invite code). There is deliberately no clickable deep link: the redeem has to happen on the visitor's household, and a link can only ever open the issuer's. **The page writes nothing to the database** — no use counter, no fetch row, and the handler adds no log line of its own; the connection server must never become a durable record of who redeemed what (the `uses` / `max_uses` columns on `gfs_invite_tokens` are dead by design). The residual is the HTTP access log, which records `GET /join/<token>` with the visitor's IP — signed off in [`principles.md`](principles.md); operators who care should redact the `/join/` path at the front end and keep retention short. 404 — with the same styled "expired or revoked" page — when the token is unknown, expired, revoked, or its space is no longer publicly listed; one answer for all of them, so the page is not an existence oracle. With a viewer configured it is a `302` to `{viewer}/v/<hash>/#v=join&g=<base_url>&t=<token>` **before** the token is looked up (every token gets the same redirect), the token only in the fragment; the viewer reads `POST /gfs/pages/invite`. |
 | GET | `/highlight/{instance_id}/{highlight_id}/{token}` | Public highlight viewer shell. Always `200` with the same page and `Cache-Control: no-store` (the URL carries the share token): no token lookup, no author-online check (not a presence oracle). The viewer's `POST /gfs/highlight_rtc/offer` consults state. |
 | GET | `/moments` | Public-Momentum directory (SPA shell). Loads `/static/users_directory.js`, which fetches `GET /gfs/moments/users` and renders cards + search. |
-| GET | `/moments/{user_id}` | Per-user landing — avatar + display_name + bio + follower count + "Follow on your Social Home" deeplink. |
+| GET | `/moments/{user_id}` | Per-user landing — avatar + display_name + bio + follower count + "Follow on your Social Home" deeplink. With a viewer configured a `302` to `{viewer}/v/<hash>/#v=person&g=<base_url>&u=<id>`; the viewer reads `GET /gfs/pages/people/{user_id}`. |
+| GET | `/gfs/pages/spaces/{space_id}` | Anon, CORS (below). The space page's content for the pinned viewer: `{server_name, space: {space_id, name, description, about_markdown (≤ 4000 chars), cover, icon, primary_color, accent_color, member_count, category}}`. `cover` / `icon` are the stored raster `data:` URIs or `null` (anything else — an `https://` URL, an SVG — is never passed on); colours plain hex. `404 {server_name}` for anything not listed (unknown, pending, banned, withdrawn). |
+| POST | `/gfs/pages/invite` | Anon, CORS. Body `{token}` (≤ 256 chars, body ≤ 1 KiB; `400` / `413` otherwise) — a POST so the token never sits in a request line. `{server_name, space: {name, accent_color, icon}, invite_code, qr}` (`qr` a PNG `data:` URI rendered here, `Cache-Control: no-store`), or `404 {server_name}` for every dead link, as `GET /join/{token}`. A pure read: nothing written, counted or logged. |
+| GET | `/gfs/pages/people/{user_id}` | Anon, CORS. A person's profile for the viewer: `{server_name, gfs_id, person: {user_id, username, display_name, instance_id, bio, picture, follower_count}}`, `picture` the mirrored avatar as a `data:` URI or `null`. `404 {server_name}` without an active registration. |
 
 These pages are server-rendered HTML and require no auth.
 
@@ -1717,7 +1722,7 @@ These pages are server-rendered HTML and require no auth.
 | `GET /api/map/tiles` | 1200 / min — one shared bucket: every Leaflet `<img>` authenticates as the signed-URL principal, and a desktop viewport is ~20 tiles. Still a ceiling, so a leaked signed URL can't drive unbounded upstream traffic from the household IP. |
 | `POST /cluster/sync` | 60 / min per **verified** peer node — counted only after the frame verified under the key this GFS holds for that node (its pin, or the GFS's own key for a shared-seed node), never on the `from` a request claims, so forged traffic naming a real peer cannot lock it out. Every request that proves no member — malformed body, unknown suite, stale timestamp, unknown or unapproved sender, key mismatch, bad signature, or a replay — spends a separate 30 / min per **source address** budget instead (wrong recipient included). Once that is spent the address is shed: its frames are still parsed and matched against the roster (no crypto), anything not naming an approved node gets 429, and a frame naming one is verified — accepted if it verifies, else it spends that node's 30 / min **failed-verify** budget, after which further such frames get 429 without a verify. Verify CPU on forgeries is therefore bounded per address, then per approved node, and the node's own budget is never spent by a forgery. Genuine peers never touch the address budget. Behind a shared reverse proxy configure `trusted_proxies` (below) so the budget keys on the real client. |
 | `POST /cluster/signaling-session{,/release}` (legacy) | 60 / min / paired instance |
-| `GET /` + `GET /spaces/{id}` + `GET /join/{token}` (GFS public pages) | 30 / min / IP — `/join/` rides the same window: it is the page an attacker would hammer to walk the token space, and since it writes nothing there is no household identity to key a limiter on. |
+| `GET /` + `GET /spaces/{id}` + `GET /join/{token}` + `/gfs/pages/*` (GFS public pages and their viewer JSON, one window — a page opened through the viewer costs two) | 30 / min / IP — `/join/` rides the same window: it is the page an attacker would hammer to walk the token space, and since it writes nothing there is no household identity to key a limiter on. |
 | `GET /api/invite-links/{token}/code` | 30 / min / IP — the endpoint is unauthenticated (the token IS the credential), so the client address is the only handle. Not brute-force protection: a token is a uuid4 hex and is not guessable. It is ordinary anonymous-endpoint shedding, and one visitor legitimately hits it once per link they open. Live and dead tokens answer identically apart from the status code. |
 | `POST /gfs/spaces/{id}/invite` | 20 / min / **instance** — the mint is signature-authenticated, so the accountable identity is known before anything is written and the limiter keys on the household rather than on an address it could rotate. Far above a human minting invites, while bounding how many rows one household can park on a server per minute. |
 | `POST /gfs/{highlight,moment}_rtc/offer` + the anon `/relay/*` GETs | 20 / min / IP — bounds the WS-push amplification from the anonymous RTC entry points |
