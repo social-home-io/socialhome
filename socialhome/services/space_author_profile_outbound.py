@@ -49,12 +49,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
+    SpaceMemberLeft,
     SpaceMemberProfileUpdated,
     SpacePostCreated,
     UserProfileUpdated,
 )
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.picture_hash import compute_picture_hash
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_author_profile import (
     PROFILE_BIO_MAX_LENGTH,
@@ -63,6 +63,7 @@ from ..domain.space_author_profile import (
     SpaceAuthorProfile,
     encode_picture_sidecar,
     encode_profile_content,
+    profile_picture_digest,
 )
 from ..domain.space_item import ITEM_TYPE_AUTHOR_PROFILE
 from ..infrastructure.event_bus import EventBus
@@ -157,6 +158,7 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         self._bus.subscribe(SpacePostCreated, self._on_post)
         self._bus.subscribe(UserProfileUpdated, self._on_profile)
         self._bus.subscribe(SpaceMemberProfileUpdated, self._on_space_profile)
+        self._bus.subscribe(SpaceMemberLeft, self._on_left)
 
     # ── Triggers ──────────────────────────────────────────────────────
 
@@ -169,9 +171,7 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
     async def _on_profile(self, event: UserProfileUpdated) -> None:
         if self._profile_cache is None:
             return
-        for space_id in await self._profile_cache.list_spaces_for_author(
-            event.user_id, self._own_instance_pk.hex()
-        ):
+        for space_id in await self._profile_cache.list_spaces_for_author(event.user_id):
             await self.publish(space_id, event.user_id)
 
     async def _on_space_profile(self, event: SpaceMemberProfileUpdated) -> None:
@@ -180,12 +180,23 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         if await self._profile_cache.get(event.space_id, event.user_id) is not None:
             await self.publish(event.space_id, event.user_id)
 
+    async def _on_left(self, event: SpaceMemberLeft) -> None:
+        """A member left or was removed: forget their cached profile, so a
+        host never forwards it to a new follower again."""
+        if self._profile_cache is None:
+            return
+        try:
+            await self._profile_cache.delete(event.space_id, event.user_id)
+        except Exception:
+            log.exception("space_author_profile: forgetting a departed member failed")
+
     # ── Publishing ────────────────────────────────────────────────────
 
     async def publish(self, space_id: str, user_id: str) -> bool:
         """Publish ``user_id``'s profile into ``space_id`` when it differs
         from what we last published there (see the module docstring).
-        ``True`` when one was scheduled. Never raises."""
+        ``True`` when one was scheduled; it is recorded as published once a
+        server took it. Never raises."""
         try:
             return await self._publish(space_id, user_id)
         except Exception:
@@ -214,6 +225,9 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             )
             return False
         member = await self._spaces.get_member(space_id, user_id)
+        if member is None:
+            # Not (or no longer) a member here: nothing to name.
+            return False
         name = (
             (member.space_display_name if member else None)
             or user.display_name
@@ -224,7 +238,7 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
         if bio is not None:
             bio = bio[:PROFILE_BIO_MAX_LENGTH]
         picture = None if protected else await self._picture(space_id, user_id)
-        picture_hash = compute_picture_hash(picture) if picture else None
+        picture_hash = profile_picture_digest(picture) if picture else None
         content, rev = encode_profile_content(
             display_name=name, bio=bio, picture_hash=picture_hash
         )
@@ -256,25 +270,32 @@ class SpaceAuthorProfileOutbound(ProtectionGateMixin):
             held is None or held.profile.picture_hash != picture_hash
         )
         outbound = {**inner, PROFILE_PICTURE_FIELD: sidecar} if new_picture else inner
-        if not self._member_gfs.schedule_item(
-            space_id, user_id, ITEM_TYPE_AUTHOR_PROFILE, outbound
-        ):
-            return False
-        await self._profile_cache.upsert_if_newer(
-            SpaceAuthorProfile(
-                space_id=space_id,
-                author_user_id=user_id,
-                author_pk=self._own_instance_pk.hex(),
-                display_name=name,
-                bio=bio,
-                picture_hash=picture_hash,
-                profile_rev=rev,
-                ts=now.isoformat(timespec="microseconds"),
-            ),
-            picture_webp=picture,
-            **await self._bundle_copy(space_id, epoch, inner, sidecar),
+        cache = self._profile_cache
+        row = SpaceAuthorProfile(
+            space_id=space_id,
+            author_user_id=user_id,
+            author_pk=self._own_instance_pk.hex(),
+            display_name=name,
+            bio=bio,
+            picture_hash=picture_hash,
+            profile_rev=rev,
+            ts=now.isoformat(timespec="microseconds"),
         )
-        return True
+        bundle_copy = await self._bundle_copy(space_id, epoch, inner, sidecar)
+
+        async def _published() -> None:
+            # Recorded only once a server took it: the record is the dedupe,
+            # so a publish no server took (no cert yet after a rotation, a
+            # server down) is sent again on the next trigger.
+            await cache.upsert_if_newer(row, picture_webp=picture, **bundle_copy)
+
+        return self._member_gfs.schedule_item(
+            space_id,
+            user_id,
+            ITEM_TYPE_AUTHOR_PROFILE,
+            outbound,
+            on_published=_published,
+        )
 
     async def _bundle_copy(
         self, space_id: str, epoch: int | None, inner: dict, sidecar: str | None

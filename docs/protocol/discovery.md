@@ -1542,7 +1542,10 @@ relay as every other item:
 
 - **Content.** The generic inner's signed `content` is compact JSON:
   `display_name` (the per-space name, else the household name; ≤ 64),
-  `bio` (the household bio; ≤ 300), `picture_hash`, `profile_rev`. Covered
+  `bio` (the household bio; ≤ 300), `picture_hash` (the **full SHA-256** of
+  the picture, hex — a 64-bit prefix would let an author make two pictures
+  with the same signed hash and show different ones through different
+  servers), `profile_rev`. Covered
   by the existing generic author signature — no new signing domain. A
   **protected** account (§CP.R) sends its name only: `bio` and
   `picture_hash` are `null`.
@@ -1568,7 +1571,10 @@ relay as every other item:
   re-sent because time passed: a follower who subscribes later gets the
   names from the host's bundle (below), each item under the epoch it was
   published at. Only for a public / global space with `allow_subscribers`
-  on.
+  on. A profile is recorded as published only once a server took it
+  (no cert yet after a rotation, or every server down → the next post
+  sends it), and only by a current member of the space; when a member
+  leaves or is removed, their cached profile is forgotten.
 - **Receiver.** Every check of a generic item (decrypt, author signature +
   self-cert, origin, writer cert with the v2 binding naming the author,
   epoch), then: the item must be about its own author; the content must
@@ -1577,9 +1583,14 @@ relay as every other item:
   household pictures; skipped when that signed picture is already held);
   it is kept per `(space, author)` in `space_author_profiles` (migration
   0113) only when its signed `ts` is newer than the held one. At most 200
-  authors per space are kept (the least recently stamped are pruned). The
-  author-signed item itself is kept only by a household that holds the
-  space seed (only a host builds bundles). It never creates a seat, a user
+  other households' authors per space are kept (the least recently stamped
+  are pruned — in a space with more authors, one whose profile is older than
+  the newest 200 is named again only on its next profile change); our own
+  authors' rows are never pruned (they are the record of what we
+  published). The author-signed item itself is kept only by a household
+  that holds the space seed (only a host builds bundles), and only its
+  signed fields, signature, writer cert and picture — never unsigned
+  padding; an item over 4 KiB without its picture is not kept at all. It never creates a seat, a user
   or a member.
 - **Naming.** `PersonSummaryService` (space scope) names anyone still
   unnamed from it, and `GET /api/spaces/{id}/authors` hands the SPA the
@@ -1629,11 +1640,14 @@ forward it unchanged:
   follower's GFS-registered identity + key-wrap key and the `accepts` labels
   of its subscribe), the host seals the content key to them and then — only
   if `accepts` lists `author_profiles_bundle` — sends the
-  `space_author_profiles_bundle`: the cached items of the space's member
-  households (an author whose household left is never forwarded), the most
+  `space_author_profiles_bundle`: the cached items of the space's current
+  writers (its roster, followers aside — a removed or departed author is
+  never forwarded), the most
   recently stamped first, **each under the epoch it was published at**,
   sealed to the follower's key-wrap key exactly like the handoff
-  (`seal_to_keywrap`, KEM-suite tagged) and authority-signed. Both go out
+  (`seal_to_keywrap`, KEM-suite tagged) and authority-signed together with an `issued_at` time (the
+  follower refuses a bundle older than an hour, so a server cannot replay
+  an old one). Both go out
   **targeted** — `POST /gfs/publish` with `to` = that follower — so no other
   subscriber receives a byte for it.
 - **Names first.** Part 0 carries every bundled name — the signed items
@@ -1642,7 +1656,11 @@ forward it unchanged:
   follower keeps one only when its bytes hash to it. Every part is padded
   to a size bucket (`ITEM_SIZE_BUCKETS`, ≤ 128 KiB), so its length shows
   only the bucket; the part COUNT still shows roughly how many bundled
-  authors have a picture (bounded by 50).
+  authors have a picture (bounded by 50), part 0's bucket roughly how many
+  authors there are, and a last picture part's bucket roughly how big the
+  leftover pictures are. The GFS delivers one subscriber's frames in
+  order, so part 0 lands first; a picture part that came first would find
+  no row and be dropped.
 - **Never on a reconnect.** The GFS re-sends `new_subscriber` for every
   subscribed space on each reconnect of the follower's socket, tagged
   `reason:"reconnect"`: the host re-seals the key and sends **no** bundle.
@@ -1718,7 +1736,7 @@ picture is a padded 64 KiB, one without 1–4 KiB):
 | Author's household restarts | each author's next post re-sent it to all *N* (≈ 640 MB per author) | nothing |
 | Name or bio change | *N* × 64 KiB | *N* × 1–4 KiB (10 000 → ≤ 40 MB) |
 | Picture change | *N* × 64 KiB | *N* × 64 KiB (≈ 640 MB, once) |
-| One new follower | ≤ 1 MB (items padded to 64 KiB each) | names part (≤ 128 KiB; ~16–64 KiB for typical casts) + picture parts within the budget (~1.7 MB for 50 pictures) |
+| One new follower | ≤ 1 MB (items padded to 64 KiB each) | names part (≤ 128 KiB; ~16–64 KiB for typical casts) + picture parts within the budget (worst case 50 pictures of 24 KB: 17 × 128 KiB ≈ 2.2 MB) |
 | Sybil flood of new followers | 30/min/space × ≤ 1 MB ≈ 43 GB/day | ≤ 16 MiB/hour ≈ 384 MiB/day per space |
 | Follower storage | ≈ 56 KB/author row (signed item with the picture again + the picture), never pruned | ≤ 24 KB picture + ~0.5 KB per row, ≤ 200 rows per space, no signed item |
 

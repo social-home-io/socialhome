@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import json
 from collections import deque
+from datetime import UTC, datetime
 
 import pytest
 
@@ -43,7 +44,13 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection, GfsSpacePublication
-from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.domain.space import (
+    JoinMode,
+    Space,
+    SpaceFeatures,
+    SpaceMember,
+    SpaceType,
+)
 from socialhome.domain.space_author_profile import PROFILE_PICTURE_FIELD
 from socialhome.domain.space_author_profile_bundle import BundleEntry
 from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
@@ -827,8 +834,10 @@ async def test_reconcile_space_everywhere_skips_space_without_subscribers(recon_
 class _Profiles:
     """The host's author-profile cache (only what the bundle reads)."""
 
-    def __init__(self, items, *, epoch: int = 1) -> None:
+    def __init__(self, items, *, epoch: int = 1, roster=None) -> None:
         self.items = items
+        #: Authors seated in the space's roster by :func:`_seat_authors`.
+        self.roster = roster
         self.epoch = epoch
         self.asked: list[tuple] = []
 
@@ -875,6 +884,23 @@ def _opened_parts(env, kw_kp) -> list[dict]:
 _OPENS_BUNDLE = ["author_profiles_bundle"]
 
 
+async def _seat_authors(env, space_id: str) -> None:
+    profiles = getattr(env["svc"], "_profiles", None)
+    if not isinstance(profiles, _Profiles) or profiles.roster is not None:
+        return
+    for item in profiles.items:
+        author = str(item.get("author_user_id") or "")
+        if author and await env["space_repo"].get(space_id) is not None:
+            await env["space_repo"].save_member(
+                SpaceMember(
+                    space_id=space_id,
+                    user_id=author,
+                    role="member",
+                    joined_at="2026-10-20T00:00:00+00:00",
+                )
+            )
+
+
 async def _subscribe(
     env,
     space_id="sp-pub",
@@ -883,7 +909,11 @@ async def _subscribe(
     reason="subscribe",
     accepts=_OPENS_BUNDLE,
 ):
-    """A ``new_subscriber`` for a NEW seat (v_61 shape) by default."""
+    """A ``new_subscriber`` for a NEW seat (v_61 shape) by default. The
+    authors of the attached profile cache are seated in the space's roster
+    first (the host bundles current writers only) unless the test seats
+    its own (``_Profiles(roster=[])``)."""
+    await _seat_authors(env, space_id)
     id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
     await env["svc"].handle(
         _new_subscriber_frame(
@@ -955,7 +985,7 @@ async def test_a_new_follower_gets_one_sealed_bundle_of_the_cached_profiles(env)
     # Forwarded author-signed and unchanged, each under the epoch it was
     # published at (H2: a rotation never forces a republish).
     assert opened["items"] == [{"epoch": 1, "item": i} for i in profiles.items]
-    assert profiles.asked == [("sp-pub", 50)]
+    assert profiles.asked == [("sp-pub", 200)]
 
 
 async def test_an_older_gfs_gets_the_fanned_out_handoff_and_no_bundle(env):
@@ -979,6 +1009,7 @@ async def test_a_restarted_host_sends_reconnecting_followers_no_bundle(env):
     env["gfs"].targeted_answer = True
     profiles = _Profiles([_signed_profile("Erin")])
     env["svc"].attach_author_profiles(profiles)  # type: ignore[arg-type]
+    await _seat_authors(env, "sp-pub")
     id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
     keys = (sub_iid, id_kp.public_key, kw_kp.public_key, keywrap_sig)
     await env["svc"].handle(
@@ -1022,6 +1053,7 @@ async def test_one_followers_seat_churn_earns_one_bundle_an_hour(env, monkeypatc
     await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
     env["gfs"].targeted_answer = True
     env["svc"].attach_author_profiles(_Profiles([_signed_profile("Erin")]))  # type: ignore[arg-type]
+    await _seat_authors(env, "sp-pub")
     id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
     frame = _new_subscriber_frame(
         "sp-pub",
@@ -1116,17 +1148,6 @@ async def test_names_come_first_and_pictures_follow_in_padded_parts(env):
         assert size in ITEM_SIZE_BUCKETS
 
 
-async def test_an_author_whose_household_left_is_not_bundled(env):
-    """The host forwards only authors of member households (and its own)."""
-    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
-    env["gfs"].targeted_answer = True
-    items = [_signed_profile("Here"), _signed_profile("Gone", origin="left.home")]
-    env["svc"].attach_author_profiles(_Profiles(items))  # type: ignore[arg-type]
-    kw_kp, _sub = await _subscribe(env)
-    [names] = _opened_parts(env, kw_kp)
-    assert [x["item"]["author_user_id"] for x in names["items"]] == ["uid-Here"]
-
-
 async def test_a_flood_of_new_followers_gets_names_but_not_pictures(env, monkeypatch):
     """M1: anyone can register and subscribe, and a GFS can name any
     household. The host spends at most its hourly byte budget per space.
@@ -1183,3 +1204,41 @@ async def test_the_tracked_spaces_and_followers_are_bounded(env, monkeypatch):
     assert list(env["svc"]._bundle_bytes) == ["sp-pub"]
     assert len(env["svc"]._bundle_bytes["sp-pub"]) == 3
     assert len(env["svc"]._bundled) == 2
+
+
+async def test_a_removed_author_of_a_member_household_is_not_bundled(env):
+    """REGRESSION (review I1): the household filter kept a removed user
+    whose household still has other members. Only the space's current
+    roster (writers, not followers) is bundled."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    await env["space_repo"].save_member(
+        SpaceMember(
+            space_id="sp-pub",
+            user_id="uid-Here",
+            role="member",
+            joined_at="2026-10-20T00:00:00+00:00",
+        )
+    )
+    items = [_signed_profile("Here"), _signed_profile("Removed")]
+    env["svc"].attach_author_profiles(_Profiles(items, roster=[]))  # type: ignore[arg-type]
+    kw_kp, _sub = await _subscribe(env)
+    [names] = _opened_parts(env, kw_kp)
+    assert [x["item"]["author_user_id"] for x in names["items"]] == ["uid-Here"]
+
+
+async def test_a_bundle_carries_a_signed_issue_time(env):
+    """Review minor: the authority-signed envelope binds when it was made,
+    so a GFS cannot replay an old bundle to a follower forever."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    env["svc"].attach_author_profiles(_Profiles([_signed_profile("Erin")]))  # type: ignore[arg-type]
+    await _subscribe(env)
+    [bundle] = [
+        c
+        for c in env["gfs"].targeted
+        if c["event_type"] == AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE
+    ]
+    issued = datetime.fromisoformat(bundle["payload"]["issued_at"])
+    assert abs((datetime.now(UTC) - issued).total_seconds()) < 60
+    assert "issued_at" in strip_authority_sig_fields(bundle["payload"])

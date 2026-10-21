@@ -14,7 +14,9 @@ current epoch, and a key rotation never forces a republish. Later parts carry
 only pictures: ``{author, hash, picture}``, where ``hash`` is the author's
 SIGNED picture hash. The follower keeps a picture only when its bytes hash
 to it. The host sends picture parts only while its hourly byte budget
-allows, so names never wait behind pictures.
+allows, so names never wait behind pictures. The GFS delivers one
+subscriber's frames in publish order, so part 0 lands first; a picture part
+that somehow came first finds no row and is dropped.
 
 Plaintext of one part::
 
@@ -39,7 +41,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from .space_author_profile import PROFILE_PICTURE_FIELD, without_picture_sidecar
+from .space_author_profile import (
+    PROFILE_PICTURE_FIELD,
+    stored_profile_inner,
+    without_picture_sidecar,
+)
 from .space_item import ITEM_SIZE_BUCKETS, pad_json_object
 
 #: The most authors one new follower is sent (the most recently stamped).
@@ -90,13 +96,16 @@ def build_bundle_parts(space_id: str, entries: list[BundleEntry]) -> list[bytes]
     names_bytes = _PART_OVERHEAD
     pictures: list[dict] = []
     for entry in entries[:MAX_BUNDLE_AUTHORS]:
-        named = {"epoch": entry.epoch, "item": without_picture_sidecar(entry.item)}
+        item = stored_profile_inner(entry.item)
+        if item is None:
+            continue
+        named = {"epoch": entry.epoch, "item": without_picture_sidecar(item)}
         size = _size(named) + 2
         if names_bytes + size > BUNDLE_PART_MAX_BYTES:
             continue
         names.append(named)
         names_bytes += size
-        raw = entry.item.get(PROFILE_PICTURE_FIELD)
+        raw = item.get(PROFILE_PICTURE_FIELD)
         if entry.picture_hash and isinstance(raw, str) and raw:
             pictures.append(
                 {

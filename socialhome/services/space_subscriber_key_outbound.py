@@ -100,7 +100,7 @@ from ..authority_sig import (
     sign_authority_event,
     strip_authority_sig_fields,
 )
-from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole
 from ..domain.space_author_profile_bundle import (
     MAX_BUNDLE_AUTHORS,
     build_bundle_parts,
@@ -167,6 +167,7 @@ class SpaceSubscriberKeyOutbound:
 
     __slots__ = (
         "_bundle_bytes",
+        "_bundle_spent",
         "_bundled",
         "_crypto",
         "_gfs",
@@ -199,6 +200,9 @@ class SpaceSubscriberKeyOutbound:
         #: ``space_id`` → monotonic times of its bundles in the last minute
         #: (the per-space rate backstop; bounded by the limit per space).
         self._bundle_bytes: OrderedDict[str, deque[tuple[float, int]]] = OrderedDict()
+        #: ``space_id`` → the bytes in its window (a running sum of
+        #: ``_bundle_bytes``, so the budget check is O(expired)).
+        self._bundle_spent: dict[str, int] = {}
         #: ``(space_id, follower)`` → monotonic time of its last bundle, in
         #: bundle order (oldest first) — the per-follower churn guard.
         self._bundled: OrderedDict[tuple[str, str], float] = OrderedDict()
@@ -329,14 +333,22 @@ class SpaceSubscriberKeyOutbound:
                 space_id,
             )
             return 0
-        entries = await self._profiles.list_signed_items(
-            space_id, limit=MAX_BUNDLE_AUTHORS
-        )
-        households = set(await self._spaces.list_member_instances(space_id))
-        households.add(self._own_instance_id)
+        # Only the space's current writers (its roster, followers aside):
+        # a removed or departed author is never forwarded, even when their
+        # household still has members. Over-fetched so departed rows don't
+        # shrink the bundle below the cap.
+        writers = {
+            m.user_id
+            for m in await self._spaces.list_members(space_id)
+            if m.role != SpaceRole.SUBSCRIBER.value
+        }
         entries = [
-            e for e in entries if str(e.item.get("origin_instance_id")) in households
-        ]
+            e
+            for e in await self._profiles.list_signed_items(
+                space_id, limit=MAX_BUNDLE_AUTHORS * 4
+            )
+            if str(e.item.get("author_user_id")) in writers
+        ][:MAX_BUNDLE_AUTHORS]
         parts = build_bundle_parts(space_id, entries)
         if not parts:
             return 0
@@ -363,7 +375,14 @@ class SpaceSubscriberKeyOutbound:
             sealed = seal_to_keywrap(
                 recipient_keywrap_pub=keywrap_pub, plaintext=plaintext
             )
-            envelope: dict = {"space_id": space_id, "sealed": sealed}
+            # ``issued_at`` is inside the authority signature: a follower
+            # refuses a bundle older than BUNDLE_MAX_AGE_S, so a server
+            # cannot replay an old one to it forever.
+            envelope: dict = {
+                "space_id": space_id,
+                "sealed": sealed,
+                "issued_at": datetime.now(UTC).isoformat(),
+            }
             envelope.update(
                 sign_authority_event(
                     event_type=AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
@@ -400,9 +419,11 @@ class SpaceSubscriberKeyOutbound:
         spent = self._bundle_bytes.get(space_id)
         if spent is None:
             return 0
+        total = self._bundle_spent.get(space_id, 0)
         while spent and now - spent[0][0] >= 3600.0:
-            spent.popleft()
-        return sum(size for _at, size in spent)
+            total -= spent.popleft()[1]
+        self._bundle_spent[space_id] = total
+        return total
 
     def _spend(self, space_id: str, now: float, size: int) -> None:
         """Count *size* bytes against *space_id*'s hourly budget. LRU-bounded
@@ -412,10 +433,12 @@ class SpaceSubscriberKeyOutbound:
             spent = deque()
             self._bundle_bytes[space_id] = spent
             if len(self._bundle_bytes) > _MAX_TRACKED_SPACES:
-                self._bundle_bytes.popitem(last=False)
+                gone, _ = self._bundle_bytes.popitem(last=False)
+                self._bundle_spent.pop(gone, None)
         else:
             self._bundle_bytes.move_to_end(space_id)
         spent.append((now, size))
+        self._bundle_spent[space_id] = self._bundle_spent.get(space_id, 0) + size
 
     def _remember_follower(self, space_id: str, follower: str, now: float) -> None:
         """Remember *follower* for :data:`BUNDLE_PER_FOLLOWER_EVERY_S`

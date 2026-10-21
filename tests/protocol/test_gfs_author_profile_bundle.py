@@ -158,3 +158,19 @@ async def test_nothing_but_a_profile_is_applied_from_a_bundle(env, profiles):
 async def test_a_bundle_for_an_unknown_space_is_ignored(env, profiles):
     item = {**_profile(BOB), "writer_cert": await _cert(env, BOB, "comment")}
     assert await env["inbound"].apply_bundled_profiles("nope", items=[(0, item)]) == 0
+
+
+async def test_a_picture_part_cannot_dress_one_author_in_anothers_picture(
+    env, profiles
+):
+    """A picture entry names its author; it is checked against THAT
+    author's signed hash, so Eve's bytes never land on Bob's row."""
+    bob = {
+        **_profile(BOB, sidecar=False),
+        "writer_cert": await _cert(env, BOB, "comment"),
+    }
+    assert await _bundle(env, bob) == 1
+    bob_hash = (await profiles.get(SPACE, BOB.user_id)).profile.picture_hash
+    eve_pic = base64.b64encode(_webp() + b"\0").decode()
+    assert await _bundle(env, pictures=[(BOB.user_id, bob_hash, eve_pic)]) == 0
+    assert await profiles.get_picture(SPACE, BOB.user_id) is None

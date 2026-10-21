@@ -89,6 +89,7 @@ import json
 import logging
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -512,12 +513,21 @@ class GfsMemberPublishService:
         return self.schedule_item(space_id, author_user_id, ITEM_TYPE_POST, inner)
 
     def schedule_item(
-        self, space_id: str, author_user_id: str, item_type: str, inner: dict
+        self,
+        space_id: str,
+        author_user_id: str,
+        item_type: str,
+        inner: dict,
+        *,
+        on_published: Callable[[], Awaitable[None]] | None = None,
     ) -> bool:
         """Plan and publish ``author_user_id``'s ``item_type`` item in the
         BACKGROUND, so the local write never waits on a connection server.
         Returns whether a task was started (``False`` when stopping or too
-        many are pending — the host path still carries the write)."""
+        many are pending — the host path still carries the write).
+        ``on_published`` runs once at least one server took the item —
+        never when none did (no cert, no capable server, every send
+        refused)."""
         if self._stopping or len(self._tasks) >= MAX_PENDING_PUBLISHES:
             log.warning(
                 "gfs.member_publish: background publish for space %s skipped "
@@ -527,7 +537,9 @@ class GfsMemberPublishService:
             )
             return False
         task = asyncio.create_task(
-            self._plan_and_publish(space_id, author_user_id, item_type, inner),
+            self._plan_and_publish(
+                space_id, author_user_id, item_type, inner, on_published
+            ),
             name=f"gfs-member-publish-{space_id}",
         )
         self._tasks.add(task)
@@ -535,12 +547,20 @@ class GfsMemberPublishService:
         return True
 
     async def _plan_and_publish(
-        self, space_id: str, author_user_id: str, item_type: str, inner: dict
+        self,
+        space_id: str,
+        author_user_id: str,
+        item_type: str,
+        inner: dict,
+        on_published: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         try:
             targets = await self.plan_item(space_id, author_user_id, item_type)
-            if targets:
-                await self.publish_item(space_id, item_type, inner, targets)
+            if not targets:
+                return
+            accepted = await self.publish_item(space_id, item_type, inner, targets)
+            if accepted and on_published is not None:
+                await on_published()
         except Exception:
             log.exception(
                 "gfs.member_publish: background publish failed for %s", space_id

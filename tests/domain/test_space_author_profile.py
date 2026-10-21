@@ -5,12 +5,14 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 
 import pytest
 from PIL import Image
 
-from socialhome.domain.picture_hash import compute_picture_hash
 from socialhome.domain.space_author_profile import (
+    MAX_PROFILE_ITEM_BYTES,
+    PROFILE_ITEM_KEYS,
     PROFILE_PICTURE_FIELD,
     PROFILE_PICTURE_MAX_BYTES,
     author_picture_url,
@@ -18,9 +20,12 @@ from socialhome.domain.space_author_profile import (
     decode_profile_content,
     encode_picture_sidecar,
     encode_profile_content,
+    profile_picture_digest,
     profile_rev,
+    stored_profile_inner,
     without_picture_sidecar,
 )
+from socialhome.services.space_item_author import _SIGNED_FIELDS
 
 
 def _webp() -> bytes:
@@ -37,14 +42,14 @@ def test_round_trip_carries_the_hash_not_the_bytes():
     content, rev = encode_profile_content(
         display_name="Noor Haddad",
         bio="Beekeeper.",
-        picture_hash=compute_picture_hash(pic),
+        picture_hash=profile_picture_digest(pic),
     )
     assert 'picture"' not in content.replace("picture_hash", "")
     assert len(content) < 256
     p = decode_profile_content(content)
     assert p is not None
     assert (p.display_name, p.bio) == ("Noor Haddad", "Beekeeper.")
-    assert p.picture_hash == compute_picture_hash(pic)
+    assert p.picture_hash == profile_picture_digest(pic)
     assert p.profile_rev == rev
 
 
@@ -61,7 +66,7 @@ def test_name_only():
 def test_sidecar_round_trip():
     pic = _webp()
     wire = encode_picture_sidecar(pic)
-    assert decode_picture_sidecar(wire, compute_picture_hash(pic)) == pic
+    assert decode_picture_sidecar(wire, profile_picture_digest(pic)) == pic
 
 
 @pytest.mark.parametrize(
@@ -148,3 +153,43 @@ def test_picture_url_is_relative_and_quoted():
         == "api/spaces/sp-1/authors/u-1/picture?v=0123456789abcdef"
     )
     assert "/" not in author_picture_url("a/b", "u", "h").split("/authors/")[0][11:]
+
+
+def test_the_signed_picture_digest_is_a_full_sha256():
+    """Review I4: a 64-bit hash prefix lets an author forge a second WebP
+    with the same signed hash (~2^32 work) and show different pictures on
+    different GFSs. The signed digest is the full SHA-256."""
+    pic = _webp()
+    digest = profile_picture_digest(pic)
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    content, _rev = encode_profile_content(
+        display_name="Noor", bio=None, picture_hash=digest
+    )
+    assert decode_profile_content(content).picture_hash == digest
+    short, _ = encode_profile_content(
+        display_name="Noor", bio=None, picture_hash=digest[:16]
+    )
+    assert decode_profile_content(short) is None
+
+
+def test_a_stored_profile_item_keeps_only_the_signed_shape():
+    """Review I5: a member could pad its own item with unsigned junk and
+    crowd every other author out of a bundle's names part."""
+    inner = {
+        "item_type": "author_profile",
+        "content": "{}",
+        "author_sig": "s",
+        "writer_cert": {"x": 1},
+        PROFILE_PICTURE_FIELD: "UklGRg==",
+        "junk": "x" * 100_000,
+    }
+    kept = stored_profile_inner(inner)
+    assert kept is not None and "junk" not in kept
+    assert kept[PROFILE_PICTURE_FIELD] == "UklGRg=="
+    assert set(kept) <= PROFILE_ITEM_KEYS
+    big = {**inner, "content": "x" * (MAX_PROFILE_ITEM_BYTES + 1)}
+    assert stored_profile_inner(big) is None
+
+
+def test_the_kept_keys_cover_every_signed_field():
+    assert set(_SIGNED_FIELDS) <= PROFILE_ITEM_KEYS

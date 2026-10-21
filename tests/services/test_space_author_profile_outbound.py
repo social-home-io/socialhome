@@ -16,6 +16,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.domain.events import (
+    SpaceMemberLeft,
     SpaceMemberProfileUpdated,
     SpacePostCreated,
     UserProfileUpdated,
@@ -29,6 +30,7 @@ from socialhome.domain.space_author_profile import (
     CachedAuthorProfile,
     decode_picture_sidecar,
     decode_profile_content,
+    profile_picture_digest,
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.media.profile_picture import PublicPictureCache
@@ -57,7 +59,9 @@ def _webp(size: int = 600, *, noisy: bool = False) -> bytes:
 class _Spaces:
     space_type: SpaceType = SpaceType.GLOBAL
     allow_subscribers: bool = True
-    member: object | None = None
+    member: object | None = field(
+        default_factory=lambda: SimpleNamespace(space_display_name=None)
+    )
     instances: list[str] = field(default_factory=list)
     seed: bytes | None = None
 
@@ -128,12 +132,27 @@ class _Crypto:
 
 
 class _MemberGfs:
+    """The member-publish path: ``on_published`` runs only once a GFS took
+    the item (:meth:`flush` stands in for that; ``fail`` for a refusal)."""
+
     def __init__(self) -> None:
         self.items: list[tuple] = []
+        self.pending: list = []
+        self.fail = False
 
-    def schedule_item(self, space_id, author_user_id, item_type, inner):
+    def schedule_item(
+        self, space_id, author_user_id, item_type, inner, *, on_published=None
+    ):
         self.items.append((space_id, author_user_id, item_type, inner))
+        if on_published is not None:
+            self.pending.append(on_published)
         return True
+
+    async def flush(self) -> None:
+        pending, self.pending = self.pending, []
+        if not self.fail:
+            for done in pending:
+                await done()
 
 
 class _Protected:
@@ -173,12 +192,11 @@ class _Cache:
             profile=row[0], has_picture=row[1] is not None, picture_sidecar=None
         )
 
-    async def list_spaces_for_author(self, author_user_id, author_pk):
-        return [
-            space
-            for (space, author), row in self.rows.items()
-            if author == author_user_id and row[0].author_pk == author_pk
-        ]
+    async def list_spaces_for_author(self, author_user_id):
+        return [space for (space, author) in self.rows if author == author_user_id]
+
+    async def delete(self, space_id, author_user_id):
+        self.rows.pop((space_id, author_user_id), None)
 
 
 class _Certs:
@@ -216,6 +234,12 @@ def _svc(**kw):
     return svc, gfs
 
 
+async def _pub(svc, space_id, user_id) -> bool:
+    out = await svc.publish(space_id, user_id)
+    await svc._member_gfs.flush()
+    return out
+
+
 def _sent(gfs, i: int = -1) -> dict:
     space_id, author, item_type, inner = gfs.items[i]
     assert (space_id, author, item_type) == ("sp", NOOR, "author_profile")
@@ -237,12 +261,12 @@ def _picture(gfs, i: int = -1) -> bytes | None:
 
 async def test_publishes_a_signed_profile_with_name_bio_and_a_small_picture():
     svc, gfs = _svc()
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
     p = _profile(gfs)
     assert (p.display_name, p.bio) == ("Noor Haddad", "Beekeeper.")
     picture = _picture(gfs)
     assert picture is not None and len(picture) <= PROFILE_PICTURE_MAX_BYTES
-    assert p.picture_hash == compute_picture_hash(picture)
+    assert p.picture_hash == profile_picture_digest(picture)
     with Image.open(io.BytesIO(picture)) as im:
         assert max(im.size) <= 256
 
@@ -252,7 +276,7 @@ async def test_the_per_space_name_and_picture_win():
     svc, gfs = _svc(
         spaces=spaces, pictures=_Pictures(user_pic=_webp(), member_pic=_webp(100))
     )
-    await svc.publish("sp", NOOR)
+    await _pub(svc, "sp", NOOR)
     assert _profile(gfs).display_name == "Noor (Imkerei)"
     with Image.open(io.BytesIO(_picture(gfs))) as im:
         assert im.size == (100, 100)
@@ -261,7 +285,7 @@ async def test_the_per_space_name_and_picture_win():
 async def test_a_protected_account_sends_its_name_only():
     svc, gfs = _svc()
     svc.attach_child_protection(_Protected({NOOR}))  # type: ignore[arg-type]
-    await svc.publish("sp", NOOR)
+    await _pub(svc, "sp", NOOR)
     p = _profile(gfs)
     assert (p.display_name, p.bio, p.picture_hash) == ("Noor Haddad", None, None)
     assert PROFILE_PICTURE_FIELD not in _sent(gfs)
@@ -274,9 +298,9 @@ async def test_a_content_key_rotation_sends_nothing():
     epoch, in the host's bundle."""
     crypto = _Crypto()
     svc, gfs = _svc(crypto=crypto)
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
     crypto.epoch = 4
-    assert not await svc.publish("sp", NOOR)
+    assert not await _pub(svc, "sp", NOOR)
     assert len(gfs.items) == 1
 
 
@@ -285,9 +309,9 @@ async def test_a_restart_sends_nothing():
     persisted cache) re-sent every author's profile on their next post."""
     cache = _Cache()
     svc, _gfs = _svc(cache=cache)
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
     restarted, gfs2 = _svc(cache=cache)
-    assert not await restarted.publish("sp", NOOR)
+    assert not await _pub(restarted, "sp", NOOR)
     assert gfs2.items == []
 
 
@@ -295,15 +319,15 @@ async def test_a_name_change_sends_no_picture_bytes_a_new_picture_does():
     users = _Users()
     pictures = _Pictures(user_pic=_webp())
     svc, gfs = _svc(users=users, pictures=pictures)
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
     assert PROFILE_PICTURE_FIELD in _sent(gfs)
     users.user.display_name = "Noor H."
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
     assert _profile(gfs).display_name == "Noor H."
     assert PROFILE_PICTURE_FIELD not in _sent(gfs)  # the 1–4 KiB bucket
     assert _profile(gfs).picture_hash == _profile(gfs, 0).picture_hash
     pictures.user_pic = _webp(300, noisy=True)
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
     assert _picture(gfs) is not None
 
 
@@ -320,7 +344,7 @@ async def test_the_public_picture_is_re_encoded_once_per_source(monkeypatch):
 
     svc, gfs = _svc(picture_cache=_Counting())
     for _ in range(4):
-        await svc.publish("sp", NOOR)
+        await _pub(svc, "sp", NOOR)
     assert len(calls) == 1 and len(gfs.items) == 1
 
 
@@ -337,6 +361,7 @@ async def test_a_profile_change_republishes_only_where_sent_and_only_if_changed(
         content="x",
     )
     await bus.publish(SpacePostCreated(post=post, space_id="sp"))
+    await gfs.flush()
     assert len(gfs.items) == 1
     event = UserProfileUpdated(
         user_id=NOOR,
@@ -346,9 +371,11 @@ async def test_a_profile_change_republishes_only_where_sent_and_only_if_changed(
         picture_hash=None,
     )
     await bus.publish(event)  # no change → nothing new
+    await gfs.flush()
     assert len(gfs.items) == 1
     users.user.bio = "Beekeeper and baker."
     await bus.publish(event)
+    await gfs.flush()
     assert len(gfs.items) == 2
     assert _profile(gfs).bio == "Beekeeper and baker."
     # A per-space edit in a space where nothing was sent: nothing.
@@ -366,7 +393,7 @@ async def test_a_profile_change_after_a_restart_still_republishes():
     cache = _Cache()
     users = _Users()
     svc, _gfs = _svc(cache=cache, users=users)
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
     bus = EventBus()
     restarted, gfs = _svc(cache=cache, users=users, bus=bus)
     restarted.wire()
@@ -406,7 +433,7 @@ async def test_only_spaces_that_admit_followers():
         _Spaces(allow_subscribers=False),
     ):
         svc, gfs = _svc(spaces=spaces)
-        assert not await svc.publish("sp", NOOR)
+        assert not await _pub(svc, "sp", NOOR)
         assert gfs.items == []
 
 
@@ -415,31 +442,31 @@ async def test_gated_on_the_known_member_households_versions():
     svc, gfs = _svc(
         spaces=spaces, federation=_Federation({"peer-new": 60, "peer-old": 59})
     )
-    assert not await svc.publish("sp", NOOR)
+    assert not await _pub(svc, "sp", NOOR)
     assert gfs.items == []
     svc, gfs = _svc(
         spaces=spaces, federation=_Federation({"peer-new": 60, "peer-old": 60})
     )
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
 
 
 async def test_an_unreadable_picture_is_left_out():
     svc, gfs = _svc(pictures=_Pictures(user_pic=b"not an image"))
-    await svc.publish("sp", NOOR)
+    await _pub(svc, "sp", NOOR)
     assert _profile(gfs).picture_hash is None
     assert PROFILE_PICTURE_FIELD not in _sent(gfs)
 
 
 async def test_a_noisy_picture_still_fits_the_cap():
     svc, gfs = _svc(pictures=_Pictures(user_pic=_webp(600, noisy=True)))
-    await svc.publish("sp", NOOR)
+    await _pub(svc, "sp", NOOR)
     pic = _picture(gfs)
     assert pic is None or len(pic) <= PROFILE_PICTURE_MAX_BYTES
 
 
 async def test_an_unknown_author_publishes_nothing():
     svc, gfs = _svc()
-    assert not await svc.publish("sp", "someone-else")
+    assert not await _pub(svc, "sp", "someone-else")
     assert gfs.items == []
 
 
@@ -456,7 +483,7 @@ async def test_without_the_cache_nothing_is_published():
         own_instance_pk=KP.public_key,
         own_identity_seed=KP.private_key,
     )
-    assert not await svc.publish("sp", NOOR)
+    assert not await _pub(svc, "sp", NOOR)
 
 
 # ── The host's copy for a new follower's bundle (v_61) ──────────────
@@ -469,23 +496,25 @@ async def test_a_seed_holder_keeps_the_item_signed_for_its_bundle():
     cache = _Cache()
     certs = _Certs(_Cert())
     svc, gfs = _svc(cache=cache, certs=certs, spaces=_Spaces(seed=b"s" * 32))
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
     [(profile, picture, signed, epoch)] = cache.writes
     sent = _sent(gfs)
     assert signed == {**sent, "writer_cert": _Cert().to_wire()}
     assert verify_signed_item_inner(signed)
     assert epoch == 3 and certs.asked == [("sp", 3)]
     assert profile.author_pk == KP.public_key.hex()
-    assert picture is not None and profile.picture_hash == compute_picture_hash(picture)
+    assert picture is not None and profile.picture_hash == profile_picture_digest(
+        picture
+    )
 
 
 async def test_a_seed_holder_keeps_the_picture_with_a_name_only_change():
     cache = _Cache()
     users = _Users()
     svc, _gfs = _svc(cache=cache, users=users, spaces=_Spaces(seed=b"s" * 32))
-    await svc.publish("sp", NOOR)
+    await _pub(svc, "sp", NOOR)
     users.user.display_name = "Noor H."
-    await svc.publish("sp", NOOR)
+    await _pub(svc, "sp", NOOR)
     signed = cache.writes[-1][2]
     assert PROFILE_PICTURE_FIELD in signed  # the bundle still has the bytes
 
@@ -494,7 +523,7 @@ async def test_a_household_without_the_seed_keeps_no_signed_item():
     """M2: only a host builds bundles."""
     cache = _Cache()
     svc, _gfs = _svc(cache=cache)
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
     [(profile, _picture, signed, epoch)] = cache.writes
     assert profile.display_name == "Noor Haddad"
     assert (signed, epoch) == (None, None)
@@ -503,6 +532,40 @@ async def test_a_household_without_the_seed_keeps_no_signed_item():
 async def test_without_a_writer_cert_only_the_profile_is_cached():
     cache = _Cache()
     svc, _gfs = _svc(cache=cache, certs=_Certs(None), spaces=_Spaces(seed=b"s" * 32))
-    assert await svc.publish("sp", NOOR)
+    assert await _pub(svc, "sp", NOOR)
     [(_profile_row, _picture, signed, epoch)] = cache.writes
     assert (signed, epoch) == (None, None)
+
+
+async def test_a_profile_is_recorded_as_sent_only_once_a_gfs_took_it():
+    """REGRESSION (review I2): the persisted dedupe used to say "sent" the
+    moment a background task started. When no GFS took the item (no cert yet
+    after a rotation, a GFS down), the profile was then never sent again."""
+    cache = _Cache()
+    svc, gfs = _svc(cache=cache)
+    gfs.fail = True
+    assert await _pub(svc, "sp", NOOR)
+    assert cache.rows == {}
+    gfs.fail = False
+    assert await _pub(svc, "sp", NOOR)  # the next trigger sends it again
+    assert len(gfs.items) == 2 and len(cache.rows) == 1
+
+
+async def test_someone_who_is_not_a_member_publishes_nothing():
+    """Review I1: a profile change must not publish into a space the
+    person left."""
+    svc, gfs = _svc(spaces=_Spaces(member=None))
+    assert not await _pub(svc, "sp", NOOR)
+    assert gfs.items == []
+
+
+async def test_leaving_a_space_forgets_the_published_profile():
+    """Review I1: a departed member's profile is not forwarded to new
+    followers from the host's cache."""
+    bus = EventBus()
+    cache = _Cache()
+    svc, _gfs = _svc(cache=cache, bus=bus)
+    svc.wire()
+    assert await _pub(svc, "sp", NOOR)
+    await bus.publish(SpaceMemberLeft(space_id="sp", user_id=NOOR))
+    assert cache.rows == {}

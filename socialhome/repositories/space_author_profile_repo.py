@@ -9,8 +9,10 @@ One row per ``(space_id, author_user_id)``: the newest verified
 - ``signed_item`` is kept only where a new-follower bundle can be built; the
   caller decides, and only a seed holder keeps it.
 
-At most :data:`MAX_CACHED_AUTHORS_PER_SPACE` rows per space; the least
-recently stamped rows are pruned.
+At most :data:`MAX_CACHED_AUTHORS_PER_SPACE` other households' rows per
+space; the least recently stamped are pruned (in a space with more authors,
+one whose profile is older than the newest 200 is then named again only on
+its next profile change). Our own authors' rows are never pruned.
 
 Holds no business logic.
 :class:`~socialhome.services.space_item_inbound.SpaceItemInbound` verifies
@@ -82,8 +84,9 @@ class AbstractSpaceAuthorProfileRepo(Protocol):
         self, space_id: str, *, limit: int
     ) -> builtins.list[BundleEntry]: ...
     async def list_spaces_for_author(
-        self, author_user_id: str, author_pk: str
+        self, author_user_id: str
     ) -> builtins.list[str]: ...
+    async def delete(self, space_id: str, author_user_id: str) -> None: ...
     async def list_for(
         self, space_id: str, author_user_ids: Iterable[str]
     ) -> builtins.list[SpaceAuthorProfile]: ...
@@ -152,10 +155,16 @@ class SqliteSpaceAuthorProfileRepo:
             ),
         )
         if changed:
+            # Our own authors' rows are never pruned: they are our record
+            # of what we published (dropping one would re-send it to every
+            # follower on the next post) and bounded by our user count.
             await self._db.enqueue(
                 "DELETE FROM space_author_profiles WHERE space_id=? AND "
-                "author_user_id NOT IN (SELECT author_user_id FROM "
-                "space_author_profiles WHERE space_id=? ORDER BY ts DESC LIMIT ?)",
+                "author_pk IS NOT (SELECT identity_public_key FROM "
+                "instance_identity) AND author_user_id NOT IN (SELECT "
+                "author_user_id FROM space_author_profiles WHERE space_id=? AND "
+                "author_pk IS NOT (SELECT identity_public_key FROM "
+                "instance_identity) ORDER BY ts DESC LIMIT ?)",
                 (profile.space_id, profile.space_id, MAX_CACHED_AUTHORS_PER_SPACE),
             )
         return bool(changed)
@@ -221,18 +230,21 @@ class SqliteSpaceAuthorProfileRepo:
                 )
         return out
 
-    async def list_spaces_for_author(
-        self, author_user_id: str, author_pk: str
-    ) -> builtins.list[str]:
-        """The spaces holding a profile of this author under this
-        household key, i.e. where a household's own author has published
-        one."""
+    async def list_spaces_for_author(self, author_user_id: str) -> builtins.list[str]:
+        """The spaces holding a profile of this author — for one of our own
+        users, where we published one (a user id is household-bound, so no
+        other household's row can carry it)."""
         rows = await self._db.fetchall(
-            "SELECT space_id FROM space_author_profiles "
-            "WHERE author_user_id=? AND author_pk=?",
-            (author_user_id, author_pk),
+            "SELECT space_id FROM space_author_profiles WHERE author_user_id=?",
+            (author_user_id,),
         )
         return [str(r["space_id"]) for r in rows]
+
+    async def delete(self, space_id: str, author_user_id: str) -> None:
+        await self._db.enqueue(
+            "DELETE FROM space_author_profiles WHERE space_id=? AND author_user_id=?",
+            (space_id, author_user_id),
+        )
 
     async def list_for(
         self, space_id: str, author_user_ids: Iterable[str]

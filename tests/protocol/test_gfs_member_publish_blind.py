@@ -38,11 +38,11 @@ from socialhome.domain.gfs_member_publish import (
     SPACE_ITEM_EVENT_TYPE,
     MemberPublishRequest,
 )
-from socialhome.domain.picture_hash import compute_picture_hash
 from socialhome.domain.space_author_profile import (
     PROFILE_PICTURE_FIELD,
     encode_picture_sidecar,
     encode_profile_content,
+    profile_picture_digest,
 )
 from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
 from socialhome.global_server.app_keys import (
@@ -445,7 +445,7 @@ async def test_an_author_profile_reaches_the_gfs_with_no_name_bio_or_picture(
     content, _rev = encode_profile_content(
         display_name="Noor Haddad",
         bio="Beekeeper on a Höngg rooftop.",
-        picture_hash=compute_picture_hash(picture),
+        picture_hash=profile_picture_digest(picture),
     )
     sent: list[dict] = []
     real_post = gfs.session.post

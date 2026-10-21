@@ -27,11 +27,11 @@ import json
 import pytest
 from PIL import Image
 
-from socialhome.domain.picture_hash import compute_picture_hash
 from socialhome.domain.space_author_profile import (
     PROFILE_PICTURE_FIELD,
     encode_picture_sidecar,
     encode_profile_content,
+    profile_picture_digest,
 )
 from socialhome.repositories.space_author_profile_repo import (
     SqliteSpaceAuthorProfileRepo,
@@ -59,6 +59,12 @@ def _webp() -> bytes:
     return buf.getvalue()
 
 
+def _other_webp() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32), (10, 200, 90)).save(buf, "WEBP")
+    return buf.getvalue()
+
+
 def _profile(
     signer, *, about=None, ts=None, sidecar: bytes | None | bool = True, **content_kw
 ) -> dict:
@@ -69,7 +75,7 @@ def _profile(
     content, _ = encode_profile_content(
         display_name=content_kw.pop("display_name", "Bob Builder"),
         bio=content_kw.pop("bio", "Builds boats."),
-        picture_hash=compute_picture_hash(picture) if picture else None,
+        picture_hash=profile_picture_digest(picture) if picture else None,
     )
     target = about or signer.user_id
     inner = _generic(
@@ -218,7 +224,7 @@ async def test_a_relayed_picture_is_re_encoded_never_stored_as_sent(env, profile
         await _cert(env, BOB, "comment"),
     )
     got = await _held(profiles, BOB.user_id)
-    assert got is not None and got.picture_hash == compute_picture_hash(sent)
+    assert got is not None and got.picture_hash == profile_picture_digest(sent)
     stored = await profiles.get_picture(SPACE, BOB.user_id)
     assert stored is not None
     raw, picture_hash = stored
@@ -280,4 +286,28 @@ async def test_a_seed_holder_keeps_the_signed_item_with_its_picture(env, profile
     [kept] = await profiles.list_signed_items(SPACE, limit=5)
     assert kept.epoch == epoch
     assert kept.item == {**inner, "writer_cert": cert}
-    assert kept.picture_hash == compute_picture_hash(_webp())
+    assert kept.picture_hash == profile_picture_digest(_webp())
+
+
+async def test_a_seed_holder_stores_the_item_without_unsigned_junk(env, profiles):
+    """Review I5: only the signed fields, the signature, the writer cert and
+    the picture are kept for the bundle — never a member's padding."""
+    await env["spaces"].set_space_seed(SPACE, env["space_kp"].private_key)
+    inner = {**_profile(BOB), "junk": "x" * 50_000}
+    await _send(env, "author_profile", inner, await _cert(env, BOB, "comment"))
+    [kept] = await profiles.list_signed_items(SPACE, limit=5)
+    assert "junk" not in kept.item
+
+
+async def test_a_seed_holder_drops_the_old_picture_when_the_hash_changes(env, profiles):
+    """Review: the held original picture rides on only while the signed
+    hash is the same; a new hash without bytes leaves no picture to forward."""
+    await env["spaces"].set_space_seed(SPACE, env["space_kp"].private_key)
+    cert = await _cert(env, BOB, "comment")
+    await _send(env, "author_profile", _profile(BOB, ts=_now(-60)), cert)
+    [first] = await profiles.list_signed_items(SPACE, limit=5)
+    assert PROFILE_PICTURE_FIELD in first.item
+    newer = _profile(BOB, picture_webp=_other_webp(), sidecar=False)
+    await _send(env, "author_profile", newer, cert)
+    [kept] = await profiles.list_signed_items(SPACE, limit=5)
+    assert PROFILE_PICTURE_FIELD not in kept.item

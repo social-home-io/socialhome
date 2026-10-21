@@ -189,11 +189,8 @@ async def test_spaces_an_author_has_a_profile_in(db):
         replace(P, space_id="sp2", author_pk="cd" * 32, author_user_id="u-x"),
         picture_webp=None,
     )
-    assert sorted(await repo.list_spaces_for_author("u-noor", "ab" * 32)) == [
-        "sp",
-        "sp2",
-    ]
-    assert await repo.list_spaces_for_author("u-noor", "cd" * 32) == []
+    assert sorted(await repo.list_spaces_for_author("u-noor")) == ["sp", "sp2"]
+    assert await repo.list_spaces_for_author("u-nobody") == []
 
 
 async def test_display_reads_name_a_picture_only_once_its_bytes_are_held(db):
@@ -210,3 +207,40 @@ async def test_display_reads_name_a_picture_only_once_its_bytes_are_held(db):
     await repo.set_picture("sp", "u-noor", "0123456789abcdef", b"RIFFokWEBP")
     [row] = await repo.list_for("sp", ["u-noor"])
     assert row.picture_hash == "0123456789abcdef"
+
+
+async def test_our_own_authors_are_never_pruned(db, monkeypatch):
+    """REGRESSION (review I3): our own rows are the persisted "what we
+    published" record; pruning one made the next post republish to every
+    follower (and evict someone else — a steady churn past the cap)."""
+    monkeypatch.setattr(
+        "socialhome.repositories.space_author_profile_repo."
+        "MAX_CACHED_AUTHORS_PER_SPACE",
+        2,
+    )
+    repo = await _repo(db)
+    await db.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES('own.home', 'x', ?, ?)",
+        ("ab" * 32, "0" * 64),
+    )
+    await repo.upsert_if_newer(P, picture_webp=None)  # ours (author_pk ab…)
+    for i in range(4):
+        await repo.upsert_if_newer(
+            replace(
+                P,
+                author_user_id=f"u{i}",
+                author_pk="cd" * 32,
+                ts=f"2026-10-20T1{i}:00:00.000000+00:00",
+            ),
+            picture_webp=None,
+        )
+    kept = sorted(p.author_user_id for p in await repo.list_for_space("sp"))
+    assert kept == ["u-noor", "u2", "u3"]
+
+
+async def test_delete_forgets_one_author(db):
+    repo = await _repo(db)
+    await repo.upsert_if_newer(P, picture_webp=None)
+    await repo.delete("sp", "u-noor")
+    assert await repo.get("sp", "u-noor") is None

@@ -16,8 +16,7 @@ def _item(i: int, *, picture: str | None = None, pad: int = 0) -> dict:
     inner = {
         "item_type": "author_profile",
         "author_user_id": f"u{i}",
-        "n": i,
-        "pad": "x" * pad,
+        "content": f"n{i}" + "x" * pad,
     }
     if picture is not None:
         inner[PROFILE_PICTURE_FIELD] = picture
@@ -36,7 +35,9 @@ def test_the_first_part_carries_every_name_and_no_picture_bytes():
     entries = [_entry(i, picture="A" * 20_000) for i in range(5)]
     parts = b.build_bundle_parts("sp", entries)
     first = _parse(parts[0])
-    assert [x["item"]["n"] for x in first["items"]] == list(range(5))
+    assert [x["item"]["author_user_id"] for x in first["items"]] == [
+        f"u{i}" for i in range(5)
+    ]
     assert all(PROFILE_PICTURE_FIELD not in x["item"] for x in first["items"])
     assert [x["epoch"] for x in first["items"]] == [i % 3 for i in range(5)]
     assert first["pictures"] == []
@@ -82,10 +83,10 @@ def test_at_most_the_author_cap():
 
 
 def test_names_that_do_not_fit_one_part_are_left_out():
-    entries = [_entry(i, pad=20_000) for i in range(10)]
+    entries = [_entry(i, pad=3_000) for i in range(60)]
     parts = b.build_bundle_parts("sp", entries)
     first = _parse(parts[0])
-    assert 0 < len(first["items"]) < 10
+    assert 0 < len(first["items"]) < b.MAX_BUNDLE_AUTHORS
     assert len(parts[0]) <= b.BUNDLE_PART_MAX_BYTES
 
 
@@ -100,7 +101,10 @@ def test_round_trip():
     ]
     assert parsed[0] is not None
     assert parsed[0].space_id == "sp"
-    assert [(e, i["n"]) for e, i in parsed[0].items] == [(0, 0), (1, 1)]
+    assert [(e, i["author_user_id"]) for e, i in parsed[0].items] == [
+        (0, "u0"),
+        (1, "u1"),
+    ]
     pics = [p for part in parsed if part is not None for p in part.pictures]
     assert pics == [("u0", f"{0:016x}", "PIC0"), ("u1", f"{1:016x}", "PIC1")]
 
@@ -133,3 +137,21 @@ def test_round_trip():
 def test_malformed_plaintext_is_refused(body):
     raw = body.encode() if isinstance(body, str) else json.dumps(body).encode()
     assert b.parse_bundle_plaintext(raw) is None
+
+
+def test_padding_that_is_not_signed_never_rides_in_a_bundle():
+    """Review I5: only the signed shape is forwarded; an oversized item is
+    left out rather than crowding the other names out of part 0."""
+    padded = {**_item(1), "junk": "x" * 100_000}
+    huge = _item(2, pad=5_000)  # over MAX_PROFILE_ITEM_BYTES even when kept
+    parts = b.build_bundle_parts(
+        "sp",
+        [
+            b.BundleEntry(epoch=0, item=padded, picture_hash=None),
+            b.BundleEntry(epoch=0, item=huge, picture_hash=None),
+            _entry(3),
+        ],
+    )
+    [first] = [_parse(raw) for raw in parts]
+    assert [x["item"]["author_user_id"] for x in first["items"]] == ["u1", "u3"]
+    assert "junk" not in first["items"][0]["item"]

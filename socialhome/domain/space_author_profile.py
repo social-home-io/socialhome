@@ -15,7 +15,7 @@ it is covered by the existing author signature with no new signing domain:
 * ``display_name`` — the space name, else the household name (≤ 64 chars);
 * ``bio`` — the household bio (≤ 300 chars), ``null`` for a protected
   account;
-* ``picture_hash`` — the 16-hex hash of the author's public picture (a
+* ``picture_hash`` — the full SHA-256 (hex) of the author's public picture (a
   WebP ≤ :data:`PROFILE_PICTURE_MAX_BYTES`, at most
   :data:`PROFILE_PICTURE_MAX_PX` square), ``null`` for none / a protected
   account;
@@ -40,10 +40,9 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from urllib.parse import quote
-
-from .picture_hash import clean_picture_hash, compute_picture_hash
 
 #: Largest picture a profile carries (bytes of WebP).
 PROFILE_PICTURE_MAX_BYTES: int = 24 * 1024
@@ -56,6 +55,46 @@ PROFILE_BIO_MAX_LENGTH: int = 300
 #: The unsigned inner field the picture bytes ride in (base64 WebP) next to
 #: the signed ``content`` that names them by hash.
 PROFILE_PICTURE_FIELD: str = "picture"
+
+#: The signed ``picture_hash`` of a profile picture: the FULL SHA-256 of the
+#: WebP, hex. A 64-bit prefix (the household ``picture_hash`` format) would
+#: let an author make two WebPs with the same signed hash (~2^32 work) and
+#: show different pictures through different servers.
+_PICTURE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+
+#: Every key a kept (and forwarded) ``author_profile`` item may carry: the
+#: author-signed fields (``services.space_item_author._SIGNED_FIELDS``,
+#: pinned by a test), the signature, the writer cert and the picture
+#: sidecar. Anything else is unsigned padding a member could use to crowd
+#: other authors out of a bundle.
+PROFILE_ITEM_KEYS: frozenset[str] = frozenset(
+    {
+        "item_type",
+        "item_target",
+        "space_id",
+        "post_id",
+        "author_user_id",
+        "author_pk",
+        "author_username",
+        "identity_anchor",
+        "origin_instance_id",
+        "ts",
+        "comment_type",
+        "parent_id",
+        "content",
+        "media_url",
+        "created_at",
+        "emoji",
+        "author_sig_suite",
+        "author_sig",
+        "writer_cert",
+        "picture",
+    }
+)
+
+#: The most bytes a kept profile item may take without its picture (a
+#: name-and-bio item with its cert is ~1–2 KiB).
+MAX_PROFILE_ITEM_BYTES: int = 4096
 
 
 @dataclass(slots=True, frozen=True)
@@ -161,9 +200,10 @@ def decode_profile_content(content: object) -> AuthorProfile | None:
     ):
         return None
     bio = (bio or "").strip() or None
-    raw_hash = body.get("picture_hash")
-    picture_hash = clean_picture_hash(raw_hash)
-    if raw_hash is not None and picture_hash is None:
+    picture_hash = body.get("picture_hash")
+    if picture_hash is not None and (
+        not isinstance(picture_hash, str) or not _PICTURE_DIGEST_RE.match(picture_hash)
+    ):
         return None
     return AuthorProfile(
         display_name=name,
@@ -171,6 +211,22 @@ def decode_profile_content(content: object) -> AuthorProfile | None:
         picture_hash=picture_hash,
         profile_rev=profile_rev(name, bio, picture_hash),
     )
+
+
+def profile_picture_digest(picture_webp: bytes) -> str:
+    """The signed ``picture_hash`` of a profile picture (full SHA-256, hex)."""
+    return hashlib.sha256(picture_webp).hexdigest()
+
+
+def stored_profile_inner(inner: dict) -> dict | None:
+    """``inner`` as a cache keeps and a bundle forwards it: only
+    :data:`PROFILE_ITEM_KEYS`, and ``None`` when that is still over
+    :data:`MAX_PROFILE_ITEM_BYTES` without the picture."""
+    kept = {k: v for k, v in inner.items() if k in PROFILE_ITEM_KEYS}
+    bare = {k: v for k, v in kept.items() if k != PROFILE_PICTURE_FIELD}
+    if len(json.dumps(bare, separators=(",", ":")).encode()) > MAX_PROFILE_ITEM_BYTES:
+        return None
+    return kept
 
 
 def encode_picture_sidecar(picture_webp: bytes) -> str:
@@ -196,7 +252,7 @@ def decode_picture_sidecar(raw: object, picture_hash: str | None) -> bytes | Non
         len(picture) > PROFILE_PICTURE_MAX_BYTES
         or picture[:4] != b"RIFF"
         or picture[8:12] != b"WEBP"
-        or compute_picture_hash(picture) != picture_hash
+        or profile_picture_digest(picture) != picture_hash
     ):
         return None
     return picture

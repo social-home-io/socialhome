@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -471,11 +472,17 @@ class _Sink:
         return len(items) + len(pictures)
 
 
-def _bundle_frame(env, space_id, *, plaintext: bytes, seed=None, kw_pub=None):
+def _bundle_frame(
+    env, space_id, *, plaintext: bytes, seed=None, kw_pub=None, issued_at=None
+):
     sealed = seal_to_keywrap(
         recipient_keywrap_pub=kw_pub or env["kw_kp"].public_key, plaintext=plaintext
     )
-    envelope: dict = {"space_id": space_id, "sealed": sealed}
+    envelope: dict = {
+        "space_id": space_id,
+        "sealed": sealed,
+        "issued_at": issued_at or datetime.now(UTC).isoformat(),
+    }
     envelope.update(
         sign_authority_event(
             event_type=AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
@@ -573,4 +580,24 @@ async def test_a_bundle_for_an_unknown_space_or_without_a_sink_is_dropped(env):
     env["svc"].attach_profiles_sink(sink)
     await env["svc"].handle(_bundle_frame(env, "sp-b", plaintext=_bundle_plain()))
     await env["svc"].handle({"event_type": "space_author_profiles_bundle"})
+    assert sink.calls == []
+
+
+@pytest.mark.parametrize(
+    "skew_s", [-7200, 3600, None], ids=["old", "future", "undated"]
+)
+async def test_a_stale_or_undated_bundle_is_refused(env, skew_s):
+    """Review minor: a GFS replaying an old bundle (or one from the future)
+    gets nothing applied."""
+    issued_at = (
+        (datetime.now(UTC) + timedelta(seconds=skew_s)).isoformat()
+        if skew_s is not None
+        else "not a time"
+    )
+    await env["mirror_space"]("sp-b", pubkey_hex=env["skp"].public_key.hex())
+    sink = _Sink()
+    env["svc"].attach_profiles_sink(sink)
+    await env["svc"].handle(
+        _bundle_frame(env, "sp-b", plaintext=_bundle_plain(), issued_at=issued_at)
+    )
     assert sink.calls == []

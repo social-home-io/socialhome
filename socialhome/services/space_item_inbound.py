@@ -91,6 +91,7 @@ from ..domain.space_author_profile import (
     SpaceAuthorProfile,
     decode_picture_sidecar,
     decode_profile_content,
+    stored_profile_inner,
     without_picture_sidecar,
 )
 from ..domain.space_item import (
@@ -306,8 +307,16 @@ class SpaceItemInbound:
         if sidecar is not None and not (same_picture and held and held.has_picture):
             picture = await public_profile_picture(sidecar)
         signed_item: dict | None = None
-        if await self._spaces.get_space_seed(item.space.id) is not None:
-            signed_item = without_picture_sidecar(item.inner)
+        kept = stored_profile_inner(item.inner)
+        if kept is None:
+            log.warning(
+                "space_item: author_profile for %s in space %s is oversized — "
+                "kept without its signed item",
+                item.author,
+                item.space.id,
+            )
+        if kept is not None and await self._spaces.get_space_seed(item.space.id):
+            signed_item = without_picture_sidecar(kept)
             # The original bytes are what a follower checks against the
             # signed hash, so the host keeps them with the item: these ones,
             # or the ones it held for the same signed hash.
