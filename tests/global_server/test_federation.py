@@ -3519,3 +3519,18 @@ async def test_a_targeted_publish_reads_one_seat_not_the_list(gfs_db, monkeypatc
         "sp-pk", "space_author_profiles_bundle", payload, to="sub-b"
     )
     assert delivered == ["sub-b"]
+
+
+async def test_a_flapping_socket_does_not_re_notify_within_the_window(gfs_db):
+    """Review: two WS hellos within RECONNECT_NOTIFY_DEDUPE_S notify each
+    seat's owner once."""
+    ws = _RecordingWsRegistry()
+    repo = SqliteGfsFederationRepo(gfs_db)
+    svc = GfsFederationService(repo, ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-fl")
+    await _signed_subscribe(svc, sub_seed, "sp-fl")
+    restarted = GfsFederationService(repo, ws_registry=ws)
+    ws.sent.clear()
+    await restarted.on_subscriber_connected("sub-r")
+    await restarted.on_subscriber_connected("sub-r")
+    assert [f["reason"] for f in _notifies(ws)] == ["reconnect"]

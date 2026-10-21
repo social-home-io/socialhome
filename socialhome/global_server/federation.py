@@ -147,13 +147,14 @@ INSTANCE_UPDATE_TS_SKEW_SECONDS: int = 300
 #: queued member items — one registration can stand for.
 MAX_SUBSCRIPTIONS_PER_INSTANCE: int = 500
 
-#: Max ``new_subscriber`` re-notifies triggered by a SINGLE subscriber
-#: (re)connect (Phase 5b-d). A household subscribed to hundreds of spaces must
-#: not turn its own reconnect into an unbounded fan-out of owner notifies (each
-#: one makes a seed-holder re-seal a key). Spaces beyond the cap are simply not
-#: re-notified on this connect — the Phase-5b-c reconcile (run by every
-#: seed-holder on ITS reconnect) still backstops them, so the cap costs latency,
-#: never correctness.
+#: Max ``new_subscriber`` re-notifies the WS hello itself sends for a SINGLE
+#: subscriber (re)connect (Phase 5b-d). It bounds the hello's own burst. The
+#: follower then re-subscribes each held seat, and those re-takes repair the
+#: rest (deduped by :data:`RECONNECT_NOTIFY_DEDUPE_S`). So a reconnect costs
+#: at most one key handoff per held seat
+#: (≤ :data:`MAX_SUBSCRIPTIONS_PER_INSTANCE`). The Phase-5b-c reconcile, which
+#: every seed holder runs on ITS own reconnect, still backstops an owner that
+#: was offline.
 MAX_RECONNECT_NOTIFIES: int = 50
 
 #: ``new_subscriber.reason`` (v_61): a NEW seat — the owner may send the
@@ -371,6 +372,7 @@ class GfsFederationService:
 
     __slots__ = (
         "_epoch_repo",
+        "_hello_seats",
         "_invite_repo",
         "_notified_seats",
         "_reconnect_tasks",
@@ -402,6 +404,11 @@ class GfsFederationService:
         # ``(subscriber, space)`` pairs notified in the last
         # RECONNECT_NOTIFY_DEDUPE_S — a seat re-take skips its notify then.
         self._notified_seats = SeenPayloadCache(
+            ttl_s=RECONNECT_NOTIFY_DEDUPE_S, cap=SEAT_NOTIFY_CACHE_MAX
+        )
+        # ``(subscriber, space)`` pairs a WS hello notified in the same
+        # window — the hello's own flap guard.
+        self._hello_seats = SeenPayloadCache(
             ttl_s=RECONNECT_NOTIFY_DEDUPE_S, cap=SEAT_NOTIFY_CACHE_MAX
         )
         # ``(subscriber, space)`` pairs that got a NEW seat in the last
@@ -968,7 +975,9 @@ class GfsFederationService:
             # just covered it; but the hello notifies at most
             # MAX_RECONNECT_NOTIFIES seats, so a seat it did not reach gets
             # its key repair here — once, never a bundle.
-            if self._notified_seats.seen(seat):
+            if existing.owning_instance == instance_id or self._notified_seats.seen(
+                seat
+            ):
                 return
             await self._notify_owner_new_subscriber(
                 existing.owning_instance,
@@ -1031,6 +1040,9 @@ class GfsFederationService:
         }
         if reason == NEW_SUBSCRIBER_REASON_SUBSCRIBE:
             sub["accepts"] = list(accepts)
+        # Recorded BEFORE the send, so a concurrent re-take of the same seat
+        # sees it. An owner that was offline then gets its repair from the
+        # next re-take after the window, or from its own 5b-c reconcile.
         self._notified_seats.record(_seat_key(subscriber.instance_id, space_id))
         try:
             await self._ws_registry.send(
@@ -1109,6 +1121,12 @@ class GfsFederationService:
             # An owner needs no handoff to itself.
             if space.owning_instance == instance_id:
                 continue
+            # A flapping socket: this seat's owner was asked by a hello
+            # moments ago. Only a HELLO counts here: a subscribe notify sent
+            # while the socket was down must still be repaired now.
+            seat = _seat_key(instance_id, space.space_id)
+            if self._hello_seats.seen(seat):
+                continue
             if sent >= MAX_RECONNECT_NOTIFIES:
                 log.info(
                     "GFS: reconnect notify for %s capped at %d spaces "
@@ -1124,6 +1142,7 @@ class GfsFederationService:
                 subscriber,
                 reason=NEW_SUBSCRIBER_REASON_RECONNECT,
             )
+            self._hello_seats.record(seat)
             sent += 1
         if sent:
             log.debug(

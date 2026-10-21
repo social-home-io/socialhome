@@ -1296,8 +1296,13 @@ capped at `MAX_RECONNECT_NOTIFIES` (50) spaces per connect. The follower
 re-subscribes every seat right after its hello (the reconnect self-heal);
 re-taking a held seat sends the same `reason:"reconnect"` notify unless that
 seat was notified in the last 120 s (`RECONNECT_NOTIFY_DEDUPE_S`, in memory),
-so the seats past the cap get their key repair too and the first 50 are not
-repaired twice. The 5b-c reconcile still backstops an offline owner.
+so the seats past the cap get their key repair too. The first 50 are usually
+not repaired twice: the hello runs as a background task, so an early re-take
+can race it, and a duplicate handoff is idempotent. The hello itself skips a
+seat an earlier hello notified within that window (a subscribe notify sent
+while the socket was down does not count), so a flapping socket does not re-notify
+its owners on every reconnect. A reconnect therefore costs at most one
+~1–2 KB handoff per held seat: a 500-seat follower costs ≈ 750 KB. The 5b-c reconcile still backstops an offline owner.
 
 WebRTC is **not** used for the SH↔GFS leg — the GFS is publicly
 reachable, so NAT traversal buys nothing while DTLS plus per-connection
@@ -1641,8 +1646,8 @@ migration 0114), so the host can forward it unchanged:
   household's verified key-wrap key).
 - **Churn earns no second bundle.** An unsubscribe → subscribe makes a new
   seat, so two guards stop a loop: the GFS forwards no `accepts` for a seat
-  of the same `(follower, space)` that was new within the hour
-  (`SEAT_CHURN_WINDOW_S`), and the host bundles one follower of a space at
+  of the same `(follower, space)` that was new within an hour of its
+  last new seat (`SEAT_CHURN_WINDOW_S`), and the host bundles one follower of a space at
   most once an hour (`BUNDLE_PER_FOLLOWER_EVERY_S`, an LRU of ≤ 10 000) —
   so one follower's loop cannot use up the space's per-minute cap and leave
   real newcomers without names. The key is re-sealed every time.
