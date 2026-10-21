@@ -41,11 +41,14 @@ from socialhome.global_server.app_keys import (
     gfs_channel_service_key,
     gfs_cluster_key,
     gfs_cluster_repo_key,
+    gfs_config_key,
     gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
+    gfs_highlight_pub_service_key,
     gfs_member_publish_key,
     gfs_moment_public_follow_repo_key,
     gfs_moment_public_registry_key,
+    gfs_rtc_key,
     gfs_ws_registry_key,
 )
 from socialhome.global_server.cluster import (
@@ -1683,3 +1686,303 @@ async def test_a_rename_on_one_node_reaches_households_on_every_node(
         )
         frames = [await _next_frame(ws, "server_info_updated") for ws in (on_a, on_b)]
     assert frames == [{"type": "server_info_updated", "server_name": "Renamed GFS"}] * 2
+
+
+# ─── Public-highlight sessions through a cluster (session-sticky routing) ──
+
+_HL_AUTHOR_ID = "hlauthor22222222222222222222222a"
+_HL_ID = "hl-cluster"
+_VIEWER_KEY = "B" + "A" * 86
+
+
+@pytest.fixture
+async def sticky_nodes(tmp_path_factory, monkeypatch):
+    """Two nodes on one DB, each with its own ``[cluster] route_tag`` — what
+    production's balancer routes a session's requests by."""
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_MIN_GAP_S", 0.0, raising=False)
+    shared = tmp_path_factory.mktemp("gfs-sticky")
+    names = ("node-a", "node-b")
+    nodes = []
+    for node_id in names:
+        config = replace(
+            _shared_config(shared, node_id), cluster_route_tag=f"tag-{node_id[-1]}"
+        )
+        server = TestServer(create_gfs_app(config))
+        await server.start_server()
+        nodes.append(server)
+    own_key = nodes[0].app[gfs_cluster_key].own_public_key_hex
+    for node_id, server in zip(names, nodes, strict=True):
+        await (
+            nodes[0]
+            .app[gfs_cluster_repo_key]
+            .insert_node(
+                ClusterNode(
+                    node_id=node_id,
+                    url=str(server.make_url("")).rstrip("/"),
+                    public_key=own_key,
+                    status="online",
+                )
+            )
+        )
+    try:
+        yield nodes
+    finally:
+        for server in reversed(nodes):
+            await server.close()
+
+
+def _balancer(nodes, scoped_id: str) -> TestServer:
+    """What the HAProxy rules do: the node whose route tag the id names."""
+    tag = scoped_id.partition(".")[0]
+    by_tag = {n.app[gfs_config_key].cluster_route_tag: n for n in nodes}
+    assert tag in by_tag, f"{scoped_id!r} names no node"
+    return by_tag[tag]
+
+
+async def _published_highlight(app) -> tuple[bytes, str]:
+    """The author household registered and one highlight published; returns
+    (author seed, share token)."""
+    kp = generate_identity_keypair()
+    await app[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(
+            instance_id=_HL_AUTHOR_ID,
+            display_name="Author",
+            public_key=kp.public_key.hex(),
+            status="active",
+        )
+    )
+    tok, _url = await app[gfs_highlight_pub_service_key].record_publish(
+        highlight_id=_HL_ID,
+        instance_id=_HL_AUTHOR_ID,
+        expires_at=10_000_000_000,
+        publish_signature="",
+    )
+    return kp.private_key, tok.token
+
+
+def _signed_author(seed: bytes, body: dict) -> dict:
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    return {**body, "signature": b64url_encode(sign_ed25519(seed, canonical))}
+
+
+def _relay_upload_headers(seed: bytes, relay_id: str) -> dict[str, str]:
+    ts = int(time.time())
+    body = {"instance_id": _HL_AUTHOR_ID, "relay_id": relay_id, "ts": ts}
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    return {
+        "X-SH-Instance": _HL_AUTHOR_ID,
+        "X-SH-Timestamp": str(ts),
+        "X-SH-Signature": b64url_encode(sign_ed25519(seed, canonical)),
+    }
+
+
+async def _signal(ws, kind: str, *, timeout: float = 5.0) -> dict:
+    """The next ``highlight_signal`` frame of *kind* on *ws*."""
+    deadline = time.monotonic() + timeout
+    while True:
+        frame = await _next_frame(
+            ws, "highlight_signal", timeout=deadline - time.monotonic()
+        )
+        if frame.get("kind") == kind:
+            return frame
+
+
+def _offer_body(token: str) -> dict:
+    return {
+        "instance_id": _HL_AUTHOR_ID,
+        "highlight_id": _HL_ID,
+        "token": token,
+        "sdp": "v=0 offer",
+        "vk": _VIEWER_KEY,
+    }
+
+
+async def test_a_highlight_session_on_one_node_reaches_the_author_on_another(
+    sticky_nodes,
+):
+    """The author's socket is on node A; the balancer sent the viewer's offer
+    to node B. The offer reaches the author through the cluster, the
+    session id names node B, and every later request of the session — the
+    author's answer and ICE, the viewer's ICE and polls — lands on B through
+    the route tag. Before, B answered the offer 503 (no socket here) and the
+    rest of the session hit nodes that did not hold it."""
+    a, b = sticky_nodes
+    seed, token = await _published_highlight(a.app)
+    async with (
+        aiohttp.ClientSession() as http,
+        http.ws_connect(a.make_url("/gfs/ws")) as author_ws,
+    ):
+        await _ws_hello(author_ws, _HL_AUTHOR_ID, seed)
+        await _await_connected(a.app, _HL_AUTHOR_ID)
+        async with http.post(
+            b.make_url("/gfs/highlight_rtc/offer"), json=_offer_body(token)
+        ) as r:
+            assert r.status == 201
+            session_id = (await r.json())["session_id"]
+        assert session_id.startswith("tag-b.")
+        offer = await _signal(author_ws, "offer")
+        assert offer["session_id"] == session_id
+        assert (offer["token"], offer["vk"], offer["sdp"]) == (
+            token,
+            _VIEWER_KEY,
+            "v=0 offer",
+        )
+
+        node = _balancer(sticky_nodes, session_id)
+        answer = {"instance_id": _HL_AUTHOR_ID, "session_id": session_id}
+        async with http.post(
+            node.make_url("/gfs/highlight_rtc/answer"),
+            json=_signed_author(seed, {**answer, "sdp": "v=0 answer"}),
+        ) as r:
+            assert r.status == 200
+        async with http.post(
+            node.make_url("/gfs/highlight_rtc/ice/author"),
+            json=_signed_author(seed, {**answer, "candidate": {"candidate": "a1"}}),
+        ) as r:
+            assert r.status == 200
+        async with http.post(
+            node.make_url("/gfs/highlight_rtc/ice/viewer"),
+            json={"session_id": session_id, "candidate": {"candidate": "v1"}},
+        ) as r:
+            assert r.status == 200
+        ice = await _signal(author_ws, "ice")
+        assert (ice["session_id"], ice["candidate"]) == (
+            session_id,
+            {"candidate": "v1"},
+        )
+        async with http.get(
+            node.make_url(f"/gfs/highlight_rtc/session/{session_id}")
+        ) as r:
+            assert r.status == 200
+            poll = await r.json()
+    assert poll["answer_sdp"] == "v=0 answer"
+    # The viewer reads the AUTHOR's candidates, never its own back.
+    assert poll["ice_candidates"] == [{"candidate": "a1"}]
+
+
+async def test_a_relayed_highlight_streams_through_the_node_the_viewer_reached(
+    sticky_nodes,
+):
+    """The relay fallback: the viewer's GET held by node B, the author's
+    socket on node A. The ``relay_offer`` reaches the author through the
+    cluster and its upload is routed to B by the relay id — the bytes go
+    author → B → viewer and never touch node A."""
+    a, b = sticky_nodes
+    seed, token = await _published_highlight(a.app)
+    async with (
+        aiohttp.ClientSession() as http,
+        http.ws_connect(a.make_url("/gfs/ws")) as author_ws,
+    ):
+        await _ws_hello(author_ws, _HL_AUTHOR_ID, seed)
+        await _await_connected(a.app, _HL_AUTHOR_ID)
+
+        async def _view() -> tuple[int, bytes]:
+            async with http.get(
+                b.make_url(f"/gfs/highlight_rtc/relay/{_HL_AUTHOR_ID}/{_HL_ID}"),
+                params={"token": token, "vk": _VIEWER_KEY},
+            ) as r:
+                return r.status, await r.read()
+
+        viewer = asyncio.create_task(_view())
+        offer = await _signal(author_ws, "relay_offer")
+        relay_id = offer["relay_id"]
+        assert relay_id.startswith("tag-b.")
+        assert (offer["token"], offer["vk"]) == (token, _VIEWER_KEY)
+        node = _balancer(sticky_nodes, relay_id)
+        async with http.post(
+            node.make_url(f"/gfs/highlight_rtc/relay-stream/{relay_id}"),
+            data=b"sealed-frames",
+            headers=_relay_upload_headers(seed, relay_id),
+        ) as r:
+            assert r.status == 200
+        status, body = await asyncio.wait_for(viewer, timeout=10)
+    assert (status, body) == (200, b"sealed-frames")
+
+
+async def test_a_highlight_whose_author_is_connected_nowhere_is_unavailable(
+    sticky_nodes,
+):
+    """No node holds the author's socket: the node that took the offer asks
+    the cluster, hears nobody holds it and answers the one uniform 503 —
+    and keeps no session."""
+    a, b = sticky_nodes
+    _seed, token = await _published_highlight(a.app)
+    async with (
+        aiohttp.ClientSession() as http,
+        http.post(b.make_url("/gfs/highlight_rtc/offer"), json=_offer_body(token)) as r,
+    ):
+        assert r.status == 503
+        assert await r.json() == {"error": "unavailable"}
+    assert b.app[gfs_rtc_key].session_count() == 0
+
+
+async def test_a_session_request_on_the_wrong_node_is_a_clean_not_found(
+    sticky_nodes, caplog
+):
+    """A balancer that does not route by tag (or a node that restarted and
+    lost the session) answers 404 — the viewer falls back to the relay — and
+    the wrong node says why in its log."""
+    a, b = sticky_nodes
+    seed, token = await _published_highlight(a.app)
+    async with (
+        aiohttp.ClientSession() as http,
+        http.ws_connect(a.make_url("/gfs/ws")) as author_ws,
+    ):
+        await _ws_hello(author_ws, _HL_AUTHOR_ID, seed)
+        await _await_connected(a.app, _HL_AUTHOR_ID)
+        async with http.post(
+            b.make_url("/gfs/highlight_rtc/offer"), json=_offer_body(token)
+        ) as r:
+            assert r.status == 201
+            session_id = (await r.json())["session_id"]
+        with caplog.at_level("WARNING"):
+            async with http.get(
+                a.make_url(f"/gfs/highlight_rtc/session/{session_id}")
+            ) as r:
+                assert r.status == 404
+    assert any("route_tag" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "token_state",
+    ["offline_author", "never_issued", "revoked", "dead_link_author_here"],
+)
+async def test_every_refusal_in_a_cluster_takes_one_cluster_round(
+    sticky_nodes, monkeypatch, token_state
+):
+    """Not a presence oracle across nodes either: a link that never was,
+    one that was revoked and one whose author is connected nowhere all wait
+    for one ``NODE_DRAIN_HINT`` round before the same uniform 503 — the
+    refusal of a dead link does not come back faster than an offline one."""
+    a, b = sticky_nodes
+    _seed, token = await _published_highlight(a.app)
+    if token_state == "revoked":
+        await a.app[gfs_highlight_pub_service_key].revoke_token(token, _HL_AUTHOR_ID)
+    if token_state in ("never_issued", "dead_link_author_here"):
+        token = "never-issued"
+    http0 = aiohttp.ClientSession()
+    if token_state == "dead_link_author_here":
+        # The named household IS connected to the node that takes the dead
+        # link: still one round, or the refusal's speed would say so.
+        author_ws = await http0.ws_connect(b.make_url("/gfs/ws"))
+        await _ws_hello(author_ws, _HL_AUTHOR_ID, _seed)
+        await _await_connected(b.app, _HL_AUTHOR_ID)
+    rounds: list[dict] = []
+    real = ClusterService._broadcast_collect
+
+    async def counted(self, msg_type, payload):
+        if self is b.app[gfs_cluster_key] and msg_type == "NODE_DRAIN_HINT":
+            rounds.append(payload)
+        return await real(self, msg_type, payload)
+
+    monkeypatch.setattr(ClusterService, "_broadcast_collect", counted)
+    async with (
+        aiohttp.ClientSession() as http,
+        http.post(b.make_url("/gfs/highlight_rtc/offer"), json=_offer_body(token)) as r,
+    ):
+        status, body, cors = r.status, await r.json(), r.headers.get("Cache-Control")
+    await http0.close()
+    assert (status, body, cors) == (503, {"error": "unavailable"}, "no-store")
+    assert len(rounds) == 1

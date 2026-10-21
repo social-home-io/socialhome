@@ -92,6 +92,14 @@ interface ViewerState {
   incomplete: boolean
 }
 
+/** Whether a signalling-session poll answered "this session is gone": the
+ *  GFS answers 404 for a session it does not hold (its server restarted, or
+ *  a load balancer sent the poll to another server), and a 5xx means the
+ *  server holding it is down. Either way it will never be answered. */
+export function sessionLost(status: number): boolean {
+  return status === 404 || status >= 500
+}
+
 /** What a viewer shows when the channel or relay closes:
  *  ``complete`` — ``stream_end`` came (or an error is already shown);
  *  ``cant_open`` — nothing sealed for this link ever arrived;
@@ -404,10 +412,24 @@ function PublicHighlightViewer(
             return
           }
           try {
-            const session = await fetchJson<{
+            const r = await gfsFetch(
+              boot.gfs,
+              `/gfs/highlight_rtc/session/${encodeURIComponent(sessionId!)}`,
+            )
+            if (sessionLost(r.status)) {
+              // The GFS no longer holds this session (the server that took
+              // the offer restarted, or the request reached another one): it
+              // will never be answered, so go to the relay now instead of
+              // polling out the whole budget.
+              if (pollTimer) clearInterval(pollTimer)
+              if (!channelOpened) void startRelayFallback()
+              return
+            }
+            if (!r.ok) return // keep polling
+            const session = (await r.json()) as {
               answer_sdp: string | null
               ice_candidates: RTCIceCandidateInit[]
-            }>(boot.gfs, `/gfs/highlight_rtc/session/${encodeURIComponent(sessionId!)}`)
+            }
             if (session.answer_sdp && pc!.remoteDescription === null) {
               await pc!.setRemoteDescription({ type: 'answer', sdp: session.answer_sdp })
             }

@@ -43,6 +43,7 @@ from pathlib import Path
 
 from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
 
+from .node_route import valid_route_tag
 from .peer_url import normalized_peer_url
 
 log = logging.getLogger(__name__)
@@ -173,6 +174,12 @@ class GfsConfig:
     cluster_node_id: str = ""
     cluster_peers: tuple[str, ...] = ()
     cluster_advertise_url: str = ""
+    #: This node's label for session-sticky routing (``[cluster] route_tag``,
+    #: ``GFS_CLUSTER_ROUTE_TAG``): stamped into every public-highlight session
+    #: and relay id this node mints, so the load balancer can send the rest of
+    #: the session here (:mod:`.node_route`). Empty: ids name no node (a single
+    #: node, or a balancer that cannot route by tag). 1-64 of ``A-Za-z0-9-``.
+    cluster_route_tag: str = ""
 
     # Loaded-from path, for audit + --set-password write-back.
     source_path: str = ""
@@ -243,6 +250,9 @@ class GfsConfig:
             cluster_advertise_url=_normalized_advertise_url(
                 cluster.get("advertise_url"), f"GFS config at {p}"
             ),
+            cluster_route_tag=_route_tag(
+                cluster.get("route_tag"), f"GFS config at {p}"
+            ),
             write_batch_window_ms=_window_ms(
                 server.get("write_batch_window_ms", DEFAULT_WRITE_BATCH_WINDOW_MS)
             ),
@@ -305,6 +315,24 @@ class GfsConfig:
                 self.instance_id,
             )
 
+    def check_cluster_routing(self) -> None:
+        """WARN when cluster mode is on without a ``[cluster] route_tag``.
+
+        A public-highlight viewing session lives in one node's memory; behind
+        a round-robin balancer its later requests reach the other nodes
+        unless the session ids name this node and the balancer routes by
+        that (:mod:`.node_route`). Never raises — a cluster whose balancer
+        pins every client to one node works without it."""
+        if self.cluster_enabled and not self.cluster_route_tag:
+            log.warning(
+                "[cluster] route_tag is empty: public-highlight sessions this "
+                "node starts name no node, so behind a round-robin load "
+                "balancer their later requests reach other nodes and viewers "
+                "fall back to the relay or fail. Set a unique route_tag "
+                "(GFS_CLUSTER_ROUTE_TAG) on every node and route by it; see "
+                "docs/operations/gfs-cluster.md.",
+            )
+
     @property
     def cluster_self_url(self) -> str:
         """The URL this node tells cluster peers to reach it at.
@@ -321,10 +349,10 @@ class GfsConfig:
 
         Env wins over the file/defaults this instance was built from
         (env > file > defaults), matching :class:`socialhome.config.Config`.
-        Only the ``[server]`` scalars have env bindings, plus one
-        exception: ``GFS_CLUSTER_ADVERTISE_URL`` (a per-alloc value is
-        what env is for; an empty or whitespace-only value counts as
-        unset). An unset var leaves its field untouched so a single
+        Only the ``[server]`` scalars have env bindings, plus two
+        exceptions: ``GFS_CLUSTER_ADVERTISE_URL`` and
+        ``GFS_CLUSTER_ROUTE_TAG`` (a per-alloc value is what env is for; an
+        empty or whitespace-only value counts as unset). An unset var leaves its field untouched so a single
         override (e.g. a per-instance ``GFS_PORT``) doesn't disturb the
         rest of the file.
         """
@@ -360,9 +388,15 @@ class GfsConfig:
             advertise_url = _normalized_advertise_url(
                 raw_advertise, "GFS_CLUSTER_ADVERTISE_URL env"
             )
+        # Same "empty is unset" rule as the advertise URL.
+        route_tag = self.cluster_route_tag
+        raw_route_tag = env.get("GFS_CLUSTER_ROUTE_TAG", "")
+        if raw_route_tag.strip():
+            route_tag = _route_tag(raw_route_tag.strip(), "GFS_CLUSTER_ROUTE_TAG env")
         return replace(
             self,
             cluster_advertise_url=advertise_url,
+            cluster_route_tag=route_tag,
             host=env.get("GFS_HOST", self.host),
             port=int(env["GFS_PORT"]) if "GFS_PORT" in env else self.port,
             base_url=env.get("GFS_BASE_URL", self.base_url),
@@ -472,6 +506,20 @@ def _normalized_advertise_url(raw: object, origin: str) -> str:
             "prefix]; no query, fragment or credentials)"
         )
     return url
+
+
+def _route_tag(raw: object, origin: str) -> str:
+    """``[cluster] route_tag``: empty / unset means "no tag". Anything else
+    must be a usable tag — a silently dropped one would leave every session
+    of this node unroutable, so it is a config error (fail-safe)."""
+    if raw is None or raw == "":
+        return ""
+    if not valid_route_tag(raw):
+        raise ValueError(
+            f"{origin} has an unusable [cluster] route_tag {raw!r} — it must "
+            "be 1-64 characters of A-Z, a-z, 0-9 and '-'"
+        )
+    return str(raw)
 
 
 def _turn_ttl(raw: int | str) -> int:
@@ -625,6 +673,13 @@ node_id = ""
 # wrong_recipient. Render each node's own address and port instead, e.g.
 # "http://10.0.0.5:28467".
 advertise_url = ""
+# This node's label for session-sticky routing: every public-highlight
+# session and relay id this node mints starts with "<route_tag>.", and the
+# load balancer must send requests naming it here (path or JSON session_id;
+# docs/operations/gfs-cluster.md has the HAProxy rules). Unique per node,
+# 1-64 of A-Z a-z 0-9 '-' (e.g. the Nomad allocation id). Leave empty on a
+# single node.
+route_tag = ""
 peers   = []
 """
 

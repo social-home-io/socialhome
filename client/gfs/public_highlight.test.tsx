@@ -180,3 +180,65 @@ describe('a stream that closes early', () => {
       .toBe('nothing_arrived')
   })
 })
+
+describe('a signalling session the GFS no longer holds', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="root"></div>'
+  })
+
+  it('is lost on a 404 or a server error, not on a transient client error', async () => {
+    const { sessionLost } = await import('./public_highlight')
+    expect(sessionLost(404)).toBe(true)
+    expect(sessionLost(502)).toBe(true)
+    expect(sessionLost(503)).toBe(true)
+    expect(sessionLost(200)).toBe(false)
+    expect(sessionLost(429)).toBe(false)
+  })
+
+  it('goes to the relay at the first lost poll instead of polling out the budget', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/gfs/highlights/ice-servers')) {
+        return new Response(JSON.stringify({ servers: [] }), { status: 200 })
+      }
+      if (url.endsWith('/gfs/highlight_rtc/offer')) {
+        return new Response(JSON.stringify({ session_id: 'node-b.abc' }), { status: 201 })
+      }
+      // The poll reached a server that does not hold the session; the relay
+      // is unavailable too — the page shows that instead of hanging.
+      return new Response('{"error":"not_found"}', { status: url.includes('/relay/') ? 503 : 404 })
+    })
+    class FakePc {
+      iceConnectionState = 'new'
+      remoteDescription = null
+      addEventListener() {}
+      createDataChannel() { return {} }
+      async createOffer() { return { type: 'offer', sdp: 'v=0' } }
+      async setLocalDescription() {}
+      close() {}
+    }
+    vi.stubGlobal('RTCPeerConnection', FakePc)
+    window.location.hash = pinnedHash()
+    await import('./public_highlight')
+    await vi.waitFor(
+      () => {
+        const urls = fetchSpy.mock.calls.map((c) => String(c[0]))
+        expect(urls.some((u) => u.includes('/gfs/highlight_rtc/relay/inst-1/hl-1'))).toBe(true)
+      },
+      { timeout: 4000 },
+    )
+    const urls = fetchSpy.mock.calls.map((c) => String(c[0]))
+    // One poll per offer — a viewer left over from an earlier test that
+    // finishes its start-up here makes two of each, never more polls.
+    const offers = urls.filter((u) => u.endsWith('/gfs/highlight_rtc/offer'))
+    const polls = urls.filter((u) => u.includes('/gfs/highlight_rtc/session/'))
+    expect(offers.length).toBeGreaterThan(0)
+    expect(polls).toEqual(
+      offers.map(() => 'https://gfs.example.org/gfs/highlight_rtc/session/node-b.abc'),
+    )
+    await vi.waitFor(() =>
+      expect(document.querySelector('[role="alert"]')).not.toBeNull(),
+    )
+    vi.unstubAllGlobals()
+  })
+})

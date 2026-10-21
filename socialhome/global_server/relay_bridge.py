@@ -15,9 +15,12 @@ the length-prefixed frames itself. This is used **only** for
 already-public, opt-in content (published highlights, public moments) —
 never for private/space/DM content.
 
-The same bridge backs both the highlight and the public-moments relay;
-``scope`` is a free-form diagnostic label (e.g. the highlight or user
-id), not a routing key.
+``scope`` is a free-form diagnostic label (the highlight id), not a
+routing key. The ``relay_id`` names the node that holds the channel
+(:mod:`.node_route`), so in a cluster the balancer sends the author's upload
+to the node holding the guest's GET — the bytes never cross nodes. One upload
+claims a channel (:meth:`RelayBridge.claim`): a second one for the same id
+is refused rather than interleaved into the guest's stream.
 """
 
 from __future__ import annotations
@@ -25,9 +28,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+
+from .node_route import scoped_id
 
 log = logging.getLogger(__name__)
 
@@ -55,16 +59,20 @@ class _Channel:
     scope: str
     queue: asyncio.Queue[bytes | None]
     connected: asyncio.Event
+    #: An author upload is feeding this channel (:meth:`RelayBridge.claim`).
+    claimed: bool = False
     created_at: float = field(default_factory=time.time)
 
 
 class RelayBridge:
     """Transient guest⇄author byte pipes keyed by an opaque ``relay_id``."""
 
-    __slots__ = ("_channels",)
+    __slots__ = ("_channels", "_route_tag")
 
-    def __init__(self) -> None:
+    def __init__(self, *, route_tag: str = "") -> None:
         self._channels: dict[str, _Channel] = {}
+        #: This node's ``[cluster] route_tag``, stamped into every relay id.
+        self._route_tag = route_tag
 
     def create(self, *, target_instance_id: str, scope: str = "") -> str | None:
         """Open a channel the author ``target_instance_id`` may stream into.
@@ -75,9 +83,10 @@ class RelayBridge:
         instead of growing memory unbounded. Bounded queue → backpressure:
         a slow guest reader throttles the author's upload.
         """
+        self.gc_expired()
         if len(self._channels) >= MAX_LIVE_CHANNELS:
             return None
-        relay_id = uuid.uuid4().hex
+        relay_id = scoped_id(self._route_tag)
         self._channels[relay_id] = _Channel(
             relay_id=relay_id,
             target_instance_id=target_instance_id,
@@ -89,6 +98,16 @@ class RelayBridge:
 
     def get(self, relay_id: str) -> _Channel | None:
         return self._channels.get(relay_id)
+
+    def claim(self, relay_id: str) -> bool:
+        """Mark *relay_id* as fed by one upload. ``False`` when the channel
+        is gone or another upload already claimed it — two uploads must not
+        interleave their bytes into one guest stream."""
+        ch = self._channels.get(relay_id)
+        if ch is None or ch.claimed:
+            return False
+        ch.claimed = True
+        return True
 
     async def feed(self, relay_id: str, chunk: bytes) -> bool:
         """Enqueue an author body chunk. Returns False if the channel is
@@ -131,10 +150,17 @@ class RelayBridge:
         self._channels.pop(relay_id, None)
 
     def gc_expired(self, *, now: float | None = None) -> int:
-        """Drop channels older than :data:`RELAY_TTL_SECONDS`. Returns the
-        count evicted. Belt-and-suspenders for abandoned streams."""
+        """Drop channels the author never connected to within
+        :data:`RELAY_TTL_SECONDS`. Returns the count evicted. Run on every
+        :meth:`create` — belt-and-suspenders for abandoned GETs. A channel
+        that is streaming is never dropped here, however long the stream
+        runs: the guest's :meth:`consume` releases it when it ends."""
         cutoff = (now if now is not None else time.time()) - RELAY_TTL_SECONDS
-        stale = [rid for rid, c in self._channels.items() if c.created_at < cutoff]
+        stale = [
+            rid
+            for rid, c in self._channels.items()
+            if c.created_at < cutoff and not c.connected.is_set()
+        ]
         for rid in stale:
             self._channels.pop(rid, None)
         return len(stale)

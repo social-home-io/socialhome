@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import socialhome.global_server.routes.highlight_rtc as hr
-from socialhome.global_server import relay_bridge
+from socialhome.global_server import relay_bridge, rtc_transport
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
     gfs_highlight_pub_service_key,
@@ -818,3 +818,118 @@ async def test_relay_offer_carries_the_viewer_key(client):
     )
     assert up.status == 200
     assert (await get_task).status == 200
+
+
+# ─── Bounds (anonymous inputs that push to the author) ─────────────────────
+
+
+async def _offer_id(client) -> str:
+    resp = await client.post(
+        "/gfs/highlight_rtc/offer",
+        json={
+            "instance_id": "inst-author",
+            "highlight_id": "s-1",
+            "token": client._token,
+            "sdp": "v=0",
+        },
+    )
+    assert resp.status == 201
+    return (await resp.json())["session_id"]
+
+
+async def test_viewer_candidates_are_forwarded_not_echoed_back(client):
+    """The viewer polls the AUTHOR's candidates; its own are only forwarded
+    to the author — never served back to it."""
+    session_id = await _offer_id(client)
+    r = await client.post(
+        "/gfs/highlight_rtc/ice/viewer",
+        json={"session_id": session_id, "candidate": {"candidate": "v"}},
+    )
+    assert r.status == 200
+    poll = await (await client.get(f"/gfs/highlight_rtc/session/{session_id}")).json()
+    assert poll["ice_candidates"] == []
+
+
+async def test_viewer_candidates_past_the_cap_are_refused_and_not_pushed(
+    client, monkeypatch
+):
+    monkeypatch.setattr(rtc_transport, "MAX_ICE_CANDIDATES_PER_SIDE", 1)
+    session_id = await _offer_id(client)
+    statuses = []
+    for n in range(2):
+        r = await client.post(
+            "/gfs/highlight_rtc/ice/viewer",
+            json={"session_id": session_id, "candidate": {"candidate": str(n)}},
+        )
+        statuses.append(r.status)
+    assert statuses == [200, 429]
+    pushed = [f for f in client._author_ws.sent if f.get("kind") == "ice"]
+    assert [f["candidate"] for f in pushed] == [{"candidate": "0"}]
+
+
+async def test_author_candidates_past_the_cap_are_refused(client, monkeypatch):
+    monkeypatch.setattr(rtc_transport, "MAX_ICE_CANDIDATES_PER_SIDE", 0)
+    session_id = await _offer_id(client)
+    body = _sign(
+        client._seed,
+        {"instance_id": "inst-author", "session_id": session_id, "candidate": {}},
+    )
+    r = await client.post("/gfs/highlight_rtc/ice/author", json=body)
+    assert r.status == 429
+
+
+async def test_an_offer_past_the_session_cap_is_uniform_and_not_pushed(
+    client, monkeypatch
+):
+    monkeypatch.setattr(rtc_transport, "MAX_LIVE_SESSIONS", 0)
+    resp = await client.post(
+        "/gfs/highlight_rtc/offer",
+        json={
+            "instance_id": "inst-author",
+            "highlight_id": "s-1",
+            "token": client._token,
+            "sdp": "v=0",
+        },
+    )
+    assert resp.status == 503
+    assert await resp.json() == {"error": "unavailable"}
+    assert client._author_ws.sent == []
+
+
+async def test_an_offer_the_author_never_got_keeps_no_session(client):
+    """The author's socket is gone by the time we push: no session lingers."""
+    client._author_ws.closed = True
+    resp = await client.post(
+        "/gfs/highlight_rtc/offer",
+        json={
+            "instance_id": "inst-author",
+            "highlight_id": "s-1",
+            "token": client._token,
+            "sdp": "v=0",
+        },
+    )
+    assert resp.status == 503
+    assert client._app[gfs_rtc_key].session_count() == 0
+
+
+async def test_a_second_upload_for_one_relay_is_refused(client):
+    """Two uploads would interleave their bytes into one guest stream."""
+    bridge = client._app[gfs_relay_bridge_key]
+    relay_id = bridge.create(target_instance_id="inst-author", scope="s-1")
+    assert bridge.claim(relay_id)
+    resp = await client.post(
+        f"/gfs/highlight_rtc/relay-stream/{relay_id}",
+        data=b"bytes",
+        headers=_relay_headers(client._seed, "inst-author", relay_id),
+    )
+    assert resp.status == 409
+    assert await resp.json() == {"error": "already_streaming"}
+
+
+async def test_a_relay_the_author_never_got_is_uniform_and_released(client):
+    client._author_ws.closed = True
+    resp = await client.get(
+        f"/gfs/highlight_rtc/relay/inst-author/s-1?token={client._token}"
+    )
+    assert resp.status == 503
+    assert client._app[gfs_relay_bridge_key]._channels == {}

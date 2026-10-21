@@ -231,13 +231,18 @@ viewer routes** follow the same rule:
   user, author's household not connected, relay capacity full, author never
   started streaming) with one response: `503 {"error":"unavailable"}`,
   `Cache-Control: no-store`. Status, body and headers are the same, and so is
-  the work: every branch runs the same lookup and the same connection check.
+  the work: every branch runs the same token lookup and the same connection
+  check. On a cluster the connection check of an author whose socket is not
+  on the node that took the request is one cluster round (the node asks the
+  others); a link that does not resolve waits for that same round before it
+  is refused, so a dead link is not refused faster than an offline author's.
   The viewers show it as "This isn't available right now."
 - **Failures are uniform, so they can't be told apart.** Unknown,
   revoked and offline all get the same reply. A caller who gets a 503 learns
   only that this request did not succeed. They cannot tell whether the item
   exists, whether the token was ever valid, or whether the author is offline.
-- **No added delay.** Failures answer at once. The relay GET's
+- **No added delay.** Failures answer at once (on a cluster: after the
+  one cluster round above, which every failure waits for alike). The relay GET's
   "online but never streamed" branch still waits for its 30 s connect
   budget, because that is how long the author's household gets to start
   streaming. No other failure is held to match it. A delay would hide

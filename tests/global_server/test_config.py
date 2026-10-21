@@ -454,6 +454,69 @@ def test_env_cluster_advertise_url_empty_is_unset(tmp_dir, monkeypatch, blank):
     assert cfg.cluster_self_url == "http://10.0.0.5:1"
 
 
+def test_cluster_route_tag_is_loaded(tmp_dir):
+    p = _cluster_toml(tmp_dir, 'route_tag = "0b1c2d3e-aaaa-bbbb-cccc-0123456789ab"')
+    cfg = GfsConfig.from_toml(p)
+    assert cfg.cluster_route_tag == "0b1c2d3e-aaaa-bbbb-cccc-0123456789ab"
+
+
+def test_cluster_route_tag_defaults_to_none(tmp_dir):
+    assert GfsConfig.from_toml(_cluster_toml(tmp_dir, "")).cluster_route_tag == ""
+
+
+@pytest.mark.parametrize("bad", ["a.b", "a b", "x" * 65, "ä"])
+def test_cluster_route_tag_unusable_is_a_config_error(tmp_dir, bad):
+    """A tag the balancer cannot route by must not be dropped silently —
+    every session of the node would be unroutable."""
+    p = _cluster_toml(tmp_dir, f'route_tag = "{bad}"')
+    with pytest.raises(ValueError, match="route_tag"):
+        GfsConfig.from_toml(p)
+
+
+def test_env_cluster_route_tag_overrides_the_file(tmp_dir, monkeypatch):
+    p = _cluster_toml(tmp_dir, 'route_tag = "from-file"')
+    monkeypatch.setenv("GFS_CLUSTER_ROUTE_TAG", " from-env ")
+    cfg = GfsConfig.from_toml(p)._with_env_overrides()
+    assert cfg.cluster_route_tag == "from-env"
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_env_cluster_route_tag_empty_is_unset(tmp_dir, monkeypatch, blank):
+    p = _cluster_toml(tmp_dir, 'route_tag = "from-file"')
+    monkeypatch.setenv("GFS_CLUSTER_ROUTE_TAG", blank)
+    cfg = GfsConfig.from_toml(p)._with_env_overrides()
+    assert cfg.cluster_route_tag == "from-file"
+
+
+def test_env_cluster_route_tag_unusable_is_a_config_error(monkeypatch):
+    monkeypatch.setenv("GFS_CLUSTER_ROUTE_TAG", "a/b")
+    with pytest.raises(ValueError, match="route_tag"):
+        GfsConfig(base_url="https://gfs.example.com")._with_env_overrides()
+
+
+def test_a_cluster_without_a_route_tag_is_warned_about(caplog):
+    with caplog.at_level("WARNING"):
+        GfsConfig(
+            base_url="https://g.test", cluster_enabled=True
+        ).check_cluster_routing()
+    assert any("route_tag is empty" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        GfsConfig(base_url="https://g.test"),
+        GfsConfig(
+            base_url="https://g.test", cluster_enabled=True, cluster_route_tag="t"
+        ),
+    ],
+)
+def test_a_single_node_or_a_tagged_one_is_not_warned_about(caplog, cfg):
+    with caplog.at_level("WARNING"):
+        cfg.check_cluster_routing()
+    assert caplog.records == []
+
+
 # ── Public identity: instance_id aliases + cluster node_id ──────────────
 
 

@@ -115,6 +115,8 @@ class RtcOfferView(GfsBaseView):
         sdp = str(body.get("sdp") or "")
         rtc = self.svc(K.gfs_rtc_key)
         session_id = await rtc.offer(instance_id, sdp)
+        if session_id is None:
+            return web.json_response({"error": "busy"}, status=503)
         return web.json_response({"session_id": session_id})
 
 
@@ -153,9 +155,11 @@ class RtcIceView(GfsBaseView):
             )
         rtc = self.svc(K.gfs_rtc_key)
         try:
-            await rtc.ice_candidate(session_id, candidate)
+            stored = await rtc.ice_candidate(session_id, candidate)
         except KeyError:
             return web.json_response({"error": "not_found"}, status=404)
+        if not stored:
+            return web.json_response({"error": "too_many_candidates"}, status=429)
         return web.json_response({"status": "ok"})
 
 

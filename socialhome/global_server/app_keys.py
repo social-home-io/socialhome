@@ -11,6 +11,7 @@ from ..db import AsyncDatabase
 from .admin_service import GfsAdminService
 from .channels import GfsChannelService
 from .cluster import ClusterService
+from .cluster_relay import ClusterRelayFanOut
 from .config import GfsConfig
 from .envelope_relay import GfsEnvelopeRelay
 from .federation import GfsFederationService
@@ -19,6 +20,7 @@ from .invites import GfsInviteService
 from .member_publish import GfsMemberPublishService
 from .moment_media import GfsMomentMediaStore
 from .moment_public_registry import MomentPublicRegistry
+from .node_route import MisrouteWarning
 from .relay_bridge import RelayBridge
 from .repositories import (
     AbstractClusterRepo,
@@ -60,6 +62,8 @@ gfs_cluster_key: AppKey[ClusterService] = AppKey("gfs_cluster")
 gfs_cluster_repo_key: AppKey[AbstractClusterRepo] = AppKey("gfs_cluster_repo")
 gfs_rtc_key: AppKey[GfsRtcSession] = AppKey("gfs_rtc")
 gfs_relay_bridge_key: AppKey[RelayBridge] = AppKey("gfs_relay_bridge")
+gfs_misroute_key: AppKey[MisrouteWarning] = AppKey("gfs_misroute")
+gfs_cluster_fan_out_key: AppKey[ClusterRelayFanOut] = AppKey("gfs_cluster_fan_out")
 gfs_ws_registry_key: AppKey[GfsWebSocketRegistry] = AppKey("gfs_ws_registry")
 gfs_http_session_key: AppKey[aiohttp.ClientSession] = AppKey("gfs_http_session")
 gfs_highlight_pub_repo_key: AppKey[AbstractGfsHighlightPublicationRepo] = AppKey(

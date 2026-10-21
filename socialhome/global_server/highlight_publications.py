@@ -12,10 +12,10 @@ The registry **never** receives or stores highlight content. It holds only:
 - N rows in ``gfs_highlight_tokens`` per publication — each a revocable
   share link with an optional human label.
 
-Author-online detection reads :class:`GfsWebSocketRegistry`: a
-publication is only servable while the author's instance has a live
-WS to this GFS, since that is the same WS we use to push the WebRTC
-signalling offer to the author when a viewer arrives.
+Whether the author's household is online is not this registry's call:
+the viewer routes decide it by delivering the signalling offer to the
+author's socket, on whichever cluster node holds it
+(``routes/highlight_rtc.py``).
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from .repositories import (
     AbstractGfsHighlightPublicationRepo,
     AbstractGfsHighlightTokenRepo,
 )
-from .ws_registry import GfsWebSocketRegistry
 
 log = logging.getLogger(__name__)
 
@@ -46,19 +45,17 @@ class ResolvedToken:
 class HighlightPublicationRegistry:
     """Records publish rows + mints / revokes share tokens."""
 
-    __slots__ = ("_base_url", "_pubs", "_tokens", "_ws")
+    __slots__ = ("_base_url", "_pubs", "_tokens")
 
     def __init__(
         self,
         pubs: AbstractGfsHighlightPublicationRepo,
         tokens: AbstractGfsHighlightTokenRepo,
-        ws: GfsWebSocketRegistry,
         *,
         base_url: str,
     ) -> None:
         self._pubs = pubs
         self._tokens = tokens
-        self._ws = ws
         # Trim a trailing slash so URL building stays a single template.
         self._base_url = base_url.rstrip("/")
 
@@ -158,18 +155,6 @@ class HighlightPublicationRegistry:
         single point of truth for the §highlights_public storage state.
         """
         return await self._pubs.get(highlight_id, instance_id)
-
-    async def author_online(self, instance_id: str) -> bool:
-        """True iff the author's SH has a live WS to this GFS.
-
-        A publication is only servable when the author is online, since
-        the viewer's offer / relay asks the GFS to push a signalling frame
-        to that exact WS. Callers MUST fold ``False`` into the same uniform
-        reply as an unknown or withdrawn publication
-        (:mod:`.public_unavailable`) — never surface it on its own, or the
-        anonymous routes become an author-presence oracle.
-        """
-        return self._ws.is_connected(instance_id)
 
     # ── URL helper ───────────────────────────────────────────────────────
 

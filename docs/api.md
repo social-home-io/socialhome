@@ -1553,7 +1553,8 @@ framed stream. Every non-success state (unknown author, unknown / revoked /
 unpublished item, author offline, relay capacity, author never streams)
 gets one response, the uniform `503 {"error":"unavailable"}` (`Cache-Control: no-store`), so these anonymous
 routes are not an author-presence oracle. Failures are answered at once,
-with no added delay. Only success shows the author's household was connected
+with no added delay (on a cluster every failure first waits for the same one
+cluster round, see [principles.md](./principles.md#the-gfs-is-not-an-author-presence-oracle)). Only success shows the author's household was connected
 (a `201` offer means it is online). That residual is in
 [`principles.md`](./principles.md#the-gfs-is-not-an-author-presence-oracle).
 
@@ -1572,13 +1573,13 @@ header. Rate limits are unchanged.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/gfs/highlights/ice-servers` | Anon (rate-limited 30/min per IP; `Cache-Control: no-store`). `{servers: [{urls}…], ttl?}` for the browser bootstrap: one entry per `[webrtc] stun_urls`, plus — only when the operator set **both** `turn_url` and `turn_secret` — one TURN entry `{urls, username, credential}` with a credential minted for this answer (TURN REST API / coturn `use-auth-secret`: `username = "<expiry>:gfs-viewer-<random>"`, `credential = base64(HMAC-SHA1(turn_secret, username))`), and `ttl` = its lifetime in seconds (`turn_ttl_seconds`, default 600). The secret never leaves the server and no static TURN user / password is ever served; a `turn_url` without a secret is left out (WARNING at startup). The viewer fetches it right before each connection, so nothing needs refreshing. |
-| POST | `/gfs/highlight_rtc/offer` | Anon (rate-limited 20/min per IP). Body `{instance_id, highlight_id, token, sdp}`; pushes a `highlight_signal kind=offer` WS frame to the author. Returns `201 {session_id}`; any failure (unknown/revoked/expired token, URL mismatch, author offline) → uniform `503 unavailable`. |
-| GET | `/gfs/highlight_rtc/session/{session_id}` | Anon poll for `answer_sdp` + author ICE. |
-| POST | `/gfs/highlight_rtc/ice/viewer` | Anon. Trickle the viewer's ICE candidate. |
+| POST | `/gfs/highlight_rtc/offer` | Anon (rate-limited 20/min per IP). Body `{instance_id, highlight_id, token, sdp, vk}`; pushes a `highlight_signal kind=offer` WS frame to the author — on a cluster, via the node holding the author's socket. Returns `201 {session_id}`; the id names the node that holds the session (`<route_tag>.<random>`, see [operations/gfs-cluster.md](operations/gfs-cluster.md)). Any failure (unknown/revoked/expired token, URL mismatch, author connected to no node, session cap) → uniform `503 unavailable`. |
+| GET | `/gfs/highlight_rtc/session/{session_id}` | Anon poll for `answer_sdp` + the author's ICE candidates. `404` when this node does not hold the session (expired, restarted, or the balancer did not route by the id) — the viewer then falls back to the relay. |
+| POST | `/gfs/highlight_rtc/ice/viewer` | Anon. Trickle the viewer's ICE candidate; forwarded to the author, not stored. `404` unknown session, `429` past 32 candidates. |
 | POST | `/gfs/highlight_rtc/answer` | Author SH (Ed25519-signed). Authority guard: `session.initiator_id` == signer. |
-| POST | `/gfs/highlight_rtc/ice/author` | Author SH (signed). Same guard. |
+| POST | `/gfs/highlight_rtc/ice/author` | Author SH (signed). Same guard. `429` past 32 candidates. |
 | GET | `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token=...` | Anon, token-gated (rate-limited 20/min per IP). Chunked `application/octet-stream`; pushes a `highlight_signal kind=relay_offer` and pipes the author's framed bytes. Any failure (bad/expired token, URL mismatch, author offline, relay capacity, author never streams) → uniform `503 unavailable`, sent at once (only the never-streams branch waits its 30 s connect budget); `422` missing token. |
-| POST | `/gfs/highlight_rtc/relay-stream/{relay_id}` | Author SH. Header-auth `X-SH-Instance` + `X-SH-Timestamp` (±300 s) + `X-SH-Signature` (Ed25519 over canonical `{"instance_id","relay_id","ts"}`); body is the raw framed stream. `403` target != signer, `404` unknown relay, `401` bad sig / stale ts, `422` missing headers. |
+| POST | `/gfs/highlight_rtc/relay-stream/{relay_id}` | Author SH. Header-auth `X-SH-Instance` + `X-SH-Timestamp` (±300 s) + `X-SH-Signature` (Ed25519 over canonical `{"instance_id","relay_id","ts"}`); body is the raw framed stream. `403` target != signer, `404` unknown relay, `409 already_streaming` a second upload for one relay, `401` bad sig / stale ts, `422` missing headers. |
 
 ### GFS — Opaque channels for private spaces (v_51)
 

@@ -33,6 +33,10 @@ Reference material for running and understanding Social Home.
   for deploying a TURN server (coturn) so two households behind
   symmetric NAT / strict firewalls can establish the federation
   WebRTC channel instead of staying on HTTPS-inbox fallback.
+- **[operations/gfs-cluster.md](./operations/gfs-cluster.md)** — Running
+  a GFS as several nodes on one database behind a load balancer: the
+  `[cluster] route_tag` and the HAProxy rules that keep a public-highlight
+  viewing session on the node that holds it.
 - **[display-api/](./display-api/README.md)** — The wall-panel JSON API
   (`/api/display/v1/`): versioning, JSON Schemas, fixtures, emoji
   attribution.

@@ -1030,6 +1030,9 @@ def _spawn_gfs_node(
     text = text.replace('signing_seed_hex = ""', f'signing_seed_hex = "{seed_hex}"')
     text = text.replace("enabled = false", "enabled = true")
     text = text.replace('node_id = ""', f'node_id = "{node_id}"')
+    # Session-sticky routing: this node's ids start with "<node_id>." and the
+    # demo's balancer routes them back here (see _gfs_cluster_highlight_link).
+    text = text.replace('route_tag = ""', f'route_tag = "{node_id}"')
     peers_toml = ", ".join(f'"{u}"' for u in peers)
     text = text.replace("peers   = []", f"peers   = [{peers_toml}]")
     config_path.write_text(text, encoding="utf-8")
@@ -1662,6 +1665,351 @@ def _gfs_cluster_cross_node_broadcast(urls: list[str]) -> None:
     asyncio.run(_run())
 
 
+#: The demo's load balancer in front of the ``gfs-cluster`` nodes (step 3g).
+GFS_CLUSTER_LB_PORT = 18779
+
+#: Paths whose session id is the last path segment, and paths whose session
+#: id is the JSON body's ``session_id`` — exactly what the production HAProxy
+#: rules route by (``docs/operations/gfs-cluster.md``).
+_HL_ID_IN_PATH = ("/gfs/highlight_rtc/session/", "/gfs/highlight_rtc/relay-stream/")
+_HL_ID_IN_BODY = (
+    "/gfs/highlight_rtc/answer",
+    "/gfs/highlight_rtc/ice/viewer",
+    "/gfs/highlight_rtc/ice/author",
+)
+
+
+def _haproxy_demo_config(urls: list[str], tags: list[str]) -> str:
+    """The production routing rules (gfs-deployment ``loadbalancer.nomad.hcl``)
+    over the demo's static nodes."""
+    servers = "\n".join(
+        f"  server {tag} {url.removeprefix('http://')} check inter 1s"
+        for tag, url in zip(tags, urls, strict=True)
+    )
+    per_node = "\n".join(
+        f"backend gfs_node_{tag}\n"
+        f"  server {tag} {url.removeprefix('http://')} track gfs_app/{tag}\n"
+        for tag, url in zip(tags, urls, strict=True)
+    )
+    return f"""global
+  maxconn 256
+defaults
+  mode http
+  timeout connect 5s
+  timeout client 60s
+  timeout server 60s
+frontend gfs_http
+  bind 127.0.0.1:{GFS_CLUSTER_LB_PORT}
+  acl hl_id_in_path path_reg ^/gfs/highlight_rtc/(session|relay-stream)/[^/]+$
+  acl hl_id_in_body path /gfs/highlight_rtc/answer /gfs/highlight_rtc/ice/viewer /gfs/highlight_rtc/ice/author
+  http-request set-var(txn.gfs_node) path,field(5,/),field(1,.) if hl_id_in_path
+  http-request wait-for-body time 2s if hl_id_in_body METH_POST
+  http-request set-var(txn.gfs_node) req.body,json_query('$.session_id'),field(1,.) if hl_id_in_body METH_POST
+  use_backend gfs_node_%[var(txn.gfs_node)] if {{ var(txn.gfs_node) -m found }}
+  default_backend gfs_app
+backend gfs_app
+  balance roundrobin
+  option httpchk GET /healthz
+{servers}
+{per_node}"""
+
+
+def _python_balancer(urls: list[str], tags: list[str]):
+    """An aiohttp stand-in for the HAProxy rules (round-robin, plus the
+    route tag in a session or relay id). Returns ``start`` / ``stop``
+    coroutines."""
+    import itertools
+
+    import aiohttp
+    from aiohttp import web
+
+    by_tag = dict(zip(tags, urls, strict=True))
+    rotation = itertools.cycle(urls)
+    state: dict = {}
+
+    def _tagged(scoped: object) -> str | None:
+        tag = str(scoped or "").partition(".")[0]
+        return by_tag.get(tag)
+
+    async def _proxy(request: web.Request) -> web.StreamResponse:
+        body = await request.read()
+        path = request.path
+        target = None
+        if path.startswith(_HL_ID_IN_PATH):
+            target = _tagged(path.rsplit("/", 1)[-1])
+        elif path in _HL_ID_IN_BODY and request.method == "POST":
+            try:
+                target = _tagged(json.loads(body or b"{}").get("session_id"))
+            except ValueError, AttributeError:
+                target = None
+        target = target or next(rotation)
+        headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in ("host", "content-length", "transfer-encoding")
+        }
+        async with state["http"].request(
+            request.method,
+            target + request.path_qs,
+            data=body or None,
+            headers=headers,
+            allow_redirects=False,
+        ) as upstream:
+            resp = web.StreamResponse(status=upstream.status)
+            for k, v in upstream.headers.items():
+                if k.lower() not in (
+                    "content-length",
+                    "transfer-encoding",
+                    "content-encoding",
+                ):
+                    resp.headers[k] = v
+            await resp.prepare(request)
+            async for chunk in upstream.content.iter_any():
+                await resp.write(chunk)
+            await resp.write_eof()
+            return resp
+
+    async def start() -> None:
+        state["http"] = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120))
+        app = web.Application()
+        app.router.add_route("*", "/{tail:.*}", _proxy)
+        state["runner"] = web.AppRunner(app)
+        await state["runner"].setup()
+        await web.TCPSite(state["runner"], "127.0.0.1", GFS_CLUSTER_LB_PORT).start()
+
+    async def stop() -> None:
+        await state["runner"].cleanup()
+        await state["http"].close()
+
+    return start, stop
+
+
+def _gfs_cluster_highlight_link(urls: list[str], tags: list[str]) -> None:
+    """Step 3g of ``gfs-cluster``: a public-highlight link plays through a
+    round-robin balancer in front of every node.
+
+    The author household's socket is on node 0. Every viewer request goes to
+    the balancer, which round-robins — except a request naming a session or
+    relay id, which it sends to the node the id's route tag names (the
+    production HAProxy rules; a real HAProxy runs them when
+    ``GFS_DEMO_HAPROXY`` names its binary, otherwise an in-process stand-in
+    does). One WebRTC signalling session per node (offer → forwarded offer →
+    answer + ICE both ways → polls), then one relayed stream per node (relay
+    GET → forwarded ``relay_offer`` → upload → bytes). Before session-sticky
+    routing the offer on a node without the author's socket answered 503 and
+    the polls / answers / uploads reached nodes that did not hold the
+    session.
+    """
+    import asyncio
+
+    import aiohttp
+
+    from socialhome.crypto import b64url_encode, sign_ed25519
+
+    lb = f"http://127.0.0.1:{GFS_CLUSTER_LB_PORT}"
+    author_id, author_seed = _gfs_cluster_register(urls[0], "highlight-author")
+    highlight_id = f"hl-{secrets.token_hex(4)}"
+    viewer_key = "B" + "A" * 86
+
+    def _signed(body: dict) -> dict:
+        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+        return body | {"signature": b64url_encode(sign_ed25519(author_seed, canonical))}
+
+    code, resp = _request(
+        f"{urls[1 % len(urls)]}/gfs/highlights/{highlight_id}/publish",
+        method="POST",
+        body=_signed(
+            {
+                "instance_id": author_id,
+                "highlight_id": highlight_id,
+                "expires_at": int(time.time()) + 3600,
+            }
+        ),
+        timeout=15.0,
+    )
+    if code != 201:
+        raise SystemExit(f"gfs-cluster: highlight publish → {code} {resp!r}")
+    token = resp["token"]
+
+    haproxy_bin = os.environ.get("GFS_DEMO_HAPROXY", "")
+    haproxy = None
+    if haproxy_bin:
+        cfg = GFS_CLUSTER_DIR / "haproxy.cfg"
+        cfg.write_text(_haproxy_demo_config(urls, tags), encoding="utf-8")
+        haproxy = subprocess.Popen(
+            [haproxy_bin, "-f", str(cfg), "-db"],
+            stdout=open(GFS_CLUSTER_DIR / "log-haproxy.txt", "wb"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    start_lb, stop_lb = _python_balancer(urls, tags)
+
+    async def _signal(ws, kind: str) -> dict:
+        deadline = time.monotonic() + 10.0
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                msg = await ws.receive(timeout=left)
+            except TimeoutError:
+                break
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                break
+            frame = json.loads(msg.data)
+            if frame.get("type") == "highlight_signal" and frame.get("kind") == kind:
+                return frame
+        raise SystemExit(
+            f"gfs-cluster: the author's socket on node 0 got no {kind!r} "
+            "within 10 s — the push did not cross nodes"
+        )
+
+    def _xff() -> dict[str, str]:
+        # A fresh address per call: the offer/relay entry is 20/min per IP.
+        return {
+            "X-Forwarded-For": f"10.9.{secrets.randbelow(250)}.{secrets.randbelow(250)}"
+        }
+
+    async def _run() -> None:
+        if haproxy is None:
+            await start_lb()
+        else:
+            await asyncio.sleep(1.5)  # haproxy up, health checks green
+        try:
+            async with aiohttp.ClientSession() as http:
+                ws = await http.ws_connect(f"{urls[0]}/gfs/ws")
+                ts = int(time.time())
+                await ws.send_json(
+                    {
+                        "type": "hello",
+                        "instance_id": author_id,
+                        "ts": ts,
+                        "sig": b64url_encode(
+                            sign_ed25519(author_seed, f"{author_id}|{ts}".encode())
+                        ),
+                    }
+                )
+                await asyncio.sleep(1.0)
+                nodes_seen: set[str] = set()
+                for _ in range(len(urls)):
+                    async with http.post(
+                        f"{lb}/gfs/highlight_rtc/offer",
+                        json={
+                            "instance_id": author_id,
+                            "highlight_id": highlight_id,
+                            "token": token,
+                            "sdp": "v=0 offer",
+                            "vk": viewer_key,
+                        },
+                        headers=_xff(),
+                    ) as r:
+                        if r.status != 201:
+                            raise SystemExit(
+                                f"gfs-cluster: highlight offer via the balancer → "
+                                f"{r.status} (the author's socket is on another node)"
+                            )
+                        sid = (await r.json())["session_id"]
+                    nodes_seen.add(sid.partition(".")[0])
+                    offer = await _signal(ws, "offer")
+                    if offer.get("session_id") != sid:
+                        raise SystemExit(f"gfs-cluster: wrong offer {offer!r}")
+                    who = {"instance_id": author_id, "session_id": sid}
+                    for path, body in (
+                        ("answer", _signed(who | {"sdp": "v=0 answer"})),
+                        (
+                            "ice/author",
+                            _signed(who | {"candidate": {"candidate": "a"}}),
+                        ),
+                        (
+                            "ice/viewer",
+                            {"session_id": sid, "candidate": {"candidate": "v"}},
+                        ),
+                    ):
+                        async with http.post(
+                            f"{lb}/gfs/highlight_rtc/{path}", json=body
+                        ) as r:
+                            if r.status != 200:
+                                raise SystemExit(
+                                    f"gfs-cluster: highlight {path} for session "
+                                    f"{sid} via the balancer → {r.status} — not "
+                                    "routed to the node holding it"
+                                )
+                    ice = await _signal(ws, "ice")
+                    if ice.get("candidate") != {"candidate": "v"}:
+                        raise SystemExit(f"gfs-cluster: wrong viewer ICE {ice!r}")
+                    for _poll in range(len(urls)):
+                        async with http.get(
+                            f"{lb}/gfs/highlight_rtc/session/{sid}"
+                        ) as r:
+                            poll = await r.json() if r.status == 200 else {}
+                            if (r.status, poll.get("answer_sdp")) != (
+                                200,
+                                "v=0 answer",
+                            ):
+                                raise SystemExit(
+                                    f"gfs-cluster: poll of session {sid} via the "
+                                    f"balancer → {r.status} {poll!r}"
+                                )
+                for _ in range(len(urls)):
+
+                    async def _view() -> tuple[int, bytes]:
+                        async with http.get(
+                            f"{lb}/gfs/highlight_rtc/relay/{author_id}/{highlight_id}",
+                            params={"token": token, "vk": viewer_key},
+                            headers=_xff(),
+                        ) as r:
+                            return r.status, await r.read()
+
+                    viewer = asyncio.create_task(_view())
+                    relay = await _signal(ws, "relay_offer")
+                    rid = relay["relay_id"]
+                    nodes_seen.add(rid.partition(".")[0])
+                    rts = int(time.time())
+                    canonical = json.dumps(
+                        {"instance_id": author_id, "relay_id": rid, "ts": rts},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode()
+                    async with http.post(
+                        f"{lb}/gfs/highlight_rtc/relay-stream/{rid}",
+                        data=b"sealed-frames-" + rid.encode(),
+                        headers={
+                            "X-SH-Instance": author_id,
+                            "X-SH-Timestamp": str(rts),
+                            "X-SH-Signature": b64url_encode(
+                                sign_ed25519(author_seed, canonical)
+                            ),
+                        },
+                    ) as r:
+                        if r.status != 200:
+                            raise SystemExit(
+                                f"gfs-cluster: relay upload {rid} via the "
+                                f"balancer → {r.status}"
+                            )
+                    got = await asyncio.wait_for(viewer, timeout=15)
+                    if got != (200, b"sealed-frames-" + rid.encode()):
+                        raise SystemExit(f"gfs-cluster: relayed stream → {got!r}")
+                await ws.close()
+                if nodes_seen != set(tags):
+                    raise SystemExit(
+                        f"gfs-cluster: highlight sessions landed on {sorted(nodes_seen)}"
+                        f", want every node {sorted(tags)}"
+                    )
+        finally:
+            if haproxy is None:
+                await stop_lb()
+
+    try:
+        asyncio.run(_run())
+    finally:
+        if haproxy is not None:
+            os.killpg(haproxy.pid, signal.SIGKILL)
+    print(
+        f"  public-highlight link through a round-robin balancer "
+        f"({'HAProxy' if haproxy is not None else 'in-process stand-in'}): "
+        f"{len(urls)} WebRTC sessions + {len(urls)} relayed streams, one per "
+        "node, author socket on node 0 — every request reached its "
+        "session's node ✓"
+    )
+
+
 def cmd_gfs_cluster() -> None:
     """Prove a MULTI-PROCESS GFS cluster serves writes without deadlocking.
 
@@ -1988,10 +2336,14 @@ def cmd_gfs_cluster() -> None:
     # 3d. Single-recipient pushes reach a socket held by another node.
     # 3e. A broadcast reaches the followers on EVERY node, exactly once.
     # 3f. So does a public moment, and its tombstone.
+    # 3g. A public-highlight session sticks to the node that started it.
     try:
         _gfs_cluster_cross_node_push(urls)
         _gfs_cluster_cross_node_broadcast(urls)
         _gfs_cluster_cross_node_moment(urls)
+        # 3g. A public-highlight link through a round-robin balancer: every
+        # request of a session reaches the node that holds it.
+        _gfs_cluster_highlight_link(urls, node_ids)
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise
