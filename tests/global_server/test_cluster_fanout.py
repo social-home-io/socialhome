@@ -1438,7 +1438,7 @@ def _moment_envelope(author_seed: bytes, *, op: str = "create") -> dict:
             **seal_body(
                 step_key=os.urandom(32),
                 author_user_id=_AUTHOR_USER,
-                key_gen=1_700_000_000,
+                key_gen=int(time.time()),
                 key_step=0,
                 moment_id="m-cluster",
                 body={"op": op, "content": "hi"},

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -260,7 +261,14 @@ async def _register_author(client, author) -> None:
     )
 
 
-def _encrypted(author, *, op: str = "create", **extra) -> dict:
+def _encrypted(
+    author,
+    *,
+    op: str = "create",
+    key_gen: int | None = None,
+    key_step: int = 0,
+    **extra,
+) -> dict:
     """An envelope in the v_62 shape: routing fields + ciphertext only."""
     return _sign(
         author,
@@ -270,14 +278,39 @@ def _encrypted(author, *, op: str = "create", **extra) -> dict:
             **seal_body(
                 step_key=os.urandom(32),
                 author_user_id="u-author",
-                key_gen=1_700_000_000,
-                key_step=0,
+                key_gen=int(time.time()) if key_gen is None else key_gen,
+                key_step=key_step,
                 moment_id="m-1",
                 body={"op": op, "content": "hi"},
             ),
             **extra,
         },
     )
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("path", ["/gfs/moments/publish", "/gfs/moments/delete"])
+async def test_an_envelope_from_an_earlier_day_is_refused_as_a_re_post(
+    client, author, path
+):
+    """A captured envelope re-posted after its key step's day: the author's
+    household always seals under today's step, so it is a replay — refused,
+    never fanned out (#1111 follow-up)."""
+    await _register_author(client, author)
+    two_days_ago = int(time.time()) - 2 * 86_400
+    resp = await client.post(path, json=_encrypted(author, key_gen=two_days_ago))
+    assert resp.status == 409
+    assert await resp.json() == {"error": "stale_envelope"}
+
+
+async def test_a_generation_days_old_publishes_under_todays_step(client, author):
+    await _register_author(client, author)
+    three_days_ago = int(time.time()) - 3 * 86_400 - 60
+    resp = await client.post(
+        "/gfs/moments/publish",
+        json=_encrypted(author, key_gen=three_days_ago, key_step=3),
+    )
+    assert resp.status == 200
 
 
 async def test_publish_returns_delivered_count(client, author):

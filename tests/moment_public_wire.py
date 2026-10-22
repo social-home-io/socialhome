@@ -9,13 +9,16 @@ its item key and the envelope signed — and a stand-in for the follower's
 from __future__ import annotations
 
 import os
+import time
 from datetime import UTC, datetime, timedelta
 
 from socialhome.moment_public_seal import seal_body, sign_wire
 
-#: The step key and key id the helpers seal under.
+#: The step key and key id the helpers seal under. The generation is minted
+#: now, so step 0 is the current step — a GFS refuses an envelope sealed
+#: under an earlier day's step as a re-post.
 TEST_KEY: bytes = os.urandom(32)
-TEST_GEN: int = 1_700_000_000
+TEST_GEN: int = int(time.time())
 TEST_STEP: int = 0
 
 

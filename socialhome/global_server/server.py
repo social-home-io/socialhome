@@ -437,7 +437,9 @@ class GfsApp:
         admin.attach_fan_out(cluster_fan_out)
         cluster_fan_out.register_audience(AUDIENCE_SPACE, federation.audience_targets)
         cluster_fan_out.register_audience(
-            AUDIENCE_FOLLOWERS, moment_public.audience_targets
+            AUDIENCE_FOLLOWERS,
+            moment_public.audience_targets,
+            seen=moment_public.seen_cache,
         )
         # Trusted-mode member publish (v_49): writer-cert-authorized items
         # fanned out through the same push-or-queue path as envelopes.

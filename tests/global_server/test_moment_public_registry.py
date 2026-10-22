@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import orjson
 import pytest
 
+from socialhome.global_server import federation as federation_mod
 from socialhome.global_server.domain import GfsMomentKeyMail
 from socialhome.global_server.moment_public_registry import (
+    MOMENT_SEEN_TTL_S,
+    MOMENT_STEP_SLACK_S,
     MomentPublicRegistry,
+    envelope_step_current,
     suites_can_open,
 )
 from socialhome.global_server.repositories import (
@@ -19,6 +24,7 @@ from socialhome.global_server.repositories import (
     SqliteGfsUserRegistrationRepo,
 )
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
+from socialhome.moment_public_seal import RATCHET_STEP_S
 
 
 class _StubWs:
@@ -577,3 +583,48 @@ async def test_author_frames_go_to_the_node_holding_the_authors_socket(
     await reg.remove_follow(follower_user_id="u-fan", followed_user_id="u-author")
     assert len(fan_out.households) == 2
     assert _sent_field(author_ws, "type") == ["follow_changed"]
+
+
+# ─── Replay window (#1111 follow-up) ─────────────────────────────────────
+
+_DAY = RATCHET_STEP_S
+_SLACK = MOMENT_STEP_SLACK_S
+
+
+@pytest.mark.parametrize(
+    ("key_step", "now", "current"),
+    [
+        (0, 1_000, True),  # sealed today
+        (0, 1_000 + _DAY + _SLACK, True),  # the step's end + the slack
+        (0, 1_000 + _DAY + _SLACK + 1, False),  # a day-old step: a re-post
+        (3, 1_000 + 3 * _DAY - _SLACK, True),  # an author clock a bit ahead
+        (3, 1_000 + 3 * _DAY - _SLACK - 1, False),  # a step not begun yet
+        (1, 1_000 + 10 * _DAY, False),
+    ],
+)
+def test_an_envelope_counts_only_on_its_key_steps_day(key_step, now, current):
+    assert envelope_step_current(1_000, key_step, now) is current
+
+
+def test_a_moment_is_remembered_as_long_as_its_step_can_be_current():
+    assert MOMENT_SEEN_TTL_S == _DAY + _SLACK
+
+
+@pytest.mark.security
+async def test_a_replay_hours_later_is_still_fanned_out_once(
+    gfs_setup, gfs_db, monkeypatch
+):
+    """Before, the GFS forgot a moment after ten minutes and fanned a
+    re-posted capture out to every follower again (each then dropped it)."""
+    reg, _relay, _cluster, _mb = await _cluster_world(gfs_setup, gfs_db)
+    follower_ws = _StubWs()
+    await gfs_setup["ws"].register("inst-follower", follower_ws)  # type: ignore[arg-type]
+    assert await reg.fan_out_moment(envelope=dict(_ENVELOPE)) == 1
+    later = time.monotonic() + 6 * 3600
+    monkeypatch.setattr(
+        federation_mod,
+        "time",
+        SimpleNamespace(monotonic=lambda: later, time=time.time),
+    )
+    assert await reg.fan_out_moment(envelope=dict(_ENVELOPE)) == 0
+    assert len(follower_ws.sent) == 1

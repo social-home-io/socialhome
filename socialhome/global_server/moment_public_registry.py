@@ -60,11 +60,10 @@ from ..moment_public_seal import (
     FRAME_MOMENT,
     FRAME_MOMENT_DELETE,
     MOMENT_SEAL_SUITE_AESGCM256,
+    RATCHET_STEP_S,
 )
 from .cluster_relay import (
     AUDIENCE_FOLLOWERS,
-    RELAY_FORWARD_SEEN_MAX,
-    RELAY_FORWARD_SEEN_TTL_S,
     typed_frame,
 )
 from .domain import (
@@ -97,6 +96,25 @@ log = logging.getLogger(__name__)
 #: household seal again.
 KEY_REQUESTS_PER_MINUTE: int = 2
 
+#: How far (seconds) the GFS's clock may disagree with an author household's
+#: about which day an envelope's key step is — an hour, so a household whose
+#: clock is a little off still publishes, and an envelope is accepted at most
+#: 25 h after it was sealed: the window a follower accepts it in
+#: (``SENT_AT_MAX_AGE_S`` in :mod:`socialhome.services.moment_public_inbound`).
+MOMENT_STEP_SLACK_S: int = 3600
+
+#: How long a node remembers a public moment it fanned out (or was forwarded):
+#: as long as its key step can still be current (one step + the slack). A
+#: re-post of the same bytes inside that time is a no-op; after it the step
+#: check (:func:`envelope_step_current`) refuses it. So a captured envelope is
+#: fanned out once per node, never again (#1111 follow-up).
+MOMENT_SEEN_TTL_S: float = float(RATCHET_STEP_S + MOMENT_STEP_SLACK_S)
+
+#: Most moments one node remembers (~140 B each: ~28 MiB when full). That is
+#: ~190 000 public moments a day per GFS before the oldest are forgotten
+#: early — and a forgotten one can be re-posted only until its step ends.
+MOMENT_SEEN_MAX: int = 200_000
+
 #: Follower user ids of one household named to the author per notice.
 MAX_FOLLOWER_USERS_NAMED: int = 50
 
@@ -104,6 +122,21 @@ MAX_FOLLOWER_USERS_NAMED: int = 50
 #: authors' newest undelivered keys, oldest first). The rest wait for the
 #: next connect — or the follower asks.
 MAX_MAILBOX_PUSH_ON_CONNECT: int = 500
+
+
+def envelope_step_current(key_gen: int, key_step: int, now: float) -> bool:
+    """Whether *now* falls in the day of the envelope's key step (± the
+    slack). ``key_gen`` is the generation's mint time and a step lasts one
+    :data:`~socialhome.moment_public_seal.RATCHET_STEP_S`, so an author's
+    household always seals under the step of the day it sends in — both
+    values are plaintext routing fields the GFS already reads, so this check
+    learns nothing new. An envelope from an earlier day is a re-post."""
+    start = key_gen + key_step * RATCHET_STEP_S
+    return (
+        start - MOMENT_STEP_SLACK_S
+        <= now
+        <= start + RATCHET_STEP_S + MOMENT_STEP_SLACK_S
+    )
 
 
 def suites_can_open(raw: str | None) -> bool:
@@ -169,11 +202,11 @@ class MomentPublicRegistry:
         #: Wakes the node holding a follower's socket for a sealed key that
         #: waits in the shared mailbox (``NODE_DRAIN_HINT``).
         self._cluster = cluster
-        #: Envelopes fanned out here (a re-POST of the same bytes is a no-op;
-        #: one forwarded from another node is in ``fan_out.seen_frame``).
-        self._seen = SeenPayloadCache(
-            ttl_s=RELAY_FORWARD_SEEN_TTL_S, cap=RELAY_FORWARD_SEEN_MAX
-        )
+        #: Envelopes fanned out here or forwarded to / from another node —
+        #: the same cache the cluster relay dedupes ``followers`` items with
+        #: (:attr:`seen_cache`), so a re-POST of the same bytes to ANY node
+        #: within :data:`MOMENT_SEEN_TTL_S` is a no-op.
+        self._seen = SeenPayloadCache(ttl_s=MOMENT_SEEN_TTL_S, cap=MOMENT_SEEN_MAX)
         self._key_requests = SlidingWindowCounter(KEY_REQUESTS_PER_MINUTE)
         self._tasks: set[asyncio.Task] = set()
 
@@ -332,6 +365,12 @@ class MomentPublicRegistry:
         }
 
     # ── Fan-out ─────────────────────────────────────────────────────────
+
+    @property
+    def seen_cache(self) -> SeenPayloadCache:
+        """The moments this node pushed or forwarded — handed to the cluster
+        relay for the ``followers`` audience, so forwarded copies count too."""
+        return self._seen
 
     async def fan_out_moment(
         self,
