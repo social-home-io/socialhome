@@ -3792,8 +3792,32 @@ class FederationService:
             and not requester_is_mesh
             and bool(payload.get("prefer_direct"))
         ):
-            # Build SDP offer, send SPACE_SYNC_OFFER back over relay.
             record = self._sync_manager.get_session(sync_id)
+            if (
+                record is not None
+                and payload.get("quiet_relay") is True
+                and self._space_sync_service is not None
+                and await self._space_sync_service.is_quiet(record)
+            ):
+                # #2(d): nothing changed since the stream this household
+                # confirmed — the session is its sentinel alone. One
+                # ``SPACE_SYNC_CHUNK`` over the relay instead of an OFFER,
+                # an ANSWER, ICE both ways, a DTLS handshake and
+                # DIRECT_READY. Only for a requester that said it takes it
+                # (``quiet_relay``): its chunk handler opens the session.
+                log.debug(
+                    "sync %s: nothing to stream — sentinel over the relay", sync_id
+                )
+                record.transport_mode = "https"
+                if record.rtc is not None:
+                    record.rtc.close()
+                    record.rtc = None
+                asyncio.create_task(
+                    self._space_sync_service.stream_initial(record),
+                    name=f"space-sync-quiet-{sync_id}",
+                )
+                return
+            # Build SDP offer, send SPACE_SYNC_OFFER back over relay.
             if record is not None and record.rtc is not None:
                 sdp_offer = await record.rtc.create_offer()
                 # The OFFER, ANSWER and every ICE candidate ride the signed
@@ -4213,6 +4237,25 @@ class FederationService:
                 sync_id,
             )
 
+    def _open_quiet_relay_session(self, sync_id: str, from_instance: str):
+        """#2(d): the provider answered our direct ``SPACE_SYNC_BEGIN``
+        over the relay (it had nothing to stream, so no OFFER minted a
+        session). Open the HTTPS receive session — only for a sync id we
+        issued, and only for the very household we asked
+        (:meth:`SyncSessionManager.pending_sync_request`)."""
+        assert self._sync_manager is not None
+        request = self._sync_manager.pending_sync_request(sync_id)
+        if request is None or request.provider_instance_id != from_instance:
+            return None
+        self._sync_manager.register_requester_https_session(
+            sync_id=sync_id,
+            space_id=request.space_id,
+            requester_instance_id=self._own_instance_id,
+            provider_instance_id=from_instance,
+            sync_mode=request.sync_mode,
+        )
+        return self._sync_manager.get_session(sync_id)
+
     async def _handle_space_sync_chunk(self, event) -> None:
         """Inbound ``SPACE_SYNC_CHUNK`` — HTTPS-fallback chunk delivery.
 
@@ -4238,6 +4281,8 @@ class FederationService:
         if not sync_id or not raw:
             return
         record = self._sync_manager.get_session(sync_id)
+        if record is None:
+            record = self._open_quiet_relay_session(sync_id, event.from_instance)
         if record is None:
             log.debug(
                 "SPACE_SYNC_CHUNK for unknown sync_id=%s from %s",

@@ -53,6 +53,42 @@ sequenceDiagram
     P->>R: SPACE_SYNC_COMPLETE
 ```
 
+## Flow — quiet periodic session (no WebRTC)
+
+Most periodic sessions have nothing to stream: no covered row changed
+since the requester's watermark, and the roster is the one it confirmed
+(see "Incremental sessions"). Such a session is its signed sentinel
+alone, so negotiating a DataChannel for it (OFFER, ANSWER, ICE both ways,
+DTLS, DIRECT_READY) cost more than the session. A requester that takes a
+quiet stream over the relay says so in its BEGIN (`quiet_relay: true`,
+`scheduler.py`); the provider then checks before it builds an OFFER
+(`SpaceSyncService.is_quiet`: plans the session and reads up to the first
+record of each resource) and, when nothing would stream, sends just the
+sentinel as a `SPACE_SYNC_CHUNK` event over the household-to-household
+path. The requester's chunk handler opens the HTTPS receive session for it,
+but only for a sync id it issued and only for the household it asked
+(`FederationService._open_quiet_relay_session` → `pending_sync_request`).
+The sentinel is checked exactly like one sent over the DataChannel, and
+`SPACE_SYNC_COMPLETE` advances the watermark as usual.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as Requester (HFS)
+    participant P as Provider (HFS)
+    R->>P: SPACE_SYNC_BEGIN<br/>(prefer_direct, quiet_relay, have_seq)
+    Note over P: incremental, nothing changed
+    P->>R: SPACE_SYNC_CHUNK (sentinel only)
+    R->>P: SPACE_SYNC_COMPLETE (clean)
+```
+
+`quiet_relay` is additive: an older provider ignores it and negotiates
+WebRTC as before, and a provider never streams over the relay to a
+requester that did not send it. An older requester has no session for a
+chunk that arrives before an OFFER and would drop it. No protocol bump.
+A session with anything to stream, a full session, a mesh-only requester
+(already relay) and a provider without watermarks are unchanged.
+
 ## Flow — long-offline catch-up
 
 A household that was offline past the 7-day outbox retention (spec §4.4.1)

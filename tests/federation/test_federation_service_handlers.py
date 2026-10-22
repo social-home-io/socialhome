@@ -26,7 +26,7 @@ from socialhome.domain.federation import (
     PairingStatus,
 )
 from socialhome.federation.federation_service import FederationService
-from socialhome.federation.sync_manager import PendingSyncRequest
+from socialhome.federation.sync_manager import PendingSyncRequest, SyncSessionManager
 
 
 def _event(
@@ -733,6 +733,85 @@ async def test_handle_space_sync_begin_confirmed_prefer_direct_uses_rtc(svc):
         send_mock.await_args.kwargs["event_type"]
         is FederationEventType.SPACE_SYNC_OFFER
     )
+
+
+def _quiet_begin_svc(svc, *, quiet: bool):
+    record = SimpleNamespace(sync_id="q1", transport_mode="rtc")
+    record.rtc = SimpleNamespace(
+        create_offer=AsyncMock(return_value="sdp-x"), close=MagicMock()
+    )
+    rtc = record.rtc
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(accepted=True, next_event=None, next_payload=None),
+    )
+    svc._sync_manager.get_session = MagicMock(return_value=record)
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.stream_initial = AsyncMock()
+    svc._space_sync_service.is_quiet = AsyncMock(return_value=quiet)
+    return record, rtc
+
+
+async def _quiet_begin(svc, payload: dict):
+    with (
+        patch.object(
+            FederationService,
+            "is_confirmed_peer",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch.object(FederationService, "send_event", new_callable=AsyncMock) as send,
+    ):
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN",
+                {
+                    "sync_id": "q1",
+                    "space_id": "sp",
+                    "sync_mode": "incremental",
+                    "prefer_direct": True,
+                    **payload,
+                },
+                space_id="sp",
+            ),
+        )
+        await asyncio.sleep(0)
+    return send
+
+
+async def test_a_quiet_session_goes_over_the_relay_without_webrtc(svc):
+    """#2(d): a periodic session with nothing to stream used to cost an
+    OFFER, an ANSWER, a trickle of ICE candidates both ways, a DTLS
+    handshake and DIRECT_READY — for one sentinel. A requester that says
+    it takes a quiet stream over the relay (``quiet_relay``) gets just the
+    sentinel as a ``SPACE_SYNC_CHUNK``: no OFFER, and the RTC handle is
+    torn down."""
+    record, rtc = _quiet_begin_svc(svc, quiet=True)
+    send = await _quiet_begin(svc, {"quiet_relay": True})
+    assert record.transport_mode == "https"
+    assert record.rtc is None
+    rtc.close.assert_called_once()
+    rtc.create_offer.assert_not_awaited()
+    svc._space_sync_service.stream_initial.assert_awaited_once_with(record)
+    send.assert_not_awaited()
+
+
+async def test_a_session_with_something_to_stream_keeps_webrtc(svc):
+    record, rtc = _quiet_begin_svc(svc, quiet=False)
+    send = await _quiet_begin(svc, {"quiet_relay": True})
+    assert record.transport_mode == "rtc"
+    rtc.create_offer.assert_awaited_once()
+    assert send.await_args.kwargs["event_type"] is FederationEventType.SPACE_SYNC_OFFER
+
+
+async def test_an_older_requester_keeps_webrtc_even_when_quiet(svc):
+    """Without ``quiet_relay`` the requester holds no session for a chunk
+    that arrives before an OFFER, so it would drop the sentinel."""
+    record, rtc = _quiet_begin_svc(svc, quiet=True)
+    await _quiet_begin(svc, {})
+    rtc.create_offer.assert_awaited_once()
+    svc._space_sync_service.is_quiet.assert_not_awaited()
+    assert record.transport_mode == "rtc"
 
 
 async def test_handle_space_sync_begin_confirmed_no_prefer_direct_uses_https(svc):
@@ -1923,6 +2002,86 @@ async def test_handle_space_sync_offer_pins_the_provider_on_the_session(svc):
         svc._sync_manager.apply_offer.await_args.kwargs["provider_instance_id"]
         == "peer-1"
     )
+
+
+async def test_a_quiet_stream_for_our_own_request_opens_its_session(svc):
+    """#2(d): the provider answered our direct BEGIN with a relay stream
+    (nothing to stream), so no OFFER minted a session. A chunk from the
+    very household we asked, for a sync id we issued, opens the HTTPS
+    receive session pinned to it — and goes to the receiver."""
+    svc._sync_manager = MagicMock()
+    opened = SimpleNamespace(provider_instance_id="peer-1", space_id="sp")
+    # No session until the chunk opens one.
+    svc._sync_manager.get_session = MagicMock(side_effect=[None, opened])
+    _solicited(svc, provider="peer-1", space_id="sp")
+    svc._space_sync_receiver = SimpleNamespace(on_chunk=AsyncMock())
+    await svc._handle_space_sync_chunk(
+        _event(
+            "SPACE_SYNC_CHUNK",
+            {"sync_id": "s1", "chunk": "raw"},
+            from_instance="peer-1",
+        ),
+    )
+    svc._sync_manager.register_requester_https_session.assert_called_once_with(
+        sync_id="s1",
+        space_id="sp",
+        requester_instance_id=svc._own_instance_id,
+        provider_instance_id="peer-1",
+        sync_mode="incremental",
+    )
+    svc._space_sync_receiver.on_chunk.assert_awaited_once_with(
+        "raw", from_instance="peer-1", expected_space_id="sp"
+    )
+
+
+async def test_a_quiet_stream_lands_through_the_real_session_manager(svc):
+    """The same, against the real :class:`SyncSessionManager`: the request
+    our BEGIN recorded opens an HTTPS receive session pinned to the
+    provider, which then takes the stream's further chunks."""
+    mgr = SyncSessionManager(MagicMock())
+    svc._sync_manager = mgr
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="peer-1",
+        sync_mode="incremental",
+    )
+    svc._space_sync_receiver = SimpleNamespace(on_chunk=AsyncMock())
+    for raw in ("c-1", "sentinel"):
+        await svc._handle_space_sync_chunk(
+            _event(
+                "SPACE_SYNC_CHUNK",
+                {"sync_id": "s1", "chunk": raw},
+                from_instance="peer-1",
+            ),
+        )
+    session = mgr.get_session("s1")
+    assert session is not None
+    assert (session.transport_mode, session.provider_instance_id) == ("https", "peer-1")
+    assert session.requester_instance_id == svc._own_instance_id
+    assert svc._space_sync_receiver.on_chunk.await_count == 2
+
+
+@pytest.mark.parametrize("asked", ["peer-1", None])
+async def test_a_chunk_for_a_request_we_did_not_send_it_opens_nothing(svc, asked):
+    """Only the household we asked may open the session: a chunk from
+    anyone else (or for an id we never issued) is dropped as before."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=None)
+    if asked is None:
+        svc._sync_manager.pending_sync_request = MagicMock(return_value=None)
+    else:
+        _solicited(svc, provider=asked)
+    svc._space_sync_receiver = SimpleNamespace(on_chunk=AsyncMock())
+    await svc._handle_space_sync_chunk(
+        _event(
+            "SPACE_SYNC_CHUNK",
+            {"sync_id": "s1", "chunk": "raw"},
+            from_instance="intruder",
+        ),
+    )
+    svc._sync_manager.register_requester_https_session.assert_not_called()
+    svc._space_sync_receiver.on_chunk.assert_not_awaited()
 
 
 async def test_handle_space_sync_chunk_refuses_an_unpinned_session(svc):

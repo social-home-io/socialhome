@@ -24,7 +24,7 @@ resource. A small resource (bans, members, zones …) keeps the single
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import orjson as _orjson
@@ -217,7 +217,7 @@ class ConditionalExporter(ResourceExporter, Protocol):
 
 async def record_batches(
     exporter: ResourceExporter, space_id: str, *, since: int | None = None
-) -> AsyncIterator[list[dict[str, Any]]]:
+) -> AsyncGenerator[list[dict[str, Any]]]:
     """The exporter's records as non-empty pages — its ``iter_batches``
     when it pages, else its whole ``list_records`` as one page.
 

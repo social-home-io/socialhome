@@ -1800,3 +1800,49 @@ async def test_the_roster_memory_is_per_household(encoder):
     await _session(svc, marks, since=None, snapshot=40)
     other = await _session(svc, marks, since=40, snapshot=50, requester="peer-o")
     assert {"bans", "members"} <= set(_records(other))
+
+
+# ─── #2(d): is there anything to stream? ──────────────────────────────────
+
+
+async def test_a_session_with_nothing_changed_is_quiet(encoder):
+    """The BEGIN handler asks before it negotiates WebRTC: a periodic
+    session whose covered resources changed nothing and whose roster the
+    requester already holds (#2(c)) has only its sentinel to send."""
+    marks = _Marks()
+    svc, _members = _roster_inc_provider(encoder, marks)
+    await _session(svc, marks, since=None, snapshot=40)
+    svc._exporters["posts"]._changed = []
+    marks._since = 40
+    assert await svc.is_quiet(_FakeSession(sync_mode="incremental")) is True
+    # Something changed: not quiet.
+    svc._exporters["posts"]._changed = [{"id": "p-9"}]
+    assert await svc.is_quiet(_FakeSession(sync_mode="incremental")) is False
+
+
+async def test_a_full_session_or_a_moved_roster_is_never_quiet(encoder):
+    marks = _Marks()
+    svc, members = _roster_inc_provider(encoder, marks)
+    svc._exporters["posts"]._changed = []
+    marks._since = None
+    assert await svc.is_quiet(_FakeSession()) is False
+    await _session(svc, marks, since=None, snapshot=40)
+    members._records = [{"user_id": "u-2"}]
+    marks._since = 40
+    assert await svc.is_quiet(_FakeSession(sync_mode="incremental")) is False
+
+
+async def test_a_failing_quiet_check_is_not_quiet(encoder):
+    marks = _Marks()
+    svc, _members = _roster_inc_provider(encoder, marks)
+
+    async def _boom(**_kw):
+        raise RuntimeError("db gone")
+
+    marks.since_for = _boom
+    assert await svc.is_quiet(_FakeSession(sync_mode="incremental")) is False
+
+
+async def test_without_watermarks_nothing_is_quiet(encoder):
+    svc = _roster_provider(encoder)
+    assert await svc.is_quiet(_FakeSession(sync_mode="incremental")) is False
