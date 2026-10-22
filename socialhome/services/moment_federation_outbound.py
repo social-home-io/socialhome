@@ -12,9 +12,11 @@ the code in this file:
 2. **Relay fan-out** (up to 3 hops total). When an inbound
    ``MOMENT_*`` envelope lands on an instance and ``hop_count < 3``,
    :meth:`relay_inbound` re-fans the same payload to the local paired
-   peers, excluding the origin instance and the immediate sender.
-   Receivers dedupe by ``moment.id`` (the row's PRIMARY KEY makes the
-   second save a no-op).
+   peers, excluding the origin instance and the immediate sender — once
+   per moment: a later copy (one arrives per relaying neighbour) is
+   relayed only when it comes from closer to the origin. Receivers dedupe
+   by ``moment.id`` (the row's PRIMARY KEY makes the second save a no-op,
+   and the inbound handler stores and announces only the first copy).
 
 **Echo-loop guard.** Bus events fired by inbound handlers are
 indistinguishable from local writes by event-class identity alone, so
@@ -28,6 +30,8 @@ before it republishes anything.
 from __future__ import annotations
 
 import logging
+import time
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -57,6 +61,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: How long a relayed moment is remembered. Mesh copies arrive within
+#: seconds; a copy redelivered by a peer's outbox later than this is
+#: relayed once more, which is bounded and harmless.
+RELAY_SEEN_TTL_S: float = 24 * 3600.0
+
+#: Most moments remembered at once (oldest dropped first) — ~100 bytes
+#: each, so a few MB at worst.
+RELAY_SEEN_MAX: int = 20_000
+
 
 class MomentFederationOutbound(
     VisibilityMixin,
@@ -72,6 +85,7 @@ class MomentFederationOutbound(
         "_federation",
         "_federation_repo",
         "_relay_policy",
+        "_relayed",
         "_user_repo",
     )
 
@@ -96,6 +110,13 @@ class MomentFederationOutbound(
         self._relay_policy = relay_policy
         self._visibility_repo = visibility_repo
         self._child_protection = None
+        #: (event type, moment id) → (lowest hop we relayed it at,
+        #: monotonic time). In a mesh a household gets one copy of a
+        #: moment per relaying neighbour; only the first — or one from
+        #: closer to the origin, which reaches further — is relayed on.
+        #: Bounded by :data:`RELAY_SEEN_MAX` and :data:`RELAY_SEEN_TTL_S`;
+        #: lost on restart (a copy arriving after one is relayed once more).
+        self._relayed: OrderedDict[tuple[str, str], tuple[int, float]] = OrderedDict()
 
     def wire(self) -> None:
         self._bus.subscribe(MomentCreated, self._on_created)
@@ -234,6 +255,9 @@ class MomentFederationOutbound(
             hop = 0
         if hop <= 0 or hop >= MOMENT_MAX_HOPS:
             return
+        seen_key = (event_type.value, str(payload.get("moment_id") or ""))
+        if not self._relay_is_new(seen_key, hop):
+            return
         origin = str(payload.get("origin_instance_id") or "")
         # §Momentum-relay-policy: don't relay a moment whose source
         # is on the household ban list, or whose author / moment is
@@ -245,6 +269,7 @@ class MomentFederationOutbound(
             target_id=str(payload.get("moment_id") or "") or None,
         ):
             return
+        self._remember_relay(seen_key, hop)
         next_payload = dict(payload)
         next_payload["hop_count"] = hop + 1
         await self._fan_to_peers(
@@ -254,6 +279,27 @@ class MomentFederationOutbound(
             exclude_instances={from_instance},
             author_user_id=str(payload.get("author_user_id") or "") or None,
         )
+
+    # ── Relay seen-map ─────────────────────────────────────────────────
+
+    def _relay_is_new(self, key: tuple[str, str], hop: int) -> bool:
+        """Whether a copy arriving at ``hop`` is worth relaying: never
+        relayed (or the entry aged out), or relayed only from further
+        away — a closer copy, relayed on, reaches more hops."""
+        held = self._relayed.get(key)
+        if held is None:
+            return True
+        relayed_hop, at = held
+        if time.monotonic() - at > RELAY_SEEN_TTL_S:
+            del self._relayed[key]
+            return True
+        return hop < relayed_hop
+
+    def _remember_relay(self, key: tuple[str, str], hop: int) -> None:
+        self._relayed[key] = (hop, time.monotonic())
+        self._relayed.move_to_end(key)
+        while len(self._relayed) > RELAY_SEEN_MAX:
+            self._relayed.popitem(last=False)
 
     # ── Helpers ────────────────────────────────────────────────────────
 

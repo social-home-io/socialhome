@@ -135,6 +135,64 @@ async def test_moment_created_persists_and_publishes(db, bus, inbound):
     relay.relay_inbound.assert_awaited_once()
 
 
+async def test_a_duplicate_copy_is_neither_stored_again_nor_republished(
+    db, bus, inbound
+):
+    """In a mesh a household gets one copy per relaying neighbour. Each one
+    used to re-save the row and re-publish ``MomentCreated`` (a WS frame
+    to every local viewer, a reply notification for a reply) — now only
+    the first does. Every copy is still offered to the relay, whose
+    seen-map decides."""
+    svc, relay = inbound
+    _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=True)
+    captured: list[MomentCreated] = []
+    bus.subscribe(MomentCreated, captured.append)
+    signed = sign_moment_origin(
+        seed=ORIGIN_KEY.private_key,
+        identity_pk=ORIGIN_KEY.public_key,
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_create_payload(),
+    )
+    await svc._on_moment_created(_event(FederationEventType.MOMENT_CREATED, signed))
+    for relayer in ("peer-r1", "peer-r2", "peer-r3"):
+        await svc._on_moment_created(
+            _event(
+                FederationEventType.MOMENT_CREATED,
+                {**signed, "hop_count": 2},
+                from_instance=relayer,
+            )
+        )
+    assert len(captured) == 1
+    assert (await svc._moment_repo.get("m-fed-1")).hop_count == 1
+    assert relay.relay_inbound.await_count == 4
+
+
+async def test_a_copy_from_closer_to_the_origin_lowers_the_stored_hop(db, bus, inbound):
+    """Seen first two hops away, then directly: the row's hop count drops
+    (it decides which local viewers' ``max_hops`` admit it). It is not
+    announced twice — a reply would notify its parent's author again."""
+    svc, _relay = inbound
+    _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=True)
+    captured: list[MomentCreated] = []
+    bus.subscribe(MomentCreated, captured.append)
+    signed = sign_moment_origin(
+        seed=ORIGIN_KEY.private_key,
+        identity_pk=ORIGIN_KEY.public_key,
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_create_payload(),
+    )
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED,
+            {**signed, "hop_count": 2},
+            from_instance="peer-relayer",
+        )
+    )
+    await svc._on_moment_created(_event(FederationEventType.MOMENT_CREATED, signed))
+    assert (await svc._moment_repo.get("m-fed-1")).hop_count == 1
+    assert len(captured) == 1
+
+
 async def test_moment_created_impersonation_dropped(db, bus, inbound):
     """A peer claiming origin=itself for an author that lives on a
     different paired peer is dropped — that's the impersonation we

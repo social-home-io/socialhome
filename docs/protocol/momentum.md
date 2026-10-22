@@ -70,17 +70,25 @@ A (author)  ────►  B (paired)  ────►  C (B's paired)  ──
 
 * The author's instance fans the envelope with
   ``hop_count = 1`` and ``origin_instance_id = self``.
-* Receivers persist (PRIMARY KEY on ``moments.id`` makes the second
-  receipt a no-op) and republish ``MomentCreated`` on the local bus
-  for the realtime layer.
+* Receivers persist the **first** copy and republish ``MomentCreated``
+  on the local bus for the realtime layer. In a mesh one copy arrives
+  per relaying neighbour; a later copy is neither stored nor announced
+  again — it only lowers the stored ``hop_count`` when it comes from
+  closer to the origin.
 * The inbound handler then calls
   ``MomentFederationOutbound.relay_inbound``, which bumps
   ``hop_count`` and re-fans to every paired peer **except**
   ``origin_instance_id`` and the immediate ``from_instance``.
+* **Once per moment.** The relay remembers, per (event type,
+  ``moment_id``), the lowest hop it relayed at (in memory, 24 h,
+  at most 20 000 entries). A later copy is relayed only when it arrives
+  at a lower hop — relayed on, that one reaches further. Creates and
+  deletes are tracked apart.
 * When ``hop_count >= MOMENT_MAX_HOPS`` (3), the relay short-circuits.
 
-The receive-side dedupe and the explicit exclusion list together
-prevent fan-out loops that could form in a fully-connected mesh.
+**Cost.** In a fully-connected mesh of *n* households, re-relaying every
+copy cost (n−1) + (n−1)(n−2) + (n−1)(n−2)(n−3) envelopes per moment
+(25 260 for n = 31); relaying once costs (n−1) + (n−1)(n−2) (900).
 
 ## Per-user max-hops visibility (§Momentum-relay-policy)
 
