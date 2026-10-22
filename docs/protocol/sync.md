@@ -47,7 +47,7 @@ sequenceDiagram
     Note over R,P: sync-v1 DataChannel open
     R->>P: SPACE_SYNC_DIRECT_READY
     loop chunks over DataChannel
-        P->>R: SPACE_SYNC_CHUNK (~100 KB)
+        P->>R: SPACE_SYNC_CHUNK (≤ 8 KB)
         R->>P: SPACE_SYNC_CHUNK_ACK (seq=N)
     end
     P->>R: SPACE_SYNC_COMPLETE
@@ -55,13 +55,20 @@ sequenceDiagram
 
 ## Flow — long-offline catch-up
 
-When a peer reconnects after the 7-day outbox-retention window has
-expired (spec §4.4.1), the requester asks each provider for events
-newer than the last `created_at` it persisted locally. The provider
-replies with a **burst of individual federation events** —
-`SPACE_POST_CREATED`, `SPACE_TASK_CREATED`, etc. — that the receiver's
-existing inbound handlers apply by primary key (re-deliveries are
-idempotent).
+A household that was offline past the 7-day outbox retention (spec §4.4.1)
+catches up through the ordinary §25.6 sync above: the periodic tick (and a
+pairing, or "Sync now") asks each provider for every shared space, and an
+incremental session with no confirmed watermark streams in full.
+
+`SPACE_SYNC_RESUME` is a second, narrower replay that answers with a
+**burst of individual federation events** — `SPACE_POST_CREATED`,
+`SPACE_TASK_CREATED`, etc. — that the receiver's existing inbound handlers
+apply by primary key (re-deliveries are idempotent). Nothing sends it
+automatically today: `SpaceSyncResumeProvider.send_request` has no caller,
+and the replay is reached only through an operator's
+`INSTANCE_RESYNC_REQUEST` (scope `space` / `calendar`, from the admin
+federation route), whose handler runs `replay_space_to` /
+`replay_calendar_to`.
 
 ```mermaid
 sequenceDiagram
@@ -108,8 +115,10 @@ Implemented by `socialhome/federation/sync/space/resume.py`
   `users` table, so a synced album or item could not be inserted at all
   and a member household received the image bytes and no rows (#650).
 
-Each resource is capped at `MAX_PER_RESOURCE = 500` events per request
-— receivers paginate by re-issuing with the new high-water mark.
+Each resource is capped at `MAX_PER_RESOURCE = 500` events per request.
+Nothing re-issues a request past that cap: a space with more than 500
+rows of one kind missed since `since` gets the 500 oldest; the rest
+arrives through the §25.6 sync.
 
 ## What a sync streams
 
@@ -213,8 +222,9 @@ late).
 skips the catch-up media walk — the live media outbox already delivered
 every blob created since, and re-enqueueing every post / gallery /
 listing blob of the space per peer per tick re-shipped the whole space's
-bytes. Pairing, a deferred retry, an authority echo, mesh catch-up and
-"Sync now" stay `"initial"` and enqueue the media. An older provider
+bytes. Pairing, an authority echo, mesh catch-up and "Sync now" stay
+`"initial"` and enqueue the media; a deferred retry asks for the mode
+that was refused (a periodic sync stays `"incremental"`). An older provider
 treats `"incremental"` as it always did (a full stream with media).
 Periodic sessions also stream **only what changed** since the last sync
 the household confirmed — see [Incremental sessions](#incremental-sessions-change-stamps--per-household-watermark).
@@ -231,7 +241,7 @@ of being torn down and restarted from scratch.
 A periodic (`"incremental"`) session streams the rows that changed since
 the last stream the requesting household **confirmed**, so the
 steady-state cost follows the space's changes, not its size. Every other
-session (pairing, a deferred retry, an echo, mesh catch-up, "Sync now",
+session (pairing, an echo, mesh catch-up, "Sync now",
 Tier 3 `"full"`) streams the whole window, as before.
 
 **Change stamp — `sync_seq` (migration 0086).** Each covered table has a
@@ -281,6 +291,11 @@ Kept **full on every session** (streamed whole, as before): the
 what every other resource is admitted against: a receiver checks each
 content record's author against the roster it holds, so the roster must be
 complete on every stream, not just its changes. Nothing else is kept full.
+Only the **host's** roster is taken, though: from any other provider the
+receiver refuses `members` and `bans` outright and keeps only the
+`member_pictures` of members seated on that household, and its content
+rows only add what the receiver lacks (`receiver.py` `_admit`). A member
+household's full roster resources are therefore streamed and dropped.
 
 A `member_pictures` record's bytes are never stored as sent: the receiver
 re-encodes them (`media/profile_picture.py:reencode_peer_picture` — decode,
@@ -815,12 +830,25 @@ overall (S-8). A BEGIN refused for lack of a slot is answered
 That refusal spends **none** of the requester's 5 / h budget for the space:
 the provider checks capacity before it charges the hourly bucket. No
 session was made, so nothing is relayed. The requester forgets the
-request and publishes `SpaceSyncDeferred`. `SpaceSyncScheduler` then asks
-again after 20 s, 40 s, 60 s and so on, up to 6 times, until that
-(space, provider) sync completes. Before this, a household that restarted
-and asked one host for more than 3 spaces at once lost the rest until the
-30-minute tick. A `rate_limited` refusal is not retried; the periodic tick
-covers it.
+request and publishes `SpaceSyncDeferred` carrying the refused request's
+`sync_mode` and `sync_id`. `SpaceSyncScheduler` then asks again after
+20 s, 40 s, 60 s and so on, up to 6 times, until that (space, provider)
+sync completes — **in the same mode**: a refused periodic sync is asked
+again as `"incremental"`. (It used to come back as `"initial"`: a full
+stream plus every media blob of the space, every 30 minutes for each
+space past the third shared with one host.) A `rate_limited` refusal is
+not retried; the periodic tick covers it.
+
+**The requester stays inside that cap.** `SpaceSyncScheduler` counts the
+BEGINs it has sent each provider that have not ended — `SpaceSyncComplete`
+for that `sync_id`, a deferral, or 120 s (`INFLIGHT_BEGIN_TTL_S`, the
+backstop for an end that never reaches us). With 3 held, a further sync
+for that provider waits instead of being sent: one entry per space (the
+mode that streams more and the more urgent priority win) and goes, most
+urgent first, as a slot frees. So the periodic tick over 10 spaces shared
+with one host sends 3 BEGINs, then one more per completed session, and
+the host refuses none. A deferral frees its slot for its own retry but
+pulls nothing else in: the host has just said it is full.
 
 **Direct-only vs mesh-capable legs.** `SPACE_SYNC_OFFER`, `SPACE_SYNC_ANSWER`,
 `SPACE_SYNC_ICE` and `SPACE_SYNC_DIRECT_READY` only make sense on the direct

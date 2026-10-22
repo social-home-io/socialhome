@@ -4066,6 +4066,8 @@ class FederationService:
                     SpaceSyncDeferred(
                         space_id=request.space_id,
                         provider_instance_id=event.from_instance,
+                        sync_mode=request.sync_mode,
+                        sync_id=sync_id,
                     )
                 )
                 return

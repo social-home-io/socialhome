@@ -1285,10 +1285,17 @@ class SpaceSyncComplete(DomainEvent):
 class SpaceSyncDeferred(DomainEvent):
     """A provider refused a ``SPACE_SYNC_BEGIN`` we sent for lack of
     capacity (``too_many_sessions`` / ``node_capacity``, §25.6 S-6 / S-8):
-    the sync was never served and must be asked for again."""
+    the sync was never served and must be asked for again.
+
+    ``sync_mode`` is what the refused BEGIN asked for, so a periodic
+    (``"incremental"``) sync is asked again as one — never as an
+    ``"initial"`` full stream with every media blob. ``sync_id`` names the
+    refused request (the requester's in-flight slot for it is free)."""
 
     space_id: str
     provider_instance_id: str
+    sync_mode: str = "initial"
+    sync_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
