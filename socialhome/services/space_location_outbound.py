@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -56,6 +57,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: An unchanged point (same 4-dp coordinates, or the same zone in
+#: ``zone_only``) is not re-sent to member households more often than
+#: this. HA pushes a fix every minute or so even while a phone sits still;
+#: the refresh keeps a still person's pin from reading hours stale
+#: ("updated N min ago") on the peers' maps.
+UNCHANGED_REFRESH_S: float = 15 * 60.0
+
 
 class SpaceLocationOutbound:
     """Fan a household :class:`PresenceUpdated` out to every opted-in
@@ -66,6 +74,7 @@ class SpaceLocationOutbound:
     __slots__ = (
         "_bus",
         "_federation",
+        "_last_sent",
         "_members",
         "_presence",
         "_spaces",
@@ -96,6 +105,10 @@ class SpaceLocationOutbound:
         self._zones = space_zone_repo
         self._users = user_repo
         self._presence = presence_repo
+        #: (space, user) → (what the last federated pin said, monotonic
+        #: time) — see :data:`UNCHANGED_REFRESH_S`. In memory: a restart
+        #: re-sends each pin once. Bounded by the members sharing a location.
+        self._last_sent: dict[tuple[str, str], tuple[tuple, float]] = {}
 
     def wire(self) -> None:
         self._bus.subscribe(PresenceUpdated, self._on_presence_updated)
@@ -231,7 +244,7 @@ class SpaceLocationOutbound:
         if payload is None:
             return
         await self._broadcast_local(space.id, payload)
-        await self._fan_out_federation(space.id, payload)
+        await self._fan_out_federation(space.id, payload, force=True)
 
     async def _on_mode_changed(self, event: SpaceLocationModeChanged) -> None:
         """Refire latest presence for every opted-in member of *this
@@ -281,7 +294,7 @@ class SpaceLocationOutbound:
             if payload is None:
                 continue
             await self._broadcast_local(space.id, payload)
-            await self._fan_out_federation(space.id, payload)
+            await self._fan_out_federation(space.id, payload, force=True)
 
     async def _payload_for_space(
         self,
@@ -367,7 +380,29 @@ class SpaceLocationOutbound:
         self,
         space_id: str,
         payload: dict,
+        *,
+        force: bool = False,
     ) -> None:
+        """Send the pin to the space's member households — unless it says
+        what the last one did and that one is younger than
+        :data:`UNCHANGED_REFRESH_S`. ``force`` (an opt-in, a tier switch)
+        always sends: those exist to put the pin on the map now."""
+        key = (space_id, str(payload.get("user_id") or ""))
+        said = (
+            (payload.get("mode"), payload.get("zone_id"))
+            if payload.get("mode") == "zone_only"
+            else (payload.get("mode"), payload.get("lat"), payload.get("lon"))
+        )
+        now = monotonic()
+        last = self._last_sent.get(key)
+        if (
+            not force
+            and last is not None
+            and last[0] == said
+            and now - last[1] < UNCHANGED_REFRESH_S
+        ):
+            return
+        self._last_sent[key] = (said, now)
         try:
             await self._federation.broadcast_to_space_members(
                 space_id,
