@@ -403,3 +403,98 @@ async def test_a_broadcast_skips_invite_link_households():
         )
     )
     assert [r[0] for r in fed.sent] == ["peer-1"]
+
+
+# ── Per-peer digest: an unchanged directory is not re-sent (#10) ──────────
+
+
+def _changed(space_id: str = "sp-x") -> SpaceConfigChanged:
+    return SpaceConfigChanged(
+        space_id=space_id, event_type="SPACE_RENAMED", payload={}, sequence=2
+    )
+
+
+async def test_a_config_change_that_leaves_the_directory_alone_sends_nothing(env):
+    """Every SpaceConfigChanged — a private space renamed, a remote space's
+    config applied here — used to send every paired peer the whole public
+    directory again. Now a peer is sent it only when what it would get
+    differs from what it got last: 10 unrelated changes, 2 peers → 2
+    envelopes (the first round), not 20."""
+    bus, fed, _svc = env
+    for _ in range(10):
+        await bus.publish(_changed("sp-private"))
+    assert [r[0] for r in fed.sent] == ["peer-1", "peer-2"]
+
+
+async def test_a_change_to_the_directory_goes_to_every_peer(env):
+    bus, fed, svc = env
+    await bus.publish(_changed())
+    fed.sent.clear()
+    svc._space_repo._spaces[0] = _space(id="sp-1", name="Allotment")
+    await bus.publish(_changed("sp-1"))
+    assert [r[0] for r in fed.sent] == ["peer-1", "peer-2"]
+    names = {s["name"] for s in fed.sent[0][2]["spaces"]}
+    assert "Allotment" in names
+
+
+async def test_a_member_count_change_is_a_change(env):
+    bus, fed, svc = env
+    await bus.publish(_changed())
+    fed.sent.clear()
+    svc._space_repo._members["sp-2"].append("u4")
+    await bus.publish(_changed())
+    assert len(fed.sent) == 2
+
+
+async def test_pair_confirm_and_upgrade_always_send(env):
+    """A new pair, or a peer crossing v_59, must get the snapshot even if
+    an earlier one to it said the same — it may not hold it."""
+    bus, fed, _svc = env
+    await bus.publish(_changed())
+    fed.sent.clear()
+    await bus.publish(PairingConfirmed(instance_id="peer-1"))
+    assert [r[0] for r in fed.sent] == ["peer-1"]
+
+
+async def test_each_peer_is_compared_to_its_own_last_snapshot():
+    """An older peer and a current one get different entries; an
+    unrelated change later sends nobody anything."""
+    floor = FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA
+    space_repo = _FakeSpaceRepo(public_spaces=[_space()], members={})
+    fed_repo = _FakeFedRepo(
+        [
+            _PeerRow("peer-old", PairingStatus.CONFIRMED),
+            _PeerRow("peer-new", PairingStatus.CONFIRMED),
+        ]
+    )
+    fed = _FakeFederationService(versions={"peer-old": floor - 1})
+    bus = EventBus()
+    PeerDirectoryService(
+        bus=bus,
+        federation_service=fed,
+        federation_repo=fed_repo,
+        space_repo=space_repo,
+    ).wire()
+    await bus.publish(_changed())
+    assert len(fed.sent) == 2
+    await bus.publish(_changed())
+    assert len(fed.sent) == 2
+
+
+async def test_a_failed_send_is_tried_again_on_the_next_change(env):
+    """A send that raised recorded nothing, so the next change re-sends."""
+    bus, fed, _svc = env
+    real_send = fed.send_event
+    calls = {"n": 0}
+
+    async def _flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        await real_send(**kw)
+
+    fed.send_event = _flaky
+    await bus.publish(_changed())
+    assert [r[0] for r in fed.sent] == ["peer-2"]
+    await bus.publish(_changed())
+    assert [r[0] for r in fed.sent] == ["peer-2", "peer-1"]
