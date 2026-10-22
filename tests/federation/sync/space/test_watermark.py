@@ -3,16 +3,21 @@ periodic session may stream only the changed rows, and when it must not."""
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from socialhome.domain.conversation import ConversationMessage, SystemChatScope
+from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.page import Page
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceSyncWatermark
 from socialhome.domain.task import Task, TaskList, TaskStatus
 from socialhome.domain.timetable import Timetable
+from socialhome.federation.sync.space import provider as provider_mod
+from socialhome.federation.sync.space import watermark as watermark_mod
 from socialhome.federation.sync.space.exporter import IncrementalExporter
 from socialhome.federation.sync.space.exporters import (
     BazaarExporter,
@@ -45,7 +50,9 @@ from socialhome.federation.sync.space.exporters import (
 )
 from socialhome.federation.sync.space.watermark import (
     FULL_RESYNC_INTERVAL_S,
+    SYNC_RECORD_LINES,
     SYNC_SHAPE_VERSION,
+    SYNC_VERSION_HISTORY_THROUGH,
     SyncWatermarks,
     parse_have_seq,
     session_shape,
@@ -110,6 +117,54 @@ def test_the_shape_names_everything_a_stream_depends_on():
         retention="30:event",
         resources=("bans", "posts", "chat_messages"),
     )
+
+
+def _shape(peer_version: int) -> str:
+    return session_shape(peer_version=peer_version, retention="", resources=("posts",))
+
+
+def test_a_version_bump_that_changes_no_sync_record_keeps_every_watermark():
+    """#2(e): the raw protocol version was part of the shape, so every
+    ``OURS`` bump — most of which touch no sync record — made the next
+    session of every household in every space a full stream. Above
+    :data:`SYNC_VERSION_HISTORY_THROUGH` only the listed
+    :data:`SYNC_RECORD_LINES` count."""
+    through = SYNC_VERSION_HISTORY_THROUGH
+    # History is kept: every older version is its own shape, as before.
+    assert _shape(through - 1) != _shape(through)
+    assert _shape(through).split("|")[1] == f"p{through}"
+    # A later bump that is no sync line keeps the shape.
+    assert _shape(through + 1) == _shape(through)
+    assert _shape(through + 7) == _shape(through)
+
+
+def test_a_listed_sync_line_changes_the_shape(monkeypatch):
+    through = SYNC_VERSION_HISTORY_THROUGH
+    monkeypatch.setattr(watermark_mod, "SYNC_RECORD_LINES", (through + 3,))
+    assert _shape(through + 2) == _shape(through)
+    assert _shape(through + 3) != _shape(through + 2)
+    assert _shape(through + 9) == _shape(through + 3)
+
+
+def test_the_sync_lines_are_consistent():
+    lines = SYNC_RECORD_LINES
+    assert list(lines) == sorted(set(lines))
+    assert all(SYNC_VERSION_HISTORY_THROUGH < line <= OURS for line in lines)
+    assert SYNC_VERSION_HISTORY_THROUGH <= OURS
+
+
+def test_every_version_gate_of_the_sync_provider_is_a_sync_line():
+    """Tripwire: a ``FederationCapability`` the provider gates a stream on
+    (``provider.py``) above the frozen history must be listed — otherwise
+    a requester crossing it would keep a watermark for records it never
+    got in their new form."""
+    source = Path(provider_mod.__file__).read_text(encoding="utf-8")
+    gates = {
+        getattr(FederationCapability, name)
+        for name in re.findall(r"FederationCapability\.(MIN_FOR_\w+)", source)
+    }
+    late = {g for g in gates if g > SYNC_VERSION_HISTORY_THROUGH}
+    assert late <= set(SYNC_RECORD_LINES), late
 
 
 async def test_snapshot_reads_the_counter():

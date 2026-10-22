@@ -609,7 +609,14 @@ Fail-safe toward more data, never less:
   and exempt types, and the resources this household gets (the v_55 chat
   gate, a resource added by an upgrade). A household that upgrades, gains
   a writer seat, or a space that keeps more history, so gets the rows it
-  could not take before;
+  could not take before. The protocol version counts only where it
+  changes a stream (#2(e), `watermark.sync_version_bucket`): every version
+  up to v_64 (`SYNC_VERSION_HISTORY_THROUGH`) is still its own shape, and
+  above it only the versions listed in `SYNC_RECORD_LINES` (a new
+  resource, a record field a receiver now stores, a version gate in
+  `provider._exporter_for` — a tripwire test checks the gates). Any other
+  `OURS` bump keeps every watermark, where it used to make the next session
+  of every household in every space a full stream;
 - **no `have_seq`** in the BEGIN → full (see above);
 - **archive lifted here** → full. While a space is archived on the
   requester its member households' records are refused by rule (the
