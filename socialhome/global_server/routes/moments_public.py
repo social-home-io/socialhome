@@ -310,6 +310,12 @@ async def _encrypted_envelope(view: GfsBaseView) -> dict | web.Response:
     # a replay past the seen-cache window reaches no follower.
     if not envelope_step_current(body["key_gen"], body["key_step"], time.time()):
         return web.json_response({"error": "stale_envelope"}, status=409)
+    # One household can't flood the fan-out (or push other authors' moments
+    # out of the seen cache): a cluster-wide budget per signing household.
+    if not registry.allow_publish(sender):
+        resp = web.json_response({"error": "rate_limited"}, status=429)
+        resp.headers["Retry-After"] = "60"
+        return resp
     return body
 
 
