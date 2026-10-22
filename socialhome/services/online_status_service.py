@@ -100,17 +100,33 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
     #: a SQLite update has no user-visible cost.
     PERSIST_DEBOUNCE: timedelta = timedelta(seconds=30)
 
-    #: How often the background loop scans for idle/resumed transitions.
-    SCHEDULER_INTERVAL: float = 60.0
+    #: How often the background loop scans for idle/resumed transitions
+    #: and for the federated transitions below that are due.
+    SCHEDULER_INTERVAL: float = 15.0
+
+    #: Peers hear that a user went offline only once every session has
+    #: been gone this long (sent on the first scan after it). A dropped
+    #: Wi-Fi or a page reload reconnects within seconds; told at once,
+    #: every peer got an offline and an online for it.
+    OFFLINE_GRACE: timedelta = timedelta(seconds=45)
+
+    #: Peers hear that a user went idle only once the idle state has held
+    #: this long. A reader who pauses past :attr:`IDLE_AFTER` and scrolls
+    #: again would otherwise flip every peer idle → online each time.
+    #: Coming back (online) is told at once.
+    IDLE_SETTLE: timedelta = timedelta(minutes=5)
 
     __slots__ = (
         "_bus",
         "_child_protection",
+        "_federated",
         "_federation",
         "_federation_repo",
+        "_idle_since",
         "_idle_users",
         "_last_persisted",
         "_lock",
+        "_offline_since",
         "_own_instance_id",
         "_remote",
         "_sessions",
@@ -138,6 +154,16 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
         self._sessions: dict[str, dict[int, datetime]] = {}
         self._idle_users: set[str] = set()
         self._last_persisted: dict[str, datetime] = {}
+        #: What peers were last told about each local user: ``"online"``,
+        #: ``"idle"`` or ``"offline"`` (absent: nothing since start). The
+        #: local bus events fire at once; the federated ones follow
+        #: :attr:`OFFLINE_GRACE` / :attr:`IDLE_SETTLE`. Bounded by the
+        #: household's users.
+        self._federated: dict[str, str] = {}
+        #: user → when their last session closed, until peers are told.
+        self._offline_since: dict[str, datetime] = {}
+        #: user → when they went idle, until peers are told or they resume.
+        self._idle_since: dict[str, datetime] = {}
         # Cross-instance state — keyed by ``user_id``. Ephemeral: a peer
         # restart triggers a full re-emit on their side, so we never
         # persist this dict.
@@ -217,6 +243,7 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
         now = _utcnow()
         was_offline = False
         was_idle = False
+        tell_peers = False
         async with self._lock:
             sessions = self._sessions.setdefault(user_id, {})
             was_offline = not sessions
@@ -226,14 +253,13 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
             # we were idle.
             if was_idle:
                 self._idle_users.discard(user_id)
+            if was_offline or was_idle:
+                tell_peers = self._mark_federated_online(user_id)
         if was_offline:
             await self._publish(UserCameOnline(user_id=user_id))
-            await self._fan_to_peers(
-                FederationEventType.USER_ONLINE,
-                user_id=user_id,
-            )
         elif was_idle:
             await self._publish(UserResumedActive(user_id=user_id))
+        if tell_peers:
             await self._fan_to_peers(
                 FederationEventType.USER_ONLINE,
                 user_id=user_id,
@@ -251,6 +277,10 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
             if not sessions:
                 self._sessions.pop(user_id, None)
                 self._idle_users.discard(user_id)
+                self._idle_since.pop(user_id, None)
+                # Peers are told on the first scan past OFFLINE_GRACE —
+                # unless a session opens again before that.
+                self._offline_since[user_id] = now
                 went_offline = True
         if not went_offline:
             return
@@ -259,11 +289,6 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
         # rate-limited.
         await self._persist_last_seen(user_id, now)
         await self._publish(UserWentOffline(user_id=user_id, last_seen_at=now))
-        await self._fan_to_peers(
-            FederationEventType.USER_OFFLINE,
-            user_id=user_id,
-            last_seen_at=now,
-        )
 
     async def touch(self, user_id: str, ws_id: int) -> None:
         """Reset the activity timestamp for one of ``user_id``'s sessions.
@@ -281,11 +306,14 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
                 # bookkeeping helper, not a recovery path.
                 return
             sessions[ws_id] = now
+            tell_peers = False
             if user_id in self._idle_users:
                 self._idle_users.discard(user_id)
                 was_idle = True
+                tell_peers = self._mark_federated_online(user_id)
         if was_idle:
             await self._publish(UserResumedActive(user_id=user_id))
+        if tell_peers:
             await self._fan_to_peers(
                 FederationEventType.USER_ONLINE,
                 user_id=user_id,
@@ -324,10 +352,14 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
                 continue
 
     async def _scan_once(self) -> None:
-        """Single idle-detection pass. Exposed for tests."""
+        """Single idle-detection pass, plus the federated transitions that
+        are due (:attr:`OFFLINE_GRACE`, :attr:`IDLE_SETTLE`). Exposed for
+        tests."""
         now = _utcnow()
         cutoff = now - self.IDLE_AFTER
         newly_idle: list[tuple[str, datetime]] = []
+        tell_idle: list[tuple[str, datetime]] = []
+        tell_offline: list[tuple[str, datetime]] = []
         async with self._lock:
             for user_id, sessions in self._sessions.items():
                 if not sessions:
@@ -335,16 +367,57 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
                 last = max(sessions.values())
                 if last < cutoff and user_id not in self._idle_users:
                     self._idle_users.add(user_id)
+                    self._idle_since[user_id] = now
                     newly_idle.append((user_id, last))
+            for user_id, since in list(self._idle_since.items()):
+                if now - since < self.IDLE_SETTLE:
+                    continue
+                del self._idle_since[user_id]
+                held = self._sessions.get(user_id)
+                if (
+                    user_id in self._idle_users
+                    and held
+                    and self._federated.get(user_id) == "online"
+                ):
+                    self._federated[user_id] = "idle"
+                    tell_idle.append((user_id, max(held.values())))
+            for user_id, since in list(self._offline_since.items()):
+                if now - since < self.OFFLINE_GRACE:
+                    continue
+                del self._offline_since[user_id]
+                if (
+                    not self._sessions.get(user_id)
+                    and self._federated.get(user_id) != "offline"
+                ):
+                    self._federated[user_id] = "offline"
+                    tell_offline.append((user_id, since))
         for user_id, last_active in newly_idle:
             await self._publish(
                 UserWentIdle(user_id=user_id, last_active_at=last_active),
             )
+        for user_id, last_active in tell_idle:
             await self._fan_to_peers(
                 FederationEventType.USER_IDLE,
                 user_id=user_id,
                 last_seen_at=last_active,
             )
+        for user_id, since in tell_offline:
+            await self._fan_to_peers(
+                FederationEventType.USER_OFFLINE,
+                user_id=user_id,
+                last_seen_at=since,
+            )
+
+    def _mark_federated_online(self, user_id: str) -> bool:
+        """The user is active again (caller holds the lock): drop any
+        pending offline / idle and say whether peers must hear "online" —
+        not when they never heard anything else."""
+        self._offline_since.pop(user_id, None)
+        self._idle_since.pop(user_id, None)
+        if self._federated.get(user_id) == "online":
+            return False
+        self._federated[user_id] = "online"
+        return True
 
     # ─── Internals ────────────────────────────────────────────────────────
 

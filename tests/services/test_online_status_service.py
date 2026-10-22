@@ -384,6 +384,8 @@ async def test_fan_to_peers_offline_carries_last_seen():
     await svc.user_session_opened("alice", ws_id=1)
     fed.sent.clear()
     await svc.user_session_closed("alice", ws_id=1)
+    _past_grace(svc, "alice")
+    await svc._scan_once()
     offline_calls = [
         (tid, ev, p)
         for (tid, ev, p) in fed.sent
@@ -393,6 +395,94 @@ async def test_fan_to_peers_offline_carries_last_seen():
     _, _, payload = offline_calls[0]
     assert payload["user_id"] == "alice"
     assert "last_seen_at" in payload
+
+
+def _federated(peers=("inst-A",)):
+    svc, _bus, _repo, captured = _make()
+    fed = _FakeFederationService()
+    svc.attach_federation(
+        federation_service=fed,
+        federation_repo=_FakeFederationRepo([_peer(p) for p in peers]),
+        own_instance_id="inst-self",
+    )
+    return svc, fed, captured
+
+
+def _past_grace(svc, user_id: str) -> None:
+    svc._offline_since[user_id] -= svc.OFFLINE_GRACE + timedelta(seconds=1)
+
+
+def _idle_settled(svc, user_id: str) -> None:
+    svc._idle_since[user_id] -= svc.IDLE_SETTLE + timedelta(seconds=1)
+
+
+def _types(fed) -> list:
+    return [t for _id, t, _p in fed.sent]
+
+
+async def test_a_flapping_connection_tells_peers_nothing():
+    """Flaky Wi-Fi: 20 drops a day, each back within seconds. Before, each
+    one cost every peer a USER_OFFLINE and a USER_ONLINE (40 envelopes per
+    peer); now the peers saw the person come online once and that's all.
+    The household's own UI still sees every transition."""
+    svc, fed, captured = _federated()
+    await svc.user_session_opened("alice", ws_id=1)
+    for ws_id in range(2, 22):
+        await svc.user_session_closed("alice", ws_id=ws_id - 1)
+        await svc._scan_once()  # inside the grace window
+        await svc.user_session_opened("alice", ws_id=ws_id)
+    assert _types(fed) == [_Evt.USER_ONLINE]
+    assert sum(isinstance(e, UserWentOffline) for e in captured) == 20
+
+
+async def test_a_real_disconnect_reaches_peers_after_the_grace():
+    svc, fed, _captured = _federated()
+    await svc.user_session_opened("alice", ws_id=1)
+    await svc.user_session_closed("alice", ws_id=1)
+    await svc._scan_once()
+    assert _types(fed) == [_Evt.USER_ONLINE]
+    _past_grace(svc, "alice")
+    await svc._scan_once()
+    await svc._scan_once()  # once, not on every scan
+    assert _types(fed) == [_Evt.USER_ONLINE, _Evt.USER_OFFLINE]
+    await svc.user_session_opened("alice", ws_id=2)
+    assert _types(fed) == [_Evt.USER_ONLINE, _Evt.USER_OFFLINE, _Evt.USER_ONLINE]
+
+
+async def test_idle_reaches_peers_only_once_it_has_held():
+    """A reader who pauses past the idle threshold and then scrolls again
+    used to flip peers idle → online each time; idle now goes out only
+    after it has held for IDLE_SETTLE, and a blip before that costs
+    nothing. Locally the idle transition still fires at once."""
+    svc, fed, captured = _federated()
+    await svc.user_session_opened("alice", ws_id=1)
+    for _ in range(5):
+        svc._sessions["alice"][1] = datetime.now(UTC) - timedelta(minutes=10)
+        await svc._scan_once()
+        assert svc.is_idle("alice")
+        await svc.touch("alice", ws_id=1)
+    assert _types(fed) == [_Evt.USER_ONLINE]
+    assert sum(isinstance(e, UserWentIdle) for e in captured) == 5
+    svc._sessions["alice"][1] = datetime.now(UTC) - timedelta(minutes=10)
+    await svc._scan_once()
+    _idle_settled(svc, "alice")
+    await svc._scan_once()
+    await svc._scan_once()
+    assert _types(fed) == [_Evt.USER_ONLINE, _Evt.USER_IDLE]
+    await svc.touch("alice", ws_id=1)
+    assert _types(fed) == [_Evt.USER_ONLINE, _Evt.USER_IDLE, _Evt.USER_ONLINE]
+
+
+async def test_going_offline_while_idle_sends_offline_not_idle():
+    svc, fed, _captured = _federated()
+    await svc.user_session_opened("alice", ws_id=1)
+    svc._sessions["alice"][1] = datetime.now(UTC) - timedelta(minutes=10)
+    await svc._scan_once()
+    await svc.user_session_closed("alice", ws_id=1)
+    _past_grace(svc, "alice")
+    await svc._scan_once()
+    assert _types(fed) == [_Evt.USER_ONLINE, _Evt.USER_OFFLINE]
+    assert "alice" not in svc._idle_since
 
 
 async def test_publish_without_bus_is_safe():
