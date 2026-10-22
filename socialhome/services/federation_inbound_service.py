@@ -3996,7 +3996,16 @@ class FederationInboundService(ProtectionGateMixin):
             hop_count=hop_count,
         )
         parent_author_user_id: str | None = None
-        if wants_local:
+        # In a mesh one copy arrives per relaying neighbour. Only the first
+        # is stored and announced; a later one only lowers the stored hop
+        # count (which local viewers' ``max_hops`` admit it) when it comes
+        # from closer to the origin. Every copy still reaches the relay
+        # below, whose seen-map decides what goes on.
+        held = await self._moment_repo.get(moment_id) if wants_local else None
+        if held is not None:
+            if hop_count < held.hop_count:
+                await self._moment_repo.save(moment)
+        elif wants_local:
             await self._moment_repo.save(moment)
             # Look up the parent's author so the local notification
             # handler can ping them when the inbound moment is a reply.

@@ -14,6 +14,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEventType, RemoteInstance
 from socialhome.federation.moment_origin import NO_RELAY_FIELD, verify_moment_origin
+from socialhome.services import moment_federation_outbound as outbound_mod
 from socialhome.services.moment_federation_outbound import (
     MomentFederationOutbound,
 )
@@ -554,3 +555,179 @@ async def test_relay_inbound_never_forwards_a_no_relay_moment(stack):
         from_instance="peer-origin",
     )
     fed.send_event.assert_not_called()
+
+
+# ── Relay seen-map: one relay per moment, unless a copy arrives closer ──
+
+
+def _relayed(payload_over: dict | None = None) -> dict:
+    payload = {
+        "moment_id": "m-1",
+        "author_user_id": "uid-author",
+        "origin_instance_id": "peer-origin",
+        "hop_count": 1,
+    }
+    payload.update(payload_over or {})
+    return payload
+
+
+async def test_a_second_copy_of_a_relayed_moment_is_not_relayed_again(stack):
+    """Before, every copy that reached us (one per relaying neighbour) was
+    fanned out again to all our peers."""
+    out, fed, fed_repo, _user_repo = stack
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[_peer("peer-x"), _peer("peer-y"), _peer("peer-z")],
+    )
+    for sender in ("peer-x", "peer-y", "peer-z"):
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_CREATED,
+            payload=_relayed({"hop_count": 2}),
+            from_instance=sender,
+        )
+    assert fed.send_event.await_count == 2  # first copy only: y + z
+
+
+async def test_a_copy_from_closer_to_the_origin_is_relayed_again(stack):
+    """First seen at hop 2 (relayed on with 3: one more hop of reach),
+    then at hop 1 — relaying that one reaches two more hops, so it goes.
+    A later hop-2 copy adds nothing."""
+    out, fed, fed_repo, _user_repo = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    for hop in (2, 1, 2, 1):
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_CREATED,
+            payload=_relayed({"hop_count": hop}),
+            from_instance="peer-sender",
+        )
+    hops = [c.kwargs["payload"]["hop_count"] for c in fed.send_event.call_args_list]
+    assert hops == [3, 2]
+
+
+async def test_create_and_delete_of_one_moment_are_tracked_apart(stack):
+    out, fed, fed_repo, _user_repo = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    for event_type in (
+        FederationEventType.MOMENT_CREATED,
+        FederationEventType.MOMENT_DELETED,
+        FederationEventType.MOMENT_DELETED,
+    ):
+        await out.relay_inbound(
+            event_type=event_type,
+            payload=_relayed(),
+            from_instance="peer-sender",
+        )
+    types = [c.kwargs["event_type"] for c in fed.send_event.call_args_list]
+    assert types == [
+        FederationEventType.MOMENT_CREATED,
+        FederationEventType.MOMENT_DELETED,
+    ]
+
+
+async def test_a_refused_copy_is_not_remembered(stack):
+    """A copy the relay policy refused (an open report) leaves no mark: once
+    the report is resolved the next copy still goes."""
+    out, fed, fed_repo, _user_repo = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    policy = MagicMock()
+    policy.allow_relay = AsyncMock(side_effect=[False, True])
+    out._relay_policy = policy
+    for _ in range(2):
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_CREATED,
+            payload=_relayed(),
+            from_instance="peer-sender",
+        )
+    assert fed.send_event.await_count == 1
+
+
+async def test_the_seen_map_is_bounded(stack, monkeypatch):
+    monkeypatch.setattr(outbound_mod, "RELAY_SEEN_MAX", 3)
+    out, fed, fed_repo, _user_repo = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    for i in range(5):
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_CREATED,
+            payload=_relayed({"moment_id": f"m-{i}"}),
+            from_instance="peer-sender",
+        )
+    assert len(out._relayed) == 3
+    # The oldest fell out: a late copy of it is relayed once more.
+    await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_relayed({"moment_id": "m-0"}),
+        from_instance="peer-sender",
+    )
+    assert fed.send_event.await_count == 6
+
+
+async def test_an_entry_expires(stack, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(outbound_mod.time, "monotonic", lambda: clock[0])
+    out, fed, fed_repo, _user_repo = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_relayed(),
+        from_instance="peer-sender",
+    )
+    clock[0] += outbound_mod.RELAY_SEEN_TTL_S + 1
+    await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_relayed(),
+        from_instance="peer-sender",
+    )
+    assert fed.send_event.await_count == 2
+
+
+async def test_a_moment_in_a_31_household_clique_costs_900_envelopes():
+    """Every household paired with every other (31 of them), one moment.
+    Before the seen-map each household re-relayed every copy it got: the
+    origin's 30 + 30 × 29 at hop 2 + 30 × 29 × 28 at hop 3 = 25 260
+    envelopes. Now each household relays once, on the first copy: 30 +
+    30 × 29 = 900. (Breadth-first, as copies arrive in the mesh.)"""
+    n = 31
+    ids = [f"h{i}" for i in range(n)]
+    queue: list[tuple[str, str, FederationEventType, dict]] = []
+    nodes: dict[str, MomentFederationOutbound] = {}
+    for iid in ids:
+        federation = _federation()
+        federation.own_instance_id = iid
+
+        async def _send(*, to_instance_id, event_type, payload, _src=iid, **_kw):
+            queue.append((_src, to_instance_id, event_type, payload))
+
+        federation.send_event = AsyncMock(side_effect=_send)
+        repo = MagicMock()
+        repo.list_social_instances = AsyncMock(
+            return_value=[_peer(other) for other in ids if other != iid]
+        )
+        users = MagicMock()
+        users.get_instance_for_user = AsyncMock(return_value="h0")
+        nodes[iid] = MomentFederationOutbound(
+            bus=MagicMock(),
+            federation_service=federation,
+            federation_repo=repo,
+            user_repo=users,
+        )
+    await nodes["h0"]._on_created(
+        MomentCreated(
+            moment_id="m-1",
+            author_user_id="uid-author",
+            content="hello",
+            media_url=None,
+            media_type=None,
+            duration_ms=None,
+            parent_moment_id=None,
+            parent_author_user_id=None,
+            origin_instance_id="h0",
+            expires_at="2026-06-01T00:00:00+00:00",
+        )
+    )
+    sent = 0
+    while queue:
+        src, dst, event_type, payload = queue.pop(0)
+        sent += 1
+        await nodes[dst].relay_inbound(
+            event_type=event_type, payload=payload, from_instance=src
+        )
+    assert sent == (n - 1) + (n - 1) * (n - 2) == 900
