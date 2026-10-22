@@ -297,11 +297,13 @@ receiver refuses `members` and `bans` outright and keeps only the
 rows only add what the receiver lacks (`receiver.py` `_admit`). So a
 household that may not speak for the roster — neither the space's owner
 nor a seed-holding delegated admin (a possible trusted inviter, see
-`host_equivalence`) — **does not stream `members` or `bans` at all**, and
-streams `member_pictures` for **its own people only**
+`host_equivalence`) — **does not stream `bans` at all**, and streams
+`members` and `member_pictures` for **its own people only**
 (`SpaceSyncService.attach_roster_authority`): its `space_members` also
-mirrors the host's members (a host stream lands there), whose pictures
-every receiver refuses from it. Its content still streams. The session shape changes with
+mirrors the host's members (a host stream lands there), whose rows and
+pictures every receiver refuses from it. Its own people's `members` rows
+still go because they carry the picture resets only their household may
+make (see "Receiver side" below). Its content still streams. The session shape changes with
 the resource set, so the first session after the upgrade is a full one.
 
 A `member_pictures` record's bytes are never stored as sent: the receiver
