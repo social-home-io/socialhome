@@ -1219,6 +1219,15 @@ async def test_a_kept_key_can_be_handed_back_undelivered(gfs_db):
     assert got is not None and got.delivered
     await mailbox.mark_undelivered("u-a", "fan", 7)
     assert [m.key_gen for m in await mailbox.undelivered_for("fan", limit=5)] == [7]
+    # Never back: an older generation, or an older step of the same one, is
+    # not kept (one conditional upsert); the same or a newer key is.
+    assert not await mailbox.put(replace(mail, key_gen=6, key_step=5))
+    assert await mailbox.put(replace(mail, key_step=3, delivery='{"s":3}'))
+    assert not await mailbox.put(replace(mail, key_step=2))
+    assert await mailbox.put(replace(mail, key_step=3, delivery='{"s":3}'))
+    got = await mailbox.get("u-a", "fan")
+    assert got is not None and (got.key_gen, got.key_step) == (7, 3)
+    assert got.delivery == '{"s":3}'
 
 
 async def _relay(queue, to, body, *, now=0, rows=10, per=10**6, total=10**6):

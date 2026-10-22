@@ -423,7 +423,12 @@ household that already follows the author, for at most a day.
   whole delivery. The GFS keeps the latest delivery per (author, follower
   household) in `gfs_moment_key_mailbox` — ciphertext it can't open — and
   pushes it at once or when that household reconnects (undelivered rows
-  only, ≤ 500 per connect).
+  only, ≤ 500 per connect). It never replaces a kept key with an older one
+  (`key_gen`, then `key_step`): an author household only ever seals its
+  current key, so an older delivery is a re-post of a captured signed
+  `/gfs/moments/keys` body — e.g. by a CDN or proxy terminating TLS in front
+  of the GFS, a different party from the GFS — and is neither kept nor
+  pushed. The check is one conditional upsert; no wire change.
 * **Anti-substitution.** The follower's key-wrap key comes from the GFS.
   The author seals only after `verify_keywrap_binding`: the instance id
   derives from the identity key, and the key-wrap key is self-signed by it.
