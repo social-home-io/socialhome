@@ -136,8 +136,8 @@ floor, no exceptions for "trusted" peers.
 ## No third-party trust
 
 The Global Federation Server (GFS) sees **routing metadata only** —
-which space an event belongs to, which peer is online for push fan-out,
-which SDP/ICE candidates need relaying. It never sees plaintext content,
+which space an event belongs to, which follower socket a relayed frame
+goes to. It never sees plaintext content,
 votes, names, or messages, and it cannot forge content, because every payload
 it relays is signed by a key it does not hold and every receiver re-verifies
 that signature itself. A compromised or malicious GFS can disrupt discovery

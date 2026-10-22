@@ -20,7 +20,9 @@ protocol**. Ongoing live updates afterwards are covered by
 `SPACE_SYNC_RESUME`, `SPACE_SYNC_COMPLETE`,
 `SPACE_SYNC_OFFER`, `SPACE_SYNC_ANSWER`, `SPACE_SYNC_ICE`,
 `SPACE_SYNC_DIRECT_READY`, `SPACE_SYNC_DIRECT_FAILED`,
-`SPACE_SYNC_REQUEST_MORE`.
+`SPACE_SYNC_REQUEST_MORE`. `SPACE_SYNC_CHUNK_ACK` is defined but no
+release sends it: a stream is confirmed once, by the requester's
+`SPACE_SYNC_COMPLETE {clean}` after the sentinel (see "Backpressure").
 
 ## Tiered transport
 
@@ -39,7 +41,7 @@ sequenceDiagram
     autonumber
     participant R as Requester (HFS)
     participant P as Provider (HFS)
-    R->>P: SPACE_SYNC_BEGIN<br/>(space_id, since=null)
+    R->>P: SPACE_SYNC_BEGIN<br/>(space_id, sync_mode, have_seq,<br/>prefer_direct, quiet_relay)
     P->>R: SPACE_SYNC_OFFER<br/>(SDP, ICE)
     R->>P: SPACE_SYNC_ANSWER<br/>(SDP, ICE)
     R-->>P: SPACE_SYNC_ICE (trickle)
@@ -47,10 +49,10 @@ sequenceDiagram
     Note over R,P: sync-v1 DataChannel open
     R->>P: SPACE_SYNC_DIRECT_READY
     loop chunks over DataChannel
-        P->>R: SPACE_SYNC_CHUNK (≤ 8 KB)
-        R->>P: SPACE_SYNC_CHUNK_ACK (seq=N)
+        P->>R: SPACE_SYNC_CHUNK (≤ 8 KB, signed, encrypted)
     end
-    P->>R: SPACE_SYNC_COMPLETE
+    P->>R: sentinel chunk (__complete__,<br/>chunk_count, snapshot_seq)
+    R->>P: SPACE_SYNC_COMPLETE (clean)
 ```
 
 ## Flow — quiet periodic session (no WebRTC)
@@ -858,15 +860,18 @@ Tripwire: `tests/protocol/test_space_more_tombstones.py` (§27.9).
 
 ## Backpressure
 
-The DataChannel carries its own high-water mark
-(`set_buffered_amount_low_threshold`), but the provider also honours
-application-level flow control: it will not send `seq=N+1` until it
-has seen the `CHUNK_ACK` for some earlier window. This keeps memory
-bounded even when the underlying SCTP buffer grows.
+There is no application-level acknowledgement per chunk. Before each
+chunk the provider checks the DataChannel's buffered amount
+(`sync_rtc.SEND_HWM_BYTES`, 1 MiB). Over it, the chunk counts as not sent:
+a strike, and after a few in a row the stream is abandoned
+(`provider._send`). An abandoned or unclean stream advances no watermark,
+so the next periodic session streams the same rows again. The requester
+counts the distinct chunks it applied against the sentinel's
+`chunk_count` (v_56) and answers `SPACE_SYNC_COMPLETE {clean}` once.
 
-`SPACE_SYNC_REQUEST_MORE` lets the requester pull the next window
-when it's finished writing the current one — useful on constrained
-devices.
+`SPACE_SYNC_REQUEST_MORE` asks the provider for one resource slice again
+(clamped, S-12). The provider streams it on the same session with the
+same chunk numbering.
 
 ## DataChannel failure (HTTPS fallback)
 

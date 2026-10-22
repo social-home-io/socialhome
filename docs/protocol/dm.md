@@ -10,9 +10,9 @@ copy of the conversation history.
 - **HFS**: both sides. Sends, receives, persists, requests history
   from a peer.
 - **GFS**: only for optional contact discovery
-  (`DM_CONTACT_REQUEST` routed via GFS between unpaired users) and
-  push fan-out when a recipient is offline (see
-  [push-relay](./push-relay.md)).
+  (`DM_CONTACT_REQUEST` routed via GFS between unpaired users). Push
+  notifications come from the recipient's own household, never a GFS
+  (see [push-relay](./push-relay.md)).
 
 ## DM E2E is transport-only
 
