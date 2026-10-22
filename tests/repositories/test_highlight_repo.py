@@ -92,7 +92,9 @@ async def test_view_and_reaction_round_trip(db, repo):
         frame_type=HighlightFrameType.IMAGE,
         media_url="/api/media/x.webp",
     )
-    await repo.mark_viewed(frame.id, "u2")
+    assert await repo.mark_viewed(frame.id, "u2") is True
+    # A second view of the same frame by the same viewer is not new.
+    assert await repo.mark_viewed(frame.id, "u2") is False
     views = await repo.list_views_for_frame(frame.id)
     assert len(views) == 1 and views[0].viewer_user_id == "u2"
 

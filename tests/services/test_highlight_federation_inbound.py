@@ -296,6 +296,27 @@ async def test_highlight_frame_viewed_persists_and_publishes(db, bus, inbound):
     assert captured[0].viewer_user_id == "uid-remote"
 
 
+async def test_a_repeated_view_receipt_is_not_announced_again(db, bus, inbound):
+    """An older viewer household still sends one receipt per re-view;
+    the author's sessions get one ping per (frame, viewer)."""
+    await _seed_local_highlight(inbound)
+    captured: list[HighlightFrameViewed] = []
+    bus.subscribe(HighlightFrameViewed, captured.append)
+    for _ in range(3):
+        await inbound._on_highlight_frame_viewed(
+            _event(
+                FederationEventType.HIGHLIGHT_FRAME_VIEWED,
+                {
+                    "highlight_id": "s-fed-1",
+                    "frame_id": "f-fed-1",
+                    "viewer_user_id": "uid-remote",
+                    "author_user_id": "uid-local",
+                },
+            ),
+        )
+    assert len(captured) == 1
+
+
 async def test_highlight_frame_viewed_authority_mismatch_dropped(db, bus, inbound):
     """The viewer must live on the envelope's signed sender."""
     await inbound._on_highlight_created(

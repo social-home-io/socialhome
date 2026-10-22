@@ -325,7 +325,11 @@ class HighlightService:
         if highlight.author_user_id == viewer_user_id:
             # Authors don't accumulate views on their own frames.
             return
-        await self._highlights.mark_viewed(frame_id, viewer_user_id)
+        if not await self._highlights.mark_viewed(frame_id, viewer_user_id):
+            # Seen before: the author already has this receipt (and a remote
+            # author's household its HIGHLIGHT_FRAME_VIEWED) — re-viewing a
+            # highlight sends nothing.
+            return
         await self._bus.publish(
             HighlightFrameViewed(
                 highlight_id=highlight.id,

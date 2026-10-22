@@ -101,7 +101,7 @@ class AbstractHighlightRepo(Protocol):
         *,
         limit: int = 50,
     ) -> builtins.list[Highlight]: ...
-    async def mark_viewed(self, frame_id: str, viewer_user_id: str) -> None: ...
+    async def mark_viewed(self, frame_id: str, viewer_user_id: str) -> bool: ...
     async def list_views_for_frame(
         self,
         frame_id: str,
@@ -380,8 +380,10 @@ class SqliteHighlightRepo:
 
     # ── Views ───────────────────────────────────────────────────────────
 
-    async def mark_viewed(self, frame_id: str, viewer_user_id: str) -> None:
-        await self._db.enqueue(
+    async def mark_viewed(self, frame_id: str, viewer_user_id: str) -> bool:
+        """Record that ``viewer_user_id`` saw ``frame_id``; ``True`` only the
+        first time — a re-view is not news to anyone."""
+        inserted = await self._db.enqueue_rowcount(
             """
             INSERT INTO highlight_frame_views(frame_id, viewer_user_id, viewed_at)
             VALUES(?, ?, datetime('now'))
@@ -389,6 +391,7 @@ class SqliteHighlightRepo:
             """,
             (frame_id, viewer_user_id),
         )
+        return bool(inserted)
 
     async def list_views_for_frame(
         self,

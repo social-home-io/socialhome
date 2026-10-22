@@ -144,6 +144,26 @@ async def test_view_publishes_event(db, svc):
     assert captured[0].viewer_user_id == "u2"
 
 
+async def test_only_the_first_view_of_a_frame_is_announced(db, svc):
+    """A viewer replays a highlight a few times; the author's household
+    needs one receipt per (frame, viewer). Before, every re-view went out
+    again (a WS frame here, a HIGHLIGHT_FRAME_VIEWED envelope to a remote
+    author's household); now only the first does."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    await _seed_user(db, "u2", "maria")
+    _, frame = await service.create_or_append_frame(
+        author_user_id="u1",
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/x.webp",
+    )
+    captured: list[HighlightFrameViewed] = []
+    bus.subscribe(HighlightFrameViewed, lambda e: captured.append(e))
+    for _ in range(5):
+        await service.mark_frame_viewed(frame_id=frame.id, viewer_user_id="u2")
+    assert len(captured) == 1
+
+
 async def test_author_view_is_noop(db, svc):
     service, bus = svc
     await _seed_user(db, "u1", "pascal")

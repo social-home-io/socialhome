@@ -3787,7 +3787,8 @@ class FederationInboundService(ProtectionGateMixin):
         )
         if highlight is None:
             return
-        await self._highlight_repo.mark_viewed(frame_id, viewer_user_id)
+        if not await self._highlight_repo.mark_viewed(frame_id, viewer_user_id):
+            return  # a repeat receipt (an older viewer household sends one per view)
         await self._bus.publish(
             HighlightFrameViewed(
                 highlight_id=highlight.id,
