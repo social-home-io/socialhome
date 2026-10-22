@@ -46,6 +46,7 @@ from socialhome.repositories.presence_repo import SqlitePresenceRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.space_zone_repo import SqliteSpaceZoneRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services import space_location_outbound as location_mod
 from socialhome.services.space_location_outbound import SpaceLocationOutbound
 
 
@@ -1101,3 +1102,128 @@ async def test_pins_go_to_member_households_only(env):
     assert [c["only_instances"] for c in env.federation.calls] == [
         frozenset({"house-m"})
     ]
+
+
+# ─── Unchanged points are not re-sent (#8) ─────────────────────────────
+
+
+async def _sharing_alice(env, space_id: str, **space_kw) -> Space:
+    sp = await env.make_space(space_id, **space_kw)
+    await env.space_repo.save_member(
+        SpaceMember(
+            space_id=sp.id,
+            user_id=env.alice_uid,
+            role="member",
+            joined_at="2026-04-27T00:00:00+00:00",
+            location_share_enabled=True,
+        ),
+    )
+    return sp
+
+
+def _fix(lat: float = 47.3769, lon: float = 8.5417, acc: float = 12.0):
+    return PresenceUpdated(
+        username="alice",
+        state="away",
+        latitude=lat,
+        longitude=lon,
+        gps_accuracy_m=acc,
+        updated_at="2026-04-27T12:00:00+00:00",
+    )
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(location_mod, "monotonic", lambda: now[0])
+    return now
+
+
+async def test_a_stationary_person_is_sent_once_not_on_every_fix(env, clock):
+    """HA pushes a fix every minute or so while a phone sits on a desk —
+    the same 4-dp point each time. Before: one envelope per member
+    household per fix (60 an hour); now: the first, then nothing until
+    the point moves or the refresh is due. The local map still gets
+    every frame."""
+    await _sharing_alice(env, "sp_still")
+    for _ in range(60):
+        await env.bus.publish(_fix(acc=12.0))
+        clock[0] += 55
+    # 60 fixes 55 s apart (54 min): the first, then a refresh at 935 s,
+    # 1 870 s and 2 805 s — 4 envelopes instead of 60.
+    assert len(env.federation.calls) == 4
+    assert len(env.ws.calls) == 60
+
+
+async def test_a_moved_point_goes_out_at_once(env, clock):
+    await _sharing_alice(env, "sp_moving")
+    await env.bus.publish(_fix(lat=47.3769))
+    await env.bus.publish(_fix(lat=47.3769))
+    await env.bus.publish(_fix(lat=47.3770))
+    lats = [c["payload"]["lat"] for c in env.federation.calls]
+    assert lats == [47.3769, 47.3770]
+
+
+async def test_an_unchanged_point_is_refreshed_after_the_interval(env, clock):
+    """Peers show "updated N min ago" under a pin; a still person's pin is
+    refreshed now and then rather than going hours stale."""
+    await _sharing_alice(env, "sp_refresh")
+    await env.bus.publish(_fix())
+    clock[0] += location_mod.UNCHANGED_REFRESH_S - 1
+    await env.bus.publish(_fix())
+    assert len(env.federation.calls) == 1
+    clock[0] += 2
+    await env.bus.publish(_fix())
+    assert len(env.federation.calls) == 2
+
+
+async def test_zone_only_sends_only_a_zone_change(env, clock):
+    """In ``zone_only`` the member's point moves inside a zone all day;
+    the payload only changes when the zone does."""
+    sp = await _sharing_alice(env, "sp_zones", location_mode="zone_only")
+    await _seed_zone(env, sp.id, name="Office", lat=47.3769, lon=8.5417)
+    await _seed_zone(env, sp.id, name="Gym", lat=47.40, lon=8.60)
+    for lat in (47.3769, 47.3770, 47.3771):
+        await env.bus.publish(_fix(lat=lat, lon=8.5417))
+    await env.bus.publish(_fix(lat=47.40, lon=8.60))
+    zones = [c["payload"]["zone_id"] for c in env.federation.calls]
+    assert zones == ["z_office", "z_gym"]
+
+
+async def test_each_space_and_person_is_tracked_apart(env, clock):
+    await _sharing_alice(env, "sp_a")
+    await _sharing_alice(env, "sp_b")
+    await env.bus.publish(_fix())
+    await env.bus.publish(_fix())
+    assert sorted(c["space_id"] for c in env.federation.calls) == ["sp_a", "sp_b"]
+
+
+async def test_opt_in_and_mode_change_always_send(env, clock):
+    """A fresh opt-in and a tier switch exist to put the pin on the map
+    now — they go out even when the point has not moved."""
+    from socialhome.domain.events import (
+        SpaceLocationModeChanged,
+        SpaceMemberLocationOptedIn,
+    )
+
+    sp = await _sharing_alice(env, "sp_force")
+    presence_repo = SqlitePresenceRepo(env.db)
+    await presence_repo.upsert_local(
+        username="alice",
+        entity_id="alice",
+        state="away",
+        zone_name=None,
+        latitude=47.3769,
+        longitude=8.5417,
+        gps_accuracy_m=12.0,
+        updated_at="2026-04-27T12:00:00+00:00",
+    )
+    await env.bus.publish(_fix())
+    await env.bus.publish(
+        SpaceMemberLocationOptedIn(space_id=sp.id, user_id=env.alice_uid)
+    )
+    await env.bus.publish(SpaceLocationModeChanged(space_id=sp.id, new_mode="gps"))
+    assert len(env.federation.calls) == 3
+    # …and the next unchanged fix after them is still skipped.
+    await env.bus.publish(_fix())
+    assert len(env.federation.calls) == 3

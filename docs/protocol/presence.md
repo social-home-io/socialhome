@@ -1,8 +1,9 @@
 # Presence
 
 Who is online, where they are, and what they're doing. Presence is
-the lowest-latency, highest-volume federation event — every status
-flicker or location update produces one envelope per paired peer.
+the lowest-latency, highest-volume federation surface: an online-status
+change goes to every social peer, and a moved space-map pin to every
+member household of each space it is shared in.
 
 ## Scope
 
@@ -16,24 +17,32 @@ flicker or location update produces one envelope per paired peer.
 `USER_STATUS_UPDATED`, `USERS_SYNC`, `USER_ONLINE`, `USER_IDLE`,
 `USER_OFFLINE`.
 
-## Flow — status change
+## Flow — location update
+
+Household presence (`home` / `away` / `zone`, the HA zone name) never
+leaves the household. What does leave it is a member's **pin on a space
+map**, only for spaces where they share their location (see "Per-space
+presence" below), and only to that space's member households.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant U as User (HFS A browser)
+    participant HA as HA / client (HFS A)
     participant A as HFS A
-    participant B as HFS B
-    participant C as HFS C
-    U->>A: POST /api/presence<br/>(status=home)
-    A->>A: persist PersonPresence
-    par fan out to confirmed peers
-        A->>B: PRESENCE_UPDATED
-        A->>C: PRESENCE_UPDATED
+    participant B as HFS B (space member)
+    HA->>A: POST /api/presence/location<br/>(lat, lon, accuracy)
+    A->>A: truncate to 4 dp, persist,<br/>local presence.updated frame
+    alt the pin moved, or the last send is ≥ 15 min old
+        A->>B: SPACE_LOCATION_UPDATED (sealed, per shared space)
+        B->>B: store pin,<br/>space_location_updated frame
+    else unchanged
+        A->>A: local frame only
     end
-    B->>B: update cache,<br/>push via WebSocket
-    C->>C: update cache,<br/>push via WebSocket
 ```
+
+Nothing sends `PRESENCE_UPDATED` today. The inbound handler
+(`PresenceService.apply_remote`, keyed on `from_instance`) still applies
+one if a peer sends it.
 
 ## GPS truncation (§25)
 
@@ -47,10 +56,15 @@ service boundary; the repository never sees full-precision values.
 
 ## Rate limiting
 
-`POST /api/presence/location` is rate-limited to 10 updates per
-minute per user. Above that, the latest update wins and the intermediate
-ones are dropped. The federation layer batches location updates on a
-short timer (currently 5 s) to keep the per-peer event rate bounded.
+`POST /api/presence/location` allows 10 requests per minute per
+**authenticated principal** (`app.py` rule table, enforced by
+`rate_limiter.py`'s per-rule bucket). An 11th request in the minute is
+answered `429 RATE_LIMITED` — it is refused, not merged into a later one.
+There is no batching timer in front of federation: each accepted update is
+fanned out as it lands, minus the unchanged ones (below). In `ha` / `haos`
+mode the Home Assistant integration posts every household member's
+location with its one token, so those 10 a minute are shared by the whole
+household.
 
 ## Scoped visibility (§23.80)
 
@@ -90,6 +104,17 @@ Two distinct fan-outs follow every household ``PresenceUpdated``:
    differs from the receiving space's `location_mode` is stored but
    neither shown on the map nor sent as a frame. It is never
    re-federated.
+
+   **An unchanged pin is not re-sent.** The federation fan-out skips a
+   pin that says what the last one sent for that (space, person) did —
+   the same 4-dp `lat` / `lon` in `gps` mode, the same `zone_id` in
+   `zone_only` — unless that send is at least 15 minutes old
+   (`UNCHANGED_REFRESH_S`, so a still person's pin doesn't read hours
+   stale on the peers' maps). A fresh opt-in and a tier switch always
+   send. The local frame still goes out on every update. Kept in memory:
+   a restart re-sends each pin once. A peer that was offline gets the
+   latest pin from the outbox (latest-only per person and space, see
+   `docs/architecture.md`).
 
    **Both space-bound payloads strip `zone_name`.** HA zones do not
    reach a space. To label a member's pin on the space map, each
