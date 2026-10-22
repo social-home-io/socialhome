@@ -74,8 +74,17 @@ sequenceDiagram
     B->>SB: dispatch via _event_registry<br/>save_highlight / save_frame
     V->>SB: GET /api/highlights<br/>(viewer reads inbox)
     V->>V: tap-through<br/>POST /frames/{id}/view
-    SB-->>Fed: HIGHLIGHT_FRAME_VIEWED back to A
+    SB-->>Fed: HIGHLIGHT_FRAME_VIEWED back to A (first view only)
 ```
+
+**One receipt per (frame, viewer).** `HighlightService.mark_frame_viewed`
+announces a view — the `HighlightFrameViewed` bus event, and with it the
+author's WS ping and, for a remote author, the `HIGHLIGHT_FRAME_VIEWED`
+envelope — only when `highlight_frame_views` gets a new row; re-watching a
+highlight sends nothing. The author's household applies the same rule to
+an inbound receipt (an older viewer household still sends one per view).
+Cost: a viewer who replays a 10-frame highlight 5 times used to send the
+author's household 50 envelopes; now 10.
 
 ## Receiver rules
 
