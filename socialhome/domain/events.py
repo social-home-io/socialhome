@@ -356,6 +356,20 @@ class SpaceMemberLocationOptedIn(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceMemberLocationOptedOut(DomainEvent):
+    """A member just turned location_share_enabled off for a space.
+
+    :class:`SpaceLocationOutbound` tells the space's member households to
+    drop the pin (``SPACE_LOCATION_UPDATED`` with ``mode: "off"``): a pin
+    goes out only on change, so without it every map kept the last one.
+    """
+
+    space_id: str
+    user_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceLocationModeChanged(DomainEvent):
     """Admin flipped a space's ``features.location_mode`` (§23.8.6).
 

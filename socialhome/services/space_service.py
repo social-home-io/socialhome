@@ -117,6 +117,7 @@ from ..domain.events import (
     SpaceMemberJoined,
     SpaceMemberLeft,
     SpaceMemberLocationOptedIn,
+    SpaceMemberLocationOptedOut,
     SpaceMemberProfileUpdated,
     SpacePostCreated,
     SpacePostModerated,
@@ -8211,7 +8212,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         are not the members' to see — so they get 403
         ``SUBSCRIBER_READ_ONLY``. Turning it off is always allowed. On
         opt-in :class:`SpaceMemberLocationOptedIn` refires the member's
-        current position for this one space."""
+        current position for this one space; on opt-out
+        :class:`SpaceMemberLocationOptedOut` takes the pin off the member
+        households' maps."""
         seat = await require_seat(self._spaces, space_id, user_id)
         if enabled and seat.role not in WRITER_ROLES:
             raise SubscriberReadOnlyError("share location")
@@ -8219,6 +8222,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if enabled:
             await self._bus.publish(
                 SpaceMemberLocationOptedIn(space_id=space_id, user_id=user_id)
+            )
+        else:
+            await self._bus.publish(
+                SpaceMemberLocationOptedOut(space_id=space_id, user_id=user_id)
             )
         return enabled
 

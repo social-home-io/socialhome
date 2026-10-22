@@ -37,8 +37,10 @@ from socialhome.domain.events import (
     RemoteSpaceLocationUpdated,
     SpaceLocationModeChanged,
     SpaceMemberLocationOptedIn,
+    SpaceMemberLocationOptedOut,
 )
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.federation_retention import supersede_key
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -1306,3 +1308,63 @@ async def test_after_a_restart_since_is_never_before_the_first_send(env, monkeyp
     assert env.federation.calls[-1]["payload"]["updated_at"] == (
         "2026-04-27T11:00:00+00:00"
     )
+
+
+# ─── #1117 residual: stopping sharing takes the pin off every map ─────────
+
+
+_FIX = PresenceUpdated(
+    username="alice",
+    state="away",
+    latitude=47.3769,
+    longitude=8.5417,
+    gps_accuracy_m=12.0,
+    updated_at="2026-04-27T12:00:00+00:00",
+)
+
+
+async def test_stopping_sharing_tells_the_member_households_to_drop_the_pin(env):
+    """A pin is sent only on change, so a receiver kept the last one for
+    good after the person stopped sharing — and a pin still queued for an
+    offline household went out after it. The removal (``mode: "off"``)
+    reaches every member household, and rides the same latest-only outbox
+    key, so it replaces a queued pin instead of following it."""
+    sp = await _sharing_alice(env, "sp_stop")
+    await env.bus.publish(_FIX)
+    assert len(env.federation.calls) == 1
+    await env.bus.publish(
+        SpaceMemberLocationOptedOut(space_id=sp.id, user_id=env.alice_uid)
+    )
+    off = env.federation.calls[-1]
+    assert off["event_type"] is FederationEventType.SPACE_LOCATION_UPDATED
+    assert off["only_instances"] == frozenset({"house-m"})
+    assert off["payload"] == {
+        "mode": "off",
+        "space_id": sp.id,
+        "user_id": env.alice_uid,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    assert (
+        supersede_key(
+            FederationEventType.SPACE_LOCATION_UPDATED,
+            space_id=sp.id,
+            payload=off["payload"],
+        )
+        == f"location:{sp.id}:{env.alice_uid}"
+    )
+
+
+async def test_sharing_again_sends_the_pin_even_if_it_did_not_move(env):
+    """Stopping forgets what was sent, so the next pin is not an
+    "unchanged" one that a receiver which dropped it would never get back."""
+    sp = await _sharing_alice(env, "sp_again")
+    await env.bus.publish(_FIX)
+    await env.bus.publish(
+        SpaceMemberLocationOptedOut(space_id=sp.id, user_id=env.alice_uid)
+    )
+    await env.bus.publish(_FIX)
+    assert [c["payload"]["mode"] for c in env.federation.calls] == [
+        "gps",
+        "off",
+        "gps",
+    ]
