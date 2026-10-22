@@ -425,16 +425,36 @@ every other household member except the subject themselves
 (self-frame suppression — the user's own UI hydrates `is_online: true`
 from the `/api/presence` payload that loads on page mount).
 
-Federation: every transition fans out to every confirmed peer as a
-`USER_ONLINE` / `USER_IDLE` / `USER_OFFLINE` event. Encrypted payload
+Federation: transitions fan out to every confirmed social peer as
+`USER_ONLINE` / `USER_IDLE` / `USER_OFFLINE` events. Encrypted payload
 carries `{user_id, last_seen_at?}` (encryption-first per §25.8.21 —
-only `event_type` and routing fields ride in plaintext). Peers apply
-inbound events to an in-memory remote-state cache and republish a
-local `UserCameOnline` / `UserWentIdle` / `UserWentOffline` so
-`RealtimeService` fans the change to local viewers' WS sessions in
+only `event_type` and routing fields ride in plaintext). The local bus
+events above fire at once; what peers are told is debounced so a flaky
+connection or a reading pause costs them nothing:
+
+- **Online** goes out at once — unless peers were never told anything
+  else (a reconnect within the offline grace sends nothing).
+- **Offline** goes out only once every session has been gone for
+  `OFFLINE_GRACE` (45 s), on the first scan after it (the scan runs every
+  15 s). A page reload or a dropped Wi-Fi that reconnects in time is
+  never seen by peers. `last_seen_at` is when the last session closed.
+- **Idle** goes out only once it has held for `IDLE_SETTLE` (5 min) after
+  the 5-minute idle threshold. Coming back before that sends nothing.
+
+Cost per peer, a household member on flaky Wi-Fi (20 drops a day, each
+back within seconds) who reads in bursts (30 idle/active flips a day):
+before, 20 × 2 + 30 × 2 = 100 envelopes a day to every peer; now about
+the 2–4 real transitions of the day.
+
+Peers apply inbound events to an in-memory remote-state cache and
+republish a local `UserCameOnline` / `UserWentIdle` / `UserWentOffline`
+so `RealtimeService` fans the change to local viewers' WS sessions in
 the same render tick a household-local change would land. The cache
-is ephemeral on purpose — a peer restart re-emits the full set on
-their side, so we never need to persist remote online state.
+is ephemeral and **nothing re-sends it**: a household that restarts
+learns a peer's users' online state only from their next transition,
+and no snapshot is sent when a peer comes back. (An envelope queued
+while a peer was unreachable is delivered latest-only per person — see
+the outbox in `docs/architecture.md`.)
 
 Implementation pointers:
 
