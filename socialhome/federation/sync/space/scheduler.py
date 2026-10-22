@@ -137,6 +137,7 @@ class SpaceSyncScheduler:
         "_mesh_catchup_done",
         "_own_instance_id",
         "_queue",
+        "_roster_echo",
         "_roster_refresh",
         "_seat_repo",
         "_space_repo",
@@ -191,6 +192,8 @@ class SpaceSyncScheduler:
         self._roster_refresh: Callable[[], Awaitable[object]] | None = None
         #: v_46 authority epoch echo builder (see :meth:`attach_authority_echo`).
         self._authority_echo: Callable[[str, str], Awaitable[dict | None]] | None = None
+        #: Roster echo builder (see :meth:`attach_roster_echo`).
+        self._roster_echo: Callable[[str, str], Awaitable[dict | None]] | None = None
         #: ``(space_id, provider)`` → deferred retries since it last completed.
         self._deferred_attempts: dict[tuple[str, str], int] = {}
         #: Pending deferred-retry waits (they end on ``_stop``).
@@ -215,6 +218,15 @@ class SpaceSyncScheduler:
         a BEGIN to that household carries, or ``None``
         (``SpaceAuthorityRotationService.authority_epoch_echo``, v_46)."""
         self._authority_echo = echo
+
+    def attach_roster_echo(
+        self, echo: Callable[[str, str], Awaitable[dict | None]]
+    ) -> None:
+        """``echo(space_id, to_instance_id)`` → the ``roster_echo`` a BEGIN
+        to that household carries, or ``None``
+        (``SpaceService.roster_echo_for``): the roster version of the last
+        snapshot we applied from that host, so it stops resending it."""
+        self._roster_echo = echo
 
     def attach_mesh_announce(self, announce: Callable[[str], Awaitable[bool]]) -> None:
         """``announce(host_instance_id)`` → ``True`` once nothing more is
@@ -265,6 +277,15 @@ class SpaceSyncScheduler:
             return await self._authority_echo(space_id, to_instance_id)
         except Exception:
             log.exception("authority epoch echo for %s failed", space_id)
+            return None
+
+    async def _roster_echo_for(self, space_id: str, to_instance_id: str) -> dict | None:
+        if self._roster_echo is None:
+            return None
+        try:
+            return await self._roster_echo(space_id, to_instance_id)
+        except Exception:
+            log.exception("roster echo for %s failed", space_id)
             return None
 
     async def _on_authority_echo_due(self, event: SpaceAuthorityEchoDue) -> None:
@@ -439,6 +460,9 @@ class SpaceSyncScheduler:
                 "prefer_direct": prefer_direct,
                 **fields,
             }
+            roster_echo = await self._roster_echo_for(space_id, peer_instance_id)
+            if roster_echo is not None:
+                payload["roster_echo"] = roster_echo
             echo = await self._echo_for(space_id, peer_instance_id)
             if echo is not None:
                 payload["authority_epoch_echo"] = echo

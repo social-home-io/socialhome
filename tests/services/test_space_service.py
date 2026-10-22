@@ -42,6 +42,7 @@ from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
     DeliveryResult,
+    FederationEvent,
     FederationEventType,
 )
 from socialhome.domain.federation_capabilities import (
@@ -8091,6 +8092,202 @@ async def test_an_upgrade_to_v32_triggers_a_snapshot(stack):
         PeerProtoVersionRaised(instance_id="peer-up", old_version=32, new_version=33)
     )
     assert len(_snapshots(fed)) == 1
+
+
+def _begin_with_echo(space_id: str, sender: str, echo: object):
+    return FederationEvent(
+        msg_id="m-begin",
+        event_type=FederationEventType.SPACE_SYNC_BEGIN,
+        from_instance=sender,
+        to_instance="self",
+        timestamp="2026-10-22T00:00:00+00:00",
+        payload={"sync_id": "s", "space_id": space_id, "roster_echo": echo},
+        space_id=space_id,
+    )
+
+
+async def _members_with_households(stack, n: int):
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    stack.space_svc._federation_repo.get_instance = AsyncMock(
+        return_value=SimpleNamespace(source=None)
+    )
+    insts = [f"peer-{i}" for i in range(n)]
+    for i, inst in enumerate(insts):
+        await _seat(remote, space.id, inst, f"u-{i}")
+        await stack.space_repo.add_space_instance(space.id, inst)
+    return space, fed, remote, insts
+
+
+async def test_an_unchanged_roster_is_sent_once_not_every_tick(stack):
+    """15 member households, 48 periodic ticks a day, roster unchanged.
+    Before: 15 × 48 = 720 snapshots a day (every seat, every time). Now the
+    first tick sends 15; each household then echoes the version it applied
+    on its next sync BEGIN, and the remaining 47 ticks send nothing."""
+    space, fed, _remote, insts = await _members_with_households(stack, 15)
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 15
+    current = (await stack.space_repo.get(space.id)).roster_sequence
+    for inst in insts:
+        _to, payload = next(
+            (c.kwargs["to_instance_id"], c.kwargs["payload"])
+            for c in fed.send_with_mesh_fallback.await_args_list
+            if c.kwargs["to_instance_id"] == inst
+        )
+        assert payload["roster_version"] == current
+        await stack.space_svc.on_sync_begin_roster_echo(
+            _begin_with_echo(
+                space.id,
+                inst,
+                {"roster_version": payload["roster_version"], "cert_epoch": None},
+            )
+        )
+    for _ in range(47):
+        assert await stack.space_svc.send_hosted_roster_snapshots() == 0
+    assert len(_snapshots(fed)) == 15
+
+
+async def test_a_roster_change_is_sent_again(stack):
+    space, _fed, remote, insts = await _members_with_households(stack, 2)
+    await stack.space_svc.send_hosted_roster_snapshots()
+    current = (await stack.space_repo.get(space.id)).roster_sequence
+    for inst in insts:
+        await stack.space_svc.on_sync_begin_roster_echo(
+            _begin_with_echo(
+                space.id, inst, {"roster_version": current, "cert_epoch": None}
+            )
+        )
+    await _seat(remote, space.id, "peer-0", "u-extra")
+    space_row = await stack.space_repo.get(space.id)
+    await stack.space_svc._emit_member_roster_gossip(
+        space_row,
+        user_id="u-extra",
+        instance_id="peer-0",
+        display_name="E",
+        user_pk=None,
+        role="member",
+        tombstoned=False,
+    )
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 2
+
+
+async def test_a_household_that_never_echoes_keeps_getting_the_snapshot(stack):
+    """An older member household sends no echo: it is healed every tick, as
+    before — nothing is skipped on a guess."""
+    _space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    for _ in range(3):
+        assert await stack.space_svc.send_hosted_roster_snapshots() == 1
+    assert len(_snapshots(fed)) == 3
+
+
+async def test_a_stale_echo_or_a_missing_writer_cert_is_sent_again(stack):
+    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
+    current = (await stack.space_repo.get(space.id)).roster_sequence
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(
+            space.id, "peer-0", {"roster_version": current - 1, "cert_epoch": None}
+        )
+    )
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
+    # Version right, but the household lacks the writer cert we would issue.
+    certs = MagicMock()
+    certs.cert_for_peer = AsyncMock(return_value={"epoch": 7})
+    certs.writer_key_for_peer = AsyncMock(return_value=None)
+    certs.channel_grant_for_peer = AsyncMock(return_value=None)
+    stack.space_svc._writer_certs = certs
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(
+            space.id, "peer-0", {"roster_version": current, "cert_epoch": 6}
+        )
+    )
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(
+            space.id, "peer-0", {"roster_version": current, "cert_epoch": 7}
+        )
+    )
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 0
+
+
+async def test_tombstones_a_household_already_holds_are_not_resent(stack):
+    """A snapshot to a household that echoed version R carries no removal
+    at or below R — it applied a full snapshot holding every one of them.
+    A removal after R, and a household without an echo, get them all."""
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    space_row = await stack.space_repo.get(space.id)
+    for user in ("u-gone-1", "u-gone-2"):
+        await _seat(remote, space.id, "peer-x", user)
+        await remote.remove(space.id, "peer-x", user)
+        await stack.space_svc._emit_member_roster_gossip(
+            space_row,
+            user_id=user,
+            instance_id="peer-x",
+            display_name=user,
+            user_pk=None,
+            role="member",
+            tombstoned=True,
+        )
+    echoed = (await stack.space_repo.get(space.id)).roster_sequence
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(
+            space.id, "peer-0", {"roster_version": echoed, "cert_epoch": None}
+        )
+    )
+    await _seat(remote, space.id, "peer-x", "u-gone-3")
+    await remote.remove(space.id, "peer-x", "u-gone-3")
+    await stack.space_svc._emit_member_roster_gossip(
+        await stack.space_repo.get(space.id),
+        user_id="u-gone-3",
+        instance_id="peer-x",
+        display_name="g3",
+        user_pk=None,
+        role="member",
+        tombstoned=True,
+    )
+    await stack.space_svc.send_hosted_roster_snapshots()
+    left = [
+        e["payload"]["user_id"]
+        for e in _snapshots(fed, to="peer-0")[-1][1]
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
+    ]
+    assert left == ["u-gone-3"]
+    # A household with no echo gets every removal.
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-new")
+    left_new = sorted(
+        e["payload"]["user_id"]
+        for e in _snapshots(fed, to="peer-new")[-1][1]
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
+    )
+    assert left_new == ["u-gone-1", "u-gone-2", "u-gone-3"]
+
+
+async def test_an_echo_from_a_non_member_or_for_a_space_we_do_not_host_is_ignored(
+    stack,
+):
+    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
+    for space_id, sender, echo in (
+        (space.id, "stranger", {"roster_version": 1, "cert_epoch": None}),
+        ("unknown-space", "peer-0", {"roster_version": 1, "cert_epoch": None}),
+        (space.id, "peer-0", {"roster_version": "x"}),
+        (space.id, "peer-0", "junk"),
+    ):
+        await stack.space_svc.on_sync_begin_roster_echo(
+            _begin_with_echo(space_id, sender, echo)
+        )
+    assert stack.space_svc._roster_heard == {}
+
+
+async def test_the_members_echo_is_what_it_applied_from_the_host(stack):
+    """The member side: the version of the last snapshot applied from the
+    host, and the writer-cert epoch held — only toward that host."""
+    stack.space_svc.note_roster_snapshot_applied("sp", "host-h", 12)
+    certs = MagicMock()
+    certs.current_own_cert_wire = AsyncMock(return_value={"epoch": 3})
+    stack.space_svc._writer_certs = certs
+    assert await stack.space_svc.roster_echo_for("sp", "host-h") == {
+        "roster_version": 12,
+        "cert_epoch": 3,
+    }
+    assert await stack.space_svc.roster_echo_for("sp", "someone-else") is None
+    assert await stack.space_svc.roster_echo_for("other-space", "host-h") is None
 
 
 async def test_only_the_host_sends_a_roster_snapshot(stack):

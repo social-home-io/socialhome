@@ -839,6 +839,43 @@ async def test_begin_to_the_owner_carries_the_authority_echo(bus, queue, sync_ma
     assert ("sp-1", "owner-o") in calls
 
 
+async def test_begin_carries_the_roster_echo_its_builder_returns(
+    bus, queue, sync_manager
+):
+    """The host stops resending a roster we hold once our BEGIN echoes it;
+    a builder failure never costs the BEGIN."""
+    fed = _FakeFederation(confirmed={"owner-o"})
+    sched, _ = _echo_sched(bus, queue, sync_manager, fed)
+
+    async def _roster_echo(space_id, to):
+        if space_id == "sp-boom":
+            raise RuntimeError("boom")
+        return {"roster_version": 9, "cert_epoch": None} if to == "owner-o" else None
+
+    sched.attach_roster_echo(_roster_echo)
+    await queue.start()
+    try:
+        for space_id, to in (
+            ("sp-1", "owner-o"),
+            ("sp-1", "peer-b"),
+            ("sp-boom", "owner-o"),
+        ):
+            await sched.enqueue_sync_for_space(space_id=space_id, peer_instance_id=to)
+        for _ in range(50):
+            if len(fed.sent) == 3:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.stop()
+    by_key = {(m["payload"]["space_id"], m["to"]): m["payload"] for m in fed.sent}
+    assert by_key[("sp-1", "owner-o")]["roster_echo"] == {
+        "roster_version": 9,
+        "cert_epoch": None,
+    }
+    assert "roster_echo" not in by_key[("sp-1", "peer-b")]
+    assert "roster_echo" not in by_key[("sp-boom", "owner-o")]
+
+
 async def test_echo_builder_failure_never_blocks_the_begin(bus, queue, sync_manager):
     fed = _FakeFederation(confirmed={"owner-o"})
     sched, _ = _echo_sched(bus, queue, sync_manager, fed)

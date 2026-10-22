@@ -129,6 +129,7 @@ from ..domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
     BehindMember,
     DeliveryResult,
+    FederationEvent,
     FederationEventType,
     InstanceSource,
     PairingStatus,
@@ -457,6 +458,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_posts",
         "_redeem_coordinator",
         "_remote_members",
+        "_roster_applied",
+        "_roster_heard",
         "_space_crypto",
         "_spaces",
         "_subscriber_keys",
@@ -504,6 +507,16 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         #: v_49 writer-cert issuer/holder (:class:`SpaceWriterCertService`).
         #: Optional — absent, no cert rides any channel (pre-v_49 behaviour).
         self._writer_certs: SpaceWriterCertService | None = None
+        #: Host side — (space, member household) → the ``roster_echo`` its
+        #: last sync BEGIN carried: (roster version of the last snapshot it
+        #: applied from us, writer-cert epoch it holds). The periodic
+        #: snapshot is skipped while both still match. In memory: after a
+        #: restart every household gets one snapshot until it echoes again.
+        #: Bounded by hosted spaces × their member households.
+        self._roster_heard: dict[tuple[str, str], tuple[int, int | None]] = {}
+        #: Member side — space → (host, roster version of the last snapshot
+        #: we applied from it), echoed on our BEGIN to that host.
+        self._roster_applied: dict[str, tuple[str, int]] = {}
         self._federation_repo = None
         self._instance_purger: InstancePurger | None = None
         #: The local-community daily check budget
@@ -1651,7 +1664,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             return False
         return await self._spaces.get_gfs_channel(space.id) is not None
 
-    async def send_roster_snapshot(self, space_id: str, *, to_instance_id: str) -> bool:
+    async def send_roster_snapshot(
+        self, space_id: str, *, to_instance_id: str, periodic: bool = False
+    ) -> bool:
         """Send household ``to_instance_id`` the whole roster of a space we host.
 
         One :data:`FederationEventType.SPACE_ROSTER_SNAPSHOT` carrying every
@@ -1674,6 +1689,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         household may never have received it. Sent on seat, on a peer's
         first v_32 advertisement and on the periodic sync tick. v_32+ only;
         best effort. Returns whether a snapshot was sent.
+
+        ``periodic`` (the tick): skipped for a household whose last sync
+        BEGIN echoed the current ``roster_version`` and the writer-cert
+        epoch we would send (``roster_echo``); a household that echoed an
+        older version is sent the removals it lacks, not every one again.
         """
         if self._federation is None:
             return False
@@ -1697,22 +1717,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             return False
         if seed is None:
             return False
-        entries = await self.roster_snapshot_entries(
-            space, seed=seed, to_instance_id=to_instance_id
-        )
-        if not entries:
-            return False
-        payload: dict = {"space_id": space.id, "entries": entries}
-        # v_44 — the periodic heal also carries the owner's cert for the
-        # current authority key, so a household that missed the rotation
-        # bundle re-pins before verifying these (new-key-signed) entries.
-        # Additive: an older receiver ignores the field.
-        cert = owner_authority_cert_via(self._federation, space)
-        if cert is not None:
-            payload["authority_cert"] = cert
         # v_49 — the recipient's OWN writer cert for the current epoch (and
         # nobody else's): the snapshot goes to this one household, encrypted
-        # to it. Issued from the roster just signed above.
+        # to it.
+        writer_cert: dict | None = None
         if self._writer_certs is not None:
             try:
                 writer_cert = await self._writer_certs.cert_for_peer(
@@ -1724,7 +1732,47 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     to_instance_id,
                     space.id,
                 )
-                writer_cert = None
+        current = int(space.roster_sequence)
+        heard = self._roster_heard.get((space.id, to_instance_id)) if periodic else None
+        if (
+            heard is not None
+            and heard[0] == current
+            and (writer_cert is None or writer_cert.get("epoch") == heard[1])
+        ):
+            # The household echoed this very roster version on its last
+            # sync BEGIN, and holds the writer cert we would send: it has
+            # all of it. Credentials that change without a roster change
+            # heal through their own paths (the rekey / rotation fan-outs,
+            # the channel service, the v_46 authority echo).
+            return False
+        entries = await self.roster_snapshot_entries(
+            space,
+            seed=seed,
+            to_instance_id=to_instance_id,
+            # Removals at or below the echoed version were in the full
+            # snapshot it applied — never resend them. (An echo ABOVE ours
+            # means we were restored from an older backup: send it all.)
+            known_version=(
+                heard[0] if heard is not None and heard[0] <= current else None
+            ),
+        )
+        if not entries:
+            return False
+        # The version this snapshot is complete up to — the member echoes it
+        # back on its next BEGIN (additive: an older receiver ignores it).
+        payload: dict = {
+            "space_id": space.id,
+            "entries": entries,
+            "roster_version": current,
+        }
+        # v_44 — the periodic heal also carries the owner's cert for the
+        # current authority key, so a household that missed the rotation
+        # bundle re-pins before verifying these (new-key-signed) entries.
+        # Additive: an older receiver ignores the field.
+        cert = owner_authority_cert_via(self._federation, space)
+        if cert is not None:
+            payload["authority_cert"] = cert
+        if self._writer_certs is not None:
             if writer_cert is not None:
                 payload["writer_cert"] = writer_cert
                 # v_50 — in a strict space, the epoch's writer group key too.
@@ -1768,9 +1816,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         *,
         seed: bytes,
         to_instance_id: str,
+        known_version: int | None = None,
     ) -> list[dict]:
         """Every seat of a space we host, authority-signed with ``seed``, as
         ``SPACE_ROSTER_SNAPSHOT`` entries for household ``to_instance_id``.
+
+        ``known_version``: the household applied a full snapshot complete up
+        to that roster version, so removals at or below it are left out.
 
         Shared by :meth:`send_roster_snapshot` and the v_44 rotation bundle
         (which signs with the NEW key). The receiver's own seats are left out
@@ -1828,6 +1880,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         for user_id, inst, display_name, user_pk, role, version, gone in seats:
             if inst == to_instance_id:
                 # The receiver's own members live in its ``space_members``.
+                continue
+            if gone and known_version is not None and version <= known_version:
+                # It holds this removal already (see ``known_version``).
                 continue
             if role == SpaceRole.SUBSCRIBER.value and not subscriber_ok:
                 continue
@@ -1896,9 +1951,69 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             for inst in await self._spaces.list_member_instances(space.id):
                 if inst == own or await self._is_relay_only_peer(inst):
                     continue
-                if await self.send_roster_snapshot(space.id, to_instance_id=inst):
+                if await self.send_roster_snapshot(
+                    space.id, to_instance_id=inst, periodic=True
+                ):
                     sent += 1
         return sent
+
+    async def on_sync_begin_roster_echo(self, event: FederationEvent) -> None:
+        """Host side: note the ``roster_echo`` a member household's
+        ``SPACE_SYNC_BEGIN`` carries (see :meth:`send_roster_snapshot`).
+
+        Kept only for a space we host and a household seated in it, so a
+        peer cannot grow the map. The echo only ever spares ITS sender a
+        snapshot (or the removals it already holds) — a household that lies
+        here costs itself, nobody else."""
+        p = event.payload if isinstance(event.payload, dict) else {}
+        echo = p.get("roster_echo")
+        if not isinstance(echo, dict):
+            return
+        version = echo.get("roster_version")
+        cert_epoch = echo.get("cert_epoch")
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 0
+            or (cert_epoch is not None and not isinstance(cert_epoch, int))
+        ):
+            return
+        space_id = str(event.space_id or p.get("space_id") or "")
+        sender = event.from_instance
+        own = self._own_instance_id
+        if not space_id or not sender or sender == own:
+            return
+        space = await self._spaces.get(space_id)
+        if space is None or not own or space.owner_instance_id != own:
+            return
+        if sender not in await self._spaces.list_member_instances(space_id):
+            return
+        self._roster_heard[(space_id, sender)] = (version, cert_epoch)
+
+    def note_roster_snapshot_applied(
+        self, space_id: str, host_instance_id: str, roster_version: int
+    ) -> None:
+        """Member side: we applied ``host_instance_id``'s full snapshot of
+        ``space_id``, complete up to ``roster_version``."""
+        self._roster_applied[space_id] = (host_instance_id, int(roster_version))
+
+    async def roster_echo_for(self, space_id: str, to_instance_id: str) -> dict | None:
+        """Member side: the ``roster_echo`` our ``SPACE_SYNC_BEGIN`` to
+        ``to_instance_id`` carries — only to the host whose snapshot we
+        applied — or ``None`` (then the host keeps sending it)."""
+        applied = self._roster_applied.get(space_id)
+        if applied is None or applied[0] != to_instance_id:
+            return None
+        cert_epoch: int | None = None
+        if self._writer_certs is not None:
+            try:
+                wire = await self._writer_certs.current_own_cert_wire(space_id)
+            except Exception:
+                log.exception("roster echo: own writer cert for %s failed", space_id)
+                wire = None
+            epoch = wire.get("epoch") if isinstance(wire, dict) else None
+            cert_epoch = epoch if isinstance(epoch, int) else None
+        return {"roster_version": applied[1], "cert_epoch": cert_epoch}
 
     async def on_peer_proto_version_raised(self, event: PeerProtoVersionRaised) -> None:
         """A member household just upgraded past the roster-snapshot line:

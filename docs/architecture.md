@@ -2216,7 +2216,10 @@ never mid-stream; see
 [incremental sessions](./protocol/sync.md#incremental-sessions-change-stamps--per-household-watermark).
 Because every author is bound to the roster mirror, the mirror must heal on
 its own: the host sends a v_32 roster snapshot on seat, on a member's
-upgrade and on the periodic sync tick, and a write that beat the gossip
+upgrade and on the periodic sync tick — on the tick only to a household
+whose last sync BEGIN did not echo the current roster version
+(`roster_echo`), and then without the removals it already holds — and a
+write that beat the gossip
 seating its author or household waits in a bounded in-memory buffer until
 the seat lands. The per-family table is in
 [`docs/protocol/spaces.md`](protocol/spaces.md).
