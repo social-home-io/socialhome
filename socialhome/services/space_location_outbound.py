@@ -57,6 +57,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _now_iso() -> str:
+    """The current UTC time, ISO 8601 (one seam for tests)."""
+    return datetime.now(UTC).isoformat()
+
+
 def _before(stamp: object, other: str) -> bool:
     """``stamp`` is an earlier UTC time than ``other`` (unreadable: yes)."""
     try:
@@ -118,10 +123,10 @@ class SpaceLocationOutbound:
         #: In memory: a restart re-sends each pin once. Bounded by the
         #: members sharing a location.
         self._last_sent: dict[tuple[str, str], tuple[tuple, str | None]] = {}
-        #: (space, user) → when they turned sharing on in this process. A
-        #: pin never says "here since" earlier than that: where they were
-        #: before they chose to share is not shared. In memory (see the
-        #: known limit in ``docs/protocol/presence.md``).
+        #: (space, user) → when they turned sharing on in this process, or
+        #: — not seen (sharing began before a restart) — when this process
+        #: first sent their pin. A pin never says "here since" earlier than
+        #: that: where they were before they chose to share is not shared.
         self._shared_from: dict[tuple[str, str], str] = {}
 
     def wire(self) -> None:
@@ -258,7 +263,7 @@ class SpaceLocationOutbound:
         )
         if payload is None:
             return
-        self._shared_from[(space.id, event.user_id)] = datetime.now(UTC).isoformat()
+        self._shared_from[(space.id, event.user_id)] = _now_iso()
         await self._publish(space.id, payload, force=True)
 
     async def _on_mode_changed(self, event: SpaceLocationModeChanged) -> None:
@@ -413,8 +418,12 @@ class SpaceLocationOutbound:
         unchanged = last is not None and last[0] == said
         if unchanged and last is not None and last[1]:
             payload = {**payload, "updated_at": last[1]}
-        start = self._shared_from.get(key)
-        if start is not None and _before(payload.get("updated_at"), start):
+        # The opt-in time when we saw it; otherwise (sharing began before
+        # this process — a restart) the time this process first sends the
+        # pin. Either way never earlier: a slightly late "since" is fine,
+        # where they were before they chose to share is not.
+        start = self._shared_from.setdefault(key, _now_iso())
+        if _before(payload.get("updated_at"), start):
             payload = {**payload, "updated_at": start}
         self._last_sent[key] = (said, payload.get("updated_at"))
         await self._broadcast_local(space_id, payload)
