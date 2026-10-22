@@ -505,43 +505,39 @@ async def test_report_invalid_json_is_400(client):
     assert resp.status == 400
 
 
-# ─── /gfs/rtc/* additional error branches ────────────────────────────
-
-
-async def test_rtc_ice_invalid_candidate_is_422(client):
-    # candidate must be a dict; sending a string triggers 422.
-    body = _sign(
-        {
-            "instance_id": "peer.home",
-            "session_id": "sess",
-            "candidate": "not-a-dict",
-        },
-        client._seed,
-    )
-    resp = await client.post("/gfs/rtc/ice", json=body)
-    assert resp.status == 422
-
-
-async def test_rtc_ice_unknown_session_is_404(client):
-    body = _sign(
-        {
-            "instance_id": "peer.home",
-            "session_id": "does-not-exist",
-            "candidate": {"candidate": "x", "sdpMid": "0"},
-        },
-        client._seed,
-    )
-    resp = await client.post("/gfs/rtc/ice", json=body)
-    assert resp.status == 404
+# ─── Signed household → GFS request auth (``_rtc_authenticate``) ─────
 
 
 async def test_rtc_authenticate_invalid_json_raises_400(client):
     resp = await client.post(
-        "/gfs/rtc/offer",
+        "/gfs/highlight_rtc/answer",
         data=b"{not-json",
         headers={"Content-Type": "application/json"},
     )
     assert resp.status == 400
+
+
+async def test_rtc_authenticate_missing_instance_id_is_422(client):
+    resp = await client.post("/gfs/highlight_rtc/answer", json={"sdp": "x"})
+    assert resp.status == 422
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/gfs/rtc/offer"),
+        ("POST", "/gfs/rtc/answer"),
+        ("POST", "/gfs/rtc/ice"),
+        ("POST", "/gfs/rtc/ping"),
+        ("GET", "/gfs/rtc/session/any"),
+    ],
+)
+async def test_household_rtc_rendezvous_is_gone(client, method, path):
+    """No Social Home release ever called the household-to-household
+    rendezvous, and its sessions shared the anonymous highlight slots — so
+    it is not served at all (#1112 follow-up)."""
+    resp = await client.request(method, path, json={})
+    assert resp.status == 404
 
 
 # ─── Admin POST body-parse error branches ────────────────────────────
@@ -924,7 +920,7 @@ def test_main_runtime_path_calls_run_app(tmp_path, monkeypatch):
     assert isinstance(called["port"], int)
 
 
-# ─── Extra RTC error branches (answer / ice / ping unknown + bad sig) ─
+# ─── Signed request auth: unknown sender + bad signature ─────────────
 
 
 async def test_rtc_answer_rejects_unknown_instance(client):
@@ -937,7 +933,7 @@ async def test_rtc_answer_rejects_unknown_instance(client):
         },
         other_seed,
     )
-    resp = await client.post("/gfs/rtc/answer", json=body)
+    resp = await client.post("/gfs/highlight_rtc/answer", json=body)
     assert resp.status == 403
 
 
@@ -951,34 +947,7 @@ async def test_rtc_answer_bad_signature(client):
         },
         other_seed,
     )
-    resp = await client.post("/gfs/rtc/answer", json=body)
-    assert resp.status == 401
-
-
-async def test_rtc_ice_unknown_instance(client):
-    other_seed, _ = _gen_ed25519()
-    body = _sign(
-        {
-            "instance_id": "ghost.home",
-            "session_id": "x",
-            "candidate": {"c": "x"},
-        },
-        other_seed,
-    )
-    resp = await client.post("/gfs/rtc/ice", json=body)
-    assert resp.status == 403
-
-
-async def test_rtc_ping_bad_signature(client):
-    other_seed, _ = _gen_ed25519()
-    body = _sign(
-        {
-            "instance_id": "peer.home",
-            "transport": "webrtc",
-        },
-        other_seed,
-    )
-    resp = await client.post("/gfs/rtc/ping", json=body)
+    resp = await client.post("/gfs/highlight_rtc/answer", json=body)
     assert resp.status == 401
 
 

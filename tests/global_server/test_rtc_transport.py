@@ -1,24 +1,11 @@
-"""Tests for GfsRtcSession + /gfs/rtc/* signalling endpoints (spec §24.12)."""
+"""Tests for GfsRtcSession, the public-highlight signalling store."""
 
 from __future__ import annotations
 
-import json
-
 import pytest
-from aiohttp.test_utils import TestClient, TestServer
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.global_server import rtc_transport
-from socialhome.global_server.app_keys import (
-    gfs_fed_repo_key,
-    gfs_rtc_key,
-)
-from socialhome.global_server.config import GfsConfig
-from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.rtc_transport import GfsRtcSession
-from socialhome.global_server.server import create_gfs_app
 
 
 @pytest.fixture
@@ -29,21 +16,21 @@ def rtc():
 
 async def test_offer_returns_session_id(rtc):
     """offer() returns a non-empty string session_id."""
-    session_id = await rtc.offer("inst-a", "v=0\r\no=...\r\n")
+    session_id = await rtc.offer("inst-a", "v=0\r\no=...\r\n", client="c")
     assert isinstance(session_id, str)
     assert len(session_id) > 0
 
 
 async def test_offer_returns_unique_ids(rtc):
     """Multiple offer() calls return distinct session_ids."""
-    id1 = await rtc.offer("inst-a", "sdp1")
-    id2 = await rtc.offer("inst-a", "sdp2")
+    id1 = await rtc.offer("inst-a", "sdp1", client="c")
+    id2 = await rtc.offer("inst-a", "sdp2", client="c")
     assert id1 != id2
 
 
 async def test_offer_stores_session(rtc):
     """offer() stores session state retrievable via get_session()."""
-    session_id = await rtc.offer("inst-x", "sdp-body")
+    session_id = await rtc.offer("inst-x", "sdp-body", client="c")
     session = rtc.get_session(session_id)
     assert session is not None
     assert session.session_id == session_id
@@ -54,7 +41,7 @@ async def test_offer_stores_session(rtc):
 
 async def test_answer_stores_answer_sdp(rtc):
     """answer() stores the answer SDP for the given session."""
-    session_id = await rtc.offer("inst-a", "offer-sdp")
+    session_id = await rtc.offer("inst-a", "offer-sdp", client="c")
     await rtc.answer(session_id, "answer-sdp")
     session = rtc.get_session(session_id)
     assert session is not None
@@ -69,7 +56,7 @@ async def test_answer_unknown_session_raises_key_error(rtc):
 
 async def test_ice_candidate_accumulates_candidates(rtc):
     """ice_candidate() appends candidates to the session."""
-    session_id = await rtc.offer("inst-b", "sdp")
+    session_id = await rtc.offer("inst-b", "sdp", client="c")
     candidate1 = {"candidate": "candidate:0 1 UDP ...", "sdpMid": "0"}
     candidate2 = {"candidate": "candidate:1 1 TCP ...", "sdpMid": "0"}
     await rtc.ice_candidate(session_id, candidate1)
@@ -95,8 +82,8 @@ async def test_get_session_returns_none_for_unknown(rtc):
 
 async def test_multiple_sessions_are_independent(rtc):
     """Two concurrent sessions do not interfere with each other."""
-    sid1 = await rtc.offer("inst-1", "sdp-1")
-    sid2 = await rtc.offer("inst-2", "sdp-2")
+    sid1 = await rtc.offer("inst-1", "sdp-1", client="c")
+    sid2 = await rtc.offer("inst-2", "sdp-2", client="c")
     await rtc.answer(sid1, "answer-1")
     s1 = rtc.get_session(sid1)
     s2 = rtc.get_session(sid2)
@@ -106,227 +93,38 @@ async def test_multiple_sessions_are_independent(rtc):
 
 async def test_offer_with_empty_sdp_is_accepted(rtc):
     """offer() accepts an empty SDP string without raising."""
-    session_id = await rtc.offer("inst-empty", "")
+    session_id = await rtc.offer("inst-empty", "", client="c")
     session = rtc.get_session(session_id)
     assert session is not None
     assert session.offer_sdp == ""
 
 
-# ─── Integration tests — /gfs/rtc/* signalling endpoints ─────────────
-
-
-def _gen_ed25519():
-    """Return (seed_bytes, public_key_hex) for a fresh Ed25519 keypair."""
-    priv = ed25519.Ed25519PrivateKey.generate()
-    seed = priv.private_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PrivateFormat.Raw,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
-    pub_hex = (
-        priv.public_key()
-        .public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
-        .hex()
-    )
-    return seed, pub_hex
-
-
-def _sign(body: dict, seed: bytes) -> dict:
-    """Attach a base64url-encoded Ed25519 ``signature`` to *body*."""
-    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
-    return {**body, "signature": b64url_encode(sign_ed25519(seed, canonical))}
-
-
-@pytest.fixture
-async def rtc_client(tmp_dir):
-    """GFS app with one active registered peer wired in."""
-    cfg = GfsConfig(
-        host="127.0.0.1",
-        port=0,
-        base_url="http://gfs.test",
-        data_dir=str(tmp_dir),
-        instance_id="gfs-node-a",
-        cluster_enabled=False,
-        cluster_node_id="gfs-node-a",
-        cluster_peers=(),
-    )
-    app = create_gfs_app(cfg)
-    seed, pub_hex = _gen_ed25519()
-    async with TestClient(TestServer(app)) as tc:
-        fed_repo = app[gfs_fed_repo_key]
-        await fed_repo.upsert_instance(
-            ClientInstance(
-                instance_id="peer.home",
-                display_name="Peer",
-                public_key=pub_hex,
-                status="active",
-            )
-        )
-        tc._seed = seed
-        tc._app = app
-        yield tc
-
-
-async def test_rtc_offer_creates_session(rtc_client):
-    body = _sign(
-        {"instance_id": "peer.home", "sdp": "v=0\r\no=- 123..."},
-        rtc_client._seed,
-    )
-    resp = await rtc_client.post("/gfs/rtc/offer", json=body)
-    assert resp.status == 200
-    data = await resp.json()
-    assert data["session_id"]
-    rtc: GfsRtcSession = rtc_client._app[gfs_rtc_key]
-    session = rtc.get_session(data["session_id"])
-    assert session is not None
-    assert session.offer_sdp.startswith("v=0")
-    # /gfs/rtc/* is the SH↔SH §4.2.3 signalling rendezvous; it does not
-    # touch the SH↔GFS rtc_connections row (that one only flips when the
-    # SH opens or closes its /gfs/ws WebSocket — see test_gfs_ws.py).
-    row = await rtc_client._app[gfs_fed_repo_key].get_rtc_connection("peer.home")
-    assert row is None
-
-
-async def test_rtc_offer_rejects_unknown_instance(rtc_client):
-    seed, _pub = _gen_ed25519()
-    body = _sign({"instance_id": "ghost.home", "sdp": "x"}, seed)
-    resp = await rtc_client.post("/gfs/rtc/offer", json=body)
-    assert resp.status == 403
-
-
-async def test_rtc_offer_rejects_bad_signature(rtc_client):
-    other_seed, _pub = _gen_ed25519()  # wrong key
-    body = _sign({"instance_id": "peer.home", "sdp": "x"}, other_seed)
-    resp = await rtc_client.post("/gfs/rtc/offer", json=body)
-    assert resp.status == 401
-
-
-async def test_rtc_answer_attaches_sdp(rtc_client):
-    body = _sign(
-        {"instance_id": "peer.home", "sdp": "offer-body"},
-        rtc_client._seed,
-    )
-    resp = await rtc_client.post("/gfs/rtc/offer", json=body)
-    session_id = (await resp.json())["session_id"]
-    answer = _sign(
-        {"instance_id": "peer.home", "session_id": session_id, "sdp": "answer-body"},
-        rtc_client._seed,
-    )
-    resp = await rtc_client.post("/gfs/rtc/answer", json=answer)
-    assert resp.status == 200
-    rtc: GfsRtcSession = rtc_client._app[gfs_rtc_key]
-    assert rtc.get_session(session_id).answer_sdp == "answer-body"
-
-
-async def test_rtc_answer_unknown_session_404(rtc_client):
-    body = _sign(
-        {"instance_id": "peer.home", "session_id": "missing", "sdp": "x"},
-        rtc_client._seed,
-    )
-    resp = await rtc_client.post("/gfs/rtc/answer", json=body)
-    assert resp.status == 404
-
-
-async def test_rtc_ice_relays_candidate(rtc_client):
-    body = _sign(
-        {"instance_id": "peer.home", "sdp": "o"},
-        rtc_client._seed,
-    )
-    session_id = (await (await rtc_client.post("/gfs/rtc/offer", json=body)).json())[
-        "session_id"
-    ]
-    ice = _sign(
-        {
-            "instance_id": "peer.home",
-            "session_id": session_id,
-            "candidate": {"candidate": "candidate:0 1 UDP ...", "sdpMid": "0"},
-        },
-        rtc_client._seed,
-    )
-    resp = await rtc_client.post("/gfs/rtc/ice", json=ice)
-    assert resp.status == 200
-    rtc: GfsRtcSession = rtc_client._app[gfs_rtc_key]
-    candidates = rtc.get_session(session_id).ice_candidates
-    assert candidates[0]["candidate"].startswith("candidate:0")
-
-
-async def test_rtc_session_poll_returns_state(rtc_client):
-    body = _sign(
-        {"instance_id": "peer.home", "sdp": "initiator-offer"},
-        rtc_client._seed,
-    )
-    session_id = (await (await rtc_client.post("/gfs/rtc/offer", json=body)).json())[
-        "session_id"
-    ]
-    resp = await rtc_client.get(f"/gfs/rtc/session/{session_id}")
-    assert resp.status == 200
-    data = await resp.json()
-    assert data["initiator_id"] == "peer.home"
-    assert data["offer_sdp"] == "initiator-offer"
-    assert data["answer_sdp"] is None
-    assert data["ice_candidates"] == []
-
-
-async def test_rtc_session_poll_404_on_unknown(rtc_client):
-    resp = await rtc_client.get("/gfs/rtc/session/nope")
-    assert resp.status == 404
-
-
-async def test_rtc_ping_updates_transport(rtc_client):
-    body = _sign(
-        {"instance_id": "peer.home", "transport": "https"},
-        rtc_client._seed,
-    )
-    resp = await rtc_client.post("/gfs/rtc/ping", json=body)
-    assert resp.status == 200
-    row = await rtc_client._app[gfs_fed_repo_key].get_rtc_connection("peer.home")
-    assert row.transport == "https"
-
-
-async def test_rtc_ping_rejects_invalid_transport(rtc_client):
-    body = _sign(
-        {"instance_id": "peer.home", "transport": "smoke-signals"},
-        rtc_client._seed,
-    )
-    resp = await rtc_client.post("/gfs/rtc/ping", json=body)
-    assert resp.status == 422
-
-
-async def test_rtc_offer_missing_instance_id_422(rtc_client):
-    # No instance_id + no signature: caller can't be authenticated.
-    resp = await rtc_client.post("/gfs/rtc/offer", json={"sdp": "x"})
-    assert resp.status == 422
-
-
 async def test_a_session_id_names_the_node_holding_it():
     rtc = GfsRtcSession(route_tag="tag-a")
-    session_id = await rtc.offer("inst-a", "sdp")
+    session_id = await rtc.offer("inst-a", "sdp", client="c")
     assert session_id is not None and session_id.startswith("tag-a.")
 
 
 async def test_offer_sweeps_expired_sessions(rtc):
-    stale = await rtc.offer("inst-a", "sdp")
+    stale = await rtc.offer("inst-a", "sdp", client="c")
     rtc.get_session(stale).created_at = 0.0
-    await rtc.offer("inst-a", "sdp")
+    await rtc.offer("inst-a", "sdp", client="c")
     assert rtc.get_session(stale) is None
     assert rtc.session_count() == 1
 
 
 async def test_offer_sheds_past_the_live_cap(rtc, monkeypatch):
     monkeypatch.setattr(rtc_transport, "MAX_LIVE_SESSIONS", 2)
-    assert await rtc.offer("inst-a", "sdp") is not None
-    kept = await rtc.offer("inst-a", "sdp")
-    assert await rtc.offer("inst-a", "sdp") is None
+    assert await rtc.offer("inst-a", "sdp", client="c") is not None
+    kept = await rtc.offer("inst-a", "sdp", client="c")
+    assert await rtc.offer("inst-a", "sdp", client="c") is None
     rtc.drop(kept)
-    assert await rtc.offer("inst-a", "sdp") is not None
+    assert await rtc.offer("inst-a", "sdp", client="c") is not None
 
 
 async def test_each_side_has_a_bounded_number_of_candidates(rtc, monkeypatch):
     monkeypatch.setattr(rtc_transport, "MAX_ICE_CANDIDATES_PER_SIDE", 2)
-    sid = await rtc.offer("inst-a", "sdp")
+    sid = await rtc.offer("inst-a", "sdp", client="c")
     assert await rtc.ice_candidate(sid, {"candidate": "1"}) is True
     assert await rtc.ice_candidate(sid, {"candidate": "2"}) is True
     assert await rtc.ice_candidate(sid, {"candidate": "3"}) is False
@@ -339,27 +137,6 @@ async def test_each_side_has_a_bounded_number_of_candidates(rtc, monkeypatch):
 async def test_counting_viewer_ice_of_an_unknown_session_raises(rtc):
     with pytest.raises(KeyError):
         rtc.count_viewer_ice("missing")
-
-
-async def test_rtc_offer_is_shed_with_503_past_the_cap(rtc_client, monkeypatch):
-    monkeypatch.setattr(rtc_transport, "MAX_LIVE_SESSIONS", 0)
-    body = _sign({"instance_id": "peer.home", "sdp": "o"}, rtc_client._seed)
-    resp = await rtc_client.post("/gfs/rtc/offer", json=body)
-    assert resp.status == 503
-
-
-async def test_rtc_ice_past_the_cap_is_429(rtc_client, monkeypatch):
-    monkeypatch.setattr(rtc_transport, "MAX_ICE_CANDIDATES_PER_SIDE", 0)
-    body = _sign({"instance_id": "peer.home", "sdp": "o"}, rtc_client._seed)
-    session_id = (await (await rtc_client.post("/gfs/rtc/offer", json=body)).json())[
-        "session_id"
-    ]
-    ice = _sign(
-        {"instance_id": "peer.home", "session_id": session_id, "candidate": {}},
-        rtc_client._seed,
-    )
-    resp = await rtc_client.post("/gfs/rtc/ice", json=ice)
-    assert resp.status == 429
 
 
 # ─── Anonymous slots (#1107 residual: one source can't fill them) ─────────
@@ -382,17 +159,6 @@ async def test_one_link_holds_a_bounded_number_of_public_sessions(rtc):
     assert await rtc.offer("other-author", "sdp", client="10.9.9.9") is not None
 
 
-@pytest.mark.security
-async def test_anonymous_sessions_leave_room_for_household_signalling(rtc, monkeypatch):
-    monkeypatch.setattr(rtc_transport, "MAX_LIVE_SESSIONS", 4)
-    monkeypatch.setattr(rtc_transport, "MAX_PUBLIC_SESSIONS", 2)
-    assert await rtc.offer("a1", "sdp", client="1.1.1.1") is not None
-    assert await rtc.offer("a2", "sdp", client="2.2.2.2") is not None
-    assert await rtc.offer("a3", "sdp", client="3.3.3.3") is None
-    # A signed household offer (no client) still finds a slot.
-    assert await rtc.offer("household", "sdp") is not None
-
-
 async def test_an_expired_public_session_frees_its_clients_slot(rtc):
     for _ in range(rtc_transport.MAX_SESSIONS_PER_CLIENT):
         await rtc.offer("author", "sdp", client="1.2.3.4")
@@ -401,7 +167,6 @@ async def test_an_expired_public_session_frees_its_clients_slot(rtc):
     assert await rtc.offer("author", "sdp", client="1.2.3.4") is not None
 
 
-def test_the_public_pool_is_below_the_whole_pool():
-    assert rtc_transport.MAX_PUBLIC_SESSIONS < rtc_transport.MAX_LIVE_SESSIONS
+def test_the_per_source_caps_are_below_the_whole_pool():
     assert rtc_transport.MAX_SESSIONS_PER_CLIENT < rtc_transport.MAX_SESSIONS_PER_AUTHOR
-    assert rtc_transport.MAX_SESSIONS_PER_AUTHOR < rtc_transport.MAX_PUBLIC_SESSIONS
+    assert rtc_transport.MAX_SESSIONS_PER_AUTHOR < rtc_transport.MAX_LIVE_SESSIONS

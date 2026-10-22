@@ -87,8 +87,8 @@ This is the less safe mode: that GFS serves the script that reads `#k` (see
 
 ## Wire endpoints
 
-Author SH → GFS (Ed25519-signed body, same `_rtc_authenticate`
-middleware as `/gfs/rtc/*`):
+Author SH → GFS (Ed25519-signed body, checked by the shared
+`_rtc_authenticate` in `global_server/routes/rtc.py`):
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -216,10 +216,10 @@ those slots, a node also refuses — with the same uniform 503, never by
 evicting someone else's session — an offer past **4 live sessions per
 client address** (IPv6 by /64, as the rate limiters bucket it) or **64 per
 author household**, and a relay GET past **2 live relays per client
-address** or **32 per author**; anonymous offers together hold at most
-**768** of the 1024 session slots, the rest staying for the signed
-household signalling of `/gfs/rtc/*` (`rtc_transport.py`,
-`relay_bridge.py`). An attacker with many addresses still needs a valid
+address** or **32 per author** (`rtc_transport.py`, `relay_bridge.py`).
+Every session is a viewer's: the GFS has no household-to-household
+signalling (`/gfs/rtc/*` was removed — no release ever called it), so no
+slots are held back. An attacker with many addresses still needs a valid
 link to an online author per 64 sessions, and fills one node's anonymous
 pool at most. Sessions older than 120 s and
 relays the author never connected to within 120 s are swept when the next

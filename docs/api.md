@@ -1612,21 +1612,6 @@ Wire shapes: `socialhome/domain/gfs_channel.py`; rationale:
 |---|---|---|
 | GET (Upgrade) | `/gfs/ws` | Persistent push channel. SH opens this once paired; the GFS pushes `{type:"relay", space_id, event_type, payload}` frames as space events fan out — the frame is identity-free (the GFS never learns which household relayed the event, so it forwards no `from_instance`). It also pushes `{type:"envelope", sealed:{kem_suite, eph_pk, ciphertext}}` — one sealed household-to-household blob relayed via `POST /gfs/envelope` (§D2b invite bootstrap). That frame carries those two fields and nothing else: the GFS cannot open the box and does not know who sealed it. Envelopes that arrived while the household was offline are drained, oldest first, immediately after the hello verifies — together with any queued member-published items, which drain as the same `{type:"relay", space_id, event_type:"space_item", epoch, writer_cert, payload}` frame a live subscriber gets from `POST /gfs/member-publish` (v_49; identity-free — the publisher is authenticated by the cert and the author signature inside, never by an outer field). It also pushes public-content RTC signalling to the author: `{type:"highlight_signal", kind}` with `kind` ∈ `offer` / `ice` / `relay_offer` (the `relay_offer` carries `{relay_id, highlight_id, token}` for the GFS-relay fallback). On an operator rename it pushes `{type:"server_info_updated", server_name}` to every connected client (on a cluster, on every node), which re-fetches `GET /gfs/info` to update the cached server name in real time (the reconnect-refresh path is the fallback). First client frame must be a signed hello `{type:"hello", instance_id, ts, sig}` within 5 s — see spec §24.12. WebSocket close codes: 4400 protocol violation, 4401 auth failure, 4408 hello timeout, 4409 replaced. An unknown / inactive instance and a bad signature both close 4401 with the one reason `auth-failed` after the same Ed25519 verify work (older GFS builds sent `unknown-instance` / `bad-signature`), so the hello is no registration oracle. Heartbeat is the WS-protocol-level ping (30 s). |
 
-## GFS — SH↔SH RTC signalling rendezvous (§4.2.3)
-
-These endpoints are an in-memory bulletin board where two paired Social
-Home instances drop SDP offer / answer / ICE candidates so they can
-bring up a direct WebRTC DataChannel between themselves for §4.2.3
-sync. The GFS holds no PeerConnection.
-
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/gfs/rtc/offer` | Store an SDP offer; return a session id. |
-| POST | `/gfs/rtc/answer` | Attach an SDP answer to a session. |
-| POST | `/gfs/rtc/ice` | Trickle ICE candidate. |
-| POST | `/gfs/rtc/ping` | HTTPS-fallback keepalive (sets `rtc_connections.transport`). |
-| GET | `/gfs/rtc/session/{session_id}` | Read session state (poll). |
-
 ## GFS — Cluster
 
 | Method | Path | Purpose |
