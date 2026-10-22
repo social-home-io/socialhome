@@ -267,6 +267,13 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "on_remote_member_left",
         "send_hosted_roster_snapshots",
         "on_peer_proto_version_raised",
+        # The roster echo: the host notes what a §24.11-authenticated member
+        # household's SPACE_SYNC_BEGIN says it already holds (only for a
+        # space we host and a household seated in it — it can only spare
+        # that household its own snapshot); the member builds its own echo
+        # for the BEGIN it sends. No actor, no route.
+        "on_sync_begin_roster_echo",
+        "roster_echo_for",
         # Internal seam the invite-redeem coordinator calls after it has
         # already consumed the token and seated the household as a member;
         # it only records a pending admin/mod elevation (a join_requests
