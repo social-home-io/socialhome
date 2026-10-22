@@ -474,7 +474,8 @@ decides:
 
 - the session is `"incremental"`, the household has a watermark, its
   `synced_shape` equals this session's shape, its last full stream is
-  under `FULL_RESYNC_INTERVAL_S` (24 h) old and its BEGIN carries a valid
+  under `FULL_RESYNC_INTERVAL_S` (24 h) old (checked by the host only, see
+  "daily anti-entropy" below) and its BEGIN carries a valid
   `have_seq` (below) → stream rows with
   `sync_seq > min(synced_seq, have_seq)` (the window still applies on top);
 - otherwise → the whole window (a full stream).
@@ -663,7 +664,14 @@ Fail-safe toward more data, never less:
   trigger (migration 0090) clears the space's `applied_seq`, so the next
   periodic BEGIN carries no `have_seq` and streams the whole window;
 - **daily anti-entropy** — a full stream at least every 24 h per
-  household, a backstop for anything a stamp could not express. A chunk
+  household, a backstop for anything a stamp could not express. **Only
+  the host runs it** (#2(f), the roster authority:
+  `SyncWatermarks.since_for(anti_entropy=...)`). Every receiver takes the
+  roster, the bans and every household's rows from the host, so the host's
+  pass converges the space. A plain member household's provider streams
+  in full once (no `full_at` yet) and then incrementally, past the day,
+  while its other full rules (shape, `have_seq`, no watermark, archive)
+  still hold. A chunk
   that did not arrive, decrypt or store, one still waiting for its key,
   and a record refused only for now (see `clean` above) re-stream on the
   next periodic session, and an archive lifted here forces a full one.
