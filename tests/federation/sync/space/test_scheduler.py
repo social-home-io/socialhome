@@ -1129,13 +1129,14 @@ async def test_every_shared_space_is_asked_for_once_slots_free(
     assert sorted(spaces) == sorted(f"sp-{i}" for i in range(8))
 
 
-async def test_a_slot_that_never_completes_is_reclaimed(
-    bus, queue, sync_manager, monkeypatch
-):
+async def test_a_slot_that_never_completes_is_reclaimed(bus, queue, sync_manager):
     """A session whose end never reaches us must not wedge the provider:
     after the in-flight TTL the waiting spaces are asked for anyway (a
     still-busy host answers ``too_many_sessions`` and the deferral retries)."""
-    monkeypatch.setattr(scheduler_mod, "INFLIGHT_BEGIN_TTL_S", 0.05)
+    # No wall-clock race: the TTL is far away while the first three go
+    # out (it used to be 50 ms — the same as the settle window, so a slow
+    # runner reclaimed slots before the first assertion). The slots are
+    # then aged past it by hand, and the drain the timer runs is run.
     fed = _FakeFederation(confirmed={"host"})
     sched = _many_spaces_sched(bus, queue, sync_manager, fed, 5)
     sched.wire()
@@ -1144,7 +1145,16 @@ async def test_a_slot_that_never_completes_is_reclaimed(
         await sched._tick_once()
         await _settle(5)
         assert len(_begins(fed)) == 3
-        await _settle(30)
+        # A timer is armed to reclaim them.
+        assert not sched._drain_timers["host"].done()
+        held = sched._inflight["host"]
+        for sync_id, (space_id, _at) in list(held.items()):
+            held[sync_id] = (
+                space_id,
+                scheduler_mod.time.monotonic() - scheduler_mod.INFLIGHT_BEGIN_TTL_S - 1,
+            )
+        await sched._drain_parked("host")
+        await _settle(5)
         assert len(_begins(fed)) == 5
     finally:
         await sched.stop()
