@@ -20,7 +20,9 @@ Triggers:
    the cap gets ``too_many_sessions`` for the rest. The requester's
    federation service turns that into :class:`SpaceSyncDeferred` and the
    scheduler asks again after :data:`DEFERRED_SYNC_RETRY_S` (growing,
-   at most :data:`MAX_DEFERRED_SYNC_RETRIES` until that space completes).
+   at most :data:`MAX_DEFERRED_SYNC_RETRIES` until that space completes),
+   in the mode the refused BEGIN asked for — a periodic sync stays
+   ``"incremental"``.
 6. **Authority epoch echo** (v_46) — a BEGIN to a space's owner carries
    the ``authority_epoch_echo`` the attached builder returns
    (:meth:`attach_authority_echo`), and :class:`SpaceAuthorityEchoDue`
@@ -29,6 +31,12 @@ Triggers:
    we reach only over the mesh to the attached announcer
    (:meth:`attach_mesh_announce`) once per process, so it learns our
    version + identity key and can deliver our writer cert (migration 0078).
+8. **Per-provider slots** — every BEGIN this scheduler sends holds one of
+   the provider's :data:`MAX_ACTIVE_SESSIONS_PER_INSTANCE` slots until its
+   ``SpaceSyncComplete`` (or deferral, or :data:`INFLIGHT_BEGIN_TTL_S`). A
+   sync asked for while all are held waits — one entry per space, the
+   stronger mode and the more urgent priority kept — and goes when one
+   frees, so a periodic tick over many shared spaces is never refused.
 
 Follows the `_stop: asyncio.Event` lifecycle (CLAUDE.md "Schedulers").
 """
@@ -38,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
@@ -53,6 +62,7 @@ from ....domain.space import Space, SpaceRole, SpaceType
 from ....infrastructure.event_bus import EventBus
 from ....infrastructure.reconnect_queue import P1_SECURITY, P4_DM, P6_PRODUCTIVITY
 from ...host_equivalence import acts_as_host
+from ...sync_manager import MAX_ACTIVE_SESSIONS_PER_INSTANCE
 
 if TYPE_CHECKING:
     from ....infrastructure.reconnect_queue import ReconnectSyncQueue
@@ -109,6 +119,18 @@ DEFERRED_SYNC_RETRY_S: float = 20.0
 #: refusal spends none of the provider's 5 / h budget.
 MAX_DEFERRED_SYNC_RETRIES: int = 6
 
+#: How long a BEGIN we sent holds one of the provider's
+#: :data:`MAX_ACTIVE_SESSIONS_PER_INSTANCE` slots in our own count when its
+#: end never reaches us (an ICE failure, a lost ``__complete__``). Past it
+#: the slot is taken back: a host that is in fact still busy answers
+#: ``too_many_sessions`` and the deferral asks again — the cap can delay a
+#: sync, never wedge one. A periodic stream normally ends in seconds.
+INFLIGHT_BEGIN_TTL_S: float = 120.0
+
+#: Which request wins when one space is asked for twice while it waits for
+#: a slot — the one that streams more.
+_MODE_RANK: dict[str, int] = {"incremental": 0, "initial": 1, "full": 2}
+
 #: Delays between startup sweep passes, in seconds. A household that has just
 #: rebooted cannot route anywhere yet: the confirmed-peer transports are still
 #: coming up, so ``discover_route`` returns None and the BEGIN fails with
@@ -128,14 +150,17 @@ class SpaceSyncScheduler:
         "_bus",
         "_deferred_attempts",
         "_deferred_tasks",
+        "_drain_timers",
         "_federation",
         "_federation_repo",
+        "_inflight",
         "_interval",
         "_mesh_announce",
         "_mesh_announced",
         "_mesh_catchup_attempts",
         "_mesh_catchup_done",
         "_own_instance_id",
+        "_parked",
         "_queue",
         "_roster_refresh",
         "_seat_repo",
@@ -199,6 +224,16 @@ class SpaceSyncScheduler:
         self._mesh_announce: Callable[[str], Awaitable[bool]] | None = None
         #: Mesh-only hosts our version reached this process.
         self._mesh_announced: set[str] = set()
+        #: provider → {sync_id: (space_id, monotonic sent-at)} — the BEGINs
+        #: we sent it that have not ended yet. A provider serves at most
+        #: :data:`MAX_ACTIVE_SESSIONS_PER_INSTANCE` of ours at once and
+        #: refuses the rest, so we never ask for more (trigger 8).
+        self._inflight: dict[str, dict[str, tuple[str, float]]] = {}
+        #: provider → {space_id: (sync_mode, priority)} waiting for a slot,
+        #: one entry per space.
+        self._parked: dict[str, dict[str, tuple[str, int]]] = {}
+        #: provider → the timer that reclaims stale slots for its waiters.
+        self._drain_timers: dict[str, asyncio.Task] = {}
 
     def attach_roster_refresh(self, refresh: Callable[[], Awaitable[object]]) -> None:
         """Run ``refresh`` on every periodic tick — the host re-sending each
@@ -297,10 +332,18 @@ class SpaceSyncScheduler:
         """
         self._mesh_catchup_done.add((event.space_id, event.from_instance))
         self._deferred_attempts.pop((event.space_id, event.from_instance), None)
+        # Its slot at the provider is free: the next waiting space goes.
+        self._release_slot(event.from_instance, event.sync_id, event.space_id)
+        await self._drain_parked(event.from_instance)
 
     async def _on_sync_deferred(self, event: SpaceSyncDeferred) -> None:
         """A provider had no free slot for our BEGIN: ask again shortly —
-        the sync was never served (trigger 5)."""
+        the sync was never served (trigger 5). The retry asks for the same
+        mode the refused BEGIN did."""
+        # The refused BEGIN holds no session there, so its slot is free for
+        # its own retry below. Nothing waiting is pulled in on a refusal:
+        # the host has just said it is full.
+        self._release_slot(event.provider_instance_id, event.sync_id, event.space_id)
         key = (event.space_id, event.provider_instance_id)
         attempts = self._deferred_attempts.get(key, 0)
         if attempts >= MAX_DEFERRED_SYNC_RETRIES:
@@ -317,21 +360,108 @@ class SpaceSyncScheduler:
                 event.space_id,
                 event.provider_instance_id,
                 DEFERRED_SYNC_RETRY_S * (attempts + 1),
+                event.sync_mode,
             ),
             name=f"SpaceSyncScheduler-deferred-{event.space_id}",
         )
         self._deferred_tasks.add(task)
         task.add_done_callback(self._deferred_tasks.discard)
 
-    async def _retry_deferred(self, space_id: str, provider: str, delay: float) -> None:
+    async def _retry_deferred(
+        self, space_id: str, provider: str, delay: float, sync_mode: str
+    ) -> None:
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=delay)
             return  # stopped while waiting
         except TimeoutError:
             pass
         await self.enqueue_sync_for_space(
-            space_id=space_id, peer_instance_id=provider, priority=P6_PRODUCTIVITY
+            space_id=space_id,
+            peer_instance_id=provider,
+            priority=P6_PRODUCTIVITY,
+            sync_mode=sync_mode,
         )
+
+    # ─── Per-provider slots (trigger 8) ────────────────────────────
+
+    def _free_slots(self, provider: str) -> int:
+        """Slots of ``provider``'s per-household cap we may still use;
+        reclaims BEGINs older than :data:`INFLIGHT_BEGIN_TTL_S` first."""
+        held = self._inflight.get(provider)
+        if held:
+            cutoff = time.monotonic() - INFLIGHT_BEGIN_TTL_S
+            for sync_id in [s for s, (_, at) in held.items() if at < cutoff]:
+                del held[sync_id]
+            if not held:
+                del self._inflight[provider]
+        return MAX_ACTIVE_SESSIONS_PER_INSTANCE - len(self._inflight.get(provider, {}))
+
+    def _release_slot(self, provider: str, sync_id: str, space_id: str) -> None:
+        """A BEGIN to ``provider`` ended. Addressed by ``sync_id``; an event
+        without one frees the slot its space holds."""
+        held = self._inflight.get(provider)
+        if not held:
+            return
+        if sync_id and sync_id in held:
+            del held[sync_id]
+        elif not sync_id:
+            match = next((s for s, (sp, _) in held.items() if sp == space_id), None)
+            if match is not None:
+                del held[match]
+        if not held:
+            del self._inflight[provider]
+
+    def _park(
+        self, provider: str, space_id: str, sync_mode: str, priority: int
+    ) -> None:
+        """Hold a sync for ``provider`` until a slot frees. One entry per
+        space: the mode that streams more and the more urgent priority win."""
+        waiting = self._parked.setdefault(provider, {})
+        held = waiting.get(space_id)
+        if held is not None:
+            mode, prio = held
+            if _MODE_RANK.get(mode, 1) > _MODE_RANK.get(sync_mode, 1):
+                sync_mode = mode
+            priority = min(prio, priority)
+        waiting[space_id] = (sync_mode, priority)
+        timer = self._drain_timers.get(provider)
+        if timer is None or timer.done():
+            self._drain_timers[provider] = asyncio.create_task(
+                self._drain_after_ttl(provider),
+                name=f"SpaceSyncScheduler-drain-{provider}",
+            )
+
+    async def _drain_after_ttl(self, provider: str) -> None:
+        """Backstop for slots whose end never reaches us: once they age
+        out, the waiting spaces go. Re-arms while anything still waits."""
+        while self._parked.get(provider) and not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=INFLIGHT_BEGIN_TTL_S)
+                return  # stopped while waiting
+            except TimeoutError:
+                pass
+            await self._drain_parked(provider)
+
+    async def _drain_parked(self, provider: str) -> None:
+        """Ask for as many waiting spaces as ``provider`` has free slots,
+        most urgent first. Each re-checks the cap when the queue runs it."""
+        waiting = self._parked.get(provider)
+        if not waiting:
+            return
+        free = self._free_slots(provider)
+        if free <= 0:
+            return
+        order = sorted(waiting.items(), key=lambda item: item[1][1])[:free]
+        for space_id, (sync_mode, priority) in order:
+            del waiting[space_id]
+            await self.enqueue_sync_for_space(
+                space_id=space_id,
+                peer_instance_id=provider,
+                priority=priority,
+                sync_mode=sync_mode,
+            )
+        if not waiting:
+            del self._parked[provider]
 
     async def start(self) -> None:
         """Begin the periodic tick. Idempotent."""
@@ -350,6 +480,10 @@ class SpaceSyncScheduler:
         if self._deferred_tasks:
             # Each wait ends on ``_stop``; nothing is mid-write.
             await asyncio.gather(*self._deferred_tasks, return_exceptions=True)
+        if self._drain_timers:
+            # Same: each timer waits on ``_stop`` and returns.
+            await asyncio.gather(*self._drain_timers.values(), return_exceptions=True)
+            self._drain_timers.clear()
         if self._startup_task is not None:
             # Waits on ``self._stop`` internally, so setting the event above
             # is enough for it to return on its own.
@@ -378,9 +512,11 @@ class SpaceSyncScheduler:
         ``sync_mode`` ``"incremental"`` is the periodic re-sync of a space
         we already hold: the provider re-ships no media and streams only the
         rows changed since the last stream we confirmed (its per-household
-        watermark, migration 0086 — a full stream when it has none). Everything else — a pairing, a
-        deferred retry, an echo, "Sync now" — is ``"initial"`` and also
-        enqueues the catch-up media.
+        watermark, migration 0086 — a full stream when it has none). A
+        pairing, an echo or "Sync now" is ``"initial"`` and also enqueues
+        the catch-up media; a deferred retry asks for what was refused.
+        While the provider has no free slot for us (trigger 8) the sync
+        waits for one rather than being sent.
 
         Fire-and-forget — the actual ``SPACE_SYNC_BEGIN`` send happens
         when the queue worker picks up the task. Callers should not
@@ -400,6 +536,12 @@ class SpaceSyncScheduler:
                     peer_instance_id,
                 )
                 return
+            # Trigger 8: the provider serves at most
+            # MAX_ACTIVE_SESSIONS_PER_INSTANCE syncs of ours at once and
+            # refuses the rest — wait for a slot instead of asking anyway.
+            if self._free_slots(peer_instance_id) <= 0:
+                self._park(peer_instance_id, space_id, sync_mode, priority)
+                return
             # Debug knob — when set, the scheduler always asks for
             # HTTPS-mode (Part C) so the federation-demo harness can
             # exercise the fallback path without staging a real ICE
@@ -415,6 +557,10 @@ class SpaceSyncScheduler:
             ):
                 prefer_direct = False
             sync_id = uuid.uuid4().hex
+            self._inflight.setdefault(peer_instance_id, {})[sync_id] = (
+                space_id,
+                time.monotonic(),
+            )
             fields = await self.begin_fields(
                 space_id=space_id,
                 peer_instance_id=peer_instance_id,

@@ -1978,6 +1978,35 @@ async def test_handle_direct_failed_at_capacity_defers_our_request(svc, reason):
     svc._sync_manager.trigger_relay_sync.assert_not_awaited()
 
 
+async def test_a_deferred_periodic_sync_stays_incremental(svc):
+    """The deferral carries what the refused BEGIN asked for. Before, the
+    retry fell back to ``"initial"`` — a full stream plus every media blob
+    of the space — for what was a periodic, changes-only sync."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=None)
+    svc._sync_manager.pending_sync_request = MagicMock(
+        return_value=PendingSyncRequest(
+            sync_id="s1",
+            space_id="sp",
+            provider_instance_id="host",
+            created_at=0,
+            sync_mode="incremental",
+            have_seq=41,
+        )
+    )
+    svc._sync_manager.forget_sync_request = MagicMock()
+    await svc._handle_space_sync_direct_failed(
+        _event(
+            "SPACE_SYNC_DIRECT_FAILED",
+            {"sync_id": "s1", "reason": "too_many_sessions"},
+            from_instance="host",
+        ),
+    )
+    published = svc._bus.publish.await_args.args[0]
+    assert published.sync_mode == "incremental"
+    assert published.sync_id == "s1"
+
+
 @pytest.mark.parametrize(
     ("reason", "sender"),
     [("rate_limited", "host"), ("too_many_sessions", "someone-else")],

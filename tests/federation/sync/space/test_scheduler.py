@@ -981,6 +981,206 @@ async def test_deferred_retries_are_capped_and_reset_on_completion(
         await queue.stop()
 
 
+async def test_a_deferred_sync_keeps_its_mode(bus, queue, sync_manager, monkeypatch):
+    """A refused periodic BEGIN is asked again as a periodic one — not as
+    an ``"initial"`` full stream that re-ships every media blob."""
+    monkeypatch.setattr(scheduler_mod, "DEFERRED_SYNC_RETRY_S", 0.01)
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _plain_sched(bus, queue, sync_manager, fed)
+    sched.wire()
+    await queue.start()
+    try:
+        await bus.publish(
+            SpaceSyncDeferred(
+                space_id="sp",
+                provider_instance_id="host",
+                sync_mode="incremental",
+                sync_id="s1",
+            )
+        )
+        for _ in range(100):
+            if fed.sent:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await sched.stop()
+        await queue.stop()
+    (begin,) = fed.sent
+    assert begin["payload"]["sync_mode"] == "incremental"
+
+
+def _many_spaces_sched(bus, queue, sync_manager, fed, n: int):
+    spaces = {SpaceType.HOUSEHOLD: [_space(f"sp-{i}") for i in range(n)]}
+    members = {f"sp-{i}": ["host"] for i in range(n)}
+    return SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("host")]),
+        space_repo=_FakeSpaceRepo(spaces_by_type=spaces, members_by_space=members),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+
+
+async def _settle(n: int = 30) -> None:
+    for _ in range(n):
+        await asyncio.sleep(0.01)
+
+
+def _begins(fed) -> list[dict]:
+    return [s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN]
+
+
+async def test_periodic_tick_asks_one_provider_for_at_most_its_capacity(
+    bus, queue, sync_manager
+):
+    """8 shared spaces with one host: the tick used to fire 8 BEGINs at
+    once; the host serves 3 and refuses 5, and each refusal came back as
+    a full re-sync with media. Now 3 go out and the rest wait for a slot."""
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _many_spaces_sched(bus, queue, sync_manager, fed, 8)
+    sched.wire()
+    await queue.start()
+    try:
+        await sched._tick_once()
+        await _settle()
+        first = _begins(fed)
+        assert len(first) == scheduler_mod.MAX_ACTIVE_SESSIONS_PER_INSTANCE == 3
+        # One session ends → the next space is asked for, still periodic.
+        done = first[0]["payload"]
+        await bus.publish(
+            SpaceSyncComplete(
+                space_id=done["space_id"], from_instance="host", sync_id=done["sync_id"]
+            )
+        )
+        await _settle()
+        after = _begins(fed)
+        assert len(after) == 4
+        assert after[-1]["payload"]["sync_mode"] == "incremental"
+        assert len({b["payload"]["space_id"] for b in after}) == 4
+    finally:
+        await sched.stop()
+        await queue.stop()
+
+
+async def test_every_shared_space_is_asked_for_once_slots_free(
+    bus, queue, sync_manager
+):
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _many_spaces_sched(bus, queue, sync_manager, fed, 8)
+    sched.wire()
+    await queue.start()
+    try:
+        await sched._tick_once()
+        for _ in range(10):
+            await _settle(5)
+            for b in _begins(fed):
+                p = b["payload"]
+                await bus.publish(
+                    SpaceSyncComplete(
+                        space_id=p["space_id"],
+                        from_instance="host",
+                        sync_id=p["sync_id"],
+                    )
+                )
+        await _settle()
+    finally:
+        await sched.stop()
+        await queue.stop()
+    spaces = [b["payload"]["space_id"] for b in _begins(fed)]
+    assert sorted(spaces) == sorted(f"sp-{i}" for i in range(8))
+
+
+async def test_a_slot_that_never_completes_is_reclaimed(
+    bus, queue, sync_manager, monkeypatch
+):
+    """A session whose end never reaches us must not wedge the provider:
+    after the in-flight TTL the waiting spaces are asked for anyway (a
+    still-busy host answers ``too_many_sessions`` and the deferral retries)."""
+    monkeypatch.setattr(scheduler_mod, "INFLIGHT_BEGIN_TTL_S", 0.05)
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _many_spaces_sched(bus, queue, sync_manager, fed, 5)
+    sched.wire()
+    await queue.start()
+    try:
+        await sched._tick_once()
+        await _settle(5)
+        assert len(_begins(fed)) == 3
+        await _settle(30)
+        assert len(_begins(fed)) == 5
+    finally:
+        await sched.stop()
+        await queue.stop()
+
+
+async def test_a_waiting_space_is_asked_for_once_with_the_strongest_mode(
+    bus, queue, sync_manager
+):
+    """Two ticks while the host is busy queue the same space once; a
+    "Sync now" (``initial``) for it wins over the periodic ask."""
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _many_spaces_sched(bus, queue, sync_manager, fed, 4)
+    sched.wire()
+    await queue.start()
+    try:
+        await sched._tick_once()
+        await _settle(5)
+        await sched._tick_once()
+        await sched.enqueue_sync_for_space(space_id="sp-3", peer_instance_id="host")
+        await _settle(5)
+        begins = _begins(fed)
+        assert len(begins) == 3
+        p = begins[0]["payload"]
+        await bus.publish(
+            SpaceSyncComplete(
+                space_id=p["space_id"], from_instance="host", sync_id=p["sync_id"]
+            )
+        )
+        await _settle()
+        begins = _begins(fed)
+        waiting = [b["payload"] for b in begins[3:]]
+        assert [(w["space_id"], w["sync_mode"]) for w in waiting] == [
+            ("sp-3", "initial")
+        ]
+    finally:
+        await sched.stop()
+        await queue.stop()
+
+
+async def test_a_deferral_frees_the_slot_for_its_own_retry(
+    bus, queue, sync_manager, monkeypatch
+):
+    """A refused BEGIN held no session at the host: its slot is free for
+    its own retry — but a refusal never pulls the next waiting space in
+    (the host just said it is full; that would only be refused too)."""
+    monkeypatch.setattr(scheduler_mod, "DEFERRED_SYNC_RETRY_S", 0.01)
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _many_spaces_sched(bus, queue, sync_manager, fed, 4)
+    sched.wire()
+    await queue.start()
+    try:
+        await sched._tick_once()
+        await _settle(5)
+        p = _begins(fed)[0]["payload"]
+        await bus.publish(
+            SpaceSyncDeferred(
+                space_id=p["space_id"],
+                provider_instance_id="host",
+                sync_mode="incremental",
+                sync_id=p["sync_id"],
+            )
+        )
+        await _settle()
+        begins = _begins(fed)
+        assert len(begins) == 4
+        assert begins[-1]["payload"]["space_id"] == p["space_id"]
+        assert begins[-1]["payload"]["sync_mode"] == "incremental"
+    finally:
+        await sched.stop()
+        await queue.stop()
+
+
 async def test_a_deferred_sync_waits_on_stop(bus, queue, sync_manager, monkeypatch):
     monkeypatch.setattr(scheduler_mod, "DEFERRED_SYNC_RETRY_S", 60.0)
     fed = _FakeFederation(confirmed={"host"})
