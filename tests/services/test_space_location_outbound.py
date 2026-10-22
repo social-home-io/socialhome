@@ -52,6 +52,7 @@ from socialhome.repositories.presence_repo import SqlitePresenceRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.space_zone_repo import SqliteSpaceZoneRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services import space_location_outbound as location_mod
 from socialhome.services.space_location_outbound import SpaceLocationOutbound
 
 
@@ -126,6 +127,14 @@ class _MemberHouseholds:
 
     async def writer_households(self, space_id: str) -> frozenset[str]:
         return self.households
+
+
+@pytest.fixture(autouse=True)
+def process_started_early(monkeypatch):
+    """The outbound never sends a "since" earlier than its own first send
+    of a pin (or the opt-in): pin "now" before every stamp these tests
+    use, so they read the stamps they set. Tests about the clamp set it."""
+    monkeypatch.setattr(location_mod, "_now_iso", lambda: "2026-01-01T00:00:00+00:00")
 
 
 @pytest.fixture
@@ -1252,12 +1261,13 @@ async def test_a_tier_switch_always_sends_with_the_since_time(env):
     assert len(env.federation.calls) == 2
 
 
-async def test_an_opt_in_never_says_since_before_it(env):
+async def test_an_opt_in_never_says_since_before_it(env, monkeypatch):
     """Where the person was before they chose to share is not shared: the
     pin an opt-in sends says "here since" the opt-in, not since 07:00 —
     and so does every later pin for the same place."""
     sp = await _alice_at_seven(env, "sp_optin_since")
-    before = datetime.now(UTC)
+    monkeypatch.setattr(location_mod, "_now_iso", lambda: "2026-04-27T10:00:00+00:00")
+    before = datetime.fromisoformat("2026-04-27T10:00:00+00:00")
     await env.bus.publish(
         SpaceMemberLocationOptedIn(space_id=sp.id, user_id=env.alice_uid)
     )
@@ -1273,3 +1283,26 @@ async def test_an_opt_in_never_says_since_before_it(env):
     later = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     await env.bus.publish(_fix(lat=47.40, at=later, since=later))
     assert env.federation.calls[-1]["payload"]["updated_at"] == later
+
+
+async def test_after_a_restart_since_is_never_before_the_first_send(env, monkeypatch):
+    """The opt-in time is gone after a restart: the first pin this process
+    sends says "here since" no earlier than that send — a little late,
+    never a leak of where they were before they chose to share — and a
+    later move carries its own time."""
+    await _alice_at_seven(env, "sp_restart")
+    monkeypatch.setattr(location_mod, "_now_iso", lambda: "2026-04-27T10:00:00+00:00")
+    await env.bus.publish(_fix(since="2026-04-27T07:00:00+00:00"))
+    assert env.federation.calls[-1]["payload"]["updated_at"] == (
+        "2026-04-27T10:00:00+00:00"
+    )
+    await env.bus.publish(
+        _fix(
+            lat=47.40,
+            at="2026-04-27T11:00:00+00:00",
+            since="2026-04-27T11:00:00+00:00",
+        )
+    )
+    assert env.federation.calls[-1]["payload"]["updated_at"] == (
+        "2026-04-27T11:00:00+00:00"
+    )
