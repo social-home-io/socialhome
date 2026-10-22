@@ -25,6 +25,7 @@ from socialhome.federation.sync.space.exporters import (
     GalleryAlbumsDeletedExporter,
     GalleryExporter,
     GalleryItemsDeletedExporter,
+    MemberPicturesExporter,
     PagesDeletedExporter,
     PagesExporter,
     PollsExporter,
@@ -55,6 +56,7 @@ from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
 from socialhome.repositories.page_repo import SqlitePageRepo
+from socialhome.repositories.profile_picture_repo import SqliteProfilePictureRepo
 from socialhome.repositories.space_poll_repo import SqliteSpacePollRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
@@ -374,6 +376,14 @@ async def _covered_record_keys(db) -> dict[str, list[str]]:
             )
         )
     await convos.soft_delete_message("m-gone")
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role, picture_hash)"
+        " VALUES('sp','u','member','0123456789abcdef')"
+    )
+    pictures = SqliteProfilePictureRepo(db)
+    await pictures.set_member_picture(
+        "sp", "u", bytes_webp=b"webp", hash="0123456789abcdef", width=1, height=1
+    )
 
     exporters = [
         PostsExporter(posts, windows),
@@ -402,6 +412,7 @@ async def _covered_record_keys(db) -> dict[str, list[str]]:
         TimetablesExporter(timetables),
         ChatMessagesExporter(convos, spaces),
         ChatMessagesDeletedExporter(convos, spaces),
+        MemberPicturesExporter(spaces, pictures),
     ]
     keys: dict[str, list[str]] = {}
     for exporter in exporters:
@@ -421,6 +432,12 @@ async def _covered_record_keys(db) -> dict[str, list[str]]:
 #: rows stamped before the change would otherwise never re-stream in the new
 #: shape until the next daily full pass.
 RECORD_KEYS_AT_SHAPE: dict[str, list[str]] = {
+    "member_pictures": [
+        "picture_hash",
+        "picture_webp_base64",
+        "space_id",
+        "user_id",
+    ],
     "bazaar": [
         "created_at",
         "currency",
@@ -667,7 +684,7 @@ RECORD_KEYS_AT_SHAPE: dict[str, list[str]] = {
 
 async def test_record_shapes_are_pinned_to_the_shape_version(db):
     keys = await _covered_record_keys(db)
-    assert SYNC_SHAPE_VERSION == 4 and keys == RECORD_KEYS_AT_SHAPE, (
+    assert SYNC_SHAPE_VERSION == 5 and keys == RECORD_KEYS_AT_SHAPE, (
         "A covered §25.6 exporter's record shape changed. Bump "
         "SYNC_SHAPE_VERSION (federation/sync/space/watermark.py) so every "
         "household gets one full stream in the new shape, then update "

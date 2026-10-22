@@ -287,10 +287,16 @@ stream of only the changed rows is safe — a delete always arrives as its
 tombstone.
 
 Kept **full on every session** (streamed whole, as before): the
-**roster** — `bans`, `members`, `member_pictures`. One row per seat, and
-what every other resource is admitted against: a receiver checks each
-content record's author against the roster it holds, so the roster must be
-complete on every stream, not just its changes. Nothing else is kept full.
+**roster** — `bans` and `members`. One row per seat, and what every other
+resource is admitted against: a receiver checks each content record's
+author against the roster it holds, so the roster must be complete on every
+stream, not just its changes. `member_pictures` is **incremental**
+(migration 0122, `SYNC_SHAPE_VERSION` 5): a picture is stamped when it is
+set or replaced — never when a receiver re-applies one it holds — and a
+periodic session streams only the pictures stamped after the watermark,
+of members who still use a per-space picture (a picture removal travels as
+the member's `picture_hash` → `null` and the live
+`SPACE_MEMBER_PROFILE_UPDATED`, as before). Nothing else is kept full.
 Only the **host's** roster is taken, though: from any other provider the
 receiver refuses `members` and `bans` outright and keeps only the
 `member_pictures` of members seated on that household, and its content

@@ -713,6 +713,50 @@ async def test_member_pictures_exporter_inlines_webp_bytes():
     assert base64.b64decode(r["picture_webp_base64"]) == b"\x89WEBP-bytes"
 
 
+async def test_member_pictures_exporter_streams_only_changed_pictures():
+    """§25.6 incremental (migration 0122): a periodic session ships only
+    the pictures stamped after the watermark — of members who still use
+    a per-space picture."""
+    import base64
+
+    from socialhome.domain.space import SpaceMember
+    from socialhome.federation.sync.space.exporter import IncrementalExporter
+    from socialhome.federation.sync.space.exporters import MemberPicturesExporter
+
+    members = [
+        SpaceMember(
+            space_id="sp-1",
+            user_id=u,
+            role="member",
+            joined_at="2026-01-01",
+            picture_hash=h,
+        )
+        for u, h in (("u-alice", "h-a"), ("u-bob", "h-b"), ("u-cara", None))
+    ]
+
+    class _SpaceRepo:
+        async def list_members(self, space_id):
+            return members
+
+    class _PicRepo:
+        def __init__(self) -> None:
+            self.asked: list[tuple[str, int]] = []
+
+        async def list_member_pictures_changed(self, space_id, since):
+            self.asked.append((space_id, since))
+            return [("u-bob", b"bob", "h-b"), ("u-cara", b"c", "h-c")]
+
+    pics = _PicRepo()
+    exporter = MemberPicturesExporter(_SpaceRepo(), pics)
+    assert isinstance(exporter, IncrementalExporter)
+    batches = [b async for b in exporter.iter_changed("sp-1", 41)]
+    recs = [r for b in batches for r in b]
+    assert pics.asked == [("sp-1", 41)]
+    # u-cara no longer uses a per-space picture: her stale blob stays home.
+    assert [r["user_id"] for r in recs] == ["u-bob"]
+    assert base64.b64decode(recs[0]["picture_webp_base64"]) == b"bob"
+
+
 async def test_member_pictures_exporter_skips_when_picture_missing():
     """Member row has hash but the bytes vanished (race / dropped row)
     — skip rather than ship a hash with no bytes."""

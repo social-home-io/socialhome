@@ -1425,6 +1425,37 @@ async def test_an_incremental_session_streams_only_changed_rows_of_covered_resou
     assert sentinel["snapshot_seq"] == 40
 
 
+async def test_a_member_household_streams_only_its_own_changed_pictures(encoder):
+    """Migration 0122 + #2(a): an incremental session from a plain member
+    household streams only the pictures changed since the watermark, and
+    of those only its own people's."""
+    marks = _Marks(snapshot=40, since=7)
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    pictures = _IncExporter(
+        "member_pictures",
+        [{"user_id": "u-ours"}, {"user_id": "u-hosts"}, {"user_id": "u-ours-2"}],
+        changed=[{"user_id": "u-ours"}, {"user_id": "u-hosts"}],
+    )
+    svc = SpaceSyncService(
+        builder=builder,
+        exporters={"member_pictures": pictures},
+        sig_suite="ed25519",
+        watermarks=marks,
+    )
+
+    async def _no(_space_id: str) -> bool:
+        return False
+
+    async def _ours(_space_id: str) -> set[str]:
+        return {"u-ours", "u-ours-2"}
+
+    svc.attach_roster_authority(_no, own_members=_ours)
+    session = _FakeSession(sync_mode="incremental", have_seq=33)
+    await svc.stream_initial(session)
+    assert _records(session)["member_pictures"] == [{"user_id": "u-ours"}]
+    assert pictures.asked_since == [7]
+
+
 async def test_no_watermark_streams_everything(encoder):
     marks = _Marks(snapshot=40, since=None)
     svc, posts = _inc_provider(encoder, marks)
