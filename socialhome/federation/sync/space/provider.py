@@ -608,6 +608,12 @@ class SpaceSyncService:
             # The requester's echo (migration 0087): ``None`` streams in
             # full, a lower one re-streams what a rolled-back requester lost.
             have_seq=getattr(session, "have_seq", None),
+            # #2(f): the daily full pass is the host's (the roster
+            # authority) — a plain member household stays incremental.
+            anti_entropy=(
+                self._roster_authority is None
+                or await self._roster_authority(session.space_id)
+            ),
         )
         session.kept_full_digests = {}
         exporters = [

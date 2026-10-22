@@ -1431,6 +1431,27 @@ def _records(session) -> dict[str, list[dict]]:
     return out
 
 
+@pytest.mark.parametrize(
+    ("authority", "anti_entropy"), [(None, True), (True, True), (False, False)]
+)
+async def test_only_the_roster_authority_asks_for_the_daily_full_pass(
+    encoder, authority, anti_entropy
+):
+    """#2(f): the daily full pass is the host's. A plain member household
+    asks its watermarks for no anti-entropy, so its sessions stay
+    incremental past the day; without an authority check, as before."""
+    marks = _Marks()
+    svc, _posts = _inc_provider(encoder, marks)
+    if authority is not None:
+
+        async def _check(_space_id: str) -> bool:
+            return authority
+
+        svc.attach_roster_authority(_check)
+    await svc.stream_initial(_FakeSession(sync_mode="incremental", have_seq=33))
+    assert marks.planned[0]["anti_entropy"] is anti_entropy
+
+
 async def test_an_incremental_session_streams_only_changed_rows_of_covered_resources(
     encoder,
 ):

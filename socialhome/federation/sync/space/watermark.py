@@ -16,7 +16,10 @@ session whenever the watermark cannot be trusted:
   of resources this household gets;
 * the last full stream is older than :data:`FULL_RESYNC_INTERVAL_S` — the
   daily anti-entropy pass that converges whatever a stamp cannot express (a
-  chunk the receiver refused, a parent it lacked at the time);
+  chunk the receiver refused, a parent it lacked at the time). Only the
+  space's host runs it (#2(f)): every receiver takes the roster, the bans
+  and every other household's rows from the host alone, so the host's pass
+  is the one that converges a space;
 * the requester's BEGIN carries no valid ``have_seq``.
 
 ``have_seq`` (migration 0087) is the requester's echo: our snapshot of the
@@ -153,11 +156,15 @@ class SyncWatermarks:
         shape: str,
         sync_mode: str,
         have_seq: int | None,
+        anti_entropy: bool = True,
     ) -> int | None:
         """The stamp above which this session streams covered rows, or
         ``None`` for a full stream. ``have_seq``: the requester's echo
         (:func:`parse_have_seq`) — ``None`` streams in full, a lower one wins,
-        a higher one is clamped to the watermark."""
+        a higher one is clamped to the watermark. ``anti_entropy`` (#2(f)):
+        whether this provider runs the daily full pass — only the space's
+        roster authority (the host) does; another household's provider
+        keeps streaming incrementally once it streamed in full."""
         if sync_mode != "incremental" or have_seq is None:
             return None
         mark = await self._repo.get(space_id, instance_id)
@@ -167,7 +174,7 @@ class SyncWatermarks:
         if full_at is None:
             return None
         age = (self._clock() - full_at).total_seconds()
-        if age > FULL_RESYNC_INTERVAL_S:
+        if anti_entropy and age > FULL_RESYNC_INTERVAL_S:
             return None
         return min(mark.seq, have_seq)
 

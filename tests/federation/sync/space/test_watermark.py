@@ -211,6 +211,45 @@ async def test_fails_safe_toward_a_full_stream(wm):
     assert since is None
 
 
+@pytest.mark.parametrize(("anti_entropy", "since"), [(True, None), (False, 7)])
+async def test_only_the_host_runs_the_daily_full_pass(anti_entropy, since):
+    """#2(f): the daily full pass converges what a stamp cannot express —
+    and every receiver takes the roster, bans and every other household's
+    rows only from the host. A plain member household's provider keeps
+    streaming incrementally past the day (``anti_entropy=False``); the
+    host still runs the pass."""
+    wm = _wm(age_s=FULL_RESYNC_INTERVAL_S * 3)
+    got = await _marks(_Repo(wm=wm)).since_for(
+        space_id="sp",
+        instance_id="h",
+        shape="S",
+        sync_mode="incremental",
+        have_seq=100,
+        anti_entropy=anti_entropy,
+    )
+    assert got == since
+
+
+@pytest.mark.parametrize(
+    "wm",
+    [
+        None,
+        _wm(shape="OLD"),
+        SpaceSyncWatermark(seq=7, shape="S", full_at=None),
+    ],
+)
+async def test_without_anti_entropy_the_other_full_rules_still_hold(wm):
+    since = await _marks(_Repo(wm=wm)).since_for(
+        space_id="sp",
+        instance_id="h",
+        shape="S",
+        sync_mode="incremental",
+        have_seq=100,
+        anti_entropy=False,
+    )
+    assert since is None
+
+
 async def test_a_naive_full_at_reads_as_utc():
     wm = SpaceSyncWatermark(seq=3, shape="S", full_at="2026-10-09 11:00:00")
     since = await _marks(_Repo(wm=wm)).since_for(
