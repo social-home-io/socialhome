@@ -191,10 +191,17 @@ already refuse an envelope dated more than 5 min ahead).
   missed a forward has nothing to remember. So a captured envelope can still
   be fanned out once more per node restart, or once per node that never saw
   it, until its step day ends.
-* Past the cap the oldest digests go first. A registered household that
-  publishes more than 200 000 envelopes within 25 h can make the GFS forget
-  other authors' moments early, and those can then be re-posted once each
-  until their step day ends.
+* Past the cap the oldest digests go first. One household can't get there
+  alone: publishes and deletes share a budget of **30 a minute per author
+  household, cluster-wide** (`MOMENT_PUBLISHES_PER_MINUTE`; each node allows
+  its `node_share` over the live nodes; `429 rate_limited`,
+  `Retry-After: 60`). That is at most ~45 000 envelopes in 25 h, under a
+  quarter of the 200 000-entry cache. A real household is far below it:
+  each user can post a top-level moment at most once per 15 min, so even ten
+  busy users replying fast stay at a few a minute. Several registered
+  households acting together that publish more than 200 000 envelopes
+  within 25 h could still make a node forget other authors' moments early.
+  Each of those could then be re-posted once, until its step day ends.
 
 The alternative was a send time in plaintext for the GFS to check. It was
 rejected: it would be one more field the GFS reads, it would need a protocol

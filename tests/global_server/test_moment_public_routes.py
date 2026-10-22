@@ -11,6 +11,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.crypto import b64url_encode, generate_identity_keypair, sign_ed25519
+from socialhome.global_server import moment_public_registry as registry_mod
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
     gfs_moment_public_registry_key,
@@ -301,6 +302,35 @@ async def test_an_envelope_from_an_earlier_day_is_refused_as_a_re_post(
     resp = await client.post(path, json=_encrypted(author, key_gen=two_days_ago))
     assert resp.status == 409
     assert await resp.json() == {"error": "stale_envelope"}
+
+
+@pytest.mark.security
+async def test_a_household_past_its_publish_budget_is_429(client, author, monkeypatch):
+    """Publishes and deletes share one per-household budget; past it the
+    envelope is refused before any fan-out."""
+    monkeypatch.setattr(registry_mod, "MOMENT_PUBLISHES_PER_MINUTE", 2)
+    await _register_author(client, author)
+    assert (
+        await client.post("/gfs/moments/publish", json=_encrypted(author))
+    ).status == 200
+    resp = await client.post(
+        "/gfs/moments/delete", json=_encrypted(author, op="delete")
+    )
+    assert resp.status == 200
+    resp = await client.post("/gfs/moments/publish", json=_encrypted(author))
+    assert resp.status == 429
+    assert resp.headers["Retry-After"] == "60"
+    assert await resp.json() == {"error": "rate_limited"}
+
+
+async def test_a_refused_envelope_spends_no_budget(client, author, monkeypatch):
+    monkeypatch.setattr(registry_mod, "MOMENT_PUBLISHES_PER_MINUTE", 1)
+    await _register_author(client, author)
+    stale = _encrypted(author, key_gen=int(time.time()) - 2 * 86_400)
+    assert (await client.post("/gfs/moments/publish", json=stale)).status == 409
+    assert (
+        await client.post("/gfs/moments/publish", json=_encrypted(author))
+    ).status == 200
 
 
 async def test_a_generation_days_old_publishes_under_todays_step(client, author):

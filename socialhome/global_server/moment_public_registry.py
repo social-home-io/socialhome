@@ -74,7 +74,7 @@ from .domain import (
 )
 from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import SeenPayloadCache
-from .public import SlidingWindowCounter
+from .public import SlidingWindowCounter, node_share
 from .repositories import (
     AbstractGfsFederationRepo,
     AbstractGfsMomentFollowRepo,
@@ -114,6 +114,15 @@ MOMENT_SEEN_TTL_S: float = float(RATCHET_STEP_S + MOMENT_STEP_SLACK_S)
 #: ~190 000 public moments a day per GFS before the oldest are forgotten
 #: early — and a forgotten one can be re-posted only until its step ends.
 MOMENT_SEEN_MAX: int = 200_000
+
+#: Public moments (creates + deletes) one author household may publish per
+#: minute, across the whole cluster (each node allows its
+#: :func:`~.public.node_share`). A household's users can post a top-level
+#: moment at most once per 15 min each, so even 10 busy users replying fast
+#: stay within a few a minute; 30 (one every 2 s, ~45 000 per 25 h) leaves
+#: one household at most ~23 % of :data:`MOMENT_SEEN_MAX` — it can't evict
+#: other authors' moments from the seen cache.
+MOMENT_PUBLISHES_PER_MINUTE: int = 30
 
 #: Follower user ids of one household named to the author per notice.
 MAX_FOLLOWER_USERS_NAMED: int = 50
@@ -164,6 +173,7 @@ class MomentPublicRegistry:
         "_instances",
         "_key_requests",
         "_mailbox",
+        "_publishes",
         "_relay",
         "_seen",
         "_tasks",
@@ -208,6 +218,7 @@ class MomentPublicRegistry:
         #: within :data:`MOMENT_SEEN_TTL_S` is a no-op.
         self._seen = SeenPayloadCache(ttl_s=MOMENT_SEEN_TTL_S, cap=MOMENT_SEEN_MAX)
         self._key_requests = SlidingWindowCounter(KEY_REQUESTS_PER_MINUTE)
+        self._publishes = SlidingWindowCounter(MOMENT_PUBLISHES_PER_MINUTE)
         self._tasks: set[asyncio.Task] = set()
 
     # ── Registration ────────────────────────────────────────────────────
@@ -365,6 +376,16 @@ class MomentPublicRegistry:
         }
 
     # ── Fan-out ─────────────────────────────────────────────────────────
+
+    def allow_publish(self, instance_id: str) -> bool:
+        """Count one accepted publish or delete from *instance_id*; ``False``
+        past :data:`MOMENT_PUBLISHES_PER_MINUTE` — this node's share of it
+        over the live cluster nodes, so the budget is cluster-wide behind a
+        round-robin balancer."""
+        nodes = self._cluster.live_node_count() if self._cluster is not None else 1
+        return self._publishes.allow(
+            instance_id, limit=node_share(MOMENT_PUBLISHES_PER_MINUTE, nodes)
+        )
 
     @property
     def seen_cache(self) -> SeenPayloadCache:

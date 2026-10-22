@@ -11,6 +11,8 @@ import pytest
 from socialhome.global_server import federation as federation_mod
 from socialhome.global_server.domain import GfsMomentKeyMail
 from socialhome.global_server.moment_public_registry import (
+    MOMENT_PUBLISHES_PER_MINUTE,
+    MOMENT_SEEN_MAX,
     MOMENT_SEEN_TTL_S,
     MOMENT_STEP_SLACK_S,
     MomentPublicRegistry,
@@ -383,8 +385,12 @@ class _FanOut:
 
 
 class _Cluster:
-    def __init__(self) -> None:
+    def __init__(self, nodes: int = 1) -> None:
         self.hints: list[str] = []
+        self.nodes = nodes
+
+    def live_node_count(self) -> int:
+        return self.nodes
 
     def hint_drain(self, instance_id: str) -> None:
         self.hints.append(instance_id)
@@ -628,3 +634,34 @@ async def test_a_replay_hours_later_is_still_fanned_out_once(
     )
     assert await reg.fan_out_moment(envelope=dict(_ENVELOPE)) == 0
     assert len(follower_ws.sent) == 1
+
+
+# ─── Per-household publish budget ─────────────────────────────────────────
+
+
+@pytest.mark.security
+async def test_one_household_publishes_at_most_its_budget_a_minute(gfs_setup, gfs_db):
+    reg, *_rest = await _cluster_world(gfs_setup, gfs_db)
+    for _ in range(MOMENT_PUBLISHES_PER_MINUTE):
+        assert reg.allow_publish("inst-author")
+    assert not reg.allow_publish("inst-author")
+    # Another household keeps its own budget.
+    assert reg.allow_publish("inst-other")
+
+
+@pytest.mark.security
+async def test_the_publish_budget_is_cluster_wide(gfs_setup, gfs_db):
+    """Behind a round-robin balancer each of N nodes allows 1/N of it."""
+    reg, _relay, cluster, _mb = await _cluster_world(gfs_setup, gfs_db)
+    cluster.nodes = 3
+    share = -(-MOMENT_PUBLISHES_PER_MINUTE // 3)
+    for _ in range(share):
+        assert reg.allow_publish("inst-author")
+    assert not reg.allow_publish("inst-author")
+
+
+def test_the_publish_budget_leaves_the_seen_cache_to_everyone_else():
+    """A full day of one household's budget fills under a quarter of the
+    25 h seen cache — it can't push other authors' moments out of it."""
+    per_window = MOMENT_PUBLISHES_PER_MINUTE * MOMENT_SEEN_TTL_S / 60
+    assert per_window < MOMENT_SEEN_MAX / 4
