@@ -1252,6 +1252,39 @@ def _roster_provider(encoder) -> SpaceSyncService:
     return SpaceSyncService(builder=builder, exporters=exporters, sig_suite="ed25519")
 
 
+async def test_a_member_household_streams_only_its_own_peoples_pictures(encoder):
+    """A member household's ``space_members`` also holds the host's
+    members (a host stream lands there); the receiver keeps only the
+    pictures of people seated on the provider (``acts_for``), so a plain
+    member household streams only its own people's."""
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    svc = SpaceSyncService(
+        builder=builder,
+        exporters={
+            "member_pictures": _FakeExporter(
+                "member_pictures",
+                [
+                    {"user_id": "u-ours", "picture_hash": "h1"},
+                    {"user_id": "u-hosts", "picture_hash": "h2"},
+                ],
+            ),
+        },
+        sig_suite="ed25519",
+    )
+
+    async def _no(_space_id: str) -> bool:
+        return False
+
+    async def _ours(_space_id: str) -> set[str]:
+        return {"u-ours"}
+
+    svc.attach_roster_authority(_no, own_members=_ours)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    users = [r["user_id"] for r in _records(session).get("member_pictures", [])]
+    assert users == ["u-ours"]
+
+
 @pytest.mark.parametrize("authority", [True, False])
 async def test_only_the_roster_authority_streams_members_and_bans(encoder, authority):
     """Every receiver refuses ``members`` and ``bans`` from a household

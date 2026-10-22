@@ -1759,7 +1759,12 @@ def _wire_federation_stack(
             return True
         return await space_repo.get_space_seed(space_id) is not None
 
-    space_sync_service.attach_roster_authority(_roster_authority)
+    async def _own_members(space_id: str) -> set[str]:
+        return set(await space_repo.list_local_member_user_ids(space_id))
+
+    space_sync_service.attach_roster_authority(
+        _roster_authority, own_members=_own_members
+    )
     app[K.space_sync_service_key] = space_sync_service
     app[K.space_sync_receiver_key] = space_sync_receiver
 
