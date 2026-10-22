@@ -140,6 +140,66 @@ its own key-wrap key for every follower and read silently — strictly weaker.
   whose hash the link names (SRI-pinned bundle, see
   [highlights_public.md](highlights_public.md)). See [Share links](#share-links).
 
+## Replays at the GFS
+
+`sent_at` is sealed, so the GFS cannot read it. Without more, anyone holding
+an envelope (every follower household gets the signed bytes) could re-post
+it to `POST /gfs/moments/publish` after the GFS's old ten-minute duplicate
+memory and have it fanned out to every follower again, who all then drop it.
+Nothing is stored twice, but the bandwidth is amplified. A popular author's
+moment re-posted once is 10 000 followers × ≤ 16 KB ≈ 160 MB, and it could
+be repeated every ten minutes, forever. Two checks close this. Neither adds
+a wire field, and neither tells the GFS anything new:
+
+* **The key step must be today's.** `key_gen` is the generation's mint time
+  and `key_step` its day (`RATCHET_STEP_S`). Both are plaintext routing
+  fields the GFS already reads, so it already knew the day an envelope was
+  sealed in. An author's household always seals under the current step, so
+  the GFS refuses an envelope whose step day (`key_gen + key_step × 86 400`
+  to one day later) is more than an hour (`MOMENT_STEP_SLACK_S`) away from
+  its own clock: `409 stale_envelope`, nothing fanned out. That hour is the
+  clock disagreement a household may have. It also means an envelope is
+  accepted at most 25 h after it was sealed, the same window a follower
+  accepts it in.
+* **Inside that window the same bytes count once.** Each node remembers the
+  digest of every moment it fanned out, forwarded or was forwarded for
+  25 h (`MOMENT_SEEN_TTL_S`, one step plus the slack). That is the same
+  cache the cluster relay uses for `followers` items, so a re-post to any
+  node is a no-op (`delivered: 0`).
+
+Together: a captured envelope is fanned out once, never again.
+
+**Cost.** No message, no wire field, no database row. Memory is ~140 B per
+remembered moment per node, capped at 200 000 (`MOMENT_SEEN_MAX`, ~28 MiB
+when full):
+
+| GFS size | Public moments / day | Remembered (25 h) | Memory per node |
+|---|---|---|---|
+| Typical: 2 000 authors × 5 | 10 000 | ~10 400 | ~1.5 MiB |
+| Large: 50 000 authors × 3 | 150 000 | ~156 000 | ~22 MiB |
+| Past the cap | > ~190 000 | 200 000 | ~28 MiB |
+
+Before, it was 20 000 entries × 10 min in each of two caches.
+
+**Older households:** a v_62/v_63 author seals under the current step like
+v_64, so nothing changes for it. A household whose clock is more than an
+hour off has its publish refused with a WARNING in its log (followers
+already refuse an envelope dated more than 5 min ahead).
+
+**Residuals.**
+* A restarted node has forgotten what it saw, and a node in a cluster that
+  missed a forward has nothing to remember. So a captured envelope can still
+  be fanned out once more per node restart, or once per node that never saw
+  it, until its step day ends.
+* Past the cap the oldest digests go first. A registered household that
+  publishes more than 200 000 envelopes within 25 h can make the GFS forget
+  other authors' moments early, and those can then be re-posted once each
+  until their step day ends.
+
+The alternative was a send time in plaintext for the GFS to check. It was
+rejected: it would be one more field the GFS reads, it would need a protocol
+bump, and older GFSs refuse unknown envelope fields.
+
 ## Event types
 
 | Event type (federation) | Direction | Purpose |
@@ -272,8 +332,8 @@ above therefore reaches households on **every** node
   `NODE_DRAIN_HINT` (`relays`, audience `followers` + the author's user id).
   Each node resolves the author's able follower households from the shared
   database and pushes to the sockets it holds; it remembers the frame (its
-  own digest, 10 min), so no node pushes it twice and a retried publish to
-  any node is a no-op. Each socket lives on one node: each follower
+  own digest, 25 h — the cache the node's own publishes use), so no node
+  pushes it twice and a retried or re-posted publish to any node is a no-op. Each socket lives on one node: each follower
   household gets the moment once.
 * **Offline followers.** A follower household that held a socket in the last
   24 h (`relay_seen_at`) but has none on any node gets the moment queued in
@@ -611,9 +671,9 @@ compare.
   for keys + base64url for signatures matches the existing
   Highlights flow.
 * **Freshness**: the sealed, signed ``sent_at`` (v_64, above) bounds a
-  replay to 25 h; a follower keeps one copy per ``moment_id`` (unique per
-  author), and the GFS drops a re-posted identical envelope for 10 min
-  (its seen-payload cache).
+  replay to 25 h at the follower, which keeps one copy per ``moment_id``
+  (unique per author). The GFS refuses a re-post before it reaches any
+  follower — see [Replays at the GFS](#replays-at-the-gfs).
 
 The recipient's verification is in
 ``socialhome/services/moment_public_inbound.py:_verify`` — single

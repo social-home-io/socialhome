@@ -374,6 +374,7 @@ class ClusterRelayFanOut:
         "_pending_targets",
         "_relay",
         "_seen",
+        "_seen_by_kind",
         "_tasks",
         "_warned_at",
         "_ws_registry",
@@ -397,6 +398,9 @@ class ClusterRelayFanOut:
         self._seen = SeenPayloadCache(
             ttl_s=RELAY_FORWARD_SEEN_TTL_S, cap=RELAY_FORWARD_SEEN_MAX
         )
+        #: A kind whose items are remembered longer, in the cache its origin
+        #: service keeps (public moments: as long as their key step lasts).
+        self._seen_by_kind: dict[str, SeenPayloadCache] = {}
         #: Inbound pushes and origin-side offline queueing, awaited in close.
         self._tasks: set[asyncio.Task[None]] = set()
         #: Offline candidates held by forwarded items not yet settled.
@@ -416,11 +420,26 @@ class ClusterRelayFanOut:
         :meth:`apply`, so neither can be built first)."""
         self._cluster = cluster
 
-    def register_audience(self, kind: str, resolve: AudienceResolver) -> None:
-        """Resolve audiences of *kind* with *resolve* on the receiving side."""
+    def register_audience(
+        self,
+        kind: str,
+        resolve: AudienceResolver,
+        *,
+        seen: SeenPayloadCache | None = None,
+    ) -> None:
+        """Resolve audiences of *kind* with *resolve* on the receiving side.
+
+        With *seen*, items of *kind* are deduped in that cache instead of
+        this relay's ten-minute one — the origin service's own, so an item
+        this node forwarded or was forwarded counts as seen there too."""
         if kind not in AUDIENCE_KINDS:
             raise ValueError(f"unknown audience kind: {kind!r}")
         self._audiences[kind] = resolve
+        if seen is not None:
+            self._seen_by_kind[kind] = seen
+
+    def _seen_for(self, kind: str) -> SeenPayloadCache:
+        return self._seen_by_kind.get(kind, self._seen)
 
     def seen_frame(self, frame: dict) -> bool:
         """Whether this node already pushed or forwarded *frame* (within
@@ -463,7 +482,7 @@ class ClusterRelayFanOut:
             return False
         self._pending_targets += len(targets)
         if item.deduped:
-            self._seen.record(item.digest())
+            self._seen_for(item.kind).record(item.digest())
         return True
 
     def forward_to_space(self, space_id: str, frame: dict) -> bool:
@@ -621,9 +640,10 @@ class ClusterRelayFanOut:
                 held.setdefault(audience, set()).update(local)
             if item.deduped:
                 digest = item.digest()
-                if self._seen.seen(digest):
+                seen = self._seen_for(item.kind)
+                if seen.seen(digest):
                     continue
-                self._seen.record(digest)
+                seen.record(digest)
             push = [t for t in local if t != item.skip]
             if push:
                 jobs.append((push, item))

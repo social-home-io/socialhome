@@ -53,6 +53,7 @@ from ..domain import GfsUserPicture
 from ..html_page import html_response
 from ..link_preview import person_handoff
 from ..moment_media import MediaRefused
+from ..moment_public_registry import envelope_step_current
 from ..page_models import load_person_page
 from .base import GfsBaseView
 from .rtc import RELAY_AUTH_MAX_SKEW_SECONDS, _rtc_authenticate
@@ -304,6 +305,11 @@ async def _encrypted_envelope(view: GfsBaseView) -> dict | web.Response:
         str(body.get("author_user_id") or ""), sender
     ):
         return web.json_response({"error": "instance_mismatch"}, status=403)
+    # An envelope sealed under an earlier day's key step is a re-post of a
+    # captured one (an author's household seals under today's): refused, so
+    # a replay past the seen-cache window reaches no follower.
+    if not envelope_step_current(body["key_gen"], body["key_step"], time.time()):
+        return web.json_response({"error": "stale_envelope"}, status=409)
     return body
 
 

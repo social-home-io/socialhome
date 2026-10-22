@@ -24,6 +24,7 @@ from socialhome.global_server.cluster_relay import (
     held_from_replies,
     wire_size,
 )
+from socialhome.global_server.federation import SeenPayloadCache
 
 _A = "homea2222222222222222222222222aa"
 _B = "homeb2222222222222222222222222bb"
@@ -679,3 +680,30 @@ async def test_waiting_like_an_undelivered_signal_is_immediate_without_a_round(
 async def test_waiting_like_an_undelivered_signal_ends_at_the_timeout():
     svc = _fan_out(cluster=_RoundCluster())
     await asyncio.wait_for(svc.wait_like_undelivered(timeout=0.01), timeout=1)
+
+
+@pytest.mark.security
+async def test_a_kind_with_its_own_seen_cache_dedupes_in_it():
+    """Public moments are remembered as long as their key step lasts, in the
+    registry's cache: what this node forwards or is forwarded lands there
+    (so a re-post to THIS node is a no-op too), and the ten-minute cache of
+    the other kinds stays untouched."""
+    registry, cluster = _Registry({_A}), _Cluster()
+    svc = _fan_out(registry=registry, cluster=cluster)
+    long_cache = SeenPayloadCache(ttl_s=90_000.0, cap=10)
+
+    async def _followers(key: str) -> list[str]:
+        return [_A]
+
+    svc.register_audience(AUDIENCE_FOLLOWERS, _followers, seen=long_cache)
+    moment = _item(_MOMENT, kind=AUDIENCE_FOLLOWERS, key="u-a")
+    await svc.apply([moment])
+    await _settle(svc)
+    assert long_cache.seen(moment.digest())
+    assert not svc.seen_frame(_MOMENT)
+    forwarded = {**_MOMENT, "payload": {"x": "forwarded here"}}
+    assert svc.forward(kind=AUDIENCE_FOLLOWERS, key="u-a", frame=forwarded)
+    assert long_cache.seen(SeenPayloadCache.digest(forwarded))
+    await svc.apply([moment])
+    await _settle(svc)
+    assert len(registry.sent) == 1
