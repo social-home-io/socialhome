@@ -113,11 +113,16 @@ def _wait_budget(error: str) -> tuple[int, float] | None:
     return None
 
 
-#: The space's roster and moderation list: every receiver takes them only
-#: from the host (or a host-equivalent seed holder) — ``receiver._admit``
-#: refuses them from any other household — so only such a household
-#: streams them (:meth:`SpaceSyncService.attach_roster_authority`).
-_ROSTER_AUTHORITY_RESOURCES: frozenset[str] = frozenset({"bans", "members"})
+#: Resources a plain member household (not the host, nor a host-equivalent
+#: seed holder) streams only for its own people
+#: (:meth:`SpaceSyncService.attach_roster_authority`). Every receiver takes
+#: the roster and the moderation list only from the roster authority
+#: (``receiver._admit``), so ``bans`` goes not at all; ``members`` goes for
+#: the picture resets only the member's own household may make; and
+#: ``member_pictures`` for the pictures only it may ship (``acts_for``).
+_OWN_PEOPLE_RESOURCES: frozenset[str] = frozenset(
+    {"bans", "members", "member_pictures"}
+)
 
 #: Resources only a member household (a writer seat) receives by
 #: catch-up — the members' places; the chat has its own version gate too.
@@ -127,7 +132,7 @@ _MEMBER_ONLY_RESOURCES: frozenset[str] = frozenset(
 
 
 class _OwnPeopleOnly:
-    """``member_pictures`` narrowed to this household's own people."""
+    """A resource narrowed to this household's own people (by ``user_id``)."""
 
     __slots__ = ("_inner", "_own", "resource")
 
@@ -304,19 +309,21 @@ class SpaceSyncService:
         exporter = self._exporters.get(resource)
         if (
             exporter is not None
-            and resource in _ROSTER_AUTHORITY_RESOURCES
+            and resource in _OWN_PEOPLE_RESOURCES
             and self._roster_authority is not None
             and not await self._roster_authority(session.space_id)
         ):
-            return None
-        if (
-            exporter is not None
-            and resource == "member_pictures"
-            and self._roster_authority is not None
-            and self._own_members is not None
-            and not await self._roster_authority(session.space_id)
-        ):
-            return _OwnPeopleOnly(exporter, self._own_members)
+            # A plain member household: only its own people's rows. Every
+            # receiver refuses the rest from it, and ``members`` still
+            # carries the picture resets only it may make
+            # (``receiver._apply_picture_resets``).
+            if resource == "member_pictures":
+                if self._own_members is None:
+                    return exporter
+                return _OwnPeopleOnly(exporter, self._own_members)
+            if resource == "bans" or self._own_members is None:
+                return None
+            exporter = _OwnPeopleOnly(exporter, self._own_members)
         version = await self._session_version(session)
         if exporter is not None and resource == "calendar":
             if isinstance(exporter, CalendarExporter) and not _series_rows(version):

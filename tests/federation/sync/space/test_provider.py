@@ -1285,6 +1285,42 @@ async def test_a_member_household_streams_only_its_own_peoples_pictures(encoder)
     assert users == ["u-ours"]
 
 
+async def test_a_member_household_streams_its_own_peoples_member_rows(encoder):
+    """A picture reset (``picture_hash`` → ``null``) a receiver missed is
+    healed only from the member's own household (``_apply_picture_resets``:
+    ``acts_for``) — the host's view of another household's member is
+    second-hand. So a plain member household keeps streaming its own
+    people's ``members`` rows (never the host's, never ``bans``)."""
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    svc = SpaceSyncService(
+        builder=builder,
+        exporters={
+            "members": _FakeExporter(
+                "members",
+                [
+                    {"user_id": "u-ours", "role": "member", "picture_hash": None},
+                    {"user_id": "u-hosts", "role": "owner", "picture_hash": None},
+                ],
+            ),
+            "bans": _FakeExporter("bans", [{"user_id": "u-banned"}]),
+        },
+        sig_suite="ed25519",
+    )
+
+    async def _no(_space_id: str) -> bool:
+        return False
+
+    async def _ours(_space_id: str) -> set[str]:
+        return {"u-ours"}
+
+    svc.attach_roster_authority(_no, own_members=_ours)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    streamed = _records(session)
+    assert [r["user_id"] for r in streamed["members"]] == ["u-ours"]
+    assert "bans" not in streamed
+
+
 @pytest.mark.parametrize("authority", [True, False])
 async def test_only_the_roster_authority_streams_members_and_bans(encoder, authority):
     """Every receiver refuses ``members`` and ``bans`` from a household
