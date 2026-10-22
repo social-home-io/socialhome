@@ -174,7 +174,7 @@ function takeFrame(
 }
 
 
-function PublicHighlightViewer(
+export function PublicHighlightViewer(
   { boot, secret, retry }: { boot: BootPayload; secret: Uint8Array<ArrayBuffer>; retry: RetryControl },
 ) {
   const [state, setState] = useState<ViewerState>({
@@ -354,12 +354,17 @@ function PublicHighlightViewer(
     async function main() {
       try {
         viewerKey = await makeViewerKey()
+        // Unmounted while it started ("Try again" remounts the viewer, or
+        // the page was left): stop here — never open a connection, post an
+        // offer or poll a session the cleanup can no longer reach.
+        if (cancelled) return
         if (!viewerKey) {
           // No WebCrypto: nothing could open the sealed stream, so don't ask.
           setStatus('error', t('hl.no_crypto'))
           return
         }
         const ice = await fetchJson<{ servers: IceServer[] }>(boot.gfs, '/gfs/highlights/ice-servers')
+        if (cancelled) return
         pc = new RTCPeerConnection({ iceServers: ice.servers })
         let sessionId: string | null = null
         let ackedCandidates = 0
@@ -396,6 +401,7 @@ function PublicHighlightViewer(
 
         const offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
+        if (cancelled) { pc.close(); return }
         const offerResp = await postJson<{ session_id: string }>(
           boot.gfs,
           '/gfs/highlight_rtc/offer',
@@ -408,9 +414,14 @@ function PublicHighlightViewer(
           },
         )
         sessionId = offerResp.session_id
+        if (cancelled) { pc.close(); return }
 
         let attempts = 0
         pollTimer = setInterval(async () => {
+          if (cancelled) {
+            if (pollTimer) clearInterval(pollTimer)
+            return
+          }
           attempts += 1
           if (attempts > POLL_MAX_ATTEMPTS) {
             if (pollTimer) clearInterval(pollTimer)
