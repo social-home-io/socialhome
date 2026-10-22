@@ -1775,7 +1775,7 @@ async def test_subscribe_to_gfs_space_signs_body(env):
     assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig))
     # v_61: what this household opens rides NEXT to the signed bytes (the
     # canonical above is unchanged, so an older GFS still verifies it).
-    assert body["accepts"] == ["author_profiles_bundle"]
+    assert body["accepts"] == ["author_profiles_bundle", "space_key_pull"]
 
 
 async def test_unpublish_space_signs_canonical_body(env):

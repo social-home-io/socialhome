@@ -1414,6 +1414,51 @@ while the socket was down does not count), so a flapping socket does not re-noti
 its owners on every reconnect. A reconnect therefore costs at most one
 ~1–2 KB handoff per held seat: a 500-seat follower costs ≈ 750 KB. The 5b-c reconcile still backstops an offline owner.
 
+### Key pull on a miss (#5b, capability `space_key_pull`)
+
+5b-d re-sealed on **every** reconnect of a follower's socket, whether or not
+it missed anything: a follower reconnecting ~14 times a day with 50 seats cost
+its spaces' owners ~700 handoffs a day, almost all for keys it already held.
+A follower now asks only when it actually **misses** a key:
+
+1. A relayed frame (`space_post_public` or `space_item`) arrives under an
+   epoch the follower holds no key for (`MissingEpochKey`), and that epoch
+   is **after** the newest key it holds, or it holds none. An older missing
+   epoch is dropped as before: the owner seals its current key only, and the
+   frame epoch is plaintext, so holding those would let a relay fill the
+   hold. The frame is held in a `PendingDecryptsCache` of its own (64
+   frames, oldest dropped, never the §25.6 sync one). It is replayed on
+   `SpaceContentKeyImported`, with every check run again.
+2. The follower asks for the key
+   (`GfsSpaceMirrorService.request_space_key` →
+   `GfsConnectionService.request_space_key`): at most once per 5 minutes per
+   space. It asks **only a server where it holds a recorded seat**, because
+   asking any other would tell that operator it follows the space. It asks
+   only one that proved `space_key_pull` in its signed `/gfs/info` block.
+   The request is `POST /gfs/spaces/{id}/key_request`, signed by the
+   follower like a subscribe over
+   `{action: "space_key_request", instance_id, space_id, ts}`.
+3. The GFS checks the signature, the space, and that the follower holds a
+   seat in it, and not the owner's own. It then sends the owner the existing
+   `new_subscriber` frame with `reason: "reconnect"`: the key repair, never
+   a bundle. It sends that at most once per seat per 120 s, shared with
+   every other key repair of that seat. The answer is always `202`, whether
+   or not anything was sent.
+4. The owner seals and relays the key as in 5b-b. Since the owner side is
+   unchanged, an owner of any version answers.
+
+A follower that pulls says so with `space_key_pull` in its WS hello and its
+subscribe `accepts`. Both are unsigned hints that only reduce what the GFS
+does for that household. The GFS then skips the 5b-d repairs for it: the
+hello's `on_subscriber_connected` pass and the key repair on a seat re-take.
+An older GFS ignores the label and keeps re-notifying; an older follower
+sends no label and keeps getting 5b-d. No household↔household shape
+changes, so there is no `OURS` bump.
+
+Cost: a quiet reconnect costs nothing. A real miss (a rotation the follower
+was offline for, a handoff lost while its socket was down) costs one signed
+request plus one ~1–2 KB handoff, the first time a frame needs the key.
+
 WebRTC is **not** used for the SH↔GFS leg — the GFS is publicly
 reachable, so NAT traversal buys nothing while DTLS plus per-connection
 PeerConnection state would be much more resource-hungry than a plain

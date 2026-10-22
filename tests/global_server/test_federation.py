@@ -3422,6 +3422,75 @@ async def test_a_resubscribe_the_hello_missed_gets_a_key_repair_only(gfs_db):
     assert "accepts" not in frame["subscriber"]
 
 
+async def test_a_key_pulling_followers_retake_notifies_nobody(gfs_db):
+    """#5b: a follower that asks for a key when it misses one
+    (``space_key_pull`` in its accepts) needs no key repair on every seat
+    re-take — that was one sealed handoff per held seat per reconnect."""
+    ws = _RecordingWsRegistry()
+    repo = SqliteGfsFederationRepo(gfs_db)
+    svc = GfsFederationService(repo, ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-kp1")
+    await _signed_subscribe(svc, sub_seed, "sp-kp1")
+    restarted = GfsFederationService(repo, ws_registry=ws)
+    ws.sent.clear()
+    await _signed_subscribe(restarted, sub_seed, "sp-kp1", accepts=("space_key_pull",))
+    assert _notifies(ws) == []
+
+
+async def _signed_key_request(svc, seed: bytes, space_id: str, *, who="sub-r"):
+    ts = _now_iso()
+    sig = _sign(
+        seed,
+        {
+            "action": "space_key_request",
+            "instance_id": who,
+            "space_id": space_id,
+            "ts": ts,
+        },
+    )
+    await svc.request_space_key(who, space_id, ts, sig)
+
+
+async def test_a_key_request_asks_the_owner_to_reseal_once(gfs_db):
+    """#5b: the follower missed the key for a frame it got. The owner is
+    asked for a key repair (``reason: reconnect`` — key only, never a
+    bundle), at most once per seat per dedupe window."""
+    ws = _RecordingWsRegistry()
+    repo = SqliteGfsFederationRepo(gfs_db)
+    svc = GfsFederationService(repo, ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-kp2")
+    await _signed_subscribe(svc, sub_seed, "sp-kp2")
+    restarted = GfsFederationService(repo, ws_registry=ws)
+    ws.sent.clear()
+    await _signed_key_request(restarted, sub_seed, "sp-kp2")
+    [frame] = _notifies(ws)
+    assert frame["reason"] == "reconnect"
+    assert frame["space_id"] == "sp-kp2"
+    assert frame["subscriber"]["instance_id"] == "sub-r"
+    assert "accepts" not in frame["subscriber"]
+    await _signed_key_request(restarted, sub_seed, "sp-kp2")
+    assert len(_notifies(ws)) == 1
+
+
+async def test_a_key_request_for_a_seat_not_held_asks_nobody(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-kp3")
+    await _signed_key_request(svc, sub_seed, "sp-kp3")  # not subscribed
+    await _signed_key_request(svc, sub_seed, "sp-unknown")
+    assert _notifies(ws) == []
+
+
+async def test_a_key_request_must_be_signed_by_the_follower(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-kp4")
+    await _signed_subscribe(svc, sub_seed, "sp-kp4")
+    other_seed, _pk = _make_keypair()
+    with pytest.raises(PermissionError):
+        await _signed_key_request(svc, other_seed, "sp-kp4")
+
+
 async def test_the_reconnect_cap_no_longer_strands_later_seats(gfs_db, monkeypatch):
     """REGRESSION (review I2a): the hello notifies at most
     MAX_RECONNECT_NOTIFIES seats; the follower's re-subscribe of the rest

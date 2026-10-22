@@ -307,6 +307,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "sealed_highlight_stream": True,
         "encrypted_moments": True,
         "encrypted_moment_media": True,
+        # #5b — a follower that missed a space key asks for it.
+        "space_key_pull": True,
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
         # address), so the GFS honestly does not offer it.

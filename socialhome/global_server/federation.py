@@ -57,6 +57,7 @@ from ..domain.space import (
     normalize_join_mode,
 )
 from ..domain.space_place import parse_place_pin_wire
+from ..domain.subscriber_accepts import ACCEPTS_SPACE_KEY_PULL
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from .domain import (
     MIN_EPOCH_STEP_INTERVAL_S,
@@ -1047,9 +1048,12 @@ class GfsFederationService:
             # reconnect). Usually the hello's ``reason: "reconnect"`` notify
             # just covered it; but the hello notifies at most
             # MAX_RECONNECT_NOTIFIES seats, so a seat it did not reach gets
-            # its key repair here — once, never a bundle.
-            if existing.owning_instance == instance_id or self._notified_seats.seen(
-                seat
+            # its key repair here — once, never a bundle. A follower that
+            # asks for a key when it misses one (#5b) gets none: it pulls.
+            if (
+                existing.owning_instance == instance_id
+                or ACCEPTS_SPACE_KEY_PULL in accepts
+                or self._notified_seats.seen(seat)
             ):
                 return
             await self._notify_owner_new_subscriber(
@@ -1079,6 +1083,55 @@ class GfsFederationService:
             inst,
             reason=NEW_SUBSCRIBER_REASON_SUBSCRIBE,
             accepts=accepts,
+        )
+
+    async def request_space_key(
+        self,
+        instance_id: str,
+        space_id: str,
+        ts: str,
+        signature: str,
+    ) -> None:
+        """A follower missed the content key of *space_id* (#5b): ask the
+        space's owner to seal it again (``new_subscriber`` with ``reason:
+        "reconnect"`` — the key repair, never a bundle).
+
+        Signed by the follower over ``{action: "space_key_request",
+        instance_id, space_id, ts}`` (:meth:`_verify_signed_request`, which
+        raises :class:`PermissionError`). Only for a seat it holds, never
+        for the owner itself, and at most once per seat per
+        :data:`RECONNECT_NOTIFY_DEDUPE_S` (shared with every other key
+        repair of that seat). Silent otherwise: an unknown space, a seat not
+        held and a throttled request all return the same."""
+        inst = await self._verify_signed_request(
+            instance_id,
+            {
+                "action": "space_key_request",
+                "instance_id": instance_id,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            signature=signature,
+        )
+        space = await self._repo.get_space(space_id)
+        if (
+            space is None
+            or not space.allow_subscribers
+            or space.owning_instance == instance_id
+        ):
+            return
+        held = {
+            s.space_id for s in await self._repo.list_subscribed_spaces(instance_id)
+        }
+        if space_id not in held:
+            return
+        if self._notified_seats.seen(_seat_key(instance_id, space_id)):
+            return
+        await self._notify_owner_new_subscriber(
+            space.owning_instance,
+            space_id,
+            inst,
+            reason=NEW_SUBSCRIBER_REASON_RECONNECT,
         )
 
     async def _notify_owner_new_subscriber(

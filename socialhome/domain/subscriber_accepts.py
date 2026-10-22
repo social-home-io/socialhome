@@ -22,9 +22,18 @@ import re
 #: The follower opens the sealed ``space_author_profiles_bundle`` (v_61).
 ACCEPTS_AUTHOR_PROFILES_BUNDLE: str = "author_profiles_bundle"
 
+#: The follower asks for a space's content key when it misses one
+#: (``POST /gfs/spaces/{id}/key_request``, #5b) — so the GFS need not have
+#: the host re-seal it on every reconnect of the follower's socket (the
+#: hello and each seat re-take). Also sent in the WS hello.
+ACCEPTS_SPACE_KEY_PULL: str = "space_key_pull"
+
 #: What this household lists on every subscribe — follower and member seats
 #: alike, so the label never tells the GFS which seats are writers'.
-OUR_ACCEPTS: tuple[str, ...] = (ACCEPTS_AUTHOR_PROFILES_BUNDLE,)
+OUR_ACCEPTS: tuple[str, ...] = (
+    ACCEPTS_AUTHOR_PROFILES_BUNDLE,
+    ACCEPTS_SPACE_KEY_PULL,
+)
 
 #: The most labels one subscribe may carry.
 MAX_ACCEPTS_LABELS: int = 16

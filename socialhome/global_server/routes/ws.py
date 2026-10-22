@@ -16,7 +16,12 @@ bookkeeping for no gain.
 
 Hello frame (must arrive within 5 s of upgrade)::
 
-    {"type": "hello", "instance_id": "<id>", "ts": <unix>, "sig": "<b64url>"}
+    {"type": "hello", "instance_id": "<id>", "ts": <unix>, "sig": "<b64url>",
+     "accepts": ["space_key_pull"]}
+
+``accepts`` (optional, #5b) is an unsigned hint like the subscribe's: a
+household listing ``space_key_pull`` asks for a space key when it misses
+one, so its hello triggers no key-repair notifies (Phase 5b-d).
 
 ``sig`` is ``Ed25519(public_key, f"{instance_id}|{ts}")`` and ``ts`` must
 be within ±300 s of the GFS clock — same convention as §24.11. On
@@ -59,6 +64,7 @@ import orjson
 from aiohttp import WSMsgType, web
 
 from ... import crypto
+from ...domain.subscriber_accepts import ACCEPTS_SPACE_KEY_PULL, parse_accepts
 from .. import app_keys as K
 from ..envelope_relay import RELAY_SEEN_MIN_SESSION_S, RELAY_SEEN_REFRESH_S
 from ..federation import TIMING_UNIFORM_DUMMY_KEY_HEX
@@ -114,9 +120,10 @@ class GfsWebSocketView(web.View):
         ws = web.WebSocketResponse(heartbeat=30.0)
         await ws.prepare(self.request)
 
-        instance_id = await self._authenticate(ws)
-        if instance_id is None:
+        hello = await self._authenticate(ws)
+        if hello is None:
             return ws
+        instance_id, accepts = hello
 
         registry = self.request.app[K.gfs_ws_registry_key]
         fed_repo = self.request.app[K.gfs_fed_repo_key]
@@ -130,9 +137,12 @@ class GfsWebSocketView(web.View):
         # hello verified and the socket registered — an unauthenticated caller
         # must never be able to trigger a fan-out. Dispatched as a background
         # task so the handshake never waits on it, and fail-soft throughout.
-        self.request.app[K.gfs_federation_key].schedule_subscriber_connected(
-            instance_id
-        )
+        # #5b — a household that asks for a key when it misses one
+        # (``space_key_pull`` in its hello) needs no repair pass.
+        if ACCEPTS_SPACE_KEY_PULL not in accepts:
+            self.request.app[K.gfs_federation_key].schedule_subscriber_connected(
+                instance_id
+            )
         # v_62 — sealed moment keys that went out while this household was
         # offline (the latest per followed author, only the undelivered).
         self.request.app[K.gfs_moment_public_registry_key].schedule_follower_connected(
@@ -192,10 +202,14 @@ class GfsWebSocketView(web.View):
 
     # ─── Hello-frame authentication ──────────────────────────────────────
 
-    async def _authenticate(self, ws: web.WebSocketResponse) -> str | None:
+    async def _authenticate(
+        self, ws: web.WebSocketResponse
+    ) -> tuple[str, tuple[str, ...]] | None:
         """Receive + verify the hello frame; close with ``4401``/``4408`` on failure.
 
-        Returns the verified ``instance_id`` on success, ``None`` after closing.
+        Returns the verified ``instance_id`` and the hello's ``accepts``
+        labels (#5b — an unsigned hint, :func:`parse_accepts`) on success,
+        ``None`` after closing.
         """
         try:
             msg = await ws.receive(timeout=HELLO_TIMEOUT_SECONDS)
@@ -271,4 +285,4 @@ class GfsWebSocketView(web.View):
             return None
 
         log.info("gfs.ws.hello accepted: instance=%s", instance_id)
-        return instance_id
+        return instance_id, parse_accepts(payload.get("accepts"))

@@ -410,7 +410,10 @@ from .services.space_moderation_service import SpaceModerationService
 from .services.space_page_service import PageModerationHandler, SpacePageService
 from .services.space_post_moderation import PostModerationHandler, SpacePostAttachments
 from .services.space_post_outbound import SpacePostOutbound
-from .services.space_public_inbound import SpacePublicInbound
+from .services.space_public_inbound import (
+    RELAY_KEY_WAIT_MAX_FRAMES,
+    SpacePublicInbound,
+)
 from .services.space_public_outbound import SpacePublicOutbound
 from .services.space_rsvp_mirror_bridge import SpaceRsvpMirrorBridge
 from .services.space_service import own_inviter_proof
@@ -4030,6 +4033,15 @@ def create_app(config: Config | None = None) -> web.Application:
         # subscriber's pin from the GFS listing's owner cert, then retries.
         gfs_space_mirror.attach_identity(own_instance_id=real_instance_id)
         space_public_inbound.attach_pin_refresher(gfs_space_mirror)
+        # #5b — a frame under an epoch we hold no key for is held and the
+        # key asked for (only where we hold a seat), instead of every owner
+        # re-sealing on each of our reconnects.
+        space_public_inbound.attach_key_pull(
+            gfs_space_mirror.request_space_key,
+            # Its own small hold: relayed frames can never evict the §25.6
+            # sync chunks parked in the shared cache.
+            PendingDecryptsCache(bus=bus, max_entries=RELAY_KEY_WAIT_MAX_FRAMES),
+        )
         # Phase 5b-b — subscriber content-key delivery. Outbound: a seed-holder
         # seals + relays the content key on a GFS ``new_subscriber`` notify.
         # Inbound: the subscriber unseals + imports the relayed handoff.

@@ -33,6 +33,7 @@ import aiohttp
 import orjson
 
 from ..crypto import b64url_encode, sign_ed25519
+from ..domain.subscriber_accepts import OUR_ACCEPTS
 
 log = logging.getLogger(__name__)
 
@@ -520,6 +521,11 @@ class GfsWebSocketClient:
             "instance_id": self._instance_id,
             "ts": ts,
             "sig": b64url_encode(sig),
+            # #5b — an unsigned hint, like the subscribe's: we ask for a
+            # space key when we miss one (``space_key_pull``), so the server
+            # need not have every owner re-seal on each reconnect. An older
+            # server ignores it.
+            "accepts": list(OUR_ACCEPTS),
         }
 
 
