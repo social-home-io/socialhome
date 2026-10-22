@@ -74,7 +74,9 @@ FULL_RESYNC_INTERVAL_S: float = 24 * 3600.0
 #:   the old shape left wrong heal on one full stream, not on the next row
 #:   change.
 #: * 4 — migration 0096: a ``space_zones`` record carries ``icon``.
-SYNC_SHAPE_VERSION: int = 4
+#: * 5 — migration 0122: ``member_pictures`` streams incrementally. A
+#:   picture changed before the upgrade carries no stamp.
+SYNC_SHAPE_VERSION: int = 5
 
 
 def session_shape(

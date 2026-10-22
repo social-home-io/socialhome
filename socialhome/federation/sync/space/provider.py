@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from ....domain.federation import (
@@ -32,6 +32,8 @@ from .exporter import (
     RESOURCE_ORDER,
     ChunkBuilder,
     ConditionalExporter,
+    IncrementalExporter,
+    ResourceExporter,
     serialise_chunk,
 )
 from .exporters.calendar import CalendarExporter
@@ -145,6 +147,19 @@ class _OwnPeopleOnly:
             for r in await self._inner.list_records(space_id)
             if str(r.get("user_id") or "") in own
         ]
+
+    async def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """The inner exporter's changed pictures (migration 0122), narrowed
+        the same way."""
+        own = await self._own(space_id)
+        inner = self._inner
+        if not isinstance(inner, IncrementalExporter):
+            yield await self.list_records(space_id)
+            return
+        async for batch in inner.iter_changed(space_id, since):
+            yield [r for r in batch if str(r.get("user_id") or "") in own]
 
 
 class SpaceSyncService:

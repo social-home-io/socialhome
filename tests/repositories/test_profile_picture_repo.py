@@ -58,3 +58,21 @@ async def test_list_member_picture_user_ids_is_per_space(repo):
     assert await repo.list_member_picture_user_ids("sp-a") == {"u1", "u2"}
     await repo.clear_member_picture("sp-a", "u1")
     assert await repo.list_member_picture_user_ids("sp-a") == {"u2"}
+
+
+async def test_changed_member_pictures_are_those_stamped_after_since(repo, db):
+    """§25.6 incremental (migration 0122): the pictures changed after a
+    watermark — re-applying one held unchanged does not count."""
+    await _put(repo, "sp-a", "u1")
+    since = await db.fetchval("SELECT seq FROM sync_seq_counter WHERE id=1")
+    await _put(repo, "sp-a", "u1")  # same picture again: not a change
+    await repo.set_member_picture(
+        "sp-a", "u2", bytes_webp=b"new", hash="fedcba9876543210", width=1, height=1
+    )
+    await repo.set_member_picture(
+        "sp-b", "u3", bytes_webp=b"new", hash="fedcba9876543210", width=1, height=1
+    )
+    changed = await repo.list_member_pictures_changed("sp-a", int(since))
+    assert changed == [("u2", b"new", "fedcba9876543210")]
+    everything = await repo.list_member_pictures_changed("sp-a", 0)
+    assert {u for u, _b, _h in everything} == {"u1", "u2"}

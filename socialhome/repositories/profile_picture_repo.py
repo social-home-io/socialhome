@@ -67,6 +67,9 @@ class AbstractProfilePictureRepo(Protocol):
         user_id: str,
     ) -> None: ...
     async def list_member_picture_user_ids(self, space_id: str) -> set[str]: ...
+    async def list_member_pictures_changed(
+        self, space_id: str, since: int
+    ) -> list[tuple[str, bytes, str]]: ...
 
 
 class SqliteProfilePictureRepo:
@@ -169,6 +172,20 @@ class SqliteProfilePictureRepo:
             "DELETE FROM space_member_profile_pictures WHERE space_id=? AND user_id=?",
             (space_id, user_id),
         )
+
+    async def list_member_pictures_changed(
+        self, space_id: str, since: int
+    ) -> list[tuple[str, bytes, str]]:
+        """``(user_id, bytes, hash)`` of the per-space pictures stamped after
+        ``since`` (§25.6 incremental, migration 0122), oldest change first."""
+        rows = await self._db.fetchall(
+            "SELECT user_id, bytes_webp, hash FROM space_member_profile_pictures"
+            " WHERE space_id=? AND sync_seq > ? ORDER BY sync_seq",
+            (space_id, int(since)),
+        )
+        return [
+            (str(r["user_id"]), bytes(r["bytes_webp"]), str(r["hash"])) for r in rows
+        ]
 
     async def list_member_picture_user_ids(self, space_id: str) -> set[str]:
         """The members of ``space_id`` this household holds a per-space
