@@ -11,7 +11,8 @@ session whenever the watermark cannot be trusted:
 * none recorded (first sync, a dropped seat, an older requester that never
   confirms, a failed stream);
 * recorded under another **shape** (:func:`session_shape`) — a record-shape
-  change, the household's protocol version, the space's retention, the set
+  change, the household's protocol version (only the versions that change
+  a stream, :func:`sync_version_bucket`), the space's retention, the set
   of resources this household gets;
 * the last full stream is older than :data:`FULL_RESYNC_INTERVAL_S` — the
   daily anti-entropy pass that converges whatever a stamp cannot express (a
@@ -45,10 +46,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "FULL_RESYNC_INTERVAL_S",
+    "SYNC_RECORD_LINES",
     "SYNC_SHAPE_VERSION",
+    "SYNC_VERSION_HISTORY_THROUGH",
     "SyncWatermarks",
     "parse_have_seq",
     "session_shape",
+    "sync_version_bucket",
 ]
 
 log = logging.getLogger(__name__)
@@ -79,13 +83,39 @@ FULL_RESYNC_INTERVAL_S: float = 24 * 3600.0
 SYNC_SHAPE_VERSION: int = 5
 
 
+#: The requester's protocol version counts in the shape only where a
+#: version changes what a sync stream carries or what its receiver takes
+#: (#2(e)). Every version up to this one stays its own shape — that history
+#: was never sorted into sync and non-sync bumps — so no watermark changes
+#: when this rule ships.
+SYNC_VERSION_HISTORY_THROUGH: int = 64
+
+#: Later versions that change a sync stream: a new resource, a record field
+#: a receiver now stores, a version gate in ``provider._exporter_for`` (a
+#: tripwire test checks the gates). A bump not listed here keeps every
+#: watermark, so it costs no household a full stream.
+SYNC_RECORD_LINES: tuple[int, ...] = ()
+
+
+def sync_version_bucket(peer_version: int) -> int:
+    """The part of ``peer_version`` a session shape depends on."""
+    if peer_version <= SYNC_VERSION_HISTORY_THROUGH:
+        return peer_version
+    return max(
+        (line for line in SYNC_RECORD_LINES if line <= peer_version),
+        default=SYNC_VERSION_HISTORY_THROUGH,
+    )
+
+
 def session_shape(
     *, peer_version: int, retention: str, resources: Iterable[str]
 ) -> str:
     """The shape a watermark is valid for: the provider's record shape, the
-    requester's protocol version, the space's retention and the resources
+    requester's protocol version (as far as it changes a stream,
+    :func:`sync_version_bucket`), the space's retention and the resources
     this requester is streamed."""
-    return f"v{SYNC_SHAPE_VERSION}|p{peer_version}|r{retention}|" + ",".join(resources)
+    version = sync_version_bucket(peer_version)
+    return f"v{SYNC_SHAPE_VERSION}|p{version}|r{retention}|" + ",".join(resources)
 
 
 def _parse_utc(value: str) -> datetime | None:

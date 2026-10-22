@@ -107,6 +107,12 @@ would be wrong (or a brand-new event type old peers can't dispatch):
 6. **Add a test** that asserts `peer_supports` returns `False` for the
    old shape and `True` for the new one (and that the compat shim
    produces the documented fallback for a sub-v_N peer).
+7. **Space sync:** if v_N changes what a §25.6 sync stream carries or
+   what its receiver takes (a new resource, a record field a receiver now
+   stores, a gate in `sync/space/provider.py`), add N to
+   `SYNC_RECORD_LINES` in `sync/space/watermark.py`, so a household
+   crossing it gets one full stream. Any other bump keeps every sync
+   watermark ([sync.md](sync.md), #2(e)).
 
 ## Version history
 
