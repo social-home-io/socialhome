@@ -264,6 +264,8 @@ async def test_enqueue_sync_for_space_sends_begin(bus, queue, sync_manager):
     assert fed.sent[0]["payload"]["space_id"] == "sp-1"
     assert fed.sent[0]["payload"]["sync_mode"] == "initial"
     assert fed.sent[0]["payload"]["prefer_direct"] is True
+    # #2(d): we take a quiet stream over the relay, without WebRTC.
+    assert fed.sent[0]["payload"]["quiet_relay"] is True
 
 
 async def test_queued_begin_for_a_peer_unpaired_meanwhile_is_skipped(

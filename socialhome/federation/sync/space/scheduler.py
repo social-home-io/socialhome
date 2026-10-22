@@ -604,6 +604,11 @@ class SpaceSyncScheduler:
                 "space_id": space_id,
                 "sync_mode": sync_mode,
                 "prefer_direct": prefer_direct,
+                # #2(d): a provider with nothing to stream may answer over
+                # the relay (just the sentinel) instead of negotiating
+                # WebRTC — our chunk handler opens the session for it. An
+                # older provider ignores the flag.
+                "quiet_relay": True,
                 **fields,
             }
             roster_echo = await self._roster_echo_for(space_id, peer_instance_id)

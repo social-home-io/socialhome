@@ -37,6 +37,7 @@ from .exporter import (
     ConditionalExporter,
     IncrementalExporter,
     ResourceExporter,
+    record_batches,
     serialise_chunk,
 )
 from .exporters.calendar import CalendarExporter
@@ -631,6 +632,33 @@ class SpaceSyncService:
             "" if session.since_seq is None else f", since {session.since_seq}",
         )
         return exporters
+
+    async def is_quiet(self, session: SyncSessionRecord) -> bool:
+        """Whether ``session`` has nothing to stream but its sentinel (#2(d)):
+        an incremental session in which no resource yields a record — the
+        covered ones changed nothing and the kept-full ones are unchanged
+        since the stream the requester confirmed (#2(c)). Reads only up to
+        the first record. Never for a full session, nor without
+        watermarks. Fail-soft: an error means "not quiet" (the session
+        streams as before)."""
+        if self._watermarks is None:
+            return False
+        try:
+            plan = await self._plan(session)
+            since = session.since_seq
+            if since is None:
+                return False
+            for exporter in plan:
+                batches = record_batches(exporter, session.space_id, since=since)
+                try:
+                    async for _batch in batches:
+                        return False
+                finally:
+                    await batches.aclose()
+        except Exception:
+            log.exception("sync %s: quiet check failed", session.sync_id)
+            return False
+        return True
 
     async def _peer_version(self, instance_id: str) -> int:
         """The requester's protocol version, part of the session shape — a
