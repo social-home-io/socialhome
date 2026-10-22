@@ -16,10 +16,13 @@ can cancel mid-stream if the peer gives up.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
+
+import orjson
 
 from ....domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
@@ -167,6 +170,74 @@ class _OwnPeopleOnly:
             yield [r for r in batch if str(r.get("user_id") or "") in own]
 
 
+#: The resources with no change stamp, which a session used to stream
+#: whole every time: the roster and the moderation list. An incremental
+#: session sends them only when they differ from what this household last
+#: streamed to the requester (:class:`_UnlessUnchanged`, #2(c)).
+_KEPT_FULL_RESOURCES: frozenset[str] = frozenset({"bans", "members"})
+
+#: ``(space_id, requester, resource) -> (records digest, snapshot)`` of the
+#: last clean, confirmed stream — in memory only: a restarted household
+#: streams each roster once more.
+_SentMap = dict[tuple[str, str, str], tuple[str, int]]
+
+
+def _records_digest(records: list[dict[str, Any]]) -> str:
+    """Order-free: rows tied on the listing's sort key (``joined_at``) may
+    come back in any order, which is no change."""
+    digest = hashlib.sha256()
+    for row in sorted(orjson.dumps(r, option=orjson.OPT_SORT_KEYS) for r in records):
+        digest.update(row)
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+class _UnlessUnchanged:
+    """A kept-full resource that an incremental session sends only when it
+    changed since the stream the requester confirmed (#2(c)).
+
+    The records are read and digested every session; they are skipped when
+    the digest equals the one of the last clean, confirmed stream to this
+    requester AND the session's watermark still covers that stream (a
+    household restored from a backup echoes an older ``have_seq``, so its
+    ``since`` falls below it and the records go again). The digest of what
+    this session holds is noted on the session; :meth:`SpaceSyncService.
+    confirm_complete` keeps it once the requester confirms. A full session
+    (``since`` ``None``) streams through :meth:`list_records`, as always."""
+
+    __slots__ = ("_inner", "_prior", "_session", "resource")
+
+    def __init__(
+        self,
+        inner: ResourceExporter,
+        session: SyncSessionRecord,
+        prior: tuple[str, int] | None,
+    ) -> None:
+        self._inner = inner
+        self._session = session
+        self._prior = prior
+        self.resource = inner.resource
+
+    async def _read(self, space_id: str) -> tuple[list[dict[str, Any]], str]:
+        records = await self._inner.list_records(space_id)
+        digest = _records_digest(records)
+        self._session.kept_full_digests[self.resource] = digest
+        return records, digest
+
+    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        records, _digest = await self._read(space_id)
+        return records
+
+    async def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        records, digest = await self._read(space_id)
+        prior = self._prior
+        if prior is not None and prior[0] == digest and since >= prior[1]:
+            return
+        yield records
+
+
 class SpaceSyncService:
     """Streams encrypted space content over a negotiated DataChannel."""
 
@@ -182,6 +253,7 @@ class SpaceSyncService:
         "_own_members",
         "_owner_statement_for",
         "_roster_authority",
+        "_roster_sent",
         "_sig_suite",
         "_space_post_repo",
         "_watermarks",
@@ -232,6 +304,7 @@ class SpaceSyncService:
         #: watermark a periodic session streams covered rows above. ``None``
         #: (not wired): every session streams in full, as before.
         self._watermarks = watermarks
+        self._roster_sent: _SentMap = {}
         #: The space's retention window bounds the catch-up media as it
         #: bounds the metadata chunks (the exporters hold their own).
         #: ``None``: no window known — everything (keep forever).
@@ -535,6 +608,19 @@ class SpaceSyncService:
             # full, a lower one re-streams what a rolled-back requester lost.
             have_seq=getattr(session, "have_seq", None),
         )
+        session.kept_full_digests = {}
+        exporters = [
+            _UnlessUnchanged(
+                e,
+                session,
+                self._roster_sent.get(
+                    (session.space_id, session.requester_instance_id, e.resource)
+                ),
+            )
+            if e.resource in _KEPT_FULL_RESOURCES
+            else e
+            for e in exporters
+        ]
         log.info(
             "sync %s: %s stream of space %s to %s (snapshot %d%s)",
             session.sync_id,
@@ -566,6 +652,13 @@ class SpaceSyncService:
             or snapshot is None
         ):
             return
+        # What the requester now holds of the kept-full resources (#2(c)).
+        for resource, digest in (
+            getattr(session, "kept_full_digests", None) or {}
+        ).items():
+            self._roster_sent[
+                (session.space_id, session.requester_instance_id, resource)
+            ] = (digest, int(snapshot))
         try:
             await self._watermarks.confirm(
                 space_id=session.space_id,

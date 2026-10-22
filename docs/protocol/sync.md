@@ -286,11 +286,22 @@ these by id and never reads "absent from the stream" as a delete, so a
 stream of only the changed rows is safe — a delete always arrives as its
 tombstone.
 
-Kept **full on every session** (streamed whole, as before): the
-**roster** — `bans` and `members`. One row per seat, and what every other
-resource is admitted against: a receiver checks each content record's
-author against the roster it holds, so the roster must be complete on every
-stream, not just its changes. `member_pictures` is **incremental**
+Kept **full** (streamed whole, never as a delta): the **roster** — `bans`
+and `members`. One row per seat, and what every other resource is admitted
+against: a receiver checks each content record's author against the roster
+it holds, so a roster stream is always the complete roster, not just its
+changes. They carry no change stamp, so an **incremental** session sends
+them **only when they changed** (#2(c), `provider.py` `_UnlessUnchanged`):
+the provider keeps, in memory, a digest of the records it last streamed to
+each household, noted once that household confirmed the stream clean
+(`SPACE_SYNC_COMPLETE`, the same rule that advances its watermark). A
+session skips the resource when the records digest the same (row order
+does not count) and the session's `since` still covers that stream. A
+household restored from a backup echoes an older `have_seq`, so its `since`
+falls below it and it gets the roster again; a provider that restarted
+holds no digests and streams each roster once; a full session always
+streams it. The session shape keeps both resources, so a skip changes no
+watermark, and no wire field is added. `member_pictures` is **incremental**
 (migration 0122, `SYNC_SHAPE_VERSION` 5): a picture is stamped when it is
 set or replaced — never when a receiver re-applies one it holds — and a
 periodic session streams only the pictures stamped after the watermark,

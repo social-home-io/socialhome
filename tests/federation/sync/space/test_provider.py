@@ -1707,3 +1707,96 @@ async def test_a_request_more_slice_mid_stream_takes_fresh_indices(encoder):
     assert sorted(indices) == list(range(len(content))) and len(content) == 2
     (sentinel,) = [f for f in frames if f["resource"] == SENTINEL_RESOURCE]
     assert sentinel["chunk_count"] == len(content)
+
+
+# ─── #2(c): the roster resources stream only when they changed ────────────
+
+
+def _roster_inc_provider(encoder, marks):
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    members = _FakeExporter("members", [{"user_id": "u-1", "role": "member"}])
+    bans = _FakeExporter("bans", [{"user_id": "u-x"}])
+    posts = _IncExporter("posts", [{"id": "p-1"}], [{"id": "p-1"}])
+    svc = SpaceSyncService(
+        builder=builder,
+        exporters={"bans": bans, "members": members, "posts": posts},
+        sig_suite="ed25519",
+        watermarks=marks,
+    )
+    return svc, members
+
+
+async def _session(svc, marks, *, since, snapshot, confirm=True, requester="peer-r"):
+    marks._since = since
+    marks._snapshot = snapshot
+    session = _FakeSession(
+        sync_mode="incremental" if since is not None else "initial",
+        requester=requester,
+    )
+    await svc.stream_initial(session)
+    if confirm:
+        await svc.confirm_complete(session)
+    return session
+
+
+async def test_the_roster_streams_once_then_only_when_it_changes(encoder):
+    """A periodic session re-streamed every ``members`` / ``bans`` row each
+    time (~50 rows to each of 14 households, 48 times a day). Now the
+    provider remembers what it last streamed to each household, and an
+    incremental session whose watermark still covers that stream sends
+    them only when they changed. The session shape keeps both resources,
+    so the watermark holds."""
+    marks = _Marks()
+    svc, members = _roster_inc_provider(encoder, marks)
+    first = await _session(svc, marks, since=None, snapshot=40)
+    assert set(_records(first)) == {"bans", "members", "posts"}
+    quiet = await _session(svc, marks, since=40, snapshot=50)
+    assert set(_records(quiet)) == {"posts"}
+    assert marks.planned[1]["shape"] == marks.planned[0]["shape"]
+    # Still quiet on the next one (the skip confirmed the same records).
+    again = await _session(svc, marks, since=50, snapshot=60)
+    assert set(_records(again)) == {"posts"}
+    members._records = [{"user_id": "u-1", "role": "admin"}]
+    moved = await _session(svc, marks, since=60, snapshot=70)
+    assert _records(moved)["members"] == [{"user_id": "u-1", "role": "admin"}]
+    assert "bans" not in _records(moved)
+
+
+async def test_the_same_roster_in_another_order_is_no_change(encoder):
+    """Rows tied on ``joined_at`` may list in any order — no re-stream."""
+    marks = _Marks()
+    svc, members = _roster_inc_provider(encoder, marks)
+    members._records = [{"user_id": "u-1"}, {"user_id": "u-2"}]
+    await _session(svc, marks, since=None, snapshot=40)
+    members._records = [{"user_id": "u-2"}, {"user_id": "u-1"}]
+    quiet = await _session(svc, marks, since=40, snapshot=50)
+    assert "members" not in _records(quiet)
+
+
+async def test_a_rolled_back_household_gets_the_roster_again(encoder):
+    """A household restored from a backup echoes an older ``have_seq``, so
+    its session streams from before the stream it confirmed: the roster
+    goes again even though it did not change here."""
+    marks = _Marks()
+    svc, _members = _roster_inc_provider(encoder, marks)
+    await _session(svc, marks, since=None, snapshot=40)
+    rolled = await _session(svc, marks, since=30, snapshot=50)
+    assert {"bans", "members"} <= set(_records(rolled))
+
+
+async def test_an_unconfirmed_stream_does_not_spare_the_next_one(encoder):
+    """Only a stream the household confirmed clean counts as held — and a
+    restarted provider (nothing remembered) streams the roster once."""
+    marks = _Marks()
+    svc, _members = _roster_inc_provider(encoder, marks)
+    await _session(svc, marks, since=None, snapshot=40, confirm=False)
+    nxt = await _session(svc, marks, since=40, snapshot=50)
+    assert {"bans", "members"} <= set(_records(nxt))
+
+
+async def test_the_roster_memory_is_per_household(encoder):
+    marks = _Marks()
+    svc, _members = _roster_inc_provider(encoder, marks)
+    await _session(svc, marks, since=None, snapshot=40)
+    other = await _session(svc, marks, since=40, snapshot=50, requester="peer-o")
+    assert {"bans", "members"} <= set(_records(other))

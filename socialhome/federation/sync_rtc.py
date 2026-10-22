@@ -468,6 +468,11 @@ class SyncSessionRecord:
     #: stream the requester confirms (``SPACE_SYNC_COMPLETE``) advances the
     #: requester's watermark — to ``snapshot_seq``, never further.
     stream_clean: bool = False
+    #: §25.6 #2(c): the digest of each kept-full resource (``members``,
+    #: ``bans``) as this session read it — kept by the provider once the
+    #: requester confirms, so the next incremental session skips it unless
+    #: it changed.
+    kept_full_digests: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.last_activity:
