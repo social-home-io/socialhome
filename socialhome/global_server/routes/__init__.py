@@ -8,8 +8,7 @@ Each module groups views by URL concern:
 * :mod:`.ws`      — ``/gfs/ws`` SH↔GFS WebSocket transport (spec §24.12,
   primary path).
 * :mod:`.cluster` — ``/cluster/*`` + admin cluster tab.
-* :mod:`.rtc`     — ``/gfs/rtc/*`` SH↔SH WebRTC signalling rendezvous
-  for §4.2.3 direct sync (the GFS holds no PeerConnection here).
+* :mod:`.rtc`     — the Ed25519 check of signed household → GFS requests.
 * :mod:`.admin`   — ``/admin/api/*`` admin portal JSON routes + static
   index + ``/admin/login`` / ``/admin/logout``.
 
@@ -131,13 +130,6 @@ from .relay import (
     SpaceUnpublishView,
     SubscribeView,
 )
-from .rtc import (
-    RtcAnswerView,
-    RtcIceView,
-    RtcOfferView,
-    RtcPingView,
-    RtcSessionView,
-)
 from .viewer_pages import (
     InvitePageDataView,
     PersonPageDataView,
@@ -250,16 +242,6 @@ def register_routes(
         ClusterSignalingEndView,
     )
 
-    # SH↔SH WebRTC signalling rendezvous for §4.2.3 direct DataChannel
-    # sync. The GFS is a public bulletin board for SDP offers / answers /
-    # ICE candidates so two NATted households can find each other; the
-    # GFS itself holds no PeerConnection.
-    app.router.add_view("/gfs/rtc/offer", RtcOfferView)
-    app.router.add_view("/gfs/rtc/answer", RtcAnswerView)
-    app.router.add_view("/gfs/rtc/ice", RtcIceView)
-    app.router.add_view("/gfs/rtc/ping", RtcPingView)
-    app.router.add_view("/gfs/rtc/session/{session_id}", RtcSessionView)
-
     # Public highlight publications (§highlights_public). Signed wire endpoints
     # for author SH instances; the public landing is anonymous.
     app.router.add_view(
@@ -285,7 +267,7 @@ def register_routes(
 
     # Public-viewer signalling for the public-highlight flow. The offer
     # endpoint is anonymous (token-gated); the answer endpoints are
-    # Ed25519-signed by the author SH like the rest of /gfs/rtc/*.
+    # Ed25519-signed by the author SH (``routes.rtc._rtc_authenticate``).
     app.router.add_view("/gfs/highlights/ice-servers", HighlightIceServersView)
     app.router.add_view("/gfs/highlight_rtc/offer", HighlightRtcOfferView)
     app.router.add_view(

@@ -99,12 +99,12 @@ which triggers an authenticated request to the user's own HFS.
 
 - `socialhome/services/push_service.py` — Web Push + subscription
   CRUD.
-- `socialhome/global_server/rtc_transport.py` — in-memory RTC
-  session store + relay routing.
+- `socialhome/global_server/rtc_transport.py` — in-memory
+  public-highlight signalling sessions.
 - `socialhome/federation/strategies.py` — `TransportStrategy`
   protocol that selects inbox / DataChannel / relay.
-- `socialhome/global_server/routes/rtc.py` — RTC signalling
-  endpoints (`POST /gfs/rtc/offer`, `…/answer`, `…/ice`).
+- `socialhome/global_server/routes/rtc.py` — the Ed25519 check
+  of signed household → GFS requests.
 - `socialhome/global_server/federation.py` — inbound relay
   validation.
 
