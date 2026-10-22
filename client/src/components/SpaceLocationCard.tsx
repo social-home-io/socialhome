@@ -55,9 +55,14 @@ interface SpacePresenceEntry {
   zone_id?: string
   zone_name?: string
   picture_url: string | null
-  /** When the member's location last changed (UTC). Optional on older
-   *  backends. */
+  /** The last write of the member's location (UTC). */
   updated_at?: string | null
+  /** When the member's place last changed (UTC) — "here since …".
+   *  Absent on older backends (then ``updated_at``). */
+  located_since?: string | null
+  /** Another household's member whose household can't be reached: the
+   *  pin is the last place it sent. */
+  stale?: boolean
   /** Set on another household's member. Their ``state`` is a server
    *  placeholder (the pin carries no state), so it is never shown. */
   instance_id?: string | null
@@ -298,6 +303,7 @@ export function SpaceLocationCard({
     sub_label: isZoneOnly ? (p.zone_name ?? null) : (zone?.name ?? _stateLabel(p)),
     avatar_url: p.picture_url,
     state: p.state,
+    stale: p.stale === true,
   }))
 
   const people: OverviewPerson[] = placed.map(({ p, zone }) => ({
@@ -307,7 +313,8 @@ export function SpaceLocationCard({
     avatar_url: p.picture_url,
     status: zone?.name ?? (isZoneOnly ? (p.zone_name ?? null) : _stateLabel(p)),
     zone_id: zone?.id ?? null,
-    updated_at: p.updated_at ?? null,
+    updated_at: p.located_since ?? p.updated_at ?? null,
+    stale: p.stale === true,
   }))
 
   // "X sharing / Y members" — Y is the full space roster (locals +

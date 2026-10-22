@@ -27,7 +27,7 @@ import { personColorToken } from '@/utils/mapMarkers'
 import { colorClass } from '@/utils/tokenColor'
 import { zoneColor } from '@/utils/zoneColor'
 import { formatRadius, sortZones } from '@/utils/zones'
-import { relativeDocsTime } from '@/utils/relativeTime'
+import { localSinceTime, relativeDocsTime } from '@/utils/relativeTime'
 import { isOne, t } from '@/i18n/i18n'
 
 export interface OverviewPerson {
@@ -42,8 +42,13 @@ export interface OverviewPerson {
   status: string | null
   /** The zone they are in now, if any — counts them in that zone. */
   zone_id?: string | null
-  /** When their location last changed (UTC). */
+  /** When their location last changed (UTC) — "here since …". A
+   *  location is shared with other households only when it changes, so
+   *  this is the time they got there, not of the latest fix. */
   updated_at?: string | null
+  /** Their household can't be reached: the pin is the last place it sent,
+   *  not where they are now. */
+  stale?: boolean
   /** App activity, when the surface knows it. */
   online?: 'online' | 'idle' | 'offline' | null
   last_seen_at?: string | null
@@ -126,8 +131,12 @@ function ZoneBadge({ z }: { z: OverviewZone }) {
 }
 
 function _personLine(p: OverviewPerson): string {
-  const ago = p.updated_at ? relativeDocsTime(p.updated_at) : null
-  return [p.status, ago].filter(Boolean).join(' · ')
+  const when = p.stale
+    ? t('location.overview.last_known')
+    : p.updated_at
+      ? t('location.overview.since', { when: localSinceTime(p.updated_at) })
+      : null
+  return [p.status, when].filter(Boolean).join(' · ')
 }
 
 function _activity(p: OverviewPerson): string | null {
@@ -282,10 +291,15 @@ export function MapOverview({ people, zones, selectedId, onSelect, renderMap }: 
           <dt>{t('location.overview.where')}</dt>
           <dd>{p.status ?? t('location.overview.shared_position')}</dd>
         </div>
-        {p.updated_at && (
+        {(p.updated_at || p.stale) && (
           <div>
-            <dt>{t('location.overview.last_update')}</dt>
-            <dd><time dateTime={p.updated_at}>{relativeDocsTime(p.updated_at)}</time></dd>
+            {/* A household that can't be reached: not "here", but the last
+                place it shared — say so, and why. */}
+            <dt>{t(p.stale ? 'location.overview.last_known' : 'location.overview.here_since')}</dt>
+            {p.updated_at && (
+              <dd><time dateTime={p.updated_at}>{localSinceTime(p.updated_at)}</time></dd>
+            )}
+            {p.stale && <dd class="sh-muted">{t('location.overview.stale_note')}</dd>}
           </div>
         )}
         {activity && (

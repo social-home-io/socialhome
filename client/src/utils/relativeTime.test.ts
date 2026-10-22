@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setLocale } from '@/i18n/i18n'
 import {
-  localClockTime, localDayKey,
+  localClockTime, localDayKey, localSinceTime,
   relativeChatTime, relativeDocsTime, relativeFutureTime,
 } from './relativeTime'
 
@@ -216,5 +216,23 @@ describe('localClockTime / localDayKey', () => {
   it('falls back on an unparseable stamp', () => {
     expect(localClockTime('garbage')).toBe('garbage')
     expect(localDayKey('garbage')).toBeNull()
+  })
+})
+
+describe('localSinceTime', () => {
+  // FIXED_NOW is 2026-05-08 13:00 UTC; the suite runs in UTC.
+  it('is the clock today, yesterday + clock, weekday + clock, then the date', () => {
+    expect(localSinceTime('2026-05-08T09:12:00Z')).toBe(localClockTime('2026-05-08T09:12:00Z'))
+    expect(localSinceTime('2026-05-07T18:40:00Z')).toBe(`yesterday ${localClockTime('2026-05-07T18:40:00Z')}`)
+    const mon = localSinceTime('2026-05-04T18:40:00Z')
+    expect(mon.endsWith(localClockTime('2026-05-04T18:40:00Z'))).toBe(true)
+    expect(mon.startsWith('Mon')).toBe(true)
+    expect(localSinceTime('2026-04-12T09:00:00Z')).toBe('Apr 12')
+    expect(localSinceTime('2025-04-12T09:00:00Z')).toBe('Apr 12, 2025')
+  })
+
+  it('reads a naive SQLite stamp as UTC and falls back on garbage', () => {
+    expect(localSinceTime('2026-05-08 09:12:00')).toBe(localClockTime('2026-05-08T09:12:00Z'))
+    expect(localSinceTime('garbage')).toBe('garbage')
   })
 })

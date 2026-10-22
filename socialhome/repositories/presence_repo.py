@@ -66,6 +66,7 @@ def _to_presence(row) -> PersonPresence:
         longitude=row["longitude"],
         gps_accuracy_m=row["gps_accuracy_m"],
         updated_at=row["updated_at"],
+        located_since=row["located_since"],
     )
 
 
@@ -117,9 +118,20 @@ class SqlitePresenceRepo:
             """
             INSERT INTO presence(
                 username, entity_id, state, zone_name,
-                latitude, longitude, gps_accuracy_m, updated_at
-            ) VALUES(?, COALESCE(?, ''), ?, ?, ?, ?, ?, ?)
+                latitude, longitude, gps_accuracy_m, updated_at, located_since
+            ) VALUES(?, COALESCE(?, ''), ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(username) DO UPDATE SET
+                -- The place moved (point, state or zone) → it is here
+                -- since this fix; the same place → it stays as it was.
+                located_since=CASE
+                    WHEN presence.located_since IS NOT NULL
+                     AND presence.state IS excluded.state
+                     AND presence.zone_name IS excluded.zone_name
+                     AND presence.latitude IS excluded.latitude
+                     AND presence.longitude IS excluded.longitude
+                    THEN presence.located_since
+                    ELSE excluded.updated_at
+                END,
                 state=excluded.state,
                 zone_name=excluded.zone_name,
                 latitude=excluded.latitude,
@@ -135,6 +147,7 @@ class SqlitePresenceRepo:
                 latitude,
                 longitude,
                 gps_accuracy_m,
+                updated_at,
                 updated_at,
             ),
         )

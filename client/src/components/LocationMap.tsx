@@ -64,6 +64,8 @@ export interface LocationMarker {
   /** A place pin (a shared location, not a person): draw this glyph
    *  instead of an avatar. */
   glyph?: string
+  /** The last place a household that can't be reached sent: drawn faded. */
+  stale?: boolean
 }
 
 /** Per-space display zone (§23.8.7). Drawn as a coloured radius with a
@@ -156,7 +158,7 @@ function _avatarHtml(m: LocationMarker, selected: boolean): string {
     ? `<img src="${escapeHtml(m.avatar_url)}" alt="" loading="lazy" />`
     : ''
   return (
-    `<span class="sh-map-avatar ${tone}${selected ? ' is-selected' : ''}">`
+    `<span class="sh-map-avatar ${tone}${selected ? ' is-selected' : ''}${m.stale ? ' is-stale' : ''}">`
     + `<span class="sh-map-avatar__initials">${escapeHtml(face)}</span>${img}`
     + `</span>`
   )

@@ -98,6 +98,9 @@
   "location.pick_on_map": "Button: choose a place by tapping a map instead of using GPS.",
   "location.precision_note": "Privacy reassurance: coordinates are rounded to 4 decimals (~11 m).",
   "location.accuracy": "Shown under a shared pin; {m} is a coarse accuracy radius in metres.",
+  "location.overview.here_since": "Label above the time a person got to where their pin is (Here since / 09:12). A pin is only shared when it moves, so this is never 'last update'.",
+  "location.overview.since": "After the place in a list row; {when} is a clock time today (09:12), 'yesterday 18:40', a weekday and time, or a date.",
+  "location.overview.last_known": "The pin of another household that cannot be reached right now: the last place it shared, not where the person is.",
   "dms.attach.menu": "Paperclip button in the chat composer that opens the attach menu.",
   "dms.location.send_failed": "Toast; {error} is a technical error message.",
 

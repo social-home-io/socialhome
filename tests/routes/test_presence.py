@@ -376,3 +376,70 @@ async def test_list_presence_carries_signed_picture_and_updated_at(client):
     assert url.startswith(f"api/users/{row['user_id']}/picture?v=feedbeef")
     assert "sig=" in url and "exp=" in url
     assert row["updated_at"]
+
+
+# ── Rate limit: per person posted, not per token ─────────────────────────
+
+
+async def _add_user(client, username: str) -> None:
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        (username, f"uid-{username}", username.title()),
+    )
+
+
+async def _post_fix(client, username: str):
+    return await client.post(
+        "/api/presence/location",
+        json={"username": username, "latitude": 47.0, "longitude": 8.0},
+        headers=_auth(client._tok),
+    )
+
+
+async def test_the_location_limit_counts_per_person_posted(client):
+    """Home Assistant posts every household member's location with one
+    token. The limit used to count per token, so a household of five
+    shared 10 fixes a minute; it now counts per person: 10 a minute each."""
+    people = ["admin", "anna", "ben", "carla", "dan"]
+    for name in people[1:]:
+        await _add_user(client, name)
+    for _ in range(10):
+        for name in people:
+            assert (await _post_fix(client, name)).status == 204
+    r = await _post_fix(client, "anna")
+    assert r.status == 429
+    # Someone else still has their own 10.
+    await _add_user(client, "eve")
+    assert (await _post_fix(client, "eve")).status == 204
+
+
+async def test_a_token_posts_only_for_people_in_its_own_household(client):
+    """Only a user of this household: a remote user's id or an unknown
+    name is refused, and spends no bucket."""
+    await client._db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status) VALUES(?,?,?,?,?,?,?,?)",
+        ("peer-x", "Peer", "00" * 32, "k1", "k2", "https://p/wh", "wh-x", "confirmed"),
+    )
+    await client._db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES(?,?,?,?)",
+        ("uid-remote", "peer-x", "remote", "Remote"),
+    )
+    for name in ("remote", "uid-remote", "nobody"):
+        assert (await _post_fix(client, name)).status == 404
+
+
+async def test_presence_rows_say_since_when(client):
+    """``GET /api/presence`` carries ``located_since`` — when the place
+    last changed — next to ``updated_at`` (the last fix)."""
+    await _post_fix(client, "admin")
+    r = await client.get("/api/presence", headers=_auth(client._tok))
+    (row,) = [p for p in await r.json() if p["username"] == "admin"]
+    assert row["located_since"] is not None
+    first = row["located_since"]
+    await _post_fix(client, "admin")
+    r = await client.get("/api/presence", headers=_auth(client._tok))
+    (row,) = [p for p in await r.json() if p["username"] == "admin"]
+    assert row["located_since"] == first

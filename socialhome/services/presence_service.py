@@ -175,6 +175,7 @@ class PresenceService(BusPublisherMixin):
                 zone_name = zone.presence_zone_name
                 state = "home" if zone.is_home else "zone"
 
+        now = datetime.now(UTC).isoformat()
         await self._repo.upsert_local(
             username=update.username,
             entity_id=update.username,
@@ -183,8 +184,12 @@ class PresenceService(BusPublisherMixin):
             latitude=lat,
             longitude=lon,
             gps_accuracy_m=acc,
-            updated_at=datetime.now(UTC).isoformat(),
+            updated_at=now,
         )
+        # When the place last changed (the repo keeps it on a fix that says
+        # the same): what "here since …" shows, here and on peers' maps.
+        stored = await self._repo.get_by_username(update.username)
+        located_since = (stored.located_since if stored else None) or now
         # Real-time fan-out so other household members see the change
         # without polling. The event carries the post-truncation
         # coordinates (§25 GPS rule). ``gps_accuracy_m`` and
@@ -200,7 +205,8 @@ class PresenceService(BusPublisherMixin):
                 latitude=lat,
                 longitude=lon,
                 gps_accuracy_m=acc,
-                updated_at=datetime.now(UTC).isoformat(),
+                updated_at=now,
+                located_since=located_since,
             )
         )
 

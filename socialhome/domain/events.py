@@ -1223,6 +1223,8 @@ class PresenceUpdated(DomainEvent):
     user_id: str | None = None
     gps_accuracy_m: float | None = None
     updated_at: str | None = None
+    #: When the member's place last changed (``presence.located_since``).
+    located_since: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

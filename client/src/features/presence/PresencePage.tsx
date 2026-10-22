@@ -37,6 +37,8 @@ interface PresenceEntry {
   gps_accuracy_m?: number | null
   /** When the presence row last changed (UTC). */
   updated_at?: string | null
+  /** When the member's place last changed — "here since …". */
+  located_since?: string | null
   last_seen_at?: string | null
   is_online?: boolean
   is_idle?: boolean
@@ -163,7 +165,7 @@ export default function PresencePage() {
     avatar_url: p.picture_url,
     status: presenceLabel(p.state, p.zone_name),
     zone_id: personZone(markers[i], zones)?.id ?? null,
-    updated_at: p.updated_at ?? null,
+    updated_at: p.located_since ?? p.updated_at ?? null,
     online: p.is_online ? (p.is_idle ? 'idle' : 'online') : 'offline',
     last_seen_at: p.last_seen_at ?? null,
   }))

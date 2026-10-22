@@ -344,3 +344,15 @@ async def test_asserted_null_zone_stays_away(zoned):
 async def test_explicit_state_is_never_overridden(zoned):
     p = await _post_gps(zoned, 52.5301, 13.4050, state="unavailable")
     assert (p.state, p.zone_name) == ("unavailable", None)
+
+
+async def test_the_event_carries_since_when_the_place_is_the_same(zoned):
+    """``located_since`` stays on a fix that says the same and moves with
+    the place; the event carries it for the space map's 'here since'."""
+    await _post_gps(zoned, 52.6, 13.5)
+    first = zoned.events[-1].located_since
+    assert first is not None
+    await _post_gps(zoned, 52.6, 13.5)
+    assert zoned.events[-1].located_since == first
+    await _post_gps(zoned, 52.61, 13.5)
+    assert zoned.events[-1].located_since != first

@@ -2488,6 +2488,11 @@ async def _remote_member_pin_entries(
         for m in await member_repo.list_for_space(space_id)
     }
     user_repo = request.app[user_repo_key]
+    fed_repo = request.app.get(federation_repo_key)
+    # A pin is only sent when it changes, so a household that can't be
+    # reached leaves its last pin standing: shown as last known, not as
+    # "here since". Unknown (a mesh-only member, no row) reads as reachable.
+    unreachable: dict[str, bool] = {}
     out: list[dict] = []
     for loc in locs:
         if loc.mode != mode_filter:
@@ -2530,6 +2535,11 @@ async def _remote_member_pin_entries(
             "picture_url": picture_url,
             "instance_id": loc.instance_id,
             "updated_at": loc.updated_at,
+            # The sender's time of the change (inside its sealed payload).
+            "located_since": loc.updated_at,
+            "stale": await _household_unreachable(
+                fed_repo, loc.instance_id, unreachable
+            ),
         }
         if mode_filter == "gps":
             entry["latitude"] = loc.latitude
@@ -2540,6 +2550,18 @@ async def _remote_member_pin_entries(
             entry["zone_name"] = loc.zone_name
         out.append(entry)
     return out
+
+
+async def _household_unreachable(
+    fed_repo, instance_id: str, seen: dict[str, bool]
+) -> bool:
+    """Whether we hold ``instance_id`` as unreachable (memoised per call)."""
+    if instance_id not in seen:
+        inst = (
+            await fed_repo.get_instance(instance_id) if fed_repo is not None else None
+        )
+        seen[instance_id] = bool(inst is not None and inst.unreachable_since)
+    return seen[instance_id]
 
 
 class SpacePresenceView(BaseView):
@@ -2640,6 +2662,7 @@ class SpacePresenceView(BaseView):
                         "zone_name": matched.name,
                         "picture_url": p.picture_url,
                         "updated_at": p.updated_at,
+                        "located_since": p.located_since or p.updated_at,
                     },
                 )
             # Remote member pins are added as ``zone_only`` entries
@@ -2680,6 +2703,7 @@ class SpacePresenceView(BaseView):
                 "gps_accuracy_m": p.gps_accuracy_m,
                 "picture_url": p.picture_url,
                 "updated_at": p.updated_at,
+                "located_since": p.located_since or p.updated_at,
             }
             for p in entries
         ]
