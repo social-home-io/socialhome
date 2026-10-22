@@ -68,6 +68,7 @@ from ..domain.federation import (
     DELIVERY_ERROR_RELAY_TOO_LARGE,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DELIVERY_ERROR_ROUTED_SEND_FAILED,
+    DELIVERY_ERROR_SUPERSEDED,
     PAIRING_REACH_URL,
     PENDING_KIND_APPROVAL,
     BroadcastResult,
@@ -80,6 +81,7 @@ from ..domain.federation import (
     pending_kind,
 )
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.federation_retention import supersede_key
 from ..domain.media_validator import validate_inbound_media_meta
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
@@ -338,6 +340,8 @@ class FederationService:
         "_space_repo",
         "_space_sync_receiver",
         "_space_sync_service",
+        "_state_send_seq",
+        "_state_sends",
         "_stopping",
         "_sync_manager",
         "_transport",
@@ -419,6 +423,14 @@ class FederationService:
         #: diagnostics, never persisted, never sent anywhere. Bounded by
         #: the number of paired peers.
         self._relay_accepted_at: dict[str, str] = {}
+        #: (peer instance_id, supersede key) → ticket of the newest
+        #: :meth:`send_event` of that latest-only state still in flight.
+        #: Only the newest send's outcome touches the outbox (an older one
+        #: finishing late must neither drop the newer queued row nor queue
+        #: itself over a newer delivered one). An entry is removed when its
+        #: send finishes; bounded by peers × keys in flight.
+        self._state_sends: dict[tuple[str, str], int] = {}
+        self._state_send_seq = 0
         #: peer instance_id → monotonic time we last saw it unpaired (either
         #: side tore the pairing down). Sends already in flight then race
         #: the row's removal; see :meth:`send_event`. Pruned past
@@ -610,6 +622,39 @@ class FederationService:
         state — a queued envelope was sealed under the rules of its time
         (a guardian block, §CP.F2, may have come since)."""
         return await self._outbox_repo.delete_pending_of_types(instance_id, event_types)
+
+    def _claim_state_send(self, instance_id: str, state_key: str | None) -> int | None:
+        """Mark this send as the newest one of a latest-only state to
+        ``instance_id``; return its ticket (``None`` for ordinary events)."""
+        if state_key is None:
+            return None
+        self._state_send_seq += 1
+        self._state_sends[(instance_id, state_key)] = self._state_send_seq
+        return self._state_send_seq
+
+    def _settle_state_send(
+        self, instance_id: str, state_key: str | None, ticket: int | None
+    ) -> bool:
+        """Finish a send; ``True`` when it may touch the outbox — an
+        ordinary event, or still the newest send of its state."""
+        if state_key is None:
+            return True
+        key = (instance_id, state_key)
+        if self._state_sends.get(key) != ticket:
+            return False
+        del self._state_sends[key]
+        return True
+
+    async def _settle_delivered_state(
+        self, instance_id: str, state_key: str | None, ticket: int | None
+    ) -> None:
+        """A state was delivered: the older one still queued for the peer
+        would land after it and roll it back — drop it. Not when a newer
+        send of the same state is already under way (its row is newer)."""
+        if state_key is None:
+            return
+        if self._settle_state_send(instance_id, state_key, ticket):
+            await self._outbox_repo.drop_superseded(instance_id, state_key)
 
     async def _on_tombstone_contact(self, instance_id: str) -> bool:
         """An unpair tombstone just proved it is online — send our queued
@@ -1519,6 +1564,10 @@ class FederationService:
                 error="key_decrypt_error",
             )
         msg_id = envelope_dict["msg_id"]
+        # §4.4.7 latest-only state (online status, a pin on a space map):
+        # at most one queued row per person (and space) for this peer.
+        state_key = supersede_key(event_type, space_id=space_id, payload=payload)
+        state_ticket = self._claim_state_send(to_instance_id, state_key)
 
         # Dispatch the envelope. When a FederationTransport facade is
         # attached, it decides between WebRTC DataChannel (§24.12.5
@@ -1558,6 +1607,9 @@ class FederationService:
                         await self._bus.publish(
                             ConnectionReachable(instance_id=to_instance_id),
                         )
+                await self._settle_delivered_state(
+                    to_instance_id, state_key, state_ticket
+                )
                 return DeliveryResult(
                     instance_id=to_instance_id,
                     ok=True,
@@ -1584,6 +1636,9 @@ class FederationService:
                             await self._bus.publish(
                                 ConnectionReachable(instance_id=to_instance_id),
                             )
+                        await self._settle_delivered_state(
+                            to_instance_id, state_key, state_ticket
+                        )
                         return DeliveryResult(
                             instance_id=to_instance_id,
                             ok=True,
@@ -1611,6 +1666,7 @@ class FederationService:
             # to re-derive the same arithmetic) is honest — the relay
             # transport already logged the WARNING naming the peer, the
             # event type and the size.
+            self._settle_state_send(to_instance_id, state_key, state_ticket)
             return DeliveryResult(
                 instance_id=to_instance_id,
                 ok=False,
@@ -1634,11 +1690,22 @@ class FederationService:
                 await self._bus.publish(
                     ConnectionUnreachable(instance_id=to_instance_id),
                 )
+        if not self._settle_state_send(to_instance_id, state_key, state_ticket):
+            # A newer send of this same state is under way: it delivers or
+            # queues the current state — this older one, queued, would only
+            # land after it and roll the peer back.
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                status_code=status_code if isinstance(status_code, int) else None,
+                error=DELIVERY_ERROR_SUPERSEDED,
+            )
         queued = await self._outbox_repo.enqueue(
             instance_id=to_instance_id,
             event_type=event_type,
             payload_json=_dumps(envelope_dict),
             msg_id=msg_id,
+            supersede_key=state_key,
         )
         if queued is None:
             # The pairing ended while this send was in flight (an unpair

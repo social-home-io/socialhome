@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -194,8 +194,6 @@ async def test_enqueue_never_drop_event_has_null_expiry(env):
 
 async def test_enqueue_ordinary_event_gets_seven_day_ttl(env):
     """An ordinary event enqueues with a ~7-day retention deadline."""
-    from datetime import datetime, timedelta
-
     now = datetime.now(UTC)
     eid = await env.outbox_repo.enqueue(
         instance_id="peer",
@@ -855,3 +853,133 @@ async def test_delete_pending_of_no_types_is_a_noop(env):
         payload_json="{}",
     )
     assert await env.outbox_repo.delete_pending_of_types("gone", frozenset()) == 0
+
+
+# ── Latest-only state (supersede_key) ──────────────────────────────────────
+
+
+async def test_supersede_key_keeps_only_the_latest_pending_row(env):
+    """A peer offline while a person's location moves: before, one row per
+    update (each later delivered, oldest first); now one — the latest."""
+    repo = env.outbox_repo
+    last = None
+    for i in range(50):
+        last = await repo.enqueue(
+            instance_id="peer",
+            event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+            payload_json=f'{{"n":{i}}}',
+            supersede_key="location:s1:u1",
+        )
+    rows = await env.db.fetchall(
+        "SELECT id, payload_json FROM federation_outbox WHERE instance_id='peer'"
+    )
+    assert [r["id"] for r in rows] == [last]
+    assert rows[0]["payload_json"] == '{"n":49}'
+
+
+async def test_supersede_key_is_per_key_and_per_peer(env):
+    repo = env.outbox_repo
+    for key in ("location:s1:u1", "location:s1:u2", "location:s2:u1"):
+        for peer in ("peer-a", "peer-b"):
+            for _ in range(3):
+                await repo.enqueue(
+                    instance_id=peer,
+                    event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+                    payload_json="{}",
+                    supersede_key=key,
+                )
+    assert await repo.count_pending_for("peer-a") == 3
+    assert await repo.count_pending_for("peer-b") == 3
+
+
+async def test_supersede_key_never_touches_unkeyed_or_failed_rows(env):
+    repo = env.outbox_repo
+    dm = await repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.DM_MESSAGE,
+        payload_json="{}",
+    )
+    failed = await repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.USER_ONLINE,
+        payload_json="{}",
+        supersede_key="online:u1",
+    )
+    await repo.mark_failed(failed)
+    newest = await repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.USER_OFFLINE,
+        payload_json="{}",
+        supersede_key="online:u1",
+    )
+    ids = {r["id"] for r in await env.db.fetchall("SELECT id FROM federation_outbox")}
+    assert ids == {dm, failed, newest}
+
+
+async def test_a_replaced_row_never_costs_a_dm_its_slot_at_the_cap(env, monkeypatch):
+    """At the per-peer cap, a fresh location replaces its own stale row
+    instead of evicting the oldest droppable row — a DM."""
+    import socialhome.repositories.outbox_repo as outbox_mod
+
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    repo = env.outbox_repo
+    dm = await repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.DM_MESSAGE,
+        payload_json="{}",
+        msg_id="dm",
+    )
+    await env.db.enqueue(
+        "UPDATE federation_outbox SET created_at='2026-01-01T00:00:00+00:00'"
+        " WHERE id='dm'"
+    )
+    for _ in range(6):
+        await repo.enqueue(
+            instance_id="peer",
+            event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+            payload_json="{}",
+            supersede_key="location:s1:u1",
+        )
+    assert dm in await _pending_ids(env, "peer")
+    assert await repo.count_pending_for("peer") == 2
+
+
+async def test_queued_call_negotiation_expires_in_two_minutes(env):
+    """Every ICE candidate is kept (each one is needed) — but none waits
+    past the ringing window: before, 7 days each."""
+    before = datetime.now(UTC)
+    for i in range(5):
+        await env.outbox_repo.enqueue(
+            instance_id="peer",
+            event_type=FederationEventType.CALL_ICE_CANDIDATE,
+            payload_json="{}",
+            msg_id=f"ice{i}",
+        )
+    rows = await env.db.fetchall(
+        "SELECT expires_at FROM federation_outbox WHERE instance_id='peer'"
+    )
+    assert len(rows) == 5
+    for r in rows:
+        expires = datetime.fromisoformat(r["expires_at"])
+        assert expires <= before + timedelta(minutes=2, seconds=5)
+
+
+async def test_drop_superseded_removes_the_queued_older_state(env):
+    """A newer state delivered directly makes the queued older one wrong —
+    delivered later, it would overwrite the newer one at the peer."""
+    repo = env.outbox_repo
+    await repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        payload_json="{}",
+        supersede_key="location:s1:u1",
+    )
+    other = await repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        payload_json="{}",
+        supersede_key="location:s1:u2",
+    )
+    assert await repo.drop_superseded("peer", "location:s1:u1") == 1
+    assert await repo.drop_superseded("peer", "location:s1:u1") == 0
+    assert await _pending_ids(env, "peer") == {other}
