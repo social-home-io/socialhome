@@ -89,7 +89,7 @@ import logging
 import time
 from collections import OrderedDict, deque
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import aiohttp
 
@@ -147,6 +147,11 @@ BUNDLE_PER_FOLLOWER_EVERY_S: float = 3600.0
 #: :data:`BUNDLE_PER_FOLLOWER_EVERY_S`; past it the oldest is forgotten.
 _MAX_TRACKED_FOLLOWERS: int = 10_000
 
+#: The most ``(space, follower, key-wrap key)`` seals remembered for the
+#: reconcile skip (#5a); past it the oldest is forgotten (and only costs one
+#: more seal on the next reconcile).
+_MAX_TRACKED_SEALS: int = 50_000
+
 #: The ``new_subscriber.reason`` of a NEW seat — the only one that earns a
 #: bundle. ``"reconnect"``, a missing or an unknown reason: key handoff only.
 _REASON_SUBSCRIBE: str = "subscribe"
@@ -162,6 +167,15 @@ def _opens_bundle(sub: dict[str, Any]) -> bool:
     return isinstance(accepts, list) and ACCEPTS_AUTHOR_PROFILES_BUNDLE in accepts
 
 
+class _Relayed(NamedTuple):
+    """A handoff the GFS accepted: the key-wrap key and epoch it was sealed
+    to, and whether it went to that follower alone (v_61 targeted)."""
+
+    keywrap_pub: bytes
+    epoch: int
+    targeted: bool
+
+
 class SpaceSubscriberKeyOutbound:
     """``new_subscriber`` GFS frame → sealed content-key handoff producer."""
 
@@ -175,6 +189,7 @@ class SpaceSubscriberKeyOutbound:
         "_http_session",
         "_own_instance_id",
         "_profiles",
+        "_sealed",
         "_spaces",
     )
 
@@ -206,6 +221,11 @@ class SpaceSubscriberKeyOutbound:
         #: ``(space_id, follower)`` → monotonic time of its last bundle, in
         #: bundle order (oldest first) — the per-follower churn guard.
         self._bundled: OrderedDict[tuple[str, str], float] = OrderedDict()
+        #: ``(space_id, follower, key-wrap pub hex)`` → the content-key epoch
+        #: this process last relayed a seal of to that follower (#5a). A
+        #: reconcile skips a follower sealed at the current epoch; in memory
+        #: only, so a restart reconciles everyone once.
+        self._sealed: OrderedDict[tuple[str, str, str], int] = OrderedDict()
 
     def attach_author_profiles(self, repo: AbstractSpaceAuthorProfileRepo) -> None:
         """Wire the author-profile cache the v_61 new-follower bundle is
@@ -283,6 +303,7 @@ class SpaceSubscriberKeyOutbound:
         # for a NEW seat (never on a reconnect) of a follower that opens it.
         if (
             sealed_to is not None
+            and sealed_to.targeted
             and gfs_id is not None
             and frame.get("reason") == _REASON_SUBSCRIBE
             and _opens_bundle(sub)
@@ -293,7 +314,7 @@ class SpaceSubscriberKeyOutbound:
                     space_id=space_id,
                     seed=seed,
                     target_instance_id=target,
-                    keywrap_pub=sealed_to[0],
+                    keywrap_pub=sealed_to.keywrap_pub,
                 )
             except Exception:
                 log.exception(
@@ -466,15 +487,16 @@ class SpaceSubscriberKeyOutbound:
         keywrap_pub_hex: str,
         keywrap_sig: str,
         gfs_id: str | None = None,
-    ) -> tuple[bytes, int] | None:
+    ) -> _Relayed | None:
         """Verify the subscriber's key-wrap binding, seal the current content
         key to it, authority-sign, and relay one ``space_subscriber_key_handoff``.
 
         With *gfs_id* (the connection the subscriber was named on) the
         handoff goes to that subscriber alone when that server proved
-        ``targeted_publish``; then ``(keywrap_pub, epoch)`` is returned, for
-        the profiles bundle. Otherwise — no *gfs_id*, an older server — it
-        is fanned out as before and ``None`` is returned.
+        ``targeted_publish`` (``targeted``, for the profiles bundle).
+        Otherwise — no *gfs_id*, an older server — it is fanned out as
+        before. Returns what was relayed (and remembers it for the
+        reconcile skip, #5a), or ``None`` when nothing was.
 
         Shared by the notify-driven :meth:`handle` and the Phase-5b-c
         :meth:`reconcile` so both run the identical anti-substitution gate +
@@ -575,13 +597,26 @@ class SpaceSubscriberKeyOutbound:
                     to_instance_id=target_instance_id,
                 )
                 if targeted is not None:
-                    return (keywrap_pub, epoch) if targeted else None
+                    if not targeted:
+                        return None
+                    return self._remember_seal(
+                        space_id,
+                        target_instance_id,
+                        keywrap_pub_hex,
+                        _Relayed(keywrap_pub, epoch, True),
+                    )
             # No target-capable server: every subscriber gets it (the seal
             # is the gate), as before v_61.
             await self._gfs.publish_space_event(
                 space_id=space_id,
                 event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
                 payload=envelope,
+            )
+            return self._remember_seal(
+                space_id,
+                target_instance_id,
+                keywrap_pub_hex,
+                _Relayed(keywrap_pub, epoch, False),
             )
         except Exception:
             log.exception(
@@ -590,6 +625,25 @@ class SpaceSubscriberKeyOutbound:
                 target_instance_id,
             )
         return None
+
+    def _remember_seal(
+        self, space_id: str, follower: str, keywrap_pub_hex: str, relayed: _Relayed
+    ) -> _Relayed:
+        key = (space_id, follower, keywrap_pub_hex.lower())
+        self._sealed[key] = relayed.epoch
+        self._sealed.move_to_end(key)
+        while len(self._sealed) > _MAX_TRACKED_SEALS:
+            self._sealed.popitem(last=False)
+        return relayed
+
+    def _sealed_at(self, space_id: str, sub: dict[str, Any]) -> int | None:
+        return self._sealed.get(
+            (
+                space_id,
+                str(sub.get("instance_id") or ""),
+                str(sub.get("keywrap_public_key") or "").lower(),
+            )
+        )
 
     async def reconcile(self, gfs_id: str) -> None:
         """Owner-offline RECONCILE (Phase-5b-c). Never raises.
@@ -749,8 +803,20 @@ class SpaceSubscriberKeyOutbound:
         subscribers = data.get("subscribers") if isinstance(data, dict) else None
         if not isinstance(subscribers, list):
             return
+        # #5a: a follower this process already sealed the current epoch to
+        # is skipped — this pass runs on every reconnect of OUR socket, and
+        # re-sealing to every follower each time was ~140k handoffs a day.
+        # A follower whose socket was down when its seal went out is
+        # repaired by its own reconnect notify (:meth:`handle`), which always
+        # re-seals; a rotation (new epoch) reaches everyone.
+        exported = await self._crypto.export_current_key(space_id)
+        current_epoch = exported[0] if exported is not None else None
         for sub in subscribers:
             if not isinstance(sub, dict):
+                continue
+            if current_epoch is not None and (
+                self._sealed_at(space_id, sub) == current_epoch
+            ):
                 continue
             await self._seal_and_relay(
                 space_id=space_id,
