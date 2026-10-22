@@ -224,6 +224,15 @@ describe('a signalling session the GFS no longer holds', () => {
       () => {
         const urls = fetchSpy.mock.calls.map((c) => String(c[0]))
         expect(urls.some((u) => u.includes('/gfs/highlight_rtc/relay/inst-1/hl-1'))).toBe(true)
+        // Every offer has had its one poll by now. A viewer left over from
+        // an earlier test (the page mounts on import and the next test only
+        // replaces the DOM, which never unmounts it) can post its offer
+        // here a moment after this test's viewer reached the relay: its
+        // poll comes one interval later. Waiting for it — rather than
+        // asserting at the first relay call — is what made this flaky.
+        const offers = urls.filter((u) => u.endsWith('/gfs/highlight_rtc/offer'))
+        const polls = urls.filter((u) => u.includes('/gfs/highlight_rtc/session/'))
+        expect(polls.length).toBe(offers.length)
       },
       { timeout: 4000 },
     )
@@ -239,6 +248,120 @@ describe('a signalling session the GFS no longer holds', () => {
     await vi.waitFor(() =>
       expect(document.querySelector('[role="alert"]')).not.toBeNull(),
     )
+    vi.unstubAllGlobals()
+  })
+})
+
+
+describe('a viewer that goes away while it starts', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('posts no offer and opens no peer connection after it is unmounted', async () => {
+    // "Try again" remounts the viewer (and a page can be left): the old
+    // one's start-up was still in flight — it went on to open an
+    // RTCPeerConnection nobody closed, post an offer to the GFS and poll
+    // that session every second, for nobody.
+    let releaseIce: (r: Response) => void = () => {}
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/gfs/highlights/ice-servers')) {
+        return new Promise<Response>((resolve) => { releaseIce = resolve })
+      }
+      return new Response(JSON.stringify({ session_id: 's-1' }), { status: 201 })
+    })
+    const built = vi.fn()
+    class FakePc {
+      iceConnectionState = 'new'
+      remoteDescription = null
+      constructor() { built() }
+      addEventListener() {}
+      createDataChannel() { return {} }
+      async createOffer() { return { type: 'offer', sdp: 'v=0' } }
+      async setLocalDescription() {}
+      close() {}
+    }
+    vi.stubGlobal('RTCPeerConnection', FakePc)
+    const { render } = await import('@testing-library/preact')
+    const { PublicHighlightViewer } = await import('./public_highlight')
+    const { linkSecretFromHash } = await import('./stream_seal')
+    const retry = { manual: () => {}, auto: () => {}, nextAutoDelayMs: () => null }
+    const view = render(
+      <PublicHighlightViewer
+        boot={{
+          instanceId: 'inst-1', highlightId: 'hl-1', token: 'tok-1',
+          gfs: 'https://gfs.example.org',
+        }}
+        secret={linkSecretFromHash(pinnedHash())!}
+        retry={retry}
+      />,
+    )
+    await vi.waitFor(() => {
+      const urls = fetchSpy.mock.calls.map((c) => String(c[0]))
+      expect(urls.some((u) => u.endsWith('/gfs/highlights/ice-servers'))).toBe(true)
+    }, { timeout: 4000 })
+    view.unmount()
+    // Preact runs an unmounted component's effect cleanup after the frame;
+    // the GFS answering is slower than that.
+    await new Promise((r) => setTimeout(r, 50))
+    releaseIce(new Response(JSON.stringify({ servers: [] }), { status: 200 }))
+    await new Promise((r) => setTimeout(r, 50))
+    const urls = fetchSpy.mock.calls.map((c) => String(c[0]))
+    expect(urls.some((u) => u.endsWith('/gfs/highlight_rtc/offer'))).toBe(false)
+    expect(built).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
+  it('stops polling and closes its connection when unmounted after the offer', async () => {
+    let releaseOffer: (r: Response) => void = () => {}
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/gfs/highlights/ice-servers')) {
+        return new Response(JSON.stringify({ servers: [] }), { status: 200 })
+      }
+      if (url.endsWith('/gfs/highlight_rtc/offer')) {
+        return new Promise<Response>((resolve) => { releaseOffer = resolve })
+      }
+      return new Response('{}', { status: 200 })
+    })
+    const closed = vi.fn()
+    class FakePc {
+      iceConnectionState = 'new'
+      remoteDescription = null
+      addEventListener() {}
+      createDataChannel() { return {} }
+      async createOffer() { return { type: 'offer', sdp: 'v=0' } }
+      async setLocalDescription() {}
+      close() { closed() }
+    }
+    vi.stubGlobal('RTCPeerConnection', FakePc)
+    const { render } = await import('@testing-library/preact')
+    const { PublicHighlightViewer } = await import('./public_highlight')
+    const { linkSecretFromHash } = await import('./stream_seal')
+    const retry = { manual: () => {}, auto: () => {}, nextAutoDelayMs: () => null }
+    const view = render(
+      <PublicHighlightViewer
+        boot={{
+          instanceId: 'inst-1', highlightId: 'hl-1', token: 'tok-1',
+          gfs: 'https://gfs.example.org',
+        }}
+        secret={linkSecretFromHash(pinnedHash())!}
+        retry={retry}
+      />,
+    )
+    await vi.waitFor(() => {
+      const urls = fetchSpy.mock.calls.map((c) => String(c[0]))
+      expect(urls.some((u) => u.endsWith('/gfs/highlight_rtc/offer'))).toBe(true)
+    }, { timeout: 4000 })
+    view.unmount()
+    await new Promise((r) => setTimeout(r, 50))
+    releaseOffer(new Response(JSON.stringify({ session_id: 's-1' }), { status: 201 }))
+    // Past the 1 s poll interval: nothing polls the session.
+    await new Promise((r) => setTimeout(r, 1300))
+    const urls = fetchSpy.mock.calls.map((c) => String(c[0]))
+    expect(urls.some((u) => u.includes('/gfs/highlight_rtc/session/'))).toBe(false)
+    expect(closed).toHaveBeenCalled()
     vi.unstubAllGlobals()
   })
 })
