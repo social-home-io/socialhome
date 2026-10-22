@@ -294,8 +294,14 @@ complete on every stream, not just its changes. Nothing else is kept full.
 Only the **host's** roster is taken, though: from any other provider the
 receiver refuses `members` and `bans` outright and keeps only the
 `member_pictures` of members seated on that household, and its content
-rows only add what the receiver lacks (`receiver.py` `_admit`). A member
-household's full roster resources are therefore streamed and dropped.
+rows only add what the receiver lacks (`receiver.py` `_admit`). So a
+household that may not speak for the roster — neither the space's owner
+nor a seed-holding delegated admin (a possible trusted inviter, see
+`host_equivalence`) — **does not stream `members` or `bans` at all**
+(`SpaceSyncService.attach_roster_authority`). Its `member_pictures` are
+already its own members' only (`space_members` holds this household's
+seats), and its content still streams. The session shape changes with
+the resource set, so the first session after the upgrade is a full one.
 
 A `member_pictures` record's bytes are never stored as sent: the receiver
 re-encodes them (`media/profile_picture.py:reencode_peer_picture` — decode,

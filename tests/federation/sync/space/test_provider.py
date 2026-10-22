@@ -1239,6 +1239,53 @@ async def test_zones_stream_only_to_a_member_household(encoder, member):
     assert streamed == (["space_zones", "space_zones_deleted"] if member else [])
 
 
+def _roster_provider(encoder) -> SpaceSyncService:
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    exporters = {
+        "bans": _FakeExporter("bans", [{"user_id": "u-banned"}]),
+        "members": _FakeExporter("members", [{"user_id": "u-1", "role": "member"}]),
+        "member_pictures": _FakeExporter(
+            "member_pictures", [{"user_id": "u-1", "picture_hash": "h"}]
+        ),
+        "posts": _FakeExporter("posts", [{"id": "p-1"}]),
+    }
+    return SpaceSyncService(builder=builder, exporters=exporters, sig_suite="ed25519")
+
+
+@pytest.mark.parametrize("authority", [True, False])
+async def test_only_the_roster_authority_streams_members_and_bans(encoder, authority):
+    """Every receiver refuses ``members`` and ``bans`` from a household
+    that isn't the space's host (or a host-equivalent seed holder) —
+    ``receiver._admit`` — so a plain member household no longer streams
+    them to every co-member each session. Its own members' pictures and
+    its content still go (the receiver takes those from it)."""
+    svc = _roster_provider(encoder)
+
+    async def _authority(_space_id: str) -> bool:
+        return authority
+
+    svc.attach_roster_authority(_authority)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    streamed = sorted(set(_resources(session)))
+    expected = ["member_pictures", "posts"]
+    if authority:
+        expected = ["bans", "member_pictures", "members", "posts"]
+    assert streamed == expected
+
+
+async def test_without_an_authority_check_the_roster_streams_as_before(encoder):
+    svc = _roster_provider(encoder)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    assert sorted(set(_resources(session))) == [
+        "bans",
+        "member_pictures",
+        "members",
+        "posts",
+    ]
+
+
 async def test_zones_never_stream_without_a_gate(encoder):
     svc = _zones_provider(encoder)
     session = _FakeSession()

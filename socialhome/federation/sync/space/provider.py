@@ -111,6 +111,12 @@ def _wait_budget(error: str) -> tuple[int, float] | None:
     return None
 
 
+#: The space's roster and moderation list: every receiver takes them only
+#: from the host (or a host-equivalent seed holder) — ``receiver._admit``
+#: refuses them from any other household — so only such a household
+#: streams them (:meth:`SpaceSyncService.attach_roster_authority`).
+_ROSTER_AUTHORITY_RESOURCES: frozenset[str] = frozenset({"bans", "members"})
+
 #: Resources only a member household (a writer seat) receives by
 #: catch-up — the members' places; the chat has its own version gate too.
 _MEMBER_ONLY_RESOURCES: frozenset[str] = frozenset(
@@ -131,6 +137,7 @@ class SpaceSyncService:
         "_media_sync",
         "_member_gate",
         "_owner_statement_for",
+        "_roster_authority",
         "_sig_suite",
         "_space_post_repo",
         "_watermarks",
@@ -208,6 +215,16 @@ class SpaceSyncService:
         #: (:meth:`SpaceWriterHouseholds.may_receive`). ``None`` streams
         #: none of them (fail closed).
         self._member_gate: Callable[[str, str], Awaitable[bool]] | None = None
+        #: Whether this household may speak for a space's roster:
+        #: ``space_id -> bool`` (the host, or a seed-holding delegated admin
+        #: that may be a member's trusted inviter). ``None``: every session
+        #: streams the roster, as before.
+        self._roster_authority: Callable[[str], Awaitable[bool]] | None = None
+
+    def attach_roster_authority(self, check: Callable[[str], Awaitable[bool]]) -> None:
+        """Wire who streams ``members`` / ``bans``: a household no receiver
+        takes them from (a plain member household) leaves them out."""
+        self._roster_authority = check
 
     def attach_member_gate(self, gate: Callable[[str, str], Awaitable[bool]]) -> None:
         """Wire who may receive a space's member-only resources by
@@ -234,6 +251,13 @@ class SpaceSyncService:
         ``SPACE_ZONE_*`` either.
         """
         exporter = self._exporters.get(resource)
+        if (
+            exporter is not None
+            and resource in _ROSTER_AUTHORITY_RESOURCES
+            and self._roster_authority is not None
+            and not await self._roster_authority(session.space_id)
+        ):
+            return None
         version = await self._session_version(session)
         if exporter is not None and resource == "calendar":
             if isinstance(exporter, CalendarExporter) and not _series_rows(version):
