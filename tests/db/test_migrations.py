@@ -393,6 +393,8 @@ async def test_0042_preserves_data(tmp_path):
             "longitude",
             "gps_accuracy_m",
             "updated_at",
+            # Added later, by 0121 (when the place last changed).
+            "located_since",
         },
         "post_drafts": {
             "id",
