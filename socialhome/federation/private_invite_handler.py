@@ -1899,6 +1899,21 @@ class PrivateSpaceInviteHandler:
                 tombstoned=tombstoned,
                 verified_epoch=space.authority_key_epoch,
             )
+        # The host's snapshot names the roster version it is complete up to;
+        # echoed on our next BEGIN to the host, it spares us the periodic
+        # resend of what we hold. Only a snapshot from the host, every entry
+        # of which verified — anything less, and the host keeps sending.
+        roster_version = p.get("roster_version")
+        if (
+            from_host
+            and self._space_service is not None
+            and isinstance(roster_version, int)
+            and not isinstance(roster_version, bool)
+            and all(reason is None for reason in reasons)
+        ):
+            self._space_service.note_roster_snapshot_applied(
+                space_id, event.from_instance, roster_version
+            )
 
     @staticmethod
     def _check_snapshot_sigs_sync(

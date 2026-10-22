@@ -462,6 +462,27 @@ member household, not only on the host:
   would be new traffic metadata for it). The host signs a snapshot's
   entries, and the receiver verifies them, in a worker thread, off the
   event loop.
+- **Only what changed, on the timer.** A snapshot names the
+  `roster_version` it is complete up to (the host's `roster_sequence`).
+  A member household that applied one from the host — every entry
+  verified — echoes it on its next `SPACE_SYNC_BEGIN` to the host as
+  `roster_echo {roster_version, cert_epoch}` (`cert_epoch`: the epoch of
+  the writer cert it holds, or `null`). The periodic tick then skips that
+  household while the echo still matches the current `roster_sequence`
+  and the writer cert the host would send; after a roster change it sends
+  the household the snapshot **without the removals at or below the
+  echoed version** (it applied them in that full snapshot). Seat and
+  upgrade snapshots are sent whole, as before. Both sides keep this in
+  memory: a restart costs one full snapshot per household. A household
+  that never echoes (older, or a link-joined one) is unchanged. Additive:
+  an older host ignores `roster_echo`, an older member ignores
+  `roster_version`. Credentials that change without a roster change heal
+  through their own paths (the rekey / rotation per-peer fan-outs, the
+  channel service, the v_46 authority echo) and still ride every snapshot
+  that is sent. Cost: a space with 50 seats, ~100 removals and 15 member
+  households used to send 15 × ~150 entries × ~400 B ≈ 900 KB every
+  30 minutes (≈ 43 MB a day; a busy space with thousands of seats or
+  removals far more); unchanged, it now sends nothing.
 - **Held writes.** A write naming a user the space has **no record of at
   all** — or, at the Follower gate, coming from a household it holds no
   row for — may simply have beaten the gossip seating them. It is held in a

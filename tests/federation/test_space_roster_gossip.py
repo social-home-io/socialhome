@@ -545,6 +545,62 @@ async def test_a_roster_snapshot_seats_every_signed_entry(tmp_dir):
     await db.shutdown()
 
 
+class _NotingSpaceService:
+    def __init__(self) -> None:
+        self.applied: list[tuple[str, str, int]] = []
+
+    def note_roster_snapshot_applied(self, space_id, host, version) -> None:
+        self.applied.append((space_id, host, version))
+
+
+def _versioned_snapshot(entries, *, version, from_instance=OWNER):
+    return _event(
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
+        {"space_id": SPACE_ID, "entries": entries, "roster_version": version},
+        from_instance=from_instance,
+    )
+
+
+async def test_a_fully_applied_host_snapshot_is_noted_for_the_echo(tmp_dir):
+    """The version is echoed back on our next BEGIN to the host, which then
+    stops resending a roster we hold."""
+    h, _spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    noted = _NotingSpaceService()
+    h.attach_space_service(noted)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await h._on_space_roster_snapshot(
+        _versioned_snapshot(
+            [_entry(j, _signed_payload(j, seed=seed, member_version=4))], version=9
+        )
+    )
+    assert noted.applied == [(SPACE_ID, OWNER, 9)]
+    await db.shutdown()
+
+
+async def test_a_snapshot_with_a_refused_entry_or_not_from_the_host_is_not_noted(
+    tmp_dir,
+):
+    """Anything less than a whole verified snapshot from the host leaves no
+    echo, so the host keeps healing us."""
+    h, _spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    noted = _NotingSpaceService()
+    h.attach_space_service(noted)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    forged = _signed_payload(j, seed=b"\x01" * 32, member_version=3, user_id="u-f")
+    good = _signed_payload(j, seed=seed, member_version=4)
+    await h._on_space_roster_snapshot(
+        _versioned_snapshot([_entry(j, good), _entry(j, forged)], version=9)
+    )
+    await h._on_space_roster_snapshot(
+        _versioned_snapshot([_entry(j, good)], version=9, from_instance="p-other")
+    )
+    await h._on_space_roster_snapshot(
+        _versioned_snapshot([_entry(j, good)], version="9")
+    )
+    assert noted.applied == []
+    await db.shutdown()
+
+
 async def test_a_roster_snapshot_skips_forged_foreign_and_unknown_entries(tmp_dir):
     h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
     j = FederationEventType.SPACE_MEMBER_JOINED

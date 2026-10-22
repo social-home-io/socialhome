@@ -4229,6 +4229,16 @@ def create_app(config: Config | None = None) -> web.Application:
         app[K.space_sync_scheduler_key].attach_roster_refresh(
             real_space_service.send_hosted_roster_snapshots
         )
+        # …except to a household whose BEGIN echoes the roster version it
+        # already applied (``roster_echo``): the member echoes, the host
+        # reads it next to the sync admission and the v_46 authority echo.
+        app[K.space_sync_scheduler_key].attach_roster_echo(
+            real_space_service.roster_echo_for
+        )
+        federation_service._event_registry.register(
+            FederationEventType.SPACE_SYNC_BEGIN,
+            real_space_service.on_sync_begin_roster_echo,
+        )
         # Multi-admin approval (quorum) — rebuild with the real instance_id
         # (mirrors the real_space_service rebuild) and wire federation + the
         # real space_service it executes approved actions through.
