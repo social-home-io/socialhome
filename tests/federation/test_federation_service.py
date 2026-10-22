@@ -37,6 +37,8 @@ from socialhome.domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
+    DELIVERY_ERROR_SUPERSEDED,
+    BroadcastResult,
     DeliveryResult,
     FederationEventType,
     InstanceSource,
@@ -340,8 +342,11 @@ class InMemoryOutboxRepo:
         msg_id: str | None = None,
         authority_json: str | None = None,
         expires_at: str | None = None,
+        supersede_key: str | None = None,
     ) -> str:
         entry_id = msg_id or str(uuid.uuid4())
+        if supersede_key is not None:
+            await self.drop_superseded(instance_id, supersede_key)
         self.enqueued.append(
             {
                 "id": entry_id,
@@ -349,9 +354,22 @@ class InMemoryOutboxRepo:
                 "event_type": event_type,
                 "payload_json": payload_json,
                 "expires_at": expires_at,
+                "supersede_key": supersede_key,
             }
         )
         return entry_id
+
+    async def drop_superseded(self, instance_id: str, supersede_key: str) -> int:
+        before = len(self.enqueued)
+        self.enqueued = [
+            e
+            for e in self.enqueued
+            if not (
+                e["instance_id"] == instance_id
+                and e.get("supersede_key") == supersede_key
+            )
+        ]
+        return before - len(self.enqueued)
 
     async def list_due(self, limit: int = 50):
         return []
@@ -590,6 +608,218 @@ async def test_send_event_failure_enqueues_outbox():
     assert outbox_repo.enqueued[0]["instance_id"] == inst.id
     # reachable → unreachable edge fired exactly once so the SPA flips red live
     assert unreachable == [inst.id]
+
+
+def _failing_http() -> MagicMock:
+    mock_http = MagicMock()
+    mock_http.post = MagicMock(side_effect=Exception("connection refused"))
+    return mock_http
+
+
+def _ok_http() -> MagicMock:
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+    mock_http = MagicMock()
+    mock_http.post = MagicMock(return_value=mock_resp)
+    return mock_http
+
+
+async def _offline_peer_service(http) -> tuple[FederationService, object, Any]:
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    inst, _ = _make_remote_instance(km)
+    await fed_repo.save_instance(inst)
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+        http_client=http,
+    )
+    return svc, outbox_repo, inst
+
+
+@pytest.mark.asyncio
+async def test_an_offline_peer_queues_one_location_per_person_and_space():
+    """§4.4.7 latest-only: 30 moves of one person in one space while the
+    peer is offline used to queue 30 envelopes (each delivered later, the
+    oldest first, and each one a slot a DM could lose at the cap); now the
+    peer gets one — the latest. A second person keeps their own row."""
+    svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
+    for i in range(30):
+        await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+            payload={"user_id": "u1", "lat": 1.0 + i / 1000, "lon": 2.0},
+            space_id="s1",
+        )
+    await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        payload={"user_id": "u2", "lat": 1.0, "lon": 2.0},
+        space_id="s1",
+    )
+    assert len(outbox_repo.enqueued) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_offline_peer_queues_one_online_status_per_person():
+    """ONLINE → IDLE → OFFLINE → ONLINE … queued for an offline peer used
+    to be one envelope per flip; only the last one says anything."""
+    svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
+    flips = (
+        FederationEventType.USER_ONLINE,
+        FederationEventType.USER_IDLE,
+        FederationEventType.USER_OFFLINE,
+    ) * 10
+    for event_type in flips:
+        await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=event_type,
+            payload={"user_id": "u1"},
+        )
+    (row,) = outbox_repo.enqueued
+    assert row["event_type"] is FederationEventType.USER_OFFLINE
+
+
+@pytest.mark.asyncio
+async def test_a_dm_queued_for_an_offline_peer_is_never_superseded():
+    svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
+    for i in range(3):
+        await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=FederationEventType.DM_MESSAGE,
+            payload={"user_id": "u1", "text": str(i)},
+        )
+    assert len(outbox_repo.enqueued) == 3
+    assert {r["supersede_key"] for r in outbox_repo.enqueued} == {None}
+
+
+@pytest.mark.asyncio
+async def test_a_delivered_state_drops_the_older_queued_one():
+    """A newer location delivered directly must not be overwritten later
+    by the older one still waiting in the outbox."""
+    svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
+    await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        payload={"user_id": "u1", "lat": 1.0, "lon": 2.0},
+        space_id="s1",
+    )
+    assert len(outbox_repo.enqueued) == 1
+    svc._http_client = _ok_http()
+    result = await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        payload={"user_id": "u1", "lat": 1.5, "lon": 2.0},
+        space_id="s1",
+    )
+    assert result.ok is True
+    assert outbox_repo.enqueued == []
+
+
+class _GatedHttp:
+    """An HTTP client whose POSTs complete in the order the test releases
+    them — each with the status (or failure) it was given."""
+
+    def __init__(self) -> None:
+        self.gates: list[tuple[asyncio.Event, list]] = []
+
+    def post(self, url, **kwargs):
+        gate = asyncio.Event()
+        outcome: list = []
+        self.gates.append((gate, outcome))
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                await gate.wait()
+                if outcome[0] is None:
+                    raise OSError("connection refused")
+                resp = MagicMock()
+                resp.status = outcome[0]
+                return resp
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+    async def release(self, index: int, status: int | None) -> None:
+        gate, outcome = self.gates[index]
+        outcome.append(status)
+        gate.set()
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+
+def _location(lat: float) -> dict:
+    return {
+        "to_instance_id": None,
+        "event_type": FederationEventType.SPACE_LOCATION_UPDATED,
+        "payload": {"user_id": "u1", "lat": lat, "lon": 2.0},
+        "space_id": "s1",
+    }
+
+
+async def _start_two_sends(svc, inst, http):
+    older = asyncio.create_task(
+        svc.send_event(**{**_location(1.0), "to_instance_id": inst.id})
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    newer = asyncio.create_task(
+        svc.send_event(**{**_location(2.0), "to_instance_id": inst.id})
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert len(http.gates) == 2
+    return older, newer
+
+
+@pytest.mark.asyncio
+async def test_an_older_state_delivered_late_never_drops_the_newer_queued_one():
+    """Two sends of one person's pin in flight: the newer fails (queued),
+    then the older one lands. The queued newer state must survive."""
+    http = _GatedHttp()
+    svc, outbox_repo, inst = await _offline_peer_service(http)
+    older, newer = await _start_two_sends(svc, inst, http)
+    await http.release(1, None)
+    await newer
+    await http.release(0, 200)
+    await older
+    (row,) = outbox_repo.enqueued
+    assert row["supersede_key"] == "location:s1:u1"
+
+
+@pytest.mark.asyncio
+async def test_an_older_state_failing_late_is_not_queued_over_the_newer():
+    """The newer one is delivered; the older one fails afterwards. Queued,
+    it would land later and move the pin back."""
+    http = _GatedHttp()
+    svc, outbox_repo, inst = await _offline_peer_service(http)
+    older, newer = await _start_two_sends(svc, inst, http)
+    await http.release(1, 200)
+    assert (await newer).ok is True
+    await http.release(0, None)
+    result = await older
+    assert result.ok is False
+    assert result.error == DELIVERY_ERROR_SUPERSEDED
+    assert outbox_repo.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_send_is_not_a_terminal_failure():
+    result = BroadcastResult(
+        attempted=1,
+        succeeded=0,
+        failed=1,
+        results=(
+            DeliveryResult(instance_id="p", ok=False, error=DELIVERY_ERROR_SUPERSEDED),
+        ),
+    )
+    assert result.terminal_failures == ()
 
 
 @pytest.mark.asyncio

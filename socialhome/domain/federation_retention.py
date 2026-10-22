@@ -2,7 +2,10 @@
 and when. NEVER_DROP events (security / structural state the receiver must
 eventually see) never expire and retry indefinitely; all others get a 7-day
 TTL from enqueue, after which the receiver rebuilds state via the sync
-protocols rather than the outbox replaying a week-stale event."""
+protocols rather than the outbox replaying a week-stale event. Call
+negotiation (:data:`SHORT_LIVED`) gets two minutes instead, and current
+state — online status, a space-map pin — is queued latest-only
+(:func:`supersede_key`)."""
 
 from __future__ import annotations
 
@@ -51,6 +54,67 @@ RETENTION_DAYS = 7
 TERMINAL_GRACE: timedelta = timedelta(hours=24)
 
 
+#: Call negotiation (§26.8): a call rings for 90 s
+#: (``call_service.RINGING_TTL_SECONDS``), so an offer, answer, candidate,
+#: busy or decline still queued after a couple of minutes describes a call
+#: that is already over — delivering it hours later only rings a dead call
+#: or fills the peer's outbox slots. The ladder (5 / 10 / 20 / 40 s) still
+#: gets four retries in. ``CALL_HANGUP`` / ``CALL_END`` keep the ordinary
+#: TTL: one per call, and the far side's call record waits for it.
+SHORT_LIVED: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.CALL_OFFER,
+        FederationEventType.CALL_ANSWER,
+        FederationEventType.CALL_DECLINE,
+        FederationEventType.CALL_BUSY,
+        FederationEventType.CALL_ICE,
+        FederationEventType.CALL_ICE_CANDIDATE,
+        FederationEventType.CALL_QUALITY,
+    }
+)
+
+#: How long a :data:`SHORT_LIVED` entry stays queued.
+SHORT_LIVED_TTL: timedelta = timedelta(minutes=2)
+
+#: Online status transitions (``USER_ONLINE`` / ``USER_IDLE`` /
+#: ``USER_OFFLINE``) — one person's current state, of which only the latest
+#: is worth delivering.
+_ONLINE_STATUS: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.USER_ONLINE,
+        FederationEventType.USER_IDLE,
+        FederationEventType.USER_OFFLINE,
+    }
+)
+
+
+def supersede_key(
+    event_type: FederationEventType,
+    *,
+    space_id: str | None,
+    payload: dict,
+) -> str | None:
+    """The latest-only key of an outbox entry, or ``None`` (kept as is).
+
+    Some events carry *state*, not history: a person's online status, a
+    person's pin on a space map. For those a newer send makes every queued
+    older one worthless — and harmful: delivered after it, the older one
+    overwrites the newer state at the peer, and every queued copy takes a
+    slot of the per-peer cap that a DM or a post would otherwise keep. So
+    the outbox holds at most one pending row per (peer, key): a new one
+    replaces it, and a newer one delivered directly drops it.
+
+    The key is local-only (an outbox column, never on the wire)."""
+    user_id = payload.get("user_id")
+    if not isinstance(user_id, str) or not user_id:
+        return None
+    if event_type in _ONLINE_STATUS:
+        return f"online:{user_id}"
+    if event_type is FederationEventType.SPACE_LOCATION_UPDATED and space_id:
+        return f"location:{space_id}:{user_id}"
+    return None
+
+
 def retention_expires_at(
     event_type: FederationEventType, *, now: datetime | None = None
 ) -> str | None:
@@ -59,4 +123,6 @@ def retention_expires_at(
     if event_type in NEVER_DROP:
         return None
     base = now or datetime.now(UTC)
+    if event_type in SHORT_LIVED:
+        return (base + SHORT_LIVED_TTL).isoformat()
     return (base + timedelta(days=RETENTION_DAYS)).isoformat()

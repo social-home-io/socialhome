@@ -501,6 +501,20 @@ outbox. NEVER_DROP rows are never evicted — if the backlog is entirely
 NEVER_DROP the new row is still inserted over the cap rather than dropping
 a security/structural event.
 
+**State, not history, is queued latest-only.** A person's online status
+(`USER_ONLINE` / `USER_IDLE` / `USER_OFFLINE`) and their pin on a space map
+(`SPACE_LOCATION_UPDATED`) describe *current* state: an outbox row for one
+of them carries a local `supersede_key` (`online:<user>` /
+`location:<space>:<user>`, `domain/federation_retention.supersede_key`).
+`enqueue` replaces the peer's pending row with the same key instead of
+adding another, and a newer state delivered directly drops it — so a peer
+that is away gets one envelope per person (and space) when it is back,
+never an older state after a newer one, and these rows never push a queued
+DM or post out at the per-peer cap. **Call negotiation** (`CALL_OFFER`,
+`CALL_ANSWER`, `CALL_ICE*`, `CALL_BUSY`, `CALL_DECLINE`, `CALL_QUALITY`)
+is `SHORT_LIVED`: a 2-minute TTL instead of 7 days, since a call rings for
+90 s. `CALL_HANGUP` / `CALL_END` keep the ordinary TTL.
+
 **What a redelivery response means.** 2xx is delivered. 5xx, a timeout or
 a network error is transient (backoff). **429 is transient too** — a rate
 limit is back-pressure ("later"), never a refusal: the receiving inbox

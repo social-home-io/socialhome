@@ -57,8 +57,10 @@ class AbstractOutboxRepo(Protocol):
         msg_id: str | None = None,
         authority_json: str | None = None,
         expires_at: str | None = None,
+        supersede_key: str | None = None,
     ) -> str | None: ...
 
+    async def drop_superseded(self, instance_id: str, supersede_key: str) -> int: ...
     async def list_due(self, limit: int = 50) -> list[OutboxEntry]: ...
     async def mark_delivered(self, entry_id: str) -> None: ...
     async def mark_failed(self, entry_id: str) -> None: ...
@@ -104,8 +106,14 @@ class SqliteOutboxRepo:
         msg_id: str | None = None,
         authority_json: str | None = None,
         expires_at: str | None = None,
+        supersede_key: str | None = None,
     ) -> str | None:
         """Queue one signed envelope for ``instance_id``; return its id.
+
+        With a ``supersede_key`` (latest-only state, see
+        :func:`~socialhome.domain.federation_retention.supersede_key`) the
+        peer's pending row with the same key is replaced, not added to — so
+        it never counts against the per-peer cap twice.
 
         Returns ``None`` — and writes nothing — when we no longer hold a
         pairing the envelope could ever be delivered to: the
@@ -123,6 +131,10 @@ class SqliteOutboxRepo:
         # explicit ``expires_at`` from the caller is respected as-is.
         if expires_at is None:
             expires_at = retention_expires_at(event_type)
+        if supersede_key is not None:
+            # Before the cap check: the row this one replaces must not make
+            # the cap evict someone's DM to make room for its successor.
+            await self.drop_superseded(instance_id, supersede_key)
         # Per-peer back-pressure (§4.4.7): a permanently-offline peer plus a
         # busy space must not flood the outbox. At/over the cap, evict the
         # oldest droppable (non-NEVER_DROP) pending row to make room. We still
@@ -142,9 +154,9 @@ class SqliteOutboxRepo:
             """
             INSERT INTO federation_outbox(
                 id, instance_id, event_type, payload_json,
-                authority_json, expires_at
+                authority_json, expires_at, supersede_key
             )
-            SELECT ?,?,?,?,?,?
+            SELECT ?,?,?,?,?,?,?
              WHERE EXISTS (
                 SELECT 1 FROM remote_instances
                  WHERE id=? AND (status<>? OR ?=?)
@@ -157,6 +169,7 @@ class SqliteOutboxRepo:
                 payload_json,
                 authority_json,
                 expires_at,
+                supersede_key,
                 instance_id,
                 PairingStatus.UNPAIRING.value,
                 event_type.value,
@@ -171,6 +184,28 @@ class SqliteOutboxRepo:
             )
             return None
         return entry_id
+
+    async def drop_superseded(self, instance_id: str, supersede_key: str) -> int:
+        """Delete ``instance_id``'s PENDING row(s) carrying ``supersede_key``;
+        return how many.
+
+        Read first (served by the partial ``idx_federation_outbox_supersede``
+        index) so the common case — nothing queued for that peer, every send
+        of a moving pin — costs a read, not a write on the single writer.
+        """
+        queued = await self._db.fetchval(
+            "SELECT COUNT(*) FROM federation_outbox"
+            " WHERE instance_id=? AND supersede_key=? AND status='pending'",
+            (instance_id, supersede_key),
+            default=0,
+        )
+        if not queued:
+            return 0
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM federation_outbox"
+            " WHERE instance_id=? AND supersede_key=? AND status='pending'",
+            (instance_id, supersede_key),
+        )
 
     async def list_due(self, limit: int = 50) -> list[OutboxEntry]:
         """Return pending entries whose ``next_attempt_at`` is due.

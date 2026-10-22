@@ -1411,6 +1411,15 @@ DELIVERY_ERROR_RELAY_TOO_LARGE: str = "relay_too_large"
 DELIVERY_ERROR_QUEUED: str = "delivery_failed"
 
 
+#: :attr:`DeliveryResult.error` value meaning "this state was already
+#: replaced" — NOT a loss. For latest-only state (online status, a pin on a
+#: space map; ``federation_retention.supersede_key``) whose direct send failed
+#: while a newer send of the same state to the same peer was already under
+#: way: that newer send delivers (or queues) the current state, so queueing
+#: this older one would only land it afterwards and roll the peer back.
+DELIVERY_ERROR_SUPERSEDED: str = "superseded"
+
+
 #: :attr:`DeliveryResult.error` value meaning "queued in the mesh target's
 #: deferred FIFO" — NOT a loss yet. ``FederationService.broadcast_to_space_members``
 #: reports it for a mesh-only member it could not reach (route cooldown, no
@@ -1544,7 +1553,9 @@ class BroadcastResult:
 
         Excludes :data:`DELIVERY_ERROR_QUEUED` — a direct-peer send that
         ``send_event`` already parked in the durable outbox and that
-        redelivers on its own — and :data:`DELIVERY_ERROR_MESH_DEFERRED`, a
+        redelivers on its own — :data:`DELIVERY_ERROR_SUPERSEDED` (a newer
+        send of the same state carries it), and
+        :data:`DELIVERY_ERROR_MESH_DEFERRED`, a
         mesh send with one re-send armed for after the route cooldown (that
         retry warns on its own if it misses). What remains is the mesh-path
         subset that got its only attempt, i.e. what a caller should warn
@@ -1554,7 +1565,12 @@ class BroadcastResult:
             r
             for r in self.results
             if not r.ok
-            and r.error not in (DELIVERY_ERROR_QUEUED, DELIVERY_ERROR_MESH_DEFERRED)
+            and r.error
+            not in (
+                DELIVERY_ERROR_QUEUED,
+                DELIVERY_ERROR_SUPERSEDED,
+                DELIVERY_ERROR_MESH_DEFERRED,
+            )
         )
 
 
