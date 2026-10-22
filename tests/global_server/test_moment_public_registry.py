@@ -665,3 +665,45 @@ def test_the_publish_budget_leaves_the_seen_cache_to_everyone_else():
     25 h seen cache — it can't push other authors' moments out of it."""
     per_window = MOMENT_PUBLISHES_PER_MINUTE * MOMENT_SEEN_TTL_S / 60
     assert per_window < MOMENT_SEEN_MAX / 4
+
+
+# ─── The mailbox never moves a key back ───────────────────────────────────
+
+
+@pytest.mark.security
+async def test_an_older_key_after_a_newer_one_is_neither_kept_nor_pushed(
+    gfs_setup, gfs_db
+):
+    """A re-posted capture of an older signed ``/gfs/moments/keys`` body
+    (e.g. by a TLS-terminating proxy in front of the GFS) arrives after the
+    newer key: the mailbox keeps the newer one and the follower is not sent
+    the older one."""
+    reg, _relay, _cluster, mailbox = await _cluster_world(gfs_setup, gfs_db)
+    follower_ws = _StubWs()
+    await gfs_setup["ws"].register("inst-follower", follower_ws)  # type: ignore[arg-type]
+
+    def _delivery(gen: int, step: int) -> dict:
+        return {
+            "author_user_id": "u-author",
+            "to": "inst-follower",
+            "key_gen": gen,
+            "key_step": step,
+        }
+
+    async def _deliver(gen: int, step: int) -> int:
+        return await reg.deliver_keys(
+            sender_instance_id="inst-author", deliveries=[_delivery(gen, step)]
+        )
+
+    assert await _deliver(8, 2) == 1
+    assert await _deliver(7, 9) == 0  # an older generation
+    assert await _deliver(8, 1) == 0  # the same generation, an older step
+    kept = await mailbox.get("u-author", "inst-follower")
+    assert kept is not None and (kept.key_gen, kept.key_step) == (8, 2)
+    assert [p["key_gen"] for p in _sent_field(follower_ws, "payload")] == [8]
+    # The same key again (the author re-sealing on a re-follow) still goes,
+    # and a newer one replaces it.
+    assert await _deliver(8, 2) == 1
+    assert await _deliver(8, 3) == 1
+    kept = await mailbox.get("u-author", "inst-follower")
+    assert kept is not None and (kept.key_gen, kept.key_step) == (8, 3)

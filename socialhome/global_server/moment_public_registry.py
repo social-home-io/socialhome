@@ -522,8 +522,15 @@ class MomentPublicRegistry:
                 key_step=int(item.get("key_step") or 0),
                 delivery=json.dumps(item, separators=(",", ":"), sort_keys=True),
             )
-            if self._mailbox is not None:
-                await self._mailbox.put(mail)
+            # An older key than the one kept is a re-posted capture: neither
+            # kept nor pushed (the household already has a newer one).
+            if self._mailbox is not None and not await self._mailbox.put(mail):
+                log.info(
+                    "moment_public.keys: an older key for %s → %s ignored",
+                    author,
+                    to,
+                )
+                continue
             if await self._push(mail):
                 delivered += 1
         log.info(

@@ -2198,7 +2198,7 @@ class SqliteGfsMomentMediaRepo:
 
 @runtime_checkable
 class AbstractGfsMomentKeyMailboxRepo(Protocol):
-    async def put(self, mail: GfsMomentKeyMail) -> None: ...
+    async def put(self, mail: GfsMomentKeyMail) -> bool: ...
     async def get(
         self, author_user_id: str, follower_instance_id: str
     ) -> GfsMomentKeyMail | None: ...
@@ -2220,15 +2220,26 @@ class SqliteGfsMomentKeyMailboxRepo:
     def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
 
-    async def put(self, mail: GfsMomentKeyMail) -> None:
-        await self._db.enqueue(
+    async def put(self, mail: GfsMomentKeyMail) -> bool:
+        """Keep *mail* unless the stored key is newer; ``True`` when kept.
+
+        Never moves a household's key back: the update applies only when
+        *mail*'s ``(key_gen, key_step)`` is at least the stored one's, in
+        the one statement (no read-then-write race). An author household
+        only ever seals its current key, so an older one is a re-post of a
+        captured signed body — by anything that terminates TLS in front of
+        this server (a CDN, a proxy), which is not this server."""
+        changed = await self._db.enqueue_rowcount(
             "INSERT INTO gfs_moment_key_mailbox(author_user_id,"
             " follower_instance_id, key_gen, key_step, delivery, delivered,"
             " updated_at) VALUES(?,?,?,?,?,?,strftime('%s','now')) "
             "ON CONFLICT(author_user_id, follower_instance_id) DO UPDATE SET "
             "key_gen=excluded.key_gen, key_step=excluded.key_step, "
             "delivery=excluded.delivery, delivered=excluded.delivered, "
-            "updated_at=excluded.updated_at",
+            "updated_at=excluded.updated_at "
+            "WHERE excluded.key_gen > gfs_moment_key_mailbox.key_gen "
+            "OR (excluded.key_gen = gfs_moment_key_mailbox.key_gen "
+            "AND excluded.key_step >= gfs_moment_key_mailbox.key_step)",
             (
                 mail.author_user_id,
                 mail.follower_instance_id,
@@ -2238,6 +2249,7 @@ class SqliteGfsMomentKeyMailboxRepo:
                 int(mail.delivered),
             ),
         )
+        return changed > 0
 
     async def get(
         self, author_user_id: str, follower_instance_id: str
