@@ -188,6 +188,13 @@ async def houses(aiohttp_client, tmp_path):
         await aiohttp_client(app)
     await _seed(h[db_key], local=AUTHOR, remote=(MEMBER, CORA))
     await _seed(c[db_key], local=CORA, remote=(HOST, AUTHOR))
+    # H is the host: on its own database the space is owned by its own
+    # instance (C knows it as ``HOST``). Only the roster authority streams
+    # ``members`` / ``bans``.
+    await h[db_key].enqueue(
+        "UPDATE spaces SET owner_instance_id=? WHERE id=?",
+        (h[federation_service_key].own_instance_id, SPACE),
+    )
     for app in (h, c):
         svc = app[space_sync_service_key]
         svc._builder = ChunkBuilder(

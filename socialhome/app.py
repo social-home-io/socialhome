@@ -1748,6 +1748,23 @@ def _wire_federation_stack(
     # attach_space_sync so the chicken/egg between the two services
     # is resolved without a constructor cycle.
     space_sync_service.attach_federation(federation_service)
+
+    async def _roster_authority(space_id: str) -> bool:
+        # Receivers take the roster only from the host or a host-equivalent
+        # (a seed-holding delegated admin, see ``host_equivalence``).
+        space = await space_repo.get(space_id)
+        if space is None:
+            return False
+        if space.owner_instance_id == federation_service.own_instance_id:
+            return True
+        return await space_repo.get_space_seed(space_id) is not None
+
+    async def _own_members(space_id: str) -> set[str]:
+        return set(await space_repo.list_local_member_user_ids(space_id))
+
+    space_sync_service.attach_roster_authority(
+        _roster_authority, own_members=_own_members
+    )
     app[K.space_sync_service_key] = space_sync_service
     app[K.space_sync_receiver_key] = space_sync_receiver
 
