@@ -57,6 +57,20 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _before(stamp: object, other: str) -> bool:
+    """``stamp`` is an earlier UTC time than ``other`` (unreadable: yes)."""
+    try:
+        a = datetime.fromisoformat(str(stamp))
+        b = datetime.fromisoformat(other)
+    except ValueError:
+        return True
+    if a.tzinfo is None:
+        a = a.replace(tzinfo=UTC)
+    if b.tzinfo is None:
+        b = b.replace(tzinfo=UTC)
+    return a < b
+
+
 class SpaceLocationOutbound:
     """Fan a household :class:`PresenceUpdated` out to every opted-in
     space, both locally (WS) and to remote member instances
@@ -69,6 +83,7 @@ class SpaceLocationOutbound:
         "_last_sent",
         "_members",
         "_presence",
+        "_shared_from",
         "_spaces",
         "_users",
         "_ws",
@@ -103,6 +118,11 @@ class SpaceLocationOutbound:
         #: In memory: a restart re-sends each pin once. Bounded by the
         #: members sharing a location.
         self._last_sent: dict[tuple[str, str], tuple[tuple, str | None]] = {}
+        #: (space, user) → when they turned sharing on in this process. A
+        #: pin never says "here since" earlier than that: where they were
+        #: before they chose to share is not shared. In memory (see the
+        #: known limit in ``docs/protocol/presence.md``).
+        self._shared_from: dict[tuple[str, str], str] = {}
 
     def wire(self) -> None:
         self._bus.subscribe(PresenceUpdated, self._on_presence_updated)
@@ -238,6 +258,7 @@ class SpaceLocationOutbound:
         )
         if payload is None:
             return
+        self._shared_from[(space.id, event.user_id)] = datetime.now(UTC).isoformat()
         await self._publish(space.id, payload, force=True)
 
     async def _on_mode_changed(self, event: SpaceLocationModeChanged) -> None:
@@ -392,6 +413,9 @@ class SpaceLocationOutbound:
         unchanged = last is not None and last[0] == said
         if unchanged and last is not None and last[1]:
             payload = {**payload, "updated_at": last[1]}
+        start = self._shared_from.get(key)
+        if start is not None and _before(payload.get("updated_at"), start):
+            payload = {**payload, "updated_at": start}
         self._last_sent[key] = (said, payload.get("updated_at"))
         await self._broadcast_local(space_id, payload)
         if unchanged and not force:

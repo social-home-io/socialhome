@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -1219,11 +1220,8 @@ async def test_each_space_and_person_is_tracked_apart(env):
     assert sorted(c["space_id"] for c in env.federation.calls) == ["sp_a", "sp_b"]
 
 
-async def test_opt_in_and_mode_change_always_send_with_the_since_time(env):
-    """A fresh opt-in and a tier switch exist to put the pin on the map
-    now — they go out even when the point has not moved, and carry the
-    time the person got there, not the time of the click."""
-    sp = await _sharing_alice(env, "sp_force")
+async def _alice_at_seven(env, space_id: str) -> Space:
+    sp = await _sharing_alice(env, space_id)
     presence_repo = SqlitePresenceRepo(env.db)
     await presence_repo.upsert_local(
         username="alice",
@@ -1235,15 +1233,43 @@ async def test_opt_in_and_mode_change_always_send_with_the_since_time(env):
         gps_accuracy_m=12.0,
         updated_at="2026-04-27T07:00:00+00:00",
     )
+    return sp
+
+
+async def test_a_tier_switch_always_sends_with_the_since_time(env):
+    """A tier switch exists to put the pin on the map now — it goes out
+    even when the point has not moved, with the time the person got
+    there, not the time of the click."""
+    sp = await _alice_at_seven(env, "sp_force")
     await env.bus.publish(_fix(since="2026-04-27T07:00:00+00:00"))
-    await env.bus.publish(
-        SpaceMemberLocationOptedIn(space_id=sp.id, user_id=env.alice_uid)
-    )
     await env.bus.publish(SpaceLocationModeChanged(space_id=sp.id, new_mode="gps"))
-    assert len(env.federation.calls) == 3
+    assert len(env.federation.calls) == 2
     assert {c["payload"]["updated_at"] for c in env.federation.calls} == {
         "2026-04-27T07:00:00+00:00"
     }
-    # …and the next unchanged fix after them is still skipped.
+    # …and the next unchanged fix after it is still skipped.
     await env.bus.publish(_fix(since="2026-04-27T07:00:00+00:00"))
-    assert len(env.federation.calls) == 3
+    assert len(env.federation.calls) == 2
+
+
+async def test_an_opt_in_never_says_since_before_it(env):
+    """Where the person was before they chose to share is not shared: the
+    pin an opt-in sends says "here since" the opt-in, not since 07:00 —
+    and so does every later pin for the same place."""
+    sp = await _alice_at_seven(env, "sp_optin_since")
+    before = datetime.now(UTC)
+    await env.bus.publish(
+        SpaceMemberLocationOptedIn(space_id=sp.id, user_id=env.alice_uid)
+    )
+    (call,) = env.federation.calls
+    sent = datetime.fromisoformat(call["payload"]["updated_at"])
+    assert sent >= before
+    await env.bus.publish(SpaceLocationModeChanged(space_id=sp.id, new_mode="gps"))
+    assert (
+        env.federation.calls[-1]["payload"]["updated_at"]
+        == (call["payload"]["updated_at"])
+    )
+    # A move after the opt-in carries its own, later time.
+    later = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    await env.bus.publish(_fix(lat=47.40, at=later, since=later))
+    assert env.federation.calls[-1]["payload"]["updated_at"] == later

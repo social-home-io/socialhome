@@ -126,7 +126,12 @@ Two distinct fan-outs follow every household ``PresenceUpdated``:
    map, the household Presence page — shows "Here since 09:12" (the clock
    today, "yesterday 18:40", the weekday within a week, else the date).
    `presence.updated_at` stays the time of the last fix: the household
-   wall dashboard fades and drops a person on it, unchanged.
+   wall dashboard fades and drops a person on it, unchanged. A pin never
+   says "here since" earlier than the person's opt-in for that space —
+   where they were before they chose to share is not shared. Known limit:
+   that opt-in time is kept in memory, so a restart before the person
+   moves again sends the pin with the presence row's own time, which can
+   predate the opt-in (a `space_members` column would close it).
 
    **A household that can't be reached leaves its last pin standing.**
    Since nothing refreshes a pin, the receiver marks a remote pin `stale`
