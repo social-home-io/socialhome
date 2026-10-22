@@ -23,6 +23,8 @@ never a GFS, never a household met through an invite link.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -55,6 +57,7 @@ class PeerDirectoryService:
         "_bus",
         "_federation",
         "_federation_repo",
+        "_sent",
         "_space_repo",
     )
 
@@ -70,6 +73,11 @@ class PeerDirectoryService:
         self._federation = federation_service
         self._federation_repo = federation_repo
         self._space_repo = space_repo
+        #: peer → digest of the last snapshot sent to it. A change that
+        #: leaves what a peer would get as it was sends it nothing. In
+        #: memory: after a restart the next change re-sends once. Bounded
+        #: by the paired households.
+        self._sent: dict[str, str] = {}
 
     def wire(self) -> None:
         self._bus.subscribe(SpaceConfigChanged, self._on_config_changed)
@@ -79,8 +87,10 @@ class PeerDirectoryService:
 
     async def _on_config_changed(self, _event: SpaceConfigChanged) -> None:
         """Any space-config change can affect the public-spaces snapshot
-        (name, description, emoji, join_mode, space_type). Broadcast the
-        full current snapshot to every paired peer.
+        (name, description, emoji, join_mode, space_type). Send the full
+        current snapshot to every paired peer whose copy it changes — most
+        config changes (a private space, a remote space's config applied
+        here) change nobody's.
         """
         await self._broadcast_snapshot()
 
@@ -126,12 +136,20 @@ class PeerDirectoryService:
             out.append(entry)
         return out
 
-    async def _send(self, peer_id: str) -> None:
+    async def _send(self, peer_id: str, *, force: bool = False) -> None:
+        """Send ``peer_id`` the snapshot — unless it is what it was last
+        sent and ``force`` (a new pair, an upgrade) is off."""
+        spaces = await self._build_snapshot(peer_id)
+        digest = hashlib.sha256(
+            json.dumps(spaces, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if not force and self._sent.get(peer_id) == digest:
+            return
         try:
             await self._federation.send_event(
                 to_instance_id=peer_id,
                 event_type=FederationEventType.SPACE_DIRECTORY_SYNC,
-                payload={"spaces": await self._build_snapshot(peer_id)},
+                payload={"spaces": spaces},
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(
@@ -140,6 +158,9 @@ class PeerDirectoryService:
                 exc,
                 exc_info=True,
             )
+            return
+        # Delivered or queued in the outbox: either way it is on its way.
+        self._sent[peer_id] = digest
 
     async def _broadcast_snapshot(self) -> None:
         # §D2b: social surface — a ``space_session`` row (a household we
@@ -155,7 +176,7 @@ class PeerDirectoryService:
         with no row here); our public spaces are not theirs to see."""
         if not await self._is_social_peer(to_instance_id):
             return
-        await self._send(to_instance_id)
+        await self._send(to_instance_id, force=True)
 
     async def _is_social_peer(self, instance_id: str) -> bool:
         """CONFIRMED and not a ``space_session`` seat — the rows

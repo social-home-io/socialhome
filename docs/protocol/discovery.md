@@ -17,7 +17,17 @@ metadata, not content.
 
 ## Event types
 
-`SPACE_DIRECTORY_SYNC` (peer-to-peer snapshot, distinct from GFS).
+`SPACE_DIRECTORY_SYNC` (peer-to-peer snapshot, distinct from GFS). The
+full public-space snapshot goes to a paired household on pair confirm, when
+it first reaches v_59, and after a space config or local-area change —
+but after a change **only when what that household would get differs
+from what it was last sent** (`PeerDirectoryService` keeps a per-peer
+digest in memory; a restart re-sends once on the next change). Most config
+changes — a private space's, a remote space's config applied here — leave
+every peer's copy as it was and send nothing. Cost: a household with 20
+paired peers and ~30 config changes a day used to send 600 snapshots
+(~2–5 KB each, ≈ 1.5–3 MB); now only the changes to its public spaces go
+out.
 `PUBLIC_SPACE_ADVERTISE` / `PUBLIC_SPACE_WITHDRAWN` remain in the enum but
 nothing sends them: a GFS listing is the owner's signed HTTPS
 `POST /gfs/spaces/{id}/publish` / `…/unpublish` (below), not a federation
