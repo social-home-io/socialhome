@@ -87,7 +87,8 @@ AUTHOR = "u-anna"  # the host's user
 CORA = "u-cora"  # C's user
 _NOW = datetime.now(UTC)
 
-#: Resources streamed whole on every session (the roster, small state).
+#: The roster resources (not stamped; `members` / `bans` go only when they
+#: changed, #2(c); `member_pictures` follow migration 0122).
 KEPT_FULL = {"bans", "members", "member_pictures"}
 
 
@@ -394,10 +395,21 @@ async def test_a_periodic_session_streams_only_what_changed_and_converges(houses
     h, c = houses
     pids, comment = await _baseline(h, c)
 
-    # Quiet: nothing covered streams; the roster still does.
+    # Quiet: nothing covered streams, and the roster C confirmed is not
+    # sent again either (#2(c)).
     quiet = await _h_to_c(h, c)
     assert not any(_content(quiet).values()), _content(quiet)
-    assert quiet.get("members")
+    assert not quiet.get("members"), quiet.get("members")
+    # A roster change on H: the next session carries the roster again.
+    await h[db_key].enqueue(
+        "UPDATE space_members SET role='admin' WHERE space_id=? AND user_id=?",
+        (SPACE, AUTHOR),
+    )
+    moved = await _h_to_c(h, c)
+    assert any(
+        r.get("user_id") == AUTHOR and r.get("role") == "admin"
+        for r in moved.get("members") or ()
+    ), moved.get("members")
 
     # Changes on H: an edit, a reaction, a poll vote, a moderator removal,
     # a comment delete, a new post.
