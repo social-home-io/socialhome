@@ -2545,7 +2545,11 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # fetch a page (the service adds its own per-member and
             # household fetch budget on top).
             "/api/link-preview": (30, 60),
-            "/api/presence/location": (10, 60),  # GPS pings
+            # GPS pings: 10 a minute per PERSON is enforced by the view
+            # (``routes/presence.py``) — Home Assistant posts the whole
+            # household's with one token. This is only the ceiling for that
+            # token: a household of 30 at the full rate.
+            "/api/presence/location": (300, 60),
             "/api/calls": (10, 60),  # initiate / signal
             # Connection management — per-peer reads (visible users,
             # transport detail), admin toggles (home sharing, GFS fallback)

@@ -56,15 +56,19 @@ service boundary; the repository never sees full-precision values.
 
 ## Rate limiting
 
-`POST /api/presence/location` allows 10 requests per minute per
-**authenticated principal** (`app.py` rule table, enforced by
-`rate_limiter.py`'s per-rule bucket). An 11th request in the minute is
-answered `429 RATE_LIMITED` — it is refused, not merged into a later one.
-There is no batching timer in front of federation: each accepted update is
-fanned out as it lands, minus the unchanged ones (below). In `ha` / `haos`
-mode the Home Assistant integration posts every household member's
-location with its one token, so those 10 a minute are shared by the whole
-household.
+`POST /api/presence/location` allows 10 fixes per minute **per person
+posted** (`routes/presence.py`, owner decision 2026-10-22). In `ha` /
+`haos` mode the Home Assistant integration posts every household member's
+location with its one token; a per-token limit made the whole household
+share 10 a minute. The same rule holds in every mode, so nothing branches
+on it. An 11th fix for the same person in the minute is answered `429
+RATE_LIMITED` — refused, not merged into a later one. The per-token rule in
+`app.py` is only a ceiling (300 a minute, a household of 30 at the full
+rate). A token posts only for people of its own household: your own row,
+or any member's with an admin token, and only a name in `users` (local
+members) — a remote user's id or an unknown name is `404` and spends no
+bucket. There is no batching timer in front of federation: each accepted
+update is fanned out as it lands, minus the unchanged ones (below).
 
 ## Scoped visibility (§23.80)
 
@@ -105,16 +109,36 @@ Two distinct fan-outs follow every household ``PresenceUpdated``:
    neither shown on the map nor sent as a frame. It is never
    re-federated.
 
-   **An unchanged pin is not re-sent.** The federation fan-out skips a
-   pin that says what the last one sent for that (space, person) did —
-   the same 4-dp `lat` / `lon` in `gps` mode, the same `zone_id` in
-   `zone_only` — unless that send is at least 15 minutes old
-   (`UNCHANGED_REFRESH_S`, so a still person's pin doesn't read hours
-   stale on the peers' maps). A fresh opt-in and a tier switch always
-   send. The local frame still goes out on every update. Kept in memory:
-   a restart re-sends each pin once. A peer that was offline gets the
-   latest pin from the outbox (latest-only per person and space, see
-   `docs/architecture.md`).
+   **A pin goes out on change only** (owner decision 2026-10-22). The
+   federation fan-out skips a pin that says what the last one sent for
+   that (space, person) did — the same 4-dp `lat` / `lon` in `gps` mode,
+   the same `zone_id` in `zone_only` — however long ago that was. A fresh
+   opt-in and a tier switch always send. The local frame still goes out
+   on every update. Kept in memory: a restart re-sends each pin once. A
+   peer that was offline gets the latest pin from the outbox (latest-only
+   per person and space, see `docs/architecture.md`).
+
+   **"Here since …", not "updated N min ago".** The pin's `updated_at`
+   (inside the sealed payload) is the time the person got there: in `gps`
+   mode the presence row's `located_since` (migration 0121 — moved by a
+   change of point, state or zone, kept by a fix that says the same), in
+   `zone_only` the time the zone was first sent. Every map — the space
+   map, the household Presence page — shows "Here since 09:12" (the clock
+   today, "yesterday 18:40", the weekday within a week, else the date).
+   `presence.updated_at` stays the time of the last fix: the household
+   wall dashboard fades and drops a person on it, unchanged. A pin never
+   says "here since" earlier than the person's opt-in for that space —
+   where they were before they chose to share is not shared. Known limit:
+   that opt-in time is kept in memory, so a restart before the person
+   moves again sends the pin with the presence row's own time, which can
+   predate the opt-in (a `space_members` column would close it).
+
+   **A household that can't be reached leaves its last pin standing.**
+   Since nothing refreshes a pin, the receiver marks a remote pin `stale`
+   when it holds the sending household as unreachable
+   (`remote_instances.unreachable_since`; a mesh-only member with no row
+   reads as reachable). The map draws it faded and says "Last known
+   place".
 
    **Both space-bound payloads strip `zone_name`.** HA zones do not
    reach a space. To label a member's pin on the space map, each

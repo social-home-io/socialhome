@@ -12,12 +12,19 @@ from ..app_keys import (
     online_status_service_key,
     preferences_service_key,
     presence_service_key,
+    rate_limiter_key,
     user_repo_key,
 )
 from ..domain.presence import LocationUpdate, PresenceState
 from ..media_signer import sign_media_urls_in
 from ..security import error_response
 from .base import BaseView
+
+#: ``POST /api/presence/location``: fixes a minute per person posted. The
+#: per-principal middleware rule in ``app.py`` is only a ceiling over a
+#: whole household's token.
+LOCATION_FIXES_PER_PERSON: int = 10
+LOCATION_WINDOW_S: int = 60
 
 
 def _derive_state(zone_name: str | None) -> PresenceState:
@@ -103,6 +110,8 @@ class PresenceCollectionView(BaseView):
                     "longitude": p.longitude,
                     "gps_accuracy_m": p.gps_accuracy_m,
                     "updated_at": p.updated_at,
+                    # When the place last changed — "here since …".
+                    "located_since": p.located_since or p.updated_at,
                     "is_online": is_online,
                     "is_idle": is_idle,
                     "last_seen_at": last_seen,
@@ -151,6 +160,24 @@ class PresenceLocationView(BaseView):
                 403,
                 "FORBIDDEN",
                 "Can only push presence for yourself unless you are admin.",
+            )
+
+        # Only a person of this household (``users`` holds local users only;
+        # a remote user's id or an unknown name is not one) — checked before
+        # the bucket below, so a refused name never spends one.
+        if await self.svc(user_repo_key).get(username) is None:
+            return error_response(404, "NOT_FOUND", "No such household member.")
+        # 10 fixes a minute per PERSON posted (owner decision 2026-10-22):
+        # Home Assistant posts every member's location with one token, and a
+        # per-token limit made the whole household share 10.
+        limiter = self.request.app.get(rate_limiter_key)
+        if limiter is not None and not limiter.is_allowed(
+            f"presence-location:{username}",
+            limit=LOCATION_FIXES_PER_PERSON,
+            window_s=LOCATION_WINDOW_S,
+        ):
+            return error_response(
+                429, "RATE_LIMITED", "Too many requests — wait a moment."
             )
 
         zone_name = body.get("zone_name")

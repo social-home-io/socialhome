@@ -35,6 +35,8 @@ beforeAll(() => {
 })
 
 const EMPTY_ZONE_TEXT = 'No one in this space is in any zone right now.'
+/** When Pascal got to the office — what "since" shows, not the last fix. */
+const pascalSince = new Date(Date.now() - 2 * 60 * 60_000).toISOString()
 /** HTML of every divIcon the map built (bubbles + zone markers). */
 const icons: string[] = []
 /** Every marker ``title`` (the accessible name / hover text). */
@@ -107,6 +109,7 @@ vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 // assertions below read the English text users see.
 
 import { SpaceLocationCard } from './SpaceLocationCard'
+import { localSinceTime } from '@/utils/relativeTime'
 import { ws as wsModule } from '@/ws'
 const mockWs = wsModule as unknown as { on: ReturnType<typeof vi.fn> }
 
@@ -354,7 +357,8 @@ describe('SpaceLocationCard', () => {
             {
               user_id: 'u_pascal', username: 'pascal', display_name: 'Pascal',
               state: 'home', latitude: 47.3770, longitude: 8.5418, picture_url: null,
-              updated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+              updated_at: new Date().toISOString(),
+              located_since: pascalSince,
             },
             {
               user_id: 'u_remote', username: null, display_name: 'Rita',
@@ -369,11 +373,34 @@ describe('SpaceLocationCard', () => {
     const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
     await findByText('Rita')
     expect(overviewRows(container).map(rowName)).toEqual(['Anna', 'Pascal', 'Rita'])
-    expect(overviewRows(container).map(rowSub)).toEqual(['Not home', 'Office · 5 min ago', null])
+    expect(overviewRows(container).map(rowSub)).toEqual([
+      'Not home', `Office · since ${localSinceTime(pascalSince)}`, null,
+    ])
     // Zones tab: Pascal is the one in the office.
     fireEvent.click(tabs(container)[1])
     expect(overviewRows(container).map((r) => r.querySelector('.sh-map-overview__count')!.textContent))
       .toEqual(['1 person'])
+  })
+
+  it('draws the pin of a household that cannot be reached faded, as last known', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'gps',
+          entries: [{
+            user_id: 'u_remote', username: null, display_name: 'Rita',
+            state: 'home', latitude: 45.0, longitude: 6.0, picture_url: null,
+            instance_id: 'peer-1', located_since: pascalSince, stale: true,
+          }],
+        })
+      }
+      return Promise.resolve({ zones: [] })
+    })
+    const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+    await findByText('Rita')
+    expect(overviewRows(container).map(rowSub)).toEqual(['Last known place'])
+    await waitFor(() => expect(icons.some((h) => h.includes('is-stale'))).toBe(true))
   })
 
   it('shares one selection between the overview and the map', async () => {

@@ -169,6 +169,30 @@ export function localClockTime(iso: string): string {
 }
 
 /**
+ * A point in time for "here since …": the wall clock today (``09:12``),
+ * "yesterday 18:40", the weekday within a week (``Mon 18:40``), else the
+ * date (``12 Oct``) — in the viewer's zone and UI language. Falls back to
+ * the raw input on parse failure.
+ */
+export function localSinceTime(iso: string): string {
+  const d = parseDelta(iso)
+  if (!d) return iso
+  const clock = localClockTime(iso)
+  if (d.sameDay) return clock
+  if (d.yesterday) return `${t('time.yesterday')} ${clock}`
+  if (d.diff < 7 * MS_PER_DAY) {
+    const day = new Date(d.t).toLocaleDateString(formatLocale(), { weekday: 'short' })
+    return `${day} ${clock}`
+  }
+  const sameYear = new Date(d.t).getFullYear() === new Date(d.now).getFullYear()
+  return new Date(d.t).toLocaleDateString(formatLocale(), {
+    month: 'short',
+    day: 'numeric',
+    year: sameYear ? undefined : 'numeric',
+  })
+}
+
+/**
  * ``YYYY-MM-DD`` of the viewer's local calendar day a server timestamp
  * falls on — the key to group rows "by day" with. ``iso.slice(0, 10)``
  * is the UTC day: a post at 00:30 in Zurich lands under yesterday.

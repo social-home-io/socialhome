@@ -50,3 +50,47 @@ async def test_get_by_username_carries_updated_at(repo):
     assert row is not None
     assert row.updated_at == "2026-10-13T08:00:00+00:00"
     assert await repo.get_by_username("nobody") is None
+
+
+async def _fix(repo, at: str, *, lat=47.1234, state="away", zone=None) -> None:
+    await repo.upsert_local(
+        username="anna",
+        entity_id=None,
+        state=state,
+        zone_name=zone,
+        latitude=lat,
+        longitude=8.5678,
+        gps_accuracy_m=10.0,
+        updated_at=at,
+    )
+
+
+async def test_located_since_stays_while_the_place_stays(repo):
+    """``updated_at`` is the last fix (the dashboard map fades on it);
+    ``located_since`` is when the place last changed ("here since")."""
+    await _fix(repo, "2026-10-13T08:00:00+00:00")
+    await _fix(repo, "2026-10-13T08:05:00+00:00")
+    row = await repo.get_by_username("anna")
+    assert row.updated_at == "2026-10-13T08:05:00+00:00"
+    assert row.located_since == "2026-10-13T08:00:00+00:00"
+
+
+async def test_located_since_moves_with_the_point_state_or_zone(repo):
+    await _fix(repo, "2026-10-13T08:00:00+00:00")
+    await _fix(repo, "2026-10-13T09:00:00+00:00", lat=47.1235)
+    assert (await repo.get_by_username("anna")).located_since == (
+        "2026-10-13T09:00:00+00:00"
+    )
+    await _fix(repo, "2026-10-13T10:00:00+00:00", lat=47.1235, state="zone", zone="Gym")
+    assert (await repo.get_by_username("anna")).located_since == (
+        "2026-10-13T10:00:00+00:00"
+    )
+
+
+async def test_a_row_from_before_0121_starts_its_since_at_the_next_fix(repo, db):
+    await _fix(repo, "2026-10-13T08:00:00+00:00")
+    await db.enqueue("UPDATE presence SET located_since=NULL WHERE username='anna'")
+    await _fix(repo, "2026-10-13T08:05:00+00:00")
+    assert (await repo.get_by_username("anna")).located_since == (
+        "2026-10-13T08:05:00+00:00"
+    )

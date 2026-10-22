@@ -50,8 +50,13 @@ class PersonPresence:
     latitude: float | None = None  # 4dp-truncated
     longitude: float | None = None  # 4dp-truncated
     gps_accuracy_m: float | None = None
-    #: When the presence row last changed (UTC, as stored).
+    #: When the presence row was last written — the last fix (UTC, as
+    #: stored). The household dashboard map fades and drops a person on it.
     updated_at: str | None = None
+    #: When the member's place last changed — the point, the state or the
+    #: zone (UTC, as stored); ``None`` on a row written before migration
+    #: 0121 until its next fix. "Here since …" on every map.
+    located_since: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

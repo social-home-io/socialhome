@@ -8,6 +8,7 @@ import { fireEvent, render } from '@testing-library/preact'
 import { useState } from 'preact/hooks'
 import { MapOverview, overlayInsets, type OverviewPerson, type OverviewZone } from './MapOverview'
 import type { MapInsets } from './LocationMap'
+import { localClockTime } from '@/utils/relativeTime'
 
 const NOW = Date.parse('2026-10-13T12:00:00Z')
 
@@ -101,14 +102,18 @@ describe('MapOverview tabs', () => {
 })
 
 describe('MapOverview rows', () => {
-  it('lists people by name with their place and last update', () => {
+  it('lists people by name with their place and since when they are there', () => {
     const { container } = render(<Harness people={[cara, ben, anna]} />)
     const r = rows(container)
     expect(r.map((x) => x.querySelector('.sh-map-overview__row-name')!.textContent))
       .toEqual(['Anna', 'Ben', 'Cara'])
-    expect(r[0].querySelector('.sh-map-overview__row-sub')!.textContent).toBe('Home · 5 min ago')
+    // A location is shared only when it changes: the time is when they
+    // got there, never "N min ago".
+    expect(r[0].querySelector('.sh-map-overview__row-sub')!.textContent)
+      .toBe(`Home · since ${localClockTime('2026-10-13T11:55:00Z')}`)
     // A naive SQLite stamp is UTC.
-    expect(r[1].querySelector('.sh-map-overview__row-sub')!.textContent).toBe('School · 2h ago')
+    expect(r[1].querySelector('.sh-map-overview__row-sub')!.textContent)
+      .toBe(`School · since ${localClockTime('2026-10-13T10:00:00Z')}`)
     expect(r[2].querySelector('.sh-map-overview__row-sub')!.textContent).toBe('Away')
   })
 
@@ -137,6 +142,22 @@ describe('MapOverview rows', () => {
       .toEqual(['1 person', '1 person', 'Nobody'])
   })
 
+  it('marks a pin from a household that cannot be reached as the last known place', () => {
+    const rita: OverviewPerson = {
+      id: 'u-rita', name: 'Rita', status: 'School', zone_id: 'z-school',
+      updated_at: '2026-10-13T08:00:00Z', stale: true,
+    }
+    const { container } = render(<Harness people={[rita]} />)
+    const r = rows(container)
+    expect(r[0].querySelector('.sh-map-overview__row-sub')!.textContent)
+      .toBe('School · Last known place')
+    fireEvent.click(r[0])
+    const facts = container.querySelector('.sh-map-overview__facts')!.textContent!
+    expect(facts).toContain(`Last known place${localClockTime('2026-10-13T08:00:00Z')}`)
+    expect(facts).not.toContain('Here since')
+    expect(facts).toContain("can't be reached")
+  })
+
   it('counts several people in one zone', () => {
     const { container } = render(<Harness people={[anna, { ...cara, zone_id: 'z-home' }]} />)
     fireEvent.click(tabButtons(container)[1])
@@ -154,7 +175,7 @@ describe('MapOverview selection', () => {
     expect(document.activeElement).toBe(heading)
     const facts = container.querySelector('.sh-map-overview__facts')!.textContent!
     expect(facts).toContain('School')
-    expect(facts).toContain('2h ago')
+    expect(facts).toContain(`Here since${localClockTime('2026-10-13T10:00:00Z')}`)
     expect(facts).toContain('Last seen 30 min ago')
   })
 

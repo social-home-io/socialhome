@@ -1,0 +1,31 @@
+-- 0121 — when a household member's location last changed.
+--
+-- ``presence.located_since`` — the time the member's place last changed:
+-- the 4-dp point, the presence state or the zone. Written by
+-- ``SqlitePresenceRepo.upsert_local``, which keeps it on a fix that says
+-- the same as the stored row and moves it on one that doesn't. The space
+-- map now sends a member's pin to other households only when it changes
+-- (owner decision 2026-10-22), so peers show "here since …" — and that
+-- time has to be the time of the change, on this household's maps and in
+-- the pin's ``updated_at`` alike.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path that touches the presence row: ``PresenceService
+--       .update_location`` (the one writer), ``SqlitePresenceRepo``
+--       (``list_active`` / ``get_by_username`` / ``upsert_local``),
+--       ``GET /api/presence``, ``GET /api/spaces/{id}/presence``,
+--       ``SpaceLocationOutbound`` (pins out), the household dashboard's
+--       map (``household_dashboard_service._located_at`` →
+--       ``dashboard/map_view.py``) and ``space_remote_member_locations``
+--       (a peer's pin, whose ``updated_at`` is already the sender's time).
+--   (2) Alternatives rejected: ``updated_at`` is the time of the last FIX,
+--       which the household dashboard map needs as it is — it fades a
+--       person whose phone stopped reporting and drops them later — so it
+--       can't also mean "since the last move"; an in-memory map in the
+--       outbound forgets on every restart and would tell peers "here since
+--       <restart>"; deriving it from history is impossible (no history is
+--       kept).
+--   (3) Smallest change: one nullable ``ADD COLUMN``, no backfill — a row
+--       without it reads its ``updated_at`` until its next fix sets it.
+
+ALTER TABLE presence ADD COLUMN located_since TEXT;

@@ -651,3 +651,42 @@ async def test_entries_carry_the_last_update(client):
     r = await client.get(f"/api/spaces/{space_id}/presence", headers=_auth(client._tok))
     [local] = [e for e in (await r.json())["entries"] if e["user_id"] == client._uid]
     assert local["updated_at"] == "2026-10-13T10:00:00+00:00"
+
+
+async def test_entries_say_since_when_and_a_cut_off_household_is_stale(client):
+    """``located_since`` is when the place last changed (a local member's
+    presence row; a remote pin's own time, the sender's change time). A
+    pin from a household we can't reach is ``stale`` — it is only sent on
+    change, so it stays up as the last known place."""
+    space_id = await _create_space(client)
+    await _enable_feature_location(client, space_id, enabled=True)
+    await _set_member_opt_in(client, space_id, client._uid, enabled=True)
+    await _seed_presence(
+        client, username="admin", user_id=client._uid, lat=47.3769, lon=8.5417
+    )
+    await client._db.enqueue(
+        "UPDATE presence SET updated_at=?, located_since=? WHERE username=?",
+        ("2026-10-13T10:00:00+00:00", "2026-10-13T07:30:00+00:00", "admin"),
+    )
+    for inst, uid in (("peer-up", "uid-up"), ("peer-down", "uid-down")):
+        await _seed_remote_member(
+            client, space_id, instance_id=inst, user_id=uid, display_name=uid
+        )
+        await _seed_remote_pin(
+            client, space_id, instance_id=inst, user_id=uid, lat=48.1, lon=11.5
+        )
+    await client._db.enqueue(
+        "UPDATE space_remote_member_locations SET updated_at=? WHERE user_id=?",
+        ("2026-10-13T09:00:00+00:00", "uid-up"),
+    )
+    await client._db.enqueue(
+        "UPDATE remote_instances SET unreachable_since=? WHERE id=?",
+        ("2026-10-13T11:00:00+00:00", "peer-down"),
+    )
+    r = await client.get(f"/api/spaces/{space_id}/presence", headers=_auth(client._tok))
+    by_id = {e["user_id"]: e for e in (await r.json())["entries"]}
+    assert by_id[client._uid]["located_since"] == "2026-10-13T07:30:00+00:00"
+    assert by_id["uid-up"]["located_since"] == "2026-10-13T09:00:00+00:00"
+    assert by_id["uid-up"]["stale"] is False
+    assert by_id["uid-down"]["stale"] is True
+    assert "stale" not in by_id[client._uid]
