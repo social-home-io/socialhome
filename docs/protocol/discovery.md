@@ -1329,10 +1329,21 @@ delivers the key while the owner is offline**:
    verified-seal+relay as 5b-b (`verify_keywrap_binding` anti-substitution gate
    → `seal_to_keywrap` → authority-sign under `space_subscriber_key_handoff` →
    relay through the content-blind GFS). A subscriber with no key-wrap key
-   (older HFS) or a forged binding is skipped — never sealed-to.
+   (older HFS) or a forged binding is skipped — never sealed-to. **A
+   subscriber this household already sealed the current epoch to is skipped
+   too** (#5a). The seed-holder remembers, in memory, the epoch it last
+   relayed a seal of to each `(space, subscriber, key-wrap key)`, noted only
+   when the GFS accepted the handoff (a refused targeted publish is
+   retried). A rotation (new epoch), a new key-wrap key, a new subscriber or
+   a seed-holder restart seals again. A subscriber whose socket was down when
+   its seal went out (delivery is socket-only) is repaired by its **own**
+   reconnect notify (`reason: "reconnect"`, Phase 5b-d), which always
+   re-seals. Before, every reconnect of the seed-holder's socket re-sealed
+   to every subscriber of every published space: about 140k handoffs a day
+   for a 10k-follower space, now about one per new follower or rotation.
 
 The reconcile is **idempotent**: the subscriber's `import_key` is per-epoch
-idempotent, so re-sealing on every reconnect is harmless (a re-import is a
+idempotent, so a duplicate seal is harmless (a re-import is a
 no-op). It is bounded to one pass per connect and fail-soft at every level (an
 unknown/inactive GFS, a per-space transport error, or a per-subscriber seal
 failure is logged and skipped). The `GET` is a **query, not a relay** —

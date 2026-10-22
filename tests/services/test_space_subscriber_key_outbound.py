@@ -559,32 +559,110 @@ async def test_reconcile_skips_forged_keywrap_binding(recon_env):
     assert recon_env["gfs"].calls == []  # but nothing sealed/relayed
 
 
-async def test_reconcile_is_idempotent(recon_env):
-    """Re-running reconcile re-seals harmlessly (the subscriber's import is
-    per-epoch idempotent; re-sealing just relays again)."""
+def _sub_row(id_kp, kw_kp, sub_iid, keywrap_sig) -> dict:
+    return {
+        "instance_id": sub_iid,
+        "identity_public_key": id_kp.public_key.hex(),
+        "keywrap_public_key": kw_kp.public_key.hex(),
+        "keywrap_sig": keywrap_sig,
+    }
+
+
+async def test_a_reconnect_reseals_only_to_subscribers_not_yet_sealed(recon_env):
+    """#5a: every GFS-socket reconnect of a seed-holder re-sealed the key to
+    EVERY subscriber of every space it published — one handoff each, ~140k
+    a day. A subscriber this household already sealed the current epoch to
+    is now skipped; a new one still gets it. (A follower that was offline
+    when its seal went out is repaired by its own reconnect notify, which
+    always re-seals.)"""
     await recon_env["make_space"]("sp-idem", SpaceType.PUBLIC, with_seed=True)
     recon_env["conn_repo"].add_conn("gfs-1")
     recon_env["conn_repo"].publish("gfs-1", "sp-idem")
-
-    id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
+    first = _sub_row(*_subscriber_identity())
     url = "https://gfs-1.example/gfs/spaces/sp-idem/subscribers"
-    recon_env["session"].program(
-        url,
-        200,
-        _subscribers_payload(
-            {
-                "instance_id": sub_iid,
-                "identity_public_key": id_kp.public_key.hex(),
-                "keywrap_public_key": kw_kp.public_key.hex(),
-                "keywrap_sig": keywrap_sig,
-            }
-        ),
+    recon_env["session"].program(url, 200, _subscribers_payload(first))
+
+    await recon_env["svc"].reconcile("gfs-1")
+    assert len(recon_env["gfs"].calls) == 1
+    await recon_env["svc"].reconcile("gfs-1")
+    assert len(recon_env["gfs"].calls) == 1  # was 2: nothing new to seal
+
+    second = _sub_row(*_subscriber_identity())
+    recon_env["session"].program(url, 200, _subscribers_payload(first, second))
+    await recon_env["svc"].reconcile("gfs-1")
+    assert len(recon_env["gfs"].calls) == 2  # only the new subscriber
+
+
+async def test_a_rotated_key_is_sealed_to_every_subscriber_again(recon_env):
+    await recon_env["make_space"]("sp-rot2", SpaceType.PUBLIC, with_seed=True)
+    _kw, _url = _program_one_subscriber(recon_env, "sp-rot2")
+    await recon_env["svc"].reconcile("gfs-1")
+    await recon_env["crypto"].rotate_epoch("sp-rot2")
+    await recon_env["svc"].reconcile_space_everywhere("sp-rot2")
+    assert len(recon_env["gfs"].calls) == 2
+
+
+async def test_a_new_keywrap_key_is_sealed_to_again(recon_env):
+    """Keyed on the key-wrap key too: a follower that re-keyed (a fresh
+    install under the same identity) gets the seal again."""
+    await recon_env["make_space"]("sp-kw", SpaceType.PUBLIC, with_seed=True)
+    recon_env["conn_repo"].add_conn("gfs-1")
+    recon_env["conn_repo"].publish("gfs-1", "sp-kw")
+    id_kp, _kw, sub_iid, _sig = _subscriber_identity()
+    url = "https://gfs-1.example/gfs/spaces/sp-kw/subscribers"
+    for _ in range(2):
+        kw_kp = generate_x25519_keypair()
+        sig = b64url_encode(sign_ed25519(id_kp.private_key, kw_kp.public_key))
+        recon_env["session"].program(
+            url, 200, _subscribers_payload(_sub_row(id_kp, kw_kp, sub_iid, sig))
+        )
+        await recon_env["svc"].reconcile("gfs-1")
+    assert len(recon_env["gfs"].calls) == 2
+
+
+async def test_a_handoff_the_server_refused_is_sealed_again(recon_env):
+    """Only a relayed seal counts: a targeted publish the GFS refused is
+    retried on the next reconnect."""
+    await recon_env["make_space"]("sp-ref", SpaceType.PUBLIC, with_seed=True)
+    _program_one_subscriber(recon_env, "sp-ref")
+    recon_env["gfs"].targeted_answer = False
+    await recon_env["svc"].reconcile("gfs-1")
+    recon_env["gfs"].targeted_answer = True
+    await recon_env["svc"].reconcile("gfs-1")
+    await recon_env["svc"].reconcile("gfs-1")
+    assert len(recon_env["gfs"].targeted) == 2  # refused, then sealed once
+
+
+async def test_a_new_subscriber_notify_spares_the_next_reconcile(recon_env):
+    await recon_env["make_space"]("sp-nf", SpaceType.PUBLIC, with_seed=True)
+    recon_env["conn_repo"].add_conn("gfs-1")
+    recon_env["conn_repo"].publish("gfs-1", "sp-nf")
+    id_kp, kw_kp, sub_iid, sig = _subscriber_identity()
+    await recon_env["svc"].handle(
+        _new_subscriber_frame("sp-nf", sub_iid, id_kp.public_key, kw_kp.public_key, sig)
     )
-
+    recon_env["session"].program(
+        "https://gfs-1.example/gfs/spaces/sp-nf/subscribers",
+        200,
+        _subscribers_payload(_sub_row(id_kp, kw_kp, sub_iid, sig)),
+    )
     await recon_env["svc"].reconcile("gfs-1")
-    await recon_env["svc"].reconcile("gfs-1")
+    assert len(recon_env["gfs"].calls) == 1
 
-    assert len(recon_env["gfs"].calls) == 2  # re-sealed, no crash
+
+async def test_a_followers_own_reconnect_notify_always_reseals(recon_env):
+    """The follower's socket may have been down when its seal went out —
+    delivery is socket-only — so its reconnect notify re-seals even though
+    this household sealed it already."""
+    await recon_env["make_space"]("sp-rc", SpaceType.PUBLIC, with_seed=True)
+    id_kp, kw_kp, sub_iid, sig = _subscriber_identity()
+    for reason in ("subscribe", "reconnect"):
+        await recon_env["svc"].handle(
+            _new_subscriber_frame(
+                "sp-rc", sub_iid, id_kp.public_key, kw_kp.public_key, sig, reason=reason
+            )
+        )
+    assert len(recon_env["gfs"].calls) == 2
 
 
 async def test_reconcile_unknown_gfs_no_crash(recon_env):
