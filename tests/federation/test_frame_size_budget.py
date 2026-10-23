@@ -404,6 +404,46 @@ def test_binary_frame_sizes_stay_within_budget() -> None:
         assert size < text[(case, path)] * 0.85, (case, path)
 
 
+#: Member items to a follower whose hello listed ``space_item_no_cert``: the
+#: GFS leaves the plaintext v1 ``writer_cert`` (279 B of JSON, the server's
+#: own authorization material) out of the frame: 294 B, ~19 % off a 1 KiB-bucket
+#: binary frame (1 512 → 1 218 B). The relay path never carried it.
+BUDGET_NO_FRAME_CERT: dict[str, int] = {
+    "post en": 1220,
+    "post de": 1220,
+    "post cjk": 4300,
+    "post cjk 600": 4300,
+    "post en + link preview": 4300,
+    "comment": 1220,
+}
+
+
+def test_member_frames_without_the_frame_cert_stay_within_budget() -> None:
+    rows = _size_table(PAYLOAD_SUITE_ZLIB)
+    with_cert = {
+        c: s
+        for c, p, _b, s in size_table(PAYLOAD_SUITE_ZLIB, binary=True)
+        if p == "member"
+    }
+    lean = {}
+    for case, path, _bucket, frame in rows:
+        if path != "member":
+            continue
+        parsed = orjson.loads(frame)
+        assert "writer_cert" in parsed
+        del parsed["writer_cert"]
+        raw = encode_binary_frame(parsed)
+        assert raw is not None
+        lean[case] = len(raw)
+    print()
+    for case, size in lean.items():
+        print(f"{case:<26}member  {with_cert[case]:>6} → {size:>6}")
+    assert set(lean) == set(BUDGET_NO_FRAME_CERT)
+    for case, size in lean.items():
+        assert size <= BUDGET_NO_FRAME_CERT[case], (case, size)
+        assert with_cert[case] - size >= 290, case
+
+
 def test_compression_never_needs_a_bigger_bucket() -> None:
     plain = {(c, p): b for c, p, b, _s in size_table()}
     for case, path, bucket, _size in size_table(PAYLOAD_SUITE_ZLIB):

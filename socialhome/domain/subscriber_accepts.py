@@ -45,6 +45,12 @@ ACCEPTS_PAYLOAD_ZLIB1: str = "payload_zlib1"
 #: choice is per connection, so it never rides a subscribe.
 ACCEPTS_WS_BINARY1: str = "ws_binary1"
 
+#: The household takes member items (``space_item``) without the plaintext
+#: ``writer_cert`` the GFS authorized the publish with: it verifies the
+#: cert inside the ciphertext either way, as it does for a strict-mode
+#: frame (which never carries one). A HELLO-only label, per connection.
+ACCEPTS_SPACE_ITEM_NO_CERT: str = "space_item_no_cert"
+
 #: What this household lists on every subscribe — follower and member seats
 #: alike, so the label never tells the GFS which seats are writers'.
 OUR_ACCEPTS: tuple[str, ...] = (
@@ -74,7 +80,11 @@ def seat_bits(accepts: tuple[str, ...]) -> int:
 
 #: What this household lists in its WS hello: the subscribe labels plus
 #: the per-connection ones.
-OUR_HELLO_ACCEPTS: tuple[str, ...] = (*OUR_ACCEPTS, ACCEPTS_WS_BINARY1)
+OUR_HELLO_ACCEPTS: tuple[str, ...] = (
+    *OUR_ACCEPTS,
+    ACCEPTS_WS_BINARY1,
+    ACCEPTS_SPACE_ITEM_NO_CERT,
+)
 
 #: The most labels one subscribe may carry.
 MAX_ACCEPTS_LABELS: int = 16

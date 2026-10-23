@@ -1919,6 +1919,42 @@ The same saving applies to every listed relay (`envelope` up to 191 KiB,
 public moments). The household → GFS publish leg is unchanged: it is one
 copy per post.
 
+### Member items without the frame cert (`space_item_no_cert`)
+
+A trusted-mode member publish carries the plaintext v1 `writer_cert`: the
+GFS verifies it against the pinned space key to authorize the publish. The
+fan-out frame used to forward that copy to every follower, 279 B of JSON in
+every frame. A follower never relied on it: it verifies the cert **inside
+the ciphertext** (the one with the user binding), and compared the outer
+copy with it only when present — a strict-mode frame never carries one.
+
+A household that lists `space_item_no_cert` in its WS hello `accepts` gets,
+**on that socket only**, `space_item` frames without `writer_cert`
+(`GfsWebSocketRegistry`, text and binary alike; live fan-out, the 24 h
+queue drain and cluster-forwarded items all go through it). The GFS still
+verifies the cert on publish, the 24 h queue still keeps it, and a socket
+without the label still gets it. No publisher change, no capability, no
+version bump: an older GFS ignores the label and keeps sending the cert,
+which the household still checks.
+
+**Measured** (`test_frame_size_budget.py`, `BUDGET_NO_FRAME_CERT`, binary
+frames of compressed items): 1 KiB-bucket post or comment **1 512 → 1 218
+B (−19 %)**; 4 KiB-bucket item 4 584 → 4 290 B. The relay path
+(`space_post_public`) never carried a frame cert.
+
+**Planning case.** 10 000 followers × 400 member-published posts a day:
+294 B × 4 M frames = **~1.2 GB a day less** (~6.0 → ~4.9 GB). Cost: none —
+the frame is built per socket already.
+
+**Why not move the inner cert to a reference.** Measured on the same
+fixtures: a 300-character post compresses to 865 B with its inner cert and
+592 B without, and both pad to the smallest (1 KiB) bucket — the wire size
+does not move. Only items between buckets gain (Latin posts of ~550–1 050
+characters, posts with a link preview). Resolving a reference on a miss
+through the GFS would let it link one author's posts by timing, which
+strict mode exists to hide; the preset zlib dictionary reaches the same
+items without new state.
+
 ### Author profiles for followers (v_60)
 
 A GFS follower holds no roster, so every post in a space it follows read

@@ -23,7 +23,9 @@ Hello frame (must arrive within 5 s of upgrade)::
 household listing ``space_key_pull`` asks for a space key when it misses
 one, so its hello triggers no key-repair notifies (Phase 5b-d).
 ``ws_binary1`` in it asks for binary push frames on THIS socket
-(:mod:`socialhome.domain.ws_binary_frame`).
+(:mod:`socialhome.domain.ws_binary_frame`); ``space_item_no_cert`` for
+member items without the plaintext ``writer_cert`` on it
+(:mod:`..ws_registry`).
 
 ``sig`` is ``Ed25519(public_key, f"{instance_id}|{ts}")`` and ``ts`` must
 be within ±300 s of the GFS clock — same convention as §24.11. On
@@ -67,6 +69,7 @@ from aiohttp import WSMsgType, web
 
 from ... import crypto
 from ...domain.subscriber_accepts import (
+    ACCEPTS_SPACE_ITEM_NO_CERT,
     ACCEPTS_SPACE_KEY_PULL,
     ACCEPTS_WS_BINARY1,
     parse_accepts,
@@ -135,7 +138,14 @@ class GfsWebSocketView(web.View):
         fed_repo = self.request.app[K.gfs_fed_repo_key]
         # ``ws_binary1`` (hello only): push frames carrying a ciphertext go to
         # THIS socket as binary frames, ciphertext raw instead of base64.
-        await registry.register(instance_id, ws, binary=ACCEPTS_WS_BINARY1 in accepts)
+        # ``space_item_no_cert`` (hello only): its member items come without
+        # the plaintext writer cert (the follower verifies the inner one).
+        await registry.register(
+            instance_id,
+            ws,
+            binary=ACCEPTS_WS_BINARY1 in accepts,
+            no_frame_cert=ACCEPTS_SPACE_ITEM_NO_CERT in accepts,
+        )
         await fed_repo.upsert_rtc_connection(instance_id, transport="websocket")
 
         # Phase 5b-d — now that this household's socket is up, ask the owner of

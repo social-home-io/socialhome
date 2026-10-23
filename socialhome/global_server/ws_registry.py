@@ -29,6 +29,14 @@ socket is evicted and closed in the background, so the household reconnects
 and drains whatever was queued meanwhile. (The frame may already sit in the
 socket's write buffer and still arrive; receivers drop the duplicate — see
 :mod:`.envelope_relay`.)
+
+Per connection, a household's hello may also list ``space_item_no_cert``:
+its member items (``space_item``) then arrive without the plaintext
+``writer_cert``. That copy is what THIS server verified to authorize the
+publish; the follower verifies the cert inside the ciphertext either way
+(and compares it with the plaintext one only when that is present, as a
+strict-mode frame never carries one), so it is ~280 B of every frame that
+nobody downstream needs. Chosen per socket, like ``ws_binary1``.
 """
 
 from __future__ import annotations
@@ -41,6 +49,7 @@ from typing import Any
 import orjson
 from aiohttp import web
 
+from ..domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 from ..domain.ws_binary_frame import encode_binary_frame
 from .fanout_stats import FanoutStats, frame_kind
 
@@ -70,7 +79,14 @@ def _dumps(payload: Any) -> bytes:
 class GfsWebSocketRegistry:
     """Per-instance registry of live GFS-side WebSocket sessions."""
 
-    __slots__ = ("_binary", "_by_instance", "_closing", "_lock", "fanout_stats")
+    __slots__ = (
+        "_binary",
+        "_by_instance",
+        "_closing",
+        "_lock",
+        "_no_frame_cert",
+        "fanout_stats",
+    )
 
     def __init__(self) -> None:
         self._by_instance: dict[str, web.WebSocketResponse] = {}
@@ -78,6 +94,9 @@ class GfsWebSocketRegistry:
         #: (``ws_binary1`` in its hello) — per connection, so a re-register
         #: without the label drops it.
         self._binary: set[str] = set()
+        #: The instances whose CURRENT socket takes member items without
+        #: the plaintext ``writer_cert`` (``space_item_no_cert``).
+        self._no_frame_cert: set[str] = set()
         #: What this node pushed, by frame kind and size class (admin
         #: overview) — counted only for frames that reached a socket.
         self.fanout_stats = FanoutStats()
@@ -93,16 +112,23 @@ class GfsWebSocketRegistry:
         ws: web.WebSocketResponse,
         *,
         binary: bool = False,
+        no_frame_cert: bool = False,
     ) -> None:
         """Register *ws* for *instance_id*, evicting any prior socket.
-        ``binary``: this socket reads ``ws_binary1`` frames."""
+        ``binary``: this socket reads ``ws_binary1`` frames.
+        ``no_frame_cert``: it takes member items without the plaintext
+        ``writer_cert`` (``space_item_no_cert``)."""
         async with self._lock:
             previous = self._by_instance.get(instance_id)
             self._by_instance[instance_id] = ws
-            if binary:
-                self._binary.add(instance_id)
-            else:
-                self._binary.discard(instance_id)
+            for labels, on in (
+                (self._binary, binary),
+                (self._no_frame_cert, no_frame_cert),
+            ):
+                if on:
+                    labels.add(instance_id)
+                else:
+                    labels.discard(instance_id)
         if previous is not None and previous is not ws and not previous.closed:
             try:
                 await previous.close(
@@ -131,6 +157,7 @@ class GfsWebSocketRegistry:
             if current is ws:
                 self._by_instance.pop(instance_id, None)
                 self._binary.discard(instance_id)
+                self._no_frame_cert.discard(instance_id)
         log.info(
             "gfs.ws.unregister: instance=%s total=%d",
             instance_id,
@@ -143,6 +170,7 @@ class GfsWebSocketRegistry:
             sockets = list(self._by_instance.values())
             self._by_instance.clear()
             self._binary.clear()
+            self._no_frame_cert.clear()
         for ws in sockets:
             if ws.closed:
                 continue
@@ -181,6 +209,7 @@ class GfsWebSocketRegistry:
         ws = self._by_instance.get(instance_id)
         if ws is None or ws.closed:
             return False
+        payload = self._for_socket(instance_id, payload)
         binary = self._binary_frame(instance_id, payload)
         if binary is not None:
             return await self._push(
@@ -203,6 +232,19 @@ class GfsWebSocketRegistry:
             )
             return False
         return await self._push(instance_id, ws, ws.send_str(msg), payload, len(raw))
+
+    def _for_socket(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """*payload* as this socket takes it: a member item without its
+        plaintext ``writer_cert`` when the socket listed
+        ``space_item_no_cert``. A copy — the caller fans the same dict out
+        to every other socket."""
+        if (
+            instance_id in self._no_frame_cert
+            and payload.get("event_type") == SPACE_ITEM_EVENT_TYPE
+            and "writer_cert" in payload
+        ):
+            return {k: v for k, v in payload.items() if k != "writer_cert"}
+        return payload
 
     def _binary_frame(self, instance_id: str, payload: dict[str, Any]) -> bytes | None:
         """The binary form of *payload* for this socket, or ``None`` (text)."""
@@ -288,3 +330,4 @@ class GfsWebSocketRegistry:
             if self._by_instance.get(instance_id) is ws:
                 self._by_instance.pop(instance_id, None)
                 self._binary.discard(instance_id)
+                self._no_frame_cert.discard(instance_id)

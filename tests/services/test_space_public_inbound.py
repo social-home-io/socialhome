@@ -1045,6 +1045,24 @@ async def test_a_member_published_post_with_a_valid_cert_is_persisted(item_env):
     assert item_env["events"][0].origin_instance_id == item_env["author_origin"]
 
 
+async def test_a_member_item_without_the_frame_cert_is_persisted(item_env):
+    """``space_item_no_cert``: the GFS leaves the plaintext v1 cert out of
+    the frame; the inner cert gets every check and is the one that counts."""
+    frame = await _item_frame(item_env)
+    del frame["writer_cert"]
+    await item_env["inbound"].handle(frame)
+    got = await item_env["post_repo"].get("post-1")
+    assert got is not None and got[1].content == "member-published content"
+
+
+@pytest.mark.security
+async def test_without_the_frame_cert_a_bad_inner_cert_still_drops(item_env):
+    frame = await _item_frame(item_env, cert=await _cert(item_env, scope="comment"))
+    del frame["writer_cert"]
+    await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
+
+
 async def test_a_compressed_member_item_is_opened_and_persisted(item_env):
     await item_env["inbound"].handle(await _item_frame(item_env, payload_suite="zlib1"))
     got = await item_env["post_repo"].get("post-1")

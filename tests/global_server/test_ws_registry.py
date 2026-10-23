@@ -346,3 +346,67 @@ async def test_a_dead_binary_socket_is_evicted(registry):
     assert await registry.send("bin", _ITEM) is False
     assert registry.is_connected("bin") is False
     assert "bin" not in registry._binary
+
+
+# ── space_item_no_cert (no plaintext writer cert, per connection) ─────────
+
+_CERT = {
+    "cert_suite": "ed25519",
+    "space_id": "sp",
+    "epoch": 3,
+    "instance_pk": "A" * 43,
+    "scope": "write",
+    "issued_at": 1_790_000_000,
+    "cert_sig": "B" * 86,
+}
+_TRUSTED_ITEM = {**_ITEM, "writer_cert": _CERT}
+
+
+async def test_a_socket_that_asked_gets_member_items_without_the_frame_cert(
+    registry,
+):
+    """The follower verifies the cert inside the ciphertext; the plaintext
+    v1 copy is the server's authorization material, 279 B of every frame.
+    The socket that listed ``space_item_no_cert`` no longer gets it; the
+    other one still does."""
+    lean, full = _FakeWS(), _FakeWS()
+    await registry.register("lean", lean, no_frame_cert=True)
+    await registry.register("full", full)
+    assert await registry.send("lean", _TRUSTED_ITEM)
+    assert await registry.send("full", _TRUSTED_ITEM)
+    assert orjson.loads(lean.sent[0]) == _ITEM
+    assert orjson.loads(full.sent[0]) == _TRUSTED_ITEM
+    assert "writer_cert" in _TRUSTED_ITEM  # the shared frame is untouched
+
+
+async def test_a_binary_lean_socket_gets_the_binary_frame_without_the_cert(registry):
+    ws = _FakeWS()
+    await registry.register("both", ws, binary=True, no_frame_cert=True)
+    assert await registry.send("both", _TRUSTED_ITEM)
+    assert decode_binary_frame(ws.sent_bytes[0]) == _ITEM
+
+
+async def test_only_member_items_lose_the_cert(registry):
+    """Another frame kind keeps every field, whatever it is named."""
+    ws = _FakeWS()
+    await registry.register("lean", ws, no_frame_cert=True)
+    other = {"type": "relay", "event_type": "space_post_public", "writer_cert": 1}
+    assert await registry.send("lean", other)
+    assert orjson.loads(ws.sent[0]) == other
+
+
+async def test_the_cert_choice_follows_the_current_socket(registry):
+    first, second = _FakeWS(), _FakeWS()
+    await registry.register("inst", first, no_frame_cert=True)
+    await registry.register("inst", second)  # reconnect without the label
+    assert await registry.send("inst", _TRUSTED_ITEM)
+    assert orjson.loads(second.sent[0]) == _TRUSTED_ITEM
+    await registry.register("inst", first, no_frame_cert=True)
+    await registry.unregister("inst", first)
+    assert "inst" not in registry._no_frame_cert
+    await registry.register("gone", _FakeWS(broken=True), no_frame_cert=True)
+    assert await registry.send("gone", _TRUSTED_ITEM) is False
+    assert "gone" not in registry._no_frame_cert
+    await registry.register("all", _FakeWS(), no_frame_cert=True)
+    await registry.close_all()
+    assert registry._no_frame_cert == set()
