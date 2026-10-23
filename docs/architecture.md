@@ -18,9 +18,11 @@ Households talk to each other directly, peer-to-peer. A central
 genuinely need a meeting point: public-space discovery, the encrypted
 relay of public / global space content to followers, sealed invite-link
 envelopes (§D2b), and public moments and highlights for people outside
-the mesh. Push notifications come from each person's own household, and
-two paired households signal their WebRTC DataChannel to each other with
-federation events (see [push-relay.md](protocol/push-relay.md)). The GFS sees
+the mesh, including the SDP/ICE signalling of a public highlight's viewers
+(`/gfs/highlight_rtc/*`). Push notifications come from each person's own
+household, and two paired households signal their WebRTC DataChannel to
+each other with federation events (see
+[push-relay.md](protocol/push-relay.md)). The GFS sees
 routing metadata only — never plaintext content, and (since the
 anonymous relay) not even which household relayed a public/global space
 event: `/gfs/publish` is authorized purely by the space-authority
@@ -80,6 +82,7 @@ flowchart LR
     subgraph GFS["GFS (public relay)"]
         G_dir["public-space directory"]
         G_relay["encrypted follower relay"]
+        G_hl["public-highlight signalling<br/>(viewer SDP/ICE)"]
         G_bridge["RelayBridge<br/>(transient, stores nothing)"]
     end
     V_pub["Public guest<br/>(browser)"]
@@ -91,6 +94,8 @@ flowchart LR
     B_app -. "subscribe" .-> G_dir
     A_app -. "space content<br/>(sealed)" .-> G_relay
 
+    V_pub -. "SDP/ICE" .-> G_hl
+    G_hl -. "relay" .-> A_app
     V_pub -- "WebRTC DataChannel (direct)" --> A_pc
     V_pub -. "relay fallback (HTTP)" .-> G_bridge
     A_app -. "framed stream" .-> G_bridge

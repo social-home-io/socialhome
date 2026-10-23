@@ -5,8 +5,9 @@ Social Home is a federated social network. Every household runs a
 directly, peer-to-peer. A **Global Federation Server (GFS)** is only
 consulted for public-space discovery, the encrypted relay of public /
 global space content to followers, sealed invite-link envelopes, and
-public moments and highlights — it never sees private content, sends no
-push and relays no household-to-household WebRTC signalling.
+public moments and highlights (including the WebRTC signalling for a
+public highlight's viewers) — it never sees private content, sends no push
+and relays no household-to-household WebRTC signalling.
 
 > **Higher-level system shape** — identity, three-tier sync, space
 > crypto, resilience — lives in [`../architecture.md`](../architecture.md).
