@@ -4,10 +4,12 @@ Social Home is a federated social network. Every household runs a
 **Household Federation Server (HFS)**; households talk to each other
 directly, peer-to-peer. A **Global Federation Server (GFS)** is only
 consulted for public-space discovery, the encrypted relay of public /
-global space content to followers, sealed invite-link envelopes, and
-public moments and highlights (including the WebRTC signalling for a
-public highlight's viewers) — it never sees private content, sends no push
-and relays no household-to-household WebRTC signalling.
+global space content to followers, sealed household-to-household
+envelopes (invite links, and the relay fallback for paired households),
+and public moments and highlights (including the WebRTC signalling for a
+public highlight's viewers) — it never sees private content and sends no
+push; a household's own WebRTC signalling travels inside its sealed
+federation envelopes, which a GFS may carry only as ciphertext.
 
 > **Higher-level system shape** — identity, three-tier sync, space
 > crypto, resilience — lives in [`../architecture.md`](../architecture.md).
@@ -146,7 +148,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
 - **Apps**
   - [Social Home Apps](./apps.md) — cross-household app-to-app federation via a dedicated `fed-app-v1` binary DataChannel (v_17) with JSON event fallback; AES-256-GCM sealed payloads delivered as `app.message` WS frames.
 - **Relay**
-  - [Push & WebRTC signalling](./push-relay.md) — push comes from each person's own household and DataChannel signalling travels household to household; no GFS in either.
+  - [Push & WebRTC signalling](./push-relay.md) — push comes from each person's own household; DataChannel signalling travels inside the households' sealed federation envelopes, which a GFS may carry only as ciphertext.
 
 ## Conventions
 

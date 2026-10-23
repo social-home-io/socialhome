@@ -10,8 +10,11 @@ shipped that way:
    it already received.
 2. **WebRTC signalling** for the household-to-household DataChannel
    (`fed-v1`) travels as signed federation events between the two paired
-   households (`FEDERATION_RTC_OFFER` / `_ANSWER` / `_ICE`), over the HTTPS
-   inbox or the mesh like any other event. The GFS rendezvous routes that
+   households (`FEDERATION_RTC_OFFER` / `_ANSWER` / `_ICE`), inside their
+   sealed federation envelopes like any other event: over the HTTPS inbox,
+   the mesh, or the GFS relay tier (`/gfs/envelope`, the fallback for paired
+   households), where a GFS carries it only as ciphertext and can't tell it
+   from any other envelope. The GFS rendezvous routes that
    once existed (`/gfs/rtc/*`) were removed without any release calling
    them (`socialhome/global_server/routes/rtc.py`). The only WebRTC the GFS
    brokers is a public highlight's anonymous viewer
@@ -22,14 +25,17 @@ shipped that way:
 - **HFS**: stores its people's push subscriptions, sends their
   notifications, and signals the federation DataChannel to each paired
   household.
-- **GFS**: none of this. What the GFS does is listed in
+- **GFS**: no push, and no signalling of its own between households. It
+  may carry a household's sealed envelopes on its relay tier, signalling
+  included, only as ciphertext. What the GFS does is listed in
   [discovery.md](./discovery.md): the public-space directory, the
   encrypted relay of public / global space content to followers, sealed
-  invite-link envelopes (§D2b), and public moments and highlights.
+  household-to-household envelopes (§D2b invite links, and the relay
+  fallback for paired households), and public moments and highlights.
 
 ## Event types
 
-RTC signalling (household to household):
+RTC signalling (household to household, inside sealed envelopes):
 `FEDERATION_RTC_OFFER`, `FEDERATION_RTC_ANSWER`, `FEDERATION_RTC_ICE`.
 
 Push has no event type of its own. A household turns an event it received
@@ -62,7 +68,7 @@ sequenceDiagram
     autonumber
     participant A as HFS A (offerer)
     participant B as HFS B (answerer)
-    A->>B: FEDERATION_RTC_OFFER (signed event,<br/>HTTPS inbox or mesh)
+    A->>B: FEDERATION_RTC_OFFER (sealed envelope,<br/>HTTPS inbox, mesh or GFS relay)
     B->>B: build answer
     B->>A: FEDERATION_RTC_ANSWER
     par trickle ICE (both directions)

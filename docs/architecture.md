@@ -16,13 +16,14 @@ Each household runs one **Household Federation Server (HFS)**.
 Households talk to each other directly, peer-to-peer. A central
 **Global Federation Server (GFS)** is consulted only for tasks that
 genuinely need a meeting point: public-space discovery, the encrypted
-relay of public / global space content to followers, sealed invite-link
-envelopes (§D2b), and public moments and highlights for people outside
+relay of public / global space content to followers, sealed household-to-
+household envelopes (§D2b invite links, and the relay fallback for paired
+households), and public moments and highlights for people outside
 the mesh, including the SDP/ICE signalling of a public highlight's viewers
 (`/gfs/highlight_rtc/*`). Push notifications come from each person's own
-household, and two paired households signal their WebRTC DataChannel to
-each other with federation events (see
-[push-relay.md](protocol/push-relay.md)). The GFS sees
+household, and two paired households signal their WebRTC DataChannel
+with federation events inside their sealed envelopes, which a GFS may carry
+only as ciphertext (see [push-relay.md](protocol/push-relay.md)). The GFS sees
 routing metadata only — never plaintext content, and (since the
 anonymous relay) not even which household relayed a public/global space
 event: `/gfs/publish` is authorized purely by the space-authority
