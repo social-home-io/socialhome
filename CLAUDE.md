@@ -438,7 +438,7 @@ PR needs ≥1**:
 | `feat` | Features | New user-visible capability |
 | `fix` | Fixes | Bug fix, regression repair, edge-case hardening |
 | `security` | Security | Vulnerability fix, hardening on auth / crypto / federation |
-| `docs` | Docs | Docs-only change |
+| `documentation` | Docs | Docs-only change |
 | `chore` | Other changes | Tooling, devcontainer, CI, dependency bump, no-behaviour refactor |
 
 The label drives the bucket; the PR title shows underneath — write a tight,
