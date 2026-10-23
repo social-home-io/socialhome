@@ -4159,7 +4159,7 @@ def create_app(config: Config | None = None) -> web.Application:
             remote_member_repo=repos.space_remote_member,
         )
         writer_certs.attach_federation(federation_service)
-        relay_coverage.attach_peer_supports(federation_service.peer_supports)
+        relay_coverage.attach_peer_supports(federation_service.space_member_supports)
         if gfs_channels is not None:
             gfs_channels.attach_federation(federation_service)
             gfs_channels.attach_sync_scheduler(app[K.space_sync_scheduler_key])

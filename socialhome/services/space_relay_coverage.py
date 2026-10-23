@@ -100,9 +100,17 @@ class SpaceRelayCoverage:
                 author_instance_id,
                 min_version=FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH,
             ):
+                log.debug(
+                    "relay coverage: %s is below v_57 or unknown — copy kept",
+                    author_instance_id,
+                )
                 return None
             space = await self._spaces.get(space_id)
             if space is None or space.gfs_servers is None:
+                log.debug(
+                    "relay coverage: no owner list for space %s — copy kept",
+                    space_id,
+                )
                 return None
             listed = {k.lower() for k in space.gfs_servers.public_keys()}
             seed = await self._spaces.get_space_seed(space_id)
@@ -127,12 +135,18 @@ class SpaceRelayCoverage:
         self, space_id: str, seed: bytes, listed: set[str], conn: GfsConnection
     ) -> bool:
         if (conn.public_key or "").lower() not in listed:
+            log.debug("relay coverage: %s is not on the owner's list", conn.id)
             return False
         if not (
             await self._gfs.member_publish_trusted_supported(conn)
             and await self._gfs.member_publish_strict_supported(conn)
             and await self._gfs.space_item_followers_supported(conn)
         ):
+            log.debug(
+                "relay coverage: %s did not prove member publish and "
+                "space_item_followers — copy kept",
+                conn.id,
+            )
             return False
         key = (space_id, conn.id)
         now = monotonic()
@@ -140,6 +154,12 @@ class SpaceRelayCoverage:
         if held is not None and now - held[0] < SUMMARY_TTL_S:
             return held[1]
         covered = await self._ask(space_id, seed, conn)
+        log.debug(
+            "relay coverage: %s for space %s — every follower reads space_item: %s",
+            conn.id,
+            space_id,
+            covered,
+        )
         if covered is None:
             return False  # unknown: keep the copy, ask again next time
         if len(self._summaries) >= _MAX_SUMMARIES:

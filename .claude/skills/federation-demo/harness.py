@@ -5799,10 +5799,9 @@ def cmd_gfs_member_publish() -> None:
     #    the post itself to every listed GFS, the GFS proved member publish
     #    and ``space_item_followers``, and every follower there (d) said it
     #    reads ``space_item`` — so a sends NO copy of e's post to that GFS
-    #    (it used to relay it again for older followers). Bookmark a's log
-    #    BEFORE the respawn: a decides as soon as it is up, often before
-    #    ``_wait_ready`` returns.
-    a_off = _log_size("a")
+    #    (it used to relay it again for older followers). A respawn starts a
+    #    fresh ``log.txt``, so a's whole new log is this step's evidence.
+    a_off = 0
     new_pid = _spawn("a", a["port"])
     state["instances"]["a"]["pid"] = new_pid
     _save(state)
