@@ -706,6 +706,32 @@ async def test_client_handler_exception_does_not_kill_loop(fake_gfs, http_sessio
         await client.stop()
 
 
+async def test_on_text_logs_the_received_frame_size_at_debug(caplog):
+    """Each frame's size is logged at DEBUG — the household side of the
+    per-follower cost the GFS counts in its admin overview."""
+    seed, _pub = _gen_keypair()
+    got: list[dict] = []
+
+    async def _relay(frame: dict) -> None:
+        got.append(frame)
+
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-x",
+        signing_key=seed,
+        session_factory=lambda: None,  # never started
+        on_relay=_relay,
+    )
+    raw = json.dumps({"type": "relay", "event_type": "space_item", "payload": "x"})
+    with caplog.at_level(logging.DEBUG, logger="socialhome.services.gfs_ws_client"):
+        await client._on_text(raw)
+    assert got and got[0]["event_type"] == "space_item"
+    assert any(
+        f"type='relay' event='space_item' chars={len(raw)}" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 async def test_on_text_dispatch_covers_every_frame_type():
     """Drive ``_on_text`` directly (no socket) so every dispatch branch
     is exercised deterministically — frame routing, the no-handler drop,

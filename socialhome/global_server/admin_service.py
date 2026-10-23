@@ -99,6 +99,12 @@ class GfsAdminService:
             "clients": {"active": clients_active, "pending": clients_pending},
             "spaces": {"active": spaces_active, "pending": spaces_pending},
             "open_reports": open_reports,
+            # This node's pushes to household sockets since it started.
+            "fanout": (
+                self._ws_registry.fanout_stats.snapshot()
+                if self._ws_registry is not None
+                else None
+            ),
         }
 
     # ── Clients ───────────────────────────────────────────────────────

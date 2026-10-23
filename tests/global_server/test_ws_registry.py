@@ -249,3 +249,24 @@ async def test_a_stalled_send_times_out_returns_false_and_evicts(registry, monke
 
 def test_send_timeout_is_the_documented_value():
     assert ws_registry_mod.WS_SEND_TIMEOUT_S == 10.0
+
+
+# ── fan-out counters ───────────────────────────────────────────────────────────
+
+
+async def test_a_delivered_frame_is_counted_by_kind_and_bytes(registry):
+    ws = _FakeWS()
+    await registry.register("inst-1", ws)
+    frame = {"type": "relay", "event_type": "space_item", "payload": "é" * 100}
+    assert await registry.send("inst-1", frame) is True
+    snap = registry.fanout_stats.snapshot()
+    assert snap["by_kind"] == {
+        "relay:space_item": {"frames": 1, "bytes": len(ws.sent[0].encode())}
+    }
+
+
+async def test_an_undelivered_frame_is_not_counted(registry):
+    await registry.register("inst-1", _FakeWS(broken=True))
+    assert await registry.send("inst-1", {"type": "relay"}) is False
+    assert await registry.send("nobody", {"type": "relay"}) is False
+    assert registry.fanout_stats.snapshot()["total"] == {"frames": 0, "bytes": 0}
