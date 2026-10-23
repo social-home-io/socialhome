@@ -1986,7 +1986,11 @@ forward it unchanged:
   `space_author_profiles_bundle`: the cached items of the space's current
   writers (its roster, followers aside — a removed or departed author is
   never forwarded), the most
-  recently stamped first, **each under the epoch it was published at**,
+  recently stamped first, **each under the epoch it was published at**
+  with a writer cert valid under the space's CURRENT authority key (a cert
+  from before an authority rotation is re-stamped for the item's household
+  at that epoch, `SpaceWriterCertService.current_item_cert`; an item no
+  current cert can carry is left out — a new follower would refuse it),
   sealed to the follower's key-wrap key exactly like the handoff
   (`seal_to_keywrap`, KEM-suite tagged) and authority-signed together with an `issued_at` time (the
   follower refuses a bundle older than an hour, so a server cannot replay

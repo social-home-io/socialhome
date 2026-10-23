@@ -1327,3 +1327,46 @@ async def test_a_bundle_carries_a_signed_issue_time(env):
     issued = datetime.fromisoformat(bundle["payload"]["issued_at"])
     assert abs((datetime.now(UTC) - issued).total_seconds()) < 60
     assert "issued_at" in strip_authority_sig_fields(bundle["payload"])
+
+
+# ── Re-stamping a cached profile's cert (authority rotation) ─────────────
+
+
+class _Certs:
+    """``current_item_cert`` stand-in: the item's own cert, a fresh one, or
+    none, keyed by author."""
+
+    def __init__(self, answers: dict[str, object]) -> None:
+        self.answers = answers
+        self.asked: list[tuple[str, int]] = []
+
+    async def current_item_cert(self, space, item, *, epoch, required_scope):
+        author = item["author_user_id"]
+        self.asked.append((author, epoch))
+        answer = self.answers[author]
+        return item.get("writer_cert") if answer == "keep" else answer
+
+
+async def test_a_bundle_carries_current_certs_and_leaves_out_the_rest(env):
+    """After an authority rotation the cached profiles still hold certs from
+    the old key, which a new follower refuses: the bundle re-stamps them, and
+    leaves out an author no current cert can carry."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    env["gfs"].targeted_answer = True
+    items = [
+        {**_signed_profile("A"), "writer_cert": {"old": "A"}},
+        {**_signed_profile("B"), "writer_cert": {"old": "B"}},
+        {**_signed_profile("C"), "writer_cert": {"current": "C"}},
+    ]
+    env["svc"].attach_author_profiles(_Profiles(items, epoch=4))  # type: ignore[arg-type]
+    certs = _Certs({"uid-A": {"fresh": "A"}, "uid-B": None, "uid-C": "keep"})
+    env["svc"].attach_writer_certs(certs)  # type: ignore[arg-type]
+    kw_kp, _sub = await _subscribe(env)
+    [names] = _opened_parts(env, kw_kp)
+    got = {x["item"]["author_user_id"]: x for x in names["items"]}
+    assert set(got) == {"uid-A", "uid-C"}
+    assert got["uid-A"]["item"]["writer_cert"] == {"fresh": "A"}
+    assert got["uid-C"]["item"]["writer_cert"] == {"current": "C"}
+    assert {e for _a, e in certs.asked} == {4}
+    # The cache itself is untouched.
+    assert items[0]["writer_cert"] == {"old": "A"}
