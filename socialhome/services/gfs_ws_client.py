@@ -33,7 +33,8 @@ import aiohttp
 import orjson
 
 from ..crypto import b64url_encode, sign_ed25519
-from ..domain.subscriber_accepts import OUR_ACCEPTS
+from ..domain.subscriber_accepts import OUR_HELLO_ACCEPTS
+from ..domain.ws_binary_frame import InvalidBinaryFrame, decode_binary_frame
 
 log = logging.getLogger(__name__)
 
@@ -353,6 +354,10 @@ class GfsWebSocketClient:
                         self.last_auth_error = None
                         auth_window_open = False
                         await self._on_text(msg.data)
+                    elif msg.type == aiohttp.WSMsgType.BINARY:
+                        self.last_auth_error = None
+                        auth_window_open = False
+                        await self._on_binary(msg.data)
                     elif msg.type in (
                         aiohttp.WSMsgType.CLOSE,
                         aiohttp.WSMsgType.CLOSING,
@@ -391,14 +396,34 @@ class GfsWebSocketClient:
             return
         if not isinstance(frame, dict):
             return
+        await self._on_frame(frame, size=len(raw), kind="chars")
+
+    async def _on_binary(self, data: bytes) -> None:
+        """A ``ws_binary1`` frame: the ciphertext string is rebuilt exactly
+        (:func:`decode_binary_frame`) BEFORE anything verifies a signature
+        over it, then the frame is dispatched like a text one. A malformed
+        frame is dropped with one line, never a traceback."""
+        try:
+            frame = decode_binary_frame(data)
+        except InvalidBinaryFrame as exc:
+            log.warning(
+                "gfs.ws.client: ignoring malformed binary frame from %s: %s",
+                self._gfs_url,
+                exc,
+            )
+            return
+        await self._on_frame(frame, size=len(data), kind="bytes")
+
+    async def _on_frame(self, frame: dict, *, size: int, kind: str) -> None:
         frame_type = frame.get("type")
         # Received frame size, for measuring what each GFS frame costs a
         # follower (the GFS counts the same per kind in its admin overview).
         log.debug(
-            "gfs.ws.client: frame type=%r event=%r chars=%d from %s",
+            "gfs.ws.client: frame type=%r event=%r %s=%d from %s",
             frame_type,
             frame.get("event_type"),
-            len(raw),
+            kind,
+            size,
             self._gfs_url,
         )
         if frame_type == "highlight_signal":
@@ -534,7 +559,9 @@ class GfsWebSocketClient:
             # space key when we miss one (``space_key_pull``), so the server
             # need not have every owner re-seal on each reconnect. An older
             # server ignores it.
-            "accepts": list(OUR_ACCEPTS),
+            # ``ws_binary1``: push frames carrying a ciphertext may come as
+            # binary frames on this connection (``_on_binary``).
+            "accepts": list(OUR_HELLO_ACCEPTS),
         }
 
 

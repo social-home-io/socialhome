@@ -1837,14 +1837,17 @@ never decrypts anything.
 | Item | Bucket | Relay frame | Member frame |
 |---|---|---|---|
 | Post, 300 characters, English or German | 1 KiB | 1 751 B | 1 833 B |
-| Post, 300 Chinese characters | 1 KiB relay / 4 KiB member | 1 751 B | 5 929 B |
+| Post, 300 Chinese characters | 4 KiB (no gain: sent as JSON) | 5 823 B | 5 905 B |
 | Post, 600 Chinese characters | 4 KiB | 5 847 B | 5 929 B |
 | Post with a link preview | 4 KiB | 5 847 B | 5 929 B |
 | Comment | 1 KiB | — | 1 835 B |
 
-Chinese text compresses less than Latin text. The member copy of a
-300-character Chinese post also binds its item type and target, so it just
-misses 1 KiB.
+Chinese text compresses far less than Latin text: each character is three
+UTF-8 bytes zlib finds little to squeeze, so a 300-character Chinese post
+stays in 4 KiB and the publisher sends no compressed copy. (The first
+measurement used a repeated Chinese passage and wrongly showed the relay
+copy in 1 KiB; the size test now uses non-repeating text and fixed keys,
+so every run measures the same bytes.)
 
 **Cost.** A 300-character post drops from 5.8 KB to 1.75 KB per follower,
 3.3× smaller. The planning case (10 000 followers × 400 posts a day) goes
@@ -1864,6 +1867,57 @@ without checking seats, so an older follower would drop that one item. The
 member-publish routes are not affected: an old node refuses the unknown
 field (400), and the household falls back to JSON. Finishing the rolling upgrade promptly
 keeps this window to minutes.
+
+### Binary frames to followers (`ws_binary1`)
+
+Every follower frame carries its ciphertext as base64url text inside a JSON
+text frame, a third more bytes than the ciphertext itself. A household that
+lists `ws_binary1` in its WS hello `accepts` gets, **on that socket only**,
+a binary frame instead (`domain/ws_binary_frame.py`):
+
+```
+version (1 byte, 1) | header length (u16, big-endian) | header | body
+```
+
+- **header** is the frame's JSON, encoded exactly like the text frame. The
+  ciphertext field is cut to its prefix: the `b64url(nonce):` part of a
+  `nonce:ciphertext` string. One key is added, `bin_path`, which names that
+  field.
+- **body** is the base64url-decoded rest of the field.
+- The household rebuilds the exact string **before** anything verifies a
+  signature over it. Unpadded base64url is deterministic, and the GFS only
+  cuts a field whose decode re-encodes to the same text. So the authority
+  signature, the author signature and the moment signature all verify
+  unchanged, and publishers are untouched.
+- Which field is the ciphertext is an explicit list per frame type
+  (`BINARY_CIPHERTEXT_PATHS`, pinned by a test):
+  - `relay`: `payload.encrypted_payload`, `payload.sealed.ciphertext`, or
+    `payload` itself for a `space_item`;
+  - `envelope`: `sealed.ciphertext`;
+  - `incoming_public_moment`: `payload.ciphertext`.
+- A frame type that is not listed, or a field that is short (under 256
+  characters) or not canonical base64url, goes as text.
+- The choice is per connection. Other sockets keep text frames, nobody falls
+  back, and fan-out costs nothing extra. Each frame keeps today's size cap.
+- A malformed binary frame (unknown version, bad length or path) is dropped
+  with one WARNING line.
+
+**Measured** (`test_frame_size_budget.py`, `BUDGET_BINARY`):
+
+| Frame | Text | Binary |
+|---|---|---|
+| Compressed post or comment, 1 KiB bucket | 1 751 / 1 833 B | 1 450 / 1 512 B (−17 %) |
+| 4 KiB-bucket item (relay / member) | 5 823 / 5 905 B | 4 522 / 4 584 B (−22 %) |
+
+The rest of each frame is the JSON header: the writer cert, signatures and
+ids.
+
+**Planning case.** 10 000 followers × 400 posts a day: ~7 GB → **~5.8 GB a
+day**.
+
+The same saving applies to every listed relay (`envelope` up to 191 KiB,
+public moments). The household → GFS publish leg is unchanged: it is one
+copy per post.
 
 ### Author profiles for followers (v_60)
 

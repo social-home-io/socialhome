@@ -922,7 +922,9 @@ Compressed items (``payload_suite: "zlib1"``): e's first post is fanned
 out compressed (the GFS log's ``gfs.member_publish: space=… suite=zlib1``),
 since the GFS proved ``payload_zlib1`` and every seat there carries the
 label (``gfs-space-post`` asserts the same for a's relay copy:
-``GFS: relaying space_post_public … suite=zlib1``). Last, the step stages an
+``GFS: relaying space_post_public … suite=zlib1``, and that d's socket
+registered for binary frames, ``gfs.ws.register: instance=<d> … binary=True``,
+so the post reached it as a ``ws_binary1`` frame). Last, the step stages an
 older follower: it clears bit 2 of d's seat (``space_subscribers
 .reads_space_item``) in the GFS DB, has e post, and asserts the GFS refused
 the compressed item (e logs ``refused a compressed item``), e sent JSON

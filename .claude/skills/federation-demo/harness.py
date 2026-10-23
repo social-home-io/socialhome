@@ -3384,6 +3384,21 @@ def cmd_gfs_space_post() -> None:
             f"gfs-space-post: the relay was not fanned out compressed: {relayed!r}"
         )
     print("  … relayed compressed (payload_suite zlib1) ✓")
+    # …and to d as a binary frame (``ws_binary1``): d's socket asked for it
+    # in its hello, so the ciphertext travelled raw and d rebuilt the exact
+    # base64url string before verifying the authority signature.
+    d_id = state["instances"]["d"]["instance_id"]
+    binary = [
+        line
+        for line in _gfs_log_lines_matching(f"gfs.ws.register: instance={d_id}")
+        if "binary=True" in line
+    ]
+    if not binary:
+        raise SystemExit(
+            "gfs-space-post: d's GFS socket never registered for binary frames "
+            "(ws_binary1 in its hello)"
+        )
+    print("  … over d's binary socket (ws_binary1), verified and decrypted ✓")
 
     # 4. The OTHER author shape: Alpha's setup admin, whose user_id is
     #    username-anchored rather than uuid4-anchored. Same relay, same

@@ -21,8 +21,9 @@ for the payload-size work (canonical suite, compression, binary frames).
 
 from __future__ import annotations
 
+import hashlib
 import os
-import secrets
+import random
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -35,7 +36,7 @@ from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
     derive_user_id,
-    generate_identity_keypair,
+    ed25519_public_key,
 )
 from socialhome.domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 from socialhome.domain.link_preview import LinkPreview
@@ -47,6 +48,7 @@ from socialhome.domain.space_item import (
     open_item_plaintext,
     seal_item_plaintext,
 )
+from socialhome.domain.ws_binary_frame import encode_binary_frame
 from socialhome.services.gfs_member_publish_service import build_item_plaintext
 from socialhome.services.space_item_author import build_signed_item_inner
 from socialhome.services.space_public_author import build_signed_author_inner
@@ -69,13 +71,22 @@ TEXT_DE = (
     "Tüte mit, wir sind von zehn bis etwa zwei Uhr da. Kaffee geht auf uns, "
     "Kuchen auf euch. Grüße an alle Nachbarn!"
 )[:300]
-TEXT_CJK = (
+#: Chinese text without repetition: a natural opening, then characters drawn
+#: (seeded, so every run measures the same bytes) from the CJK block. Real
+#: Chinese compresses a little better than this, so its numbers are a
+#: ceiling. A repeated passage would compress far better than any real post.
+_CJK_OPENING = (
     "今天早上在菜园里真是太美好了！西红柿终于红了，豆子正沿着新的架子往上爬，"
-    "有人在门口放了一篮李子，还留了一张纸条写着请随便拿。星期六如果你想要的话就带个袋子来，"
-    "我们大概从十点待到两点左右。咖啡我们请客，蛋糕就交给你们了。"
-) * 8
-TEXT_CJK_LONG = TEXT_CJK[:600]
-TEXT_CJK = TEXT_CJK[:300]
+    "有人在门口放了一篮李子，还留了一张纸条写着请随便拿。"
+)
+_CJK_RNG = random.Random(20261023)
+TEXT_CJK_LONG = (
+    _CJK_OPENING
+    + "".join(
+        chr(_CJK_RNG.randrange(0x4E00, 0x6000)) for _ in range(600 - len(_CJK_OPENING))
+    )
+)[:600]
+TEXT_CJK = TEXT_CJK_LONG[:300]
 
 SPACE_ID = "a3f1c2d4e5b60718293a4b5c6d7e8f90"
 EPOCH = 7
@@ -93,16 +104,23 @@ class _World:
     content_key: bytes
 
 
+def _fixed(label: str, n: int = 32) -> bytes:
+    """Deterministic bytes: keys and ids are fixed, so every run (and the
+    text vs binary comparison) measures exactly the same plaintext — a case
+    near a bucket boundary can't flip between runs."""
+    return hashlib.sha256(label.encode()).digest()[:n]
+
+
 def _world() -> _World:
-    space = generate_identity_keypair()
-    author = generate_identity_keypair()
+    space_seed, author_seed = _fixed("space seed"), _fixed("author seed")
+    author_pk = ed25519_public_key(author_seed)
     return _World(
-        space_seed=space.private_key,
-        author_seed=author.private_key,
-        author_pk=author.public_key,
-        author_user_id=derive_user_id(author.public_key, "erin"),
-        origin_instance_id=derive_instance_id(author.public_key),
-        content_key=os.urandom(32),
+        space_seed=space_seed,
+        author_seed=author_seed,
+        author_pk=author_pk,
+        author_user_id=derive_user_id(author_pk, "erin"),
+        origin_instance_id=derive_instance_id(author_pk),
+        content_key=_fixed("content key"),
     )
 
 
@@ -130,7 +148,7 @@ def _cert(world: _World, scope: str = "write"):
 
 def _post(world: _World, text: str, *, preview: bool = False) -> Post:
     return Post(
-        id=secrets.token_hex(16),
+        id=_fixed("post " + text, 16).hex(),
         author=world.author_user_id,
         type=PostType.TEXT,
         created_at=datetime(2026, 10, 23, 9, 30, tzinfo=UTC),
@@ -169,9 +187,9 @@ def _post_inner(world: _World, text: str, *, member: bool, preview: bool = False
 def _comment_inner(world: _World, text: str) -> dict:
     return build_signed_item_inner(
         item_type="comment",
-        item_target=secrets.token_hex(16),
+        item_target=_fixed("comment " + text, 16).hex(),
         space_id=SPACE_ID,
-        post_id=secrets.token_hex(16),
+        post_id=_fixed("post of " + text, 16).hex(),
         author_user_id=world.author_user_id,
         author_username="erin",
         author_pk=world.author_pk,
@@ -238,11 +256,26 @@ def member_frame(
     return orjson.dumps(frame), len(plaintext)
 
 
-def size_table(suite: str = PAYLOAD_SUITE_JSON) -> list[tuple[str, str, int, int]]:
+def size_table(
+    suite: str = PAYLOAD_SUITE_JSON, *, binary: bool = False
+) -> list[tuple[str, str, int, int]]:
     """``(case, path, bucket, frame bytes)`` for every fixture, under
-    ``suite``."""
+    ``suite`` — as the JSON text frame, or with ``binary`` the ``ws_binary1``
+    frame a socket that asked for one receives."""
+    rows = _size_table(suite)
+    if not binary:
+        return [(c, p, b, len(f)) for c, p, b, f in rows]
+    out = []
+    for case, path, bucket, frame in rows:
+        raw = encode_binary_frame(orjson.loads(frame))
+        assert raw is not None, (case, path)
+        out.append((case, path, bucket, len(raw)))
+    return out
+
+
+def _size_table(suite: str) -> list[tuple[str, str, int, bytes]]:
     w = _world()
-    rows: list[tuple[str, str, int, int]] = []
+    rows: list[tuple[str, str, int, bytes]] = []
     for label, text in (
         ("post en", TEXT_EN),
         ("post de", TEXT_DE),
@@ -250,26 +283,26 @@ def size_table(suite: str = PAYLOAD_SUITE_JSON) -> list[tuple[str, str, int, int
         ("post cjk 600", TEXT_CJK_LONG),
     ):
         frame, bucket = relay_frame(w, _post_inner(w, text, member=False), suite)
-        rows.append((label, "relay", bucket, len(frame)))
+        rows.append((label, "relay", bucket, frame))
         frame, bucket = member_frame(
             w, "post", _post_inner(w, text, member=True), suite
         )
-        rows.append((label, "member", bucket, len(frame)))
+        rows.append((label, "member", bucket, frame))
     frame, bucket = relay_frame(
         w, _post_inner(w, TEXT_EN, member=False, preview=True), suite
     )
-    rows.append(("post en + link preview", "relay", bucket, len(frame)))
+    rows.append(("post en + link preview", "relay", bucket, frame))
     frame, bucket = member_frame(
         w, "post", _post_inner(w, TEXT_EN, member=True, preview=True), suite
     )
-    rows.append(("post en + link preview", "member", bucket, len(frame)))
+    rows.append(("post en + link preview", "member", bucket, frame))
     frame, bucket = member_frame(
         w,
         "comment",
         _comment_inner(w, "Count me in, I'll bring a plum cake!"),
         suite,
     )
-    rows.append(("comment", "member", bucket, len(frame)))
+    rows.append(("comment", "member", bucket, frame))
     return rows
 
 
@@ -313,15 +346,16 @@ def test_frame_sizes_stay_within_budget() -> None:
 #: The same cases under ``payload_suite: "zlib1"`` — what a server that
 #: proved ``payload_zlib1`` fans out once every follower there reads it. A
 #: 300-character Latin-script post drops from the 4 KiB to the 1 KiB bucket
-#: (~5.8 KB → ~1.75 KB per follower). Chinese text compresses less: the
-#: relay copy fits 1 KiB, the member copy (its inner also binds the item
-#: type and target) just misses it, as does a post with a link preview.
+#: (~5.8 KB → ~1.75 KB per follower). Chinese text compresses far less
+#: (each character is three UTF-8 bytes of near-random data to zlib): a
+#: 300-character post stays in 4 KiB, as does a post with a link preview —
+#: the publisher then sends no compressed copy at all.
 BUDGET_ZLIB: dict[tuple[str, str], tuple[int, int]] = {
     ("post en", "relay"): (1024, 1760),
     ("post en", "member"): (1024, 1840),
     ("post de", "relay"): (1024, 1760),
     ("post de", "member"): (1024, 1840),
-    ("post cjk", "relay"): (1024, 1760),
+    ("post cjk", "relay"): (4096, 5860),
     ("post cjk", "member"): (4096, 5940),
     ("post cjk 600", "relay"): (4096, 5860),
     ("post cjk 600", "member"): (4096, 5940),
@@ -339,6 +373,35 @@ def test_compressed_frame_sizes_stay_within_budget() -> None:
         want_bucket, max_bytes = BUDGET_ZLIB[(case, path)]
         assert bucket == want_bucket, (case, path, bucket)
         assert size <= max_bytes, (case, path, size)
+
+
+#: ``ws_binary1`` frames of the compressed items (what a follower whose
+#: socket asked for binary frames receives): the ciphertext travels raw
+#: instead of base64: ~17 % off a 1 KiB-bucket frame (1 751 → 1 450 B) and
+#: ~22 % off a 4 KiB one (5 823 → 4 522 B) — the rest is the JSON header.
+BUDGET_BINARY: dict[tuple[str, str], int] = {
+    ("post en", "relay"): 1460,
+    ("post en", "member"): 1520,
+    ("post de", "relay"): 1460,
+    ("post de", "member"): 1520,
+    ("post cjk", "relay"): 4530,
+    ("post cjk", "member"): 4590,
+    ("post cjk 600", "relay"): 4530,
+    ("post cjk 600", "member"): 4590,
+    ("post en + link preview", "relay"): 4530,
+    ("post en + link preview", "member"): 4590,
+    ("comment", "member"): 1520,
+}
+
+
+def test_binary_frame_sizes_stay_within_budget() -> None:
+    rows = size_table(PAYLOAD_SUITE_ZLIB, binary=True)
+    _print_table(rows)
+    text = {(c, p): s for c, p, _b, s in size_table(PAYLOAD_SUITE_ZLIB)}
+    assert {(case, path) for case, path, _b, _s in rows} == set(BUDGET_BINARY)
+    for case, path, _bucket, size in rows:
+        assert size <= BUDGET_BINARY[(case, path)], (case, path, size)
+        assert size < text[(case, path)] * 0.85, (case, path)
 
 
 def test_compression_never_needs_a_bigger_bucket() -> None:
