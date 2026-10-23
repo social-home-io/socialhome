@@ -662,7 +662,7 @@ async def test_the_seen_map_is_bounded(stack, monkeypatch):
 
 async def test_an_entry_expires(stack, monkeypatch):
     clock = [1000.0]
-    monkeypatch.setattr(outbound_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(outbound_mod, "monotonic", lambda: clock[0])
     out, fed, fed_repo, _user_repo = stack
     fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
     await out.relay_inbound(

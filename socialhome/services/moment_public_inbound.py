@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from cryptography.exceptions import InvalidTag
@@ -249,7 +250,7 @@ class MomentPublicInbound:
     def _hold(self, author: str, gen: int, op: str, env: dict, gfs_id: str) -> None:
         """Keep *env* until its key arrives — bounded per generation and in
         all."""
-        now = time.monotonic()
+        now = monotonic()
         for k in list(self._held):
             self._held[k] = [h for h in self._held[k] if now - h[0] < HOLD_FOR_S]
             if not self._held[k]:
@@ -274,7 +275,7 @@ class MomentPublicInbound:
 
     async def _release(self, author: str, gen: int) -> None:
         """Open what was held for (*author*, *gen*) now its key is here."""
-        now = time.monotonic()
+        now = monotonic()
         for at, op, env, gfs_id in self._held.pop((author, gen), []):
             if now - at < HOLD_FOR_S:
                 await self._on_envelope(env, op=op, gfs_id=gfs_id)

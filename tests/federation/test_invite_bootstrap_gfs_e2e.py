@@ -730,6 +730,10 @@ async def test_a_reply_the_relay_refuses_is_logged_on_the_issuer(
     assert result["space_id"] == _space.id
     roster = await b.remote_members.list_for_space(_space.id)
     assert [m.user_id for m in roster] == [a.user_id]
+    # The host registers the fan-out target only once the ACK is on its
+    # way (``_commit_redeem``), in its own handler task — which can still
+    # be running when the redeemer's ``await`` returns. Wait for it.
+    await gfs.drain()
     assert a.instance_id in await b.space_repo.list_member_instances(_space.id)
 
 
