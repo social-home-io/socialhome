@@ -488,33 +488,54 @@ def test_dictionary_frame_sizes_stay_within_budget() -> None:
     assert {(c, p) for c, p, _b, _f in rows} == set(BUDGET_DICT)
 
 
-@pytest.mark.parametrize(
-    ("case", "path", "want"),
-    [
-        # 1 KiB under plain zlib already: the dictionary copy goes too (same
-        # bucket), so its label never hints at the content.
-        ("post en", "member", {"zlib1", "zlib1+dict1"}),
-        # 4 KiB under plain zlib (no gain over JSON), 1 KiB with the
-        # dictionary: only that copy.
-        ("post en + link preview", "member", {"zlib1+dict1"}),
-        ("post en + link preview", "relay", {"zlib1+dict1"}),
-        # Plain zlib saves no bucket over JSON (no zlib1 copy); the dictionary
-        # copy is no larger, so it still goes under its label.
-        ("post cjk", "member", {"zlib1+dict1"}),
-    ],
-)
-def test_which_compressed_copies_are_sealed(case, path, want) -> None:
+def _copies(case: str, path: str) -> tuple[set[str], dict[str, int], int]:
+    """``(suites sealed, their buckets, JSON bucket)`` for a fixture item."""
     w = _world()
     text, preview = {
         "post en": (TEXT_EN, False),
         "post en + link preview": (TEXT_EN, True),
         "post cjk": (TEXT_CJK, False),
+        "post cjk 600": (TEXT_CJK_LONG, False),
     }[case]
     inner = _post_inner(w, text, member=path == "member", preview=preview)
     inner = {**inner, WRITER_CERT_FIELD: _cert(w).to_wire()}
     body = {"item_type": "post", "inner": inner} if path == "member" else inner
     json_len = len(seal_item_plaintext(body) or b"")
-    assert set(compressed_item_plaintexts(body, json_len=json_len)) == want
+    copies = compressed_item_plaintexts(body, json_len=json_len)
+    return set(copies), {s: len(pt) for s, pt in copies.items()}, json_len
+
+
+_CASES = [
+    (case, path)
+    for case in ("post en", "post en + link preview", "post cjk", "post cjk 600")
+    for path in ("member", "relay")
+]
+
+
+@pytest.mark.security
+def test_the_suites_sent_never_depend_on_whether_compression_saves_a_bucket():
+    """The suite label is routing-visible. Items where compression saves a
+    bucket (a Latin post: 4 KiB JSON → 1 KiB; a link preview with the
+    dictionary) and items where it saves none (CJK: 4 KiB either way) get
+    the SAME labels, so the GFS learns nothing about how compressible the
+    content is or what it carries."""
+    saves, saves_none = set(), set()
+    for case, path in _CASES:
+        suites, buckets, json_len = _copies(case, path)
+        assert suites == {"zlib1", "zlib1+dict1"}, (case, path, suites)
+        if min(buckets.values()) < json_len:
+            saves.add((case, path))
+        else:
+            saves_none.add((case, path))
+    # The fixtures really cover both kinds.
+    assert saves and saves_none, (saves, saves_none)
+
+
+def test_a_compressed_copy_is_never_larger_than_its_fallback():
+    for case, path in _CASES:
+        _suites, buckets, json_len = _copies(case, path)
+        assert buckets["zlib1"] <= json_len, (case, path)
+        assert buckets["zlib1+dict1"] <= buckets["zlib1"], (case, path)
 
 
 def test_compression_never_needs_a_bigger_bucket() -> None:
