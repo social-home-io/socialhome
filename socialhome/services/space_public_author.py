@@ -38,9 +38,9 @@ card but never forge or alter it.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
+from ..canonical_json import canonical_bytes
 from ..crypto import (
     b64url_decode,
     b64url_encode,
@@ -161,7 +161,7 @@ def author_signing_bytes(inner: dict) -> bytes:
                 body[k] = value
         else:
             body[k] = inner.get(k)
-    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    canonical = canonical_bytes(body)
     return _AUTHOR_SIG_DOMAIN + canonical
 
 
@@ -274,7 +274,7 @@ def link_preview_signing_bytes(inner: dict) -> bytes:
         "link_preview": inner.get("link_preview"),
         "link_preview_sig_suite": inner.get("link_preview_sig_suite"),
     }
-    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    canonical = canonical_bytes(body)
     return _LINK_PREVIEW_SIG_DOMAIN + canonical
 
 

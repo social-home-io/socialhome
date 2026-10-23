@@ -42,10 +42,10 @@ from __future__ import annotations
 
 import binascii
 import ipaddress
-import json
 import secrets
 from urllib.parse import urlsplit
 
+from .canonical_json import canonical_str
 from .crypto import (
     b64url_decode,
     b64url_encode,
@@ -197,15 +197,13 @@ def proof_signing_bytes(
     ``replaces``) — binding it would fail whenever ``/gfs/info`` and
     ``/gfs/proof`` land on different nodes.
     """
-    body = json.dumps(
+    body = canonical_str(
         {
             "base_url": normalize_gfs_base_url(base_url),
             "gfs_key": gfs_key_hex.strip().lower(),
             "nonce": nonce,
             "suite": suite,
-        },
-        separators=(",", ":"),
-        sort_keys=True,
+        }
     )
     return PROOF_SIGNING_PREFIX + body.encode("utf-8")
 

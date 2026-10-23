@@ -38,8 +38,9 @@ largest bucket), so each one, sealed and base64'd, fits the GFS's 256 KiB
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
+
+import orjson
 
 from .space_author_profile import (
     PROFILE_PICTURE_FIELD,
@@ -82,7 +83,7 @@ class ParsedBundlePart:
 
 
 def _size(value: object) -> int:
-    return len(json.dumps(value).encode("utf-8"))
+    return len(orjson.dumps(value))
 
 
 def build_bundle_parts(space_id: str, entries: list[BundleEntry]) -> list[bytes]:
@@ -149,7 +150,7 @@ def parse_bundle_plaintext(raw: bytes) -> ParsedBundlePart | None:
     part (shape and counts only — every item and picture is verified by
     the caller)."""
     try:
-        body = json.loads(raw)
+        body = orjson.loads(raw)
     except ValueError:
         return None
     if not isinstance(body, dict):

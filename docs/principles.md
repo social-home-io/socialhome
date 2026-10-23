@@ -285,7 +285,7 @@ exactly:**
 
 - **The GFS sees, per envelope: `to_instance`, a timestamp and a size
   bucket.** Nothing else is on the wire. The sealed plaintext is padded to
-  one of 1 / 4 / 16 / 64 / 128 / 191 KiB before sealing, so the blob
+  one of 4 / 16 / 64 / 128 / 191 KiB before sealing, so the blob
   length names a bucket, not the envelope's size — a moderation submission
   and a plain write look alike. The whole §24.11 envelope —
   including the routing fields that are plaintext on every other

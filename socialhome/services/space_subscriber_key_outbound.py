@@ -84,7 +84,6 @@ key import is per-epoch idempotent, so re-sealing is harmless.
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import time
 from collections import OrderedDict, deque
@@ -92,6 +91,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import aiohttp
+import orjson
 
 from ..authority_sig import (
     AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
@@ -567,7 +567,7 @@ class SpaceSubscriberKeyOutbound:
         }
         sealed = seal_to_keywrap(
             recipient_keywrap_pub=keywrap_pub,
-            plaintext=json.dumps(meta).encode("utf-8"),
+            plaintext=orjson.dumps(meta),
         )
         # IDENTITY-FREE WIRE SHAPE: the envelope names nobody. The target is
         # used locally (to pick + verify the key-wrap key we seal to, and for

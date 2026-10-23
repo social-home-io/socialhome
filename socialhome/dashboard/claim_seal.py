@@ -31,17 +31,18 @@ sibling suite: a longer ``epk`` / panel key, same shape.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass, field
 
+import orjson
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from ..canonical_json import canonical_bytes, canonical_str
 from ..crypto import (
     b64url_decode,
     b64url_encode,
@@ -138,9 +139,7 @@ def _shared(private: bytes, public: bytes) -> bytes:
 
 
 def _plaintext(claim: str, url: str) -> bytes:
-    return json.dumps(
-        {"claim": claim, "url": url}, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    return canonical_bytes({"claim": claim, "url": url})
 
 
 def _seal_claim_with(
@@ -168,15 +167,13 @@ def _seal_claim_with(
     suite = PANEL_CLAIM_SUITE_X25519_AESGCM
     key = claim_key(_shared(eph_private, panel_pub), eph_public, panel_pub)
     ct = AESGCM(key).encrypt(nonce, _plaintext(claim, url), claim_aad(suite, panel_pub))
-    return json.dumps(
+    return canonical_str(
         {
             "ct": b64url_encode(ct),
             "epk": b64url_encode(eph_public),
             "nonce": b64url_encode(nonce),
             "suite": suite,
-        },
-        separators=(",", ":"),
-        sort_keys=True,
+        }
     )
 
 
@@ -216,7 +213,7 @@ def open_sealed_claim(
     the key and open it. Any other failure — malformed, wrong key,
     tampered — is one :class:`SealedClaimInvalid` with no detail."""
     try:
-        parsed = json.loads(sealed)
+        parsed = orjson.loads(sealed)
     except (TypeError, ValueError) as exc:
         raise SealedClaimInvalid() from exc
     if not isinstance(parsed, dict):
@@ -235,7 +232,7 @@ def open_sealed_claim(
     try:
         key = claim_key(_shared(panel_private, epk), epk, panel_pub)
         plain = AESGCM(key).decrypt(nonce, ct, claim_aad(str(suite), panel_pub))
-        body = json.loads(plain)
+        body = orjson.loads(plain)
     except (InvalidPanelKey, InvalidTag, ValueError) as exc:
         raise SealedClaimInvalid() from exc
     if not isinstance(body, dict):

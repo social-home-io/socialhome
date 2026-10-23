@@ -13,7 +13,6 @@ The fan-out itself rides the persistent WS — see
 from __future__ import annotations
 
 import base64
-import json
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -22,6 +21,7 @@ import aiohttp
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from ..canonical_json import canonical_bytes
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
 from ..domain.moment_public import (
@@ -542,9 +542,7 @@ class MomentPublicService(ProtectionGateMixin):
 
     def _sign_body(self, body: dict) -> dict:
         signing_key = self._require_signing_key()
-        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
-            "utf-8"
-        )
+        canonical = canonical_bytes(body)
         signed = dict(body)
         signed["signature"] = b64url_encode(sign_ed25519(signing_key, canonical))
         return signed

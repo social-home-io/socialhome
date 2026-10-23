@@ -38,6 +38,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from ..access_log import RedactingAccessLogger
 from ..db import AsyncDatabase
 from ..hardening import install_security_headers
+from ..json_text import dumps_str
 from ..pinned_viewer import load_pinned_viewer
 from . import app_keys as K
 from .addressee import GfsAddressee
@@ -606,7 +607,7 @@ class GfsApp:
             self.config.base_url,
         )
         await self.db.startup()
-        http_session = aiohttp.ClientSession()
+        http_session = aiohttp.ClientSession(json_serialize=dumps_str)
         app[K.gfs_http_session_key] = http_session
 
         # Mirror TOML's admin_password_hash into the DB on first run.

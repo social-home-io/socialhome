@@ -119,7 +119,7 @@ def test_malformed_inputs_return_false(pk_hex, sig):
 def test_module_only_depends_on_the_crypto_primitives():
     """Dependency discipline (mirrors ``socialhome/authority_sig.py``): the
     module is imported by BOTH the GFS process and the household service, so
-    its own imports stay at json + the Ed25519/base64 helpers."""
+    its own imports stay at canonical_json + the Ed25519/base64 helpers."""
     src = pathlib.Path("socialhome/capabilities_sig.py").read_text()
     tree = ast.parse(src)
     modules = set()
@@ -128,7 +128,7 @@ def test_module_only_depends_on_the_crypto_primitives():
             modules.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom):
             modules.add(("." * node.level) + (node.module or ""))
-    assert modules == {"__future__", "json", ".crypto"}
+    assert modules == {"__future__", ".canonical_json", ".crypto"}
 
 
 def test_importing_module_does_not_pull_either_stack():

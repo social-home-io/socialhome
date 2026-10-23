@@ -37,7 +37,6 @@ Depends only on :mod:`socialhome.crypto` and :mod:`socialhome.authority_sig`.
 from __future__ import annotations
 
 import binascii
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -47,6 +46,7 @@ from .authority_sig import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
+from .canonical_json import canonical_bytes
 from .crypto import (
     b64url_decode,
     b64url_encode,
@@ -125,9 +125,7 @@ def _is_int(value: object) -> bool:
 
 def owner_statement_signing_bytes(statement: dict) -> bytes:
     body = {k: v for k, v in statement.items() if k != "owner_statement_sig"}
-    return _PREFIX + json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
-        "utf-8"
-    )
+    return _PREFIX + canonical_bytes(body)
 
 
 def sign_owner_statement(

@@ -10,10 +10,10 @@ a JSON response helper.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
+import orjson
 from aiohttp import web
 
 from ...domain.errors import PayloadTooLargeError
@@ -85,7 +85,7 @@ class GfsBaseView(web.View):
         """:meth:`bounded_raw` + parse as a JSON object (400 otherwise)."""
         raw = await self.bounded_raw(max_bytes)
         try:
-            parsed = json.loads(raw)
+            parsed = orjson.loads(raw)
         except ValueError as exc:
             raise web.HTTPBadRequest(reason=f"Invalid JSON body: {exc}") from exc
         if not isinstance(parsed, dict):

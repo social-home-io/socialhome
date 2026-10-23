@@ -37,21 +37,22 @@ Wire shapes (every one suite-tagged; receivers refuse unknown suites):
   the routing fields so a sealed blob can't be lifted into another delivery;
   ``key_suite`` is :data:`KEY_SUITE_AESGCM_256` (the space content-key tag).
 
-Pure and dependency-light (only ``cryptography`` + :mod:`socialhome.crypto`,
+Pure and dependency-light (only ``cryptography``, ``orjson`` + :mod:`socialhome.crypto`,
 like :mod:`socialhome.authority_sig`), so the content-blind GFS process can
 import the wire shapes without the household stack.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
+import orjson
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .canonical_json import canonical_bytes
 from .crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
 
 #: The one moment-content suite this build speaks: AES-256-GCM, 96-bit
@@ -203,7 +204,7 @@ def seal_body(
         raise ValueError("moment id missing or too long")
     suite = MOMENT_SEAL_SUITE_AESGCM256
     nonce = os.urandom(_NONCE_BYTES)
-    plaintext = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    plaintext = orjson.dumps(body, option=orjson.OPT_SORT_KEYS)
     ct = AESGCM(item_key(step_key, moment_id)).encrypt(
         nonce, plaintext, _aad(author_user_id, key_gen, key_step, moment_id, suite)
     )
@@ -252,7 +253,7 @@ def open_with_item_key(*, key: bytes, envelope: dict[str, Any]) -> dict[str, Any
     plaintext = AESGCM(key).decrypt(
         nonce, ct, _aad(author, gen, step, moment_id, suite)
     )
-    body = json.loads(plaintext)
+    body = orjson.loads(plaintext)
     if not isinstance(body, dict):
         raise TypeError("sealed body is not a JSON object")
     return body
@@ -271,7 +272,7 @@ def key_plaintext(
     *, author_user_id: str, key_gen: int, key_step: int, to: str, key: bytes
 ) -> bytes:
     """The bytes a key delivery seals to the follower's key-wrap key."""
-    return json.dumps(
+    return orjson.dumps(
         {
             "author_user_id": author_user_id,
             "key_gen": key_gen,
@@ -280,9 +281,8 @@ def key_plaintext(
             "key_suite": KEY_SUITE_AESGCM_256,
             "key": b64url_encode(key),
         },
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
+        option=orjson.OPT_SORT_KEYS,
+    )
 
 
 def parse_key_plaintext(
@@ -293,7 +293,7 @@ def parse_key_plaintext(
     blob can't be lifted into another one). Raises :class:`ValueError`,
     :class:`TypeError` (not a JSON object) or
     :class:`UnsupportedMomentSealSuite` otherwise."""
-    body = json.loads(raw)
+    body = orjson.loads(raw)
     if not isinstance(body, dict):
         raise TypeError("sealed key is not a JSON object")
     require_known_key_suite(body.get("key_suite"))
@@ -320,7 +320,7 @@ def key_at_rest_context(author_user_id: str, key_gen: int, *, own: bool) -> byte
 
 def _canonical(body: dict[str, Any]) -> bytes:
     unsigned = {k: v for k, v in body.items() if k != "signature"}
-    return json.dumps(unsigned, separators=(",", ":"), sort_keys=True).encode()
+    return canonical_bytes(unsigned)
 
 
 def sign_wire(signing_key: bytes, body: dict[str, Any]) -> dict[str, Any]:

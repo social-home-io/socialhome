@@ -62,7 +62,6 @@ from __future__ import annotations
 
 import base64
 import hmac
-import json
 import logging
 import time
 import uuid
@@ -73,6 +72,7 @@ from typing import Literal
 
 import aiohttp
 
+from ..canonical_json import canonical_bytes
 from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
 from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.errors import SpaceNotPublishableError, TierChangeRequiredError
@@ -2543,11 +2543,7 @@ class GfsConnectionService:
         pin = place_pin_of(space) if with_place else None
         if pin is not None:
             body["place"] = place_pin_wire(pin)
-        canonical = json.dumps(
-            body,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+        canonical = canonical_bytes(body)
         body["signature"] = b64url_encode(
             sign_ed25519(self._own_signing_key, canonical),
         )
@@ -2631,16 +2627,14 @@ class GfsConnectionService:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
         ts = datetime.now(UTC).isoformat()
-        canonical = json.dumps(
+        canonical = canonical_bytes(
             {
                 "action": "unpublish",
                 "owning_instance": self._own_instance_id,
                 "space_id": space_id,
                 "ts": ts,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+            }
+        )
         body = {
             "owning_instance": self._own_instance_id,
             "ts": ts,
@@ -2837,11 +2831,7 @@ class GfsConnectionService:
         }
         if gfs_token is not None:
             payload["gfs_token"] = gfs_token
-        canonical = json.dumps(
-            payload,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+        canonical = canonical_bytes(payload)
         return b64url_encode(sign_ed25519(self._own_signing_key, canonical))
 
     async def subscribe_to_gfs_space(self, space_id: str, gfs_id: str) -> str:
@@ -2865,16 +2855,14 @@ class GfsConnectionService:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
         ts = datetime.now(UTC).isoformat()
-        canonical = json.dumps(
+        canonical = canonical_bytes(
             {
                 "action": "subscribe",
                 "instance_id": self._own_instance_id,
                 "space_id": space_id,
                 "ts": ts,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+            }
+        )
         body = {
             "action": "subscribe",
             "instance_id": self._own_instance_id,
@@ -2940,16 +2928,14 @@ class GfsConnectionService:
                 "cannot unsubscribe from a GFS space without a wired signing identity",
             )
         ts = datetime.now(UTC).isoformat()
-        canonical = json.dumps(
+        canonical = canonical_bytes(
             {
                 "action": "unsubscribe",
                 "instance_id": self._own_instance_id,
                 "space_id": space_id,
                 "ts": ts,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+            }
+        )
         body = {
             "action": "unsubscribe",
             "instance_id": self._own_instance_id,
@@ -3193,16 +3179,14 @@ class GfsConnectionService:
         if conn is None or not is_path_safe_id(space_id):
             return False
         ts = datetime.now(UTC).isoformat()
-        canonical = json.dumps(
+        canonical = canonical_bytes(
             {
                 "action": "space_key_request",
                 "instance_id": self._own_instance_id,
                 "space_id": space_id,
                 "ts": ts,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+            }
+        )
         body = {
             "instance_id": self._own_instance_id,
             "ts": ts,
@@ -3604,15 +3588,13 @@ class GfsConnectionService:
         if not self._own_instance_id or not self._own_signing_key:
             return None
         ts = datetime.now(UTC).isoformat()
-        canonical = json.dumps(
+        canonical = canonical_bytes(
             {
                 "instance_id": self._own_instance_id,
                 "display_name": display_name,
                 "ts": ts,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+            }
+        )
         sig = b64url_encode(sign_ed25519(self._own_signing_key, canonical))
         return {
             "instance_id": self._own_instance_id,
@@ -3712,11 +3694,6 @@ class GfsConnectionService:
         (logged, never raised). Called by :class:`ReportService` in the
         background; the local report is always the source of truth.
         """
-        import json
-        from datetime import datetime
-
-        from ..crypto import b64url_encode, sign_ed25519
-
         conn = await self._repo.get(gfs_id)
         if conn is None or conn.status != "active":
             return False
@@ -3730,9 +3707,7 @@ class GfsConnectionService:
             "reporter_user_id": reporter_user_id,
             "created_at": datetime.now(UTC).isoformat(),
         }
-        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
-            "utf-8"
-        )
+        canonical = canonical_bytes(body)
         body["signature"] = b64url_encode(
             sign_ed25519(signing_key, canonical),
         )
@@ -3776,10 +3751,6 @@ class GfsConnectionService:
 
         Returns ``True`` on a 2xx response. Logs + drops on any failure.
         """
-        import json
-
-        from ..crypto import b64url_encode, sign_ed25519
-
         conn = await self._repo.get(gfs_id)
         if conn is None or conn.status != "active":
             return False
@@ -3790,11 +3761,7 @@ class GfsConnectionService:
             "message": message,
             "from_instance": from_instance,
         }
-        canonical = json.dumps(
-            body,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+        canonical = canonical_bytes(body)
         body["signature"] = b64url_encode(sign_ed25519(signing_key, canonical))
 
         try:

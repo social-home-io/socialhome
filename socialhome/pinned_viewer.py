@@ -18,12 +18,13 @@ checks it against this manifest and publishes its files.
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
+
+import orjson
 
 from .crypto import b64url_encode
 
@@ -74,7 +75,7 @@ def load_pinned_viewer(path: Path = MANIFEST_PATH) -> PinnedViewer | None:
     GFS-served link, as with ``public_viewer_base_url`` empty.
     """
     try:
-        return parse_manifest(json.loads(path.read_text(encoding="utf-8")))
+        return parse_manifest(orjson.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError) as exc:
         log.warning(
             "pinned highlight viewer manifest %s unusable (%s): public "

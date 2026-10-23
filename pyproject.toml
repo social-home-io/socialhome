@@ -215,6 +215,22 @@ markers = [
     "integration: real DB / real aiohttp client (§27.5)",
 ]
 
+[tool.ruff.lint]
+# ruff's default rules (see the ``ruff`` pin above), plus one banned API.
+extend-select = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# JSON is orjson everywhere; the bytes a signature or a hash covers go
+# through ``socialhome.canonical_json`` — the one module allowed the stdlib
+# ``json`` (orjson can't reproduce ``ensure_ascii`` or stdlib float forms).
+"json".msg = "use orjson; signed or hashed JSON bytes go through socialhome.canonical_json"
+
+[tool.ruff.lint.per-file-ignores]
+"socialhome/canonical_json.py" = ["TID251"]
+# Migrations are frozen history: they keep the code they shipped with.
+"socialhome/migrations/**" = ["TID251"]
+"tests/**" = ["TID251"]
+
 [tool.coverage.run]
 branch = true
 source = ["socialhome"]

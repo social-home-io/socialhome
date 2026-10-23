@@ -88,7 +88,6 @@ owner) everything keeps the pre-v_57 targets.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import secrets
 import time
@@ -98,8 +97,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import aiohttp
+import orjson
 
 from ..authority_sig import AUTHORITY_EVENT_SPACE_EPOCH_NOTICE, sign_authority_event
+from ..canonical_json import canonical_bytes
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.events import (
     SpaceConfigChanged,
@@ -207,7 +208,7 @@ def parse_item_plaintext(plaintext: bytes) -> tuple[str, dict] | None:
     """``(item_type, inner)`` from decrypted bytes, or ``None`` if malformed
     or of a type this build does not carry. The size padding is ignored."""
     try:
-        body = json.loads(plaintext)
+        body = orjson.loads(plaintext)
     except ValueError:
         return None
     if not isinstance(body, dict):
@@ -889,9 +890,7 @@ class GfsMemberPublishService:
                 publish_mode=mode,
                 writer_key_cert=wkc,
             )
-            canonical = json.dumps(
-                payload, separators=(",", ":"), sort_keys=True
-            ).encode("utf-8")
+            canonical = canonical_bytes(payload)
             body = {
                 "owning_instance": self._own_instance_id,
                 "gfs_instance_id": conn.gfs_instance_id,

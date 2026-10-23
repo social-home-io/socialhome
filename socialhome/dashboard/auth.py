@@ -89,7 +89,6 @@ import base64
 import binascii
 import hashlib
 import hmac
-import json
 import logging
 import math
 import re
@@ -100,6 +99,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+import orjson
+
+from ..canonical_json import legacy_json_dumps
 from ..rate_limiter import RateLimiter
 
 if TYPE_CHECKING:
@@ -297,7 +299,7 @@ def _b64decode(text: str) -> bytes | None:
 
 def _parse_payload(body: bytes) -> SessionClaims | None:
     try:
-        data = json.loads(body)
+        data = orjson.loads(body)
     except ValueError:  # covers JSONDecodeError and UnicodeDecodeError
         return None
     if not isinstance(data, dict):
@@ -494,7 +496,7 @@ class DashboardAuth:
             "l": bool(locked),
             "n": session_id or _b64encode(secrets.token_bytes(_NONCE_BYTES)),
         }
-        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        body = legacy_json_dumps(payload, separators=(",", ":")).encode("utf-8")
         sig = hmac.new(secret, body, hashlib.sha256).digest()
         return f"{_b64encode(body)}.{_b64encode(sig)}"
 

@@ -182,12 +182,13 @@ def test_parse_proof_nonce():
 
 def test_module_stays_dependency_light():
     """Both the content-blind GFS and the household import this module, so it
-    may depend only on the stdlib and :mod:`socialhome.crypto`."""
+    may depend only on the stdlib, :mod:`socialhome.crypto` and
+    :mod:`socialhome.canonical_json`."""
     src = pathlib.Path(__file__).parents[1] / "socialhome" / "gfs_proof.py"
     tree = ast.parse(src.read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.level:
-            assert node.module == "crypto", node.module
+            assert node.module in {"crypto", "canonical_json"}, node.module
 
 
 @pytest.mark.parametrize(

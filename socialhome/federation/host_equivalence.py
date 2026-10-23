@@ -37,9 +37,10 @@ reaches this household. Nothing changes for the owner itself.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+
+import orjson
 
 from ..domain.space import SpaceRole
 from ..space_owner_statement import MAX_STATEMENT_AGE_MS
@@ -59,7 +60,7 @@ def owner_statement_current(space: Space, *, now_ms: int | None = None) -> bool:
     if not space.owner_statement:
         return False
     try:
-        held = json.loads(space.owner_statement)
+        held = orjson.loads(space.owner_statement)
         issued_at = int(held["issued_at"])
         same_key = (
             str(held["authority_pk"]).lower()

@@ -37,7 +37,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import json
 import logging
 import re
 import unicodedata
@@ -46,6 +45,8 @@ import weakref
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+
+import orjson
 
 from ..crypto import (
     derive_instance_id,
@@ -9204,7 +9205,7 @@ def space_metadata_for_federation(
     # delegated admin invites can seat the stub under the REAL owner.
     if owner_statement is None and space.owner_statement:
         try:
-            stored = json.loads(space.owner_statement)
+            stored = orjson.loads(space.owner_statement)
         except ValueError:
             stored = None
         owner_statement = stored if isinstance(stored, dict) else None
@@ -9706,7 +9707,7 @@ def _verified_owner_statement(
     except ValueError as exc:
         log.warning("space %s: ignored an owner statement — %s", space_id, exc)
         return None
-    return json.dumps(statement, separators=(",", ":"), sort_keys=True)
+    return orjson.dumps(statement, option=orjson.OPT_SORT_KEYS).decode()
 
 
 def resolve_join_owner(
@@ -9889,7 +9890,7 @@ def seal_join_snapshot(
             "rotated_by": key.get("rotated_by"),
             "sealed_key": sealed,
         }
-    return json.dumps(
+    return orjson.dumps(
         {
             "meta": stored,
             "host_identity_pk": (
@@ -9897,9 +9898,8 @@ def seal_join_snapshot(
             ),
             "received_at_ms": received_at_ms,
             "owner_instance_id": owner_instance_id,
-        },
-        separators=(",", ":"),
-    )
+        }
+    ).decode()
 
 
 def open_join_snapshot(
@@ -9916,7 +9916,7 @@ def open_join_snapshot(
     if not raw:
         return None
     try:
-        snapshot = json.loads(raw)
+        snapshot = orjson.loads(raw)
     except ValueError:
         return None
     meta = snapshot.get("meta") if isinstance(snapshot, dict) else None
@@ -10177,8 +10177,8 @@ async def store_owner_statement(space_repo, space_id: str, statement_json: str) 
         return False
     if current.owner_statement:
         try:
-            held = json.loads(current.owner_statement)
-            new = json.loads(statement_json)
+            held = orjson.loads(current.owner_statement)
+            new = orjson.loads(statement_json)
             same_key = (
                 str(held.get("authority_pk", "")).lower()
                 == str(new["authority_pk"]).lower()

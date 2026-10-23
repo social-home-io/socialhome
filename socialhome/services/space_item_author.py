@@ -30,8 +30,7 @@ Signed fields (every one always present — ``None`` when unused — except
 
 from __future__ import annotations
 
-import json
-
+from ..canonical_json import canonical_bytes
 from ..crypto import (
     b64url_decode,
     b64url_encode,
@@ -89,7 +88,7 @@ def item_signing_bytes(inner: dict) -> bytes:
         if k in _OMITTED_WHEN_ABSENT and value is None:
             continue
         body[k] = value
-    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    canonical = canonical_bytes(body)
     return _ITEM_AUTHOR_SIG_DOMAIN + canonical
 
 

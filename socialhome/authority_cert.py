@@ -40,10 +40,10 @@ the signature and cannot be swapped in transit.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from .canonical_json import canonical_bytes
 from .crypto import (
     b64url_decode,
     b64url_encode,
@@ -120,9 +120,7 @@ def authority_cert_signing_bytes(cert: dict) -> bytes:
     """Canonical, domain-separated bytes the owner signs: the cert without
     ``cert_sig``, sorted keys, compact separators."""
     body = {k: v for k, v in cert.items() if k != "cert_sig"}
-    return _CERT_PREFIX + json.dumps(
-        body, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    return _CERT_PREFIX + canonical_bytes(body)
 
 
 def sign_authority_cert(

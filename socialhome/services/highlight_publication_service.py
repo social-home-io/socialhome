@@ -11,7 +11,7 @@ HTTP-signed publish / revoke / unpublish exchange with the GFS — the
 WebRTC streaming layer arrives in PR2 (``HighlightSignalingHandler``).
 
 Per :class:`GfsConnectionService`, every body is canonicalised
-(``json.dumps(sort_keys=True, separators=(",",":"))``) and signed with
+(:func:`~socialhome.canonical_json.canonical_bytes`) and signed with
 the local instance's Ed25519 key. The signature lands in a
 ``"signature"`` field appended to the body; the GFS-side
 ``_rtc_authenticate`` middleware strips and verifies it.
@@ -19,13 +19,13 @@ the local instance's Ed25519 key. The signature lands in a
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
 from typing import Protocol
 
 import aiohttp
 
+from ..canonical_json import canonical_bytes
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
 from ..domain.errors import CodedError
@@ -431,9 +431,7 @@ class HighlightPublicationService(ProtectionGateMixin):
             raise HighlightPublicationError(
                 "HighlightPublicationService used before attach_identity",
             )
-        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
-            "utf-8"
-        )
+        canonical = canonical_bytes(body)
         signed = dict(body)
         signed["signature"] = b64url_encode(sign_ed25519(self._signing_key, canonical))
         return signed

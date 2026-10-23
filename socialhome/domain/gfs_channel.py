@@ -87,10 +87,10 @@ process.
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 
+from ..canonical_json import canonical_bytes
 from .gfs_member_publish import (
     GFS_PUBLISH_MODES,
     MAX_NONCE_CHARS,
@@ -176,7 +176,7 @@ def valid_channel_id(value: object) -> str:
 def canonical(body: dict) -> bytes:
     """Canonical JSON (sorted keys, compact) — the encoding every signature
     in this module covers."""
-    return json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return canonical_bytes(body)
 
 
 def _is_int(value: object) -> bool:

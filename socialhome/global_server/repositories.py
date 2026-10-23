@@ -17,7 +17,6 @@ business logic.
 
 from __future__ import annotations
 
-import json
 import time
 from typing import Any, Protocol, runtime_checkable
 
@@ -1532,14 +1531,14 @@ def _dump_cert(cert: dict | None) -> str | None:
     """Canonical JSON for the stored cert (stable for the CAS compare)."""
     if cert is None:
         return None
-    return json.dumps(cert, separators=(",", ":"), sort_keys=True)
+    return orjson.dumps(cert, option=orjson.OPT_SORT_KEYS).decode()
 
 
 def _load_cert(raw: object) -> dict | None:
     if not isinstance(raw, str) or not raw:
         return None
     try:
-        value = json.loads(raw)
+        value = orjson.loads(raw)
     except ValueError:
         return None
     return value if isinstance(value, dict) else None

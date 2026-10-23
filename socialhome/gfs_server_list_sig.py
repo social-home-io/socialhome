@@ -24,7 +24,8 @@ check — this module only answers "did the owner sign exactly this".
 from __future__ import annotations
 
 import binascii
-import json
+
+import orjson
 
 from .crypto import (
     b64url_decode,
@@ -60,7 +61,7 @@ def gfs_server_list_signing_bytes(
     body = {
         "space_id": space_id,
         "owner_instance_id": owner_instance_id,
-        "servers": json.loads(servers_json),
+        "servers": orjson.loads(servers_json),
         "issued_at": issued_at,
         "owner_pk": owner_pk,
         "gfs_servers_sig_suite": suite,

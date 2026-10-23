@@ -16,9 +16,10 @@ Scope:
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
+
+import orjson
 
 from ..db import AsyncDatabase
 from ..domain.post import (
@@ -942,7 +943,7 @@ def _decode_stamps(raw: object) -> dict[str, list]:
     if not isinstance(raw, str) or not raw:
         return {}
     try:
-        data = json.loads(raw)
+        data = orjson.loads(raw)
     except ValueError:
         return {}
     if not isinstance(data, dict):
@@ -975,4 +976,4 @@ def _encode_stamps(stamps: dict[str, list]) -> str:
     for keys in by_user.values():
         _evict(keys, MAX_REACTION_STAMPS_PER_USER)
     _evict(list(stamps), MAX_REACTION_STAMPS_PER_POST)
-    return json.dumps(stamps, ensure_ascii=False, sort_keys=True)
+    return orjson.dumps(stamps, option=orjson.OPT_SORT_KEYS).decode()

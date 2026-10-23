@@ -43,10 +43,10 @@ below v_38 at all (it might relay it).
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..canonical_json import canonical_utf8_bytes
 from ..crypto import (
     b64url_decode,
     b64url_encode,
@@ -140,12 +140,7 @@ def moment_origin_signing_bytes(
     if carries_no_relay(payload):
         signed[NO_RELAY_FIELD] = payload[NO_RELAY_FIELD]
         domain = _DOMAIN_NO_RELAY
-    return domain + json.dumps(
-        signed,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
+    return domain + canonical_utf8_bytes(signed)
 
 
 def sign_moment_origin(

@@ -26,10 +26,11 @@ so a signature made with the old key fails everywhere automatically.
 
 from __future__ import annotations
 
-import json
 import logging
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
+
+import orjson
 
 from ..authority_cert import (
     InvalidAuthorityCert,
@@ -118,7 +119,7 @@ def owner_statement_via(federation: object, space: Space) -> dict | None:
     if not space.owner_statement:
         return None
     try:
-        stored = json.loads(space.owner_statement)
+        stored = orjson.loads(space.owner_statement)
     except ValueError:
         return None
     return stored if isinstance(stored, dict) else None

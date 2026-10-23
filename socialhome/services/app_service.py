@@ -22,7 +22,6 @@ import asyncio
 import hashlib
 import inspect
 import io
-import json
 import logging
 import shutil
 import tarfile
@@ -32,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiofiles.os
+import orjson
 
 from ..domain.apps import (
     _VALID_MIN_AGES,
@@ -577,7 +577,7 @@ class AppService(BusPublisherMixin):
         entry = await self._repo.kv_get(app_id, user_id, key)
         if entry is None:
             raise KeyError(key)
-        return json.loads(entry.value_json)
+        return orjson.loads(entry.value_json)
 
     async def store_list(self, app_id: str, user_id: str) -> dict[str, object]:
         """Return all key→value pairs in the per-user store as a parsed dict.
@@ -589,7 +589,7 @@ class AppService(BusPublisherMixin):
         """
         await self._require_enabled_app(app_id, user_id)
         return {
-            e.key: json.loads(e.value_json)
+            e.key: orjson.loads(e.value_json)
             for e in await self._repo.kv_list(app_id, user_id)
         }
 
@@ -617,7 +617,7 @@ class AppService(BusPublisherMixin):
                 f"Key length {len(key)} exceeds maximum {APP_KV_MAX_KEY_LEN}"
             )
 
-        value_json = json.dumps(value)
+        value_json = orjson.dumps(value).decode()
         if len(value_json.encode("utf-8")) > APP_KV_MAX_VALUE_BYTES:
             raise AppQuotaExceededError(
                 f"Serialised value size exceeds maximum {APP_KV_MAX_VALUE_BYTES} bytes"
@@ -717,8 +717,8 @@ class AppService(BusPublisherMixin):
         manifest_path = dest / "manifest.json"
         try:
             manifest_text = manifest_path.read_text(encoding="utf-8")
-            return json.loads(manifest_text)
-        except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+            return orjson.loads(manifest_text)
+        except (FileNotFoundError, OSError, orjson.JSONDecodeError) as exc:
             raise AppIntegrityError(
                 f"Invalid or missing manifest.json in bundle: {exc}"
             ) from exc

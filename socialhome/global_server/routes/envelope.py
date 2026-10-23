@@ -7,9 +7,9 @@ aiohttp surface over it.
 
 from __future__ import annotations
 
-import json
 import logging
 
+import orjson
 from aiohttp import web
 
 from .. import app_keys as K
@@ -55,7 +55,7 @@ class EnvelopeRelayView(GfsBaseView):
         relay = self.svc(K.gfs_envelope_relay_key)
         raw = await self.bounded_raw(ENVELOPE_MAX_BODY_BYTES)
         try:
-            parsed = json.loads(raw)
+            parsed = orjson.loads(raw)
         except ValueError as exc:
             raise web.HTTPBadRequest(reason=f"Invalid JSON body: {exc}") from exc
         try:

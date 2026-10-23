@@ -29,12 +29,13 @@ moment.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
+
+import orjson
 
 from ..crypto import b64url_encode
 from ..domain.errors import CodedError
@@ -130,7 +131,9 @@ class MomentPublicShareService:
                     item_key, associated_data=_context(moment.id)
                 ),
                 media_by_gfs=(
-                    json.dumps(media_by_gfs, sort_keys=True) if media_by_gfs else None
+                    orjson.dumps(media_by_gfs, option=orjson.OPT_SORT_KEYS).decode()
+                    if media_by_gfs
+                    else None
                 ),
             )
         )
@@ -254,7 +257,7 @@ class MomentPublicShareService:
             the GFS refused it.
         """
         by_gfs: dict[str, dict] = (
-            json.loads(share.media_by_gfs) if share.media_by_gfs else {}
+            orjson.loads(share.media_by_gfs) if share.media_by_gfs else {}
         )
         if gfs_id in by_gfs:
             return by_gfs[gfs_id]
@@ -269,7 +272,9 @@ class MomentPublicShareService:
             raise ShareLinkUnavailableError()
         self._media.remember(moment.author_user_id, moment.id, gfs_id, prepared)
         by_gfs[gfs_id] = prepared.body
-        await self._shares.set_media(moment.id, json.dumps(by_gfs, sort_keys=True))
+        await self._shares.set_media(
+            moment.id, orjson.dumps(by_gfs, option=orjson.OPT_SORT_KEYS).decode()
+        )
         log.info(
             "moment_public.share: moment %s's file sealed again for %s",
             moment.id,

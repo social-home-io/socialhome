@@ -78,6 +78,7 @@ from ..domain.timetable import (
     TimetableValidationError,
 )
 from ..domain.user import PersonSummary
+from ..json_text import dumps_str
 from ..media_signer import sign_media_urls_in
 from ..peer_url import InvalidPeerUrlError
 from ..repositories.page_repo import PageLockError, PageNotFoundError
@@ -273,7 +274,7 @@ class BaseView(web.View):
             sanitised = sanitise_for_api(data)
         else:
             sanitised = data
-        return web.json_response(sanitised, status=status)
+        return web.json_response(sanitised, status=status, dumps=dumps_str)
 
     def _queued(self, item: SpaceModerationItem) -> web.Response:
         """202 for a write that went to the space moderation queue (§4.3

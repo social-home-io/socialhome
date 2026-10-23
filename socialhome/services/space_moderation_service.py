@@ -37,12 +37,13 @@ household that holds no content-authority seat.
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
+
+import orjson
 
 from ..domain.events import (
     SpaceConfigChanged,
@@ -222,7 +223,7 @@ def item_payload_snapshot(item: SpaceModerationItem) -> dict | None:
     if not item.current_snapshot:
         return None
     try:
-        value = json.loads(item.current_snapshot)
+        value = orjson.loads(item.current_snapshot)
     except TypeError, ValueError:
         return None
     return value if isinstance(value, dict) else None
@@ -575,7 +576,7 @@ class SpaceModerationService(BusPublisherMixin):
         if self._federated is None:
             return False
         try:
-            space_id = str(json.loads(entry.payload_json).get("space_id") or "")
+            space_id = str(orjson.loads(entry.payload_json).get("space_id") or "")
         except TypeError, ValueError:
             return False
         space = await self._spaces.get(space_id) if space_id else None

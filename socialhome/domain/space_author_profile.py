@@ -39,10 +39,13 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-import json
 import re
 from dataclasses import dataclass
 from urllib.parse import quote
+
+import orjson
+
+from ..canonical_json import canonical_utf8_str, legacy_json_dumps
 
 #: Largest picture a profile carries (bytes of WebP).
 PROFILE_PICTURE_MAX_BYTES: int = 24 * 1024
@@ -150,7 +153,7 @@ def author_picture_url(space_id: str, user_id: str, picture_hash: str) -> str:
 
 def profile_rev(display_name: str, bio: str | None, picture_hash: str | None) -> str:
     """A short digest of the profile — changes when any part changes."""
-    body = json.dumps(
+    body = legacy_json_dumps(
         [display_name, bio, picture_hash], separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
     return hashlib.sha256(body).hexdigest()[:16]
@@ -162,16 +165,13 @@ def encode_profile_content(
     """``(content, profile_rev)`` for the signed item ``content`` — the
     picture by its hash only (the bytes go in the sidecar)."""
     rev = profile_rev(display_name, bio, picture_hash)
-    content = json.dumps(
+    content = canonical_utf8_str(
         {
             "display_name": display_name,
             "bio": bio,
             "picture_hash": picture_hash,
             "profile_rev": rev,
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-        ensure_ascii=False,
+        }
     )
     return content, rev
 
@@ -183,7 +183,7 @@ def decode_profile_content(content: object) -> AuthorProfile | None:
     if not isinstance(content, str):
         return None
     try:
-        body = json.loads(content)
+        body = orjson.loads(content)
     except ValueError:
         return None
     if not isinstance(body, dict):
@@ -224,7 +224,10 @@ def stored_profile_inner(inner: dict) -> dict | None:
     :data:`MAX_PROFILE_ITEM_BYTES` without the picture."""
     kept = {k: v for k, v in inner.items() if k in PROFILE_ITEM_KEYS}
     bare = {k: v for k, v in kept.items() if k != PROFILE_PICTURE_FIELD}
-    if len(json.dumps(bare, separators=(",", ":")).encode()) > MAX_PROFILE_ITEM_BYTES:
+    if (
+        len(legacy_json_dumps(bare, separators=(",", ":")).encode())
+        > MAX_PROFILE_ITEM_BYTES
+    ):
         return None
     return kept
 

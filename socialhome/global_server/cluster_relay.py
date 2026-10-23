@@ -71,7 +71,6 @@ instance ids of the same cluster's own sockets.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import time
@@ -80,6 +79,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from ..canonical_json import canonical_str
 from ..moment_public_seal import MOMENT_FRAME_TYPES
 from .envelope_relay import (
     ENVELOPE_INSTANCE_ID_RE,
@@ -219,7 +219,7 @@ SettleCallback = Callable[[frozenset[str]], None]
 def wire_size(value: object) -> int:
     """Bytes *value* takes in a signed ``/cluster/sync`` frame (the same
     canonical encoding :meth:`ClusterService._signed_frame` uses)."""
-    return len(json.dumps(value, separators=(",", ":"), sort_keys=True))
+    return len(canonical_str(value))
 
 
 def _valid_key(raw: object) -> bool:

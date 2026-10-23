@@ -37,7 +37,6 @@ import asyncio
 import hashlib
 import hmac
 import ipaddress
-import json
 import logging
 import re
 import secrets
@@ -46,6 +45,8 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
+
+import orjson
 
 from ..domain.household_dashboard import (
     IDLE_RETURN_CHOICES,
@@ -248,7 +249,7 @@ def _settings_to_json(settings: DashboardSettings) -> str:
     data["people"] = {
         uid: {"show": p.show, "picture": p.picture} for uid, p in settings.people
     }
-    return json.dumps(data, sort_keys=True)
+    return orjson.dumps(data, option=orjson.OPT_SORT_KEYS).decode()
 
 
 def _settings_from_json(raw: str | None) -> DashboardSettings:
@@ -257,7 +258,7 @@ def _settings_from_json(raw: str | None) -> DashboardSettings:
     if raw is None:
         return DashboardSettings()
     try:
-        data = json.loads(raw)
+        data = orjson.loads(raw)
     except ValueError:
         log.warning("stored dashboard settings are not valid JSON — using defaults")
         return DashboardSettings()
@@ -343,7 +344,7 @@ def _displays_from_json(raw: str | None) -> tuple[DashboardDisplay, ...]:
     if raw is None:
         return ()
     try:
-        data = json.loads(raw)
+        data = orjson.loads(raw)
     except ValueError:
         log.warning("stored dashboard displays are not valid JSON — none paired")
         return ()
@@ -361,7 +362,7 @@ def _displays_from_json(raw: str | None) -> tuple[DashboardDisplay, ...]:
 
 
 def _displays_to_json(displays: tuple[DashboardDisplay, ...]) -> str:
-    return json.dumps([_display_to_dict(d) for d in displays])
+    return orjson.dumps([_display_to_dict(d) for d in displays]).decode()
 
 
 def _token_hash(raw: str) -> str:
@@ -765,7 +766,7 @@ class DashboardSettingsService:
             "expires_at": issued_at + SETUP_TOKEN_TTL_SECONDS,
         }
         async with self._lock:
-            await self._repo.set(KEY_SETUP_TOKEN, json.dumps(record))
+            await self._repo.set(KEY_SETUP_TOKEN, orjson.dumps(record).decode())
         return raw
 
     async def consume_setup_token(self, raw: str, *, now: float | None = None) -> bool:
@@ -778,7 +779,7 @@ class DashboardSettingsService:
             if stored is None:
                 return False
             try:
-                record = json.loads(stored)
+                record = orjson.loads(stored)
                 expected = record["hash"]
                 expires_at = float(record["expires_at"])
                 if not isinstance(expected, str):

@@ -51,13 +51,15 @@ Pure: no I/O, no crypto, no logging.
 
 from __future__ import annotations
 
-import json
 import re
 import unicodedata
 from collections.abc import Collection
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+import orjson
+
+from ..canonical_json import canonical_str
 from ..peer_url import is_private_host, validate_peer_url
 from .errors import WrongTypeError
 
@@ -132,7 +134,7 @@ def _is_int(value: object) -> bool:
 
 def canonical_json(value: object) -> str:
     """Sorted keys, compact separators — the form that is signed."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return canonical_str(value)
 
 
 @dataclass(slots=True, frozen=True)
@@ -314,7 +316,7 @@ class SignedGfsServerList:
 
     def to_wire(self) -> dict:
         return {
-            "servers": json.loads(self.servers_json),
+            "servers": orjson.loads(self.servers_json),
             "issued_at": self.issued_at,
             "owner_pk": self.owner_pk,
             "gfs_servers_sig_suite": self.gfs_servers_sig_suite,
@@ -327,7 +329,7 @@ class SignedGfsServerList:
         """The usable entries and how many were dropped (see
         :func:`gfs_servers_from_wire`)."""
         servers, dropped = gfs_servers_from_wire(
-            json.loads(self.servers_json), own_routes=own_routes
+            orjson.loads(self.servers_json), own_routes=own_routes
         )
         return servers or (), dropped
 
@@ -337,7 +339,7 @@ class SignedGfsServerList:
         OWNER matching its own choice back to its connections (the key is
         the trust anchor; an id or URL may have moved since)."""
         keys: list[str] = []
-        for entry in json.loads(self.servers_json)[:MAX_GFS_SERVERS]:
+        for entry in orjson.loads(self.servers_json)[:MAX_GFS_SERVERS]:
             key = entry.get("public_key") if isinstance(entry, dict) else None
             if (
                 isinstance(key, str)
@@ -360,7 +362,7 @@ def signed_gfs_server_list_from_column(text: str | None) -> SignedGfsServerList 
     if text is None:
         return None
     try:
-        return SignedGfsServerList.from_wire(json.loads(text))
+        return SignedGfsServerList.from_wire(orjson.loads(text))
     except ValueError:
         return None
 

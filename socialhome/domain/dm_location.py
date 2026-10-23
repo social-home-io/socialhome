@@ -25,10 +25,11 @@ local API; an inbound event carrying it is refused).
 
 from __future__ import annotations
 
-import json
 import math
 import unicodedata
 from dataclasses import dataclass
+
+import orjson
 
 from .errors import WrongTypeError
 
@@ -57,20 +58,14 @@ class DmLocation:
 
     def to_content(self) -> str:
         """Canonical compact JSON for ``ConversationMessage.content``."""
-        return json.dumps(
+        return orjson.dumps(
             {
                 "lat": self.lat,
                 "lon": self.lon,
                 "label": self.label,
                 "accuracy_m": self.accuracy_m,
-            },
-            separators=(",", ":"),
-            ensure_ascii=False,
-        )
-
-
-def _reject_constant(name: str) -> float:
-    raise ValueError(f"location coordinate must be finite, got {name}")
+            }
+        ).decode()
 
 
 def _coord(raw: object, name: str, limit: float) -> float:
@@ -113,12 +108,14 @@ def _accuracy(raw: object) -> int | None:
 
 
 def parse_location_content(content: str) -> DmLocation:
-    """Parse + validate + round a location message's ``content``."""
+    """Parse + validate + round a location message's ``content``. orjson
+    refuses ``NaN`` / ``Infinity`` outright, so no coordinate parses to a
+    non-finite float."""
     if not isinstance(content, str) or len(content) > _MAX_RAW_LEN:
         raise ValueError("location content must be a short JSON object")
     try:
-        data = json.loads(content, parse_constant=_reject_constant)
-    except json.JSONDecodeError as exc:
+        data = orjson.loads(content)
+    except orjson.JSONDecodeError as exc:
         raise ValueError("location content must be a JSON object") from exc
     if not isinstance(data, dict):
         raise WrongTypeError("location content must be a JSON object")

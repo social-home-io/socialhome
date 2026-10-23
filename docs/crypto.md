@@ -105,6 +105,23 @@ under one still needs the prime-order part's private key.
 - **Vulnerable to Shor's algorithm:** Ed25519 (signatures), X25519
   (key agreement), P-256 ECDSA (VAPID).
 
+### Canonical JSON
+
+Most signed shapes below sign "canonical JSON": sorted keys, compact
+separators (`,` and `:`), and ASCII only — every non-ASCII character as a
+`\uXXXX` escape (an emoji as its surrogate pair), floats in Python's
+`repr` form (`5e-05`, `1e+16`). A verifier rebuilds these bytes from the
+parsed fields, so both sides must produce them exactly.
+`socialhome/canonical_json.py` is the one place that does:
+`canonical_bytes` / `canonical_str` for that form, `canonical_utf8_*` for
+the few shapes first signed with raw UTF-8 (the moment origin signature,
+the page version hash, the author-profile item), and `legacy_json_dumps`
+for the remaining pre-existing shapes with other arguments. Everything
+else in the code uses orjson, which cannot produce this form (no
+`ensure_ascii`, different small-float text); the federation envelope,
+the space sync stream and pairing were born orjson and sign orjson bytes.
+Golden vectors in `tests/test_canonical_json.py` pin the bytes.
+
 ## Where each primitive is used
 
 **Identity** — every instance mints an Ed25519 keypair at first start

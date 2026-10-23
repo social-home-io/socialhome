@@ -130,9 +130,8 @@ def encode(header: dict, payload: bytes = b"") -> bytes:
     body = bytes(payload)
     # Canonical: sorted keys, compact, UTF-8. ``orjson.dumps`` already
     # returns UTF-8 bytes (no ``ensure_ascii`` escaping, always compact),
-    # so ``OPT_SORT_KEYS`` reproduces the previous
-    # ``json.dumps(sort_keys=True, separators=(",",":"), ensure_ascii=False)``
-    # output byte-for-byte.
+    # so ``OPT_SORT_KEYS`` reproduces the previous stdlib sorted-keys,
+    # compact, ``ensure_ascii=False`` output byte-for-byte.
     header_bytes = orjson.dumps(header, option=orjson.OPT_SORT_KEYS)
     return (
         struct.pack(">I", len(header_bytes))

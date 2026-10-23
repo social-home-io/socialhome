@@ -94,7 +94,6 @@ Every cryptographic wire shape here is suite-tagged:
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -332,7 +331,7 @@ def seal_bootstrap_envelope(
             "substitution)",
         )
     signed = sign_bootstrap_body(body, identity_seed=identity_seed)
-    plaintext = json.dumps(signed).encode("utf-8")
+    plaintext = orjson.dumps(signed)
     if len(plaintext) > MAX_INNER_BYTES:
         raise BootstrapEnvelopeTooLarge(
             f"bootstrap body is {len(plaintext)} bytes (> {MAX_INNER_BYTES})",
@@ -396,7 +395,7 @@ def unseal_envelope_body(
     if len(plaintext) > MAX_INNER_BYTES:
         raise ValueError("bootstrap body too large")
     try:
-        body = json.loads(plaintext)
+        body = orjson.loads(plaintext)
     except Exception as exc:
         raise ValueError(f"bootstrap body is not JSON: {exc}") from exc
     if not isinstance(body, dict):

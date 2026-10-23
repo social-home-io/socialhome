@@ -137,6 +137,9 @@ PR-only and verify-before-claiming gates still hold for anything that lands.
 - Python 3.14+. `match/case` for event dispatch.
 - Type hints on all public methods. `str | None`, not `Optional[str]`.
 - `log = logging.getLogger(__name__)` at module level — never `print()`.
+- **JSON is orjson.** Bytes a signature or a hash covers go only through
+  `socialhome/canonical_json.py` (the one module allowed stdlib `json`;
+  ruff `TID251` bans it elsewhere). aiohttp hooks take `json_text.dumps_str`.
 - **All imports at file top** — never inside a function/method. Only
   exception: `if TYPE_CHECKING:` for circular-import type annotations. If a
   top-level import is circular, restructure or use `TYPE_CHECKING`.

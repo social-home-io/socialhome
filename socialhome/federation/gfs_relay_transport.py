@@ -128,8 +128,14 @@ RELAY_MAX_BODY_BYTES: int = 320 * 1024
 
 #: Sealed-plaintext sizes a relayed envelope is padded up to, so the GFS
 #: learns the bucket and not the size. The item ladder
-#: (:data:`~socialhome.domain.space_item.ITEM_SIZE_BUCKETS`, 1 / 4 / 16 /
-#: 64 / 128 KiB) plus one rung at 191 KiB: the largest round size whose
+#: (:data:`~socialhome.domain.space_item.ITEM_SIZE_BUCKETS`) from 4 KiB up
+#: (4 / 16 / 64 / 128 KiB) plus one rung at 191 KiB. No 1 KiB rung: a plain
+#: space write's compact (orjson) envelope fits in 1 KiB while a moderation
+#: submission of the same post (item + snapshot + the author's signed inner)
+#: does not, so a 1 KiB rung would tell the relay "this post went to the
+#: moderators" by bucket alone. Under the stdlib encoding every envelope was
+#: over 1 KiB anyway, so 4 KiB has always been the floor in practice. 191 KiB
+#: is the largest round size whose
 #: seal every receiver opens — ``unseal_envelope_body`` refuses a
 #: ciphertext string over ``MAX_SEALED_BLOB_BYTES`` (256 KiB of base64,
 #: i.e. ~192 KiB of plaintext) before the AEAD. Pinned by
@@ -141,7 +147,7 @@ RELAY_MAX_BODY_BYTES: int = 320 * 1024
 #: envelopes is ~11 MiB — well under the 64 MiB
 #: ``ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT``; the byte cap still binds only
 #: for top-bucket frames, exactly as it did for large frames before.
-RELAY_SIZE_BUCKETS: tuple[int, ...] = (*ITEM_SIZE_BUCKETS, 191 * 1024)
+RELAY_SIZE_BUCKETS: tuple[int, ...] = (*ITEM_SIZE_BUCKETS[1:], 191 * 1024)
 
 #: Cheap pre-seal bound on the envelope JSON, so an oversize frame costs a
 #: length compare instead of a JSON pad + AES-GCM pass over a megabyte. A

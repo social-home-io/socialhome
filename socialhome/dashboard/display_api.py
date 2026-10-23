@@ -64,7 +64,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping
@@ -232,7 +231,7 @@ async def _json_object(request: web.Request) -> dict[str, object] | None:
     if not raw.strip():
         return {}
     try:
-        body = json.loads(raw)
+        body = orjson.loads(raw)
     except ValueError:
         return None
     return body if isinstance(body, dict) else None

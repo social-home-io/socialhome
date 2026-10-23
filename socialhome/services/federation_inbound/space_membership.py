@@ -8,10 +8,11 @@ publishes a local domain event so the admin UI sees the change.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+
+import orjson
 
 from ...domain.events import (
     RemoteSpaceCreated,
@@ -304,7 +305,7 @@ class SpaceMembershipInboundHandlers:
         except ValueError as exc:
             log.warning("owner statement for %s refused — %s", space_id, exc)
             return
-        statement_json = json.dumps(statement, separators=(",", ":"), sort_keys=True)
+        statement_json = orjson.dumps(statement, option=orjson.OPT_SORT_KEYS).decode()
         pinned = (
             str(space.identity_public_key or "").lower(),
             space.authority_key_epoch,

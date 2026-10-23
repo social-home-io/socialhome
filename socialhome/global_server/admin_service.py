@@ -14,6 +14,7 @@ import uuid
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
+from ..canonical_json import canonical_bytes
 from ..crypto import b64url_decode, verify_ed25519
 from .domain import GfsAppeal, GfsFraudReport
 
@@ -555,13 +556,7 @@ def verify_report_signature(
     the ``/gfs/report`` route after it looks up the reporter's public
     key in ``client_instances``.
     """
-    import json
-
-    canonical = json.dumps(
-        body_without_sig,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
+    canonical = canonical_bytes(body_without_sig)
     try:
         raw_key = bytes.fromhex(public_key_hex)
         raw_sig = b64url_decode(signature)

@@ -48,11 +48,12 @@ retires the writer key with it.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+
+import orjson
 
 from ..crypto import b64url_decode, derive_instance_id, ed25519_public_key
 from ..domain.federation_capabilities import FederationCapability
@@ -562,7 +563,7 @@ class SpaceWriterCertService:
             log.warning("writer key for space %s refused: %s", space_id, exc)
             return False
         wrapped = self._kek.encrypt(
-            json.dumps(grant.to_wire(), sort_keys=True).encode("utf-8"),
+            orjson.dumps(grant.to_wire(), option=orjson.OPT_SORT_KEYS),
             associated_data=self._writer_key_aad(space_id, grant.epoch),
         )
         stored = await self._keys.set_writer_key(space_id, grant.epoch, wrapped)
@@ -596,7 +597,7 @@ class SpaceWriterCertService:
             raw = self._kek.decrypt(
                 wrapped, associated_data=self._writer_key_aad(space_id, epoch)
             )
-            grant = WriterKeyGrant.from_wire(json.loads(raw))
+            grant = WriterKeyGrant.from_wire(orjson.loads(raw))
             if grant.epoch != epoch:
                 return None
             return verify_writer_key_grant(
@@ -667,7 +668,9 @@ class SpaceWriterCertService:
             )
             return False
         stored = await self._keys.set_writer_cert(
-            space_id, cert.epoch, json.dumps(cert.to_wire(), sort_keys=True)
+            space_id,
+            cert.epoch,
+            orjson.dumps(cert.to_wire(), option=orjson.OPT_SORT_KEYS).decode(),
         )
         if not stored:
             log.info(
@@ -687,7 +690,7 @@ class SpaceWriterCertService:
         if space is None:
             return None
         try:
-            cert = WriterCert.from_wire(json.loads(raw))
+            cert = WriterCert.from_wire(orjson.loads(raw))
             verify_writer_cert(
                 cert,
                 space_pubkey=bytes.fromhex(space.identity_public_key),

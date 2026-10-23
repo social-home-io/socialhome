@@ -25,6 +25,7 @@ import json
 from collections import deque
 from datetime import UTC, datetime
 
+import orjson
 import pytest
 
 from socialhome.authority_sig import (
@@ -1228,7 +1229,7 @@ async def test_names_come_first_and_pictures_follow_in_padded_parts(env):
         f"uid-A{i}" for i in range(6)
     ]
     for part in parts:
-        size = len(json.dumps(part).encode())
+        size = len(orjson.dumps(part))
         assert size in ITEM_SIZE_BUCKETS
 
 
