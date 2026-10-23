@@ -1867,3 +1867,93 @@ async def test_a_failing_quiet_check_is_not_quiet(encoder):
 async def test_without_watermarks_nothing_is_quiet(encoder):
     svc = _roster_provider(encoder)
     assert await svc.is_quiet(_FakeSession(sync_mode="incremental")) is False
+
+
+# ─── Step 16: a member household streams only its own people's content ──
+
+
+def _content_provider(encoder) -> SpaceSyncService:
+    ours, theirs = "u-ours", "u-hosts"
+    exporters = {
+        "posts": _FakeExporter(
+            "posts", [{"id": "p-1", "author": ours}, {"id": "p-2", "author": theirs}]
+        ),
+        "comments": _FakeExporter(
+            "comments",
+            [{"id": "c-1", "author": theirs}, {"id": "c-2", "author": ours}],
+        ),
+        "pages": _FakeExporter(
+            "pages",
+            [
+                {"id": "pg-1", "created_by": theirs},
+                {"id": "pg-2", "created_by": ""},  # creator unknown: kept
+            ],
+        ),
+        "stickies": _FakeExporter(
+            "stickies",
+            [{"id": "s-1", "created_by": ours}, {"id": "s-2", "author": theirs}],
+        ),
+        "gallery": _FakeExporter(
+            "gallery",
+            [
+                {"id": "a-1", "kind": "album", "owner_user_id": ours},
+                {"id": "a-2", "kind": "album", "owner_id": theirs},
+                {"id": "i-1", "uploaded_by": theirs},
+                {"id": "i-2", "uploader": ours},
+            ],
+        ),
+        "bazaar": _FakeExporter(
+            "bazaar",
+            [
+                {"post_id": "p-1", "seller_user_id": ours},
+                {"post_id": "p-2", "seller_user_id": theirs},
+            ],
+        ),
+        # A removal: a moderator household may remove anyone's row, and the
+        # receiver judges that itself — never narrowed.
+        "posts_deleted": _FakeExporter("posts_deleted", [{"id": "p-9"}]),
+    }
+    return SpaceSyncService(
+        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
+        exporters=exporters,
+        sig_suite="ed25519",
+    )
+
+
+@pytest.mark.parametrize("authority", [False, True])
+async def test_a_member_household_streams_only_its_own_peoples_content(
+    encoder, authority
+):
+    """Every receiver takes from a household that isn't the host only the
+    rows its own people wrote (``receiver._admit``: ``acts_for``). A plain
+    member household mirrors the whole space, so it streamed every
+    household's rows to every co-member, all refused. The host still
+    streams everything."""
+    svc = _content_provider(encoder)
+
+    async def _authority(_space_id: str) -> bool:
+        return authority
+
+    async def _ours(_space_id: str) -> set[str]:
+        return {"u-ours"}
+
+    svc.attach_roster_authority(_authority, own_members=_ours)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    ids = {
+        resource: [r.get("id") or r.get("post_id") for r in rows]
+        for resource, rows in _records(session).items()
+    }
+    if authority:
+        assert ids["posts"] == ["p-1", "p-2"]
+        assert ids["gallery"] == ["a-1", "a-2", "i-1", "i-2"]
+        return
+    assert ids == {
+        "posts": ["p-1"],
+        "comments": ["c-2"],
+        "pages": ["pg-2"],
+        "stickies": ["s-1"],
+        "gallery": ["a-1", "i-2"],
+        "bazaar": ["p-1"],
+        "posts_deleted": ["p-9"],
+    }

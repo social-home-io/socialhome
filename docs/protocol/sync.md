@@ -356,8 +356,22 @@ nor a seed-holding delegated admin (a possible trusted inviter, see
 mirrors the host's members (a host stream lands there), whose rows and
 pictures every receiver refuses from it. Its own people's `members` rows
 still go because they carry the picture resets only their household may
-make (see "Receiver side" below). Its content still streams. The session shape changes with
-the resource set, so the first session after the upgrade is a full one.
+make (see "Receiver side" below). The session shape changes with the
+resource set, so the first session after the upgrade is a full one.
+
+Its **content** goes the same way (step 16, `provider._OWN_CONTENT_OWNERS`):
+it mirrors the whole space, but every receiver adds a row from it only
+when it speaks for the row's maker (`receiver._admit`: `acts_for`). So it
+streams only its own people's rows: posts and comments by `author`, task
+lists, tasks, pages and calendar events by `created_by`, stickies by
+`author` / `created_by`, gallery albums by owner and items by uploader,
+and bazaar listings by seller. A record that names no maker is kept, and
+the receiver judges it as before. Removals (`*_deleted`), zones,
+timetables, schedules and the chat are not narrowed, because their own
+rules (a moderator household may remove anyone's row, zones are an admin
+household's) are the receiver's to apply. The host and a seed-holding
+delegated admin still stream every row. No record shape changes, so the
+watermark shape is unchanged.
 
 A `member_pictures` record's bytes are never stored as sent: the receiver
 re-encodes them (`media/profile_picture.py:reencode_peer_picture` — decode,

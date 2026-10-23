@@ -449,8 +449,9 @@ async def test_a_quiet_space_streams_nothing_either_way(houses):
     nothing, so what H streamed to C does not bounce back for ever."""
     h, c = houses
     pids, _comment = await _baseline(h, c)
-    # C's first stream to H: full (no watermark) — H's posts, as C holds them.
-    assert _ids(await _c_to_h(h, c), "posts") == set(pids)
+    # C's first stream to H: full (no watermark) — but a member household
+    # streams only its own people's rows (step 16), so none of H's posts.
+    assert _ids(await _c_to_h(h, c), "posts") == set()
     await _posts(h).edit(pids[0], "touched", space_id=SPACE)
     await _h_to_c(h, c)
     # C stored the edit after its last snapshot, so it relays it once …
@@ -1046,6 +1047,15 @@ async def test_a_record_whose_author_is_not_seated_here_yet_streams_again(houses
     await _c_to_h(h, c)  # C's first stream to H (full): sets C's watermark
     assert not any(_content(await _c_to_h(h, c)).values())
     dora = "u-dora"
+    # Dora is C's own: a local user seated in the space there.
+    await c[db_key].enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        (dora, dora, dora),
+    )
+    await c[db_key].enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,'member')",
+        (SPACE, dora),
+    )
     pid = mint_owner_bound_id(SPACE_POST_KIND, space_id=SPACE, owner_user_id=dora)
     await _write_post(c, pid, dora, "hello from Dora")
 
@@ -1064,14 +1074,15 @@ async def test_a_record_whose_author_is_not_seated_here_yet_streams_again(houses
 
 
 async def test_a_record_refused_by_rule_does_not_hold_the_stream(houses):
-    """A user H knows — its own — is a refusal, not a race: the stream stays
-    clean and the record is not streamed again."""
+    """A user H knows — its own — is a refusal, not a race. Since step 16 the
+    record does not even leave C: a member household streams only its own
+    people's rows, so nothing is sent, refused, or held."""
     h, c = houses
     await _c_to_h(h, c)
     pid = _pid(AUTHOR)  # H's own user: C may not author for her
     await _write_post(c, pid, AUTHOR, "forged")
     first = await _c_to_h(h, c)
-    assert _ids(first, "posts") == {pid}
+    assert _ids(first, "posts") == set()
     assert await _post_row(h, pid) is None
     assert not any(_content(await _c_to_h(h, c)).values())
 

@@ -33,6 +33,7 @@ from ....domain.federation import (
 from ....domain.federation_capabilities import FederationCapability
 from .exporter import (
     RESOURCE_ORDER,
+    BatchedExporter,
     ChunkBuilder,
     ConditionalExporter,
     IncrementalExporter,
@@ -135,40 +136,102 @@ _MEMBER_ONLY_RESOURCES: frozenset[str] = frozenset(
 )
 
 
-class _OwnPeopleOnly:
-    """A resource narrowed to this household's own people (by ``user_id``)."""
+def _user_of(record: dict[str, Any]) -> str | None:
+    return str(record.get("user_id") or "")
 
-    __slots__ = ("_inner", "_own", "resource")
+
+def _first_of(*fields: str) -> Callable[[dict[str, Any]], str | None]:
+    """The owner is the first of *fields* the record carries; a record
+    naming none is kept (``None``) — the receiver judges it itself."""
+
+    def _owner(record: dict[str, Any]) -> str | None:
+        for name in fields:
+            value = record.get(name)
+            if value:
+                return str(value)
+        return None
+
+    return _owner
+
+
+def _gallery_owner(record: dict[str, Any]) -> str | None:
+    if record.get("kind") == "album":
+        return _first_of("owner_user_id", "owner_id")(record)
+    return _first_of("uploaded_by", "uploader")(record)
+
+
+#: The content a plain member household streams only for its own people
+#: (step 16): each resource's record → the user who made it, the person
+#: ``receiver._admit`` requires the provider to speak for (``acts_for``)
+#: before it adds the row. Removals, zones, timetables, schedules and the
+#: chat are not here: their own rules (a moderator household may remove
+#: anyone's row, an admin household owns zones…) are the receiver's.
+_OWN_CONTENT_OWNERS: dict[str, Callable[[dict[str, Any]], str | None]] = {
+    "posts": _first_of("author"),
+    "comments": _first_of("author"),
+    "task_lists": _first_of("created_by"),
+    "tasks": _first_of("created_by"),
+    "tasks_archived": _first_of("created_by"),
+    "pages": _first_of("created_by"),
+    "stickies": _first_of("author", "created_by"),
+    "calendar": _first_of("created_by"),
+    "gallery": _gallery_owner,
+    "bazaar": _first_of("seller_user_id"),
+}
+
+
+class _OwnPeopleOnly:
+    """A resource narrowed to this household's own people: a record is kept
+    when its owner (``owner_of``, by default its ``user_id``) is one of them,
+    or when it names none."""
+
+    __slots__ = ("_inner", "_own", "_owner_of", "resource")
 
     def __init__(
         self,
         inner: ResourceExporter,
         own: Callable[[str], Awaitable[set[str]]],
+        owner_of: Callable[[dict[str, Any]], str | None] = _user_of,
     ) -> None:
         self._inner = inner
         self._own = own
+        self._owner_of = owner_of
         self.resource = inner.resource
+
+    def _keep(self, rows: list[dict[str, Any]], own: set[str]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            owner = self._owner_of(r)
+            if owner is None or owner in own:
+                out.append(r)
+        return out
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
         own = await self._own(space_id)
-        return [
-            r
-            for r in await self._inner.list_records(space_id)
-            if str(r.get("user_id") or "") in own
-        ]
+        return self._keep(await self._inner.list_records(space_id), own)
+
+    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        """The inner exporter's pages, narrowed the same way."""
+        own = await self._own(space_id)
+        inner = self._inner
+        if not isinstance(inner, BatchedExporter):
+            yield self._keep(await inner.list_records(space_id), own)
+            return
+        async for batch in inner.iter_batches(space_id):
+            yield self._keep(batch, own)
 
     async def iter_changed(
         self, space_id: str, since: int
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        """The inner exporter's changed pictures (migration 0122), narrowed
-        the same way."""
+        """The inner exporter's changed rows, narrowed the same way."""
         own = await self._own(space_id)
         inner = self._inner
         if not isinstance(inner, IncrementalExporter):
-            yield await self.list_records(space_id)
+            async for batch in self.iter_batches(space_id):
+                yield batch
             return
         async for batch in inner.iter_changed(space_id, since):
-            yield [r for r in batch if str(r.get("user_id") or "") in own]
+            yield self._keep(batch, own)
 
 
 #: The resources with no change stamp, which a session used to stream
@@ -362,6 +425,24 @@ class SpaceSyncService:
         self._member_gate = gate
 
     async def _exporter_for(
+        self, resource: str, session: SyncSessionRecord
+    ) -> ResourceExporter | None:
+        """The exporter for ``resource``, shaped for this requester and —
+        on a plain member household — narrowed to its own people's content
+        (:data:`_OWN_CONTENT_OWNERS`, step 16)."""
+        exporter = await self._shaped_exporter(resource, session)
+        owner_of = _OWN_CONTENT_OWNERS.get(resource)
+        if (
+            exporter is None
+            or owner_of is None
+            or self._own_members is None
+            or self._roster_authority is None
+            or await self._roster_authority(session.space_id)
+        ):
+            return exporter
+        return _OwnPeopleOnly(exporter, self._own_members, owner_of)
+
+    async def _shaped_exporter(
         self, resource: str, session: SyncSessionRecord
     ) -> ResourceExporter | None:
         """The exporter for ``resource``, shaped for this requester.
