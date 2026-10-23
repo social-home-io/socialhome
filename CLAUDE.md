@@ -621,6 +621,12 @@ silently wrong rather than just "unknown"):
    (what v_N changed, what an older peer's fallback is).
 5. Update the demo harness in `.claude/skills/federation-demo/` so `verify`
    asserts the new version round-trips.
+6. If v_N changes what a space sync stream carries or what its receiver
+   takes (a new resource, a record field a receiver now stores, a gate in
+   `sync/space/provider.py`), add N to `SYNC_RECORD_LINES` in
+   `federation/sync/space/watermark.py`. That gives a household crossing it
+   one full stream; any other bump keeps every sync watermark (a tripwire
+   test fails on an unlisted provider gate).
 
 Per-peer feature-flag sets on top of the integer are deferred until there's
 real evidence of selective deployments, asymmetric support, or forks — a
