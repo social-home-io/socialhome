@@ -73,7 +73,7 @@ import functools
 import hashlib
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from cryptography.exceptions import InvalidTag
@@ -119,6 +119,7 @@ from ..writer_cert import verify_writer_users
 from .gfs_member_publish_service import parse_item_plaintext
 from .inbound_media_store import local_media_ref, local_media_refs
 from .link_preview_service import wire_link_preview
+from .space_crypto_service import MissingEpochKey
 from .space_item_author import (
     UnsupportedItemAuthorSigSuite,
     verify_signed_item_inner,
@@ -140,11 +141,17 @@ if TYPE_CHECKING:
     )
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
+    from .pending_decrypts_cache import PendingDecryptsCache
     from .space_authority_pin import AuthorityPinRefresher
     from .space_crypto_service import SpaceContentEncryption
     from .space_mentions import SpaceMentionResolver
 
 log = logging.getLogger(__name__)
+
+#: The most relayed frames held for a missing space key at once (#5b),
+#: oldest dropped first. A follower needs a handful: the frames of one
+#: rotation it was offline for.
+RELAY_KEY_WAIT_MAX_FRAMES: int = 64
 
 
 class SpacePublicInbound:
@@ -155,8 +162,10 @@ class SpacePublicInbound:
         "_bus",
         "_crypto",
         "_items",
+        "_key_pull",
         "_mentions",
         "_own_instance_id",
+        "_pending_decrypts",
         "_pending_parents",
         "_pin_refresher",
         "_posts",
@@ -199,6 +208,48 @@ class SpacePublicInbound:
         #: Holds an item whose post (or parent comment) has not landed here
         #: yet and re-runs its frame when it does. ``None`` drops instead.
         self._pending_parents: PendingParentBuffer | None = None
+        #: #5b — asks a server that seats us for a space key we miss, and
+        #: holds the frame until that key lands. ``None``: dropped.
+        self._key_pull: Callable[[str], Awaitable[bool]] | None = None
+        self._pending_decrypts: PendingDecryptsCache | None = None
+
+    def attach_key_pull(
+        self,
+        pull: Callable[[str], Awaitable[bool]],
+        pending: PendingDecryptsCache,
+    ) -> None:
+        """Wire the #5b key pull: a frame under an epoch we hold no key for
+        is held in *pending* (replayed on :class:`SpaceContentKeyImported`)
+        and *pull* asks for the key (``GfsSpaceMirrorService
+        .request_space_key`` — rate-limited, only where we hold a seat)."""
+        self._key_pull = pull
+        self._pending_decrypts = pending
+
+    async def _await_key(
+        self, space_id: str, epoch: int, replay: Callable[[], Awaitable[None]]
+    ) -> None:
+        """Hold *replay* until *space_id*'s *epoch* key lands, and ask for
+        it. Fail-soft: a failed request still leaves the frame held (a key
+        that arrives another way replays it).
+
+        Only for an epoch AFTER the newest key we hold (or with none held):
+        the owner seals its current key, so an older missing epoch would
+        never come — and the frame epoch is plaintext, so a relay could
+        otherwise fill the hold with frames no key will ever open. The hold
+        is this path's own bounded cache, never the sync one."""
+        if self._pending_decrypts is None or self._key_pull is None:
+            return
+        held = await self._crypto.get_current_epoch(space_id)
+        if held is not None and epoch <= held:
+            return
+        self._pending_decrypts.stash(space_id, epoch, replay)
+        try:
+            await self._key_pull(space_id)
+        except Exception:
+            log.exception(
+                "space_public.inbound: asking for the key of space %s failed",
+                space_id,
+            )
 
     def attach_pending_parents(self, buffer: PendingParentBuffer) -> None:
         """Wire the parent-wait buffer (shared with the federated path)."""
@@ -314,6 +365,17 @@ class SpacePublicInbound:
             return
         try:
             pt = await self._crypto.decrypt(space_id, epoch, ciphertext)
+        except MissingEpochKey:
+            log.info(
+                "space_public.inbound: no key for space %s epoch %s yet — "
+                "holding the frame",
+                space_id,
+                epoch,
+            )
+            await self._await_key(
+                space_id, epoch, functools.partial(self._on_relay, envelope)
+            )
+            return
         except (RuntimeError, ValueError, InvalidTag) as exc:
             # No epoch key held yet (Phase 5b ships subscriber keys), a
             # malformed ciphertext (ValueError), or a tampered-but-valid-b64
@@ -550,6 +612,19 @@ class SpacePublicInbound:
             return
         try:
             pt = await self._crypto.decrypt(item.space_id, item.epoch, item.payload)
+        except MissingEpochKey:
+            log.info(
+                "space_public.inbound: no key for space %s epoch %s yet — "
+                "holding the space_item",
+                item.space_id,
+                item.epoch,
+            )
+            await self._await_key(
+                item.space_id,
+                item.epoch,
+                functools.partial(self._on_space_item, frame),
+            )
+            return
         except (RuntimeError, ValueError, InvalidTag) as exc:
             log.info(
                 "space_public.inbound: cannot decrypt space_item for %s epoch %s: %s",

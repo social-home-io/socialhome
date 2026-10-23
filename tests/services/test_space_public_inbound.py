@@ -31,7 +31,12 @@ from socialhome.crypto import (
     sign_ed25519,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import CommentDeleted, PostDeleted, SpacePostCreated
+from socialhome.domain.events import (
+    CommentDeleted,
+    PostDeleted,
+    SpaceContentKeyImported,
+    SpacePostCreated,
+)
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import (
     JoinMode,
@@ -62,6 +67,7 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.pending_decrypts_cache import PendingDecryptsCache
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_item_author import build_signed_item_inner
 from socialhome.services.space_mentions import SpaceMentionResolver
@@ -493,6 +499,82 @@ async def test_missing_content_key_dropped_gracefully(env):
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
+
+
+async def _lose_key(env) -> tuple[int, bytes]:
+    """Drop this household's copy of the current key; return it."""
+    epoch, raw = await env["crypto"].export_current_key("sp-1")
+    await env["db"].enqueue("DELETE FROM space_keys WHERE space_id='sp-1'")
+    await env["db"].fetchone("SELECT 1")
+    return epoch, raw
+
+
+async def test_a_frame_under_a_missing_key_asks_for_it_and_lands_once_it_comes(env):
+    """#5b: a follower that misses the key no longer drops the frame and
+    waits for its next reconnect's key repair: it asks for the key (once)
+    and the held frame lands when the key does."""
+    envelope = await _make_envelope(env)
+    epoch, raw = await _lose_key(env)
+    asked: list[str] = []
+
+    async def _pull(space_id: str) -> bool:
+        asked.append(space_id)
+        return True
+
+    env["inbound"].attach_key_pull(_pull, PendingDecryptsCache(bus=env["bus"]))
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert asked == ["sp-1"]
+    assert await env["post_repo"].get("post-1") is None
+
+    await env["crypto"].import_key("sp-1", epoch, raw)
+    await env["bus"].publish(SpaceContentKeyImported(space_id="sp-1", epoch=epoch))
+    assert await env["post_repo"].get("post-1") is not None
+    assert len(env["events"]) == 1
+
+
+async def test_a_missing_key_older_than_ours_is_neither_held_nor_asked(env):
+    """The owner seals its CURRENT key, so an older epoch we lack would never
+    come; and the frame epoch is plaintext, so holding such frames would let
+    a relay fill the hold."""
+    envelope = await _make_envelope(env)
+    old_epoch = envelope["epoch"]
+    await env["crypto"].rotate_epoch("sp-1")
+    await env["db"].enqueue(
+        "DELETE FROM space_keys WHERE space_id='sp-1' AND epoch=?", (old_epoch,)
+    )
+    await env["db"].fetchone("SELECT 1")
+    asked: list[str] = []
+
+    async def _pull(space_id: str) -> bool:
+        asked.append(space_id)
+        return True
+
+    pending = PendingDecryptsCache(bus=env["bus"])
+    env["inbound"].attach_key_pull(_pull, pending)
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert asked == []
+    assert len(pending) == 0
+
+
+async def test_without_a_key_puller_a_missing_key_still_drops(env):
+    envelope = await _make_envelope(env)
+    await _lose_key(env)
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert await env["post_repo"].get("post-1") is None
+
+
+async def test_a_failing_key_pull_still_holds_the_frame(env):
+    envelope = await _make_envelope(env)
+    epoch, raw = await _lose_key(env)
+
+    async def _boom(_space_id: str) -> bool:
+        raise RuntimeError("gfs down")
+
+    env["inbound"].attach_key_pull(_boom, PendingDecryptsCache(bus=env["bus"]))
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await env["crypto"].import_key("sp-1", epoch, raw)
+    await env["bus"].publish(SpaceContentKeyImported(space_id="sp-1", epoch=epoch))
+    assert await env["post_repo"].get("post-1") is not None
 
 
 async def test_unknown_local_space_dropped(env):

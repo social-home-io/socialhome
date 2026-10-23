@@ -454,6 +454,96 @@ async def test_ws_connect_renotifies_owner_of_existing_subscriptions(ws_client):
         await sub_ws.close()
 
 
+async def _owner_socket(ws_client):
+    app = ws_client._app
+    owner_seed, owner_pub = _gen_ed25519()
+    await app[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(
+            instance_id="owner.home",
+            display_name="Owner",
+            public_key=owner_pub,
+            status="active",
+        )
+    )
+    await _publish_and_subscribe_peer(
+        app, ws_client._seed, owner_id="owner.home", owner_seed=owner_seed
+    )
+    owner_ws = await ws_client.ws_connect("/gfs/ws")
+    await owner_ws.send_json(_hello("owner.home", owner_seed))
+    registry = app[gfs_ws_registry_key]
+    for _ in range(100):
+        if registry.is_connected("owner.home"):
+            break
+        await asyncio.sleep(0.01)
+    return owner_ws
+
+
+async def test_a_key_pulling_followers_hello_renotifies_nobody(ws_client):
+    """#5b: a follower that asks for a key when it misses one
+    (``space_key_pull`` in its hello) costs its spaces' owners no key
+    repair on every reconnect."""
+    owner_ws = await _owner_socket(ws_client)
+    sub_ws = await ws_client.ws_connect("/gfs/ws")
+    hello = _hello("peer.home", ws_client._seed)
+    hello["accepts"] = ["space_key_pull"]
+    await sub_ws.send_json(hello)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(owner_ws.receive(), timeout=0.5)
+    await sub_ws.close()
+    await owner_ws.close()
+
+
+def _key_request_body(seed: bytes, *, space_id="space-1", who="peer.home") -> dict:
+    ts = _now_iso()
+    canonical = json.dumps(
+        {
+            "action": "space_key_request",
+            "instance_id": who,
+            "space_id": space_id,
+            "ts": ts,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "instance_id": who,
+        "ts": ts,
+        "signature": b64url_encode(sign_ed25519(seed, canonical)),
+    }
+
+
+async def test_a_key_request_reaches_the_owner_as_a_key_repair(ws_client):
+    owner_ws = await _owner_socket(ws_client)
+    # The subscribe a moment ago notified the owner; a key request inside
+    # the dedupe window would rightly be dropped, so start past it.
+    ws_client._app[gfs_federation_key]._notified_seats._seen.clear()
+    resp = await ws_client.post(
+        "/gfs/spaces/space-1/key_request", json=_key_request_body(ws_client._seed)
+    )
+    assert resp.status == 202
+    msg = await asyncio.wait_for(owner_ws.receive(), timeout=5.0)
+    frame = json.loads(msg.data)
+    assert frame["type"] == "new_subscriber"
+    assert frame["reason"] == "reconnect"
+    assert frame["subscriber"]["instance_id"] == "peer.home"
+    await owner_ws.close()
+
+
+async def test_a_key_request_needs_the_followers_signature(ws_client):
+    other_seed, _pub = _gen_ed25519()
+    resp = await ws_client.post(
+        "/gfs/spaces/space-1/key_request", json=_key_request_body(other_seed)
+    )
+    assert resp.status == 403
+    resp = await ws_client.post("/gfs/spaces/space-1/key_request", json={})
+    assert resp.status == 400
+
+
+async def test_the_server_says_it_takes_key_requests(ws_client):
+    resp = await ws_client.get("/gfs/info")
+    assert (await resp.json())["capabilities"]["space_key_pull"] is True
+
+
 async def test_ws_connect_survives_reconnect_notify_failure(ws_client, monkeypatch):
     """A repo failure in the reconnect notify must not break the handshake —
     the socket still registers and the hello still succeeds."""

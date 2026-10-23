@@ -184,6 +184,10 @@ PIN_REFRESH_INTERVAL_S = 60.0
 #: Most spaces whose last refresh time is remembered at once.
 _PIN_REFRESH_MAX_TRACKED = 1024
 
+#: Minimum seconds between two content-key requests for one space (#5b): a
+#: burst of frames under an epoch we hold no key for asks once.
+KEY_REQUEST_INTERVAL_S = 300.0
+
 
 def _listing_pin(body: dict) -> tuple[str, int] | None:
     """``(identity_public_key, authority_rotation_seq)`` off a GFS listing,
@@ -226,6 +230,7 @@ class GfsSpaceMirrorService:
         "_gfs",
         "_gfs_conn_repo",
         "_http_client",
+        "_last_key_request",
         "_last_pin_refresh",
         "_own_instance_id",
         "_public_spaces",
@@ -263,6 +268,7 @@ class GfsSpaceMirrorService:
         self._http_client: aiohttp.ClientSession | None = None
         self._own_instance_id = ""
         self._last_pin_refresh: dict[str, float] = {}
+        self._last_key_request: dict[str, float] = {}
         # Each server's whole public directory. ``app`` shares one cache
         # with member publish (over the cookie-less publish session);
         # standalone wiring reads it over the mirror's own session.
@@ -491,6 +497,33 @@ class GfsSpaceMirrorService:
         return await self._refresh_from(
             await self._gfs_conn_repo.list_active(), space_id
         )
+
+    async def request_space_key(self, space_id: str) -> bool:
+        """We got a relayed frame of *space_id* under an epoch we hold no
+        key for (#5b): ask a server that seats us for it to have the owner
+        seal it again. Only servers holding a recorded seat of ours — asking
+        any other would tell its operator we follow the space. At most once
+        per :data:`KEY_REQUEST_INTERVAL_S` per space. ``True`` when one
+        server took the request."""
+        now = time.monotonic()
+        last = self._last_key_request.get(space_id)
+        if last is not None and now - last < KEY_REQUEST_INTERVAL_S:
+            return False
+        if len(self._last_key_request) >= _PIN_REFRESH_MAX_TRACKED:
+            self._last_key_request = {
+                sid: at
+                for sid, at in self._last_key_request.items()
+                if now - at < KEY_REQUEST_INTERVAL_S
+            }
+        self._last_key_request[space_id] = now
+        active = await self._gfs_conn_repo.list_active()
+        for seat in await self._seats.list_for_space(space_id):
+            conn = next((c for c in active if _belongs(seat, c)), None)
+            if conn is not None and await self._gfs.request_space_key(
+                space_id, conn.id
+            ):
+                return True
+        return False
 
     def _remember_refresh(self, space_id: str, now: float) -> None:
         """Record a refresh; prune entries past the interval so the map is

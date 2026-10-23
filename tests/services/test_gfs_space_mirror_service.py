@@ -2379,3 +2379,60 @@ async def test_a_follow_seated_under_the_old_id_survives_a_real_rebind(env):
     await mirror.unsubscribe("sp-1")
     assert gfs.unsubscribes == [("sp-1", "conn-1")]
     assert await _seat_ids(env, "sp-1") == []
+
+
+# ─── #5b: ask for a missed content key ───────────────────────────────────
+
+
+class _KeyGfs(_StubGfs):
+    __slots__ = ("asked", "takes")
+
+    def __init__(self, takes: bool = True) -> None:
+        super().__init__()
+        self.asked: list[tuple[str, str]] = []
+        self.takes = takes
+
+    async def request_space_key(self, space_id: str, gfs_id: str) -> bool:
+        self.asked.append((space_id, gfs_id))
+        return self.takes
+
+
+@pytest.mark.security
+async def test_a_missed_key_is_asked_only_where_we_hold_a_seat(env):
+    """Asking a server that does not seat us would tell its operator we
+    follow the space — the same rule as the unsubscribe."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await env.conns.save(_conn("gfs-2", inbox_url="https://b.test"))
+    await _mirrored(env, gfs="gfs-2")
+    gfs = _KeyGfs()
+    mirror = _mirror(env, _StubSession(), gfs)
+    assert await mirror.request_space_key("sp-1") is True
+    assert gfs.asked == [("sp-1", "gfs-2")]
+
+
+async def test_a_burst_of_misses_asks_once(env):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _mirrored(env, gfs="gfs-1")
+    gfs = _KeyGfs()
+    mirror = _mirror(env, _StubSession(), gfs)
+    for _ in range(5):
+        await mirror.request_space_key("sp-1")
+    assert gfs.asked == [("sp-1", "gfs-1")]
+
+
+async def test_without_a_recorded_seat_nobody_is_asked(env):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _mirrored(env, gfs=None)
+    gfs = _KeyGfs()
+    assert await _mirror(env, _StubSession(), gfs).request_space_key("sp-1") is False
+    assert gfs.asked == []
+
+
+async def test_a_server_that_does_not_take_it_tries_the_next_seat(env):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await env.conns.save(_conn("gfs-2", inbox_url="https://b.test"))
+    await _mirrored(env, gfs="gfs-1")
+    await _seat(env, "sp-1", "gfs-2")
+    gfs = _KeyGfs(takes=False)
+    assert await _mirror(env, _StubSession(), gfs).request_space_key("sp-1") is False
+    assert sorted(gfs.asked) == [("sp-1", "gfs-1"), ("sp-1", "gfs-2")]

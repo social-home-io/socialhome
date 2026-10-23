@@ -82,6 +82,7 @@ from ..domain.media_constraints import (
     SPACE_IMAGE_DATA_URI_PREFIX,
     SPACE_IMAGE_EMBED_MAX_BYTES,
 )
+from ..domain.moment_public import is_path_safe_id
 from ..domain.space import (
     SpaceType,
     normalize_category,
@@ -380,6 +381,7 @@ class GfsConnectionService:
         "_repo",
         "_rotation_warned",
         "_sealed_highlight_stream",
+        "_space_key_pull",
         "_space_repo",
         "_target_warned",
         "_targeted_publish",
@@ -469,6 +471,9 @@ class GfsConnectionService:
         # …and ``encrypted_moment_media`` (v_63): the GFS keeps encrypted
         # moment blobs (``/gfs/moments/media``).
         self._encrypted_moment_media: dict[str, bool] = {}
+        # …and ``space_key_pull`` (#5b): the GFS takes a follower's
+        # ``/gfs/spaces/{id}/key_request``. Asked only once proved.
+        self._space_key_pull: dict[str, bool] = {}
         # Same again for ``member_publish_trusted`` (v_49): whether the GFS
         # carries the identified ``POST /gfs/member-publish`` and the
         # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
@@ -687,6 +692,7 @@ class GfsConnectionService:
             self._sealed_highlight_stream,
             self._encrypted_moments,
             self._encrypted_moment_media,
+            self._space_key_pull,
             self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
@@ -3134,6 +3140,67 @@ class GfsConnectionService:
         return await self._signed_capability_supported(
             conn, "encrypted_moment_media", self._encrypted_moment_media
         )
+
+    async def space_key_pull_supported(self, gfs_id: str) -> bool:
+        """Whether the GFS *gfs_id* proved ``space_key_pull`` (#5b) under a
+        valid signature: it takes a follower's key request."""
+        conn = await self._repo.get(gfs_id)
+        if conn is None or conn.status != "active" or not conn.inbox_url:
+            return False
+        return await self._signed_capability_supported(
+            conn, "space_key_pull", self._space_key_pull
+        )
+
+    async def request_space_key(self, space_id: str, gfs_id: str) -> bool:
+        """Ask the GFS *gfs_id* to have *space_id*'s owner seal its content
+        key to us again (#5b: we got a frame under an epoch we hold no key
+        for). Signed like a subscribe, over ``{action: "space_key_request",
+        instance_id, space_id, ts}``. Only to a server that proved
+        ``space_key_pull``; ``True`` when it accepted the request. Never
+        raises."""
+        if not self._own_instance_id or not self._own_signing_key:
+            return False
+        if not await self.space_key_pull_supported(gfs_id):
+            return False
+        conn = await self._repo.get(gfs_id)
+        if conn is None or not is_path_safe_id(space_id):
+            return False
+        ts = datetime.now(UTC).isoformat()
+        canonical = json.dumps(
+            {
+                "action": "space_key_request",
+                "instance_id": self._own_instance_id,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        body = {
+            "instance_id": self._own_instance_id,
+            "ts": ts,
+            "signature": b64url_encode(sign_ed25519(self._own_signing_key, canonical)),
+        }
+        try:
+            async with self._client().post(
+                f"{conn.inbox_url}/gfs/spaces/{space_id}/key_request",
+                allow_redirects=False,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status >= 300:
+                    log.warning(
+                        "gfs: %s refused a key request for space %s — HTTP %d",
+                        gfs_id,
+                        space_id,
+                        resp.status,
+                    )
+                    return False
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            log.warning("gfs: key request to %s failed: %s", gfs_id, exc)
+            return False
+        log.info("gfs: asked %s for the content key of space %s", gfs_id, space_id)
+        return True
 
     async def publish_space_event_to(
         self,

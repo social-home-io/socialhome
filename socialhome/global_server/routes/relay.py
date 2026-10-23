@@ -193,6 +193,12 @@ class GfsInfoView(GfsBaseView):
             # household uploads moment media only to a server that proved it;
             # an older one gets the moment without its file.
             "encrypted_moment_media": True,
+            # #5b — ``POST /gfs/spaces/{id}/key_request``: a follower that
+            # misses a space's content key asks for it, and one that says
+            # so (``space_key_pull`` in its hello / subscribe ``accepts``)
+            # gets no key repair on every reconnect. A household asks only
+            # a server that proved this.
+            "space_key_pull": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         if cfg.instance_id_aliases:
@@ -554,6 +560,36 @@ class SubscribeView(GfsBaseView):
         except PermissionError as exc:
             return web.json_response({"error": str(exc)}, status=403)
         return web.json_response({"status": "subscribed"})
+
+
+class SpaceKeyRequestView(GfsBaseView):
+    """``POST /gfs/spaces/{space_id}/key_request`` — a follower household
+    missed the space's content key (#5b, capability ``space_key_pull``).
+
+    Body: ``{instance_id, ts, signature}``, signed by the follower over
+    ``{action: "space_key_request", instance_id, space_id, ts}`` like a
+    subscribe. The space's owner is asked to seal the key again (a
+    ``new_subscriber`` key repair). Always ``202`` once the signature
+    verifies: whether the seat is held, the owner online or the request
+    throttled is not told back. A missing field is a ``400``, a bad
+    signature a ``403``."""
+
+    async def post(self) -> web.Response:
+        svc = self.svc(K.gfs_federation_key)
+        body = await self.body_or_400()
+        try:
+            instance_id = str(body["instance_id"])
+            ts = str(body["ts"])
+            signature = str(body["signature"])
+        except KeyError as exc:
+            raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
+        try:
+            await svc.request_space_key(
+                instance_id, self.request.match_info["space_id"], ts, signature
+            )
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        return web.json_response({"queued": True}, status=202)
 
 
 class SpacesListView(GfsBaseView):

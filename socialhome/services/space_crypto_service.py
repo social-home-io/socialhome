@@ -93,6 +93,12 @@ class UnsupportedKeySuite(ValueError):
     possible once a Phase-2 hybrid scheme lands."""
 
 
+class MissingEpochKey(RuntimeError):
+    """:meth:`SpaceContentEncryption.decrypt` holds no key for the epoch —
+    the one decrypt failure a later key import can heal (#5b). A
+    ``RuntimeError``, as before, so existing callers keep catching it."""
+
+
 class SpaceContentEncryption(BusPublisherMixin):
     """Encrypt/decrypt space content under per-epoch AES-256-GCM keys.
 
@@ -416,7 +422,7 @@ class SpaceContentEncryption(BusPublisherMixin):
         """Decrypt under the specified epoch's key."""
         key = await self._repo.get(space_id, epoch)
         if key is None:
-            raise RuntimeError(
+            raise MissingEpochKey(
                 f"SpaceContentEncryption: missing epoch {epoch} for space {space_id!r}"
             )
         raw = self._kek.decrypt(
