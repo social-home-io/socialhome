@@ -1837,14 +1837,17 @@ never decrypts anything.
 | Item | Bucket | Relay frame | Member frame |
 |---|---|---|---|
 | Post, 300 characters, English or German | 1 KiB | 1 751 B | 1 833 B |
-| Post, 300 Chinese characters | 1 KiB relay / 4 KiB member | 1 751 B | 5 929 B |
+| Post, 300 Chinese characters | 4 KiB (no gain: sent as JSON) | 5 823 B | 5 905 B |
 | Post, 600 Chinese characters | 4 KiB | 5 847 B | 5 929 B |
 | Post with a link preview | 4 KiB | 5 847 B | 5 929 B |
 | Comment | 1 KiB | — | 1 835 B |
 
-Chinese text compresses less than Latin text. The member copy of a
-300-character Chinese post also binds its item type and target, so it just
-misses 1 KiB.
+Chinese text compresses far less than Latin text: each character is three
+UTF-8 bytes zlib finds little to squeeze, so a 300-character Chinese post
+stays in 4 KiB and the publisher sends no compressed copy. (The first
+measurement used a repeated Chinese passage and wrongly showed the relay
+copy in 1 KiB; the size test now uses non-repeating text and fixed keys,
+so every run measures the same bytes.)
 
 **Cost.** A 300-character post drops from 5.8 KB to 1.75 KB per follower,
 3.3× smaller. The planning case (10 000 followers × 400 posts a day) goes

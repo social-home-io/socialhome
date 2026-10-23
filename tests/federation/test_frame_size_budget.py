@@ -21,8 +21,9 @@ for the payload-size work (canonical suite, compression, binary frames).
 
 from __future__ import annotations
 
+import hashlib
 import os
-import secrets
+import random
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -35,7 +36,7 @@ from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
     derive_user_id,
-    generate_identity_keypair,
+    ed25519_public_key,
 )
 from socialhome.domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 from socialhome.domain.link_preview import LinkPreview
@@ -70,13 +71,22 @@ TEXT_DE = (
     "Tüte mit, wir sind von zehn bis etwa zwei Uhr da. Kaffee geht auf uns, "
     "Kuchen auf euch. Grüße an alle Nachbarn!"
 )[:300]
-TEXT_CJK = (
+#: Chinese text without repetition: a natural opening, then characters drawn
+#: (seeded, so every run measures the same bytes) from the CJK block. Real
+#: Chinese compresses a little better than this, so its numbers are a
+#: ceiling. A repeated passage would compress far better than any real post.
+_CJK_OPENING = (
     "今天早上在菜园里真是太美好了！西红柿终于红了，豆子正沿着新的架子往上爬，"
-    "有人在门口放了一篮李子，还留了一张纸条写着请随便拿。星期六如果你想要的话就带个袋子来，"
-    "我们大概从十点待到两点左右。咖啡我们请客，蛋糕就交给你们了。"
-) * 8
-TEXT_CJK_LONG = TEXT_CJK[:600]
-TEXT_CJK = TEXT_CJK[:300]
+    "有人在门口放了一篮李子，还留了一张纸条写着请随便拿。"
+)
+_CJK_RNG = random.Random(20261023)
+TEXT_CJK_LONG = (
+    _CJK_OPENING
+    + "".join(
+        chr(_CJK_RNG.randrange(0x4E00, 0x6000)) for _ in range(600 - len(_CJK_OPENING))
+    )
+)[:600]
+TEXT_CJK = TEXT_CJK_LONG[:300]
 
 SPACE_ID = "a3f1c2d4e5b60718293a4b5c6d7e8f90"
 EPOCH = 7
@@ -94,16 +104,23 @@ class _World:
     content_key: bytes
 
 
+def _fixed(label: str, n: int = 32) -> bytes:
+    """Deterministic bytes: keys and ids are fixed, so every run (and the
+    text vs binary comparison) measures exactly the same plaintext — a case
+    near a bucket boundary can't flip between runs."""
+    return hashlib.sha256(label.encode()).digest()[:n]
+
+
 def _world() -> _World:
-    space = generate_identity_keypair()
-    author = generate_identity_keypair()
+    space_seed, author_seed = _fixed("space seed"), _fixed("author seed")
+    author_pk = ed25519_public_key(author_seed)
     return _World(
-        space_seed=space.private_key,
-        author_seed=author.private_key,
-        author_pk=author.public_key,
-        author_user_id=derive_user_id(author.public_key, "erin"),
-        origin_instance_id=derive_instance_id(author.public_key),
-        content_key=os.urandom(32),
+        space_seed=space_seed,
+        author_seed=author_seed,
+        author_pk=author_pk,
+        author_user_id=derive_user_id(author_pk, "erin"),
+        origin_instance_id=derive_instance_id(author_pk),
+        content_key=_fixed("content key"),
     )
 
 
@@ -131,7 +148,7 @@ def _cert(world: _World, scope: str = "write"):
 
 def _post(world: _World, text: str, *, preview: bool = False) -> Post:
     return Post(
-        id=secrets.token_hex(16),
+        id=_fixed("post " + text, 16).hex(),
         author=world.author_user_id,
         type=PostType.TEXT,
         created_at=datetime(2026, 10, 23, 9, 30, tzinfo=UTC),
@@ -170,9 +187,9 @@ def _post_inner(world: _World, text: str, *, member: bool, preview: bool = False
 def _comment_inner(world: _World, text: str) -> dict:
     return build_signed_item_inner(
         item_type="comment",
-        item_target=secrets.token_hex(16),
+        item_target=_fixed("comment " + text, 16).hex(),
         space_id=SPACE_ID,
-        post_id=secrets.token_hex(16),
+        post_id=_fixed("post of " + text, 16).hex(),
         author_user_id=world.author_user_id,
         author_username="erin",
         author_pk=world.author_pk,
@@ -329,15 +346,16 @@ def test_frame_sizes_stay_within_budget() -> None:
 #: The same cases under ``payload_suite: "zlib1"`` — what a server that
 #: proved ``payload_zlib1`` fans out once every follower there reads it. A
 #: 300-character Latin-script post drops from the 4 KiB to the 1 KiB bucket
-#: (~5.8 KB → ~1.75 KB per follower). Chinese text compresses less: the
-#: relay copy fits 1 KiB, the member copy (its inner also binds the item
-#: type and target) just misses it, as does a post with a link preview.
+#: (~5.8 KB → ~1.75 KB per follower). Chinese text compresses far less
+#: (each character is three UTF-8 bytes of near-random data to zlib): a
+#: 300-character post stays in 4 KiB, as does a post with a link preview —
+#: the publisher then sends no compressed copy at all.
 BUDGET_ZLIB: dict[tuple[str, str], tuple[int, int]] = {
     ("post en", "relay"): (1024, 1760),
     ("post en", "member"): (1024, 1840),
     ("post de", "relay"): (1024, 1760),
     ("post de", "member"): (1024, 1840),
-    ("post cjk", "relay"): (1024, 1760),
+    ("post cjk", "relay"): (4096, 5860),
     ("post cjk", "member"): (4096, 5940),
     ("post cjk 600", "relay"): (4096, 5860),
     ("post cjk 600", "member"): (4096, 5940),
@@ -366,7 +384,7 @@ BUDGET_BINARY: dict[tuple[str, str], int] = {
     ("post en", "member"): 1520,
     ("post de", "relay"): 1460,
     ("post de", "member"): 1520,
-    ("post cjk", "relay"): 1460,
+    ("post cjk", "relay"): 4530,
     ("post cjk", "member"): 4590,
     ("post cjk 600", "relay"): 4530,
     ("post cjk 600", "member"): 4590,
