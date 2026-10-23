@@ -66,13 +66,20 @@ def serialize_feed(
 
 
 def feed_etag(payload: bytes) -> str:
-    """Strong ETag for ``Cache-Control`` on the feed endpoint.
+    """Weak ETag for the feed endpoint's conditional GET.
 
-    sha256-hash of the body — calendar clients honour ETag and do
-    conditional GETs, saving bandwidth on the polling cycle (Apple
-    Calendar polls every ~5 min by default).
+    sha256 of the body without its ``DTSTAMP`` lines — calendar clients
+    honour ETag and poll with ``If-None-Match`` (Apple Calendar every ~5
+    min). Every VEVENT's ``DTSTAMP`` is the render time (no revision time
+    is stored), so a hash over the whole body changed every second and a
+    client never got its 304. Weak (``W/``), because two bodies that match
+    differ in those stamps: the same calendar, not the same bytes
+    (RFC 9110 §8.8.1).
     """
-    return f'"{hashlib.sha256(payload).hexdigest()[:32]}"'
+    stable = b"\r\n".join(
+        line for line in payload.split(b"\r\n") if not line.startswith(b"DTSTAMP:")
+    )
+    return f'W/"{hashlib.sha256(stable).hexdigest()[:32]}"'
 
 
 # ─── Internals ──────────────────────────────────────────────────────────────

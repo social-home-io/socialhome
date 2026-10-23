@@ -131,6 +131,19 @@ def test_feed_etag_is_stable():
     assert feed_etag(a) == feed_etag(a)
 
 
+def test_feed_etag_survives_a_new_render_second():
+    """Each VEVENT's DTSTAMP is the render time, so a hash of the raw body
+    changed every second and a polling calendar client never got a 304
+    (the flaky ``test_feed_token_lifecycle`` was this). The same calendar
+    rendered later carries the same (weak) ETag."""
+    a = serialize_feed([_ev(id="x")])
+    stamp = next(line for line in a.split(b"\r\n") if line.startswith(b"DTSTAMP:"))
+    later = a.replace(stamp, b"DTSTAMP:20991231T235959Z")
+    assert later != a
+    assert feed_etag(later) == feed_etag(a)
+    assert feed_etag(a).startswith('W/"')
+
+
 def test_long_summary_is_folded():
     long_summary = "x" * 200
     payload = serialize_event(_ev(summary=long_summary)).decode("utf-8")

@@ -152,7 +152,11 @@ crosses a privacy line. RSVPs stay in-app.
 Per-event download — `GET /api/calendars/events/{id}/export.ics` —
 is member-only via the standard auth flow (no token in URL).
 
-Conditional GET via strong ETag (`sha256` of body, truncated). Apple
+Conditional GET via a **weak** ETag: `sha256` of the body without its
+`DTSTAMP` lines, truncated (`serialization/ics.py` `feed_etag`). Every
+VEVENT's `DTSTAMP` is the render time (no revision time is stored), so a
+hash of the whole body changed every second and a polling client never got
+a 304. Apple
 Calendar / Google Calendar honour the `Cache-Control: max-age=900`
 header and skip refetches within the window.
 

@@ -1731,8 +1731,12 @@ async def test_a_disconnecting_gfs_gets_the_unregister_in_the_background(env):
     channel_id = await _channel_ready(env)
     conn = env.owner.svc._conn_repo.conn
     await env.owner.svc.on_gfs_disconnect(conn)
-    # Nothing inline: the DELETE route never waits on the server.
-    assert await env.app[gfs_channel_repo_key].get(channel_id) is not None
+    # Nothing inline: the DELETE route never waits on the server — the
+    # unregister is a background task still pending when the call returns.
+    # (Reading the server's table here awaited I/O, which let that task run
+    # first now and then: the old check was a race, not a guarantee.)
+    pending = list(env.owner.svc._tasks)
+    assert pending and not any(t.done() for t in pending)
     await env.owner.svc.wait_idle()
     assert await env.app[gfs_channel_repo_key].get(channel_id) is None
 

@@ -941,9 +941,21 @@ async def _ws_hello(ws, instance_id: str, seed: bytes) -> None:
     )
 
 
+#: How long a hello may take to register under a loaded test run. The node
+#: answers in milliseconds; this only bounds a hang (a refused hello then
+#: fails naming the household).
+_CONNECT_WAIT_S = 30.0
+
+
 async def _await_connected(app, instance_id: str) -> None:
+    """The node registered *instance_id*'s socket. Was a 5 s window — under
+    a parallel coverage run the event loop can starve that long, so the
+    cluster tests failed on a slow handshake, not a broken one."""
     registry = app[gfs_ws_registry_key]
-    assert await _wait_for(lambda: _async_true(registry.is_connected(instance_id)))
+    assert await _wait_for(
+        lambda: _async_true(registry.is_connected(instance_id)),
+        timeout=_CONNECT_WAIT_S,
+    ), f"{instance_id}'s socket never registered"
 
 
 async def _next_frame(ws, frame_type: str, *, timeout: float = 5.0) -> dict:

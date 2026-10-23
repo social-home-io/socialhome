@@ -405,7 +405,7 @@ async def test_a_held_moment_past_its_wait_is_not_opened(db, monkeypatch):
     keys = StubMomentKeys(missing={"u-noor"})
     inbound, _ = await _env(db, keys=keys)
     clock = [1000.0]
-    monkeypatch.setattr(moment_public_inbound.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(moment_public_inbound, "monotonic", lambda: clock[0])
     await _create(inbound, _moment("m-old"))
     clock[0] += HOLD_FOR_S + 1
     keys.import_gen = TEST_GEN

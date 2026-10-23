@@ -30,8 +30,8 @@ before it republishes anything.
 from __future__ import annotations
 
 import logging
-import time
 from collections import OrderedDict
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -290,13 +290,13 @@ class MomentFederationOutbound(
         if held is None:
             return True
         relayed_hop, at = held
-        if time.monotonic() - at > RELAY_SEEN_TTL_S:
+        if monotonic() - at > RELAY_SEEN_TTL_S:
             del self._relayed[key]
             return True
         return hop < relayed_hop
 
     def _remember_relay(self, key: tuple[str, str], hop: int) -> None:
-        self._relayed[key] = (hop, time.monotonic())
+        self._relayed[key] = (hop, monotonic())
         self._relayed.move_to_end(key)
         while len(self._relayed) > RELAY_SEEN_MAX:
             self._relayed.popitem(last=False)
