@@ -29,13 +29,20 @@ proves the named author wrote it). Without the per-author signature,
 ``author_pk`` / ``author_user_id`` are both public, so a seed-holder could
 attribute a post to any member; the signature closes that hole.
 
-Scope (Phase 5a2): only a *seed-holding* household relays, and only its OWN
-household's locally-authored posts (the producer's ``author`` must be a local
-user — enforced below — so this household always holds the author's identity
-seed and can produce ``author_sig``). A plain member's public post reaches
-subscribers only when a seed-holder (owner or delegated admin) relays —
-accepted for this phase. Authors' own edits and deletes travel over the
-member relay (``space_item``); see below for removals.
+Scope: only a *seed-holding* household relays here, and on the local-author
+path only its OWN household's posts (the producer's ``author`` must be a
+local user — enforced below — so this household always holds the author's
+identity seed and can produce ``author_sig``). Since v_49 a plain member
+household publishes its own items itself, over the member relay
+(``space_item``, :mod:`socialhome.services.gfs_member_publish_service`:
+anonymous under the writer group key in a strict space, and since v_57 in a
+publicly readable trusted one too, to every GFS the owner listed; a member
+household without the group key publishes identified to the servers it is
+registered on). Its posts are still also relayed by every seed-holder
+(the remote-author path below), because a follower on an older build reads
+only ``space_post_public``. Followers dedupe the two copies by post id.
+Authors' own edits and deletes travel over the member relay only; see below
+for removals.
 
 Remote-author relay (Phase 5a relay): a *remote* member's public post — where
 this seed-holder does NOT hold the author's identity seed — is relayed when it

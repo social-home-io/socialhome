@@ -53,8 +53,13 @@ Reference material for running and understanding Social Home.
   standalone service. Source lives under `socialhome/` (excluding
   `socialhome/global_server/`).
 - **GFS — Global Federation Server.** A public relay service operated
-  per community. Provides the public-space directory, push fan-out, and
-  WebRTC signalling bootstrap. Source lives under
+  per community. Provides the public-space directory, the encrypted relay
+  of public / global space content to followers, sealed household-to-
+  household envelopes (invite links, and the relay fallback for paired
+  households), and public moments and highlights (including the WebRTC
+  signalling for a public highlight's viewers). It sends no push; a
+  household's own WebRTC signalling travels inside its sealed federation
+  envelopes, which a GFS may carry only as ciphertext. Source lives under
   `socialhome/global_server/`.
 - **Space.** A group context shared across households — a private
   family space, a neighbourhood watch, a public community. Spaces are
