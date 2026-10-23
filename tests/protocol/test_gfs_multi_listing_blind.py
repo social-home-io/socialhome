@@ -456,23 +456,25 @@ async def test_a_ciphertext_sent_anonymously_never_goes_identified(world):
         for _n, method, url, body in world["sent"]
         if method == "POST" and url.endswith("/gfs/member-publish-anon")
     }
-    assert len(anon_payloads) == 1
+    # One ciphertext per payload suite tried (a server may refuse the
+    # dictionary copy and take the next one), never more.
+    assert 1 <= len(anon_payloads) <= 3
     # The key is gone (a rotation we have not caught up with): a retry of
     # the queued anonymous item is dropped — never downgraded to identified.
     world["certs"].key = False
-    [payload] = anon_payloads
-    item = GfsPublish(
-        space_id=SPACE_ID,
-        event_type="space_item_anon",
-        payload={"epoch": EPOCH, "payload": payload},
-    )
-    for conn_id in ("conn-a", world["b_target"]):
-        outcome = await world["svc"]._retry_send(conn_id, item)
-        assert outcome.kind == "permanent"
+    for payload in anon_payloads:
+        item = GfsPublish(
+            space_id=SPACE_ID,
+            event_type="space_item_anon",
+            payload={"epoch": EPOCH, "payload": payload},
+        )
+        for conn_id in ("conn-a", world["b_target"]):
+            outcome = await world["svc"]._retry_send(conn_id, item)
+            assert outcome.kind == "permanent"
     for _name, method, url, body in world["sent"]:
         if method == "POST" and url.endswith("/gfs/member-publish"):
             pytest.fail(f"identified publish sent: {url}")
-        if body and isinstance(body, dict) and body.get("payload") == payload:
+        if body and isinstance(body, dict) and body.get("payload") in anon_payloads:
             assert url.endswith("/gfs/member-publish-anon")
     for r in (*world["seen_a"], *world["seen_b"]):
         assert r["path"] != "/gfs/member-publish"

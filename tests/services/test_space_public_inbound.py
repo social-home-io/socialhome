@@ -217,8 +217,8 @@ async def _make_envelope(
         inner["writer_cert"] = writer_cert
     if plaintext is None:
         plaintext = (
-            zlib_item_plaintext(inner)
-            if payload_suite == "zlib1"
+            zlib_item_plaintext(inner, suite=payload_suite)
+            if payload_suite in ("zlib1", "zlib1+dict1")
             else json.dumps(inner).encode()
         )
     epoch, ct = await env["crypto"].encrypt(space_id, plaintext)
@@ -266,9 +266,10 @@ async def test_valid_relay_decrypts_persists_and_publishes(env):
 _BOMB = zlib.compress(b" " * (512 * 1024 * 1024 // 64), 9)
 
 
-async def test_a_compressed_relay_is_opened_and_persisted(env):
+@pytest.mark.parametrize("suite", ["zlib1", "zlib1+dict1"])
+async def test_a_compressed_relay_is_opened_and_persisted(env, suite):
     envelope = await _make_envelope(
-        env, payload_suite="zlib1", content="Grüße 漢字 😀 " * 40
+        env, payload_suite=suite, content="Grüße 漢字 😀 " * 40
     )
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     got = await env["post_repo"].get("post-1")
@@ -1017,8 +1018,8 @@ async def _item_frame(
     body = {"item_type": item_type, "inner": inner}
     if plaintext is None:
         plaintext = (
-            zlib_item_plaintext(body)
-            if payload_suite == "zlib1"
+            zlib_item_plaintext(body, suite=payload_suite)
+            if payload_suite in ("zlib1", "zlib1+dict1")
             else json.dumps(body).encode()
         )
     sealed_epoch, ct = await env["crypto"].encrypt("sp-1", plaintext)
@@ -1063,8 +1064,9 @@ async def test_without_the_frame_cert_a_bad_inner_cert_still_drops(item_env):
     assert await item_env["post_repo"].get("post-1") is None
 
 
-async def test_a_compressed_member_item_is_opened_and_persisted(item_env):
-    await item_env["inbound"].handle(await _item_frame(item_env, payload_suite="zlib1"))
+@pytest.mark.parametrize("suite", ["zlib1", "zlib1+dict1"])
+async def test_a_compressed_member_item_is_opened_and_persisted(item_env, suite):
+    await item_env["inbound"].handle(await _item_frame(item_env, payload_suite=suite))
     got = await item_env["post_repo"].get("post-1")
     assert got is not None and got[1].content == "member-published content"
 

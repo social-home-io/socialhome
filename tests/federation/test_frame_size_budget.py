@@ -45,6 +45,8 @@ from socialhome.domain.space_item import (
     ITEM_SIZE_BUCKETS,
     PAYLOAD_SUITE_JSON,
     PAYLOAD_SUITE_ZLIB,
+    PAYLOAD_SUITE_ZLIB_DICT1,
+    compressed_item_plaintexts,
     open_item_plaintext,
     seal_item_plaintext,
 )
@@ -442,6 +444,77 @@ def test_member_frames_without_the_frame_cert_stay_within_budget() -> None:
     for case, size in lean.items():
         assert size <= BUDGET_NO_FRAME_CERT[case], (case, size)
         assert with_cert[case] - size >= 290, case
+
+
+#: ``zlib1+dict1`` (preset dictionary ``domain/item_zdict.ZDICT_V1``):
+#: ``(bucket, binary frame bytes)`` — member frames as a
+#: ``space_item_no_cert`` follower gets them (no plaintext writer cert). The
+#: link-preview post drops from the 4 KiB to the 1 KiB bucket; items already
+#: in 1 KiB stay there (the bucket floor).
+BUDGET_DICT: dict[tuple[str, str], tuple[int, int]] = {
+    ("post en", "relay"): (1024, 1460),
+    ("post en", "member"): (1024, 1230),
+    ("post de", "relay"): (1024, 1460),
+    ("post de", "member"): (1024, 1230),
+    ("post cjk", "relay"): (4096, 4530),
+    ("post cjk", "member"): (4096, 4310),
+    ("post cjk 600", "relay"): (4096, 4530),
+    ("post cjk 600", "member"): (4096, 4310),
+    ("post en + link preview", "relay"): (1024, 1460),
+    ("post en + link preview", "member"): (1024, 1230),
+    ("comment", "member"): (1024, 1230),
+}
+
+
+def _lean_binary(frame: bytes) -> int:
+    parsed = orjson.loads(frame)
+    parsed.pop("writer_cert", None)
+    raw = encode_binary_frame(parsed)
+    assert raw is not None
+    return len(raw)
+
+
+def test_dictionary_frame_sizes_stay_within_budget() -> None:
+    rows = _size_table(PAYLOAD_SUITE_ZLIB_DICT1)
+    zlib = {(c, p): b for c, p, b, _f in _size_table(PAYLOAD_SUITE_ZLIB)}
+    print()
+    for case, path, bucket, frame in rows:
+        size = _lean_binary(frame)
+        print(f"{case:<26}{path:<8}{zlib[(case, path)]:>6} → {bucket:>6}{size:>7}")
+        want_bucket, max_bytes = BUDGET_DICT[(case, path)]
+        assert bucket == want_bucket, (case, path, bucket)
+        assert bucket <= zlib[(case, path)], (case, path)
+        assert size <= max_bytes, (case, path, size)
+    assert {(c, p) for c, p, _b, _f in rows} == set(BUDGET_DICT)
+
+
+@pytest.mark.parametrize(
+    ("case", "path", "want"),
+    [
+        # 1 KiB under plain zlib already: the dictionary copy goes too (same
+        # bucket), so its label never hints at the content.
+        ("post en", "member", {"zlib1", "zlib1+dict1"}),
+        # 4 KiB under plain zlib (no gain over JSON), 1 KiB with the
+        # dictionary: only that copy.
+        ("post en + link preview", "member", {"zlib1+dict1"}),
+        ("post en + link preview", "relay", {"zlib1+dict1"}),
+        # Plain zlib saves no bucket over JSON (no zlib1 copy); the dictionary
+        # copy is no larger, so it still goes under its label.
+        ("post cjk", "member", {"zlib1+dict1"}),
+    ],
+)
+def test_which_compressed_copies_are_sealed(case, path, want) -> None:
+    w = _world()
+    text, preview = {
+        "post en": (TEXT_EN, False),
+        "post en + link preview": (TEXT_EN, True),
+        "post cjk": (TEXT_CJK, False),
+    }[case]
+    inner = _post_inner(w, text, member=path == "member", preview=preview)
+    inner = {**inner, WRITER_CERT_FIELD: _cert(w).to_wire()}
+    body = {"item_type": "post", "inner": inner} if path == "member" else inner
+    json_len = len(seal_item_plaintext(body) or b"")
+    assert set(compressed_item_plaintexts(body, json_len=json_len)) == want
 
 
 def test_compression_never_needs_a_bigger_bucket() -> None:

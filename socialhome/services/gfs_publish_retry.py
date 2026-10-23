@@ -84,15 +84,16 @@ class GfsPublish:
     space_id: str
     event_type: str
     payload: dict
-    #: The same item with a zlib-compressed plaintext (``payload_suite:
-    #: "zlib1"``), or ``None``. Sent instead of ``payload`` to a server that
-    #: proved ``payload_zlib1`` and has not refused it for this space lately.
-    compressed: dict | None = None
+    #: The same item under compressed payload suites (``"zlib1+dict1"`` /
+    #: ``"zlib1"`` → its envelope), or ``None``. One of them is sent instead
+    #: of ``payload`` to a server that proved that suite and has not refused
+    #: it for this space lately.
+    compressed: dict[str, dict] | None = None
 
-    def body(self, *, compressed: bool = False) -> dict:
+    def body(self, *, suite: str | None = None) -> dict:
         """The wire body — ``{space_id, event_type, payload}``, nothing else
-        (``payload`` the compressed variant when asked and present)."""
-        payload = self.compressed if compressed and self.compressed else self.payload
+        (``payload`` the copy under *suite* when asked and present)."""
+        payload = (self.compressed or {}).get(suite or "") or self.payload
         return {
             "space_id": self.space_id,
             "event_type": self.event_type,

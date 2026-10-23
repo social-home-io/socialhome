@@ -65,7 +65,7 @@ import hmac
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime
 from typing import Literal
@@ -88,6 +88,7 @@ from ..domain.space import (
     normalize_category,
     normalize_join_mode,
 )
+from ..domain.space_item import COMPRESSED_PAYLOAD_SUITES, PAYLOAD_SUITE_ZLIB_DICT1
 from ..domain.space_place import place_pin_of, place_pin_wire
 from ..domain.subscriber_accepts import OUR_ACCEPTS
 from ..federation.keywrap_seal import KEM_SUITE_X25519
@@ -379,6 +380,7 @@ class GfsConnectionService:
         "_own_instance_id",
         "_own_signing_key",
         "_payload_zlib1",
+        "_payload_zlib1_dict1",
         "_place_pin",
         "_possession",
         "_private_channels",
@@ -493,10 +495,14 @@ class GfsConnectionService:
         # …and ``payload_zlib1``: the GFS takes a zlib-compressed item and
         # refuses it (409) while a follower of the space can't open one.
         self._payload_zlib1: dict[str, bool] = {}
-        # ``(connection id, space id)`` → when that server last refused a
-        # compressed item for that space (``time.monotonic()``): JSON there
-        # for :data:`PAYLOAD_SUITE_REFUSAL_TTL_S`. Bounded, oldest out.
-        self._suite_refused_at: dict[tuple[str, str], float] = {}
+        # …and ``payload_zlib1_dict1``: the same for ``zlib1+dict1`` (zlib
+        # with the preset dictionary).
+        self._payload_zlib1_dict1: dict[str, bool] = {}
+        # ``(connection id, space id, suite)`` → when that server last
+        # refused an item under that compressed suite for that space
+        # (``time.monotonic()``): the next suite there for
+        # :data:`PAYLOAD_SUITE_REFUSAL_TTL_S`. Bounded, oldest out.
+        self._suite_refused_at: dict[tuple[str, str, str], float] = {}
         # Same again for ``member_publish_trusted`` (v_49): whether the GFS
         # carries the identified ``POST /gfs/member-publish`` and the
         # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
@@ -718,6 +724,7 @@ class GfsConnectionService:
             self._space_key_pull,
             self._space_item_followers,
             self._payload_zlib1,
+            self._payload_zlib1_dict1,
             self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
@@ -3047,16 +3054,17 @@ class GfsConnectionService:
         event_type: str,
         payload: dict,
         skip: Callable[[GfsConnection], Awaitable[bool]] | None = None,
-        compressed_payload: dict | None = None,
+        compressed_payloads: dict[str, dict] | None = None,
     ) -> int:
         """Relay a single space-content event to a space's GFS subscribers.
 
-        ``compressed_payload``: the same item with a zlib-compressed
-        plaintext (``payload_suite: "zlib1"``). A server that proved
-        ``payload_zlib1`` gets it instead of ``payload`` until it refuses one
-        for this space (409 — a follower there can't open it); the JSON
-        ``payload`` then goes to that server at once, and keeps going there
-        for :data:`PAYLOAD_SUITE_REFUSAL_TTL_S` (:meth:`compress_for`).
+        ``compressed_payloads``: the same item under compressed payload
+        suites (``"zlib1+dict1"`` / ``"zlib1"`` → its envelope). A server
+        gets the most preferred one it proved, instead of ``payload``,
+        until it refuses that suite for this space (409 — a follower there
+        can't open it); the next suite — finally the JSON ``payload`` — then
+        goes to that server at once, and keeps going there for
+        :data:`PAYLOAD_SUITE_REFUSAL_TTL_S` (:meth:`payload_suite_for`).
 
         ``skip`` (step 12): a server it answers ``True`` for gets nothing —
         a seed holder's copy of a member's post where every follower reads
@@ -3122,7 +3130,7 @@ class GfsConnectionService:
             space_id=space_id,
             event_type=event_type,
             payload=payload,
-            compressed=compressed_payload,
+            compressed=compressed_payloads,
         )
         delivered = 0
         for conn in conns:
@@ -3195,30 +3203,60 @@ class GfsConnectionService:
             conn, "payload_zlib1", self._payload_zlib1
         )
 
-    async def compress_for(self, conn: GfsConnection, space_id: str) -> bool:
-        """Whether to send *space_id*'s next item to *conn* compressed: the
-        server proved ``payload_zlib1`` and has not refused a compressed item
-        for this space within :data:`PAYLOAD_SUITE_REFUSAL_TTL_S`."""
-        refused = self._suite_refused_at.get((conn.id, space_id))
-        if refused is not None:
-            if time.monotonic() - refused < PAYLOAD_SUITE_REFUSAL_TTL_S:
-                return False
-            del self._suite_refused_at[(conn.id, space_id)]
-        return await self.payload_zlib1_supported(conn)
+    async def payload_zlib1_dict1_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``payload_zlib1_dict1`` under a valid
+        signature: the same contract for ``zlib1+dict1``."""
+        return await self._signed_capability_supported(
+            conn, "payload_zlib1_dict1", self._payload_zlib1_dict1
+        )
 
-    def note_suite_refused(self, conn: GfsConnection, space_id: str) -> None:
-        """*conn* refused a compressed item for *space_id* (a follower there
-        lacks ``payload_zlib1``): JSON there for the next hour."""
-        key = (conn.id, space_id)
+    async def payload_suite_for(
+        self, conn: GfsConnection, space_id: str, offered: Collection[str]
+    ) -> str | None:
+        """The compressed suite to send *space_id*'s next item to *conn*
+        under: the first of :data:`COMPRESSED_PAYLOAD_SUITES` the caller
+        has a copy for (*offered*), the server proved, and it has not
+        refused for this space within :data:`PAYLOAD_SUITE_REFUSAL_TTL_S`.
+        ``None``: send JSON."""
+        for suite in COMPRESSED_PAYLOAD_SUITES:
+            if suite not in offered or self._suite_refused(conn, space_id, suite):
+                continue
+            supported = (
+                self.payload_zlib1_dict1_supported
+                if suite == PAYLOAD_SUITE_ZLIB_DICT1
+                else self.payload_zlib1_supported
+            )
+            if await supported(conn):
+                return suite
+        return None
+
+    def _suite_refused(self, conn: GfsConnection, space_id: str, suite: str) -> bool:
+        key = (conn.id, space_id, suite)
+        refused = self._suite_refused_at.get(key)
+        if refused is None:
+            return False
+        if time.monotonic() - refused < PAYLOAD_SUITE_REFUSAL_TTL_S:
+            return True
+        del self._suite_refused_at[key]
+        return False
+
+    def note_suite_refused(
+        self, conn: GfsConnection, space_id: str, suite: str
+    ) -> None:
+        """*conn* refused an item under *suite* for *space_id* (a follower
+        there does not read it, or an older node does not know it): the next
+        suite there — or JSON — for the next hour."""
+        key = (conn.id, space_id, suite)
         self._suite_refused_at.pop(key, None)
         while len(self._suite_refused_at) >= MAX_SUITE_REFUSALS:
             self._suite_refused_at.pop(next(iter(self._suite_refused_at)))
         self._suite_refused_at[key] = time.monotonic()
         log.info(
-            "GFS %s refused a compressed item for space %s (a follower there "
-            "does not read payload_zlib1) — sending JSON there for %d s",
+            "GFS %s refused a compressed item for space %s (suite %s: a "
+            "follower there does not read it) — not sending it there for %d s",
             conn.id,
             space_id,
+            suite,
             PAYLOAD_SUITE_REFUSAL_TTL_S,
         )
 
@@ -3472,18 +3510,23 @@ class GfsConnectionService:
     async def _post_item_publish(
         self, conn: GfsConnection, item: GfsPublish
     ) -> PublishOutcome:
-        """POST ``item`` to ``conn`` — compressed where :meth:`compress_for`
-        allows it, and on that server's 409 refusal the JSON body at once."""
-        if item.compressed is not None and await self.compress_for(conn, item.space_id):
+        """POST ``item`` to ``conn`` — under the compressed suite
+        :meth:`payload_suite_for` picks, and on that server's refusal of it
+        under the next one at once, finally as JSON."""
+        offered = item.compressed or {}
+        for _ in range(len(offered)):
+            suite = await self.payload_suite_for(conn, item.space_id, offered)
+            if suite is None:
+                break
             outcome = await self._post_publish(
-                conn, item.body(compressed=True), space_id=item.space_id
+                conn, item.body(suite=suite), space_id=item.space_id
             )
             if outcome.kind not in ("suite_refused", "permanent"):
                 return outcome
             # 409: a follower there can't open it. Any other refusal of the
-            # compressed copy (a node that does not know the label): the JSON
-            # one decides — and that server gets JSON for the next hour.
-            self.note_suite_refused(conn, item.space_id)
+            # compressed copy (a node that does not know the suite): the next
+            # copy decides — and that server skips this suite for an hour.
+            self.note_suite_refused(conn, item.space_id, suite)
         return await self._post_publish(conn, item.body(), space_id=item.space_id)
 
     def _warn_publish_unsupported(self, conn: GfsConnection) -> None:

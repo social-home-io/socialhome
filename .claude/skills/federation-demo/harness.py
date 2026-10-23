@@ -3373,17 +3373,17 @@ def cmd_gfs_space_post() -> None:
             f"{seen.get('author')!r}, expected {author_id!r}",
         )
     print(f"  d sees the post decrypted, authored by {seen['author']} ✓")
-    # The host's relay copy went compressed (``payload_suite: "zlib1"``,
-    # under its authority signature): the GFS proved ``payload_zlib1`` and
-    # every follower seat there reads it.
+    # The host's relay copy went compressed with the preset dictionary
+    # (``payload_suite: "zlib1+dict1"``, under its authority signature): the GFS
+    # proved ``payload_zlib1_dict1`` and every follower seat there reads it.
     relayed = _gfs_log_lines_matching(
         f"GFS: relaying space_post_public for space {space_id}", offset=gfs_off
     )
-    if not any("suite=zlib1" in line for line in relayed):
+    if not any("suite=zlib1+dict1" in line for line in relayed):
         raise SystemExit(
             f"gfs-space-post: the relay was not fanned out compressed: {relayed!r}"
         )
-    print("  … relayed compressed (payload_suite zlib1) ✓")
+    print("  … relayed compressed (payload_suite zlib1+dict1) ✓")
     # …and to d as a binary frame (``ws_binary1``): d's socket asked for it
     # in its hello, so the ciphertext travelled raw and d rebuilt the exact
     # base64url string before verifying the authority signature.
@@ -5862,16 +5862,16 @@ def cmd_gfs_member_publish() -> None:
             f"gfs-member-publish: the GFS log carries the post text: {leaked[:1]!r}"
         )
     print(f"  the GFS fanned the member-published item out ({fanned[-1].strip()}) ✓")
-    # Compressed (``payload_suite: "zlib1"``): the GFS proved
-    # ``payload_zlib1`` and every seat of the space said it reads it, so the
-    # item went in the 1 KiB bucket instead of 4 KiB.
-    if not any("suite=zlib1" in line for line in fanned):
+    # Compressed with the preset dictionary (``payload_suite: "zlib1+dict1"``):
+    # the GFS proved ``payload_zlib1_dict1`` and every seat of the space said
+    # it reads it (seat labels 7).
+    if not any("suite=zlib1+dict1" in line for line in fanned):
         raise SystemExit(
             "gfs-member-publish: the member-published item was not fanned out "
             f"compressed — {fanned[-1].strip()!r}. Every follower seat should "
-            "carry payload_zlib1 (space_subscribers.reads_space_item & 2)."
+            "carry payload_zlib1_dict1 (space_subscribers.reads_space_item & 4)."
         )
-    print("  … compressed (payload_suite zlib1), and d decrypted it ✓")
+    print("  … compressed (payload_suite zlib1+dict1), and d decrypted it ✓")
 
     # 3b. PR 3 — comments, reactions and own edits / deletes, still with the
     #     host offline. d (a follower) reads them only from the member relay:
@@ -5952,10 +5952,10 @@ def _old_follower_forces_json(state: dict, space_id: str) -> None:
         " WHERE space_id=? AND instance_id=?",
         seat,
     )
-    if not rows or rows[0][0] != 3:
+    if not rows or rows[0][0] != 7:
         raise SystemExit(
-            f"gfs-member-publish: d's seat labels are {rows!r}, expected 3 "
-            "(space_item + payload_zlib1)"
+            f"gfs-member-publish: d's seat labels are {rows!r}, expected 7 "
+            "(space_item + payload_zlib1 + payload_zlib1_dict1)"
         )
     _gfs_write(
         "UPDATE space_subscribers SET reads_space_item=1"
@@ -6003,7 +6003,7 @@ def _old_follower_forces_json(state: dict, space_id: str) -> None:
         )
     finally:
         _gfs_write(
-            "UPDATE space_subscribers SET reads_space_item=3"
+            "UPDATE space_subscribers SET reads_space_item=7"
             " WHERE space_id=? AND instance_id=?",
             seat,
         )

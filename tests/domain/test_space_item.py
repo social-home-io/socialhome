@@ -10,10 +10,12 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from orjson import dumps as orjson_dumps
 
+from socialhome.domain.item_zdict import ZDICT_V1 as ZDICT
 from socialhome.domain.space_item import (
     AUTHORITY_KIND_APPROVED_POST,
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
+    COMPRESSED_PAYLOAD_SUITES,
     GENERIC_ITEM_TYPES,
     ITEM_SIZE_BUCKETS,
     ITEM_TYPE_COMMENT,
@@ -29,6 +31,7 @@ from socialhome.domain.space_item import (
     PAD_FIELD,
     PAYLOAD_SUITE_JSON,
     PAYLOAD_SUITE_ZLIB,
+    PAYLOAD_SUITE_ZLIB_DICT1,
     POST_SHAPED_ITEM_TYPES,
     REMOVAL_TARGET_COMMENT,
     REMOVAL_TARGET_POST,
@@ -232,7 +235,9 @@ def test_payload_suite_of_defaults_and_rejects_unknown():
     for bad in ("zlib2", "", 3, "JSON"):
         with pytest.raises(UnsupportedPayloadSuite):
             payload_suite_of(bad)
-    assert SUPPORTED_PAYLOAD_SUITES == {"json", "zlib1"}
+    assert payload_suite_of("zlib1+dict1") == PAYLOAD_SUITE_ZLIB_DICT1
+    assert SUPPORTED_PAYLOAD_SUITES == {"json", "zlib1", "zlib1+dict1"}
+    assert COMPRESSED_PAYLOAD_SUITES == ("zlib1+dict1", "zlib1")
 
 
 def test_zlib_item_round_trips_and_pads_to_a_bucket():
@@ -304,3 +309,66 @@ def test_data_after_the_stream_must_be_zero_padding():
 def test_garbage_is_a_value_error():
     with pytest.raises(ValueError, match="corrupt"):
         open_item_plaintext(b"{not zlib}", PAYLOAD_SUITE_ZLIB)
+
+
+# ── zlib1+dict1 (preset dictionary) ──────────────────────────────────────
+
+_SHAPED_BODY = {
+    "item_type": "post",
+    "inner": {
+        "post_id": "p" * 32,
+        "space_id": "s" * 32,
+        "author_user_id": "u" * 32,
+        "author_pk": "ab" * 32,
+        "author_username": "erin",
+        "type": "text",
+        "content": "Plums by the gate, help yourself.",
+        "media_url": None,
+        "image_urls": [],
+        "created_at": "2026-10-23T09:30:00+00:00",
+        "hidden_from_feed": False,
+        "origin_instance_id": "o" * 32,
+        "item_type": "post",
+        "item_target": "p" * 32,
+        "author_sig": "x" * 86,
+    },
+}
+
+
+def test_a_dictionary_item_round_trips_and_is_smaller():
+    sealed = seal_item_plaintext(_SHAPED_BODY, suite=PAYLOAD_SUITE_ZLIB_DICT1)
+    assert sealed is not None and len(sealed) in ITEM_SIZE_BUCKETS
+    assert json.loads(open_item_plaintext(sealed, "zlib1+dict1")) == _SHAPED_BODY
+    raw = orjson_dumps(_SHAPED_BODY)
+    assert len(zlib.compress(raw, 9)) - len(sealed.rstrip(b"\0")) > 100
+
+
+@pytest.mark.security
+def test_a_dictionary_stream_never_opens_as_plain_zlib_or_back():
+    """The suite names the dictionary. A GFS flipping the routing-visible
+    label gains nothing: a dictionary stream does not inflate as plain zlib
+    (it names a dictionary the plain reader does not have), and a plain
+    stream read under the dictionary suite is the same item (zlib uses the
+    dictionary only when the stream asks for it). The author signature
+    inside decides either way."""
+    with_dict = seal_item_plaintext(_SHAPED_BODY, suite=PAYLOAD_SUITE_ZLIB_DICT1)
+    plain = seal_item_plaintext(_SHAPED_BODY, suite=PAYLOAD_SUITE_ZLIB)
+    assert with_dict is not None and plain is not None
+    with pytest.raises(ValueError, match="corrupt"):
+        open_item_plaintext(with_dict, PAYLOAD_SUITE_ZLIB)
+    assert json.loads(open_item_plaintext(plain, PAYLOAD_SUITE_ZLIB_DICT1)) == (
+        _SHAPED_BODY
+    )
+
+
+@pytest.mark.security
+def test_a_dictionary_bomb_is_refused_at_the_same_cap():
+    deflater = zlib.compressobj(9, zlib.DEFLATED, 15, 9, zlib.Z_DEFAULT_STRATEGY, ZDICT)
+    bomb = deflater.compress(b"0" * (64 * MAX_INFLATED_ITEM_BYTES)) + deflater.flush()
+    with pytest.raises(ValueError, match="cap"):
+        open_item_plaintext(bomb, PAYLOAD_SUITE_ZLIB_DICT1)
+
+
+def test_zlib_item_plaintext_refuses_an_unknown_suite():
+    with pytest.raises(UnsupportedPayloadSuite):
+        zlib_item_plaintext(_SHAPED_BODY, suite="json")

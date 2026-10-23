@@ -121,8 +121,8 @@ from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, SpaceType
 from ..domain.space_item import (
     ITEM_TYPE_POST,
     PAYLOAD_SUITE_JSON,
-    PAYLOAD_SUITE_ZLIB,
     SUPPORTED_ITEM_TYPES,
+    compressed_item_plaintexts,
     required_scope,
     seal_item_plaintext,
 )
@@ -165,9 +165,10 @@ _KIND_ITEM = SPACE_ITEM_EVENT_TYPE
 _KIND_ANON = "space_item_anon"
 _KIND_NOTICE = "space_epoch_notice"
 
-#: Key of a queued item's zlib copy (process-local queue data, never sent:
-#: the request carries one payload and names its ``payload_suite``).
-_COMPRESSED_KEY = "compressed_payload"
+#: Key of a queued item's compressed copies, ``{suite: ciphertext}``
+#: (process-local queue data, never sent: the request carries one payload
+#: and names its ``payload_suite``).
+_COMPRESSED_KEY = "compressed_payloads"
 
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
@@ -648,16 +649,17 @@ class GfsMemberPublishService:
         epoch: int,
         cert: WriterCert,
         ciphertext: str,
-        compressed: str | None = None,
+        compressed: dict[str, str] | None = None,
     ) -> GfsPublish | None:
         """The queue item for an item sealed at ``epoch``: ANONYMOUS when we
         hold the writer group key for that epoch (the cert stays inside the
         ciphertext only); ``None`` in a strict space without it (host path —
         never identified); else IDENTIFIED with the v1 cert fields in the
         clear (the user binding stays inside the ciphertext — it names this
-        household's users). ``compressed`` (the zlib copy, same epoch) rides
-        along as ``compressed_payload`` for the servers that take it."""
-        extra = {_COMPRESSED_KEY: compressed} if compressed is not None else {}
+        household's users). ``compressed`` (the compressed copies by suite,
+        same epoch) rides along as ``compressed_payloads`` for the servers
+        that take them."""
+        extra = {_COMPRESSED_KEY: compressed} if compressed else {}
         if await self._writer_certs.own_writer_key(space_id, epoch) is not None:
             return GfsPublish(
                 space_id=space_id,
@@ -683,10 +685,11 @@ class GfsMemberPublishService:
 
     async def _seal(
         self, space_id: str, item_type: str, inner: dict
-    ) -> tuple[int, WriterCert, str, str | None] | None:
-        """``(epoch, cert, ciphertext, compressed ciphertext | None)`` of the
-        item sealed with our writer cert for the epoch it is encrypted
-        under; the zlib copy only when it lands in a smaller size bucket."""
+    ) -> tuple[int, WriterCert, str, dict[str, str]] | None:
+        """``(epoch, cert, ciphertext, compressed ciphertexts by suite)`` of
+        the item sealed with our writer cert for the epoch it is encrypted
+        under; a compressed copy only when it lands in a smaller size bucket
+        (:func:`~socialhome.domain.space_item.compressed_item_plaintexts`)."""
         body = {k: v for k, v in inner.items() if k != WRITER_CERT_FIELD}
         needed = required_scope(item_type)
         for _attempt in range(2):
@@ -704,18 +707,22 @@ class GfsMemberPublishService:
                 return None
             item = {**body, WRITER_CERT_FIELD: cert.to_wire()}
             plaintext = build_item_plaintext(item_type, item)
-            compressed = build_item_plaintext(item_type, item, suite=PAYLOAD_SUITE_ZLIB)
+            copies = compressed_item_plaintexts(
+                {"item_type": item_type, "inner": item}, json_len=len(plaintext)
+            )
             try:
                 sealed_epoch, ct = await self._crypto.encrypt(space_id, plaintext)
-                z_ct = None
-                if compressed is not None and len(compressed) < len(plaintext):
-                    z_epoch, z_ct = await self._crypto.encrypt(space_id, compressed)
+                z_cts: dict[str, str] = {}
+                for suite, pt in copies.items():
+                    z_epoch, z_ct = await self._crypto.encrypt(space_id, pt)
                     if z_epoch != sealed_epoch:
-                        z_ct = None
+                        z_cts = {}
+                        break
+                    z_cts[suite] = z_ct
             except RuntimeError:
                 return None
             if sealed_epoch == epoch:
-                return epoch, cert, ct, z_ct
+                return epoch, cert, ct, z_cts
         log.warning(
             "gfs.member_publish: content epoch kept moving for space %s — not published",
             space_id,
@@ -771,12 +778,13 @@ class GfsMemberPublishService:
         )
 
     async def _variant(self, conn: GfsConnection, space_id: str, data: dict) -> dict:
-        """``data`` as sent to ``conn``: its zlib copy (``payload_suite``
-        set) where :meth:`GfsConnectionService.compress_for` allows it,
-        else the JSON one."""
-        compressed = data.get(_COMPRESSED_KEY)
-        if compressed and await self._gfs.compress_for(conn, space_id):
-            return {**data, "payload": compressed, "suite": PAYLOAD_SUITE_ZLIB}
+        """``data`` as sent to ``conn``: the compressed copy (``payload_suite``
+        set) :meth:`GfsConnectionService.payload_suite_for` picks, else the
+        JSON one."""
+        offered = data.get(_COMPRESSED_KEY) or {}
+        suite = await self._gfs.payload_suite_for(conn, space_id, offered)
+        if suite is not None:
+            return {**data, "payload": offered[suite], "suite": suite}
         return data
 
     async def _post_anon_item(
@@ -1016,15 +1024,19 @@ class GfsMemberPublishService:
         refused the field (an older node of a cluster mid-upgrade), one more
         without it."""
         bound = self._gfs.addressee_key_for(conn) is not None
-        compressed = bool(
-            item.payload.get(_COMPRESSED_KEY)
-        ) and await self._gfs.compress_for(conn, item.space_id)
+        offered = item.payload.get(_COMPRESSED_KEY) or {}
         outcome = await self._attempt(conn, item)
-        if compressed and outcome.kind in ("suite_refused", "permanent"):
-            # A follower there can't open a compressed item (409), or an
-            # older node of a cluster mid-upgrade refused the unknown field
-            # (400): JSON there now, and for the next hour (``compress_for``).
-            self._gfs.note_suite_refused(conn, item.space_id)
+        for _ in range(len(offered)):
+            if outcome.kind not in ("suite_refused", "permanent"):
+                break
+            suite = await self._gfs.payload_suite_for(conn, item.space_id, offered)
+            if suite is None:
+                break
+            # A follower there can't open that suite (409), or an older node
+            # of a cluster mid-upgrade refused the unknown suite (400): the
+            # next copy there now — finally JSON — and for the next hour
+            # (``payload_suite_for``).
+            self._gfs.note_suite_refused(conn, item.space_id, suite)
             outcome = await self._attempt(conn, item)
         if bound and self._gfs.addressee_key_for(conn) is None:
             outcome = await self._attempt(conn, item)

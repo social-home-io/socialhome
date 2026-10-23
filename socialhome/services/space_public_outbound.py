@@ -130,12 +130,11 @@ from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
     PAYLOAD_SUITE_FIELD,
-    PAYLOAD_SUITE_ZLIB,
     REMOVAL_TARGET_COMMENT,
     REMOVAL_TARGET_POST,
     AuthorityRemoval,
+    compressed_item_plaintexts,
     pad_json_object,
-    zlib_item_plaintext,
 )
 from ..domain.writer_cert import (
     WRITER_SCOPE_COMMENT,
@@ -606,19 +605,22 @@ class SpacePublicOutbound:
         await self._publish(space_id, seed, sealed, what=f"{target} removal")
 
     async def _seal(self, space_id: str, body: dict) -> _Sealed:
-        """Encrypt ``body`` under the current epoch, padded JSON — plus, when
-        it lands in a smaller size bucket, a zlib-compressed copy sealed under
-        the same epoch (``payload_suite: "zlib1"``). Raises ``RuntimeError``
-        when there is no content key."""
+        """Encrypt ``body`` under the current epoch, padded JSON — plus the
+        compressed copies that land in a smaller size bucket
+        (:func:`compressed_item_plaintexts`: ``zlib1+dict1`` / ``zlib1``),
+        sealed under the same epoch. Raises ``RuntimeError`` when there is
+        no content key."""
         plain = pad_json_object(body)
         epoch, ct = await self._crypto.encrypt(space_id, plain)
-        compressed = zlib_item_plaintext(body)
-        if compressed is None or len(compressed) >= len(plain):
-            return _Sealed(epoch, ct, None)
-        z_epoch, z_ct = await self._crypto.encrypt(space_id, compressed)
-        # A rotation between the two: the JSON copy alone (it is the one
-        # every follower reads).
-        return _Sealed(epoch, ct, z_ct if z_epoch == epoch else None)
+        compressed: dict[str, str] = {}
+        for suite, pt in compressed_item_plaintexts(body, json_len=len(plain)).items():
+            z_epoch, z_ct = await self._crypto.encrypt(space_id, pt)
+            # A rotation in between: the JSON copy alone (it is the one
+            # every follower reads).
+            if z_epoch != epoch:
+                return _Sealed(epoch, ct, {})
+            compressed[suite] = z_ct
+        return _Sealed(epoch, ct, compressed)
 
     @staticmethod
     def _envelope(
@@ -654,26 +656,19 @@ class SpacePublicOutbound:
     ) -> None:
         """Authority-sign ``{space_id, epoch, encrypted_payload}`` under
         ``space_post_public`` and hand it to every GFS the space is on — the
-        compressed copy too, for the servers that take it."""
+        compressed copies too, for the servers that take them."""
         envelope = self._envelope(space_id, seed, sealed.epoch, sealed.ct, suite=None)
-        compressed = (
-            self._envelope(
-                space_id,
-                seed,
-                sealed.epoch,
-                sealed.compressed_ct,
-                suite=PAYLOAD_SUITE_ZLIB,
-            )
-            if sealed.compressed_ct is not None
-            else None
-        )
+        compressed = {
+            suite: self._envelope(space_id, seed, sealed.epoch, ct, suite=suite)
+            for suite, ct in sealed.compressed_cts.items()
+        }
         try:
             await self._gfs.publish_space_event(
                 space_id=space_id,
                 event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
                 payload=envelope,
                 skip=skip,
-                compressed_payload=compressed,
+                compressed_payloads=compressed or None,
             )
         except Exception:
             log.exception(
@@ -799,11 +794,11 @@ class SpacePublicOutbound:
 
 class _Sealed(NamedTuple):
     """One item sealed for the relay: the padded-JSON ciphertext every
-    follower reads, and the zlib copy (same epoch) or ``None``."""
+    follower reads, and its compressed copies (same epoch) by suite."""
 
     epoch: int
     ct: str
-    compressed_ct: str | None
+    compressed_cts: dict[str, str]
 
 
 class _NoWriterCert(Exception):
