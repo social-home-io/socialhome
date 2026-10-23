@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 
 import aiohttp
@@ -14,7 +15,8 @@ from aiohttp.test_utils import TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from socialhome.crypto import b64url_decode, verify_ed25519
+from socialhome.crypto import b64url_decode, b64url_encode, verify_ed25519
+from socialhome.domain.ws_binary_frame import encode_binary_frame
 from socialhome.services.gfs_ws_client import GfsWebSocketClient, _to_ws_url
 
 try:
@@ -730,6 +732,70 @@ async def test_on_text_logs_the_received_frame_size_at_debug(caplog):
         f"type='relay' event='space_item' chars={len(raw)}" in r.getMessage()
         for r in caplog.records
     )
+
+
+async def test_a_binary_frame_is_rebuilt_then_dispatched(caplog):
+    """``ws_binary1``: the ciphertext string comes back exactly before the
+    relay handler (and its signature checks) sees the frame."""
+    seed, _pub = _gen_keypair()
+    got: list[dict] = []
+
+    async def _relay(frame: dict) -> None:
+        got.append(frame)
+
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-x",
+        signing_key=seed,
+        session_factory=lambda: None,  # never started
+        on_relay=_relay,
+    )
+    frame = {
+        "type": "relay",
+        "space_id": "sp",
+        "event_type": "space_item",
+        "epoch": 1,
+        "payload": f"{b64url_encode(os.urandom(12))}:{b64url_encode(os.urandom(600))}",
+    }
+    data = encode_binary_frame(frame)
+    with caplog.at_level(logging.DEBUG, logger="socialhome.services.gfs_ws_client"):
+        await client._on_binary(data)
+    assert got == [frame]
+    assert any(f"bytes={len(data)}" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("data", [b"", b"\x09\x00\x02{}", b"\x01\xff\xff{}"])
+async def test_a_malformed_binary_frame_is_dropped_with_one_line(caplog, data):
+    seed, _pub = _gen_keypair()
+    got: list[dict] = []
+
+    async def _relay(frame: dict) -> None:
+        got.append(frame)
+
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-x",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=_relay,
+    )
+    with caplog.at_level(logging.WARNING):
+        await client._on_binary(data)
+    assert got == []
+    assert "malformed binary frame" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+def test_the_hello_asks_for_binary_frames():
+    seed, _pub = _gen_keypair()
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-x",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=None,
+    )
+    assert "ws_binary1" in client._build_hello()["accepts"]
 
 
 async def test_on_text_dispatch_covers_every_frame_type():

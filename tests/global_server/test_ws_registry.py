@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from datetime import UTC, datetime
 from typing import Any
 
+import orjson
 import pytest
 
+from socialhome.crypto import b64url_encode
+from socialhome.domain.ws_binary_frame import decode_binary_frame
 from socialhome.global_server import ws_registry as ws_registry_mod
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 
@@ -23,6 +28,7 @@ class _FakeWS:
 
     def __init__(self, *, broken: bool = False) -> None:
         self.sent: list[str] = []
+        self.sent_bytes = []
         self.closed_with: tuple[int, bytes] | None = None
         self._broken = broken
 
@@ -34,6 +40,11 @@ class _FakeWS:
         if self._broken:
             raise ConnectionResetError("simulated drop")
         self.sent.append(msg)
+
+    async def send_bytes(self, data: bytes) -> None:
+        if self._broken:
+            raise ConnectionResetError("simulated drop")
+        self.sent_bytes.append(data)
 
     async def close(self, *, code: int = 1000, message: bytes = b"") -> None:
         self.closed_with = (code, message)
@@ -270,3 +281,68 @@ async def test_an_undelivered_frame_is_not_counted(registry):
     assert await registry.send("inst-1", {"type": "relay"}) is False
     assert await registry.send("nobody", {"type": "relay"}) is False
     assert registry.fanout_stats.snapshot()["total"] == {"frames": 0, "bytes": 0}
+
+
+# ── ws_binary1 (binary frames, per connection) ─────────────────────────────
+
+_CT = f"{b64url_encode(os.urandom(12))}:{b64url_encode(os.urandom(1040))}"
+_ITEM = {
+    "type": "relay",
+    "space_id": "sp",
+    "event_type": "space_item",
+    "epoch": 3,
+    "payload": _CT,
+}
+
+
+async def test_a_binary_socket_gets_a_binary_frame_and_a_text_one_text(registry):
+    """Per connection: the same frame goes binary to the socket that asked
+    and as text to the other — nobody falls back."""
+    binary, text = _FakeWS(), _FakeWS()
+    await registry.register("bin", binary, binary=True)
+    await registry.register("txt", text)
+    assert await registry.send("bin", _ITEM)
+    assert await registry.send("txt", _ITEM)
+    assert binary.sent == [] and len(binary.sent_bytes) == 1
+    assert text.sent_bytes == [] and len(text.sent) == 1
+    assert decode_binary_frame(binary.sent_bytes[0]) == orjson.loads(text.sent[0])
+    assert len(binary.sent_bytes[0]) < len(text.sent[0].encode()) * 0.8
+    by_kind = registry.fanout_stats.snapshot()["by_kind"]["relay:space_item"]
+    assert by_kind["bytes"] == len(binary.sent_bytes[0]) + len(text.sent[0])
+
+
+async def test_a_frame_without_a_listed_ciphertext_stays_text(registry):
+    ws = _FakeWS()
+    await registry.register("bin", ws, binary=True)
+    assert await registry.send("bin", {"type": "new_subscriber", "space_id": "sp"})
+    assert len(ws.sent) == 1 and ws.sent_bytes == []
+
+
+async def test_the_binary_header_encodes_exactly_like_a_text_frame(registry):
+    """Same encoder for both (``default=str``, datetimes passed through it),
+    so a binary follower reads the same values a text follower does."""
+    binary, text = _FakeWS(), _FakeWS()
+    await registry.register("bin", binary, binary=True)
+    await registry.register("txt", text)
+    frame = {**_ITEM, "when": datetime(2026, 1, 1, tzinfo=UTC)}
+    assert await registry.send("bin", frame)
+    assert await registry.send("txt", frame)
+    assert decode_binary_frame(binary.sent_bytes[0]) == orjson.loads(text.sent[0])
+
+
+async def test_the_binary_choice_follows_the_current_socket(registry):
+    first, second = _FakeWS(), _FakeWS()
+    await registry.register("inst", first, binary=True)
+    await registry.register("inst", second)  # reconnect without the label
+    assert await registry.send("inst", _ITEM)
+    assert len(second.sent) == 1 and second.sent_bytes == []
+    await registry.register("inst", first, binary=True)
+    await registry.unregister("inst", first)
+    assert "inst" not in registry._binary
+
+
+async def test_a_dead_binary_socket_is_evicted(registry):
+    await registry.register("bin", _FakeWS(broken=True), binary=True)
+    assert await registry.send("bin", _ITEM) is False
+    assert registry.is_connected("bin") is False
+    assert "bin" not in registry._binary

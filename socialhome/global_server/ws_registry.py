@@ -35,11 +35,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 from typing import Any
 
 import orjson
 from aiohttp import web
 
+from ..domain.ws_binary_frame import encode_binary_frame
 from .fanout_stats import FanoutStats, frame_kind
 
 log = logging.getLogger(__name__)
@@ -60,13 +62,22 @@ _EVICT_STALLED_CODE = 1013
 WS_SEND_TIMEOUT_S: float = 10.0
 
 
+def _dumps(payload: Any) -> bytes:
+    """The JSON of every pushed frame (text frames and binary headers)."""
+    return orjson.dumps(payload, default=str, option=orjson.OPT_PASSTHROUGH_DATETIME)
+
+
 class GfsWebSocketRegistry:
     """Per-instance registry of live GFS-side WebSocket sessions."""
 
-    __slots__ = ("_by_instance", "_closing", "_lock", "fanout_stats")
+    __slots__ = ("_binary", "_by_instance", "_closing", "_lock", "fanout_stats")
 
     def __init__(self) -> None:
         self._by_instance: dict[str, web.WebSocketResponse] = {}
+        #: The instances whose CURRENT socket asked for binary frames
+        #: (``ws_binary1`` in its hello) — per connection, so a re-register
+        #: without the label drops it.
+        self._binary: set[str] = set()
         #: What this node pushed, by frame kind and size class (admin
         #: overview) — counted only for frames that reached a socket.
         self.fanout_stats = FanoutStats()
@@ -80,11 +91,18 @@ class GfsWebSocketRegistry:
         self,
         instance_id: str,
         ws: web.WebSocketResponse,
+        *,
+        binary: bool = False,
     ) -> None:
-        """Register *ws* for *instance_id*, evicting any prior socket."""
+        """Register *ws* for *instance_id*, evicting any prior socket.
+        ``binary``: this socket reads ``ws_binary1`` frames."""
         async with self._lock:
             previous = self._by_instance.get(instance_id)
             self._by_instance[instance_id] = ws
+            if binary:
+                self._binary.add(instance_id)
+            else:
+                self._binary.discard(instance_id)
         if previous is not None and previous is not ws and not previous.closed:
             try:
                 await previous.close(
@@ -96,9 +114,10 @@ class GfsWebSocketRegistry:
                     "ws.evict failed instance=%s: %s", instance_id, exc, exc_info=True
                 )
         log.info(
-            "gfs.ws.register: instance=%s total=%d",
+            "gfs.ws.register: instance=%s total=%d binary=%s",
             instance_id,
             self.connection_count(),
+            binary,
         )
 
     async def unregister(
@@ -111,6 +130,7 @@ class GfsWebSocketRegistry:
             current = self._by_instance.get(instance_id)
             if current is ws:
                 self._by_instance.pop(instance_id, None)
+                self._binary.discard(instance_id)
         log.info(
             "gfs.ws.unregister: instance=%s total=%d",
             instance_id,
@@ -122,6 +142,7 @@ class GfsWebSocketRegistry:
         async with self._lock:
             sockets = list(self._by_instance.values())
             self._by_instance.clear()
+            self._binary.clear()
         for ws in sockets:
             if ws.closed:
                 continue
@@ -149,7 +170,9 @@ class GfsWebSocketRegistry:
     # ─── Push ─────────────────────────────────────────────────────────────
 
     async def send(self, instance_id: str, payload: dict[str, Any]) -> bool:
-        """Push a JSON frame to *instance_id*.
+        """Push a JSON frame to *instance_id* — as a ``ws_binary1`` binary
+        frame when that socket asked for one and the frame carries a listed
+        ciphertext (:mod:`socialhome.domain.ws_binary_frame`), else as text.
 
         Returns ``True`` on successful send, ``False`` when no socket is
         registered or the send failed (in which case the dead socket is
@@ -158,15 +181,18 @@ class GfsWebSocketRegistry:
         ws = self._by_instance.get(instance_id)
         if ws is None or ws.closed:
             return False
+        binary = self._binary_frame(instance_id, payload)
+        if binary is not None:
+            return await self._push(
+                instance_id, ws, ws.send_bytes(binary), payload, len(binary)
+            )
         try:
             # Inside the guard on purpose: an unencodable frame used to escape
             # ``send`` as a TypeError, past ``_deliver_one``, past the fan-out
             # gather, and out of the relay handler as a 500. A frame we cannot
             # serialise is simply undeliverable — report it like any other
             # failed push.
-            raw = orjson.dumps(
-                payload, default=str, option=orjson.OPT_PASSTHROUGH_DATETIME
-            )
+            raw = _dumps(payload)
             msg = raw.decode()
         except TypeError as exc:
             # The socket is healthy — this is a payload bug, so do NOT evict it.
@@ -176,10 +202,32 @@ class GfsWebSocketRegistry:
                 exc,
             )
             return False
+        return await self._push(instance_id, ws, ws.send_str(msg), payload, len(raw))
+
+    def _binary_frame(self, instance_id: str, payload: dict[str, Any]) -> bytes | None:
+        """The binary form of *payload* for this socket, or ``None`` (text)."""
+        if instance_id not in self._binary:
+            return None
+        try:
+            return encode_binary_frame(payload, dumps=_dumps)
+        except TypeError:
+            # Unencodable: the text path reports it (and keeps the socket).
+            return None
+
+    async def _push(
+        self,
+        instance_id: str,
+        ws: web.WebSocketResponse,
+        send: Awaitable[None],
+        payload: dict[str, Any],
+        size: int,
+    ) -> bool:
+        """Await one ``send_str`` / ``send_bytes`` under the stall timeout;
+        count it, or evict a dead / stalled socket."""
         try:
             async with asyncio.timeout(WS_SEND_TIMEOUT_S):
-                await ws.send_str(msg)
-            self.fanout_stats.record(frame_kind(payload), len(raw))
+                await send
+            self.fanout_stats.record(frame_kind(payload), size)
             return True
         except TimeoutError:
             log.debug("gfs.ws.send stalled instance=%s — evicting", instance_id)
@@ -239,3 +287,4 @@ class GfsWebSocketRegistry:
         async with self._lock:
             if self._by_instance.get(instance_id) is ws:
                 self._by_instance.pop(instance_id, None)
+                self._binary.discard(instance_id)

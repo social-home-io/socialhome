@@ -40,6 +40,11 @@ ACCEPTS_SPACE_ITEM: str = "space_item"
 #: for a space while any seat lacks it, so the publisher sends JSON.
 ACCEPTS_PAYLOAD_ZLIB1: str = "payload_zlib1"
 
+#: The household reads binary GFS→household WebSocket frames
+#: (:mod:`socialhome.domain.ws_binary_frame`). A HELLO-only label: the
+#: choice is per connection, so it never rides a subscribe.
+ACCEPTS_WS_BINARY1: str = "ws_binary1"
+
 #: What this household lists on every subscribe — follower and member seats
 #: alike, so the label never tells the GFS which seats are writers'.
 OUR_ACCEPTS: tuple[str, ...] = (
@@ -66,6 +71,10 @@ def seat_bits(accepts: tuple[str, ...]) -> int:
         bits |= SEAT_BIT_PAYLOAD_ZLIB1
     return bits
 
+
+#: What this household lists in its WS hello: the subscribe labels plus
+#: the per-connection ones.
+OUR_HELLO_ACCEPTS: tuple[str, ...] = (*OUR_ACCEPTS, ACCEPTS_WS_BINARY1)
 
 #: The most labels one subscribe may carry.
 MAX_ACCEPTS_LABELS: int = 16

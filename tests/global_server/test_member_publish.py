@@ -16,6 +16,7 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import aiohttp
 import orjson
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -42,6 +43,7 @@ from socialhome.domain.gfs_member_publish import (
     owner_epoch_notice_signing_payload,
 )
 from socialhome.domain.writer_cert import MAX_WRITER_CERT_EPOCH
+from socialhome.domain.ws_binary_frame import decode_binary_frame
 from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server import federation as federation_mod
 from socialhome.global_server import member_publish as mp_mod
@@ -91,15 +93,18 @@ class _Household:
             status=status,
         )
 
-    def hello(self) -> dict:
+    def hello(self, accepts: list[str] | None = None) -> dict:
         ts = int(datetime.now(UTC).timestamp())
         sig = sign_ed25519(self.seed, f"{self.instance_id}|{ts}".encode())
-        return {
+        hello = {
             "type": "hello",
             "instance_id": self.instance_id,
             "ts": ts,
             "sig": b64url_encode(sig),
         }
+        if accepts is not None:
+            hello["accepts"] = accepts
+        return hello
 
 
 SPACE_SEED = os.urandom(32)
@@ -1838,3 +1843,48 @@ async def test_info_advertises_payload_zlib1_in_the_signed_block(gfs):
         body["capabilities_sig"],
         body["capabilities_sig_suite"],
     )
+
+
+# ── ws_binary1: binary frames, chosen per connection ─────────────────────
+
+
+async def _next_item(ws) -> aiohttp.WSMessage:
+    """The next item frame on *ws*, skipping owner notices
+    (``new_subscriber``) that are always text."""
+    while True:
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        if msg.type == aiohttp.WSMsgType.BINARY:
+            return msg
+        if orjson.loads(msg.data).get("type") == "relay":
+            return msg
+
+
+async def test_a_binary_and_a_text_follower_get_the_same_item(gfs):
+    """The owner's socket asked for ``ws_binary1``, the subscriber's did
+    not: one publish reaches both — binary on one, text on the other — and
+    the binary frame rebuilds to exactly the text one (the ciphertext string
+    byte for byte, so every signature over it still verifies)."""
+    fed = gfs.app_[gfs_fed_repo_key]
+    await fed.add_subscriber(space_id=SPACE_ID, instance_id=gfs.owner.instance_id)
+    ciphertext = f"{b64url_encode(os.urandom(12))}:{b64url_encode(os.urandom(1040))}"
+    async with (
+        gfs.ws_connect("/gfs/ws") as text_ws,
+        gfs.ws_connect("/gfs/ws") as binary_ws,
+    ):
+        await text_ws.send_json(gfs.subscriber.hello())
+        await binary_ws.send_json(gfs.owner.hello(["space_key_pull", "ws_binary1"]))
+        await _wait_connected(gfs.app_, gfs.subscriber.instance_id)
+        await _wait_connected(gfs.app_, gfs.owner.instance_id)
+        resp = await gfs.post(
+            "/gfs/member-publish", json=_body(gfs.publisher, payload=ciphertext)
+        )
+        assert resp.status == 200
+        text_msg = await _next_item(text_ws)
+        binary_msg = await _next_item(binary_ws)
+    assert text_msg.type == aiohttp.WSMsgType.TEXT
+    assert binary_msg.type == aiohttp.WSMsgType.BINARY
+    text_frame = orjson.loads(text_msg.data)
+    assert decode_binary_frame(binary_msg.data) == text_frame
+    assert text_frame["payload"] == ciphertext
+    # A quarter of the ciphertext saved: it travels raw, not as base64.
+    assert len(binary_msg.data) < len(text_msg.data.encode()) - 300
