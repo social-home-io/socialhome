@@ -279,7 +279,7 @@ from .services import (
     UserService,
 )
 from .services.alias_service import AliasResolver, AliasService
-from .services.app_catalog_service import AppCatalogService
+from .services.app_catalog_service import AppCatalogService, release_session
 from .services.app_federation_service import AppFederationService
 from .services.app_service import AppService
 from .services.app_update_scheduler import AppUpdateScheduler
@@ -471,8 +471,10 @@ async def _download_bytes(url: str) -> bytes:
     used before the shared app session is available (e.g. during catalog
     fetches in ``AppCatalogService``).  Calls ``raise_for_status()`` so any
     non-2xx response surfaces as an :class:`aiohttp.ClientResponseError`.
+    The release host's response headers exceed aiohttp's default limit
+    (:func:`release_session`).
     """
-    async with aiohttp.ClientSession() as session, session.get(url) as resp:
+    async with release_session() as session, session.get(url) as resp:
         resp.raise_for_status()
         return await resp.read()
 
@@ -3010,7 +3012,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app_service = AppService(
         repo=repos.app,
         catalog=AppCatalogService(
-            session_factory=lambda: aiohttp.ClientSession(),
+            session_factory=release_session,
             catalog_url=config.apps_catalog_url,
         ),
         apps_path=pathlib.Path(config.apps_path),

@@ -3,9 +3,16 @@
 import json
 from typing import Any, Self
 
+import aiohttp
 import pytest
+from aiohttp import web
 
-from socialhome.services.app_catalog_service import CATALOG_TTL_S, AppCatalogService
+from socialhome.services.app_catalog_service import (
+    CATALOG_TTL_S,
+    RELEASE_MAX_FIELD_SIZE,
+    AppCatalogService,
+    release_session,
+)
 
 
 class _FakeResp:
@@ -202,3 +209,48 @@ async def test_last_fetched_monotonic_set_after_fetch():
     await svc.fetch_catalog()
     assert svc.last_fetched_monotonic is not None
     assert svc.last_fetched_monotonic > 0
+
+
+# ── GitHub's release download headers (2026-10-23) ─────────────────────
+#
+# ``github.com/…/releases/latest/download/catalog.json`` answers with a
+# Content-Security-Policy header longer than aiohttp's default 8 190-byte
+# field limit, so every catalog fetch (and every bundle download) failed
+# with ``400 Got more than 8190 bytes when reading`` — Browse answered 500.
+
+_LONG_CSP = "default-src 'none'; " + "; ".join(
+    f"img-src https://cdn{i}.githubassets.example" for i in range(400)
+)
+
+
+@pytest.fixture
+async def long_header_server(aiohttp_server):
+    async def handler(request: web.Request) -> web.Response:
+        return web.json_response(
+            {"apps": []}, headers={"Content-Security-Policy": _LONG_CSP}
+        )
+
+    app = web.Application()
+    app.router.add_get("/catalog.json", handler)
+    return await aiohttp_server(app)
+
+
+async def test_a_release_host_header_over_8190_bytes_is_read(long_header_server):
+    assert len(_LONG_CSP) > 8190
+    url = str(long_header_server.make_url("/catalog.json"))
+    svc = AppCatalogService(session_factory=release_session, catalog_url=url)
+    assert await svc.fetch_catalog() == []
+
+
+async def test_the_default_session_limit_is_what_broke(long_header_server):
+    """The regression this guards: aiohttp's default refuses the header."""
+    url = str(long_header_server.make_url("/catalog.json"))
+    svc = AppCatalogService(session_factory=aiohttp.ClientSession, catalog_url=url)
+    with pytest.raises(aiohttp.ClientResponseError):
+        await svc.fetch_catalog()
+
+
+async def test_release_session_bounds_the_header_size():
+    assert RELEASE_MAX_FIELD_SIZE >= 32 * 1024
+    async with release_session() as session:
+        assert session._max_field_size == RELEASE_MAX_FIELD_SIZE

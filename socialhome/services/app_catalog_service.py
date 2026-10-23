@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import aiohttp
 import orjson
 
 from ..domain.apps import AppCatalogEntry
@@ -20,6 +21,21 @@ log = logging.getLogger(__name__)
 
 #: How long (seconds) a cached catalog result is considered fresh.
 CATALOG_TTL_S: float = 24 * 60 * 60
+
+#: Longest single response header the catalog and bundle downloads read.
+#: GitHub's release-download responses carry a Content-Security-Policy
+#: header longer than aiohttp's default 8 190 bytes (since 2026-10-23:
+#: ``400 Got more than 8190 bytes when reading``), which failed every
+#: catalog fetch and bundle download. Still bounded: a header past this is
+#: refused, as before.
+RELEASE_MAX_FIELD_SIZE: int = 64 * 1024
+
+
+def release_session() -> aiohttp.ClientSession:
+    """A short-lived session for the app catalog and bundle downloads, with
+    room for the release host's long response headers
+    (:data:`RELEASE_MAX_FIELD_SIZE`)."""
+    return aiohttp.ClientSession(max_field_size=RELEASE_MAX_FIELD_SIZE)
 
 
 class AppCatalogService:
