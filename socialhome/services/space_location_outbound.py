@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from ..domain.events import (
     PresenceUpdated,
+    RemoteSpaceLocationRemoved,
     RemoteSpaceLocationUpdated,
     SpaceLocationModeChanged,
     SpaceMemberLocationOptedIn,
@@ -148,6 +149,10 @@ class SpaceLocationOutbound:
             RemoteSpaceLocationUpdated,
             self._on_remote_location,
         )
+        self._bus.subscribe(
+            RemoteSpaceLocationRemoved,
+            self._on_remote_location_removed,
+        )
 
     async def _on_remote_location(self, event: RemoteSpaceLocationUpdated) -> None:
         """A remote member's pin was stored — emit the same local
@@ -189,6 +194,21 @@ class SpaceLocationOutbound:
                 "updated_at": event.updated_at,
             }
         await self._broadcast_local(event.space_id, payload)
+
+    async def _on_remote_location_removed(
+        self, event: RemoteSpaceLocationRemoved
+    ) -> None:
+        """A remote member stopped sharing: the local
+        ``space_location_removed`` frame, so open Map tabs drop the pin at
+        once. Same audience as a pin; local only."""
+        await self._broadcast_removed(
+            event.space_id,
+            {
+                "space_id": event.space_id,
+                "user_id": event.user_id,
+                "instance_id": event.instance_id,
+            },
+        )
 
     async def _on_presence_updated(self, event: PresenceUpdated) -> None:
         # Skip when the accuracy gate dropped coordinates — there is
@@ -281,6 +301,10 @@ class SpaceLocationOutbound:
         key = (event.space_id, event.user_id)
         self._last_sent.pop(key, None)
         self._shared_from.pop(key, None)
+        # This household's own open Map tabs drop the pin at once.
+        await self._broadcast_removed(
+            event.space_id, {"space_id": event.space_id, "user_id": event.user_id}
+        )
         await self._fan_out_federation(
             event.space_id,
             {
@@ -398,7 +422,18 @@ class SpaceLocationOutbound:
 
     # ── Fan-out helpers ────────────────────────────────────────────────
 
-    async def _broadcast_local(self, space_id: str, payload: dict) -> None:
+    async def _broadcast_removed(self, space_id: str, data: dict) -> None:
+        """``space_location_removed`` to this household's members of the
+        space (the pin's audience)."""
+        await self._broadcast_local(space_id, data, frame_type="space_location_removed")
+
+    async def _broadcast_local(
+        self,
+        space_id: str,
+        payload: dict,
+        *,
+        frame_type: str = "space_location_updated",
+    ) -> None:
         """The pin to this household's members of the space — never its
         followers, who may not read the map (owner decision 13)."""
         try:
@@ -418,7 +453,7 @@ class SpaceLocationOutbound:
             return
         await self._ws.broadcast_to_users(
             user_ids,
-            {"type": "space_location_updated", "data": payload},
+            {"type": frame_type, "data": payload},
         )
 
     async def _publish(

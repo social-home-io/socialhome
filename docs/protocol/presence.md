@@ -130,7 +130,12 @@ Two distinct fan-outs follow every household ``PresenceUpdated``:
    out after it. The sender forgets what it last sent, so the first pin
    after sharing again always goes out. An older receiver drops the
    unknown mode (its map keeps the pin, as before), so this needs no
-   protocol bump.
+   protocol bump. Open Map tabs drop the pin **at once**: the local
+   `space_location_removed` frame goes to the space's local members, both
+   on the sender's household (the person stopped here) and on every
+   receiver (`RemoteSpaceLocationRemoved`). The household wall dashboard
+   needs nothing: its map shows the household's own people, not a space
+   map.
 
    **Newer wins on the receiver.** A pin that took a slower path (an
    outbox retry, the mesh) never overwrites a later one. The stored row

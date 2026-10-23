@@ -32,6 +32,7 @@ from ..domain.events import (
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
     RemoteSpaceInviteReceived,
+    RemoteSpaceLocationRemoved,
     RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
     SpaceAdminAuthorityRevoked,
@@ -986,6 +987,12 @@ class PrivateSpaceInviteHandler:
             user_id,
             event.from_instance,
             space_id,
+        )
+        # Open Map tabs drop the pin now, not on their 30 s poll.
+        await self._bus.publish(
+            RemoteSpaceLocationRemoved(
+                space_id=space_id, instance_id=event.from_instance, user_id=user_id
+            )
         )
 
     async def _on_space_location_updated(
