@@ -1637,7 +1637,7 @@ Wire shapes: `socialhome/domain/gfs_channel.py`; rationale:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/admin/api/overview` | Dashboard stats. |
+| GET | `/admin/api/overview` | Dashboard stats, plus `fanout`: frames and bytes this node pushed to household sockets since it started (`total`, `by_kind`, `by_size`). |
 | GET | `/admin/api/clients` | Registered instances. |
 | POST | `/admin/api/clients/{instance_id}/{accept\|reject\|ban}` | Moderate instances. |
 | GET | `/admin/api/spaces` | Published spaces, including owner-withdrawn ones (each row carries `withdrawn`). |

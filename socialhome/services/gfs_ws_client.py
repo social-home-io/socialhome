@@ -392,6 +392,15 @@ class GfsWebSocketClient:
         if not isinstance(frame, dict):
             return
         frame_type = frame.get("type")
+        # Received frame size, for measuring what each GFS frame costs a
+        # follower (the GFS counts the same per kind in its admin overview).
+        log.debug(
+            "gfs.ws.client: frame type=%r event=%r chars=%d from %s",
+            frame_type,
+            frame.get("event_type"),
+            len(raw),
+            self._gfs_url,
+        )
         if frame_type == "highlight_signal":
             if self._on_highlight_signal is None:
                 log.debug(

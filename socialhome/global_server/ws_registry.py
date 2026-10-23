@@ -40,6 +40,8 @@ from typing import Any
 import orjson
 from aiohttp import web
 
+from .fanout_stats import FanoutStats, frame_kind
+
 log = logging.getLogger(__name__)
 
 
@@ -61,10 +63,13 @@ WS_SEND_TIMEOUT_S: float = 10.0
 class GfsWebSocketRegistry:
     """Per-instance registry of live GFS-side WebSocket sessions."""
 
-    __slots__ = ("_by_instance", "_closing", "_lock")
+    __slots__ = ("_by_instance", "_closing", "_lock", "fanout_stats")
 
     def __init__(self) -> None:
         self._by_instance: dict[str, web.WebSocketResponse] = {}
+        #: What this node pushed, by frame kind and size class (admin
+        #: overview) — counted only for frames that reached a socket.
+        self.fanout_stats = FanoutStats()
         self._lock = asyncio.Lock()
         #: Background closes of stalled sockets, awaited by ``close_all``.
         self._closing: set[asyncio.Task[None]] = set()
@@ -159,9 +164,10 @@ class GfsWebSocketRegistry:
             # gather, and out of the relay handler as a 500. A frame we cannot
             # serialise is simply undeliverable — report it like any other
             # failed push.
-            msg = orjson.dumps(
+            raw = orjson.dumps(
                 payload, default=str, option=orjson.OPT_PASSTHROUGH_DATETIME
-            ).decode()
+            )
+            msg = raw.decode()
         except TypeError as exc:
             # The socket is healthy — this is a payload bug, so do NOT evict it.
             log.warning(
@@ -173,6 +179,7 @@ class GfsWebSocketRegistry:
         try:
             async with asyncio.timeout(WS_SEND_TIMEOUT_S):
                 await ws.send_str(msg)
+            self.fanout_stats.record(frame_kind(payload), len(raw))
             return True
         except TimeoutError:
             log.debug("gfs.ws.send stalled instance=%s — evicting", instance_id)

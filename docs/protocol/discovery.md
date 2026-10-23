@@ -1727,6 +1727,45 @@ its author did not publish it. Remaining risk: an author whose own
 publish fails for good (a permanent refusal; transient ones are retried)
 is no longer backed by the seed holders' copies on such a server.
 
+### What one post costs a follower
+
+After step 12, a post reaches each follower once. Bytes per post are then
+the only lever left. `tests/federation/test_frame_size_budget.py` builds the
+real follower frames for both paths and pins their size:
+
+- **relay**: a seed holder's `space_post_public` copy.
+- **member**: the author's own `space_item`.
+
+Each frame contains the production author signature, writer cert, item
+padding (`ITEM_SIZE_BUCKETS`), encryption and GFS fan-out shape. Measured
+2026-10-23 (frame = the JSON text frame a follower's socket receives):
+
+| Item | Padding bucket | Relay frame | Member frame |
+|---|---|---|---|
+| Post, 300 characters (English, German or Chinese) | 4 KiB | 5 823 B | 5 905 B |
+| Post, 600 Chinese characters, stdlib `ensure_ascii` padding (before #1146) | 16 KiB | 22 207 B | 22 289 B |
+| Post, 600 Chinese characters, compact UTF-8 padding (#1146) | 4 KiB | 5 823 B | 5 905 B |
+| Post with a link preview | 4 KiB | 5 823 B | 5 905 B |
+| Comment | 4 KiB | — | 5 907 B |
+
+**Why ~5.8 KB.** Every item carries about 1.2 KB of fixed JSON: ids, two
+hex public keys, three signatures and the writer cert. That pushes even a
+short post past the 1 KiB bucket into 4 KiB. The 4 KiB plaintext travels
+as base64 (×4/3) inside a JSON text frame, so roughly 2.7 KB of each frame
+is padding.
+
+**Planning case.** 10 000 followers × 400 posts a day × 5.8 KB = **~23 GB a
+day** from one GFS.
+
+**Counters.** Each GFS node counts what it actually pushes to household
+sockets: frames and bytes per frame kind (`relay:space_post_public`,
+`relay:space_item`, `envelope`, …) and per size class (named after the
+padding bucket a frame of that size carries). These counters appear under
+`fanout` in `GET /admin/api/overview` (`global_server/fanout_stats.py`).
+They are per node and in memory, and they only count what the GFS already
+reads to route a frame. A household logs each received frame's size at
+DEBUG (`gfs.ws.client: frame type=… event=… chars=…`).
+
 ### Author profiles for followers (v_60)
 
 A GFS follower holds no roster, so every post in a space it follows read

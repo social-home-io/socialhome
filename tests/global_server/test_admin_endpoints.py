@@ -12,6 +12,7 @@ from socialhome.global_server.admin import hash_password
 from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_fed_repo_key,
+    gfs_ws_registry_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
@@ -52,6 +53,23 @@ async def test_overview_returns_zero_counts_on_empty_db(client):
     assert body["clients"] == {"active": 0, "pending": 0}
     assert body["spaces"] == {"active": 0, "pending": 0}
     assert body["open_reports"] == 0
+    # Nothing pushed yet: the fan-out counters start at zero.
+    assert body["fanout"] == {
+        "total": {"frames": 0, "bytes": 0},
+        "by_kind": {},
+        "by_size": {},
+    }
+
+
+async def test_overview_counts_frames_pushed_to_household_sockets(client):
+    """The overview shows what this node fanned out, per kind and size."""
+    registry = client._app[gfs_ws_registry_key]
+    registry.fanout_stats.record("relay:space_item", 5823)
+    resp = await client.get("/admin/api/overview")
+    fanout = (await resp.json())["fanout"]
+    assert fanout["total"] == {"frames": 1, "bytes": 5823}
+    assert fanout["by_kind"] == {"relay:space_item": {"frames": 1, "bytes": 5823}}
+    assert fanout["by_size"] == {"4k": {"frames": 1, "bytes": 5823}}
 
 
 # ── Clients ────────────────────────────────────────────────────────────
