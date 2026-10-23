@@ -100,9 +100,13 @@ from ..domain.space_item import (
     AUTHORITY_KIND_REMOVAL,
     ITEM_TYPE_AUTHOR_PROFILE,
     ITEM_TYPE_POST_EDIT,
+    PAYLOAD_SUITE_FIELD,
     POST_SHAPED_ITEM_TYPES,
     AuthorityRemoval,
+    UnsupportedPayloadSuite,
     item_stamp,
+    open_item_plaintext,
+    payload_suite_of,
     required_scope,
     stamp_to_db,
 )
@@ -364,6 +368,18 @@ class SpacePublicInbound:
             )
             return
         try:
+            # Under the authority signature verified above; an unknown suite
+            # is refused, never read as JSON.
+            suite = payload_suite_of(envelope.get(PAYLOAD_SUITE_FIELD))
+        except UnsupportedPayloadSuite as exc:
+            log.warning(
+                "space_public.inbound: unsupported payload_suite %s for space %s "
+                "— dropped",
+                exc,
+                space_id,
+            )
+            return
+        try:
             pt = await self._crypto.decrypt(space_id, epoch, ciphertext)
         except MissingEpochKey:
             log.info(
@@ -390,8 +406,10 @@ class SpacePublicInbound:
             )
             return
         try:
-            inner = orjson.loads(pt)
-        except orjson.JSONDecodeError:
+            inner = orjson.loads(open_item_plaintext(pt, suite))
+        except ValueError:
+            # Not JSON, or a compressed item that is corrupt or would inflate
+            # past the cap (``open_item_plaintext``) — never a traceback.
             log.warning(
                 "space_public.inbound: undecodable inner payload for space %s",
                 space_id,
@@ -633,7 +651,17 @@ class SpacePublicInbound:
                 exc,
             )
             return
-        parsed = parse_item_plaintext(pt)
+        try:
+            parsed = parse_item_plaintext(open_item_plaintext(pt, item.suite))
+        except ValueError as exc:
+            log.warning(
+                "space_public.inbound: undecodable %s space_item for space %s "
+                "(%s) — dropped",
+                item.suite,
+                item.space_id,
+                exc,
+            )
+            return
         if parsed is None:
             log.warning(
                 "space_public.inbound: unsupported space_item for space %s — dropped",

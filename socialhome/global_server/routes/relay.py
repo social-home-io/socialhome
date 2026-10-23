@@ -8,6 +8,13 @@ from dataclasses import asdict
 import orjson
 from aiohttp import web
 
+from ...domain.space_item import (
+    PAYLOAD_SUITE_FIELD,
+    PAYLOAD_SUITE_UNSUPPORTED_ERROR,
+    PayloadSuiteRefused,
+    UnsupportedPayloadSuite,
+    payload_suite_of,
+)
 from ...domain.space_place import PlacePin, place_pin_wire
 from ...domain.subscriber_accepts import parse_accepts
 from ...gfs_proof import PROOF_CAPABILITY, bindable_base_url, parse_proof_nonce
@@ -204,6 +211,14 @@ class GfsInfoView(GfsBaseView):
             # authority signature). A seed holder skips its relay copy of a
             # member's post on a server only when that server proved this.
             "space_item_followers": True,
+            # Takes a zlib-compressed item (``payload_suite: "zlib1"``) on
+            # ``/gfs/publish`` and both member publishes, keeps each seat's
+            # ``payload_zlib1`` label, and answers 409
+            # ``payload_suite_unsupported`` while any seat of the space lacks
+            # it. A household compresses only toward a server that proved
+            # this; an older one would relay it to followers who can't open
+            # it (``/gfs/publish``) or refuse the field (member publish).
+            "payload_zlib1": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         if cfg.instance_id_aliases:
@@ -474,6 +489,11 @@ class PublishView(GfsBaseView):
         # v_61 routing target: one subscriber of the space (optional).
         to = body.get("to")
         to = _require_short_str(to, "to") if to is not None else ""
+        if isinstance(payload, dict):
+            try:
+                payload_suite_of(payload.get(PAYLOAD_SUITE_FIELD))
+            except UnsupportedPayloadSuite as exc:
+                raise web.HTTPBadRequest(reason="Unsupported payload_suite") from exc
         try:
             delivered = await svc.publish_event(
                 space_id,
@@ -490,6 +510,12 @@ class PublishView(GfsBaseView):
             return web.json_response(
                 {"error": "not authorized to relay for this space"},
                 status=403,
+            )
+        except PayloadSuiteRefused:
+            # Authorized, but a follower here cannot open a compressed item:
+            # the publisher re-sends it as JSON.
+            return web.json_response(
+                {"error": PAYLOAD_SUITE_UNSUPPORTED_ERROR}, status=409
             )
         return web.json_response(
             {"status": "published", "delivered_to": len(delivered)},

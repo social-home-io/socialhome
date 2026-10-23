@@ -47,6 +47,7 @@ from socialhome.domain.space_item import (
     AUTHORITY_KIND_REMOVAL,
     ITEM_SIZE_BUCKETS,
     PAD_FIELD,
+    open_item_plaintext,
 )
 from socialhome.domain.writer_cert import WriterCert
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
@@ -81,7 +82,7 @@ class _CaptureGfs:
         self.calls: list[dict] = []
 
     async def publish_space_event(
-        self, *, space_id, event_type, payload, skip=None
+        self, *, space_id, event_type, payload, skip=None, compressed_payload=None
     ) -> int:
         self.calls.append(
             {
@@ -89,6 +90,7 @@ class _CaptureGfs:
                 "event_type": event_type,
                 "payload": payload,
                 "skip": skip,
+                "compressed_payload": compressed_payload,
             }
         )
         return 1
@@ -233,6 +235,64 @@ async def test_public_post_relayed_encrypted_and_authority_signed(env):
     # the ciphertext, never a plaintext field).
     assert "author_sig" not in envelope
     assert inner["author_sig"] not in blob
+
+
+async def test_the_post_also_travels_as_a_signed_compressed_copy(env):
+    """Next to the JSON envelope every follower reads, a zlib copy
+    (``payload_suite: "zlib1"``, under the same authority signature) for the
+    servers that take it — a smaller size bucket, the same inner."""
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    # Long enough that its JSON needs the 4 KiB bucket; it compresses to 1 KiB.
+    post = dataclasses.replace(
+        _post(env["author_user_id"]), content="hello public space, " * 60
+    )
+    await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-pub"))
+    call = env["gfs"].calls[0]
+    plain, zipped = call["payload"], call["compressed_payload"]
+    assert zipped is not None
+    assert set(zipped) == set(plain) | {"payload_suite"}
+    assert zipped["payload_suite"] == "zlib1"
+    assert zipped["epoch"] == plain["epoch"]
+    assert verify_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+        space_id="sp-pub",
+        payload=strip_authority_sig_fields(zipped),
+        authority_sig=zipped["authority_sig"],
+        authority_sig_suite=zipped["authority_sig_suite"],
+        space_public_key=skp.public_key,
+    )
+    # Stripping the label breaks the signature: a relay can't relabel it.
+    assert not verify_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+        space_id="sp-pub",
+        payload={
+            k: v
+            for k, v in strip_authority_sig_fields(zipped).items()
+            if k != "payload_suite"
+        },
+        authority_sig=zipped["authority_sig"],
+        authority_sig_suite=zipped["authority_sig_suite"],
+        space_public_key=skp.public_key,
+    )
+    json_pt = await env["crypto"].decrypt(
+        "sp-pub", plain["epoch"], plain["encrypted_payload"]
+    )
+    zlib_pt = await env["crypto"].decrypt(
+        "sp-pub", zipped["epoch"], zipped["encrypted_payload"]
+    )
+    assert len(zlib_pt) < len(json_pt)
+    assert len(zlib_pt) in ITEM_SIZE_BUCKETS
+    inner = json.loads(open_item_plaintext(zlib_pt, "zlib1"))
+    assert inner == {k: v for k, v in json.loads(json_pt).items() if k != "_pad"}
+
+
+async def test_a_post_compression_cannot_shrink_travels_as_json_only(env):
+    """Short items already sit in the smallest bucket: no second copy."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+    )
+    assert env["gfs"].calls[0]["compressed_payload"] is None
 
 
 async def test_global_space_also_relays(env):

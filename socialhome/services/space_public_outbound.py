@@ -118,7 +118,7 @@ has no content key, :meth:`SpaceContentEncryption.encrypt` raises
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from ..authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
@@ -129,10 +129,13 @@ from ..domain.events import CommentDeleted, PostDeleted, SpacePostCreated
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
+    PAYLOAD_SUITE_FIELD,
+    PAYLOAD_SUITE_ZLIB,
     REMOVAL_TARGET_COMMENT,
     REMOVAL_TARGET_POST,
     AuthorityRemoval,
     pad_json_object,
+    zlib_item_plaintext,
 )
 from ..domain.writer_cert import (
     WRITER_SCOPE_COMMENT,
@@ -323,7 +326,7 @@ class SpacePublicOutbound:
         # we never relay plaintext (Encryption-First Rule). v_49: our own
         # writer cert for exactly the epoch we encrypt under rides inside.
         try:
-            epoch, ct = await self._encrypt_with_cert(
+            sealed = await self._encrypt_with_cert(
                 event.space_id, inner, self._own_instance_id
             )
         except RuntimeError:
@@ -334,7 +337,7 @@ class SpacePublicOutbound:
                 post.id,
             )
             return
-        await self._publish(event.space_id, seed, epoch, ct, what=f"post {post.id}")
+        await self._publish(event.space_id, seed, sealed, what=f"post {post.id}")
 
     async def _relay_remote_authored(self, event: SpacePostCreated) -> None:
         """Relay another member household's public/global post to the GFS
@@ -425,7 +428,7 @@ class SpacePublicOutbound:
             return
         try:
             if restamp_for is not None:
-                epoch, ct = await self._encrypt_with_cert(
+                sealed = await self._encrypt_with_cert(
                     event.space_id,
                     relay,
                     restamp_for,
@@ -433,9 +436,7 @@ class SpacePublicOutbound:
                     required=True,
                 )
             else:
-                epoch, ct = await self._crypto.encrypt(
-                    event.space_id, pad_json_object(relay)
-                )
+                sealed = await self._seal(event.space_id, relay)
         except _NoWriterCert:
             log.warning(
                 "space_public.outbound: author household %s holds no writer "
@@ -463,7 +464,7 @@ class SpacePublicOutbound:
             else None
         )
         await self._publish(
-            event.space_id, seed, epoch, ct, what="remote-author post", skip=skip
+            event.space_id, seed, sealed, what="remote-author post", skip=skip
         )
 
     # ── Authority-only items: approved posts and removals ────────────────
@@ -494,7 +495,7 @@ class SpacePublicOutbound:
             return
         origin = str(inner.get("origin_instance_id") or "")
         try:
-            epoch, ct = await self._encrypt_with_cert(
+            sealed = await self._encrypt_with_cert(
                 event.space_id,
                 inner,
                 origin,
@@ -520,7 +521,7 @@ class SpacePublicOutbound:
             )
             return
         await self._publish(
-            event.space_id, seed, epoch, ct, what=f"approved post {post.id}"
+            event.space_id, seed, sealed, what=f"approved post {post.id}"
         )
 
     async def _on_post_deleted(self, event: PostDeleted) -> None:
@@ -593,9 +594,7 @@ class SpacePublicOutbound:
             )
             return
         try:
-            epoch, ct = await self._crypto.encrypt(
-                space_id, pad_json_object(removal.to_inner())
-            )
+            sealed = await self._seal(space_id, removal.to_inner())
         except RuntimeError:
             log.warning(
                 "space_public.outbound: no content key for space %s — cannot "
@@ -604,25 +603,36 @@ class SpacePublicOutbound:
                 target,
             )
             return
-        await self._publish(space_id, seed, epoch, ct, what=f"{target} removal")
+        await self._publish(space_id, seed, sealed, what=f"{target} removal")
 
-    async def _publish(
-        self,
-        space_id: str,
-        seed: bytes,
-        epoch: int,
-        ct: str,
-        *,
-        what: str,
-        skip: SkipTarget | None = None,
-    ) -> None:
-        """Authority-sign ``{space_id, epoch, encrypted_payload}`` under
-        ``space_post_public`` and hand it to every GFS the space is on."""
+    async def _seal(self, space_id: str, body: dict) -> _Sealed:
+        """Encrypt ``body`` under the current epoch, padded JSON — plus, when
+        it lands in a smaller size bucket, a zlib-compressed copy sealed under
+        the same epoch (``payload_suite: "zlib1"``). Raises ``RuntimeError``
+        when there is no content key."""
+        plain = pad_json_object(body)
+        epoch, ct = await self._crypto.encrypt(space_id, plain)
+        compressed = zlib_item_plaintext(body)
+        if compressed is None or len(compressed) >= len(plain):
+            return _Sealed(epoch, ct, None)
+        z_epoch, z_ct = await self._crypto.encrypt(space_id, compressed)
+        # A rotation between the two: the JSON copy alone (it is the one
+        # every follower reads).
+        return _Sealed(epoch, ct, z_ct if z_epoch == epoch else None)
+
+    @staticmethod
+    def _envelope(
+        space_id: str, seed: bytes, epoch: int, ct: str, *, suite: str | None
+    ) -> dict:
+        """``{space_id, epoch, encrypted_payload[, payload_suite]}`` plus the
+        authority signature over all of it (so the suite tag is signed)."""
         envelope: dict = {
             "space_id": space_id,
             "epoch": epoch,
             "encrypted_payload": ct,
         }
+        if suite is not None:
+            envelope[PAYLOAD_SUITE_FIELD] = suite
         envelope.update(
             sign_authority_event(
                 event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
@@ -631,12 +641,39 @@ class SpacePublicOutbound:
                 space_seed=seed,
             )
         )
+        return envelope
+
+    async def _publish(
+        self,
+        space_id: str,
+        seed: bytes,
+        sealed: _Sealed,
+        *,
+        what: str,
+        skip: SkipTarget | None = None,
+    ) -> None:
+        """Authority-sign ``{space_id, epoch, encrypted_payload}`` under
+        ``space_post_public`` and hand it to every GFS the space is on — the
+        compressed copy too, for the servers that take it."""
+        envelope = self._envelope(space_id, seed, sealed.epoch, sealed.ct, suite=None)
+        compressed = (
+            self._envelope(
+                space_id,
+                seed,
+                sealed.epoch,
+                sealed.compressed_ct,
+                suite=PAYLOAD_SUITE_ZLIB,
+            )
+            if sealed.compressed_ct is not None
+            else None
+        )
         try:
             await self._gfs.publish_space_event(
                 space_id=space_id,
                 event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
                 payload=envelope,
                 skip=skip,
+                compressed_payload=compressed,
             )
         except Exception:
             log.exception(
@@ -705,7 +742,7 @@ class SpacePublicOutbound:
         expect_pk: str = "",
         required: bool = False,
         required_scope: str = WRITER_SCOPE_WRITE,
-    ) -> tuple[int, str]:
+    ) -> _Sealed:
         """Encrypt ``inner`` with ``instance_id``'s writer cert for the epoch
         it is encrypted under (re-read once if a rotation lands in between).
         Without a cert service, or with no cert for that household that
@@ -716,7 +753,7 @@ class SpacePublicOutbound:
         if self._writer_certs is None:
             if required:
                 raise _NoWriterCert(instance_id)
-            return await self._crypto.encrypt(space_id, pad_json_object(inner))
+            return await self._seal(space_id, inner)
         for _attempt in range(2):
             current = await self._crypto.get_current_epoch(space_id)
             if current is None:
@@ -746,9 +783,9 @@ class SpacePublicOutbound:
             body.pop(WRITER_CERT_FIELD, None)
             if cert is not None:
                 body[WRITER_CERT_FIELD] = cert.to_wire()
-            epoch, ct = await self._crypto.encrypt(space_id, pad_json_object(body))
-            if cert is None or epoch == cert.epoch:
-                return epoch, ct
+            sealed = await self._seal(space_id, body)
+            if cert is None or sealed.epoch == cert.epoch:
+                return sealed
         log.warning(
             "space_public.outbound: content epoch kept moving for space %s — "
             "relaying without a writer cert",
@@ -757,7 +794,16 @@ class SpacePublicOutbound:
         if required:
             raise _NoWriterCert(instance_id)
         body = {k: v for k, v in inner.items() if k != WRITER_CERT_FIELD}
-        return await self._crypto.encrypt(space_id, pad_json_object(body))
+        return await self._seal(space_id, body)
+
+
+class _Sealed(NamedTuple):
+    """One item sealed for the relay: the padded-JSON ciphertext every
+    follower reads, and the zlib copy (same epoch) or ``None``."""
+
+    epoch: int
+    ct: str
+    compressed_ct: str | None
 
 
 class _NoWriterCert(Exception):

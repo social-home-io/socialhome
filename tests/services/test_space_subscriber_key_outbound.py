@@ -92,7 +92,7 @@ class _CaptureGfs:
         return self.targeted_answer
 
     async def publish_space_event(
-        self, *, space_id, event_type, payload, skip=None
+        self, *, space_id, event_type, payload, skip=None, compressed_payload=None
     ) -> int:
         self.calls.append(
             {

@@ -149,12 +149,13 @@ class AbstractGfsFederationRepo(Protocol):
     ) -> None: ...
     async def purge_subscribers(self, space_id: str) -> int: ...
     async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]: ...
-    async def set_reads_space_item(
-        self, space_id: str, instance_id: str, *, reads: bool
+    async def set_seat_accepts(
+        self, space_id: str, instance_id: str, *, bits: int
     ) -> None: ...
     async def count_subscribers_without_space_item(
         self, space_id: str
     ) -> tuple[int, int]: ...
+    async def count_subscribers_without_payload_zlib1(self, space_id: str) -> int: ...
     async def get_subscriber(
         self, space_id: str, instance_id: str
     ) -> GfsSubscriber | None: ...
@@ -584,15 +585,18 @@ class SqliteGfsFederationRepo:
         )
         return removed
 
-    async def set_reads_space_item(
-        self, space_id: str, instance_id: str, *, reads: bool
+    async def set_seat_accepts(
+        self, space_id: str, instance_id: str, *, bits: int
     ) -> None:
-        """Record whether the seat's household reads ``space_item`` — its
-        own word from the subscribe ``accepts`` (migration 0023)."""
+        """Record what the seat's household reads — its own word from the
+        subscribe ``accepts``, as the
+        :func:`~socialhome.domain.subscriber_accepts.seat_bits` bitmask in
+        ``reads_space_item`` (migration 0023; bit 1 ``space_item``, bit 2
+        ``payload_zlib1``)."""
         await self._db.enqueue(
             "UPDATE space_subscribers SET reads_space_item=?"
             " WHERE space_id=? AND instance_id=?",
-            (1 if reads else 0, space_id, instance_id),
+            (int(bits), space_id, instance_id),
         )
 
     async def count_subscribers_without_space_item(
@@ -603,7 +607,7 @@ class SqliteGfsFederationRepo:
         row = await self._db.fetchone(
             """
             SELECT COUNT(*) AS total,
-                   COALESCE(SUM(CASE WHEN ss.reads_space_item = 1
+                   COALESCE(SUM(CASE WHEN (ss.reads_space_item & 1) = 1
                                      THEN 0 ELSE 1 END), 0) AS without
             FROM space_subscribers ss
             JOIN client_instances ci USING (instance_id)
@@ -614,6 +618,21 @@ class SqliteGfsFederationRepo:
         if row is None:
             return 0, 0
         return int(row["total"]), int(row["without"])
+
+    async def count_subscribers_without_payload_zlib1(self, space_id: str) -> int:
+        """Active subscribers of *space_id* not known to read a
+        zlib-compressed item (bit 2 unset; NULL counts as unset)."""
+        row = await self._db.fetchone(
+            """
+            SELECT COUNT(*) AS without
+            FROM space_subscribers ss
+            JOIN client_instances ci USING (instance_id)
+            WHERE ss.space_id = ? AND ci.status = 'active'
+              AND (COALESCE(ss.reads_space_item, 0) & 2) = 0
+            """,
+            (space_id,),
+        )
+        return int(row["without"]) if row is not None else 0
 
     async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]:
         rows = await self._db.fetchall(

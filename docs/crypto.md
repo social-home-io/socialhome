@@ -664,7 +664,23 @@ item type is hidden in the ciphertext; receivers enforce the real scope).
 the GFS holds no key. Its plaintext is padded to a size bucket (1 / 4 / 16 /
 64 / 128 KiB, a `_pad` JSON field) before encryption, so the padding is
 authenticated with the item and the ciphertext length reveals only the
-bucket. **Content-epoch notice** — `POST
+bucket. **Payload suite** (`domain/space_item.py`): a relayed item's
+plaintext encoding is labelled `payload_suite` on the authority-signed relay
+envelope, the signed member-publish requests and the fan-out frame —
+`"json"` (the padded JSON above; the label is omitted, the first-revision
+default) or `"zlib1"` (compact JSON, `zlib` level 9, then zero bytes up to
+the same buckets, all inside the AEAD, so the length still names only the
+bucket). `SUPPORTED_PAYLOAD_SUITES` / `UnsupportedPayloadSuite`: a receiver
+refuses an unknown suite, never reads it as JSON. A receiver inflates at most
+`MAX_INFLATED_ITEM_BYTES` (128 KiB, the largest bucket; a sender compresses
+only JSON that small) and requires the stream to end with only zero padding
+after it, so a member holding the content key cannot make followers inflate
+a decompression bomb. Compression runs inside the encryption, on content the
+attacker already chose; the bucket padding still hides the length, so a
+compression-ratio side channel only shows the bucket. The fan-out frame's
+label is outside the ciphertext and unsigned on the member path: a GFS that
+flips it only makes the item undecodable (the author signature inside still
+decides), which it could do by dropping the frame anyway. **Content-epoch notice** — `POST
 /gfs/spaces/{id}/epoch`, two forms. The OWNER's: its household identity
 signature (Ed25519, the registered key) over canonical JSON of `{action:
 "gfs-owner-epoch-notice:v1", owning_instance, gfs_instance_id, space_id,

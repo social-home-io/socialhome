@@ -151,7 +151,7 @@ class _ToGfs:
         self.payloads: list[tuple[str, dict]] = []
 
     async def publish_space_event(
-        self, *, space_id, event_type, payload, skip=None
+        self, *, space_id, event_type, payload, skip=None, compressed_payload=None
     ) -> int:
         self.payloads.append((event_type, payload))
         assert self.svc is not None

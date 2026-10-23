@@ -136,7 +136,7 @@ async def test_the_summary_counts_followers_that_cannot_read_member_items(gfs_cl
     for iid, reads in (("new-a", True), ("new-b", True), ("old-c", None)):
         await _add_subscriber(app, space_id="sp", instance_id=iid, with_keywrap=True)
         if reads is not None:
-            await fed_repo.set_reads_space_item("sp", iid, reads=reads)
+            await fed_repo.set_seat_accepts("sp", iid, bits=1 if reads else 0)
     resp = await gfs_client.get(
         "/gfs/spaces/sp/subscribers",
         params={**_signed_query(skp, space_id="sp"), "summary": "1"},
@@ -144,7 +144,7 @@ async def test_the_summary_counts_followers_that_cannot_read_member_items(gfs_cl
     assert resp.status == 200
     assert await resp.json() == {"subscribers": 3, "without_space_item": 1}
 
-    await fed_repo.set_reads_space_item("sp", "old-c", reads=True)
+    await fed_repo.set_seat_accepts("sp", "old-c", bits=1)
     resp = await gfs_client.get(
         "/gfs/spaces/sp/subscribers",
         params={**_signed_query(skp, space_id="sp"), "summary": "1"},

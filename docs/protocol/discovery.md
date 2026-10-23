@@ -1766,6 +1766,105 @@ They are per node and in memory, and they only count what the GFS already
 reads to route a frame. A household logs each received frame's size at
 DEBUG (`gfs.ws.client: frame type=… event=… chars=…`).
 
+### Compressed items (`payload_suite: "zlib1"`)
+
+Most of that 5.8 KB is padding to a bucket the item barely needs. The same
+item zlib-compressed fits the 1 KiB bucket, so it is sent compressed
+wherever every follower can open it.
+
+**Encoding** (`domain/space_item.py`, see [crypto.md](../crypto.md)):
+
+- The item's compact JSON is compressed with zlib (level 9), padded with
+  zero bytes to the smallest `ITEM_SIZE_BUCKETS` size, then encrypted under
+  the space content key as before. Padding and compression are both inside
+  the AEAD.
+- The suite is a label: `payload_suite: "zlib1"`. It sits on the relay
+  envelope (under the authority signature), on the member-publish requests
+  (signed by the household or the writer key) and on the fan-out frame.
+- A missing label means `"json"`, today's padded JSON. A receiver refuses
+  an unknown suite and refuses a stream that would inflate past 128 KiB.
+- A sender compresses only when that lands in a smaller bucket. It never
+  compresses JSON over 128 KiB.
+
+**Who may receive it.** The GFS sends one copy to every follower, so an item
+goes compressed only when every follower on that server can read it:
+
+1. A household lists `payload_zlib1` in its WS hello and subscribe
+   `accepts`.
+2. The GFS keeps that label per seat, as bit 2 of
+   `space_subscribers.reads_space_item`. The column is the same one step 12
+   already uses (bit 1 is `space_item`), so there is no migration. A seat
+   taken before, or by an older household, has no bit 2.
+3. The GFS proves `payload_zlib1` in its signed capability block. It answers
+   **409 `payload_suite_unsupported`** to a compressed item (on
+   `/gfs/publish`, `/gfs/member-publish` or `/gfs/member-publish-anon`)
+   while any seat of the space lacks the label. It checks this after
+   authorization, so the answer is no oracle.
+4. A publisher sends a compressed item only to a server that proved
+   `payload_zlib1`. A seed holder sends both copies, each authority-signed;
+   a member sends its compressed request. On a 409, the publisher sends the
+   JSON item to that server at once and keeps that (server, space) on JSON
+   for an hour (`GfsConnectionService.compress_for`). Any other refusal of
+   a compressed item is handled the same way, so an older node that rejects
+   the unknown field also gets the JSON item.
+5. Private spaces' opaque channels always carry JSON.
+
+```mermaid
+sequenceDiagram
+    participant P as Publisher (seed holder or member)
+    participant G as GFS
+    participant F as Followers
+    F->>G: subscribe accepts [..., "payload_zlib1"]
+    Note over G: per seat: reads_space_item bit 2
+    P->>G: POST /gfs/publish payload_suite "zlib1"
+    alt every seat has payload_zlib1
+        G-->>P: 200
+        G->>F: relay frame (1 KiB bucket)
+    else some seat lacks it
+        G-->>P: 409 payload_suite_unsupported
+        P->>G: POST /gfs/publish (JSON, 4 KiB bucket)
+        G->>F: relay frame
+        Note over P: JSON to this (server, space) for 1 h
+    end
+```
+
+**What the GFS learns: nothing new.** It already holds each seat's labels,
+and the suite is a routing-visible label like `authority_sig_suite`. It
+never decrypts anything.
+
+**Measured** (`test_frame_size_budget.py`, the `zlib1` table):
+
+| Item | Bucket | Relay frame | Member frame |
+|---|---|---|---|
+| Post, 300 characters, English or German | 1 KiB | 1 751 B | 1 833 B |
+| Post, 300 Chinese characters | 1 KiB relay / 4 KiB member | 1 751 B | 5 929 B |
+| Post, 600 Chinese characters | 4 KiB | 5 847 B | 5 929 B |
+| Post with a link preview | 4 KiB | 5 847 B | 5 929 B |
+| Comment | 1 KiB | — | 1 835 B |
+
+Chinese text compresses less than Latin text. The member copy of a
+300-character Chinese post also binds its item type and target, so it just
+misses 1 KiB.
+
+**Cost.** A 300-character post drops from 5.8 KB to 1.75 KB per follower,
+3.3× smaller. The planning case (10 000 followers × 400 posts a day) goes
+from ~23 GB to **~7 GB a day** from one GFS, assuming mostly Latin-script
+text.
+
+The fallback costs one extra request (409, then the JSON copy) per (GFS,
+space) per hour while an older follower stays seated there. A seed holder
+signs and encrypts each item twice (about 70 µs), and its retry queue holds
+both copies. Compression runs at level 9, under a millisecond for a 4 KiB
+item.
+
+**Residual risk (mixed-version cluster).** During a rolling upgrade of a GFS
+cluster, a household can see the capability from a new node while its
+`/gfs/publish` lands on an old one. The old node relays opaque payloads
+without checking seats, so an older follower would drop that one item. The
+member-publish routes are not affected: an old node refuses the unknown
+field (400), and the household falls back to JSON. Finishing the rolling upgrade promptly
+keeps this window to minutes.
+
 ### Author profiles for followers (v_60)
 
 A GFS follower holds no roster, so every post in a space it follows read

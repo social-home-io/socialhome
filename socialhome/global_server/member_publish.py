@@ -133,6 +133,7 @@ from ..domain.gfs_member_publish import (
     MemberPublishRequest,
     owner_epoch_notice_signing_payload,
 )
+from ..domain.space_item import PAYLOAD_SUITE_FIELD, PAYLOAD_SUITE_JSON
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH, WRITER_SCOPE_COMMENT
 from ..domain.writer_key import UnsupportedWriterKeySuite, WriterKeyCert
 from ..writer_cert import (
@@ -464,10 +465,11 @@ class GfsMemberPublishService:
             skip=job.publisher_id,
         )
         log.debug(
-            "gfs.member_publish: space=%s reached=%d of %d",
+            "gfs.member_publish: space=%s reached=%d of %d suite=%s",
             job.space_id,
             reached,
             len(targets),
+            job.frame.get(PAYLOAD_SUITE_FIELD) or PAYLOAD_SUITE_JSON,
         )
 
     # ── Publish ───────────────────────────────────────────────────────────
@@ -515,6 +517,10 @@ class GfsMemberPublishService:
         except (InvalidWriterCert, UnsupportedWriterCertSuite, ValueError) as exc:
             raise PermissionError(f"writer cert refused: {exc}") from exc
         await self._check_cert_epoch(req.target, req.epoch)
+        # A compressed item only while every follower reads it (409 else).
+        await self._federation.require_payload_suite_readers(
+            req.target, req.payload_suite
+        )
 
         # Replay guard AFTER authorization (a refused body must never mute a
         # legitimate one). The digest covers the signature, so it is exactly
@@ -574,6 +580,9 @@ class GfsMemberPublishService:
             req.epoch, now=int(self._clock()), grace_s=MEMBER_PUBLISH_EPOCH_GRACE_S
         ):
             raise PermissionError("writer key epoch is not open here")
+        await self._federation.require_payload_suite_readers(
+            req.target, req.payload_suite
+        )
         digest = SeenPayloadCache.digest(req.to_wire())
         if self._anon_seen.seen(digest):
             raise PermissionError("replayed request")

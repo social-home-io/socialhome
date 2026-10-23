@@ -45,9 +45,17 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
+
+import orjson
+
+from ..domain.space_item import PAYLOAD_SUITE_UNSUPPORTED_ERROR
 
 log = logging.getLogger(__name__)
+
+#: Most of a 409 body read to tell a payload-suite refusal from any other
+#: conflict — the GFS answers a few dozen bytes.
+_REFUSAL_BODY_MAX_BYTES: int = 1024
 
 #: Wait before retry *n + 1* of a connection's head item; the length is the
 #: retry budget. ~5 s, 30 s, 2 min, 10 min — about 13 minutes in all, which
@@ -76,13 +84,19 @@ class GfsPublish:
     space_id: str
     event_type: str
     payload: dict
+    #: The same item with a zlib-compressed plaintext (``payload_suite:
+    #: "zlib1"``), or ``None``. Sent instead of ``payload`` to a server that
+    #: proved ``payload_zlib1`` and has not refused it for this space lately.
+    compressed: dict | None = None
 
-    def body(self) -> dict:
-        """The wire body — ``{space_id, event_type, payload}``, nothing else."""
+    def body(self, *, compressed: bool = False) -> dict:
+        """The wire body — ``{space_id, event_type, payload}``, nothing else
+        (``payload`` the compressed variant when asked and present)."""
+        payload = self.compressed if compressed and self.compressed else self.payload
         return {
             "space_id": self.space_id,
             "event_type": self.event_type,
-            "payload": self.payload,
+            "payload": payload,
         }
 
 
@@ -90,7 +104,7 @@ class GfsPublish:
 class PublishOutcome:
     """How one ``POST /gfs/publish`` attempt ended."""
 
-    kind: Literal["delivered", "transient", "permanent"]
+    kind: Literal["delivered", "transient", "permanent", "suite_refused"]
     #: Seconds the server asked us to wait (a 429's ``Retry-After``).
     retry_after_s: float | None = None
 
@@ -105,6 +119,27 @@ class PublishOutcome:
     @classmethod
     def permanent(cls) -> PublishOutcome:
         return cls("permanent")
+
+    @classmethod
+    def suite_refused(cls) -> PublishOutcome:
+        """409 ``payload_suite_unsupported``: a follower there cannot open a
+        compressed item — send the JSON one instead."""
+        return cls("suite_refused")
+
+
+async def is_payload_suite_refusal(resp: Any) -> bool:
+    """Whether ``resp`` is the GFS's ``409 payload_suite_unsupported``.
+    Reads at most :data:`_REFUSAL_BODY_MAX_BYTES` of the body."""
+    if resp.status != 409:
+        return False
+    try:
+        raw = await resp.content.read(_REFUSAL_BODY_MAX_BYTES)
+        body = orjson.loads(raw)
+    except ValueError, OSError:
+        return False
+    return isinstance(body, dict) and body.get("error") == (
+        PAYLOAD_SUITE_UNSUPPORTED_ERROR
+    )
 
 
 def parse_retry_after_s(value: str | None) -> float | None:
@@ -224,6 +259,7 @@ class GfsPublishRetryQueue:
             space_id=item.space_id,
             event_type=item.event_type,
             payload=copy.deepcopy(item.payload),
+            compressed=copy.deepcopy(item.compressed),
         )
         conn = self._queues.get(conn_id)
         if conn is None:

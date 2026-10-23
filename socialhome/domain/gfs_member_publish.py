@@ -64,6 +64,12 @@ import re
 from dataclasses import dataclass
 
 from ..canonical_json import canonical_bytes
+from .space_item import (
+    PAYLOAD_SUITE_FIELD,
+    PAYLOAD_SUITE_JSON,
+    UnsupportedPayloadSuite,
+    payload_suite_of,
+)
 from .writer_cert import MAX_WRITER_CERT_EPOCH, WriterCert
 from .writer_key import WriterKeyCert
 
@@ -238,6 +244,29 @@ def _with_gfs_key(gfs_key: str | None, body: dict) -> dict:
     return body
 
 
+def _with_payload_suite(payload_suite: str | None, body: dict) -> dict:
+    """*body* plus ``payload_suite`` when set — signed when present, omitted
+    when ``None`` (the first-revision bytes, meaning
+    :data:`~socialhome.domain.space_item.PAYLOAD_SUITE_JSON`). A household
+    sets it only toward a server that proved ``payload_zlib1``; an older one
+    refuses the unknown field."""
+    if payload_suite is not None:
+        body[PAYLOAD_SUITE_FIELD] = payload_suite
+    return body
+
+
+def _payload_suite(raw: dict) -> str | None:
+    """The request's or frame's ``payload_suite`` as sent (``None`` when
+    absent). An unknown suite is refused — never read as JSON."""
+    value = raw.get(PAYLOAD_SUITE_FIELD)
+    if value is None:
+        return None
+    try:
+        return payload_suite_of(value)
+    except UnsupportedPayloadSuite as exc:
+        raise InvalidMemberPublish("invalid field: payload_suite") from exc
+
+
 def _gfs_key(raw: dict) -> str | None:
     value = raw.get("gfs_key")
     if value is None:
@@ -302,26 +331,38 @@ class MemberPublishRequest:
     #: households). The server refuses a mismatch.
     gfs_key: str | None = None
 
+    #: How ``payload``'s plaintext is encoded (``None`` = omitted: JSON).
+    #: Signed when present.
+    payload_suite: str | None = None
+
     @property
     def event_type(self) -> str:
         return SPACE_ITEM_EVENT_TYPE
 
+    @property
+    def suite(self) -> str:
+        """The payload suite, :data:`PAYLOAD_SUITE_JSON` when omitted."""
+        return self.payload_suite or PAYLOAD_SUITE_JSON
+
     def signing_payload(self) -> dict:
         """Every signed field: the request minus ``signature``, plus the
         ``action`` domain separator."""
-        return _with_gfs_key(
-            self.gfs_key,
-            {
-                "action": MEMBER_PUBLISH_ACTION,
-                "instance_id": self.instance_id,
-                "gfs_instance_id": self.gfs_instance_id,
-                "ts": self.ts,
-                "target": self.target,
-                "event_type": SPACE_ITEM_EVENT_TYPE,
-                "epoch": self.epoch,
-                "writer_cert": self.writer_cert.v1().to_wire(),
-                "payload": self.payload,
-            },
+        return _with_payload_suite(
+            self.payload_suite,
+            _with_gfs_key(
+                self.gfs_key,
+                {
+                    "action": MEMBER_PUBLISH_ACTION,
+                    "instance_id": self.instance_id,
+                    "gfs_instance_id": self.gfs_instance_id,
+                    "ts": self.ts,
+                    "target": self.target,
+                    "event_type": SPACE_ITEM_EVENT_TYPE,
+                    "epoch": self.epoch,
+                    "writer_cert": self.writer_cert.v1().to_wire(),
+                    "payload": self.payload,
+                },
+            ),
         )
 
     def signing_bytes(self) -> bytes:
@@ -337,13 +378,16 @@ class MemberPublishRequest:
 
     def fan_out_frame(self) -> dict:
         """The identity-free frame the GFS fans out to subscribers."""
-        return {
-            "space_id": self.target,
-            "event_type": SPACE_ITEM_EVENT_TYPE,
-            "epoch": self.epoch,
-            "writer_cert": self.writer_cert.v1().to_wire(),
-            "payload": self.payload,
-        }
+        return _with_payload_suite(
+            self.payload_suite,
+            {
+                "space_id": self.target,
+                "event_type": SPACE_ITEM_EVENT_TYPE,
+                "epoch": self.epoch,
+                "writer_cert": self.writer_cert.v1().to_wire(),
+                "payload": self.payload,
+            },
+        )
 
     @classmethod
     def from_wire(cls, raw: object) -> MemberPublishRequest:
@@ -354,12 +398,13 @@ class MemberPublishRequest:
         if (
             not MEMBER_PUBLISH_REQUEST_KEYS
             <= set(raw)
-            <= MEMBER_PUBLISH_REQUEST_KEYS | {"gfs_key"}
+            <= MEMBER_PUBLISH_REQUEST_KEYS | {"gfs_key", PAYLOAD_SUITE_FIELD}
         ):
             raise InvalidMemberPublish("unexpected or missing fields")
         _event_type(raw)
         return cls(
             gfs_key=_gfs_key(raw),
+            payload_suite=_payload_suite(raw),
             instance_id=_short_str(raw, "instance_id", MAX_WIRE_ID_CHARS),
             gfs_instance_id=_short_str(raw, "gfs_instance_id", MAX_WIRE_ID_CHARS),
             ts=_short_str(raw, "ts", _MAX_SHORT_FIELD_CHARS),
@@ -400,25 +445,37 @@ class MemberPublishAnonRequest:
     #: households). The server refuses a mismatch.
     gfs_key: str | None = None
 
+    #: How ``payload``'s plaintext is encoded (``None`` = omitted: JSON).
+    #: Signed when present.
+    payload_suite: str | None = None
+
     @property
     def event_type(self) -> str:
         return SPACE_ITEM_EVENT_TYPE
 
+    @property
+    def suite(self) -> str:
+        """The payload suite, :data:`PAYLOAD_SUITE_JSON` when omitted."""
+        return self.payload_suite or PAYLOAD_SUITE_JSON
+
     def signing_body(self) -> dict:
         """Every signed field: the request minus ``writer_sig`` (the suite
         tag is inside the signature)."""
-        return _with_gfs_key(
-            self.gfs_key,
-            {
-                "gfs_instance_id": self.gfs_instance_id,
-                "ts": self.ts,
-                "nonce": self.nonce,
-                "target": self.target,
-                "event_type": SPACE_ITEM_EVENT_TYPE,
-                "epoch": self.epoch,
-                "payload": self.payload,
-                "writer_sig_suite": self.writer_sig_suite,
-            },
+        return _with_payload_suite(
+            self.payload_suite,
+            _with_gfs_key(
+                self.gfs_key,
+                {
+                    "gfs_instance_id": self.gfs_instance_id,
+                    "ts": self.ts,
+                    "nonce": self.nonce,
+                    "target": self.target,
+                    "event_type": SPACE_ITEM_EVENT_TYPE,
+                    "epoch": self.epoch,
+                    "payload": self.payload,
+                    "writer_sig_suite": self.writer_sig_suite,
+                },
+            ),
         )
 
     def signing_bytes(self) -> bytes:
@@ -430,12 +487,15 @@ class MemberPublishAnonRequest:
 
     def fan_out_frame(self) -> dict:
         """The frame the GFS fans out: routing fields + ciphertext only."""
-        return {
-            "space_id": self.target,
-            "event_type": SPACE_ITEM_EVENT_TYPE,
-            "epoch": self.epoch,
-            "payload": self.payload,
-        }
+        return _with_payload_suite(
+            self.payload_suite,
+            {
+                "space_id": self.target,
+                "event_type": SPACE_ITEM_EVENT_TYPE,
+                "epoch": self.epoch,
+                "payload": self.payload,
+            },
+        )
 
     @classmethod
     def from_wire(cls, raw: object) -> MemberPublishAnonRequest:
@@ -448,12 +508,13 @@ class MemberPublishAnonRequest:
         if (
             not MEMBER_PUBLISH_ANON_REQUEST_KEYS
             <= set(raw)
-            <= MEMBER_PUBLISH_ANON_REQUEST_KEYS | {"gfs_key"}
+            <= MEMBER_PUBLISH_ANON_REQUEST_KEYS | {"gfs_key", PAYLOAD_SUITE_FIELD}
         ):
             raise InvalidMemberPublish("unexpected or missing fields")
         _event_type(raw)
         return cls(
             gfs_key=_gfs_key(raw),
+            payload_suite=_payload_suite(raw),
             gfs_instance_id=_short_str(raw, "gfs_instance_id", MAX_WIRE_ID_CHARS),
             ts=_short_str(raw, "ts", _MAX_SHORT_FIELD_CHARS),
             nonce=_nonce(raw),
@@ -486,6 +547,16 @@ class SpaceItemFrame:
     epoch: int
     writer_cert: WriterCert | None
     payload: str
+    #: How the plaintext is encoded (``None`` = omitted: JSON). Outside the
+    #: ciphertext, so a GFS could flip it — which only makes the item
+    #: undecodable, never readable as something else (the author signature
+    #: inside still decides).
+    payload_suite: str | None = None
+
+    @property
+    def suite(self) -> str:
+        """The payload suite, :data:`PAYLOAD_SUITE_JSON` when omitted."""
+        return self.payload_suite or PAYLOAD_SUITE_JSON
 
     def to_wire(self) -> dict:
         wire: dict = {
@@ -496,7 +567,7 @@ class SpaceItemFrame:
         }
         if self.writer_cert is not None:
             wire["writer_cert"] = self.writer_cert.v1().to_wire()
-        return wire
+        return _with_payload_suite(self.payload_suite, wire)
 
     @classmethod
     def from_wire(cls, raw: object) -> SpaceItemFrame:
@@ -513,4 +584,5 @@ class SpaceItemFrame:
             epoch=_epoch(raw),
             writer_cert=_cert(raw) if "writer_cert" in raw else None,
             payload=_payload(raw),
+            payload_suite=_payload_suite(raw),
         )

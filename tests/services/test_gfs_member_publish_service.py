@@ -42,7 +42,7 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
-from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
+from socialhome.domain.space_item import ITEM_SIZE_BUCKETS, open_item_plaintext
 from socialhome.domain.writer_cert import WriterCert
 from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
@@ -226,6 +226,17 @@ class _Gfs:
 
     async def member_publish_trusted_supported(self, conn):
         return self.capable
+
+    #: Whether the server proved ``payload_zlib1``; the (server, space)
+    #: pairs it refused a compressed item for.
+    zlib: bool = False
+    suite_refused: frozenset[tuple[str, str]] = frozenset()
+
+    async def compress_for(self, conn, space_id):
+        return self.zlib and (conn.id, space_id) not in self.suite_refused
+
+    def note_suite_refused(self, conn, space_id):
+        self.suite_refused = self.suite_refused | {(conn.id, space_id)}
 
     async def subscribe_to_gfs_space(self, space_id, gfs_id):
         self.subscribed.append((space_id, gfs_id))
@@ -869,6 +880,63 @@ async def test_a_published_comment_carries_only_ciphertext_and_its_real_type(wor
     assert (item_type, got["content"]) == ("comment", "hello")
 
 
+# ── payload_suite "zlib1" (against the real GFS) ────────────────────────
+
+
+def _long_inner(**extra) -> dict:
+    # Its JSON needs the 4 KiB bucket; compressed it fits in 1 KiB.
+    return _inner(content="hello from the allotment, " * 80, **extra)
+
+
+async def _label(world, *households, bits: int = 3) -> None:
+    fed = world["app"][gfs_fed_repo_key]
+    for h in households:
+        await fed.set_seat_accepts(SPACE_ID, h.instance_id, bits=bits)
+
+
+async def test_a_post_goes_compressed_where_every_follower_reads_it(world):
+    world["gfs"].zlib = True
+    await _label(world, world["sub"])
+    svc = world["svc"]
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
+    assert [c.id for c in await svc.publish_post(SPACE_ID, _long_inner(), targets)] == [
+        "conn-1"
+    ]
+    frame = (await _queued(world))[0].sealed
+    assert frame["payload_suite"] == "zlib1"
+    pt = world["crypto"].decrypt(frame["payload"])
+    assert len(pt) == 1024
+    item_type, got = parse_item_plaintext(open_item_plaintext(pt, "zlib1"))
+    assert (item_type, got["content"]) == ("post", _long_inner()["content"])
+
+
+async def test_an_old_follower_makes_the_gfs_refuse_and_the_post_goes_json(world):
+    """The subscriber's seat has no ``payload_zlib1`` (an older household):
+    the GFS answers 409, the household notes it and sends the JSON item at
+    once — the follower still gets the post."""
+    world["gfs"].zlib = True
+    svc = world["svc"]
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
+    assert [c.id for c in await svc.publish_post(SPACE_ID, _long_inner(), targets)] == [
+        "conn-1"
+    ]
+    rows = await _queued(world)
+    assert len(rows) == 1
+    frame = rows[0].sealed
+    assert "payload_suite" not in frame
+    _type, got = parse_item_plaintext(world["crypto"].decrypt(frame["payload"]))
+    assert got["content"] == _long_inner()["content"]
+    assert world["gfs"].suite_refused == {("conn-1", SPACE_ID)}
+
+
+async def test_a_server_without_payload_zlib1_never_sees_a_compressed_item(world):
+    await _label(world, world["sub"])
+    svc = world["svc"]
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
+    await svc.publish_post(SPACE_ID, _long_inner(), targets)
+    assert "payload_suite" not in (await _queued(world))[0].sealed
+
+
 async def test_publish_item_refuses_a_type_our_cert_cannot_carry(world):
     svc = world["svc"]
     svc._writer_certs.scope = "comment"
@@ -1022,6 +1090,32 @@ async def test_strict_publishes_anonymously_over_the_cookie_less_session(world):
     )
     assert item_type == "post"
     assert got["writer_cert"]["writer_user_ids"] == [AUTHOR]
+
+
+@pytest.mark.security
+async def test_strict_compresses_and_falls_back_like_trusted(world):
+    """The anonymous request signs ``payload_suite`` under the writer key;
+    an older follower's seat makes the GFS refuse it (409) and the JSON
+    item goes anonymously right after."""
+    await _gfs_strict(world)
+    _identified, anon = _strict_world(world)
+    world["gfs"].zlib = True
+    svc = world["svc"]
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
+    assert [c.id for c in await svc.publish_post(SPACE_ID, _long_inner(), targets)] == [
+        "conn-1"
+    ]
+    sent = [b for u, b in anon.posts if u.endswith("/gfs/member-publish-anon")]
+    assert [b.get("payload_suite") for b in sent] == ["zlib1", None]
+    [row] = await _queued(world)
+    assert "payload_suite" not in row.sealed
+    # With every seat labelled, the next one stays compressed.
+    world["gfs"].suite_refused = frozenset()
+    await _label(world, world["sub"])
+    anon.posts.clear()
+    await svc.publish_post(SPACE_ID, _long_inner(post_id="p-2"), targets)
+    sent = [b for u, b in anon.posts if u.endswith("/gfs/member-publish-anon")]
+    assert [b.get("payload_suite") for b in sent] == ["zlib1"]
 
 
 @pytest.mark.security
@@ -1681,3 +1775,46 @@ async def test_auto_subscribe_never_goes_to_a_listing_target(world):
     svc = world["svc"]
     assert await svc._subscribe([_listing(world)], SPACE_ID) == 0
     assert world["gfs"].subscribed == []
+
+
+class _OldSuiteNode:
+    """An older node of a cluster mid-upgrade: 400 to any body carrying
+    ``payload_suite`` (an unknown field there), 200 otherwise."""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict] = []
+
+    def app(self) -> web.Application:
+        async def handler(request: web.Request) -> web.Response:
+            body = await request.json()
+            self.bodies.append(body)
+            if "payload_suite" in body:
+                raise web.HTTPBadRequest(reason="unexpected or missing fields")
+            return web.json_response({"status": "published"})
+
+        app = web.Application()
+        app.router.add_post("/gfs/member-publish", handler)
+        return app
+
+
+async def test_an_older_node_refusing_the_suite_gets_the_json_item(world):
+    """The capability came from a newer node; the balancer sent the
+    compressed request to an older one, which refuses the unknown field. The
+    JSON item goes out at once, and that space stays on JSON there."""
+    svc = world["svc"]
+    world["gfs"].zlib = True
+    old = _OldSuiteNode()
+    async with TestServer(old.app()) as server:
+        conn = replace(world["conn"], inbox_url=str(server.make_url("")).rstrip("/"))
+        data = {
+            "epoch": 3,
+            "writer_cert": (await svc._writer_certs.own_cert(SPACE_ID, 3)).to_wire(),
+            "payload": "anNvbg",
+            "compressed_payload": "emxpYg",
+        }
+        item = GfsPublish(space_id=SPACE_ID, event_type="space_item", payload=data)
+        outcome = await svc._send(conn, item)
+    assert outcome.kind == "delivered"
+    assert [b.get("payload_suite") for b in old.bodies] == ["zlib1", None]
+    assert [b["payload"] for b in old.bodies] == ["emxpYg", "anNvbg"]
+    assert world["gfs"].suite_refused == {(conn.id, SPACE_ID)}

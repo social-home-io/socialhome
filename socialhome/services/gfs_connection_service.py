@@ -109,6 +109,7 @@ from .gfs_publish_retry import (
     GfsPublishRetryQueue,
     PublishOutcome,
     classify_publish_status,
+    is_payload_suite_refusal,
 )
 from .gfs_server_targets import refusal_outcome, resolve_server_targets
 from .space_authority_pin import owner_authority_cert
@@ -321,6 +322,15 @@ LISTING_PROOF_TTL_S: float = 3600.0
 #: RAM caches evicted.
 LISTING_TARGET_IDLE_S: float = 24 * 3600.0
 
+#: How long a server's 409 ``payload_suite_unsupported`` for a space keeps
+#: that (server, space) on JSON: one extra round trip per hour while an
+#: older follower remains there.
+PAYLOAD_SUITE_REFUSAL_TTL_S: int = 3600
+
+#: Most (server, space) refusals remembered; the oldest is forgotten first
+#: (it then costs one more 409).
+MAX_SUITE_REFUSALS: int = 4096
+
 
 def _possession_key(conn: GfsConnection) -> tuple[str, str]:
     """(connection id, normalized address) — so a check of a candidate copy
@@ -368,6 +378,7 @@ class GfsConnectionService:
         "_on_repinned",
         "_own_instance_id",
         "_own_signing_key",
+        "_payload_zlib1",
         "_place_pin",
         "_possession",
         "_private_channels",
@@ -384,6 +395,7 @@ class GfsConnectionService:
         "_space_item_followers",
         "_space_key_pull",
         "_space_repo",
+        "_suite_refused_at",
         "_target_warned",
         "_targeted_publish",
         "_theme_repo",
@@ -478,6 +490,13 @@ class GfsConnectionService:
         # …and ``space_item_followers`` (step 12): the GFS counts the
         # followers that cannot read a member's own item.
         self._space_item_followers: dict[str, bool] = {}
+        # …and ``payload_zlib1``: the GFS takes a zlib-compressed item and
+        # refuses it (409) while a follower of the space can't open one.
+        self._payload_zlib1: dict[str, bool] = {}
+        # ``(connection id, space id)`` → when that server last refused a
+        # compressed item for that space (``time.monotonic()``): JSON there
+        # for :data:`PAYLOAD_SUITE_REFUSAL_TTL_S`. Bounded, oldest out.
+        self._suite_refused_at: dict[tuple[str, str], float] = {}
         # Same again for ``member_publish_trusted`` (v_49): whether the GFS
         # carries the identified ``POST /gfs/member-publish`` and the
         # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
@@ -698,6 +717,7 @@ class GfsConnectionService:
             self._encrypted_moment_media,
             self._space_key_pull,
             self._space_item_followers,
+            self._payload_zlib1,
             self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
@@ -3027,8 +3047,16 @@ class GfsConnectionService:
         event_type: str,
         payload: dict,
         skip: Callable[[GfsConnection], Awaitable[bool]] | None = None,
+        compressed_payload: dict | None = None,
     ) -> int:
         """Relay a single space-content event to a space's GFS subscribers.
+
+        ``compressed_payload``: the same item with a zlib-compressed
+        plaintext (``payload_suite: "zlib1"``). A server that proved
+        ``payload_zlib1`` gets it instead of ``payload`` until it refuses one
+        for this space (409 — a follower there can't open it); the JSON
+        ``payload`` then goes to that server at once, and keeps going there
+        for :data:`PAYLOAD_SUITE_REFUSAL_TTL_S` (:meth:`compress_for`).
 
         ``skip`` (step 12): a server it answers ``True`` for gets nothing —
         a seed holder's copy of a member's post where every follower reads
@@ -3090,7 +3118,12 @@ class GfsConnectionService:
         conns = await self._relay_targets(space_id)
         if not conns:
             return 0
-        item = GfsPublish(space_id=space_id, event_type=event_type, payload=payload)
+        item = GfsPublish(
+            space_id=space_id,
+            event_type=event_type,
+            payload=payload,
+            compressed=compressed_payload,
+        )
         delivered = 0
         for conn in conns:
             if conn.status != "active":
@@ -3116,7 +3149,7 @@ class GfsConnectionService:
             if capability == "unsupported":
                 self._warn_publish_unsupported(conn)
                 continue
-            outcome = await self._post_publish(conn, item.body(), space_id=space_id)
+            outcome = await self._post_item_publish(conn, item)
             if outcome.kind == "delivered":
                 delivered += 1
             elif outcome.kind == "transient":
@@ -3152,6 +3185,41 @@ class GfsConnectionService:
         and answers the authority-signed follower summary."""
         return await self._signed_capability_supported(
             conn, "space_item_followers", self._space_item_followers
+        )
+
+    async def payload_zlib1_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``payload_zlib1`` under a valid
+        signature: it takes a compressed item and refuses one (409) while a
+        follower of the space cannot open it."""
+        return await self._signed_capability_supported(
+            conn, "payload_zlib1", self._payload_zlib1
+        )
+
+    async def compress_for(self, conn: GfsConnection, space_id: str) -> bool:
+        """Whether to send *space_id*'s next item to *conn* compressed: the
+        server proved ``payload_zlib1`` and has not refused a compressed item
+        for this space within :data:`PAYLOAD_SUITE_REFUSAL_TTL_S`."""
+        refused = self._suite_refused_at.get((conn.id, space_id))
+        if refused is not None:
+            if time.monotonic() - refused < PAYLOAD_SUITE_REFUSAL_TTL_S:
+                return False
+            del self._suite_refused_at[(conn.id, space_id)]
+        return await self.payload_zlib1_supported(conn)
+
+    def note_suite_refused(self, conn: GfsConnection, space_id: str) -> None:
+        """*conn* refused a compressed item for *space_id* (a follower there
+        lacks ``payload_zlib1``): JSON there for the next hour."""
+        key = (conn.id, space_id)
+        self._suite_refused_at.pop(key, None)
+        while len(self._suite_refused_at) >= MAX_SUITE_REFUSALS:
+            self._suite_refused_at.pop(next(iter(self._suite_refused_at)))
+        self._suite_refused_at[key] = time.monotonic()
+        log.info(
+            "GFS %s refused a compressed item for space %s (a follower there "
+            "does not read payload_zlib1) — sending JSON there for %d s",
+            conn.id,
+            space_id,
+            PAYLOAD_SUITE_REFUSAL_TTL_S,
         )
 
     async def space_key_pull_supported(self, gfs_id: str) -> bool:
@@ -3318,6 +3386,8 @@ class GfsConnectionService:
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
+                if await is_payload_suite_refusal(resp):
+                    return PublishOutcome.suite_refused()
                 outcome = classify_publish_status(
                     resp.status, resp.headers.get("Retry-After")
                 )
@@ -3397,6 +3467,23 @@ class GfsConnectionService:
         if capability == "unsupported":
             self._warn_publish_unsupported(conn)
             return PublishOutcome.permanent()
+        return await self._post_item_publish(conn, item)
+
+    async def _post_item_publish(
+        self, conn: GfsConnection, item: GfsPublish
+    ) -> PublishOutcome:
+        """POST ``item`` to ``conn`` — compressed where :meth:`compress_for`
+        allows it, and on that server's 409 refusal the JSON body at once."""
+        if item.compressed is not None and await self.compress_for(conn, item.space_id):
+            outcome = await self._post_publish(
+                conn, item.body(compressed=True), space_id=item.space_id
+            )
+            if outcome.kind not in ("suite_refused", "permanent"):
+                return outcome
+            # 409: a follower there can't open it. Any other refusal of the
+            # compressed copy (a node that does not know the label): the JSON
+            # one decides — and that server gets JSON for the next hour.
+            self.note_suite_refused(conn, item.space_id)
         return await self._post_publish(conn, item.body(), space_id=item.space_id)
 
     def _warn_publish_unsupported(self, conn: GfsConnection) -> None:
