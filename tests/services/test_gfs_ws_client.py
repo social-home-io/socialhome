@@ -796,6 +796,8 @@ def test_the_hello_asks_for_binary_frames():
         on_relay=None,
     )
     assert "ws_binary1" in client._build_hello()["accepts"]
+    # Member items without the plaintext writer cert: verified inside.
+    assert "space_item_no_cert" in client._build_hello()["accepts"]
 
 
 async def test_on_text_dispatch_covers_every_frame_type():

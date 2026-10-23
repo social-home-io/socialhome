@@ -1888,3 +1888,33 @@ async def test_a_binary_and_a_text_follower_get_the_same_item(gfs):
     assert text_frame["payload"] == ciphertext
     # A quarter of the ciphertext saved: it travels raw, not as base64.
     assert len(binary_msg.data) < len(text_msg.data.encode()) - 300
+
+
+async def test_a_follower_that_asked_gets_the_item_without_the_frame_cert(gfs):
+    """``space_item_no_cert``: the server verified the plaintext writer cert
+    to authorize the publish; the follower that listed the label gets the
+    same item without it (it verifies the cert inside the ciphertext), the
+    other follower still gets it."""
+    fed = gfs.app_[gfs_fed_repo_key]
+    await fed.add_subscriber(space_id=SPACE_ID, instance_id=gfs.owner.instance_id)
+    async with (
+        gfs.ws_connect("/gfs/ws") as full_ws,
+        gfs.ws_connect("/gfs/ws") as lean_ws,
+    ):
+        await full_ws.send_json(gfs.subscriber.hello())
+        await lean_ws.send_json(
+            gfs.owner.hello(["space_key_pull", "ws_binary1", "space_item_no_cert"])
+        )
+        await _wait_connected(gfs.app_, gfs.subscriber.instance_id)
+        await _wait_connected(gfs.app_, gfs.owner.instance_id)
+        ciphertext = (
+            f"{b64url_encode(os.urandom(12))}:{b64url_encode(os.urandom(1040))}"
+        )
+        resp = await gfs.post(
+            "/gfs/member-publish", json=_body(gfs.publisher, payload=ciphertext)
+        )
+        assert resp.status == 200
+        full = orjson.loads((await _next_item(full_ws)).data)
+        lean = decode_binary_frame((await _next_item(lean_ws)).data)
+    assert "writer_cert" in full
+    assert lean == {k: v for k, v in full.items() if k != "writer_cert"}
