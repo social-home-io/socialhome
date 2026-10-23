@@ -381,6 +381,7 @@ class GfsConnectionService:
         "_repo",
         "_rotation_warned",
         "_sealed_highlight_stream",
+        "_space_item_followers",
         "_space_key_pull",
         "_space_repo",
         "_target_warned",
@@ -474,6 +475,9 @@ class GfsConnectionService:
         # …and ``space_key_pull`` (#5b): the GFS takes a follower's
         # ``/gfs/spaces/{id}/key_request``. Asked only once proved.
         self._space_key_pull: dict[str, bool] = {}
+        # …and ``space_item_followers`` (step 12): the GFS counts the
+        # followers that cannot read a member's own item.
+        self._space_item_followers: dict[str, bool] = {}
         # Same again for ``member_publish_trusted`` (v_49): whether the GFS
         # carries the identified ``POST /gfs/member-publish`` and the
         # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
@@ -693,6 +697,7 @@ class GfsConnectionService:
             self._encrypted_moments,
             self._encrypted_moment_media,
             self._space_key_pull,
+            self._space_item_followers,
             self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
@@ -3035,8 +3040,13 @@ class GfsConnectionService:
         space_id: str,
         event_type: str,
         payload: dict,
+        skip: Callable[[GfsConnection], Awaitable[bool]] | None = None,
     ) -> int:
         """Relay a single space-content event to a space's GFS subscribers.
+
+        ``skip`` (step 12): a server it answers ``True`` for gets nothing —
+        a seed holder's copy of a member's post where every follower reads
+        the member's own item (:mod:`socialhome.services.space_relay_coverage`).
 
         POSTs to ``POST /gfs/publish`` on every GFS on the owner's signed list
         (v_57, including servers this household is not registered on — the
@@ -3099,6 +3109,15 @@ class GfsConnectionService:
         for conn in conns:
             if conn.status != "active":
                 continue
+            if skip is not None and await skip(conn):
+                log.info(
+                    "publish_space_event: %s for space %s not sent to %s — every "
+                    "follower there reads the member's own item",
+                    event_type,
+                    space_id,
+                    conn.id,
+                )
+                continue
             if self._publish_retry.pending(conn.id):
                 # Earlier publishes to this GFS are waiting for a retry:
                 # join them rather than overtake (subscribers see order).
@@ -3139,6 +3158,14 @@ class GfsConnectionService:
             return False
         return await self._signed_capability_supported(
             conn, "encrypted_moment_media", self._encrypted_moment_media
+        )
+
+    async def space_item_followers_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``space_item_followers`` (step 12)
+        under a valid signature: it keeps each seat's ``space_item`` label
+        and answers the authority-signed follower summary."""
+        return await self._signed_capability_supported(
+            conn, "space_item_followers", self._space_item_followers
         )
 
     async def space_key_pull_supported(self, gfs_id: str) -> bool:

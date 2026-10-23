@@ -150,7 +150,9 @@ class _ToGfs:
         self.svc: GfsFederationService | None = None
         self.payloads: list[tuple[str, dict]] = []
 
-    async def publish_space_event(self, *, space_id, event_type, payload) -> int:
+    async def publish_space_event(
+        self, *, space_id, event_type, payload, skip=None
+    ) -> int:
         self.payloads.append((event_type, payload))
         assert self.svc is not None
         return len(await self.svc.publish_event(space_id, event_type, payload))

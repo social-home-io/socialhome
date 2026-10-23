@@ -148,6 +148,7 @@ if TYPE_CHECKING:
     from ..repositories.user_repo import AbstractUserRepo
     from .gfs_connection_service import GfsConnectionService
     from .space_crypto_service import SpaceContentEncryption
+    from .space_relay_coverage import SkipTarget, SpaceRelayCoverage
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +164,7 @@ class SpacePublicOutbound:
         "_own_instance_id",
         "_own_instance_pk",
         "_posts",
+        "_relay_coverage",
         "_spaces",
         "_users",
         "_writer_certs",
@@ -195,9 +197,16 @@ class SpacePublicOutbound:
         self._own_identity_seed: bytes = b""
         #: v_49 writer certs — ``None`` keeps the pre-v_49 relay unchanged.
         self._writer_certs: SpaceWriterCertService | None = None
+        #: Step 12 — which GFSs need our copy of a remote member's post.
+        self._relay_coverage: SpaceRelayCoverage | None = None
         #: The space post store — only read to skip the removal of a
         #: calendar-derived post (never relayed, so nothing to remove).
         self._posts: AbstractSpacePostRepo | None = None
+
+    def attach_relay_coverage(self, coverage: SpaceRelayCoverage) -> None:
+        """Wire step 12: a remote member's post skips the GFSs where every
+        follower reads the author's own ``space_item``."""
+        self._relay_coverage = coverage
 
     def attach_posts(self, posts: AbstractSpacePostRepo) -> None:
         """Wire the space post store (see :attr:`_posts`)."""
@@ -436,7 +445,19 @@ class SpacePublicOutbound:
                 event.space_id,
             )
             return
-        await self._publish(event.space_id, seed, epoch, ct, what="remote-author post")
+        # Step 12: a v_57 author published this post itself to every listed
+        # GFS; a server where every follower reads that ``space_item`` gets
+        # no copy from us.
+        skip = (
+            await self._relay_coverage.redundant_on(
+                event.space_id, event.origin_instance_id
+            )
+            if self._relay_coverage is not None
+            else None
+        )
+        await self._publish(
+            event.space_id, seed, epoch, ct, what="remote-author post", skip=skip
+        )
 
     # ── Authority-only items: approved posts and removals ────────────────
 
@@ -579,7 +600,14 @@ class SpacePublicOutbound:
         await self._publish(space_id, seed, epoch, ct, what=f"{target} removal")
 
     async def _publish(
-        self, space_id: str, seed: bytes, epoch: int, ct: str, *, what: str
+        self,
+        space_id: str,
+        seed: bytes,
+        epoch: int,
+        ct: str,
+        *,
+        what: str,
+        skip: SkipTarget | None = None,
     ) -> None:
         """Authority-sign ``{space_id, epoch, encrypted_payload}`` under
         ``space_post_public`` and hand it to every GFS the space is on."""
@@ -601,6 +629,7 @@ class SpacePublicOutbound:
                 space_id=space_id,
                 event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
                 payload=envelope,
+                skip=skip,
             )
         except Exception:
             log.exception(

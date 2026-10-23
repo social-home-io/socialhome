@@ -199,6 +199,11 @@ class GfsInfoView(GfsBaseView):
             # gets no key repair on every reconnect. A household asks only
             # a server that proved this.
             "space_key_pull": True,
+            # Step 12 — keeps each seat's ``space_item`` label and answers
+            # ``GET /gfs/spaces/{id}/subscribers?summary=1`` (counts, under the
+            # authority signature). A seed holder skips its relay copy of a
+            # member's post on a server only when that server proved this.
+            "space_item_followers": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         if cfg.instance_id_aliases:
@@ -648,6 +653,22 @@ class SpaceSubscribersView(GfsBaseView):
         svc = self.svc(K.gfs_federation_key)
         space_id = self.request.match_info["space_id"]
         q = self.request.query
+        if q.get("summary") == "1":
+            # Step 12 — counts only, under the same authority signature: how
+            # many followers here don't read ``space_item`` (a seed holder
+            # skips its relay copy of a member's post only at zero).
+            try:
+                total, without = await svc.count_subscribers_without_space_item(
+                    space_id,
+                    ts=str(q.get("ts") or ""),
+                    authority_sig=str(q.get("authority_sig") or ""),
+                    authority_sig_suite=str(q.get("authority_sig_suite") or ""),
+                )
+            except PermissionError as exc:
+                return web.json_response({"error": str(exc)}, status=403)
+            return web.json_response(
+                {"subscribers": total, "without_space_item": without}
+            )
         try:
             subscribers = await svc.list_subscribers_with_keys(
                 space_id,

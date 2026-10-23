@@ -125,6 +125,40 @@ async def test_valid_authority_sig_returns_subscribers_with_keys(gfs_client):
     assert by_id["sub-bare"]["keywrap_sig"] == ""
 
 
+async def test_the_summary_counts_followers_that_cannot_read_member_items(gfs_client):
+    """Step 12: a seed holder skips its relay copy of a member's post only
+    when no follower here lacks ``space_item``. ``?summary=1`` answers just
+    the counts — never the list — under the same authority signature. An
+    unknown seat (taken before, or by an older household) counts as lacking."""
+    app = gfs_client.server.app
+    skp = await _seed_space(app, space_id="sp")
+    fed_repo = app[gfs_fed_repo_key]
+    for iid, reads in (("new-a", True), ("new-b", True), ("old-c", None)):
+        await _add_subscriber(app, space_id="sp", instance_id=iid, with_keywrap=True)
+        if reads is not None:
+            await fed_repo.set_reads_space_item("sp", iid, reads=reads)
+    resp = await gfs_client.get(
+        "/gfs/spaces/sp/subscribers",
+        params={**_signed_query(skp, space_id="sp"), "summary": "1"},
+    )
+    assert resp.status == 200
+    assert await resp.json() == {"subscribers": 3, "without_space_item": 1}
+
+    await fed_repo.set_reads_space_item("sp", "old-c", reads=True)
+    resp = await gfs_client.get(
+        "/gfs/spaces/sp/subscribers",
+        params={**_signed_query(skp, space_id="sp"), "summary": "1"},
+    )
+    assert (await resp.json())["without_space_item"] == 0
+
+
+async def test_the_summary_needs_the_authority_signature(gfs_client):
+    app = gfs_client.server.app
+    await _seed_space(app, space_id="sp")
+    resp = await gfs_client.get("/gfs/spaces/sp/subscribers", params={"summary": "1"})
+    assert resp.status == 403
+
+
 async def test_missing_signature_is_403(gfs_client):
     app = gfs_client.server.app
     await _seed_space(app, space_id="sp")

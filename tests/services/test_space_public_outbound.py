@@ -80,12 +80,15 @@ class _CaptureGfs:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def publish_space_event(self, *, space_id, event_type, payload) -> int:
+    async def publish_space_event(
+        self, *, space_id, event_type, payload, skip=None
+    ) -> int:
         self.calls.append(
             {
                 "space_id": space_id,
                 "event_type": event_type,
                 "payload": payload,
+                "skip": skip,
             }
         )
         return 1
@@ -347,6 +350,38 @@ async def test_remote_authored_relay_happy_path(env):
         author_signing_bytes(inner),
         b64url_decode(inner["author_sig"]),
     )
+
+
+class _Coverage:
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, str | None]] = []
+
+    async def redundant_on(self, space_id, author_instance_id):
+        self.asked.append((space_id, author_instance_id))
+
+        async def _skip(conn) -> bool:
+            return True
+
+        return _skip
+
+
+async def test_a_remote_authored_relay_asks_where_its_copy_is_redundant(env):
+    """Step 12: the relay of a remote member's post carries the per-server
+    skip test for its author household; a local author's post never does."""
+    await env["make_space"]("sp-cov", SpaceType.PUBLIC, with_seed=True)
+    coverage = _Coverage()
+    env["sub"].attach_relay_coverage(coverage)
+    _author_kp, author_user_id, relay = _remote_relay(space_id="sp-cov")
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-cov",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert coverage.asked == [("sp-cov", "beta.home")]
+    assert env["gfs"].calls[-1]["skip"] is not None
 
 
 async def test_remote_authored_not_seed_holder_not_relayed(env):

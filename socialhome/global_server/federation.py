@@ -57,7 +57,7 @@ from ..domain.space import (
     normalize_join_mode,
 )
 from ..domain.space_place import parse_place_pin_wire
-from ..domain.subscriber_accepts import ACCEPTS_SPACE_KEY_PULL
+from ..domain.subscriber_accepts import ACCEPTS_SPACE_ITEM, ACCEPTS_SPACE_KEY_PULL
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from .domain import (
     MIN_EPOCH_STEP_INTERVAL_S,
@@ -1041,6 +1041,12 @@ class GfsFederationService:
             space_id=space_id,
             instance_id=instance_id,
         )
+        # Step 12 — kept per seat, refreshed by every subscribe (the re-take
+        # on each reconnect too): a seed holder skips its relay copy of a
+        # member's post only where no follower lacks ``space_item``.
+        await self._repo.set_reads_space_item(
+            space_id, instance_id, reads=ACCEPTS_SPACE_ITEM in accepts
+        )
         log.debug("GFS: %s subscribed to space %s", instance_id, space_id)
         seat = _seat_key(instance_id, space_id)
         if not created:
@@ -1393,6 +1399,43 @@ class GfsFederationService:
         replayed here. Returns the subscriber rows (instance ids + their
         already-registered identity / key-wrap pubkeys) on success.
         """
+        await self._verify_subscribers_query(
+            space_id,
+            ts=ts,
+            authority_sig=authority_sig,
+            authority_sig_suite=authority_sig_suite,
+        )
+        return await self._repo.list_subscribers_with_keys(space_id)
+
+    async def count_subscribers_without_space_item(
+        self,
+        space_id: str,
+        *,
+        ts: str,
+        authority_sig: str,
+        authority_sig_suite: str,
+    ) -> tuple[int, int]:
+        """``(subscribers, those that don't read space_item)`` for a verified
+        seed holder (step 12) — the same authority-signed query as
+        :meth:`list_subscribers_with_keys`, answering counts only."""
+        await self._verify_subscribers_query(
+            space_id,
+            ts=ts,
+            authority_sig=authority_sig,
+            authority_sig_suite=authority_sig_suite,
+        )
+        return await self._repo.count_subscribers_without_space_item(space_id)
+
+    async def _verify_subscribers_query(
+        self,
+        space_id: str,
+        *,
+        ts: str,
+        authority_sig: str,
+        authority_sig_suite: str,
+    ) -> None:
+        """The seed-holder check of a subscribers query; raises
+        :class:`PermissionError` (see :meth:`list_subscribers_with_keys`)."""
         existing = await self._repo.get_space(space_id)
         if existing is None or not existing.identity_public_key:
             # No row, or no pinned key → nothing verifiable → release nothing.
@@ -1422,8 +1465,6 @@ class GfsFederationService:
             raise PermissionError("invalid authority key") from exc
         if not ok:
             raise PermissionError("invalid authority signature")
-
-        return await self._repo.list_subscribers_with_keys(space_id)
 
     async def unsubscribe(
         self,

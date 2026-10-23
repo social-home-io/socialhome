@@ -150,6 +150,12 @@ class AbstractGfsFederationRepo(Protocol):
     ) -> None: ...
     async def purge_subscribers(self, space_id: str) -> int: ...
     async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]: ...
+    async def set_reads_space_item(
+        self, space_id: str, instance_id: str, *, reads: bool
+    ) -> None: ...
+    async def count_subscribers_without_space_item(
+        self, space_id: str
+    ) -> tuple[int, int]: ...
     async def get_subscriber(
         self, space_id: str, instance_id: str
     ) -> GfsSubscriber | None: ...
@@ -578,6 +584,37 @@ class SqliteGfsFederationRepo:
             (space_id,),
         )
         return removed
+
+    async def set_reads_space_item(
+        self, space_id: str, instance_id: str, *, reads: bool
+    ) -> None:
+        """Record whether the seat's household reads ``space_item`` — its
+        own word from the subscribe ``accepts`` (migration 0023)."""
+        await self._db.enqueue(
+            "UPDATE space_subscribers SET reads_space_item=?"
+            " WHERE space_id=? AND instance_id=?",
+            (1 if reads else 0, space_id, instance_id),
+        )
+
+    async def count_subscribers_without_space_item(
+        self, space_id: str
+    ) -> tuple[int, int]:
+        """``(active subscribers, those not known to read space_item)`` of
+        *space_id* — a seat with no answer (NULL) counts as not reading it."""
+        row = await self._db.fetchone(
+            """
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(CASE WHEN ss.reads_space_item = 1
+                                     THEN 0 ELSE 1 END), 0) AS without
+            FROM space_subscribers ss
+            JOIN client_instances ci USING (instance_id)
+            WHERE ss.space_id = ? AND ci.status = 'active'
+            """,
+            (space_id,),
+        )
+        if row is None:
+            return 0, 0
+        return int(row["total"]), int(row["without"])
 
     async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]:
         rows = await self._db.fetchall(

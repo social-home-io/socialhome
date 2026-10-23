@@ -415,6 +415,7 @@ from .services.space_public_inbound import (
     SpacePublicInbound,
 )
 from .services.space_public_outbound import SpacePublicOutbound
+from .services.space_relay_coverage import SpaceRelayCoverage
 from .services.space_rsvp_mirror_bridge import SpaceRsvpMirrorBridge
 from .services.space_service import own_inviter_proof
 from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
@@ -4009,6 +4010,13 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         space_public_outbound.attach_writer_certs(writer_certs)
         space_public_outbound.attach_posts(space_post_repo)
+        # Step 12 — a remote member's post skips the GFSs where every
+        # follower reads the author's own ``space_item`` (the author's
+        # version is wired with the federation stack below).
+        relay_coverage = SpaceRelayCoverage(
+            space_repo=space_repo, gfs_service=gfs_connection_service
+        )
+        space_public_outbound.attach_relay_coverage(relay_coverage)
         space_public_outbound.wire()
         space_public_inbound = SpacePublicInbound(
             bus=bus,
@@ -4151,6 +4159,7 @@ def create_app(config: Config | None = None) -> web.Application:
             remote_member_repo=repos.space_remote_member,
         )
         writer_certs.attach_federation(federation_service)
+        relay_coverage.attach_peer_supports(federation_service.space_member_supports)
         if gfs_channels is not None:
             gfs_channels.attach_federation(federation_service)
             gfs_channels.attach_sync_scheduler(app[K.space_sync_scheduler_key])

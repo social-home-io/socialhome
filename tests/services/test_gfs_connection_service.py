@@ -1775,7 +1775,7 @@ async def test_subscribe_to_gfs_space_signs_body(env):
     assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig))
     # v_61: what this household opens rides NEXT to the signed bytes (the
     # canonical above is unchanged, so an older GFS still verifies it).
-    assert body["accepts"] == ["author_profiles_bundle", "space_key_pull"]
+    assert body["accepts"] == ["author_profiles_bundle", "space_key_pull", "space_item"]
 
 
 async def test_unpublish_space_signs_canonical_body(env):
@@ -1915,6 +1915,27 @@ async def test_publish_space_event_fans_identity_free_to_each_published_gfs(env)
             "event_type": "space_post_public",
             "payload": envelope,
         }
+
+
+async def test_publish_space_event_skips_the_servers_the_caller_names(env):
+    """Step 12: a server the ``skip`` test answers yes for gets nothing."""
+    session = _RecordingSession()
+    svc, _kp = await _publish_event_svc(
+        env, session, space_id="sp-skip", gfs_ids=["g1", "g2"]
+    )
+    svc._anon_publish.update({"g1": True, "g2": True})
+
+    async def _skip(conn) -> bool:
+        return conn.id == "g1"
+
+    delivered = await svc.publish_space_event(
+        space_id="sp-skip",
+        event_type="space_post_public",
+        payload={"space_id": "sp-skip", "epoch": 0, "encrypted_payload": "ct"},
+        skip=_skip,
+    )
+    assert delivered == 1
+    assert [u for u, _ in session.posts] == ["https://g2.example/gfs/publish"]
 
 
 async def test_publish_space_event_returns_zero_without_signing_key(env):

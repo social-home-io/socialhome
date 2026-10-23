@@ -37,13 +37,16 @@ the scope each needs: :mod:`socialhome.domain.space_item`. A seed holder
 publishes no posts here (it relays them with the authority signature) but
 does publish its other items, which no other path carries to followers.
 
-**No host dedupe.** The host keeps relaying the member's post to every
-GFS (``space_post_public``) exactly as before, because followers on an older
-build read only that copy; receivers that understand ``space_item`` get the
-post twice and drop the second copy by post id. The member publish itself
+**Host dedupe (step 12).** Every seed holder also relays a member's post
+(``space_post_public``), because a follower on an older build reads only
+that copy; a receiver that understands ``space_item`` gets it twice and
+drops the second copy by post id. Followers now say they read
+``space_item`` (subscribe ``accepts``, kept per seat by the GFS), and a seed
+holder skips its copy on a server where no follower lacks it, the author is
+at v_57 or later and the server proved member publish
+(:mod:`socialhome.services.space_relay_coverage`). The member publish itself
 runs in the background (:meth:`GfsMemberPublishService.schedule_post`) —
-post creation never waits on a connection server. Revisit once followers
-advertise ``space_item`` support.
+post creation never waits on a connection server.
 
 Retries ride a second :class:`GfsPublishRetryQueue` (#808 machinery): a
 transient failure (transport, 408, 429, 5xx, a busy GFS's 503) is retried

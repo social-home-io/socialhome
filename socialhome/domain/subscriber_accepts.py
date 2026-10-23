@@ -28,11 +28,18 @@ ACCEPTS_AUTHOR_PROFILES_BUNDLE: str = "author_profiles_bundle"
 #: hello and each seat re-take). Also sent in the WS hello.
 ACCEPTS_SPACE_KEY_PULL: str = "space_key_pull"
 
+#: The household reads a member's own ``space_item`` publish (v_49), so a
+#: seed holder's ``space_post_public`` copy of that post is redundant for it.
+#: The GFS keeps this per seat (GFS migration 0023) and tells a seed holder
+#: how many followers lack it (step 12).
+ACCEPTS_SPACE_ITEM: str = "space_item"
+
 #: What this household lists on every subscribe — follower and member seats
 #: alike, so the label never tells the GFS which seats are writers'.
 OUR_ACCEPTS: tuple[str, ...] = (
     ACCEPTS_AUTHOR_PROFILES_BUNDLE,
     ACCEPTS_SPACE_KEY_PULL,
+    ACCEPTS_SPACE_ITEM,
 )
 
 #: The most labels one subscribe may carry.
