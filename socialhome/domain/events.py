@@ -385,6 +385,21 @@ class SpaceLocationModeChanged(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class RemoteSpaceLocationRemoved(DomainEvent):
+    """A remote member stopped sharing their location in a space (inbound
+    ``SPACE_LOCATION_UPDATED`` with ``mode: "off"``); their pin was deleted.
+    :class:`SpaceLocationOutbound` turns it into the local
+    ``space_location_removed`` frame so open Map tabs drop the pin at once.
+    Local-only: never re-federated.
+    """
+
+    space_id: str
+    instance_id: str
+    user_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class RemoteSpaceLocationUpdated(DomainEvent):
     """A remote member's space-map pin was stored (§23.8.6).
 

@@ -22,6 +22,7 @@ from socialhome.domain.events import (
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
     RemoteSpaceInviteReceived,
+    RemoteSpaceLocationRemoved,
     RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
 )
@@ -2134,6 +2135,23 @@ async def test_a_stopped_share_takes_the_pin_off_the_map():
     )
     locations.delete_for_member.assert_awaited_once_with("sp-a", "peer-1", "u1")
     locations.upsert.assert_not_awaited()
+
+
+async def test_a_stopped_share_is_published_for_open_maps():
+    """The pin goes from open Map tabs at once, not on their 30 s poll."""
+    h, _locations, _ = await _location_handler()
+    await h._on_space_location_updated(
+        _event(
+            "SPACE_LOCATION_UPDATED",
+            {"space_id": "sp-a", "user_id": "u1", "mode": "off"},
+        )
+    )
+    [removed] = [e for e in h._bus.events if isinstance(e, RemoteSpaceLocationRemoved)]
+    assert (removed.space_id, removed.instance_id, removed.user_id) == (
+        "sp-a",
+        "peer-1",
+        "u1",
+    )
 
 
 async def test_a_removal_from_a_household_without_the_seat_is_ignored():

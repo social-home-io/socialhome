@@ -697,6 +697,86 @@ describe('SpaceLocationCard', () => {
       }
     })
 
+    const removedHandler = () => {
+      const call = mockWs.on.mock.calls.find((c: unknown[]) => c[0] === 'space_location_removed')
+      return (call as unknown as [string, (e: unknown) => void])[1]
+    }
+    const removed = (data: Record<string, string>) => ({
+      type: 'space_location_removed',
+      data: { type: 'space_location_removed', data },
+    })
+
+    it('drops the pin of someone who stopped sharing at once', async () => {
+      // A remote household's member, and a local one of the same id must stay.
+      entries = [
+        { ...pascal(47.3769), instance_id: 'peer.home' },
+        { ...pascal(47.39), user_id: 'u_anna', username: 'anna', display_name: 'Anna' },
+      ]
+      const { findAllByText, queryAllByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+      expect((await findAllByText('Pascal')).length).toBeGreaterThan(0)
+      act(() => {
+        removedHandler()(removed({ space_id: 'sp_test', user_id: 'u_pascal', instance_id: 'peer.home' }))
+      })
+      await waitFor(() => expect(queryAllByText('Pascal')).toHaveLength(0))
+      expect((await findAllByText('Anna')).length).toBeGreaterThan(0)
+    })
+
+    it('a local stop names no household and spares a remote namesake', async () => {
+      entries = [
+        { ...pascal(47.3769), instance_id: 'peer.home' },
+        { ...pascal(47.39), user_id: 'u_anna', username: 'anna', display_name: 'Anna' },
+      ]
+      const { findAllByText, queryAllByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+      expect((await findAllByText('Anna')).length).toBeGreaterThan(0)
+      act(() => { removedHandler()(removed({ space_id: 'sp_test', user_id: 'u_anna' })) })
+      await waitFor(() => expect(queryAllByText('Anna')).toHaveLength(0))
+      act(() => { removedHandler()(removed({ space_id: 'sp_test', user_id: 'u_pascal' })) })
+      expect((await findAllByText('Pascal')).length).toBeGreaterThan(0)
+    })
+
+    it('the sharing count follows at once', async () => {
+      mockApi.get.mockImplementation((url: string) => {
+        if (url.includes('/presence')) {
+          return Promise.resolve({
+            feature_enabled: true, location_mode: 'gps', entries,
+            sharing_count: 1, total_members: 3,
+          })
+        }
+        return Promise.resolve({ zones: [] })
+      })
+      const { findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+      await findByText(/^1 of 3 sharing GPS/)
+      act(() => { removedHandler()(removed({ space_id: 'sp_test', user_id: 'u_pascal' })) })
+      await findByText(/^0 of 3 sharing GPS/)
+    })
+
+    it('my own stop on another device switches the banner too', async () => {
+      mockApi.get.mockImplementation((url: string) => {
+        if (url.includes('/presence')) {
+          return Promise.resolve({ feature_enabled: true, location_mode: 'gps', entries })
+        }
+        if (url.includes('/members')) {
+          return Promise.resolve([{ user_id: 'u_pascal', location_share_enabled: true }])
+        }
+        return Promise.resolve({ zones: [] })
+      })
+      const { findByRole, queryByRole } = render(
+        <SpaceLocationCard spaceId="sp_test" currentUserId="u_pascal" />,
+      )
+      await findByRole('button', { name: /stop sharing/i })
+      act(() => { removedHandler()(removed({ space_id: 'sp_test', user_id: 'u_pascal' })) })
+      await waitFor(() => {
+        expect(queryByRole('button', { name: /stop sharing/i })).toBeNull()
+      })
+    })
+
+    it('ignores a removal for another space', async () => {
+      const { findAllByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+      expect((await findAllByText('Pascal')).length).toBeGreaterThan(0)
+      act(() => { removedHandler()(removed({ space_id: 'sp_other', user_id: 'u_pascal' })) })
+      expect((await findAllByText('Pascal')).length).toBeGreaterThan(0)
+    })
+
     it('ignores a pin frame for another space', async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true })
       try {

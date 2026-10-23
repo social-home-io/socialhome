@@ -34,6 +34,7 @@ from socialhome.crypto import (
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
     PresenceUpdated,
+    RemoteSpaceLocationRemoved,
     RemoteSpaceLocationUpdated,
     SpaceLocationModeChanged,
     SpaceMemberLocationOptedIn,
@@ -1368,3 +1369,40 @@ async def test_sharing_again_sends_the_pin_even_if_it_did_not_move(env):
         "off",
         "gps",
     ]
+
+
+def _removed_frames(env) -> list[tuple[list[str], dict]]:
+    return [
+        (users, frame)
+        for users, frame in env.ws.calls
+        if frame.get("type") == "space_location_removed"
+    ]
+
+
+async def test_stopping_sharing_takes_the_pin_off_this_households_open_maps(env):
+    """The household's own members' open Map tabs drop the pin at once."""
+    sp = await _sharing_alice(env, "sp_live_local")
+    await env.bus.publish(
+        SpaceMemberLocationOptedOut(space_id=sp.id, user_id=env.alice_uid)
+    )
+    [(users, frame)] = _removed_frames(env)
+    assert env.alice_uid in users
+    assert frame["data"] == {"space_id": sp.id, "user_id": env.alice_uid}
+
+
+async def test_a_remote_members_stop_takes_the_pin_off_open_maps(env):
+    """Another household's member stopped sharing (``mode: "off"``): this
+    household's members see the pin go at once, named with its household."""
+    sp = await _sharing_alice(env, "sp_live_remote")
+    await env.bus.publish(
+        RemoteSpaceLocationRemoved(
+            space_id=sp.id, instance_id="peer.home", user_id="u-remote"
+        )
+    )
+    [(users, frame)] = _removed_frames(env)
+    assert env.alice_uid in users
+    assert frame["data"] == {
+        "space_id": sp.id,
+        "user_id": "u-remote",
+        "instance_id": "peer.home",
+    }

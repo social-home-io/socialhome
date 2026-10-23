@@ -203,8 +203,8 @@ export function SpaceLocationCard({
     // local members). The frame is the federation payload, not the
     // presence-entry shape the map renders, so refetch the presence
     // view only — zones and the roster didn't change. Coalesced so a
-    // burst of GPS updates costs one request. Remote members' pins
-    // still arrive via the 30 s poll (no frame for inbound pins).
+    // burst of GPS updates costs one request. A remote member's pin
+    // arrives the same way (the inbound pin is re-sent as this frame).
     let pinTimer: ReturnType<typeof setTimeout> | null = null
     const offPin = ws.on('space_location_updated', (e) => {
       const d = (e.data as { data?: { space_id?: string } }).data
@@ -219,12 +219,40 @@ export function SpaceLocationCard({
       }, PIN_REFRESH_COALESCE_MS)
     })
 
+    // Someone stopped sharing their location here: drop their pin at once
+    // instead of on the next poll. A remote member's removal names their
+    // household (``instance_id``); a local member's names none, so it never
+    // takes a remote member of the same id off the map.
+    const offRemoved = ws.on('space_location_removed', (e) => {
+      const d = (e.data as {
+        data?: { space_id?: string, user_id?: string, instance_id?: string }
+      }).data
+      if (d?.space_id !== spaceId || !d.user_id) return
+      const household = d.instance_id || null
+      // I stopped on another device or tab: the banner follows too.
+      if (household === null && d.user_id === currentUserId) setSharingMe(false)
+      setData((prev) => {
+        if (!prev) return prev
+        const entries = prev.entries.filter((p) => !(
+          p.user_id === d.user_id && (p.instance_id || null) === household
+        ))
+        const gone = prev.entries.length - entries.length
+        if (gone === 0) return prev
+        // The server's count still includes them until the next poll.
+        const sharing = prev.sharing_count == null
+          ? prev.sharing_count
+          : Math.max(0, prev.sharing_count - gone)
+        return { ...prev, entries, sharing_count: sharing }
+      })
+    })
+
     return () => {
       cancelled = true
       clearInterval(t)
       if (pinTimer !== null) clearTimeout(pinTimer)
       offZone()
       offPin()
+      offRemoved()
     }
   }, [spaceId, currentUserId])
 
