@@ -548,10 +548,12 @@ class GfsConnectionService:
         #: seat keeper, the private-channel owner (each only records state
         #: and schedules its requests in the background).
         self._on_disconnect: list[Callable[[GfsConnection], Awaitable[object]]] = []
-        #: Called with the removed connection AFTER its row is gone — the
-        #: owner's private-channel lists drop that server
-        #: (:meth:`GfsServerSelectionService.on_connection_removed`).
-        self._on_removed: Callable[[GfsConnection], Awaitable[object]] | None = None
+        #: Called in order with the removed connection AFTER its row is gone
+        #: — the owner's private-channel lists drop that server
+        #: (:meth:`GfsServerSelectionService.on_connection_removed`), and its
+        #: push socket closes now, not at the next reconcile
+        #: (:meth:`GfsWebSocketSupervisor.forget`).
+        self._on_removed: list[Callable[[GfsConnection], Awaitable[object]]] = []
         #: Called in order with the connection id after it adopted the
         #: server's new public id (:meth:`_rebind_to_served_id`): the seat
         #: keeper moves this household's follow seats to the new id, the
@@ -802,8 +804,9 @@ class GfsConnectionService:
     def attach_on_removed(
         self, hook: Callable[[GfsConnection], Awaitable[object]]
     ) -> None:
-        """Wire the follow-up run after a connection's row was deleted."""
-        self._on_removed = hook
+        """Add a follow-up run after a connection's row was deleted (in the
+        order attached; one failing never skips the next)."""
+        self._on_removed.append(hook)
 
     def attach_on_rebound(self, hook: Callable[[str], Awaitable[object]]) -> None:
         """Add a hook run after a connection adopted a new public id (hooks
@@ -2326,9 +2329,9 @@ class GfsConnectionService:
         await self._repo.delete(gfs_id)
         for space_id in listed:
             await self._listings_changed(space_id)
-        if self._on_removed is not None:
+        for removed in self._on_removed:
             try:
-                await self._on_removed(conn)
+                await removed(conn)
             except Exception:
                 log.exception("gfs: on-removed hook failed for %s", gfs_id)
 

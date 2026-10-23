@@ -259,6 +259,58 @@ async def test_supervisor_stops_clients_for_removed_pairings(http_session):
             await supervisor.stop()
 
 
+async def test_forget_closes_a_removed_connections_socket_at_once(http_session):
+    """The household removed the connection: its socket closes now, not at
+    the next reconcile — up to 30 s in which that server's pushes were still
+    taken in (the demo's gfs-private-channel-multi saw a channel item arrive
+    over a GFS the follower had just left). The reconcile does not start it
+    again: the row is gone."""
+    repo = _FakeRepo(
+        [_make_conn("g1", "http://gfs1.test"), _make_conn("g2", "http://gfs2.test")]
+    )
+    stops: list[str] = []
+
+    class _StubClient:
+        def __init__(self, *, gfs_url, **_kwargs):
+            self.gfs_url = gfs_url
+
+        def is_alive(self) -> bool:
+            return True
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            stops.append(self.gfs_url)
+
+    with patch(
+        "socialhome.infrastructure.gfs_ws_supervisor.GfsWebSocketClient",
+        _StubClient,
+    ):
+        supervisor = GfsWebSocketSupervisor(
+            repo=repo,
+            instance_id="sh-1",
+            signing_key=b"\x00" * 32,
+            session_factory=lambda: http_session,
+            on_relay=AsyncMock(),
+            reconcile_interval_seconds=3600.0,  # never ticks in this test
+        )
+        await supervisor.start()
+        try:
+            assert supervisor.client_count() == 2
+            repo.set_active([_make_conn("g1", "http://gfs1.test")])
+            await supervisor.forget("g2")
+            assert stops == ["http://gfs2.test"]
+            assert not supervisor.is_running("g2")
+            assert supervisor.is_running("g1")
+            await supervisor._reconcile_once()
+            assert supervisor.client_count() == 1
+            await supervisor.forget("never-there")  # no-op
+            assert stops == ["http://gfs2.test"]
+        finally:
+            await supervisor.stop()
+
+
 async def test_supervisor_restarts_dead_client_on_reconcile(http_session):
     """A client whose loop task died (``is_alive()`` False) is restarted on
     the next reconcile even though its pairing is still active — the

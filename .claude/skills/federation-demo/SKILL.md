@@ -1020,8 +1020,12 @@ picks **GFS A only** as its channel server (``PUT
 link, d through an internal one. The channel is registered on A — **B holds
 no row for it**, though a is connected to B. a then picks A **and** B: B gets
 the channel with its trusted-mode writer key pinned, and d stores the
-owner's two-server list. d restarts with the loopback shim, e leaves A (it
-reaches the channel over B only, seated there). a goes offline; d (on A
+owner's two-server list **and** the re-issued channel grant naming both (they
+travel separately; a d restarted between the two keeps a grant naming A only
+and publishes nothing to B). d restarts with the loopback shim, e leaves A —
+its socket to A closes at once (``gfs.ws.supervisor: stopped client``), not
+at the next reconcile — and reaches the channel over B only, seated there.
+a goes offline; d (on A
 only) posts; e receives it over B. Asserts B saw only anonymous
 ``/gfs/channels/publish-anon`` requests (never the identified route), holds
 no ``client_instances`` row for d, and its log and database never name the

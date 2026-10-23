@@ -4555,6 +4555,27 @@ async def test_disconnect_runs_the_removed_hook_after_the_row_is_gone(env):
     assert await repo.get("hk-rm2") is None
 
 
+async def test_every_removed_hook_runs_in_order_and_one_failing_skips_none(env):
+    """The channel-list follow-up AND the push-socket close both run (the
+    second used to overwrite the first: one slot)."""
+    _, repo = env
+    await repo.save(_make_conn("hk-many"))
+    svc = GfsConnectionService(repo, http_client=_StubSession())  # type: ignore[arg-type]
+    seen: list[str] = []
+
+    async def _first(conn) -> None:
+        seen.append(f"lists:{conn.id}")
+        raise RuntimeError("x")
+
+    async def _second(conn) -> None:
+        seen.append(f"socket:{conn.id}")
+
+    svc.attach_on_removed(_first)
+    svc.attach_on_removed(_second)
+    await svc.disconnect("hk-many")
+    assert seen == ["lists:hk-many", "socket:hk-many"]
+
+
 async def test_publish_body_never_names_the_other_listing_servers(env):
     """The owner's GFS list is for members only: no GFS learns which other
     servers list the space."""
