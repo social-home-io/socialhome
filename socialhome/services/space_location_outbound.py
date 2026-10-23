@@ -39,6 +39,7 @@ from ..domain.events import (
     RemoteSpaceLocationUpdated,
     SpaceLocationModeChanged,
     SpaceMemberLocationOptedIn,
+    SpaceMemberLocationOptedOut,
 )
 from ..domain.federation import FederationEventType
 from ..domain.space import WRITER_ROLES, Space, SpaceZone
@@ -138,6 +139,10 @@ class SpaceLocationOutbound:
         self._bus.subscribe(
             SpaceMemberLocationOptedIn,
             self._on_member_opted_in,
+        )
+        self._bus.subscribe(
+            SpaceMemberLocationOptedOut,
+            self._on_member_opted_out,
         )
         self._bus.subscribe(
             RemoteSpaceLocationUpdated,
@@ -265,6 +270,26 @@ class SpaceLocationOutbound:
             return
         self._shared_from[(space.id, event.user_id)] = _now_iso()
         await self._publish(space.id, payload, force=True)
+
+    async def _on_member_opted_out(self, event: SpaceMemberLocationOptedOut) -> None:
+        """The member stopped sharing: tell the space's member households
+        to drop the pin (``mode: "off"``). A pin goes out only on change,
+        so without this every map kept the last one; and it rides the same
+        latest-only outbox key as a pin, so it replaces one still queued for
+        an offline household instead of going out after it. What was sent is
+        forgotten, so the next pin after sharing again always goes out."""
+        key = (event.space_id, event.user_id)
+        self._last_sent.pop(key, None)
+        self._shared_from.pop(key, None)
+        await self._fan_out_federation(
+            event.space_id,
+            {
+                "mode": "off",
+                "space_id": event.space_id,
+                "user_id": event.user_id,
+                "updated_at": _now_iso(),
+            },
+        )
 
     async def _on_mode_changed(self, event: SpaceLocationModeChanged) -> None:
         """Refire latest presence for every opted-in member of *this

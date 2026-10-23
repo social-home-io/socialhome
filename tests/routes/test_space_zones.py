@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome.app_keys import event_bus_key
+from socialhome.domain.events import SpaceMemberLocationOptedOut
+
 from .conftest import _auth
 
 
@@ -386,6 +389,12 @@ async def test_member_location_sharing_patch_disable(client):
         json={"enabled": True},
         headers=_auth(client._tok),
     )
+    stopped: list[SpaceMemberLocationOptedOut] = []
+
+    async def _record(event: SpaceMemberLocationOptedOut) -> None:
+        stopped.append(event)
+
+    client.app[event_bus_key].subscribe(SpaceMemberLocationOptedOut, _record)
     r = await client.patch(
         f"/api/spaces/{space_id}/members/me/location-sharing",
         json={"enabled": False},
@@ -393,6 +402,8 @@ async def test_member_location_sharing_patch_disable(client):
     )
     assert r.status == 200
     assert (await r.json())["location_share_enabled"] is False
+    # #1117 residual: stopping takes the pin off the member households' maps.
+    assert [(e.space_id, e.user_id) for e in stopped] == [(space_id, client._uid)]
 
 
 async def test_member_location_sharing_invalid_body_422(client):

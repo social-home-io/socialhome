@@ -2103,6 +2103,71 @@ async def test_space_location_updated_accepts_a_matching_pair():
     locations.upsert.assert_awaited_once()
 
 
+def _pin(updated_at: str | None, **extra) -> SimpleNamespace:
+    payload = {
+        "space_id": "sp-a",
+        "user_id": "u1",
+        "mode": "gps",
+        "lat": 1.0,
+        "lon": 2.0,
+        **extra,
+    }
+    if updated_at is not None:
+        payload["updated_at"] = updated_at
+    return _event("SPACE_LOCATION_UPDATED", payload)
+
+
+async def test_a_stopped_share_takes_the_pin_off_the_map():
+    """#1117 residual: ``mode: "off"`` — the person stopped sharing. The pin
+    is deleted; it used to stay on every map for good."""
+    h, locations, _ = await _location_handler()
+    await h._on_space_location_updated(
+        _event(
+            "SPACE_LOCATION_UPDATED",
+            {
+                "space_id": "sp-a",
+                "user_id": "u1",
+                "mode": "off",
+                "updated_at": "2026-10-22T10:00:00+00:00",
+            },
+        )
+    )
+    locations.delete_for_member.assert_awaited_once_with("sp-a", "peer-1", "u1")
+    locations.upsert.assert_not_awaited()
+
+
+async def test_a_removal_from_a_household_without_the_seat_is_ignored():
+    h, locations, _ = await _location_handler(seat=False)
+    await h._on_space_location_updated(
+        _event(
+            "SPACE_LOCATION_UPDATED",
+            {"space_id": "sp-a", "user_id": "u1", "mode": "off"},
+        )
+    )
+    locations.delete_for_member.assert_not_awaited()
+
+
+async def test_a_pin_from_before_the_removal_does_not_come_back():
+    """A pin that left before the person stopped sharing (and arrives
+    later, over another path) is older than the removal: dropped. A pin
+    from sharing again is newer: kept."""
+    h, locations, _ = await _location_handler()
+    await h._on_space_location_updated(_pin("2026-10-22T10:00:00+00:00", mode="off"))
+    await h._on_space_location_updated(_pin("2026-10-22T09:00:00+00:00"))
+    locations.upsert.assert_not_awaited()
+    await h._on_space_location_updated(_pin("2026-10-22T11:00:00+00:00"))
+    locations.upsert.assert_awaited_once()
+
+
+async def test_a_since_in_the_future_is_clamped_to_now():
+    """A newer-since-wins receiver must not be lockable by a far-future
+    stamp (a skewed clock): it is stored as now."""
+    h, locations, _ = await _location_handler()
+    await h._on_space_location_updated(_pin("2999-01-01T00:00:00+00:00"))
+    stored = locations.upsert.call_args.args[0].updated_at
+    assert stored is not None and stored < "2999"
+
+
 async def test_space_location_updated_truncates_gps_and_publishes_for_live_pins():
     """A remote pin is stored at 4 decimals (the GPS rule applies to what
     a peer sends too) and published so open Map tabs move it live."""

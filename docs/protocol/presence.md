@@ -118,6 +118,29 @@ Two distinct fan-outs follow every household ``PresenceUpdated``:
    peer that was offline gets the latest pin from the outbox (latest-only
    per person and space, see `docs/architecture.md`).
 
+   **Stopping sharing takes the pin off every map.** Turning
+   `location_share_enabled` off (`SpaceService.set_my_location_sharing`)
+   sends the member households `SPACE_LOCATION_UPDATED` with
+   `{mode: "off", space_id, user_id, updated_at}` (sealed like a pin). The
+   receiver deletes that person's pin, but only from the household that
+   holds their seat (any role). Before, nothing was sent: a pin goes out
+   only on change, so every map kept the last one for good. The removal has
+   the pin's latest-only outbox key (`location:{space}:{user}`), so for an
+   offline household it **replaces** a pin still queued instead of going
+   out after it. The sender forgets what it last sent, so the first pin
+   after sharing again always goes out. An older receiver drops the
+   unknown mode (its map keeps the pin, as before), so this needs no
+   protocol bump.
+
+   **Newer wins on the receiver.** A pin that took a slower path (an
+   outbox retry, the mesh) never overwrites a later one. The stored row
+   orders on the pin's `updated_at`, compared as instants
+   (`space_remote_location_repo`). A stamp more than 5 minutes ahead of the
+   receiver's clock is read as now, so a skewed clock can't lock a pin in
+   place. A pin older than the person's last removal is dropped too: kept
+   in memory per (space, household, person), so after a restart the
+   deleted row is the guard.
+
    **"Here since …", not "updated N min ago".** The pin's `updated_at`
    (inside the sealed payload) is the time the person got there: in `gps`
    mode the presence row's `located_since` (migration 0121 — moved by a

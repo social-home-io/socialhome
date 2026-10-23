@@ -77,6 +77,13 @@ class SqliteSpaceRemoteLocationRepo:
                 zone_id=excluded.zone_id,
                 zone_name=excluded.zone_name,
                 updated_at=excluded.updated_at
+            -- Newer wins: a pin that took a slower path (an outbox retry,
+            -- the mesh) never overwrites a later one. Compared as instants,
+            -- so a naive ``datetime('now')`` row and an ISO 8601 stamp
+            -- order correctly; an unreadable stored stamp never blocks.
+            WHERE julianday(space_remote_member_locations.updated_at) IS NULL
+               OR julianday(excluded.updated_at)
+                  >= julianday(space_remote_member_locations.updated_at)
             """,
             (
                 loc.space_id,

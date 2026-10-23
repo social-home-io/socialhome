@@ -23,6 +23,8 @@ import asyncio
 import base64
 import logging
 import time
+from collections import OrderedDict
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ..crypto import ed25519_public_key
@@ -185,6 +187,39 @@ def _log_roster_sig_refusal(
         )
 
 
+#: Most "stopped sharing" stamps a household remembers (see
+#: ``PrivateSpaceInviteHandler._location_removed``).
+_MAX_LOCATION_REMOVALS: int = 10_000
+
+#: How far ahead of our clock a pin's "here since" may be before it is read
+#: as now — a receiver that keeps the newer pin must not be lockable by a
+#: far-future stamp.
+_LOCATION_FUTURE_SKEW = timedelta(minutes=5)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _location_stamp(raw: object) -> str | None:
+    """A pin's ``updated_at`` as a UTC ISO 8601 string — what the stored
+    row orders on (newer wins). ``None`` when absent or unreadable (the row
+    then takes the database's now); a stamp more than
+    :data:`_LOCATION_FUTURE_SKEW` ahead of our clock reads as now."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    now = datetime.now(UTC)
+    if parsed > now + _LOCATION_FUTURE_SKEW:
+        parsed = now
+    return parsed.astimezone(UTC).isoformat()
+
+
 class PrivateSpaceInviteHandler:
     """Inbound dispatcher for the :data:`SPACE_PRIVATE_INVITE*` family."""
 
@@ -195,6 +230,7 @@ class PrivateSpaceInviteHandler:
         "_federation",
         "_icon_repo",
         "_local_area_budget",
+        "_location_removed",
         "_own_instance_id",
         "_remote_locations",
         "_remote_members",
@@ -250,6 +286,11 @@ class PrivateSpaceInviteHandler:
         #: space map endpoint surfaces remote members' pins alongside
         #: local presence.
         self._remote_locations = remote_location_repo
+        #: ``(space, household, user)`` → when that person stopped sharing
+        #: (the removal's own stamp). A pin from before it — one that took
+        #: a slower path — must not put them back on the map. In memory,
+        #: bounded: after a restart the deleted row is the guard there is.
+        self._location_removed: OrderedDict[tuple[str, str, str], str] = OrderedDict()
         #: This household's instance id — set in :meth:`attach_to`. Lets the
         #: roster merge tell "a space we host" from a mirror (v_44).
         self._own_instance_id = ""
@@ -914,6 +955,39 @@ class PrivateSpaceInviteHandler:
             )
         )
 
+    async def _on_location_removed(self, event, space_id: str, user_id: str) -> None:
+        """``mode: "off"``: the person stopped sharing their location in
+        this space — take their pin off our map. Only from the household
+        that holds their seat (any role: stopping is always theirs to do)."""
+        assert self._remote_locations is not None
+        seat = await self._remote_members.get(space_id, event.from_instance, user_id)
+        if seat is None:
+            return
+        stamp = _location_stamp(event.payload.get("updated_at")) or _utc_now_iso()
+        key = (space_id, event.from_instance, user_id)
+        self._location_removed[key] = stamp
+        self._location_removed.move_to_end(key)
+        while len(self._location_removed) > _MAX_LOCATION_REMOVALS:
+            self._location_removed.popitem(last=False)
+        try:
+            await self._remote_locations.delete_for_member(
+                space_id, event.from_instance, user_id
+            )
+        except Exception:
+            log.exception(
+                "SPACE_LOCATION_UPDATED: removing %s@%s's pin in %s failed",
+                user_id,
+                event.from_instance,
+                space_id,
+            )
+            return
+        log.info(
+            "SPACE_LOCATION_UPDATED: %s@%s stopped sharing in %s — pin removed",
+            user_id,
+            event.from_instance,
+            space_id,
+        )
+
     async def _on_space_location_updated(
         self,
         event: FederationEvent,
@@ -964,6 +1038,9 @@ class PrivateSpaceInviteHandler:
         space_id = routing_space_id or payload_space_id
         user_id = str(p.get("user_id") or "")
         mode = str(p.get("mode") or "")
+        if mode == "off" and space_id and user_id:
+            await self._on_location_removed(event, space_id, user_id)
+            return
         if not space_id or not user_id or mode not in ("gps", "zone_only"):
             log.debug(
                 "SPACE_LOCATION_UPDATED from %s missing required fields",
@@ -1022,7 +1099,17 @@ class PrivateSpaceInviteHandler:
             lat = lon = accuracy_m = None
             zone_id = str(p["zone_id"]) if p.get("zone_id") else None
             zone_name = str(p["zone_name"]) if p.get("zone_name") else None
-        updated_at = str(p["updated_at"]) if p.get("updated_at") else None
+        updated_at = _location_stamp(p.get("updated_at"))
+        removed = self._location_removed.get((space_id, event.from_instance, user_id))
+        if removed is not None and updated_at is not None and updated_at < removed:
+            log.info(
+                "SPACE_LOCATION_UPDATED for %s@%s in %s is from before they "
+                "stopped sharing — dropped",
+                user_id,
+                event.from_instance,
+                space_id,
+            )
+            return
         try:
             await self._remote_locations.upsert(
                 SpaceRemoteLocation(
