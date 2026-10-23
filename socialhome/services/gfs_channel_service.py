@@ -95,7 +95,6 @@ comes too fast gets a ``429`` and lands from the retry queue.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import secrets
 import time
@@ -105,6 +104,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import aiohttp
+import orjson
 
 from ..crypto import b64url_decode, b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.events import (
@@ -1591,7 +1591,7 @@ class GfsChannelService:
             raw = self._kek.decrypt(
                 wrapped, associated_data=_grant_aad(space_id, epoch)
             )
-            grant = GfsChannelGrant.from_wire(json.loads(raw))
+            grant = GfsChannelGrant.from_wire(orjson.loads(raw))
             verify_grant(
                 grant,
                 space_pubkey=bytes.fromhex(space.identity_public_key),

@@ -21,9 +21,10 @@ Pure functions, no I/O.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass
+
+from ..canonical_json import canonical_utf8_str
 
 #: The suite tag of a version hash — the only one this build speaks.
 VERSION_HASH_SUITE = "sha256"
@@ -71,15 +72,12 @@ class DraftBase:
 def version_hash(title: str, content: str, cover_image_url: str | None = None) -> str:
     """The version id of a page body: ``sha256:`` + hex digest of the
     canonical JSON ``{"content": …, "cover": …, "title": …}``."""
-    blob = json.dumps(
+    blob = canonical_utf8_str(
         {
             "content": content or "",
             "cover": cover_image_url or "",
             "title": title or "",
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
+        }
     )
     return f"{VERSION_HASH_SUITE}:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
 

@@ -180,6 +180,7 @@ from .infrastructure.task_deadline_scheduler import TaskDeadlineScheduler
 from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
 from .infrastructure.user_identity import ensure_user_identities
 from .infrastructure.user_status_expiry_scheduler import UserStatusExpiryScheduler
+from .json_text import dumps_str
 from .media.image_processor import ImageProcessor
 from .media.profile_picture import PublicPictureCache
 from .media.video_processor import VideoProcessor
@@ -3672,6 +3673,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # push) reuses its connection pool. Closed in _on_cleanup.
         http_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
+            json_serialize=dumps_str,
         )
         app[K.http_session_key] = http_session
         gfs_connection_service.attach_session(http_session)

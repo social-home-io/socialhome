@@ -71,11 +71,11 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import json
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
+import orjson
 from cryptography.exceptions import InvalidTag
 
 from ..authority_sig import (
@@ -390,8 +390,8 @@ class SpacePublicInbound:
             )
             return
         try:
-            inner = json.loads(pt)
-        except json.JSONDecodeError:
+            inner = orjson.loads(pt)
+        except orjson.JSONDecodeError:
             log.warning(
                 "space_public.inbound: undecodable inner payload for space %s",
                 space_id,
@@ -1141,7 +1141,7 @@ class SpacePublicInbound:
 def _retained_bytes(frame: dict) -> int:
     """What a held replay keeps alive: the whole frame it re-runs."""
     try:
-        return len(json.dumps(frame))
+        return len(orjson.dumps(frame))
     except TypeError, ValueError:
         return len(repr(frame))
 

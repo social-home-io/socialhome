@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict
 
+import orjson
 from aiohttp import web
 
 from ...domain.space_place import PlacePin, place_pin_wire
@@ -263,7 +263,7 @@ class GfsProofView(GfsBaseView):
     async def post(self) -> web.Response:
         raw = await self.bounded_raw(_PROOF_MAX_BODY_BYTES)
         try:
-            body = json.loads(raw)
+            body = orjson.loads(raw)
         except ValueError as exc:
             raise web.HTTPBadRequest(reason="Invalid JSON body") from exc
         nonce = parse_proof_nonce(body.get("nonce") if isinstance(body, dict) else None)

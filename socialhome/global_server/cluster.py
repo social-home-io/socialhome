@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import heapq
-import json
 import logging
 import math
 import re
@@ -32,8 +31,10 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import aiohttp
+import orjson
 
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
+from ..canonical_json import canonical_bytes
 from ..capabilities_sig import sign_capabilities
 from ..crypto import (
     b64url_decode,
@@ -2686,11 +2687,7 @@ class ClusterService:
         }
         if to:
             body["to"] = to
-        canonical = json.dumps(
-            body,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+        canonical = canonical_bytes(body)
         sig = (
             b64url_encode(sign_ed25519(self._signing_key, canonical))
             if self._signing_key
@@ -2737,7 +2734,7 @@ class ClusterService:
                     if len(raw) > DRAIN_HINT_REPLY_MAX_BYTES:
                         return None
                 try:
-                    reply = json.loads(raw)
+                    reply = orjson.loads(raw)
                 except ValueError:
                     return None
                 return reply if isinstance(reply, dict) else None
@@ -2831,7 +2828,7 @@ def _parse_notice(raw: object) -> SubscriberNotice | None:
 def _node_address_key(node_id: str, client_ip: str) -> str:
     """Unambiguous limiter key for a (node id, address) pair — a node id
     may contain any character, so no separator would do."""
-    return json.dumps([node_id, client_ip])
+    return orjson.dumps([node_id, client_ip]).decode()
 
 
 def _frame_digest(raw: bytes) -> bytes:

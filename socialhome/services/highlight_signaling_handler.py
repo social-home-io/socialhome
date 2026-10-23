@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import os
 import pathlib
@@ -40,6 +39,7 @@ import aiohttp
 import aiolibdatachannel as rtc
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from ..canonical_json import canonical_bytes
 from ..crypto import b64url_encode, sign_ed25519
 from ..media.profile_picture import PublicPictureCache
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
@@ -554,9 +554,7 @@ class HighlightSignalingHandler(ProtectionGateMixin):
         instance_id = self._require_instance_id()
         ts = int(time.time())
         body = {"instance_id": instance_id, "relay_id": relay_id, "ts": ts}
-        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
-            "utf-8"
-        )
+        canonical = canonical_bytes(body)
         sig = b64url_encode(sign_ed25519(self._signing_key, canonical))
         return {
             "X-SH-Instance": instance_id,
@@ -678,9 +676,7 @@ class HighlightSignalingHandler(ProtectionGateMixin):
             raise RuntimeError(
                 "HighlightSignalingHandler used before attach_identity",
             )
-        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode(
-            "utf-8"
-        )
+        canonical = canonical_bytes(body)
         signed = dict(body)
         signed["signature"] = b64url_encode(sign_ed25519(self._signing_key, canonical))
         return signed

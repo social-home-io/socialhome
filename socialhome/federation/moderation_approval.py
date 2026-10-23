@@ -30,11 +30,11 @@ a content event writes, so the receiver can look for an item about it.
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from ..canonical_json import legacy_json_dumps
 from ..domain.calendar import coerce_capacity
 from ..domain.errors import WrongTypeError
 from ..domain.federation import FederationEventType
@@ -692,5 +692,7 @@ def _event_edit(p: Mapping, by: str, w: Mapping, h: Mapping) -> tuple[dict, dict
 
 def _digest(projection: Mapping[str, Any]) -> str:
     """A stable digest of a projection (sorted keys, canonical JSON)."""
-    blob = json.dumps(projection, sort_keys=True, separators=(",", ":"), default=str)
+    blob = legacy_json_dumps(
+        projection, sort_keys=True, separators=(",", ":"), default=str
+    )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()

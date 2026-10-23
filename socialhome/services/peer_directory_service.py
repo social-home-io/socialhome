@@ -24,10 +24,10 @@ never a GFS, never a household met through an invite link.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from typing import TYPE_CHECKING
 
+from ..canonical_json import canonical_bytes
 from ..domain.events import (
     PairingConfirmed,
     PeerProtoVersionRaised,
@@ -140,9 +140,7 @@ class PeerDirectoryService:
         """Send ``peer_id`` the snapshot — unless it is what it was last
         sent and ``force`` (a new pair, an upgrade) is off."""
         spaces = await self._build_snapshot(peer_id)
-        digest = hashlib.sha256(
-            json.dumps(spaces, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        digest = hashlib.sha256(canonical_bytes(spaces)).hexdigest()
         if not force and self._sent.get(peer_id) == digest:
             return
         try:

@@ -26,9 +26,10 @@ freshness — a move is a durable fact, so ``verify_move_link`` runs with
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING
+
+import orjson
 
 from ..crypto import (
     MoveLinkError,
@@ -120,7 +121,7 @@ class UserMoveService:
                 new_user_id=link.new_user_id,
                 new_instance_id=link.new_instance_id,
                 issued_at=link.issued_at,
-                move_link_json=json.dumps(link.to_wire_dict()),
+                move_link_json=orjson.dumps(link.to_wire_dict()).decode(),
             )
         except StaleMoveLink as exc:
             log.info(
@@ -138,7 +139,7 @@ class UserMoveService:
         link_json = await self._user_repo.get_move_link(old_user_id)
         if link_json is None:
             return None
-        return {"move_link": json.loads(link_json)}
+        return {"move_link": orjson.loads(link_json)}
 
     async def _on_resolve_request(self, event: FederationEvent) -> None:
         """Reply to a resolve request with the stored link (if we hold one).

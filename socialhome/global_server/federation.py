@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import itertools
-import json
 import logging
 import time
 from dataclasses import replace
@@ -50,6 +49,7 @@ from ..authority_sig import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
+from ..canonical_json import canonical_bytes
 from ..crypto import b64url_decode, verify_ed25519
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
 from ..domain.space import (
@@ -334,11 +334,7 @@ class SeenPayloadCache:
     @staticmethod
     def digest(payload: object) -> bytes:
         """Return the 32-byte BLAKE2b digest of *payload*'s canonical JSON."""
-        canonical = json.dumps(
-            payload,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+        canonical = canonical_bytes(payload)
         return hashlib.blake2b(canonical, digest_size=32).digest()
 
     def seen(self, key: bytes, *, now: float | None = None) -> bool:
@@ -732,16 +728,14 @@ class GfsFederationService:
             raise PermissionError("Invalid Ed25519 signature")
         inst = await self._repo.get_instance(from_instance)
         known = inst is not None and inst.status != "banned"
-        canonical = json.dumps(
+        canonical = canonical_bytes(
             {
                 "space_id": space_id,
                 "event_type": event_type,
                 "payload": payload,
                 "from_instance": from_instance,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+            }
+        )
         key_hex = (
             inst.public_key
             if known and inst is not None
@@ -917,11 +911,7 @@ class GfsFederationService:
         # branch): an empty or invalid signature is a hard PermissionError.
         if not signature:
             raise PermissionError("Invalid Ed25519 signature")
-        canonical = json.dumps(
-            payload,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+        canonical = canonical_bytes(payload)
         try:
             # A malformed stored pubkey is just as unverifiable as a
             # malformed signature — fail closed with the same
@@ -1717,11 +1707,7 @@ class GfsFederationService:
         has_ts = bool(ts)
         if has_ts:
             signed["ts"] = ts
-        canonical = json.dumps(
-            signed,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+        canonical = canonical_bytes(signed)
         try:
             # A malformed stored pubkey is just as unverifiable as a malformed
             # signature — fail closed with the same PermissionError instead of

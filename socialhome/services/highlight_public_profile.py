@@ -26,9 +26,9 @@ profile out of every byte it relays and stores (it stores none).
 
 from __future__ import annotations
 
-import json
 import os
 
+import orjson
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -88,7 +88,7 @@ def seal_profile(
     nonce = os.urandom(12)
     ciphertext = AESGCM(_key(ephemeral, viewer_key)).encrypt(
         nonce,
-        json.dumps(profile, separators=(",", ":"), ensure_ascii=False).encode(),
+        orjson.dumps(profile),
         highlight_id.encode(),
     )
     return (
@@ -123,7 +123,7 @@ def open_profile(
         ciphertext,
         highlight_id.encode(),
     )
-    out = json.loads(plaintext)
+    out = orjson.loads(plaintext)
     if not isinstance(out, dict):
         raise TypeError("sealed profile is not an object")
     return out

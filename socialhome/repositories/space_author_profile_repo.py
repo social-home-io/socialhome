@@ -24,9 +24,10 @@ reads.
 from __future__ import annotations
 
 import builtins
-import json
 from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
+
+import orjson
 
 from ..db import AsyncDatabase
 from ..domain.space_author_profile import (
@@ -148,9 +149,7 @@ class SqliteSpaceAuthorProfileRepo:
                 profile.picture_hash,
                 profile.profile_rev,
                 profile.ts,
-                json.dumps(signed_item, separators=(",", ":"))
-                if signed_item is not None
-                else None,
+                orjson.dumps(signed_item).decode() if signed_item is not None else None,
                 item_epoch,
             ),
         )
@@ -285,7 +284,7 @@ def _load_item(raw: object) -> dict | None:
     if not isinstance(raw, str):
         return None
     try:
-        item = json.loads(raw)
+        item = orjson.loads(raw)
     except ValueError:
         return None
     return item if isinstance(item, dict) else None

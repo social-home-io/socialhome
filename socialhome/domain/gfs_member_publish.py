@@ -60,10 +60,10 @@ process.
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 
+from ..canonical_json import canonical_bytes
 from .writer_cert import MAX_WRITER_CERT_EPOCH, WriterCert
 from .writer_key import WriterKeyCert
 
@@ -327,9 +327,7 @@ class MemberPublishRequest:
     def signing_bytes(self) -> bytes:
         """Canonical bytes the household signs — the same encoding the GFS
         verifies every signed household request with."""
-        return json.dumps(
-            self.signing_payload(), separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
+        return canonical_bytes(self.signing_payload())
 
     def to_wire(self) -> dict:
         body = self.signing_payload()
@@ -425,9 +423,7 @@ class MemberPublishAnonRequest:
 
     def signing_bytes(self) -> bytes:
         """Canonical, domain-separated bytes the writer group key signs."""
-        return MEMBER_PUBLISH_ANON_PREFIX + json.dumps(
-            self.signing_body(), separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
+        return MEMBER_PUBLISH_ANON_PREFIX + canonical_bytes(self.signing_body())
 
     def to_wire(self) -> dict:
         return {**self.signing_body(), "writer_sig": self.writer_sig}

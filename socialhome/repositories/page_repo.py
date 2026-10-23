@@ -24,12 +24,13 @@ short record of resolved ones (``conflict=0``).
 from __future__ import annotations
 
 import builtins
-import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
+
+import orjson
 
 from ..db import AsyncDatabase
 from ..domain.page_version import DraftBase, PageConflictSide, version_hash
@@ -1143,7 +1144,7 @@ def encode_side_body(
         data["resolves"] = list(resolves)
     if sent:
         data["sent"] = sent
-    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return orjson.dumps(data, option=orjson.OPT_SORT_KEYS).decode()
 
 
 def decode_side_body(body: str, *, fallback_title: str) -> _StoredVersion:
@@ -1151,7 +1152,7 @@ def decode_side_body(body: str, *, fallback_title: str) -> _StoredVersion:
     bare-content row under ``fallback_title``."""
     if body.startswith("{"):
         try:
-            data = json.loads(body)
+            data = orjson.loads(body)
         except ValueError:
             data = None
         if (

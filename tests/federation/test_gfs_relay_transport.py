@@ -285,7 +285,9 @@ def test_the_bucket_ladder_extends_the_item_ladder_and_fits_every_cap():
     """The top rung is the largest sealed plaintext EVERY receiver opens:
     ``unseal_envelope_body`` (unchanged since before padding) refuses a
     ciphertext string over ``MAX_SEALED_BLOB_BYTES`` before the AEAD."""
-    assert RELAY_SIZE_BUCKETS[: len(ITEM_SIZE_BUCKETS)] == ITEM_SIZE_BUCKETS
+    # No 1 KiB rung: it would single out a small plain write from a
+    # moderation submission of the same post (see RELAY_SIZE_BUCKETS).
+    assert RELAY_SIZE_BUCKETS[:-1] == ITEM_SIZE_BUCKETS[1:]
     assert list(RELAY_SIZE_BUCKETS) == sorted(set(RELAY_SIZE_BUCKETS))
     kp = generate_x25519_keypair()
     top = RELAY_SIZE_BUCKETS[-1]
@@ -328,7 +330,7 @@ async def test_two_envelopes_in_one_bucket_look_identical_to_the_relay():
             sealed=call["envelope"]["sealed"],
             recipient_keywrap_priv=kp.private_key,
         )
-        assert len(plain) == RELAY_SIZE_BUCKETS[1]
+        assert len(plain) == RELAY_SIZE_BUCKETS[0] == 4096
 
 
 async def test_a_receiver_from_before_padding_still_reads_the_envelope():

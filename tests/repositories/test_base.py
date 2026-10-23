@@ -175,7 +175,7 @@ def test_retention_window_sql_cutoff_and_exempt_types():
         exempt_types=("poll", "poll", "event"),
     )
     assert "p.type IN (SELECT value FROM json_each(?))" in sql
-    assert params == ("2026-01-01 00:00:00", '["event", "poll"]')
+    assert params == ("2026-01-01 00:00:00", '["event","poll"]')
     # Exempt types without a type column add nothing beyond the cutoff.
     sql, _ = retention_window_sql("c", "x", exempt_types=("poll",))
     assert "json_each" not in sql

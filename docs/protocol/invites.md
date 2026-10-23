@@ -822,8 +822,10 @@ the identity-free `{to_instance, sealed}` body:
 
 **The sealed plaintext is padded to a size bucket.** Before sealing, the
 wrapper gets a `_pad` key of ASCII `0`s so the plaintext is exactly one of
-`RELAY_SIZE_BUCKETS` — 1, 4, 16, 64, 128 or 191 KiB (the item ladder of
-the member-publish relay plus one rung). The ciphertext length is the one
+`RELAY_SIZE_BUCKETS` — 4, 16, 64, 128 or 191 KiB (the item ladder of
+the member-publish relay from 4 KiB up, plus one rung; no 1 KiB rung, since
+a plain write's compact envelope fits there and its moderation submission
+does not). The ciphertext length is the one
 property of the payload the relay still observes, and unpadded it was
 telling: a moderation submission (item + snapshot + the author's signed
 inner) is about twice a plain write, a reaction a fraction of a post.

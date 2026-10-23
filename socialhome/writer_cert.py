@@ -20,11 +20,11 @@ required action. Every failure raises — callers drop the item.
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Iterable
 from dataclasses import replace
 
+from .canonical_json import canonical_bytes
 from .crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
 from .domain.writer_cert import (
     MAX_WRITER_CERT_EPOCH,
@@ -70,16 +70,12 @@ class InvalidWriterCert(ValueError):
 
 def writer_cert_signing_bytes(cert: WriterCert) -> bytes:
     """Canonical, domain-separated bytes the space authority key signs."""
-    return _WRITER_CERT_PREFIX + json.dumps(
-        cert.signing_body(), separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    return _WRITER_CERT_PREFIX + canonical_bytes(cert.signing_body())
 
 
 def writer_users_signing_bytes(cert: WriterCert) -> bytes:
     """Canonical, domain-separated bytes the user binding signs."""
-    return _WRITER_USERS_PREFIX + json.dumps(
-        cert.users_signing_body(), separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    return _WRITER_USERS_PREFIX + canonical_bytes(cert.users_signing_body())
 
 
 def bind_writer_users(

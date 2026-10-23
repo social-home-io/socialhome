@@ -18,10 +18,11 @@ must never appear in any API response or federation payload.
 
 from __future__ import annotations
 
-import json
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+
+import orjson
 
 from .errors import WrongTypeError
 from .picture_hash import clean_picture_hash
@@ -92,9 +93,9 @@ class UserStatus:
         (``{emoji, text, expires_at}``); ``None`` when nothing is set."""
         if not self.is_set:
             return None
-        return json.dumps(
+        return orjson.dumps(
             {"emoji": self.emoji, "text": self.text, "expires_at": self.expires_at}
-        )
+        ).decode()
 
     @classmethod
     def from_json(cls, raw: str | None) -> UserStatus:
@@ -104,7 +105,7 @@ class UserStatus:
         if not raw:
             return cls()
         try:
-            data = json.loads(raw)
+            data = orjson.loads(raw)
         except ValueError:
             return cls()
         if not isinstance(data, dict):

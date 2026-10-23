@@ -31,10 +31,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import logging
 import time
 
+import orjson
 from aiohttp import web
 
 from ...csp import media_response_headers
@@ -114,7 +114,7 @@ def _suites_json(raw: object) -> str | None | web.Response:
         ):
             return web.json_response({"error": "moment_suites_invalid"}, status=422)
         out[kind] = sorted(set(names))
-    return json.dumps(out, separators=(",", ":"), sort_keys=True)
+    return orjson.dumps(out, option=orjson.OPT_SORT_KEYS).decode()
 
 
 # ─── Signed wire endpoints ─────────────────────────────────────────────────

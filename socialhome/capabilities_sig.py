@@ -28,8 +28,7 @@ drags the other's stack in — in particular the household never imports the
 
 from __future__ import annotations
 
-import json
-
+from .canonical_json import canonical_str
 from .crypto import (
     b64url_decode,
     b64url_encode,
@@ -67,10 +66,8 @@ def capabilities_signing_bytes(gfs_instance_id: str, capabilities: dict) -> byte
     separators make the encoding canonical: a receiver that re-serialises the
     parsed JSON reproduces the signer's exact bytes regardless of key order.
     """
-    body = json.dumps(
-        {"gfs_instance_id": gfs_instance_id, "capabilities": capabilities},
-        separators=(",", ":"),
-        sort_keys=True,
+    body = canonical_str(
+        {"gfs_instance_id": gfs_instance_id, "capabilities": capabilities}
     )
     return CAPS_SIGNING_PREFIX + body.encode("utf-8")
 

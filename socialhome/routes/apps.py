@@ -11,8 +11,7 @@ Four resource groups:
 
 from __future__ import annotations
 
-import json
-
+import orjson
 from aiohttp import web
 
 from ..app_keys import app_federation_service_key, app_service_key
@@ -393,7 +392,7 @@ class AppMessagesView(BaseView):
         # Guard against excessively large payloads before forwarding to
         # the federation layer.  JSON-encode to get a byte-accurate count.
         try:
-            encoded_size = len(json.dumps(payload).encode())
+            encoded_size = len(orjson.dumps(payload))
         except TypeError, ValueError:
             return error_response(
                 400, "UNPROCESSABLE", "payload must be JSON-serialisable."

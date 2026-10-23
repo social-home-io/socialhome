@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 import time
 from collections.abc import Callable
 
 import aiohttp
+import orjson
 
 from ..domain.federation import GfsConnection
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODE_STRICT
@@ -224,7 +224,7 @@ class GfsDirectoryCache:
             return None
         if raw is None:
             return None
-        # Up to 64 MiB of JSON: parse in a worker thread. ``json.loads``
+        # Up to 64 MiB of JSON: parse in a worker thread. ``orjson.loads``
         # holds the GIL, so this slows the loop rather than freezing it —
         # the byte cap is what bounds the cost.
         return await asyncio.to_thread(_parse_directory, raw, url)
@@ -238,7 +238,7 @@ def _parse_directory(
     it is unparsable, has no ``spaces`` list, or lists more than
     :data:`MAX_DIRECTORY_IDS` (refused, never truncated)."""
     try:
-        body = json.loads(raw)
+        body = orjson.loads(raw)
     except (ValueError, UnicodeDecodeError) as exc:
         log.warning("gfs_directory: %s returned an unparsable body: %s", url, exc)
         return None

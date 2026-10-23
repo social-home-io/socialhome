@@ -855,6 +855,13 @@ GFS_CLUSTER_PORTS: tuple[int, ...] = (18770, 18771, 18772)
 GFS_CLUSTER_DIR = ROOT / "gfs-cluster"
 GFS_CLUSTER_SEED_HEX = "b7" * 32
 
+#: Erin's name and bio carry non-ASCII (Latin, CJK, an astral emoji): her
+#: author-signed profile and posts must verify on the real wire, where the
+#: signer and every verifier rebuild canonical JSON (ASCII escapes) from
+#: parsed fields.
+ERIN_DISPLAY_NAME = "Erin Zoë 漢 😀"
+ERIN_BIO = "Grows tomatoes on the balcony — Grüße 🍅"
+
 
 def _gfs_config_path() -> Path:
     return GFS_DIR / "global_server.toml"
@@ -3289,7 +3296,7 @@ def cmd_gfs_space_post() -> None:
         space_id,
         username="erin",
         password="erin-pw-demo",
-        display_name="Erin",
+        display_name=ERIN_DISPLAY_NAME,
     )
     state["gfs_space_author_user_id"] = author_id
 
@@ -3299,7 +3306,7 @@ def cmd_gfs_space_post() -> None:
     d_off = _log_size("d")
 
     # Marker keeps the step re-runnable against a live sandbox.
-    content = f"Global space post over the GFS — {time.time_ns()}"
+    content = f"Global space post over the GFS — Grüße 漢字 😀 {time.time_ns()}"
     s, post = _request(
         f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/posts",
         token=author_token,
@@ -3519,11 +3526,11 @@ def cmd_gfs_space_author_profile() -> None:
         )
 
     row = _wait(lambda r: r is not None, "Erin's profile")
-    if row["display_name"] != "Erin":
+    if row["display_name"] != ERIN_DISPLAY_NAME:
         raise SystemExit(f"gfs-space-author-profile: d names Erin {row!r}")
     print("  d names Erin from her published profile (no roster seat) ✓")
 
-    bio = "Grows tomatoes on the balcony."
+    bio = ERIN_BIO
     s, login = _request(
         f"{a_url}/api/auth/token",
         method="POST",
@@ -3646,7 +3653,7 @@ def cmd_gfs_space_follower_names() -> None:
         raise SystemExit(
             f"gfs-space-follower-names: e did not name Erin within 30 s ({got!r})"
         )
-    if got["display_name"] != "Erin":
+    if got["display_name"] != ERIN_DISPLAY_NAME:
         raise SystemExit(f"gfs-space-follower-names: e names Erin {got!r}")
     print(
         f"  e (new follower) names Erin with her bio after "
@@ -3844,7 +3851,7 @@ def cmd_gfs_space_follower_reconnect() -> None:
         token=e["token"],
     )
     names = {r["user_id"]: r.get("display_name") for r in rows} if s == 200 else {}
-    if names.get(erin) != "Erin":
+    if names.get(erin) != ERIN_DISPLAY_NAME:
         raise SystemExit(f"gfs-space-follower-reconnect: e lost Erin ({names!r})")
     print(
         "gfs-space-follower-reconnect: ok (a reconnect re-seals the key, "
@@ -3902,7 +3909,7 @@ def cmd_gfs_space_rotate() -> None:
         space_id,
         username="erin",
         password="erin-pw-demo",
-        display_name="Erin",
+        display_name=ERIN_DISPLAY_NAME,
     )
 
     # 2. Remove frank — this is what forces the epoch rotation.
@@ -10997,7 +11004,7 @@ def cmd_verify() -> None:
             token=e["token"],
         )
         names = {r["user_id"]: r.get("display_name") for r in body} if s == 200 else {}
-        if names.get(gsfn["user_id"]) != "Erin":
+        if names.get(gsfn["user_id"]) != ERIN_DISPLAY_NAME:
             failures.append(f"e: new follower does not name Erin ({names!r})")
         else:
             print("  e (new follower) names Erin ✓")
@@ -11014,7 +11021,7 @@ def cmd_verify() -> None:
         rows = {r["user_id"]: r for r in body} if s == 200 else {}
         got = rows.get(gsap["user_id"])
         if not got or (got.get("display_name"), got.get("bio")) != (
-            "Erin",
+            ERIN_DISPLAY_NAME,
             gsap["bio"],
         ):
             failures.append(f"d: GFS follower's author profile for Erin is {got!r}")

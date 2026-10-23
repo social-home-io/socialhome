@@ -10,9 +10,10 @@ bound ``?`` parameter, so there is no injection surface to allow-list.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
+
+import orjson
 
 from ..db import AsyncDatabase
 from ..domain.apps import AppKvEntry, AppManifest, AppPendingSession, InstalledApp
@@ -74,7 +75,7 @@ def _row_to_pending(row) -> AppPendingSession:
         session_id=str(row["session_id"]),
         from_instance=str(row["from_instance"]),
         from_user=row["from_user"],
-        payload=json.loads(row["payload_json"]),
+        payload=orjson.loads(row["payload_json"]),
         created_at=str(row["created_at"]),
     )
 
@@ -90,7 +91,7 @@ def _row_to_app(row) -> InstalledApp:
         name=str(row["name"]),
         version=str(row["version"]),
         enabled=bool(row["enabled"]),
-        manifest=AppManifest.from_dict(json.loads(row["manifest_json"])),
+        manifest=AppManifest.from_dict(orjson.loads(row["manifest_json"])),
         bundle_path=str(row["bundle_path"]),
         bundle_sha256=str(row["bundle_sha256"]),
         source_url=str(row["source_url"]),
@@ -132,13 +133,13 @@ class SqliteAppRepo:
                 app.name,
                 app.version,
                 1 if app.enabled else 0,
-                json.dumps(
+                orjson.dumps(
                     {
                         "entry": app.manifest.entry,
                         "icon": app.manifest.icon,
                         "capabilities": list(app.manifest.capabilities),
                     }
-                ),
+                ).decode(),
                 app.bundle_path,
                 app.bundle_sha256,
                 app.source_url,
@@ -158,13 +159,13 @@ class SqliteAppRepo:
             (
                 app.name,
                 app.version,
-                json.dumps(
+                orjson.dumps(
                     {
                         "entry": app.manifest.entry,
                         "icon": app.manifest.icon,
                         "capabilities": list(app.manifest.capabilities),
                     }
-                ),
+                ).decode(),
                 app.bundle_path,
                 app.bundle_sha256,
                 app.source_url,
@@ -256,7 +257,7 @@ class SqliteAppRepo:
                 s.session_id,
                 s.from_instance,
                 s.from_user,
-                json.dumps(s.payload),
+                orjson.dumps(s.payload).decode(),
                 s.created_at,
             ),
         )

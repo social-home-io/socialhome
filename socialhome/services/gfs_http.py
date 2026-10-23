@@ -23,10 +23,11 @@ under the byte limit can still hold a very large number of tiny rows.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 from urllib.parse import urlsplit
+
+import orjson
 
 log = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ async def read_json_capped(resp: Any, *, url: str, limit: int) -> Any | None:
     if raw is None:
         return None
     try:
-        return json.loads(raw)
+        return orjson.loads(raw)
     except (ValueError, UnicodeDecodeError) as exc:
         log.warning("gfs_http: %s returned an unparsable body: %s", url, exc)
         return None

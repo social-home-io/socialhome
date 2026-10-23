@@ -6,10 +6,11 @@ layer. The goal here is only to collapse common row-to-domain boilerplate.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Iterable, Mapping
 from typing import Any
+
+import orjson
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -43,15 +44,17 @@ def dump_json(value: Any) -> str:
     Uses ``sort_keys=True`` + compact separators so equality checks on the
     DB column (e.g. idempotent upserts) are reliable.
     """
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return orjson.dumps(
+        value, option=orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS
+    ).decode()
 
 
 def load_json(value: str | None, default: Any) -> Any:
     if value is None or value == "":
         return default
     try:
-        return json.loads(value)
-    except json.JSONDecodeError:
+        return orjson.loads(value)
+    except orjson.JSONDecodeError:
         return default
 
 
@@ -104,7 +107,7 @@ def retention_window_sql(
             f" AND (datetime({created_col}) >= datetime(?)"
             f" OR {type_col} IN (SELECT value FROM json_each(?)))"
         ),
-        (cutoff, json.dumps(exempt)),
+        (cutoff, orjson.dumps(exempt).decode()),
     )
 
 

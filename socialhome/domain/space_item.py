@@ -35,9 +35,10 @@ Pure module — no I/O.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+
+import orjson
 
 from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
 
@@ -176,12 +177,12 @@ def pad_json_object(
     ``body`` is not mutated."""
     out = {k: v for k, v in body.items() if k != PAD_FIELD}
     out[PAD_FIELD] = ""
-    base = json.dumps(out).encode("utf-8")
+    base = orjson.dumps(out)
     bucket = next((b for b in buckets if b >= len(base)), None)
     if bucket is None:
         return base
     out[PAD_FIELD] = "0" * (bucket - len(base))
-    return json.dumps(out).encode("utf-8")
+    return orjson.dumps(out)
 
 
 # ── Authority-only notices (host relay, ``space_post_public``) ───────────

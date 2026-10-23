@@ -7,11 +7,12 @@ served from a GitHub release asset. This service only *reads* it; install
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections.abc import Callable
 from typing import Any
+
+import orjson
 
 from ..domain.apps import AppCatalogEntry
 
@@ -82,7 +83,7 @@ class AppCatalogService:
         ):
             resp.raise_for_status()
             raw = await resp.text()
-        doc = json.loads(raw)
+        doc = orjson.loads(raw)
         out: list[AppCatalogEntry] = []
         for item in doc.get("apps", []):
             try:

@@ -51,10 +51,11 @@ hooks live in the GFS WS endpoint.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any
+
+import orjson
 
 from ..moment_public_seal import (
     FRAME_MOMENT,
@@ -154,7 +155,7 @@ def suites_can_open(raw: str | None) -> bool:
     if not raw:
         return False
     try:
-        parsed = json.loads(raw)
+        parsed = orjson.loads(raw)
     except ValueError:
         return False
     if not isinstance(parsed, dict):
@@ -520,7 +521,7 @@ class MomentPublicRegistry:
                 follower_instance_id=to,
                 key_gen=int(item.get("key_gen") or 0),
                 key_step=int(item.get("key_step") or 0),
-                delivery=json.dumps(item, separators=(",", ":"), sort_keys=True),
+                delivery=orjson.dumps(item, option=orjson.OPT_SORT_KEYS).decode(),
             )
             # An older key than the one kept is a re-posted capture: neither
             # kept nor pushed (the household already has a newer one).
@@ -547,7 +548,7 @@ class MomentPublicRegistry:
         mailbox and the household id rides the next drain hint. Never with
         *wake* from a push the hint itself started — that would loop."""
         try:
-            payload = json.loads(mail.delivery)
+            payload = orjson.loads(mail.delivery)
         except ValueError:  # pragma: no cover - we wrote it
             return False
         ok = await self._ws_registry.send(
@@ -660,7 +661,7 @@ class MomentPublicRegistry:
             return None
         suites_raw = await self._follows.suites_at(followed_user_id, instance_id)
         try:
-            suites = json.loads(suites_raw) if suites_raw else None
+            suites = orjson.loads(suites_raw) if suites_raw else None
         except ValueError:
             suites = None
         return {

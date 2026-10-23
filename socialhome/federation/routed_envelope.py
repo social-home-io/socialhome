@@ -84,13 +84,14 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+import orjson
 
 from ..crypto import derive_instance_id
 from ..domain.federation import FederationEvent, FederationEventType
@@ -401,11 +402,9 @@ class SpaceRoutedHandler:
         # Mint origin ephemeral, seal the inner payload, stash priv
         # for the reply leg.
         origin_priv_b64, origin_pub_b64 = routed_crypto.generate_ephemeral_keypair()
-        inner_payload_json = json.dumps(
-            inner_payload,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        inner_payload_json = orjson.dumps(
+            inner_payload, option=orjson.OPT_SORT_KEYS
+        ).decode()
         sealed = routed_crypto.seal_inner_payload(
             inner_payload_json=inner_payload_json,
             origin_eph_priv_b64=origin_priv_b64,
@@ -486,11 +485,9 @@ class SpaceRoutedHandler:
                 f" route_id={route_id[:8]} (expired or never received)",
             )
         target_priv_b64, target_pub_b64, origin_pub_b64, reply_path, _exp = entry
-        inner_payload_json = json.dumps(
-            inner_payload,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        inner_payload_json = orjson.dumps(
+            inner_payload, option=orjson.OPT_SORT_KEYS
+        ).decode()
         sealed = routed_crypto.seal_reply_payload(
             inner_payload_json=inner_payload_json,
             target_eph_priv_b64=target_priv_b64,
@@ -773,7 +770,7 @@ class SpaceRoutedHandler:
                 )
                 return
             try:
-                inner_payload = json.loads(inner_payload_json)
+                inner_payload = orjson.loads(inner_payload_json)
             except ValueError, TypeError:
                 log.warning(
                     "SPACE_ROUTED route_id=%s: inner_payload JSON parse failed",
@@ -839,7 +836,7 @@ class SpaceRoutedHandler:
             )
             return
         try:
-            inner_payload = json.loads(inner_payload_json)
+            inner_payload = orjson.loads(inner_payload_json)
         except ValueError, TypeError:
             log.warning(
                 "SPACE_ROUTED route_id=%s: reply inner_payload JSON parse failed",
@@ -1628,7 +1625,7 @@ class SpaceRoutedHandler:
             path=new_path,
             target_eph_pk_b64=new_eph,
             inner_event_type=pending.inner_event_type,
-            inner_payload=json.loads(inner_payload_json),
+            inner_payload=orjson.loads(inner_payload_json),
             target_identity_pk=route_service.cached_target_identity_pk(target) or "",
             is_retry=True,
         )

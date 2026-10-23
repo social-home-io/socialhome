@@ -29,10 +29,10 @@ GFS process can import the size bounds.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 
+import orjson
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -185,7 +185,7 @@ def seal_share(
     """A moment's share copy: *body* (text, timestamps, the media
     descriptor) as a ``share`` blob — what a per-moment link's viewer opens
     with the moment's item key. Normally the 4 KB bucket."""
-    data = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    data = orjson.dumps(body, option=orjson.OPT_SORT_KEYS)
     return seal_media(
         item_key=item_key,
         author_user_id=author_user_id,
@@ -200,7 +200,7 @@ def open_share(
 ) -> dict:
     """The body of a share copy. Raises like :func:`open_media`, and
     :class:`TypeError` when it is not a JSON object."""
-    body = json.loads(
+    body = orjson.loads(
         open_media(
             blob=blob,
             item_key=item_key,

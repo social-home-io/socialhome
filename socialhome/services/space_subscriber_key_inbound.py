@@ -43,11 +43,11 @@ like a relayed item.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import orjson
 from cryptography.exceptions import InvalidTag
 
 from ..authority_sig import (
@@ -225,8 +225,8 @@ class SpaceSubscriberKeyInbound:
             )
             return
         try:
-            meta = json.loads(plaintext)
-        except json.JSONDecodeError:
+            meta = orjson.loads(plaintext)
+        except orjson.JSONDecodeError:
             log.warning(
                 "space_subscriber_key.inbound: undecodable meta for space %s",
                 space_id,

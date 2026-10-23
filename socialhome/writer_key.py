@@ -36,11 +36,10 @@ can be lifted onto another statement):
 
 from __future__ import annotations
 
-import json
-
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .canonical_json import canonical_bytes
 from .crypto import (
     b64url_decode,
     b64url_encode,
@@ -83,9 +82,7 @@ def derive_writer_seed(space_seed: bytes, space_id: str, epoch: int) -> bytes:
 
 def writer_key_cert_signing_bytes(cert: WriterKeyCert) -> bytes:
     """Canonical, domain-separated bytes the space authority seed signs."""
-    return _CERT_PREFIX + json.dumps(
-        cert.signing_body(), separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    return _CERT_PREFIX + canonical_bytes(cert.signing_body())
 
 
 def sign_writer_key_cert(

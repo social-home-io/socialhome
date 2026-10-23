@@ -12,7 +12,6 @@ maps those to HTTP codes via ``_map_exc`` (§5.2).
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import secrets
 import uuid
@@ -606,7 +605,7 @@ class UserService(ProtectionGateMixin):
                 prefs[key] = value
         new_user = replace(
             user,
-            preferences_json=json.dumps(prefs, sort_keys=True, separators=(",", ":")),
+            preferences_json=orjson.dumps(prefs, option=orjson.OPT_SORT_KEYS).decode(),
         )
         await self._repo.save(new_user)
         return new_user

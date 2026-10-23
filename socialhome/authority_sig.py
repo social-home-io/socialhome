@@ -21,8 +21,7 @@ existing importers keep working unchanged.
 
 from __future__ import annotations
 
-import json
-
+from .canonical_json import canonical_str
 from .crypto import (
     b64url_decode,
     b64url_encode,
@@ -156,10 +155,8 @@ def authority_signing_bytes(
     (same keys/values, any insertion order) produce identical bytes, so
     signer and verifier always agree.
     """
-    body = json.dumps(
-        {"event_type": event_type, "space_id": space_id, "payload": payload},
-        separators=(",", ":"),
-        sort_keys=True,
+    body = canonical_str(
+        {"event_type": event_type, "space_id": space_id, "payload": payload}
     )
     return b"space-authority:v1:" + body.encode()
 
