@@ -1783,8 +1783,8 @@ wherever every follower can open it.
   (signed by the household or the writer key) and on the fan-out frame.
 - A missing label means `"json"`, today's padded JSON. A receiver refuses
   an unknown suite and refuses a stream that would inflate past 128 KiB.
-- A sender compresses only when that lands in a smaller bucket. It never
-  compresses JSON over 128 KiB.
+- A sender seals the compressed copy whenever it is no larger than the JSON
+  one, also when both land in the same bucket: the label is routing-visible, and one sent only on items that compress past a bucket edge would tell the GFS how compressible the content is. It never compresses JSON over 128 KiB, and leaves the copy out only when compression would grow the item into a larger bucket (the bucket then shows the size anyway).
 
 **Who may receive it.** The GFS sends one copy to every follower, so an item
 goes compressed only when every follower on that server can read it:
@@ -1974,9 +1974,9 @@ person. The dictionary is part of the suite and pinned by its SHA-256
 - **Gate.** The same as `zlib1`: the GFS answers `409
   payload_suite_unsupported` while any seat of the space lacks the label.
 - **Sender.** The publisher (seed holder or member, trusted and strict)
-  seals a `zlib1` copy when it lands in a smaller bucket than JSON (as
-  before) and a dictionary copy whenever it is no larger than the next
-  fallback (`compressed_item_plaintexts`) — also in the same bucket, so the routing-visible label never tells the GFS that the dictionary helped this item (a content hint); it names only what the followers read. Each server
+  seals a `zlib1` copy and a dictionary copy whenever each is no larger
+  than the next fallback (`compressed_item_plaintexts`: JSON, then `zlib1`)
+  — also in the same bucket, so the routing-visible label never tells the GFS that compression or the dictionary helped this item (a content hint); it names only what the followers read. Each server
   gets the most preferred copy it proved and has not refused for the space
   in the last hour; on a refusal (409, or 400 from an older node) the next
   copy goes at once, finally JSON.
@@ -2005,6 +2005,17 @@ five posts: ~2.5 GB of ~4.9 GB). Extra cost: one more compression and
 encryption per post on the publisher (under a millisecond), once per post,
 not per follower; one 409 per (server, space) per hour while a follower
 without the label remains.
+
+**The label says nothing about the content.** Both compressed copies are
+sealed whenever they are no larger than their fallback, not only when they
+save a bucket, so every item a server can take compressed travels under the
+same label (`test_the_suites_sent_never_depend_on_whether_compression_saves_a_bucket`).
+Cost: ~0. An item that compression does not shrink past a bucket edge goes
+in the same bucket either way; the label adds ~25 B of JSON (`"payload_suite":"zlib1"`) to that frame, under 2 % of a 1 KiB-bucket frame, and the copy
+costs the publisher one compression and encryption per post (under a
+millisecond), not per follower.
+A follower without the label now causes a 409 for those items too, still at
+most one per (server, space, suite) per hour.
 
 ### Author profiles for followers (v_60)
 

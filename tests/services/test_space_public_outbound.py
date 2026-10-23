@@ -334,14 +334,24 @@ async def test_every_worthwhile_copy_travels_signed_under_its_suite(env):
         assert json.loads(open_item_plaintext(pt, suite)) == want
 
 
-async def test_a_post_zlib1_cannot_shrink_travels_as_json_and_dictionary(env):
-    """Short items already sit in the smallest bucket: no zlib1 copy (the
-    #1148 rule), but the dictionary copy, no larger, still goes."""
+@pytest.mark.security
+async def test_a_short_post_carries_the_same_suites_as_a_long_one(env):
+    """Short items already sit in the smallest bucket, so compression saves
+    no byte there — yet they carry the same compressed copies a long post
+    does: the routing-visible label must not tell the GFS which items
+    compressed past a bucket edge."""
     await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
     await env["bus"].publish(
         SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
     )
-    assert set(env["gfs"].calls[0]["compressed_payloads"]) == {"zlib1+dict1"}
+    long_post = dataclasses.replace(
+        _post(env["author_user_id"]),
+        id="post-2",
+        content="hello public space, " * 60,
+    )
+    await env["bus"].publish(SpacePostCreated(post=long_post, space_id="sp-pub"))
+    short, long_ = (set(c["compressed_payloads"]) for c in env["gfs"].calls[:2])
+    assert short == long_ == {"zlib1", "zlib1+dict1"}
 
 
 async def test_global_space_also_relays(env):

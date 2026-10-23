@@ -299,28 +299,25 @@ def compressed_item_plaintexts(
     json_len: int,
     buckets: tuple[int, ...] = ITEM_SIZE_BUCKETS,
 ) -> dict[str, bytes]:
-    """The compressed copies of ``body`` to send, by suite.
+    """The compressed copies of ``body`` to send, by suite: each of
+    :data:`COMPRESSED_PAYLOAD_SUITES` whose plaintext is **no larger** than
+    what a server would get without it — the next less preferred copy,
+    finally the JSON one (``json_len`` bytes).
 
-    * ``zlib1`` only when it is strictly smaller than the JSON one
-      (``json_len`` bytes) — the #1148 rule, unchanged.
-    * ``zlib1+dict1`` whenever it is **no larger** than what a server would
-      get without it (the ``zlib1`` copy, else JSON). Not only when it saves
-      a bucket: the suite label is routing-visible, and a label that showed
-      up only on items the dictionary shrinks past a bucket edge would tell
-      the GFS something about the content (e.g. "a link preview"). Sent
-      whenever it can be, the label says only what the followers read."""
+    Not only when it saves a bucket: the suite label is routing-visible,
+    and a label that showed up only on items compression (or the
+    dictionary) shrinks past a bucket edge would tell the GFS something
+    about the content — how compressible it is, whether it carries a link
+    preview. Sent whenever it can be, the label says only what the
+    followers read. Left out only when compression would GROW the item
+    into a larger bucket (incompressible text at a bucket edge) or the item
+    is past :data:`MAX_INFLATED_ITEM_BYTES` — the bucket then names its size
+    already."""
     out: dict[str, bytes] = {}
     floor = json_len
     for suite in reversed(COMPRESSED_PAYLOAD_SUITES):
         sealed = zlib_item_plaintext(body, buckets=buckets, suite=suite)
-        if sealed is None:
-            continue
-        fits = (
-            len(sealed) <= floor
-            if suite == PAYLOAD_SUITE_ZLIB_DICT1
-            else len(sealed) < floor
-        )
-        if fits:
+        if sealed is not None and len(sealed) <= floor:
             out[suite] = sealed
             floor = len(sealed)
     return out
