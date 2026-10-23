@@ -1955,6 +1955,57 @@ through the GFS would let it link one author's posts by timing, which
 strict mode exists to hide; the preset zlib dictionary reaches the same
 items without new state.
 
+### Preset zlib dictionary (`zlib1+dict1`)
+
+Each item is compressed alone, so zlib spends a large part of it on the keys
+and constant values every item repeats (`"author_sig"`, `"writer_cert"`,
+`"users_sig_suite":"ed25519"`, the link-preview keys …). The payload suite
+`zlib1+dict1` is `zlib1` with a preset dictionary
+(`domain/item_zdict.ZDICT_V1`, 1 742 B): the shapes of a member post, a
+relayed post and a comment with every variable value emptied, built from a
+space and author made up for it. It holds no data of any space, household or
+person. The dictionary is part of the suite and pinned by its SHA-256
+(`tests/domain/test_item_zdict.py`): a new dictionary is a new suite
+(`zlib1+dict2`), never an edit.
+
+- **Labels.** A follower lists `payload_zlib1_dict1` on every subscribe; the
+  GFS keeps it in bit 4 of `space_subscribers.reads_space_item` (no
+  migration) and proves `payload_zlib1_dict1` in its signed capability block.
+- **Gate.** The same as `zlib1`: the GFS answers `409
+  payload_suite_unsupported` while any seat of the space lacks the label.
+- **Sender.** The publisher (seed holder or member, trusted and strict)
+  seals a `zlib1` copy when it lands in a smaller bucket than JSON (as
+  before) and a dictionary copy whenever it is no larger than the next
+  fallback (`compressed_item_plaintexts`) — also in the same bucket, so the routing-visible label never tells the GFS that the dictionary helped this item (a content hint); it names only what the followers read. Each server
+  gets the most preferred copy it proved and has not refused for the space
+  in the last hour; on a refusal (409, or 400 from an older node) the next
+  copy goes at once, finally JSON.
+- **Receiver.** Inflates under the suite's own dictionary, with the same
+  128 KiB cap and zero-padding rule. A dictionary stream does not open as
+  plain `zlib1`; a plain stream read under `zlib1+dict1` is the same item.
+
+**Measured** (`test_frame_size_budget.py`, `BUDGET_DICT`; binary frames, a
+member frame without the frame cert):
+
+| Item | `zlib1` | `zlib1+dict1` |
+|---|---|---|
+| 300-character post or comment | 1 KiB bucket, 1 456 / 1 218 B | same 1 KiB bucket, sent under the label |
+| 300-character post with a link preview | **4 KiB**, 4 528 / 4 290 B | **1 KiB, 1 456 / 1 224 B (−68 % / −71 %)** |
+| 300-character CJK post | 4 KiB | 4 KiB, sent under the label |
+
+Compressed sizes on longer Latin text (member post, with the writer cert):
+the 1 KiB bucket now holds up to about 850 characters (`zlib1`: about 520),
+and a post with a link preview up to about 450 characters (`zlib1`: none).
+A typical short post saves nothing: it was in the smallest bucket already.
+
+**Planning case.** 10 000 followers × 400 posts a day. Every post with a link
+preview saves ~3.07 KB per follower frame: a share *p* of posts with a link
+preview saves `p × 400 × 10 000 × 3.07 KB` = **p × 12.3 GB a day** (one in
+five posts: ~2.5 GB of ~4.9 GB). Extra cost: one more compression and
+encryption per post on the publisher (under a millisecond), once per post,
+not per follower; one 409 per (server, space) per hour while a follower
+without the label remains.
+
 ### Author profiles for followers (v_60)
 
 A GFS follower holds no roster, so every post in a space it follows read

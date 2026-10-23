@@ -227,16 +227,25 @@ class _Gfs:
     async def member_publish_trusted_supported(self, conn):
         return self.capable
 
-    #: Whether the server proved ``payload_zlib1``; the (server, space)
-    #: pairs it refused a compressed item for.
+    #: Whether the server proved ``payload_zlib1`` / ``payload_zlib1_dict1``;
+    #: the (server, space, suite) triples it refused.
     zlib: bool = False
-    suite_refused: frozenset[tuple[str, str]] = frozenset()
+    dict1: bool = False
+    suite_refused: frozenset[tuple[str, str, str]] = frozenset()
 
-    async def compress_for(self, conn, space_id):
-        return self.zlib and (conn.id, space_id) not in self.suite_refused
+    async def payload_suite_for(self, conn, space_id, offered):
+        proved = {"zlib1": self.zlib, "zlib1+dict1": self.dict1}
+        for suite in ("zlib1+dict1", "zlib1"):
+            if (
+                suite in offered
+                and proved[suite]
+                and (conn.id, space_id, suite) not in self.suite_refused
+            ):
+                return suite
+        return None
 
-    def note_suite_refused(self, conn, space_id):
-        self.suite_refused = self.suite_refused | {(conn.id, space_id)}
+    def note_suite_refused(self, conn, space_id, suite):
+        self.suite_refused = self.suite_refused | {(conn.id, space_id, suite)}
 
     async def subscribe_to_gfs_space(self, space_id, gfs_id):
         self.subscribed.append((space_id, gfs_id))
@@ -926,7 +935,7 @@ async def test_an_old_follower_makes_the_gfs_refuse_and_the_post_goes_json(world
     assert "payload_suite" not in frame
     _type, got = parse_item_plaintext(world["crypto"].decrypt(frame["payload"]))
     assert got["content"] == _long_inner()["content"]
-    assert world["gfs"].suite_refused == {("conn-1", SPACE_ID)}
+    assert world["gfs"].suite_refused == {("conn-1", SPACE_ID, "zlib1")}
 
 
 async def test_a_server_without_payload_zlib1_never_sees_a_compressed_item(world):
@@ -1810,11 +1819,88 @@ async def test_an_older_node_refusing_the_suite_gets_the_json_item(world):
             "epoch": 3,
             "writer_cert": (await svc._writer_certs.own_cert(SPACE_ID, 3)).to_wire(),
             "payload": "anNvbg",
-            "compressed_payload": "emxpYg",
+            "compressed_payloads": {"zlib1": "emxpYg"},
         }
         item = GfsPublish(space_id=SPACE_ID, event_type="space_item", payload=data)
         outcome = await svc._send(conn, item)
     assert outcome.kind == "delivered"
     assert [b.get("payload_suite") for b in old.bodies] == ["zlib1", None]
     assert [b["payload"] for b in old.bodies] == ["emxpYg", "anNvbg"]
-    assert world["gfs"].suite_refused == {(conn.id, SPACE_ID)}
+    assert world["gfs"].suite_refused == {(conn.id, SPACE_ID, "zlib1")}
+
+
+class _NoDictFollowerNode:
+    """A GFS where one follower reads zlib1 but not the dictionary: 409
+    ``payload_suite_unsupported`` to ``zlib1+dict1``, 200 otherwise."""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict] = []
+
+    def app(self) -> web.Application:
+        async def handler(request: web.Request) -> web.Response:
+            body = await request.json()
+            self.bodies.append(body)
+            if body.get("payload_suite") == "zlib1+dict1":
+                return web.json_response(
+                    {"error": "payload_suite_unsupported"}, status=409
+                )
+            return web.json_response({"status": "published"})
+
+        app = web.Application()
+        app.router.add_post("/gfs/member-publish", handler)
+        return app
+
+
+async def _send_both_copies(world, node) -> tuple[object, object]:
+    svc = world["svc"]
+    async with TestServer(node.app()) as server:
+        conn = replace(world["conn"], inbox_url=str(server.make_url("")).rstrip("/"))
+        data = {
+            "epoch": 3,
+            "writer_cert": (await svc._writer_certs.own_cert(SPACE_ID, 3)).to_wire(),
+            "payload": "anNvbg",
+            "compressed_payloads": {"zlib1+dict1": "ZGljdA", "zlib1": "emxpYg"},
+        }
+        item = GfsPublish(space_id=SPACE_ID, event_type="space_item", payload=data)
+        return conn, await svc._send(conn, item)
+
+
+async def test_a_dictionary_refusal_falls_back_to_zlib1_not_json(world):
+    """The server proved both suites, but a follower there reads plain
+    zlib1 only: the dictionary copy is refused (409), the zlib1 copy goes
+    at once — not JSON — and the dictionary is skipped there for an hour."""
+    world["gfs"].zlib = True
+    world["gfs"].dict1 = True
+    node = _NoDictFollowerNode()
+    conn, outcome = await _send_both_copies(world, node)
+    assert outcome.kind == "delivered"
+    assert [b.get("payload_suite") for b in node.bodies] == ["zlib1+dict1", "zlib1"]
+    assert [b["payload"] for b in node.bodies] == ["ZGljdA", "emxpYg"]
+    assert world["gfs"].suite_refused == {(conn.id, SPACE_ID, "zlib1+dict1")}
+
+
+async def test_a_server_without_the_dictionary_gets_the_zlib1_copy(world):
+    world["gfs"].zlib = True
+    node = _NoDictFollowerNode()
+    _conn, outcome = await _send_both_copies(world, node)
+    assert outcome.kind == "delivered"
+    assert [b.get("payload_suite") for b in node.bodies] == ["zlib1"]
+
+
+async def test_an_old_node_refusing_both_suites_ends_on_json(world):
+    """An older node that knows neither suite (400): dictionary, then zlib1,
+    then JSON — each refusal noted, the item delivered."""
+    world["gfs"].zlib = True
+    world["gfs"].dict1 = True
+    old = _OldSuiteNode()
+    conn, outcome = await _send_both_copies(world, old)
+    assert outcome.kind == "delivered"
+    assert [b.get("payload_suite") for b in old.bodies] == [
+        "zlib1+dict1",
+        "zlib1",
+        None,
+    ]
+    assert world["gfs"].suite_refused == {
+        (conn.id, SPACE_ID, "zlib1+dict1"),
+        (conn.id, SPACE_ID, "zlib1"),
+    }

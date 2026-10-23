@@ -4024,8 +4024,34 @@ async def test_the_seat_keeps_both_labels_as_bits(gfs_db):
     svc = GfsFederationService(repo)
     await _zlib_space(svc, "sp-z-bits", accepts=("payload_zlib1",))
     # zlib yes, space_item no: the step-12 count still counts it as lacking.
-    assert await repo.count_subscribers_without_payload_zlib1("sp-z-bits") == 0
+    assert await repo.count_subscribers_without_seat_bit("sp-z-bits", 2) == 0
+    assert await repo.count_subscribers_without_seat_bit("sp-z-bits", 4) == 1
     assert await repo.count_subscribers_without_space_item("sp-z-bits") == (1, 1)
+
+
+async def test_a_dictionary_item_needs_every_seat_to_read_the_dictionary(gfs_db):
+    """``zlib1+dict1``: a follower that reads plain zlib1 only can't open
+    it (the stream needs the preset dictionary), so the GFS refuses it while
+    any seat lacks ``payload_zlib1_dict1`` — and still takes zlib1."""
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    seed = await _zlib_space(svc, "sp-d-old", accepts=("space_item", "payload_zlib1"))
+    with pytest.raises(PayloadSuiteRefused):
+        await _relay_with_suite(svc, seed, "sp-d-old", "zlib1+dict1")
+    assert await _relay_with_suite(svc, seed, "sp-d-old", "zlib1") == ["sub-z"]
+
+
+async def test_a_dictionary_item_reaches_followers_that_read_it(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    seed = await _zlib_space(
+        svc,
+        "sp-d-new",
+        accepts=("space_item", "payload_zlib1", "payload_zlib1_dict1"),
+    )
+    assert await _relay_with_suite(svc, seed, "sp-d-new", "zlib1+dict1") == ["sub-z"]
+    relays = [f for _, f in ws.sent if f["type"] == "relay"]
+    assert relays[0]["payload"]["payload_suite"] == "zlib1+dict1"
 
 
 async def test_an_unknown_relay_suite_is_refused(gfs_db):

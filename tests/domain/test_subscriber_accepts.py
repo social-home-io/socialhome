@@ -7,10 +7,13 @@ import pytest
 from socialhome.domain.subscriber_accepts import (
     ACCEPTS_AUTHOR_PROFILES_BUNDLE,
     ACCEPTS_PAYLOAD_ZLIB1,
+    ACCEPTS_PAYLOAD_ZLIB1_DICT1,
     MAX_ACCEPTS_LABEL_CHARS,
     MAX_ACCEPTS_LABELS,
     OUR_ACCEPTS,
+    SEAT_BIT_FOR_SUITE,
     parse_accepts,
+    seat_bits,
 )
 
 
@@ -20,6 +23,16 @@ def test_our_accepts_include_the_bundle():
     assert ACCEPTS_PAYLOAD_ZLIB1 == "payload_zlib1"
     assert ACCEPTS_PAYLOAD_ZLIB1 in OUR_ACCEPTS
     assert parse_accepts(list(OUR_ACCEPTS)) == OUR_ACCEPTS
+
+
+def test_the_dictionary_label_is_its_own_seat_bit():
+    """``zlib1+dict1`` readers say so on every subscribe; the GFS keeps it
+    in bit 4 and gates that suite on it."""
+    assert ACCEPTS_PAYLOAD_ZLIB1_DICT1 == "payload_zlib1_dict1"
+    assert ACCEPTS_PAYLOAD_ZLIB1_DICT1 in OUR_ACCEPTS
+    assert seat_bits(OUR_ACCEPTS) == 7
+    assert seat_bits(("payload_zlib1_dict1",)) == 4
+    assert SEAT_BIT_FOR_SUITE == {"zlib1": 2, "zlib1+dict1": 4}
 
 
 def test_missing_is_empty():

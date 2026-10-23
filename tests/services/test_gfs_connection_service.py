@@ -1780,6 +1780,7 @@ async def test_subscribe_to_gfs_space_signs_body(env):
         "space_key_pull",
         "space_item",
         "payload_zlib1",
+        "payload_zlib1_dict1",
     ]
 
 
@@ -5118,15 +5119,22 @@ class _SuiteSession(_RecordingSession):
     """Answers ``409 payload_suite_unsupported`` (or ``refuse_status``) to a
     compressed body while ``refuse`` is set; 200 otherwise."""
 
-    def __init__(self, *, refuse: bool, refuse_status: int = 409) -> None:
+    def __init__(
+        self,
+        *,
+        refuse: bool,
+        refuse_status: int = 409,
+        refuse_suites: frozenset[str] = frozenset({"zlib1", "zlib1+dict1"}),
+    ) -> None:
         super().__init__()
         self.refuse = refuse
         self.refuse_status = refuse_status
+        self.refuse_suites = refuse_suites
 
     def post(self, url, *, json=None, **_kw):
         self.posts.append((url, json or {}))
         suite = ((json or {}).get("payload") or {}).get("payload_suite")
-        if self.refuse and suite == "zlib1":
+        if self.refuse and suite in self.refuse_suites:
             text = '{"error": "payload_suite_unsupported"}'
             return _StubResp(self.refuse_status, text=text)
         return _StubResp(200, {"status": "published"})
@@ -5152,7 +5160,7 @@ async def _publish_z(svc) -> int:
         space_id="sp-z",
         event_type="space_post_public",
         payload=_JSON_ENV,
-        compressed_payload=_ZLIB_ENV,
+        compressed_payloads={"zlib1": _ZLIB_ENV},
     )
 
 
@@ -5199,11 +5207,11 @@ async def test_the_refusal_memory_is_bounded(env, monkeypatch):
     monkeypatch.setattr(gfs_connection_service, "MAX_SUITE_REFUSALS", 3)
     conn = await svc._repo.get("g1")
     for i in range(5):
-        svc.note_suite_refused(conn, f"sp-{i}")
+        svc.note_suite_refused(conn, f"sp-{i}", "zlib1")
     assert list(svc._suite_refused_at) == [
-        ("g1", "sp-2"),
-        ("g1", "sp-3"),
-        ("g1", "sp-4"),
+        ("g1", "sp-2", "zlib1"),
+        ("g1", "sp-3", "zlib1"),
+        ("g1", "sp-4", "zlib1"),
     ]
 
 
@@ -5215,7 +5223,7 @@ async def test_a_retried_item_keeps_its_compressed_copy(env):
         space_id="sp-z",
         event_type="space_post_public",
         payload=_JSON_ENV,
-        compressed=_ZLIB_ENV,
+        compressed={"zlib1": _ZLIB_ENV},
     )
     outcome = await svc._retry_publish("g1", item)
     assert outcome.kind == "delivered"
@@ -5230,7 +5238,7 @@ async def test_an_older_node_refusing_the_compressed_copy_gets_json(env):
     svc._payload_zlib1["g1"] = True
     assert await _publish_z(svc) == 1
     assert [b["payload"] for _u, b in session.posts] == [_ZLIB_ENV, _JSON_ENV]
-    assert ("g1", "sp-z") in svc._suite_refused_at
+    assert ("g1", "sp-z", "zlib1") in svc._suite_refused_at
 
 
 async def test_a_transient_failure_of_the_compressed_copy_is_retried_as_is(env):
@@ -5240,3 +5248,85 @@ async def test_a_transient_failure_of_the_compressed_copy_is_retried_as_is(env):
     assert await _publish_z(svc) == 0
     assert [b["payload"] for _u, b in session.posts] == [_ZLIB_ENV]
     assert svc._suite_refused_at == {}
+
+
+# ─── payload_suite "zlib1+dict1": the preset dictionary first ───────────────
+
+_DICT_ENV = {
+    **_ZLIB_ENV,
+    "encrypted_payload": "dict-ct",
+    "payload_suite": "zlib1+dict1",
+}
+_BOTH = {"zlib1": _ZLIB_ENV, "zlib1+dict1": _DICT_ENV}
+
+
+async def _publish_both(svc) -> int:
+    return await svc.publish_space_event(
+        space_id="sp-z",
+        event_type="space_post_public",
+        payload=_JSON_ENV,
+        compressed_payloads=_BOTH,
+    )
+
+
+async def test_a_server_that_proved_the_dictionary_gets_that_copy(env):
+    session = _SuiteSession(refuse=False)
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = True
+    svc._payload_zlib1_dict1["g1"] = True
+    assert await _publish_both(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [_DICT_ENV]
+
+
+async def test_a_server_with_zlib1_only_gets_the_zlib1_copy(env):
+    session = _SuiteSession(refuse=False)
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = True
+    svc._payload_zlib1_dict1["g1"] = False
+    assert await _publish_both(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [_ZLIB_ENV]
+
+
+async def test_a_dictionary_refusal_falls_back_to_zlib1_for_the_hour(env):
+    """A follower there reads zlib1 but not the dictionary: 409 to the
+    dictionary copy, the zlib1 one right after — and zlib1 first there for
+    the next hour."""
+    session = _SuiteSession(refuse=True, refuse_suites=frozenset({"zlib1+dict1"}))
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = True
+    svc._payload_zlib1_dict1["g1"] = True
+    assert await _publish_both(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [_DICT_ENV, _ZLIB_ENV]
+    assert list(svc._suite_refused_at) == [("g1", "sp-z", "zlib1+dict1")]
+    session.posts.clear()
+    assert await _publish_both(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [_ZLIB_ENV]
+
+
+async def test_both_refused_ends_on_json(env):
+    session = _SuiteSession(refuse=True)
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = True
+    svc._payload_zlib1_dict1["g1"] = True
+    assert await _publish_both(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [
+        _DICT_ENV,
+        _ZLIB_ENV,
+        _JSON_ENV,
+    ]
+
+
+async def test_an_item_with_only_the_dictionary_copy_skips_zlib1(env):
+    """No zlib1 copy (it saved no bucket over JSON): a server without the
+    dictionary gets JSON."""
+    session = _SuiteSession(refuse=False)
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = True
+    svc._payload_zlib1_dict1["g1"] = False
+    await svc.publish_space_event(
+        space_id="sp-z",
+        event_type="space_post_public",
+        payload=_JSON_ENV,
+        compressed_payloads={"zlib1+dict1": _DICT_ENV},
+    )
+    assert [b["payload"] for _u, b in session.posts] == [_JSON_ENV]

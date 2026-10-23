@@ -48,6 +48,7 @@ from socialhome.domain.space_item import (
     ITEM_SIZE_BUCKETS,
     PAD_FIELD,
     open_item_plaintext,
+    zlib_item_plaintext,
 )
 from socialhome.domain.writer_cert import WriterCert
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
@@ -57,6 +58,7 @@ from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services import space_public_outbound
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_author import (
     author_signing_bytes,
@@ -82,7 +84,7 @@ class _CaptureGfs:
         self.calls: list[dict] = []
 
     async def publish_space_event(
-        self, *, space_id, event_type, payload, skip=None, compressed_payload=None
+        self, *, space_id, event_type, payload, skip=None, compressed_payloads=None
     ) -> int:
         self.calls.append(
             {
@@ -90,7 +92,7 @@ class _CaptureGfs:
                 "event_type": event_type,
                 "payload": payload,
                 "skip": skip,
-                "compressed_payload": compressed_payload,
+                "compressed_payloads": compressed_payloads,
             }
         )
         return 1
@@ -248,7 +250,11 @@ async def test_the_post_also_travels_as_a_signed_compressed_copy(env):
     )
     await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-pub"))
     call = env["gfs"].calls[0]
-    plain, zipped = call["payload"], call["compressed_payload"]
+    plain, copies = call["payload"], call["compressed_payloads"]
+    # The dictionary copy goes too (no larger; its label must not hint at the
+    # content), next to the zlib1 one a server without the dictionary gets.
+    assert set(copies) == {"zlib1", "zlib1+dict1"}
+    zipped = copies["zlib1"]
     assert zipped is not None
     assert set(zipped) == set(plain) | {"payload_suite"}
     assert zipped["payload_suite"] == "zlib1"
@@ -286,13 +292,56 @@ async def test_the_post_also_travels_as_a_signed_compressed_copy(env):
     assert inner == {k: v for k, v in json.loads(json_pt).items() if k != "_pad"}
 
 
-async def test_a_post_compression_cannot_shrink_travels_as_json_only(env):
-    """Short items already sit in the smallest bucket: no second copy."""
+async def test_every_worthwhile_copy_travels_signed_under_its_suite(env):
+    """Where both compressed copies save a bucket, both go along — each
+    sealed under the same epoch and authority-signed with its own suite
+    tag — and each opens to the same inner."""
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    real = space_public_outbound.compressed_item_plaintexts
+
+    def both(body, *, json_len):
+        dict_pt = zlib_item_plaintext(body, suite="zlib1+dict1")
+        plain_pt = zlib_item_plaintext(body)
+        assert dict_pt is not None and plain_pt is not None
+        assert real(body, json_len=json_len)  # it does compress
+        return {"zlib1": plain_pt, "zlib1+dict1": dict_pt}
+
+    post = dataclasses.replace(
+        _post(env["author_user_id"]), content="hello public space, " * 60
+    )
+    with patch.object(space_public_outbound, "compressed_item_plaintexts", both):
+        await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-pub"))
+    call = env["gfs"].calls[0]
+    copies = call["compressed_payloads"]
+    assert set(copies) == {"zlib1", "zlib1+dict1"}
+    json_pt = await env["crypto"].decrypt(
+        "sp-pub", call["payload"]["epoch"], call["payload"]["encrypted_payload"]
+    )
+    want = {k: v for k, v in json.loads(json_pt).items() if k != "_pad"}
+    for suite, env_ in copies.items():
+        assert env_["payload_suite"] == suite
+        assert verify_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            space_id="sp-pub",
+            payload=strip_authority_sig_fields(env_),
+            authority_sig=env_["authority_sig"],
+            authority_sig_suite=env_["authority_sig_suite"],
+            space_public_key=skp.public_key,
+        )
+        pt = await env["crypto"].decrypt(
+            "sp-pub", env_["epoch"], env_["encrypted_payload"]
+        )
+        assert json.loads(open_item_plaintext(pt, suite)) == want
+
+
+async def test_a_post_zlib1_cannot_shrink_travels_as_json_and_dictionary(env):
+    """Short items already sit in the smallest bucket: no zlib1 copy (the
+    #1148 rule), but the dictionary copy, no larger, still goes."""
     await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
     await env["bus"].publish(
         SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
     )
-    assert env["gfs"].calls[0]["compressed_payload"] is None
+    assert set(env["gfs"].calls[0]["compressed_payloads"]) == {"zlib1+dict1"}
 
 
 async def test_global_space_also_relays(env):

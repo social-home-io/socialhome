@@ -680,7 +680,15 @@ attacker already chose; the bucket padding still hides the length, so a
 compression-ratio side channel only shows the bucket. The fan-out frame's
 label is outside the ciphertext and unsigned on the member path: a GFS that
 flips it only makes the item undecodable (the author signature inside still
-decides), which it could do by dropping the frame anyway. **Content-epoch notice** — `POST
+decides), which it could do by dropping the frame anyway. `"zlib1+dict1"` is
+`zlib1` with a preset dictionary (`domain/item_zdict.ZDICT_V1`: the item
+shapes' keys and constant values, every variable value emptied, so it holds
+no data of any space or person). The dictionary is part of the suite and
+pinned by its SHA-256 in `tests/domain/test_item_zdict.py`: a new dictionary
+is a new suite, never an edit. A dictionary stream does not inflate as plain
+`zlib1` (it names a dictionary that reader lacks); a plain stream read under
+`zlib1+dict1` is the same item, so flipping the label gains nothing. The
+inflation cap and padding rules are the same. **Content-epoch notice** — `POST
 /gfs/spaces/{id}/epoch`, two forms. The OWNER's: its household identity
 signature (Ed25519, the registered key) over canonical JSON of `{action:
 "gfs-owner-epoch-notice:v1", owning_instance, gfs_instance_id, space_id,

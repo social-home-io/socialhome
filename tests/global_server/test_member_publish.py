@@ -1811,6 +1811,25 @@ async def test_a_seat_that_reads_space_item_only_still_lacks_zlib(gfs):
     assert resp.status == 409
 
 
+async def test_a_dictionary_item_needs_the_dictionary_label_on_every_seat(gfs):
+    """``zlib1+dict1``: a seat that reads plain zlib1 only (bits 3) refuses
+    it (409); once every seat also reads the dictionary (bits 7) it is
+    fanned out under its suite."""
+    await _label_seats(gfs, 7, gfs.publisher)
+    await _label_seats(gfs, 3, gfs.subscriber)
+    body = _body(gfs.publisher, payload_suite="zlib1+dict1")
+    resp = await gfs.post("/gfs/member-publish", json=body)
+    assert resp.status == 409
+    assert await resp.json() == {"error": "payload_suite_unsupported"}
+    await _label_seats(gfs, 7, gfs.subscriber)
+    resp = await gfs.post(
+        "/gfs/member-publish", json=_body(gfs.publisher, payload_suite="zlib1+dict1")
+    )
+    assert resp.status == 200
+    queued = await _queued(gfs, gfs.subscriber)
+    assert [q.sealed.get("payload_suite") for q in queued] == ["zlib1+dict1"]
+
+
 async def test_a_compressed_item_is_relayed_when_every_seat_reads_it(gfs):
     await _label_seats(gfs, 3, gfs.publisher, gfs.subscriber)
     body = _body(gfs.publisher, payload_suite="zlib1")

@@ -219,6 +219,12 @@ class GfsInfoView(GfsBaseView):
             # this; an older one would relay it to followers who can't open
             # it (``/gfs/publish``) or refuse the field (member publish).
             "payload_zlib1": True,
+            # The same for ``payload_suite: "zlib1+dict1"`` (zlib with the
+            # preset dictionary ``domain/item_zdict.ZDICT_V1``): each seat's
+            # ``payload_zlib1_dict1`` label, 409 while any seat lacks it.
+            # A household sends it only to a server that proved this; an
+            # older one would refuse the suite (400) or relay it unchecked.
+            "payload_zlib1_dict1": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         if cfg.instance_id_aliases:

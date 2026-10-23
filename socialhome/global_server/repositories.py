@@ -155,7 +155,9 @@ class AbstractGfsFederationRepo(Protocol):
     async def count_subscribers_without_space_item(
         self, space_id: str
     ) -> tuple[int, int]: ...
-    async def count_subscribers_without_payload_zlib1(self, space_id: str) -> int: ...
+    async def count_subscribers_without_seat_bit(
+        self, space_id: str, bit: int
+    ) -> int: ...
     async def get_subscriber(
         self, space_id: str, instance_id: str
     ) -> GfsSubscriber | None: ...
@@ -592,7 +594,7 @@ class SqliteGfsFederationRepo:
         subscribe ``accepts``, as the
         :func:`~socialhome.domain.subscriber_accepts.seat_bits` bitmask in
         ``reads_space_item`` (migration 0023; bit 1 ``space_item``, bit 2
-        ``payload_zlib1``)."""
+        ``payload_zlib1``, bit 4 ``payload_zlib1_dict1``)."""
         await self._db.enqueue(
             "UPDATE space_subscribers SET reads_space_item=?"
             " WHERE space_id=? AND instance_id=?",
@@ -619,18 +621,19 @@ class SqliteGfsFederationRepo:
             return 0, 0
         return int(row["total"]), int(row["without"])
 
-    async def count_subscribers_without_payload_zlib1(self, space_id: str) -> int:
-        """Active subscribers of *space_id* not known to read a
-        zlib-compressed item (bit 2 unset; NULL counts as unset)."""
+    async def count_subscribers_without_seat_bit(self, space_id: str, bit: int) -> int:
+        """Active subscribers of *space_id* whose seat lacks label *bit*
+        (:data:`~socialhome.domain.subscriber_accepts.SEAT_BIT_FOR_SUITE`;
+        NULL counts as unset)."""
         row = await self._db.fetchone(
             """
             SELECT COUNT(*) AS without
             FROM space_subscribers ss
             JOIN client_instances ci USING (instance_id)
             WHERE ss.space_id = ? AND ci.status = 'active'
-              AND (COALESCE(ss.reads_space_item, 0) & 2) = 0
+              AND (COALESCE(ss.reads_space_item, 0) & ?) = 0
             """,
-            (space_id,),
+            (space_id, int(bit)),
         )
         return int(row["without"]) if row is not None else 0
 

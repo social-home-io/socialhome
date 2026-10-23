@@ -141,24 +141,28 @@ def test_suite_refused_outcome():
 
 def test_the_body_picks_the_compressed_copy_only_when_asked_and_present():
     item = GfsPublish(
-        space_id="sp", event_type="e", payload={"j": 1}, compressed={"z": 1}
+        space_id="sp",
+        event_type="e",
+        payload={"j": 1},
+        compressed={"zlib1": {"z": 1}, "zlib1+dict1": {"d": 1}},
     )
     assert item.body()["payload"] == {"j": 1}
-    assert item.body(compressed=True)["payload"] == {"z": 1}
-    assert _item().body(compressed=True)["payload"] == _item().payload
+    assert item.body(suite="zlib1")["payload"] == {"z": 1}
+    assert item.body(suite="zlib1+dict1")["payload"] == {"d": 1}
+    assert _item().body(suite="zlib1")["payload"] == _item().payload
 
 
 async def test_a_queued_item_keeps_a_private_copy_of_both_payloads(fast):
     send = _ScriptedSend([TRANSIENT])
     queue = GfsPublishRetryQueue(send)
-    compressed = {"z": [1]}
+    compressed = {"zlib1": {"z": [1]}}
     queue.enqueue(
         "g1",
         GfsPublish(space_id="sp", event_type="e", payload={}, compressed=compressed),
     )
-    compressed["z"].append(2)
+    compressed["zlib1"]["z"].append(2)
     queued = queue._queues["g1"].items[0]
-    assert queued.compressed == {"z": [1]}
+    assert queued.compressed == {"zlib1": {"z": [1]}}
 
 
 # ── The queue ────────────────────────────────────────────────────────────

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import re
 
+from .space_item import PAYLOAD_SUITE_ZLIB, PAYLOAD_SUITE_ZLIB_DICT1
+
 #: The follower opens the sealed ``space_author_profiles_bundle`` (v_61).
 ACCEPTS_AUTHOR_PROFILES_BUNDLE: str = "author_profiles_bundle"
 
@@ -40,6 +42,11 @@ ACCEPTS_SPACE_ITEM: str = "space_item"
 #: for a space while any seat lacks it, so the publisher sends JSON.
 ACCEPTS_PAYLOAD_ZLIB1: str = "payload_zlib1"
 
+#: The household opens an item compressed with the preset dictionary
+#: (``payload_suite: "zlib1+dict1"``, :mod:`socialhome.domain.item_zdict`).
+#: Kept per seat in bit 4, gated like ``payload_zlib1``.
+ACCEPTS_PAYLOAD_ZLIB1_DICT1: str = "payload_zlib1_dict1"
+
 #: The household reads binary GFS→household WebSocket frames
 #: (:mod:`socialhome.domain.ws_binary_frame`). A HELLO-only label: the
 #: choice is per connection, so it never rides a subscribe.
@@ -58,6 +65,7 @@ OUR_ACCEPTS: tuple[str, ...] = (
     ACCEPTS_SPACE_KEY_PULL,
     ACCEPTS_SPACE_ITEM,
     ACCEPTS_PAYLOAD_ZLIB1,
+    ACCEPTS_PAYLOAD_ZLIB1_DICT1,
 )
 
 #: Bits of the GFS's per-seat label set (``space_subscribers
@@ -66,6 +74,14 @@ OUR_ACCEPTS: tuple[str, ...] = (
 #: a bit existed reads it as unset: fail-safe toward the plain relay.
 SEAT_BIT_SPACE_ITEM: int = 1
 SEAT_BIT_PAYLOAD_ZLIB1: int = 2
+SEAT_BIT_PAYLOAD_ZLIB1_DICT1: int = 4
+
+#: The seat bit a follower needs for each compressed payload suite: the GFS
+#: refuses an item under that suite (409) while any seat lacks it.
+SEAT_BIT_FOR_SUITE: dict[str, int] = {
+    PAYLOAD_SUITE_ZLIB: SEAT_BIT_PAYLOAD_ZLIB1,
+    PAYLOAD_SUITE_ZLIB_DICT1: SEAT_BIT_PAYLOAD_ZLIB1_DICT1,
+}
 
 
 def seat_bits(accepts: tuple[str, ...]) -> int:
@@ -75,6 +91,8 @@ def seat_bits(accepts: tuple[str, ...]) -> int:
         bits |= SEAT_BIT_SPACE_ITEM
     if ACCEPTS_PAYLOAD_ZLIB1 in accepts:
         bits |= SEAT_BIT_PAYLOAD_ZLIB1
+    if ACCEPTS_PAYLOAD_ZLIB1_DICT1 in accepts:
+        bits |= SEAT_BIT_PAYLOAD_ZLIB1_DICT1
     return bits
 
 

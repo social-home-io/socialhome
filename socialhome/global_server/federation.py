@@ -58,12 +58,15 @@ from ..domain.space import (
 )
 from ..domain.space_item import (
     PAYLOAD_SUITE_FIELD,
-    PAYLOAD_SUITE_ZLIB,
     PayloadSuiteRefused,
     payload_suite_of,
 )
 from ..domain.space_place import parse_place_pin_wire
-from ..domain.subscriber_accepts import ACCEPTS_SPACE_KEY_PULL, seat_bits
+from ..domain.subscriber_accepts import (
+    ACCEPTS_SPACE_KEY_PULL,
+    SEAT_BIT_FOR_SUITE,
+    seat_bits,
+)
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from .domain import (
     MIN_EPOCH_STEP_INTERVAL_S,
@@ -1417,14 +1420,17 @@ class GfsFederationService:
         self, space_id: str, raw_suite: object
     ) -> None:
         """Refuse a compressed item for *space_id* while any active seat
-        lacks ``payload_zlib1`` (:class:`PayloadSuiteRefused` → HTTP 409),
-        so a follower that cannot open it is never sent one. One fan-out
-        reaches every follower, so one such seat refuses it for all: the
-        publisher then sends JSON. An unknown suite raises
+        lacks that suite's label — ``payload_zlib1``, or
+        ``payload_zlib1_dict1`` for the preset dictionary
+        (:class:`PayloadSuiteRefused` → HTTP 409) — so a follower that
+        cannot open it is never sent one. One fan-out reaches every
+        follower, so one such seat refuses it for all: the publisher then
+        sends the next suite it has. An unknown suite raises
         :class:`~socialhome.domain.space_item.UnsupportedPayloadSuite`."""
-        if payload_suite_of(raw_suite) != PAYLOAD_SUITE_ZLIB:
+        bit = SEAT_BIT_FOR_SUITE.get(payload_suite_of(raw_suite))
+        if bit is None:
             return
-        if await self._repo.count_subscribers_without_payload_zlib1(space_id):
+        if await self._repo.count_subscribers_without_seat_bit(space_id, bit):
             raise PayloadSuiteRefused(space_id)
 
     async def count_subscribers_without_space_item(

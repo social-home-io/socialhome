@@ -99,6 +99,9 @@ class _Gfs:
     async def refresh_if_stale(self, conn):
         return conn
 
+    async def payload_suite_for(self, conn, space_id, offered):
+        return None  # never proved a compressed suite: JSON
+
     async def member_publish_trusted_supported(self, conn):
         return True
 

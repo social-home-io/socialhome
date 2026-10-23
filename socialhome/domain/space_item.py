@@ -41,6 +41,7 @@ from datetime import UTC, datetime, timedelta
 
 import orjson
 
+from .item_zdict import ZDICT_V1
 from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
 
 ITEM_TYPE_POST: str = "post"
@@ -196,9 +197,25 @@ PAYLOAD_SUITE_JSON: str = "json"
 #: inside the AEAD, so the ciphertext length still names only the bucket.
 #: A 300-character post shrinks from the 4 KiB bucket to 1 KiB.
 PAYLOAD_SUITE_ZLIB: str = "zlib1"
+#: As :data:`PAYLOAD_SUITE_ZLIB`, with the preset dictionary
+#: :data:`~socialhome.domain.item_zdict.ZDICT_V1` (the item shapes' keys and
+#: constant values). A post with a link preview drops from the 4 KiB bucket
+#: to 1 KiB; a new dictionary is a new suite.
+PAYLOAD_SUITE_ZLIB_DICT1: str = "zlib1+dict1"
 SUPPORTED_PAYLOAD_SUITES: frozenset[str] = frozenset(
-    {PAYLOAD_SUITE_JSON, PAYLOAD_SUITE_ZLIB}
+    {PAYLOAD_SUITE_JSON, PAYLOAD_SUITE_ZLIB, PAYLOAD_SUITE_ZLIB_DICT1}
 )
+#: The compressed suites, most preferred first: a publisher sends a server
+#: the first one it proved and has not refused for the space lately.
+COMPRESSED_PAYLOAD_SUITES: tuple[str, ...] = (
+    PAYLOAD_SUITE_ZLIB_DICT1,
+    PAYLOAD_SUITE_ZLIB,
+)
+#: The preset dictionary of each compressed suite (``None``: plain zlib).
+_ZDICTS: dict[str, bytes | None] = {
+    PAYLOAD_SUITE_ZLIB: None,
+    PAYLOAD_SUITE_ZLIB_DICT1: ZDICT_V1,
+}
 #: The wire field naming the suite (routing-visible, like
 #: ``authority_sig_suite``; the GFS gates compressed items on it).
 PAYLOAD_SUITE_FIELD: str = "payload_suite"
@@ -224,7 +241,8 @@ PAYLOAD_SUITE_UNSUPPORTED_ERROR: str = "payload_suite_unsupported"
 
 class PayloadSuiteRefused(Exception):
     """The GFS refuses a compressed item: some seat of the space lacks the
-    ``payload_zlib1`` label (see :data:`PAYLOAD_SUITE_UNSUPPORTED_ERROR`)."""
+    suite's label (``payload_zlib1`` / ``payload_zlib1_dict1``, see
+    :data:`PAYLOAD_SUITE_UNSUPPORTED_ERROR`)."""
 
 
 def payload_suite_of(raw: object) -> str:
@@ -240,20 +258,72 @@ def payload_suite_of(raw: object) -> str:
 
 
 def zlib_item_plaintext(
-    body: dict, *, buckets: tuple[int, ...] = ITEM_SIZE_BUCKETS
+    body: dict,
+    *,
+    buckets: tuple[int, ...] = ITEM_SIZE_BUCKETS,
+    suite: str = PAYLOAD_SUITE_ZLIB,
 ) -> bytes | None:
-    """``body`` under :data:`PAYLOAD_SUITE_ZLIB`: compact orjson, zlib,
-    zero-padded to a bucket. ``None`` when the suite cannot carry it (its
-    JSON is over :data:`MAX_INFLATED_ITEM_BYTES`, or the stream over the
-    largest bucket) — the caller sends :data:`PAYLOAD_SUITE_JSON`."""
+    """``body`` under a compressed ``suite`` (:data:`PAYLOAD_SUITE_ZLIB`, or
+    :data:`PAYLOAD_SUITE_ZLIB_DICT1` with its preset dictionary): compact
+    orjson, zlib, zero-padded to a bucket. ``None`` when the suite cannot
+    carry it (its JSON is over :data:`MAX_INFLATED_ITEM_BYTES`, or the
+    stream over the largest bucket) — the caller sends
+    :data:`PAYLOAD_SUITE_JSON`."""
+    if suite not in _ZDICTS:
+        raise UnsupportedPayloadSuite(suite)
     raw = orjson.dumps({k: v for k, v in body.items() if k != PAD_FIELD})
     if len(raw) > MAX_INFLATED_ITEM_BYTES:
         return None
-    data = zlib.compress(raw, _ZLIB_LEVEL)
+    zdict = _ZDICTS[suite]
+    if zdict is None:
+        data = zlib.compress(raw, _ZLIB_LEVEL)
+    else:
+        deflater = zlib.compressobj(
+            _ZLIB_LEVEL,
+            zlib.DEFLATED,
+            zlib.MAX_WBITS,
+            9,
+            zlib.Z_DEFAULT_STRATEGY,
+            zdict,
+        )
+        data = deflater.compress(raw) + deflater.flush()
     bucket = next((b for b in buckets if b >= len(data)), None)
     if bucket is None:
         return None
     return data + b"\0" * (bucket - len(data))
+
+
+def compressed_item_plaintexts(
+    body: dict,
+    *,
+    json_len: int,
+    buckets: tuple[int, ...] = ITEM_SIZE_BUCKETS,
+) -> dict[str, bytes]:
+    """The compressed copies of ``body`` to send, by suite.
+
+    * ``zlib1`` only when it is strictly smaller than the JSON one
+      (``json_len`` bytes) — the #1148 rule, unchanged.
+    * ``zlib1+dict1`` whenever it is **no larger** than what a server would
+      get without it (the ``zlib1`` copy, else JSON). Not only when it saves
+      a bucket: the suite label is routing-visible, and a label that showed
+      up only on items the dictionary shrinks past a bucket edge would tell
+      the GFS something about the content (e.g. "a link preview"). Sent
+      whenever it can be, the label says only what the followers read."""
+    out: dict[str, bytes] = {}
+    floor = json_len
+    for suite in reversed(COMPRESSED_PAYLOAD_SUITES):
+        sealed = zlib_item_plaintext(body, buckets=buckets, suite=suite)
+        if sealed is None:
+            continue
+        fits = (
+            len(sealed) <= floor
+            if suite == PAYLOAD_SUITE_ZLIB_DICT1
+            else len(sealed) < floor
+        )
+        if fits:
+            out[suite] = sealed
+            floor = len(sealed)
+    return out
 
 
 def seal_item_plaintext(
@@ -264,29 +334,31 @@ def seal_item_plaintext(
 ) -> bytes | None:
     """The plaintext a relayed item is encrypted as under ``suite``.
     :data:`PAYLOAD_SUITE_JSON` is :func:`pad_json_object`;
-    :data:`PAYLOAD_SUITE_ZLIB` is :func:`zlib_item_plaintext` (``None`` when
+    the compressed suites are :func:`zlib_item_plaintext` (``None`` when
     the suite cannot carry the item). Raises
     :class:`UnsupportedPayloadSuite` for any other suite."""
     if suite == PAYLOAD_SUITE_JSON:
         return pad_json_object(body, buckets=buckets)
-    if suite == PAYLOAD_SUITE_ZLIB:
-        return zlib_item_plaintext(body, buckets=buckets)
-    raise UnsupportedPayloadSuite(suite)
+    return zlib_item_plaintext(body, buckets=buckets, suite=suite)
 
 
 def open_item_plaintext(plaintext: bytes, suite: str) -> bytes:
     """The JSON bytes of a decrypted item sealed under ``suite``.
 
-    :data:`PAYLOAD_SUITE_ZLIB` inflates at most
-    :data:`MAX_INFLATED_ITEM_BYTES` (a stream that would inflate further is
-    refused, never buffered), requires the stream to end, and allows only
-    zero padding after it. Raises :class:`ValueError` on any of that and
-    :class:`UnsupportedPayloadSuite` for an unknown suite."""
+    A compressed suite inflates at most :data:`MAX_INFLATED_ITEM_BYTES` (a
+    stream that would inflate further is refused, never buffered), requires
+    the stream to end, and allows only zero padding after it — under the
+    suite's own preset dictionary, never another one. Raises
+    :class:`ValueError` on any of that and :class:`UnsupportedPayloadSuite`
+    for an unknown suite."""
     if suite == PAYLOAD_SUITE_JSON:
         return plaintext
-    if suite != PAYLOAD_SUITE_ZLIB:
+    if suite not in _ZDICTS:
         raise UnsupportedPayloadSuite(suite)
-    inflater = zlib.decompressobj()
+    zdict = _ZDICTS[suite]
+    inflater = (
+        zlib.decompressobj() if zdict is None else zlib.decompressobj(zdict=zdict)
+    )
     try:
         out = inflater.decompress(plaintext, MAX_INFLATED_ITEM_BYTES)
     except zlib.error as exc:
