@@ -6,6 +6,7 @@ import pytest
 
 from socialhome.domain.subscriber_accepts import (
     ACCEPTS_AUTHOR_PROFILES_BUNDLE,
+    ACCEPTS_PAYLOAD_ZLIB1,
     MAX_ACCEPTS_LABEL_CHARS,
     MAX_ACCEPTS_LABELS,
     OUR_ACCEPTS,
@@ -15,6 +16,9 @@ from socialhome.domain.subscriber_accepts import (
 
 def test_our_accepts_include_the_bundle():
     assert ACCEPTS_AUTHOR_PROFILES_BUNDLE in OUR_ACCEPTS
+    # It reads zlib-compressed items (payload_suite "zlib1").
+    assert ACCEPTS_PAYLOAD_ZLIB1 == "payload_zlib1"
+    assert ACCEPTS_PAYLOAD_ZLIB1 in OUR_ACCEPTS
     assert parse_accepts(list(OUR_ACCEPTS)) == OUR_ACCEPTS
 
 

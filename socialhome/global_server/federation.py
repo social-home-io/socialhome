@@ -56,8 +56,14 @@ from ..domain.space import (
     normalize_category,
     normalize_join_mode,
 )
+from ..domain.space_item import (
+    PAYLOAD_SUITE_FIELD,
+    PAYLOAD_SUITE_ZLIB,
+    PayloadSuiteRefused,
+    payload_suite_of,
+)
 from ..domain.space_place import parse_place_pin_wire
-from ..domain.subscriber_accepts import ACCEPTS_SPACE_ITEM, ACCEPTS_SPACE_KEY_PULL
+from ..domain.subscriber_accepts import ACCEPTS_SPACE_KEY_PULL, seat_bits
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from .domain import (
     MIN_EPOCH_STEP_INTERVAL_S,
@@ -601,6 +607,13 @@ class GfsFederationService:
         # and no GFS-added target id — a subscriber learns nothing about which
         # household relayed the event, and dedupes on the post id inside the
         # encrypted payload.
+        # A compressed item (``payload_suite: "zlib1"``, covered by the
+        # authority signature just verified) only while every follower of
+        # the space reads it — AFTER authorization, so the 409 is no oracle.
+        await self.require_payload_suite_readers(
+            space_id,
+            payload.get(PAYLOAD_SUITE_FIELD) if isinstance(payload, dict) else None,
+        )
         event_body = {
             "space_id": space_id,
             "event_type": event_type,
@@ -634,10 +647,13 @@ class GfsFederationService:
             subscribers = await self._repo.list_subscribers(space_id)
 
         log.debug(
-            "GFS: relaying %s for space %s to %d subscriber(s)",
+            "GFS: relaying %s for space %s to %d subscriber(s) suite=%s",
             event_type,
             space_id,
             len(subscribers),
+            payload_suite_of(
+                payload.get(PAYLOAD_SUITE_FIELD) if isinstance(payload, dict) else None
+            ),
         )
 
         if not to and subscribers and self._fan_out_fwd is not None:
@@ -1034,8 +1050,8 @@ class GfsFederationService:
         # Step 12 — kept per seat, refreshed by every subscribe (the re-take
         # on each reconnect too): a seed holder skips its relay copy of a
         # member's post only where no follower lacks ``space_item``.
-        await self._repo.set_reads_space_item(
-            space_id, instance_id, reads=ACCEPTS_SPACE_ITEM in accepts
+        await self._repo.set_seat_accepts(
+            space_id, instance_id, bits=seat_bits(accepts)
         )
         log.debug("GFS: %s subscribed to space %s", instance_id, space_id)
         seat = _seat_key(instance_id, space_id)
@@ -1396,6 +1412,20 @@ class GfsFederationService:
             authority_sig_suite=authority_sig_suite,
         )
         return await self._repo.list_subscribers_with_keys(space_id)
+
+    async def require_payload_suite_readers(
+        self, space_id: str, raw_suite: object
+    ) -> None:
+        """Refuse a compressed item for *space_id* while any active seat
+        lacks ``payload_zlib1`` (:class:`PayloadSuiteRefused` → HTTP 409),
+        so a follower that cannot open it is never sent one. One fan-out
+        reaches every follower, so one such seat refuses it for all: the
+        publisher then sends JSON. An unknown suite raises
+        :class:`~socialhome.domain.space_item.UnsupportedPayloadSuite`."""
+        if payload_suite_of(raw_suite) != PAYLOAD_SUITE_ZLIB:
+            return
+        if await self._repo.count_subscribers_without_payload_zlib1(space_id):
+            raise PayloadSuiteRefused(space_id)
 
     async def count_subscribers_without_space_item(
         self,

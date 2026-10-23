@@ -2852,6 +2852,17 @@ def _gfs_rows(sql: str, params: tuple = ()) -> list[tuple]:
         conn.close()
 
 
+def _gfs_write(sql: str, params: tuple = ()) -> None:
+    """One write to the GFS's SQLite DB — ONLY to stage a household the demo
+    cannot boot (an older follower's seat without a new ``accepts`` label)."""
+    conn = sqlite3.connect(GFS_DIR / "gfs.db")
+    try:
+        conn.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _gfs_log_size() -> int:
     """Byte length of the GFS process log right now (0 if absent).
 
@@ -3333,6 +3344,17 @@ def cmd_gfs_space_post() -> None:
             f"{seen.get('author')!r}, expected {author_id!r}",
         )
     print(f"  d sees the post decrypted, authored by {seen['author']} ✓")
+    # The host's relay copy went compressed (``payload_suite: "zlib1"``,
+    # under its authority signature): the GFS proved ``payload_zlib1`` and
+    # every follower seat there reads it.
+    relayed = _gfs_log_lines_matching(
+        f"GFS: relaying space_post_public for space {space_id}", offset=gfs_off
+    )
+    if not any("suite=zlib1" in line for line in relayed):
+        raise SystemExit(
+            f"gfs-space-post: the relay was not fanned out compressed: {relayed!r}"
+        )
+    print("  … relayed compressed (payload_suite zlib1) ✓")
 
     # 4. The OTHER author shape: Alpha's setup admin, whose user_id is
     #    username-anchored rather than uuid4-anchored. Same relay, same
@@ -5796,6 +5818,16 @@ def cmd_gfs_member_publish() -> None:
             f"gfs-member-publish: the GFS log carries the post text: {leaked[:1]!r}"
         )
     print(f"  the GFS fanned the member-published item out ({fanned[-1].strip()}) ✓")
+    # Compressed (``payload_suite: "zlib1"``): the GFS proved
+    # ``payload_zlib1`` and every seat of the space said it reads it, so the
+    # item went in the 1 KiB bucket instead of 4 KiB.
+    if not any("suite=zlib1" in line for line in fanned):
+        raise SystemExit(
+            "gfs-member-publish: the member-published item was not fanned out "
+            f"compressed — {fanned[-1].strip()!r}. Every follower seat should "
+            "carry payload_zlib1 (space_subscribers.reads_space_item & 2)."
+        )
+    print("  … compressed (payload_suite zlib1), and d decrypted it ✓")
 
     # 3b. PR 3 — comments, reactions and own edits / deletes, still with the
     #     host offline. d (a follower) reads them only from the member relay:
@@ -5854,11 +5886,83 @@ def cmd_gfs_member_publish() -> None:
     #    moderator's removal of e's post, and e's post approved from the
     #    review queue of the space switched to MODERATED.
     _moderation_outcomes_reach_followers(state, space_id)
+    _old_follower_forces_json(state, space_id)
     print(
         "gfs-member-publish: ok (member posts, comments, reactions, edits and "
         "deletes reach followers without the host; moderator removals and "
-        "approved posts reach them on the host's authority)"
+        "approved posts reach them on the host's authority; compressed where "
+        "every follower reads it, JSON otherwise)"
     )
+
+
+def _old_follower_forces_json(state: dict, space_id: str) -> None:
+    """A follower seat without ``payload_zlib1`` (an older household — staged
+    by clearing the bit in the GFS DB, since the demo boots only this build)
+    makes the GFS refuse a compressed item (409). e notes it, publishes the
+    JSON item at once, and d still gets the post. The bit is restored after.
+    """
+    d = state["instances"]["d"]
+    seat = (space_id, d["instance_id"])
+    rows = _gfs_rows(
+        "SELECT reads_space_item FROM space_subscribers"
+        " WHERE space_id=? AND instance_id=?",
+        seat,
+    )
+    if not rows or rows[0][0] != 3:
+        raise SystemExit(
+            f"gfs-member-publish: d's seat labels are {rows!r}, expected 3 "
+            "(space_item + payload_zlib1)"
+        )
+    _gfs_write(
+        "UPDATE space_subscribers SET reads_space_item=1"
+        " WHERE space_id=? AND instance_id=?",
+        seat,
+    )
+    try:
+        gfs_off = _gfs_log_size()
+        e_off = _log_size("e")
+        content = f"Posted while an older follower is seated — {time.time_ns()}"
+        st, post = _e_request(
+            state,
+            "POST",
+            f"/api/spaces/{space_id}/posts",
+            {"type": "text", "content": content},
+        )
+        post_id = _must("e posts with an older follower seated", st, post, ok=(201,))[
+            "id"
+        ]
+        _poll_rows(
+            "d",
+            "SELECT content FROM space_posts WHERE id = ?",
+            (post_id,),
+            lambda r: bool(r) and r[0][0] == content,
+            what="d never got e's post while its seat lacked payload_zlib1",
+        )
+        refused = _log_lines_matching(
+            "e", f"refused a compressed item for space {space_id}", offset=e_off
+        )
+        if not refused:
+            raise SystemExit(
+                "gfs-member-publish: e never logged the GFS's payload-suite "
+                "refusal — did the compressed item reach an older follower?"
+            )
+        fanned = _gfs_log_lines_matching(
+            f"gfs.member_publish: space={space_id}", offset=gfs_off
+        )
+        if not fanned or any("suite=zlib1" in line for line in fanned):
+            raise SystemExit(
+                f"gfs-member-publish: expected only JSON fan-outs, got {fanned!r}"
+            )
+        print(
+            "  an older follower's seat: the GFS refused the compressed item, "
+            "e sent JSON, d got the post ✓"
+        )
+    finally:
+        _gfs_write(
+            "UPDATE space_subscribers SET reads_space_item=3"
+            " WHERE space_id=? AND instance_id=?",
+            seat,
+        )
 
 
 def _poll_rows(

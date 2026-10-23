@@ -131,6 +131,7 @@ def _body(
     signer: _Household | None = None,
     gfs_instance_id: str = GFS_ID,
     gfs_key: str | None = None,
+    payload_suite: str | None = None,
 ) -> dict:
     req = MemberPublishRequest(
         instance_id=publisher.instance_id,
@@ -142,6 +143,7 @@ def _body(
         writer_cert=cert if cert is not None else _cert(publisher, epoch=epoch),
         payload=payload,
         gfs_key=gfs_key,
+        payload_suite=payload_suite,
     )
     sig = sign_ed25519((signer or publisher).seed, req.signing_bytes())
     return replace(req, signature=b64url_encode(sig)).to_wire()
@@ -1768,3 +1770,71 @@ async def test_a_long_lived_ws_session_keeps_its_seen_mark_fresh(gfs, monkeypatc
                 break
             await asyncio.sleep(0.01)
     assert (await _seen_at() or 0) >= int(time.time()) - 60
+
+
+# ── payload_suite "zlib1" ────────────────────────────────────────────────
+
+
+async def _label_seats(gfs, bits: int, *households: _Household) -> None:
+    fed = gfs.app_[gfs_fed_repo_key]
+    for h in households:
+        await fed.set_seat_accepts(SPACE_ID, h.instance_id, bits=bits)
+
+
+async def test_a_compressed_item_is_refused_while_a_seat_lacks_the_label(gfs):
+    """One fan-out reaches every follower, so ONE seat without
+    ``payload_zlib1`` (here: an older household, NULL) refuses it for all —
+    409, and nothing is fanned out or queued."""
+    await _label_seats(gfs, 3, gfs.publisher)
+    resp = await gfs.post(
+        "/gfs/member-publish", json=_body(gfs.publisher, payload_suite="zlib1")
+    )
+    assert resp.status == 409
+    assert await resp.json() == {"error": "payload_suite_unsupported"}
+    assert await _queued(gfs, gfs.subscriber) == []
+    # The same item as JSON goes through.
+    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    assert resp.status == 200
+
+
+async def test_a_seat_that_reads_space_item_only_still_lacks_zlib(gfs):
+    await _label_seats(gfs, 3, gfs.publisher)
+    await _label_seats(gfs, 1, gfs.subscriber)
+    resp = await gfs.post(
+        "/gfs/member-publish", json=_body(gfs.publisher, payload_suite="zlib1")
+    )
+    assert resp.status == 409
+
+
+async def test_a_compressed_item_is_relayed_when_every_seat_reads_it(gfs):
+    await _label_seats(gfs, 3, gfs.publisher, gfs.subscriber)
+    body = _body(gfs.publisher, payload_suite="zlib1")
+    resp = await gfs.post("/gfs/member-publish", json=body)
+    assert resp.status == 200
+    queued = await _queued(gfs, gfs.subscriber)
+    assert [q.sealed.get("payload_suite") for q in queued] == ["zlib1"]
+
+
+async def test_the_suite_refusal_comes_only_after_authorization(gfs):
+    """A forged request never learns whether the space has old followers."""
+    body = _body(gfs.publisher, payload_suite="zlib1", signer=gfs.subscriber)
+    await _assert_refused(await gfs.post("/gfs/member-publish", json=body))
+
+
+async def test_an_unknown_suite_is_a_400(gfs):
+    body = {**_body(gfs.publisher), "payload_suite": "zlib9"}
+    resp = await gfs.post("/gfs/member-publish", json=body)
+    assert resp.status == 400
+
+
+async def test_info_advertises_payload_zlib1_in_the_signed_block(gfs):
+    resp = await gfs.get("/gfs/info")
+    body = await resp.json()
+    assert body["capabilities"]["payload_zlib1"] is True
+    assert verify_capabilities(
+        body["public_key"],
+        body["gfs_instance_id"],
+        body["capabilities"],
+        body["capabilities_sig"],
+        body["capabilities_sig_suite"],
+    )

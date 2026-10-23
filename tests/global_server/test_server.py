@@ -14,11 +14,13 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from socialhome.authority_sig import sign_authority_event
 from socialhome.capabilities_sig import (
     CAPS_SIG_SUITE_ED25519,
     UnsupportedCapsSigSuite,
     verify_capabilities,
 )
+from socialhome.crypto import generate_space_keypair
 from socialhome.csp import build_public_page_csp, build_spa_csp
 from socialhome.global_server import create_gfs_app, server
 from socialhome.global_server.app_keys import (
@@ -27,7 +29,7 @@ from socialhome.global_server.app_keys import (
     gfs_token_service_key,
 )
 from socialhome.global_server.config import GfsConfig
-from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
 
@@ -311,6 +313,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "space_key_pull": True,
         # Step 12 — counts followers that cannot read member items.
         "space_item_followers": True,
+        # Takes zlib-compressed items; 409 while a follower can't open one.
+        "payload_zlib1": True,
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
         # address), so the GFS honestly does not offer it.
@@ -398,6 +402,59 @@ async def test_publish_passes_a_target_through(gfs_client):
     }
     resp = await gfs_client.post("/gfs/publish", json=body)
     assert resp.status == 403
+
+
+async def test_publish_refuses_an_unknown_payload_suite(gfs_client):
+    """An unknown ``payload_suite`` is a 400 before anything else runs."""
+    body = {
+        "space_id": "sp-z",
+        "event_type": "space_post_public",
+        "payload": {"payload_suite": "zlib9"},
+    }
+    resp = await gfs_client.post("/gfs/publish", json=body)
+    assert resp.status == 400
+
+
+async def test_publish_answers_409_for_a_compressed_item_an_old_follower_cant_open(
+    gfs_client,
+):
+    """Authorized, but a seat lacks ``payload_zlib1``: 409
+    ``payload_suite_unsupported`` (the household re-sends JSON)."""
+    app = gfs_client.server.app
+    fed = app[gfs_fed_repo_key]
+    skp = generate_space_keypair()
+    for iid in ("owner.home", "old.home"):
+        await fed.upsert_instance(
+            ClientInstance(
+                instance_id=iid, display_name=iid, public_key="aa" * 32, status="active"
+            )
+        )
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="sp-z",
+            owning_instance="owner.home",
+            name="S",
+            status="active",
+            identity_public_key=skp.public_key.hex(),
+        )
+    )
+    await fed.add_subscriber(space_id="sp-z", instance_id="old.home")
+    payload: dict = {"encrypted_payload": "x", "payload_suite": "zlib1"}
+    payload.update(
+        sign_authority_event(
+            event_type="space_post_public",
+            space_id="sp-z",
+            payload=payload,
+            space_seed=skp.private_key,
+        )
+    )
+    body = {"space_id": "sp-z", "event_type": "space_post_public", "payload": payload}
+    resp = await gfs_client.post("/gfs/publish", json=body)
+    assert resp.status == 409
+    assert await resp.json() == {"error": "payload_suite_unsupported"}
+    await fed.set_seat_accepts("sp-z", "old.home", bits=3)
+    resp = await gfs_client.post("/gfs/publish", json=body)
+    assert resp.status == 200
 
 
 async def test_admin_static_index_served(gfs_client):

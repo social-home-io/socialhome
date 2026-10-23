@@ -1775,7 +1775,12 @@ async def test_subscribe_to_gfs_space_signs_body(env):
     assert verify_ed25519(kp.public_key, canonical, b64url_decode(sig))
     # v_61: what this household opens rides NEXT to the signed bytes (the
     # canonical above is unchanged, so an older GFS still verifies it).
-    assert body["accepts"] == ["author_profiles_bundle", "space_key_pull", "space_item"]
+    assert body["accepts"] == [
+        "author_profiles_bundle",
+        "space_key_pull",
+        "space_item",
+        "payload_zlib1",
+    ]
 
 
 async def test_unpublish_space_signs_canonical_body(env):
@@ -5104,3 +5109,134 @@ async def test_an_idle_listing_target_is_evicted(env, monkeypatch):
     await svc.server_targets("other")
     assert target.id not in svc._member_publish_strict
     assert target.id not in svc._listing_seen
+
+
+# ─── payload_suite "zlib1": compressed where the server takes it ────────────
+
+
+class _SuiteSession(_RecordingSession):
+    """Answers ``409 payload_suite_unsupported`` (or ``refuse_status``) to a
+    compressed body while ``refuse`` is set; 200 otherwise."""
+
+    def __init__(self, *, refuse: bool, refuse_status: int = 409) -> None:
+        super().__init__()
+        self.refuse = refuse
+        self.refuse_status = refuse_status
+
+    def post(self, url, *, json=None, **_kw):
+        self.posts.append((url, json or {}))
+        suite = ((json or {}).get("payload") or {}).get("payload_suite")
+        if self.refuse and suite == "zlib1":
+            text = '{"error": "payload_suite_unsupported"}'
+            return _StubResp(self.refuse_status, text=text)
+        return _StubResp(200, {"status": "published"})
+
+
+_JSON_ENV = {"space_id": "sp-z", "epoch": 0, "encrypted_payload": "json-ct"}
+_ZLIB_ENV = {
+    "space_id": "sp-z",
+    "epoch": 0,
+    "encrypted_payload": "zlib-ct",
+    "payload_suite": "zlib1",
+}
+
+
+async def _zlib_svc(env, session):
+    svc, _kp = await _publish_event_svc(env, session, space_id="sp-z", gfs_ids=["g1"])
+    svc._anon_publish["g1"] = True
+    return svc
+
+
+async def _publish_z(svc) -> int:
+    return await svc.publish_space_event(
+        space_id="sp-z",
+        event_type="space_post_public",
+        payload=_JSON_ENV,
+        compressed_payload=_ZLIB_ENV,
+    )
+
+
+async def test_a_server_that_proved_payload_zlib1_gets_the_compressed_copy(env):
+    session = _SuiteSession(refuse=False)
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = True
+    assert await _publish_z(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [_ZLIB_ENV]
+
+
+async def test_a_server_without_the_capability_gets_json_only(env):
+    session = _SuiteSession(refuse=False)
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = False
+    assert await _publish_z(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [_JSON_ENV]
+
+
+async def test_a_409_falls_back_to_json_at_once_and_for_the_next_hour(env, monkeypatch):
+    """An older follower on that server: the GFS refuses the compressed
+    copy, the JSON one goes right after, and further items to that (server,
+    space) go JSON-only until the refusal expires."""
+    session = _SuiteSession(refuse=True)
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = True
+    now = [1000.0]
+    monkeypatch.setattr(gfs_connection_service.time, "monotonic", lambda: now[0])
+    assert await _publish_z(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [_ZLIB_ENV, _JSON_ENV]
+    session.posts.clear()
+    assert await _publish_z(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [_JSON_ENV]
+    # An hour on, it asks again (the follower may have upgraded).
+    now[0] += gfs_connection_service.PAYLOAD_SUITE_REFUSAL_TTL_S + 1
+    session.posts.clear()
+    session.refuse = False
+    assert await _publish_z(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [_ZLIB_ENV]
+
+
+async def test_the_refusal_memory_is_bounded(env, monkeypatch):
+    svc = await _zlib_svc(env, _SuiteSession(refuse=False))
+    monkeypatch.setattr(gfs_connection_service, "MAX_SUITE_REFUSALS", 3)
+    conn = await svc._repo.get("g1")
+    for i in range(5):
+        svc.note_suite_refused(conn, f"sp-{i}")
+    assert list(svc._suite_refused_at) == [
+        ("g1", "sp-2"),
+        ("g1", "sp-3"),
+        ("g1", "sp-4"),
+    ]
+
+
+async def test_a_retried_item_keeps_its_compressed_copy(env):
+    session = _SuiteSession(refuse=False)
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = True
+    item = GfsPublish(
+        space_id="sp-z",
+        event_type="space_post_public",
+        payload=_JSON_ENV,
+        compressed=_ZLIB_ENV,
+    )
+    outcome = await svc._retry_publish("g1", item)
+    assert outcome.kind == "delivered"
+    assert [b["payload"] for _u, b in session.posts] == [_ZLIB_ENV]
+
+
+async def test_an_older_node_refusing_the_compressed_copy_gets_json(env):
+    """A node of a cluster mid-upgrade that does not know the label (here a
+    400) gets the JSON copy at once, and JSON for the next hour."""
+    session = _SuiteSession(refuse=True, refuse_status=400)
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = True
+    assert await _publish_z(svc) == 1
+    assert [b["payload"] for _u, b in session.posts] == [_ZLIB_ENV, _JSON_ENV]
+    assert ("g1", "sp-z") in svc._suite_refused_at
+
+
+async def test_a_transient_failure_of_the_compressed_copy_is_retried_as_is(env):
+    session = _SuiteSession(refuse=True, refuse_status=503)
+    svc = await _zlib_svc(env, session)
+    svc._payload_zlib1["g1"] = True
+    assert await _publish_z(svc) == 0
+    assert [b["payload"] for _u, b in session.posts] == [_ZLIB_ENV]
+    assert svc._suite_refused_at == {}

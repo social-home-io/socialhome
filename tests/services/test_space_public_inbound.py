@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import zlib
 from datetime import UTC, datetime
 
 import pytest
@@ -51,6 +52,7 @@ from socialhome.domain.space_item import (
     AUTHORITY_KIND_REMOVAL,
     AuthorityRemoval,
     pad_json_object,
+    zlib_item_plaintext,
 )
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
@@ -165,8 +167,13 @@ async def _make_envelope(
     tamper_preview: dict | None = None,
     preview_suite: str = "ed25519",
     writer_cert: dict | None = None,
+    payload_suite: str | None = None,
+    plaintext: bytes | None = None,
 ):
     """Build a relayed envelope.
+
+    ``payload_suite`` labels it (signed) and, for ``zlib1``, compresses the
+    inner; ``plaintext`` replaces the encrypted bytes outright.
 
     By default the inner ``author_sig`` is produced by the real author's
     identity seed (``author_kp.private_key``). ``author_sign_seed`` overrides
@@ -208,8 +215,16 @@ async def _make_envelope(
             inner["link_preview"] = tamper_preview
     if writer_cert is not None:
         inner["writer_cert"] = writer_cert
-    epoch, ct = await env["crypto"].encrypt(space_id, json.dumps(inner).encode())
+    if plaintext is None:
+        plaintext = (
+            zlib_item_plaintext(inner)
+            if payload_suite == "zlib1"
+            else json.dumps(inner).encode()
+        )
+    epoch, ct = await env["crypto"].encrypt(space_id, plaintext)
     envelope = {"space_id": space_id, "epoch": epoch, "encrypted_payload": ct}
+    if payload_suite is not None:
+        envelope["payload_suite"] = payload_suite
     envelope.update(
         sign_authority_event(
             event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
@@ -242,6 +257,48 @@ async def test_valid_relay_decrypts_persists_and_publishes(env):
     assert post.author == env["author_user_id"]
     assert len(env["events"]) == 1
     assert env["events"][0].origin_instance_id == env["author_origin"]
+
+
+# ── payload_suite "zlib1" ────────────────────────────────────────────────
+
+#: A member holding the content key can seal a tiny stream that inflates to
+#: gigabytes; the follower must stop at the cap, never buffer it.
+_BOMB = zlib.compress(b" " * (512 * 1024 * 1024 // 64), 9)
+
+
+async def test_a_compressed_relay_is_opened_and_persisted(env):
+    envelope = await _make_envelope(
+        env, payload_suite="zlib1", content="Grüße 漢字 😀 " * 40
+    )
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    got = await env["post_repo"].get("post-1")
+    assert got is not None and got[1].content == "Grüße 漢字 😀 " * 40
+
+
+async def test_a_relay_with_an_unknown_suite_is_dropped(env, caplog):
+    envelope = await _make_envelope(env, payload_suite="zlib9")
+    with caplog.at_level(logging.WARNING):
+        await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert await env["post_repo"].get("post-1") is None
+    assert "unsupported payload_suite" in caplog.text
+
+
+async def test_a_relay_whose_suite_label_was_stripped_is_dropped(env):
+    """The label is under the authority signature: a relay that strips it
+    (to make a follower read zlib bytes as JSON) breaks the signature."""
+    envelope = await _make_envelope(env, payload_suite="zlib1")
+    del envelope["payload_suite"]
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert await env["post_repo"].get("post-1") is None
+
+
+async def test_a_relayed_decompression_bomb_is_dropped_without_a_traceback(env, caplog):
+    envelope = await _make_envelope(env, payload_suite="zlib1", plaintext=_BOMB)
+    with caplog.at_level(logging.WARNING):
+        await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert await env["post_repo"].get("post-1") is None
+    assert "undecodable inner payload" in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 async def test_relayed_post_resolves_mentions_against_local_member_view(env):
@@ -952,17 +1009,20 @@ async def _item_frame(
     item_type: str = "post",
     epoch: int | None = None,
     plaintext: bytes | None = None,
+    payload_suite: str | None = None,
 ) -> dict:
     inner = dict(inner if inner is not None else _signed_inner(env))
     cert = cert if cert is not None else await _cert(env)
     inner["writer_cert"] = cert
-    sealed_epoch, ct = await env["crypto"].encrypt(
-        "sp-1",
-        plaintext
-        if plaintext is not None
-        else json.dumps({"item_type": item_type, "inner": inner}).encode(),
-    )
-    return {
+    body = {"item_type": item_type, "inner": inner}
+    if plaintext is None:
+        plaintext = (
+            zlib_item_plaintext(body)
+            if payload_suite == "zlib1"
+            else json.dumps(body).encode()
+        )
+    sealed_epoch, ct = await env["crypto"].encrypt("sp-1", plaintext)
+    frame = {
         "type": "relay",
         "space_id": "sp-1",
         "event_type": "space_item",
@@ -971,6 +1031,9 @@ async def _item_frame(
         "writer_cert": frame_cert if frame_cert is not None else _v1(cert),
         "payload": ct,
     }
+    if payload_suite is not None:
+        frame["payload_suite"] = payload_suite
+    return frame
 
 
 async def test_a_member_published_post_with_a_valid_cert_is_persisted(item_env):
@@ -980,6 +1043,27 @@ async def test_a_member_published_post_with_a_valid_cert_is_persisted(item_env):
     space_id, post = got
     assert (space_id, post.content) == ("sp-1", "member-published content")
     assert item_env["events"][0].origin_instance_id == item_env["author_origin"]
+
+
+async def test_a_compressed_member_item_is_opened_and_persisted(item_env):
+    await item_env["inbound"].handle(await _item_frame(item_env, payload_suite="zlib1"))
+    got = await item_env["post_repo"].get("post-1")
+    assert got is not None and got[1].content == "member-published content"
+
+
+async def test_a_member_item_bomb_is_dropped(item_env, caplog):
+    frame = await _item_frame(item_env, payload_suite="zlib1", plaintext=_BOMB)
+    with caplog.at_level(logging.WARNING):
+        await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
+    assert "undecodable zlib1 space_item" in caplog.text
+
+
+async def test_a_member_item_with_an_unknown_suite_is_dropped(item_env):
+    frame = await _item_frame(item_env)
+    frame["payload_suite"] = "zlib9"
+    await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
 
 
 async def test_a_duplicate_of_the_federated_copy_is_dropped(item_env):

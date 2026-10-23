@@ -34,13 +34,38 @@ ACCEPTS_SPACE_KEY_PULL: str = "space_key_pull"
 #: how many followers lack it (step 12).
 ACCEPTS_SPACE_ITEM: str = "space_item"
 
+#: The household opens an item whose plaintext is zlib-compressed
+#: (``payload_suite: "zlib1"``). The GFS keeps this per seat (bit 2 of
+#: ``space_subscribers.reads_space_item``) and refuses a compressed item
+#: for a space while any seat lacks it, so the publisher sends JSON.
+ACCEPTS_PAYLOAD_ZLIB1: str = "payload_zlib1"
+
 #: What this household lists on every subscribe — follower and member seats
 #: alike, so the label never tells the GFS which seats are writers'.
 OUR_ACCEPTS: tuple[str, ...] = (
     ACCEPTS_AUTHOR_PROFILES_BUNDLE,
     ACCEPTS_SPACE_KEY_PULL,
     ACCEPTS_SPACE_ITEM,
+    ACCEPTS_PAYLOAD_ZLIB1,
 )
+
+#: Bits of the GFS's per-seat label set (``space_subscribers
+#: .reads_space_item``, GFS migration 0023 — a bitmask since
+#: ``payload_zlib1``; the column keeps its first name). A seat taken before
+#: a bit existed reads it as unset: fail-safe toward the plain relay.
+SEAT_BIT_SPACE_ITEM: int = 1
+SEAT_BIT_PAYLOAD_ZLIB1: int = 2
+
+
+def seat_bits(accepts: tuple[str, ...]) -> int:
+    """The per-seat bitmask the GFS keeps for a subscribe's ``accepts``."""
+    bits = 0
+    if ACCEPTS_SPACE_ITEM in accepts:
+        bits |= SEAT_BIT_SPACE_ITEM
+    if ACCEPTS_PAYLOAD_ZLIB1 in accepts:
+        bits |= SEAT_BIT_PAYLOAD_ZLIB1
+    return bits
+
 
 #: The most labels one subscribe may carry.
 MAX_ACCEPTS_LABELS: int = 16

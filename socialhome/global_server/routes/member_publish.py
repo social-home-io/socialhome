@@ -26,6 +26,7 @@ from ...domain.gfs_member_publish import (
     MemberPublishAnonRequest,
     MemberPublishRequest,
 )
+from ...domain.space_item import PAYLOAD_SUITE_UNSUPPORTED_ERROR, PayloadSuiteRefused
 from .. import app_keys as K
 from ..member_publish import MemberPublishBusy, MemberPublishRateLimited
 from ..public import PUBLISH_MAX_BODY_BYTES
@@ -37,13 +38,21 @@ _REFUSED_PUBLISH = {"error": "not authorized to publish to this space"}
 _REFUSED_NOTICE = {"error": "not authorized for this space"}
 
 
+def _suite_refused() -> web.Response:
+    """``409`` for an authorized but compressed item a follower of the
+    space cannot open — the household re-sends it as JSON."""
+    return web.json_response({"error": PAYLOAD_SUITE_UNSUPPORTED_ERROR}, status=409)
+
+
 class MemberPublishView(GfsBaseView):
     """``POST /gfs/member-publish`` — see :mod:`..member_publish`.
 
     ``200 {"status": "published"}`` once accepted (a suppressed replay is the
     same answer); ``400`` for a malformed body; ``403`` (uniform) for any
-    authorization failure; ``429`` past a per-household or per-space limit;
-    ``503`` while the background fan-out is stopped or its backlog is full."""
+    authorization failure; ``409 payload_suite_unsupported`` for a compressed
+    item while a follower of the space lacks ``payload_zlib1``; ``429`` past a
+    per-household or per-space limit; ``503`` while the background fan-out is
+    stopped or its backlog is full."""
 
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_member_publish_key)
@@ -62,6 +71,8 @@ class MemberPublishView(GfsBaseView):
             resp = web.json_response({"error": "busy"}, status=503)
             resp.headers["Retry-After"] = "5"
             return resp
+        except PayloadSuiteRefused:
+            return _suite_refused()
         except PermissionError as exc:
             log.debug("GFS member publish refused for space %s: %s", req.target, exc)
             return web.json_response(_REFUSED_PUBLISH, status=403)
@@ -96,6 +107,8 @@ class MemberPublishAnonView(GfsBaseView):
             resp = web.json_response({"error": "busy"}, status=503)
             resp.headers["Retry-After"] = "5"
             return resp
+        except PayloadSuiteRefused:
+            return _suite_refused()
         except PermissionError as exc:
             log.debug(
                 "GFS anonymous member publish refused for space %s: %s",

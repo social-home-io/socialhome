@@ -415,3 +415,52 @@ def test_the_owner_notice_payload_signs_the_gfs_key_only_when_present():
     assert owner_epoch_notice_signing_payload(**kw, gfs_key="ab" * 32)["gfs_key"] == (
         "ab" * 32
     )
+
+
+# ── payload_suite ────────────────────────────────────────────────────────
+
+
+def test_payload_suite_is_signed_and_framed_only_when_present():
+    plain = _l2_req()
+    assert plain.suite == "json"
+    assert "payload_suite" not in plain.signing_payload()
+    assert "payload_suite" not in plain.fan_out_frame()
+    zipped = _l2_req(payload_suite="zlib1")
+    assert zipped.suite == "zlib1"
+    assert zipped.signing_payload()["payload_suite"] == "zlib1"
+    assert zipped.signing_bytes() != plain.signing_bytes()
+    assert zipped.fan_out_frame()["payload_suite"] == "zlib1"
+    assert MemberPublishRequest.from_wire(zipped.to_wire()) == zipped
+    # A first-revision request keeps its exact bytes.
+    assert set(plain.to_wire()) == MEMBER_PUBLISH_REQUEST_KEYS
+
+
+@pytest.mark.parametrize("bad", ["zlib2", "", 1, "JSON"])
+def test_an_unknown_payload_suite_is_refused_everywhere(bad):
+    with pytest.raises(InvalidMemberPublish, match="payload_suite"):
+        MemberPublishRequest.from_wire({**_wire(), "payload_suite": bad})
+    with pytest.raises(InvalidMemberPublish, match="payload_suite"):
+        MemberPublishAnonRequest.from_wire({**_anon_wire(), "payload_suite": bad})
+    frame = _l2_req().fan_out_frame()
+    with pytest.raises(InvalidMemberPublish, match="payload_suite"):
+        SpaceItemFrame.from_wire({**frame, "payload_suite": bad})
+
+
+def test_anon_payload_suite_is_signed_and_framed():
+    req = MemberPublishAnonRequest.from_wire({**_anon_wire(), "payload_suite": "zlib1"})
+    assert req.suite == "zlib1"
+    assert req.signing_body()["payload_suite"] == "zlib1"
+    assert req.fan_out_frame()["payload_suite"] == "zlib1"
+    plain = MemberPublishAnonRequest.from_wire(_anon_wire())
+    assert "payload_suite" not in plain.signing_body()
+    assert plain.signing_bytes() != req.signing_bytes()
+
+
+def test_space_item_frame_carries_the_suite():
+    zipped = _l2_req(payload_suite="zlib1")
+    frame = SpaceItemFrame.from_wire({"type": "relay", **zipped.fan_out_frame()})
+    assert frame.suite == "zlib1"
+    assert frame.to_wire() == zipped.fan_out_frame()
+    plain = SpaceItemFrame.from_wire(_l2_req().fan_out_frame())
+    assert plain.suite == "json"
+    assert "payload_suite" not in plain.to_wire()

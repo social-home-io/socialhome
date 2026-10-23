@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import zlib
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
+from orjson import dumps as orjson_dumps
 
 from socialhome.domain.space_item import (
     AUTHORITY_KIND_APPROVED_POST,
@@ -21,19 +24,28 @@ from socialhome.domain.space_item import (
     ITEM_TYPE_POST_EDIT,
     ITEM_TYPE_REACTION_ADD,
     ITEM_TYPE_REACTION_REMOVE,
+    MAX_INFLATED_ITEM_BYTES,
     MAX_ITEM_CLOCK_SKEW_S,
     PAD_FIELD,
+    PAYLOAD_SUITE_JSON,
+    PAYLOAD_SUITE_ZLIB,
     POST_SHAPED_ITEM_TYPES,
     REMOVAL_TARGET_COMMENT,
     REMOVAL_TARGET_POST,
     REMOVAL_TARGETS,
     SUPPORTED_AUTHORITY_KINDS,
     SUPPORTED_ITEM_TYPES,
+    SUPPORTED_PAYLOAD_SUITES,
     AuthorityRemoval,
+    UnsupportedPayloadSuite,
     item_stamp,
+    open_item_plaintext,
     pad_json_object,
+    payload_suite_of,
     required_scope,
+    seal_item_plaintext,
     stamp_to_db,
+    zlib_item_plaintext,
 )
 from socialhome.domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
 
@@ -202,3 +214,93 @@ def test_the_authority_kinds_are_disjoint_from_the_member_item_types():
     }
     assert not SUPPORTED_AUTHORITY_KINDS & SUPPORTED_ITEM_TYPES
     assert REMOVAL_TARGETS == {REMOVAL_TARGET_POST, REMOVAL_TARGET_COMMENT}
+
+
+# ── Payload suites ───────────────────────────────────────────────────────
+
+_POST_BODY = {
+    "post_id": "p" * 32,
+    "content": "Lovely morning at the allotment — Grüße 漢字 😀 " * 20,
+    "author_pk": "ab" * 32,
+    "author_sig": "s" * 86,
+}
+
+
+def test_payload_suite_of_defaults_and_rejects_unknown():
+    assert payload_suite_of(None) == PAYLOAD_SUITE_JSON
+    assert payload_suite_of("zlib1") == PAYLOAD_SUITE_ZLIB
+    for bad in ("zlib2", "", 3, "JSON"):
+        with pytest.raises(UnsupportedPayloadSuite):
+            payload_suite_of(bad)
+    assert SUPPORTED_PAYLOAD_SUITES == {"json", "zlib1"}
+
+
+def test_zlib_item_round_trips_and_pads_to_a_bucket():
+    sealed = seal_item_plaintext(_POST_BODY, suite=PAYLOAD_SUITE_ZLIB)
+    assert sealed is not None
+    assert len(sealed) in ITEM_SIZE_BUCKETS
+    assert len(sealed) < len(pad_json_object(_POST_BODY))
+    assert json.loads(open_item_plaintext(sealed, PAYLOAD_SUITE_ZLIB)) == _POST_BODY
+
+
+def test_zlib_item_drops_a_pad_the_body_carries():
+    sealed = seal_item_plaintext({**_POST_BODY, PAD_FIELD: "000"}, suite="zlib1")
+    assert sealed is not None
+    assert PAD_FIELD not in json.loads(open_item_plaintext(sealed, "zlib1"))
+
+
+def test_json_suite_is_pad_json_object_and_opens_as_is():
+    sealed = seal_item_plaintext(_POST_BODY)
+    assert sealed == pad_json_object(_POST_BODY)
+    assert open_item_plaintext(sealed, PAYLOAD_SUITE_JSON) == sealed
+
+
+def test_unknown_suite_is_refused_both_ways():
+    with pytest.raises(UnsupportedPayloadSuite):
+        seal_item_plaintext(_POST_BODY, suite="brotli")
+    with pytest.raises(UnsupportedPayloadSuite):
+        open_item_plaintext(b"{}", "brotli")
+
+
+def test_an_item_too_large_to_inflate_safely_is_not_compressed():
+    big = {"content": "x" * (MAX_INFLATED_ITEM_BYTES + 1)}
+    assert zlib_item_plaintext(big) is None
+    assert seal_item_plaintext(big, suite="zlib1") is None
+
+
+def test_a_stream_over_the_top_bucket_is_not_compressed():
+    noise = {"content": os.urandom(4096).hex()}
+    assert zlib_item_plaintext(noise, buckets=(1024, 4096)) is None
+    assert zlib_item_plaintext(noise) is not None
+
+
+def test_a_decompression_bomb_is_refused_without_inflating_it():
+    """A member holding the content key could seal a small stream that
+    inflates to gigabytes. The receiver stops at the cap."""
+    bomb = zlib.compress(b"0" * (64 * MAX_INFLATED_ITEM_BYTES), 9)
+    assert len(bomb) < 16_384
+    with pytest.raises(ValueError, match="cap"):
+        open_item_plaintext(bomb, PAYLOAD_SUITE_ZLIB)
+
+
+def test_exactly_the_cap_inflates():
+    raw = b'"' + b"a" * (MAX_INFLATED_ITEM_BYTES - 2) + b'"'
+    assert open_item_plaintext(zlib.compress(raw), "zlib1") == raw
+
+
+def test_a_truncated_stream_is_refused():
+    sealed = zlib.compress(orjson_dumps(_POST_BODY))
+    with pytest.raises(ValueError, match="end"):
+        open_item_plaintext(sealed[:-6], PAYLOAD_SUITE_ZLIB)
+
+
+def test_data_after_the_stream_must_be_zero_padding():
+    sealed = zlib.compress(orjson_dumps(_POST_BODY))
+    assert open_item_plaintext(sealed + b"\0" * 50, "zlib1") == orjson_dumps(_POST_BODY)
+    with pytest.raises(ValueError, match="after"):
+        open_item_plaintext(sealed + b"\0\x01", PAYLOAD_SUITE_ZLIB)
+
+
+def test_garbage_is_a_value_error():
+    with pytest.raises(ValueError, match="corrupt"):
+        open_item_plaintext(b"{not zlib}", PAYLOAD_SUITE_ZLIB)

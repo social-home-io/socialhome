@@ -13,6 +13,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from socialhome.domain.space_item import PayloadSuiteRefused, UnsupportedPayloadSuite
 from socialhome.global_server import federation as federation_mod
 from socialhome.global_server.domain import GfsSubscriber
 from socialhome.global_server.federation import GfsFederationService
@@ -3963,3 +3964,72 @@ async def test_a_broadcast_another_node_forwarded_here_is_a_replay(gfs_db):
     )
     assert fan_out.forwarded == []
     assert ws.sent == []
+
+
+# ── payload_suite "zlib1" on the relay ────────────────────────────────────
+
+
+async def _zlib_space(svc, space_id: str, *, accepts: tuple[str, ...]) -> bytes:
+    """A space with one follower ``sub-z`` whose subscribe said *accepts*;
+    returns the space seed."""
+    owner_seed, owner_pk = _make_keypair()
+    space_seed, space_pk = _make_keypair()
+    sub_seed, sub_pk = _make_keypair()
+    await svc.register_instance("owner-z", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-z", sub_pk.hex(), auto_accept=True)
+    await _publish_known_space(
+        svc,
+        owner_seed,
+        owning_instance="owner-z",
+        space_id=space_id,
+        identity_public_key=space_pk.hex(),
+    )
+    ts = _now_iso()
+    sig = _sign(
+        sub_seed,
+        {"action": "subscribe", "instance_id": "sub-z", "space_id": space_id, "ts": ts},
+    )
+    await svc.subscribe("sub-z", space_id, ts, sig, accepts=accepts)
+    return space_seed
+
+
+async def _relay_with_suite(svc, space_seed: bytes, space_id: str, suite: object):
+    payload: dict = {"ciphertext": "opaque-blob", "payload_suite": suite}
+    payload.update(_sign_authority(space_seed, space_id=space_id, payload=payload))
+    return await svc.publish_event(space_id, "space_post_public", payload)
+
+
+async def test_a_compressed_relay_is_refused_while_a_follower_lacks_the_label(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    seed = await _zlib_space(svc, "sp-z-old", accepts=("space_item",))
+    with pytest.raises(PayloadSuiteRefused):
+        await _relay_with_suite(svc, seed, "sp-z-old", "zlib1")
+    assert [f for _, f in ws.sent if f["type"] == "relay"] == []
+    # JSON (named or not) still goes through.
+    assert await _relay_with_suite(svc, seed, "sp-z-old", "json") == ["sub-z"]
+
+
+async def test_a_compressed_relay_reaches_followers_that_read_it(gfs_db):
+    ws = _RecordingWsRegistry()
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
+    seed = await _zlib_space(svc, "sp-z-new", accepts=("space_item", "payload_zlib1"))
+    assert await _relay_with_suite(svc, seed, "sp-z-new", "zlib1") == ["sub-z"]
+    relays = [f for _, f in ws.sent if f["type"] == "relay"]
+    assert relays[0]["payload"]["payload_suite"] == "zlib1"
+
+
+async def test_the_seat_keeps_both_labels_as_bits(gfs_db):
+    repo = SqliteGfsFederationRepo(gfs_db)
+    svc = GfsFederationService(repo)
+    await _zlib_space(svc, "sp-z-bits", accepts=("payload_zlib1",))
+    # zlib yes, space_item no: the step-12 count still counts it as lacking.
+    assert await repo.count_subscribers_without_payload_zlib1("sp-z-bits") == 0
+    assert await repo.count_subscribers_without_space_item("sp-z-bits") == (1, 1)
+
+
+async def test_an_unknown_relay_suite_is_refused(gfs_db):
+    svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db))
+    seed = await _zlib_space(svc, "sp-z-bad", accepts=("payload_zlib1",))
+    with pytest.raises(UnsupportedPayloadSuite):
+        await _relay_with_suite(svc, seed, "sp-z-bad", "zlib9")

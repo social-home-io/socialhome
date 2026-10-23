@@ -918,6 +918,16 @@ own signature, relayed and marked by a (e's writer cert is comment-scope
 under Reviewed, so e could not publish it itself). The GFS
 log carries neither text nor ids. Posts go back to open afterwards.
 
+Compressed items (``payload_suite: "zlib1"``): e's first post is fanned
+out compressed (the GFS log's ``gfs.member_publish: space=… suite=zlib1``),
+since the GFS proved ``payload_zlib1`` and every seat there carries the
+label (``gfs-space-post`` asserts the same for a's relay copy:
+``GFS: relaying space_post_public … suite=zlib1``). Last, the step stages an
+older follower: it clears bit 2 of d's seat (``space_subscribers
+.reads_space_item``) in the GFS DB, has e post, and asserts the GFS refused
+the compressed item (e logs ``refused a compressed item``), e sent JSON
+(``suite=json``) and d still got the post. The bit is restored afterwards.
+
 ### ``gfs-member-publish-strict`` — anonymous member publish (v_50)
 
 Needs ``gfs-member-publish``. The owner a switches its global space to
