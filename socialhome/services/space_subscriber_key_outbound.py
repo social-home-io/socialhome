@@ -87,6 +87,7 @@ import base64
 import logging
 import time
 from collections import OrderedDict, deque
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -103,13 +104,17 @@ from ..authority_sig import (
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole
 from ..domain.space_author_profile_bundle import (
     MAX_BUNDLE_AUTHORS,
+    BundleEntry,
     build_bundle_parts,
 )
+from ..domain.space_item import ITEM_TYPE_AUTHOR_PROFILE, required_scope
 from ..domain.subscriber_accepts import ACCEPTS_AUTHOR_PROFILES_BUNDLE
 from ..federation.keywrap_seal import seal_to_keywrap, verify_keywrap_binding
 from ..services.space_crypto_service import KEY_SUITE_AESGCM_256
+from .space_writer_cert_service import WRITER_CERT_FIELD
 
 if TYPE_CHECKING:
+    from ..domain.space import Space
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
     from ..repositories.space_author_profile_repo import (
         AbstractSpaceAuthorProfileRepo,
@@ -117,6 +122,7 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from .gfs_connection_service import GfsConnectionService
     from .space_crypto_service import SpaceContentEncryption
+    from .space_writer_cert_service import SpaceWriterCertService
 
 log = logging.getLogger(__name__)
 
@@ -191,6 +197,7 @@ class SpaceSubscriberKeyOutbound:
         "_profiles",
         "_sealed",
         "_spaces",
+        "_writer_certs",
     )
 
     def __init__(
@@ -204,6 +211,7 @@ class SpaceSubscriberKeyOutbound:
         self._crypto = space_crypto
         self._gfs = gfs_service
         self._own_instance_id: str = ""
+        self._writer_certs: SpaceWriterCertService | None = None
         # Reconcile-only deps, wired lazily (the GFS-connection repo + the
         # shared HTTP session aren't available at the same step as the rest).
         # Until attached, :meth:`reconcile` no-ops.
@@ -227,10 +235,44 @@ class SpaceSubscriberKeyOutbound:
         #: only, so a restart reconciles everyone once.
         self._sealed: OrderedDict[tuple[str, str, str], int] = OrderedDict()
 
+    def attach_writer_certs(self, certs: SpaceWriterCertService) -> None:
+        """Wire the writer-cert service: a bundled item whose cert predates
+        an authority rotation is re-stamped (:meth:`_with_current_certs`)."""
+        self._writer_certs = certs
+
     def attach_author_profiles(self, repo: AbstractSpaceAuthorProfileRepo) -> None:
         """Wire the author-profile cache the v_61 new-follower bundle is
         built from."""
         self._profiles = repo
+
+    async def _with_current_certs(
+        self, space: Space, entries: list[BundleEntry]
+    ) -> list[BundleEntry]:
+        """``entries`` with every writer cert valid under the space's current
+        authority key. A cached profile keeps the cert it was published with;
+        after an authority rotation (v_44) a new follower refuses that cert,
+        so the author would stay "Someone" until they changed their profile.
+        Re-stamped at the item's epoch; an item no current cert can carry
+        (its author left, or we are no seed holder) is left out."""
+        if self._writer_certs is None:
+            return entries
+        scope = required_scope(ITEM_TYPE_AUTHOR_PROFILE)
+        out: list[BundleEntry] = []
+        for entry in entries:
+            cert = await self._writer_certs.current_item_cert(
+                space, entry.item, epoch=entry.epoch, required_scope=scope
+            )
+            if cert is None:
+                log.info(
+                    "space_subscriber_key.outbound: a cached profile in space %s "
+                    "has no current writer cert — left out of the bundle",
+                    space.id,
+                )
+                continue
+            if cert is not entry.item.get(WRITER_CERT_FIELD):
+                entry = replace(entry, item={**entry.item, WRITER_CERT_FIELD: cert})
+            out.append(entry)
+        return out
 
     def attach_identity(self, *, own_instance_id: str) -> None:
         self._own_instance_id = own_instance_id
@@ -370,6 +412,9 @@ class SpaceSubscriberKeyOutbound:
             )
             if str(e.item.get("author_user_id")) in writers
         ][:MAX_BUNDLE_AUTHORS]
+        space = await self._spaces.get(space_id)
+        if space is not None:
+            entries = await self._with_current_certs(space, entries)
         parts = build_bundle_parts(space_id, entries)
         if not parts:
             return 0

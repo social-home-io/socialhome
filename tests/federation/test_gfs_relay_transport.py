@@ -9,6 +9,7 @@ production :class:`~socialhome.services.gfs_envelope_sender
 from __future__ import annotations
 
 import json
+import logging
 
 import orjson
 import pytest
@@ -40,6 +41,7 @@ from socialhome.federation.invite_bootstrap import (
 )
 from socialhome.federation.keywrap_seal import open_keywrap, seal_to_keywrap
 from socialhome.global_server.envelope_relay import ENVELOPE_MAX_BODY_BYTES
+from socialhome.services.gfs_envelope_sender import EnvelopeRelayUnavailable
 
 ENVELOPE = {
     "msg_id": "msg-1",
@@ -271,6 +273,35 @@ async def test_a_configuration_refusal_is_still_a_plain_failure():
     )
 
     assert (ok, status) == (False, None)
+
+
+async def test_no_reachable_relay_is_logged_without_a_traceback(caplog):
+    """``EnvelopeRelayUnavailable`` is an expected state (no connection
+    server here reaches the peer, e.g. while a GFS connection is being
+    replaced): one INFO line with the reason, never a traceback — the demo's
+    log audit read the traceback as a crash. Anything else keeps its
+    traceback, at WARNING."""
+    kp = generate_x25519_keypair()
+    relay = _FakeRelay(raises=EnvelopeRelayUnavailable("not connected there"))
+    with caplog.at_level(logging.INFO):
+        ok, status = await GfsRelayTransport(relay_sender=relay).send(
+            instance=_instance(kp), envelope_dict=ENVELOPE
+        )
+    assert (ok, status) == (False, None)
+    [record] = [r for r in caplog.records if "gfs relay" in r.getMessage()]
+    assert record.levelno == logging.INFO
+    assert record.exc_info is None
+    assert "not connected there" in record.getMessage()
+
+    caplog.clear()
+    relay = _FakeRelay(raises=RuntimeError("bug"))
+    with caplog.at_level(logging.INFO):
+        await GfsRelayTransport(relay_sender=relay).send(
+            instance=_instance(kp), envelope_dict=ENVELOPE
+        )
+    [record] = [r for r in caplog.records if "gfs relay" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is not None
 
 
 # ─── Size padding (the GFS sees a bucket, not a size) ────────────────────

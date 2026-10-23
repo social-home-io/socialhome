@@ -106,6 +106,7 @@ from typing import Any
 import orjson
 
 from ..domain.federation import RemoteInstance
+from ..domain.space import SpacePermissionError
 from ..domain.space_item import ITEM_SIZE_BUCKETS, pad_json_object
 from .invite_bootstrap import EnvelopeRelayThrottled, RelayEnvelopeSender
 from .keywrap_seal import seal_to_keywrap
@@ -359,14 +360,23 @@ class GfsRelayTransport:
                 instance.id,
             )
             return False, RELAY_STATUS_THROTTLED
-        except Exception as exc:
-            # A *configuration* refusal (EnvelopeRelayUnavailable) is a
-            # transport failure here, not a user-facing error: the send
-            # is queued and the operator sees the reason in the log. A
-            # transport must never raise — the contract in
-            # ``strategies.TransportStrategy``.
+        except SpacePermissionError as exc:
+            # A *configuration* refusal (``EnvelopeRelayUnavailable``: no
+            # connection server here reaches that peer — e.g. while a GFS
+            # connection is being replaced) is a transport failure here, not
+            # a user-facing error: the send is queued and the operator sees
+            # the reason in the log. An expected state, so no traceback.
             log.info(
                 "gfs relay: no connection server could carry an envelope for %s: %s",
+                instance.id,
+                exc,
+            )
+            return False, None
+        except Exception as exc:
+            # Anything else is a bug worth its traceback. A transport must
+            # never raise — the contract in ``strategies.TransportStrategy``.
+            log.warning(
+                "gfs relay: sending an envelope for %s failed: %s",
                 instance.id,
                 exc,
                 exc_info=True,

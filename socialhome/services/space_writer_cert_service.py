@@ -762,6 +762,49 @@ class SpaceWriterCertService:
             return False
         return True
 
+    async def current_item_cert(
+        self, space: Space, item: dict, *, epoch: int, required_scope: str
+    ) -> dict | None:
+        """A cert for a cached, author-signed ``item`` (published at
+        ``epoch``) that verifies against the space's CURRENT pin.
+
+        The item's own cert while it still verifies; after an authority
+        rotation (v_44) it was signed by the old key and no receiver accepts
+        it, so a seed holder re-issues one for the item's origin household
+        at the same epoch — the re-stamp the relay path does for a remote
+        author's post (the cert sits outside the author signature). ``None``
+        when neither works (not a seed holder, the household no longer holds
+        a seat that permits ``required_scope``, or the author is no longer
+        one of its writers): such an item would be refused anyway."""
+        try:
+            author_pk = bytes.fromhex(str(item.get("author_pk") or ""))
+        except ValueError:
+            return None
+        raw = item.get(WRITER_CERT_FIELD)
+        try:
+            verify_writer_cert(
+                WriterCert.from_wire(raw),
+                space_pubkey=bytes.fromhex(space.identity_public_key),
+                space_id=space.id,
+                epoch=epoch,
+                author_pk=author_pk,
+                required_scope=required_scope,
+            )
+            return raw if isinstance(raw, dict) else None
+        except ValueError:
+            pass
+        origin = str(item.get("origin_instance_id") or "")
+        cert = await self.issue_for_instance(
+            space.id, origin, epoch=epoch, instance_pk_hint=author_pk
+        )
+        if (
+            cert is None
+            or not scope_permits(cert.scope, required_scope)
+            or str(item.get("author_user_id") or "") not in cert.writer_user_ids
+        ):
+            return None
+        return cert.to_wire()
+
     async def epoch_is_fresh(
         self, space_id: str, epoch: int, *, now: datetime | None = None
     ) -> bool:

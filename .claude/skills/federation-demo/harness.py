@@ -633,6 +633,28 @@ def _log_lines_matching(label: str, needle: str, *, offset: int = 0) -> list[str
     return [line for line in text.splitlines() if needle in line]
 
 
+def _all_log_lines_matching(label: str, needle: str) -> list[str]:
+    """Lines containing ``needle`` across every log ``label`` has written
+    this run — the ones earlier processes left (``log.<n>.txt``, kept by
+    :func:`_spawn`) and the current ``log.txt``. For ``verify`` checks whose
+    evidence an intervening respawn moved aside."""
+    d = _instance_dir(label)
+    rotated = sorted(
+        d.glob("log.*.txt"),
+        key=lambda p: int(p.stem.split(".", 1)[1])
+        if p.stem.split(".", 1)[1].isdigit()
+        else -1,
+    )
+    lines: list[str] = []
+    for path in [*rotated, d / "log.txt"]:
+        try:
+            text = path.read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        lines.extend(line for line in text.splitlines() if needle in line)
+    return lines
+
+
 def _log_contains(label: str, needle: str, *, offset: int = 0) -> bool:
     """``True`` when ``label``'s log has a line containing ``needle`` at or
     after byte ``offset`` (default: anywhere in the file)."""
@@ -662,8 +684,15 @@ def _write_config(label: str, port: int, name: str) -> None:
 
 def _spawn(label: str, port: int, *, extra_env: dict | None = None) -> int:
     d = _instance_dir(label)
-    # A new process truncates ``log.txt``: every noise window recorded
-    # against the old file is void from here on (see ``_audit_logs``).
+    # A new process starts a fresh ``log.txt``: every noise window recorded
+    # against the old file is void from here on (see ``_audit_logs``). The
+    # old one is kept as ``log.<generation>.txt`` for the few ``verify``
+    # checks that need evidence from before a respawn
+    # (:func:`_all_log_lines_matching`).
+    if (d / "log.txt").exists():
+        (d / "log.txt").rename(
+            d / f"log.{_log_generations().get(label, 0)}.txt"
+        )
     _bump_log_generation(label)
     log = open(d / "log.txt", "wb")
     env = {
@@ -10811,16 +10840,17 @@ def cmd_verify() -> None:
         #      relaying household onto the fan-out frame again or the receiver
         #      started reading (and logging) the outer identity.
         if "gfs_space_post_id" in state:
+            # Every log d wrote this run: later GFS steps respawn d, and the
+            # record is from gfs-space-post.
             relay_lines = [
                 line
-                for line in _log_lines_matching("d", "gfs.relay.received:")
+                for line in _all_log_lines_matching("d", "gfs.relay.received:")
                 if f"space={gfs_space_id}" in line
             ]
             if not relay_lines:
                 failures.append(
                     f"d: no 'gfs.relay.received: space={gfs_space_id}' record "
-                    "in d's log (note: _spawn truncates log.txt, so a step "
-                    "that respawned d since gfs-space-post wipes the evidence)",
+                    "in any of d's logs",
                 )
             else:
                 identified = [line for line in relay_lines if "from=" in line]

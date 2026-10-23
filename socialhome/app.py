@@ -4086,6 +4086,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # v_61 — a new follower's profiles bundle: built by the host from the
         # author-profile cache, verified item by item on the follower.
         space_subscriber_key_outbound.attach_author_profiles(repos.space_author_profile)
+        # …re-stamping a cached profile whose cert predates an authority
+        # rotation (a new follower would refuse the old key's cert).
+        space_subscriber_key_outbound.attach_writer_certs(writer_certs)
         space_subscriber_key_inbound.attach_profiles_sink(space_public_inbound)
 
         # 5. Federation stack — FederationService + sync manager + typing/dm/
