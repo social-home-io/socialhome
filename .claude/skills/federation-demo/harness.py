@@ -5702,10 +5702,10 @@ def cmd_gfs_member_publish() -> None:
        within the poll window. The GFS log shows the member-publish fan-out
        for the space, and no line carries the post text.
     4. Restart a. a receives e's post over the normal member path (the
-       relay envelope queue) and relays it to the GFS as before — older
-       followers read only the host's copy.
-    5. d holds exactly ONE copy of e's post: it received it twice (e's own
-       publish, then the host's relay) and the receiver dedupes by post id.
+       relay envelope queue) and sends NO copy to the GFS (step 12): e is
+       v_57, the GFS proved member publish and ``space_item_followers``,
+       and every follower there reads ``space_item``.
+    5. d holds exactly ONE copy of e's post.
 
     Between 3 and 4 (PR 3, host still offline): e comments on and reacts to
     its post, posts a second post, edits it and deletes it; d (follower)
@@ -5795,10 +5795,14 @@ def cmd_gfs_member_publish() -> None:
     #     no other path ever carried them to a follower.
     second_id, edited = _member_publish_items(state, space_id, post_id, gfs_off)
 
-    # 4. The host comes back and relays the post as before. Bookmark the GFS
-    #    log BEFORE the respawn: a relays the queued post as soon as it is up,
-    #    often before ``_wait_ready`` returns.
-    back_off = _gfs_log_size()
+    # 4. The host comes back. Step 12: e is a v_57 household that published
+    #    the post itself to every listed GFS, the GFS proved member publish
+    #    and ``space_item_followers``, and every follower there (d) said it
+    #    reads ``space_item`` — so a sends NO copy of e's post to that GFS
+    #    (it used to relay it again for older followers). Bookmark a's log
+    #    BEFORE the respawn: a decides as soon as it is up, often before
+    #    ``_wait_ready`` returns.
+    a_off = _log_size("a")
     new_pid = _spawn("a", a["port"])
     state["instances"]["a"]["pid"] = new_pid
     _save(state)
@@ -5806,26 +5810,25 @@ def cmd_gfs_member_publish() -> None:
     print(f"  a respawned: pid={new_pid}")
     _await_space_post(state, "a", space_id, post_id)
     print("  a (host) caught e's post up over the member path ✓")
-    # Settle: a relays the post to the GFS right after receiving it.
     deadline = time.monotonic() + 30.0
-    relayed: list[str] = []
-    while time.monotonic() < deadline and not relayed:
+    skipped: list[str] = []
+    while time.monotonic() < deadline and not skipped:
         time.sleep(3.0)
-        relayed = [
+        skipped = [
             line
-            for line in _gfs_log_lines_matching(
-                "GFS: relaying space_post_public", offset=back_off
+            for line in _log_lines_matching(
+                "a", "reads the member's own item", offset=a_off
             )
             if space_id in line
         ]
-    if not relayed:
+    if not skipped:
         raise SystemExit(
-            "gfs-member-publish: a never relayed e's post to the GFS after "
-            "restarting — older followers, which read only the host's copy, "
-            "would miss it.",
+            "gfs-member-publish: a did not skip its copy of e's post — every "
+            "follower on the GFS reads e's own space_item, so the host's relay "
+            "is a redundant fan-out (step 12)."
         )
-    print("  a relayed e's post to the GFS as before (older followers) ✓")
-    time.sleep(3.0)  # let d process the host's copy
+    print("  a sent no copy of e's post: every follower reads e's own item ✓")
+    time.sleep(3.0)  # let anything late land on d
 
     # 5. d received it twice and holds exactly one copy.
     rows = _rows("d", "SELECT id FROM space_posts WHERE id = ?", (post_id,))

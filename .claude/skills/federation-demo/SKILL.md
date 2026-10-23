@@ -896,9 +896,10 @@ post. e publishes the post itself (``POST /gfs/member-publish``, signed by
 its household key, authorized by its writer cert), so follower d receives
 it decrypted while a is down; the GFS log shows the member-publish fan-out
 and never the post text. Then a restarts, catches e's post up over the
-member path and relays it to the GFS as before (older followers read only
-the host's copy); d receives it twice and holds exactly ONE copy (receiver
-dedupe by post id). Polls every 3 s.
+member path and sends **no** copy to the GFS (step 12): e is v_57, the GFS
+proved member publish and `space_item_followers`, and every follower there
+reads `space_item` — a's log shows the skip. d holds exactly ONE copy.
+Polls every 3 s.
 
 Also, with a still down (PR 3): e comments on its post and reacts to it, then
 posts a second post, edits it and deletes it. d (a follower, which no other

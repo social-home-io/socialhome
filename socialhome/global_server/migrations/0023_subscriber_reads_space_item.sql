@@ -1,0 +1,34 @@
+-- GFS 0023 — does a seat's household read ``space_item``? Follows 0022.
+--
+-- A member household publishes its own items over the GFS (``space_item``,
+-- v_49; to every listed GFS since v_57), and every seed holder of the space
+-- relays the same post again as ``space_post_public`` — because a follower
+-- on an older build reads only that copy. With 10 000 followers and three
+-- seed holders that is three extra fan-outs of every post. A seed holder
+-- may skip its copy only when no follower on that server lacks
+-- ``space_item``, and only this server knows its followers: it keeps, per
+-- seat, the follower's own word from its subscribe ``accepts``.
+--
+-- CLAUDE.md "audit before a migration":
+-- 1. Audited every path touching ``space_subscribers``: ``subscribe`` /
+--    ``unsubscribe`` (federation.py), the relay fan-out and the 24 h queue
+--    (``list_subscribers``, ``list_recently_seen_subscribers``), the targeted
+--    seat lookup, the 5b-c subscriber query (``list_subscribers_with_keys``)
+--    and the reconnect notify (``list_subscribed_spaces``), the purge when a
+--    space stops being readable, and the household-side mirror (which never
+--    reads this table). ``accepts`` was deliberately never stored (v_61): it
+--    only rode the owner's ``new_subscriber`` frame for a NEW seat, so no
+--    existing column or cache holds it for the seats already there.
+-- 2. Alternatives rejected: the seed holder skipping on the author's version
+--    alone (silently loses every remote member's post for an older follower);
+--    asking each follower (the GFS holds no household address, and a seed
+--    holder must never learn who follows); an in-memory set on the server (a
+--    restart or another cluster node would read "everyone reads it" from an
+--    empty set — the wrong default); filtering on the server by event type
+--    (it cannot tell a remote member's relayed post from the host's own).
+-- 3. Smallest change: one NULL-defaulted column, no backfill and no index
+--    (the count runs on ``idx_space_subscribers``, one space at a time).
+--    NULL — a seat taken before this release, or by an older household —
+--    counts as "does not read it": fail-safe toward the relay. Every
+--    subscribe (a new seat or the re-take on each reconnect) writes it.
+ALTER TABLE space_subscribers ADD COLUMN reads_space_item INTEGER;

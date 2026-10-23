@@ -1694,6 +1694,39 @@ these; adversarial review of PR 2):
    [Comments, reactions and own edits / deletes](#comments-reactions-and-own-edits--deletes-v_49)
    below.
 
+### A seed holder's copy of a member's post (step 12)
+
+A member household publishes its own post to every GFS the owner listed
+(`space_item`, v_57). Every seed holder of the space **also** relays that
+post as `space_post_public` (`SpacePublicOutbound._relay_remote_authored`),
+because a follower on an older build reads only that copy. With 10 000
+followers, three seed holders and 400 member posts a day, those copies are
+three extra fan-outs of every post.
+
+A seed holder now skips its copy **on a given GFS** only when all of these
+hold (`services/space_relay_coverage.py`):
+
+1. the author's household is at v_57 or later
+   (`MIN_FOR_MULTI_GFS_PUBLISH`: it publishes to every listed server);
+2. the server is on the owner's signed list for the space;
+3. the server proved `member_publish_trusted`, `member_publish_strict` and
+   `space_item_followers` in its signed capability block;
+4. the server says **no follower there lacks `space_item`**: the
+   authority-signed `GET /gfs/spaces/{id}/subscribers?summary=1` answers
+   `without_space_item: 0`. Each follower says it reads `space_item` in
+   its subscribe `accepts`, and the GFS keeps that per seat (GFS migration
+   0023, refreshed by the re-take on every reconnect). An unknown seat
+   (older household, seat taken before) counts as one that does not.
+
+Anything unknown (no owner list, an unreachable server, a refused or odd
+answer, an author we can't judge) keeps the copy. The answer is cached for
+60 s per (space, server), so a burst of posts asks once. The query rides
+the cookie-less publish session and names no household. A post released
+from the moderation queue (`_relay_approved`) is never skipped, because
+its author did not publish it. Remaining risk: an author whose own
+publish fails for good (a permanent refusal; transient ones are retried)
+is no longer backed by the seed holders' copies on such a server.
+
 ### Author profiles for followers (v_60)
 
 A GFS follower holds no roster, so every post in a space it follows read

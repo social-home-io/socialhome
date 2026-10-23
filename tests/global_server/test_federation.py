@@ -3422,6 +3422,30 @@ async def test_a_resubscribe_the_hello_missed_gets_a_key_repair_only(gfs_db):
     assert "accepts" not in frame["subscriber"]
 
 
+async def _reads(repo, space_id: str, instance_id: str):
+    row = await repo._db.fetchone(
+        "SELECT reads_space_item FROM space_subscribers"
+        " WHERE space_id=? AND instance_id=?",
+        (space_id, instance_id),
+    )
+    return row["reads_space_item"]
+
+
+async def test_a_seat_keeps_whether_its_household_reads_member_items(gfs_db):
+    """Step 12: the follower's own ``space_item`` label is kept per seat,
+    written on the new seat and refreshed on every re-take."""
+    ws = _RecordingWsRegistry()
+    repo = SqliteGfsFederationRepo(gfs_db)
+    svc = GfsFederationService(repo, ws_registry=ws)
+    sub_seed = await _owner_and_keywrap_sub(svc, space_id="sp-si")
+    await _signed_subscribe(svc, sub_seed, "sp-si", accepts=("space_item",))
+    assert await _reads(repo, "sp-si", "sub-r") == 1
+    await _signed_subscribe(svc, sub_seed, "sp-si")  # an older build again
+    assert await _reads(repo, "sp-si", "sub-r") == 0
+    await _signed_subscribe(svc, sub_seed, "sp-si", accepts=("space_item",))
+    assert await _reads(repo, "sp-si", "sub-r") == 1
+
+
 async def test_a_key_pulling_followers_retake_notifies_nobody(gfs_db):
     """#5b: a follower that asks for a key when it misses one
     (``space_key_pull`` in its accepts) needs no key repair on every seat
