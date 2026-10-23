@@ -8286,6 +8286,11 @@ def cmd_gfs_private_channel_multi() -> None:
         print(f"  channel {channel_id} lives on A only — B never heard of it ✓")
 
         # 3. A and B.
+        grants_before = _rows(
+            "d",
+            "SELECT epoch, gfs_channel FROM space_keys WHERE space_id=?",
+            (space_id,),
+        )
         st, body = _as(
             state,
             "a",
@@ -8313,9 +8318,22 @@ def cmd_gfs_private_channel_multi() -> None:
             what="d never stored the owner's two channel servers",
             timeout=90.0,
         )
+        # The list and the re-issued grant (which names the servers d may
+        # publish anonymously to) travel separately: the list with the
+        # owner's config, the grant in the roster snapshot ``distribute``
+        # sends after it. d killed between the two keeps a grant naming A
+        # only and — correctly — never publishes to B. Wait for the grant.
+        _poll_rows(
+            "d",
+            "SELECT epoch, gfs_channel FROM space_keys WHERE space_id=?",
+            (space_id,),
+            lambda r: bool(r) and r != grants_before,
+            what="d never got the owner's re-issued channel grant naming A and B",
+            timeout=90.0,
+        )
         print(
             "  the channel lives on A and B (writer key pinned, trusted); d holds "
-            "the two-server list ✓"
+            "the two-server list and the grant naming both ✓"
         )
 
         # 4. d sees loopback as public; e reaches the channel over B only.
@@ -8324,8 +8342,20 @@ def cmd_gfs_private_channel_multi() -> None:
         _save(state)
         _wait_ready(d["port"])
         e_a_id = state["gfs"]["pairings"]["e"]["id"]
+        e_leave_off = _log_size("e")
         st, body = _as(state, "e", "DELETE", f"/api/gfs/connections/{e_a_id}")
         _must("e leaves GFS A", st, body, ok=(200, 204))
+        # Its push socket to A closes with the connection — not at the next
+        # 30 s reconcile, while A could still hand it the channel's items.
+        stopped = f"gfs.ws.supervisor: stopped client gfs_id={e_a_id}"
+        deadline = time.monotonic() + 5.0
+        while not _log_lines_matching("e", stopped, offset=e_leave_off):
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    "gfs-private-channel-multi: e's socket to GFS A stayed open "
+                    "after e removed the connection"
+                )
+            time.sleep(0.2)
         _poll_gfs_b_rows(
             "SELECT instance_id FROM gfs_channel_subscribers WHERE channel_id=?",
             (channel_id,),

@@ -4847,6 +4847,11 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         await gfs_ws_supervisor.start()
         app[K.gfs_ws_supervisor_key] = gfs_ws_supervisor
+        # A removed connection's push socket closes at once: nothing that
+        # server pushes after the household left it is taken in.
+        gfs_connection_service.attach_on_removed(
+            lambda conn: gfs_ws_supervisor.forget(conn.id)
+        )
         # Warm the RAM-only GFS capability cache now, not only when each
         # socket connects: until then ``GET /api/gfs/connections`` reads
         # ``envelope_relay: false`` and the pairing reach picker / GFS

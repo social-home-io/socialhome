@@ -315,6 +315,15 @@ class GfsWebSocketSupervisor:
             conn.inbox_url,
         )
 
+    async def forget(self, gfs_id: str) -> None:
+        """Close *gfs_id*'s push socket now — its connection was removed.
+
+        Called after the row is gone, so the next reconcile does not start
+        it again. Without this the socket stayed up until that reconcile
+        (up to :data:`DEFAULT_RECONCILE_INTERVAL_SECONDS`), and frames the
+        removed server pushed meanwhile were still taken in."""
+        await self._stop_client(gfs_id)
+
     async def _stop_client(self, gfs_id: str) -> None:
         async with self._lock:
             client = self._clients.pop(gfs_id, None)
