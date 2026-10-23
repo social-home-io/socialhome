@@ -229,6 +229,8 @@ export function SpaceLocationCard({
       }).data
       if (d?.space_id !== spaceId || !d.user_id) return
       const household = d.instance_id || null
+      // I stopped on another device or tab: the banner follows too.
+      if (household === null && d.user_id === currentUserId) setSharingMe(false)
       setData((prev) => {
         if (!prev) return prev
         const entries = prev.entries.filter((p) => !(

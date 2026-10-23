@@ -750,6 +750,26 @@ describe('SpaceLocationCard', () => {
       await findByText(/^0 of 3 sharing GPS/)
     })
 
+    it('my own stop on another device switches the banner too', async () => {
+      mockApi.get.mockImplementation((url: string) => {
+        if (url.includes('/presence')) {
+          return Promise.resolve({ feature_enabled: true, location_mode: 'gps', entries })
+        }
+        if (url.includes('/members')) {
+          return Promise.resolve([{ user_id: 'u_pascal', location_share_enabled: true }])
+        }
+        return Promise.resolve({ zones: [] })
+      })
+      const { findByRole, queryByRole } = render(
+        <SpaceLocationCard spaceId="sp_test" currentUserId="u_pascal" />,
+      )
+      await findByRole('button', { name: /stop sharing/i })
+      act(() => { removedHandler()(removed({ space_id: 'sp_test', user_id: 'u_pascal' })) })
+      await waitFor(() => {
+        expect(queryByRole('button', { name: /stop sharing/i })).toBeNull()
+      })
+    })
+
     it('ignores a removal for another space', async () => {
       const { findAllByText } = render(<SpaceLocationCard spaceId="sp_test" />)
       expect((await findAllByText('Pascal')).length).toBeGreaterThan(0)
