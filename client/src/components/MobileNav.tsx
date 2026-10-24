@@ -234,10 +234,10 @@ export function MobileNav() {
           aria-controls="sh-mobile-drawer"
           onClick={() => (mobileSidebarOpen.value = !mobileSidebarOpen.value)}
         >
-          <span class="sh-mobile-tab__icon" aria-hidden="true">
-            {moreActive ? '✕' : '☰'}
-          </span>
-          <span class="sh-mobile-tab__label">{moreActive ? t('common.close') : t('nav.more')}</span>
+          {/* Stays "More" while open: the bar dims under the scrim and
+              the drawer's own ✕ is the close control. */}
+          <span class="sh-mobile-tab__icon" aria-hidden="true">☰</span>
+          <span class="sh-mobile-tab__label">{t('nav.more')}</span>
         </button>
       </nav>
     </>
