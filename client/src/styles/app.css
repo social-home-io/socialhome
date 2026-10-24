@@ -706,7 +706,8 @@ html.sh-kbd-open .sh-comment-overlay {
     background: var(--sh-bg);
     border-inline-end: 1px solid var(--sh-border);
     box-shadow: 12px 0 32px -16px rgba(26, 24, 20, 0.45);
-    z-index: calc(var(--sh-z-dropdown) + 1);
+    /* Above the scrim, which sits above the tab bar. */
+    z-index: calc(var(--sh-z-dropdown) + 2);
     overflow-y: auto;
     /* Focus lands on the drawer itself (tabindex=-1) when it opens;
      * the container is not a control, so no ring around the panel. */
@@ -719,15 +720,14 @@ html.sh-kbd-open .sh-comment-overlay {
   .sh-mobile-drawer .sh-sidenav {
     display: flex;
     /* Fill the drawer so the same scroll-region-over-footer split
-     * applies: nav scrolls, identity strip stays put above the tab
-     * bar. */
+     * applies: nav scrolls, identity strip stays put at the bottom. */
     height: 100%;
     min-height: 0;
     position: static;
     border-inline-end: none;
-    /* Clear the mobile-nav tab bar so the last item (Admin /
-     * Federation) doesn't sit under it. */
-    padding-bottom: calc(84px + env(safe-area-inset-bottom, 0));
+    /* The tab bar sits under the scrim, so the drawer runs to the
+     * bottom edge; only the home indicator needs clearing. */
+    padding-bottom: env(safe-area-inset-bottom, 0);
   }
   /* RTL: the drawer sits on the right, so it parks off the right edge
    * and casts its shadow to the left. */
@@ -770,7 +770,10 @@ html.sh-kbd-open .sh-comment-overlay {
     background: rgba(26, 24, 20, 0.45);
     backdrop-filter: blur(2px);
     -webkit-backdrop-filter: blur(2px);
-    z-index: var(--sh-z-dropdown);
+    /* Over the tab bar: the drawer is a modal dialog with its own ✕,
+     * so the bar dims with the page instead of a sliver of it (the
+     * More tab) poking out undimmed beside the drawer. */
+    z-index: calc(var(--sh-z-dropdown) + 1);
     animation: sh-fade-in 160ms ease;
   }
   /* Lock background scroll while the drawer is open. */
@@ -806,9 +809,6 @@ html.sh-kbd-open .sh-comment-overlay {
       - var(--sh-space-md) - var(--sh-space-sm)
       - env(safe-area-inset-bottom, 0px)
     );
-  }
-  html.sh-kbd-open .sh-mobile-drawer .sh-sidenav {
-    padding-bottom: calc(var(--sh-space-md) + env(safe-area-inset-bottom, 0px));
   }
   html.sh-kbd-open .sh-timetable-brushbar {
     bottom: env(safe-area-inset-bottom, 0px);
@@ -17701,6 +17701,16 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
     bottom: calc(var(--sh-mobile-nav-height) + env(safe-area-inset-bottom, 0px) + var(--sh-space-sm));
   }
   .sh-savebar__actions .sh-btn { min-height: 44px; }
+  /* Keyboard up: the browser scrolls the field being typed into to just
+   * above the keyboard — right where a bottom-sticky bar floats, so it
+   * covered that field. While typing, the bar drops back into the flow
+   * after the form (Save is right below the last field) and docks at
+   * the bottom again once the keyboard closes. */
+  html.sh-kbd-open .sh-savebar {
+    position: static;
+    margin-top: var(--sh-space-md);
+    box-shadow: none;
+  }
 }
 @media (max-width: 640px) {
   .sh-profile-glance, .sh-profile-form { padding: var(--sh-space-md); }

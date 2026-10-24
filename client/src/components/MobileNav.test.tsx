@@ -215,6 +215,14 @@ describe('MobileNav', () => {
       container.querySelector('.sh-mobile-drawer')!.classList.contains('sh-mobile-drawer--open'),
     ).toBe(true)
   })
+
+  it('the More tab keeps its label while the drawer is open (no second Close)', () => {
+    const { container } = render(wrap(<MobileNav />))
+    const more = container.querySelector<HTMLButtonElement>('button.sh-mobile-tab--more')!
+    act(() => { more.click() })
+    expect(more.getAttribute('aria-expanded')).toBe('true')
+    expect(more.textContent).toBe('☰More')
+  })
 })
 
 describe('MobileNav — links under the HA ingress prefix', () => {
@@ -324,5 +332,22 @@ describe('MobileNav — steps aside while the on-screen keyboard is up', () => {
     expect(chat).not.toBeNull()
     expect(chat![1]).not.toContain('--sh-mobile-nav-height')
     expect(css).toMatch(/html\.sh-kbd-open \.sh-back-to-top \{ display: none; \}/)
+    // The unsaved-changes bar stops floating over the field being typed
+    // into: with the keyboard up it sits in the flow after the form.
+    expect(css).toMatch(/html\.sh-kbd-open \.sh-savebar \{[^}]*position: static;/)
+  })
+
+  it('app.css lays the open drawer over the tab bar, under no stray tab', () => {
+    // The scrim covers the tab bar, the drawer covers the scrim, so no
+    // undimmed slice of the bar (the More tab) pokes out beside it.
+    const css = readFileSync(join(__dirname, '..', 'styles', 'app.css'), 'utf8')
+    const z = (sel: string) => {
+      const m = css.match(new RegExp(`\\n  ${sel.replace(/\./g, '\\.')} \\{[^}]*z-index: ([^;]+);`))
+      expect(m, sel).not.toBeNull()
+      return m![1]
+    }
+    expect(css).toMatch(/\n\.sh-mobile-nav \{[^}]*z-index: var\(--sh-z-dropdown\);/)
+    expect(z('.sh-mobile-drawer-scrim')).toBe('calc(var(--sh-z-dropdown) + 1)')
+    expect(z('.sh-mobile-drawer')).toBe('calc(var(--sh-z-dropdown) + 2)')
   })
 })
