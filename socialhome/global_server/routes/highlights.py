@@ -238,6 +238,9 @@ _VIEWER_CSS = (
     ".viewer-retry:hover{border-color:#fff;}"
     ".viewer-retry:focus-visible{outline:2px solid #fff;outline-offset:2px;}"
     ".status{color:#aaa;font-size:.9em;text-align:center;}"
+    # How the stream arrives: direct from the home, or through this server.
+    ".highlight-transport{margin:8px 12px 12px;color:#aaa;font-size:.8em;"
+    "text-align:center;}"
     # The stream closed before its end: what came plays, plus this note.
     ".highlight-incomplete{display:flex;flex-wrap:wrap;align-items:center;"
     "justify-content:center;gap:8px 12px;margin:12px;padding:8px 12px;"
