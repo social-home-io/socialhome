@@ -28,6 +28,7 @@ html,body{margin:0;padding:0;background:#111;color:#eee;font-family:system-ui,sa
 .viewer-retry:hover{border-color:#fff;}
 .viewer-retry:focus-visible{outline:2px solid #fff;outline-offset:2px;}
 .status{color:#aaa;font-size:.9em;text-align:center;}
+.highlight-transport{margin:8px 12px 12px;color:#aaa;font-size:.8em;text-align:center;}
 .highlight-incomplete{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px 12px;margin:12px;padding:8px 12px;border-radius:8px;background:rgba(255,255,255,.08);color:#ddd;font-size:.9em;text-align:center;}
 .highlight-incomplete p{margin:0;}
 .highlight-end>p{margin:0;}

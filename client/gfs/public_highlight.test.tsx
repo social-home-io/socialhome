@@ -365,3 +365,99 @@ describe('a viewer that goes away while it starts', () => {
     vi.unstubAllGlobals()
   })
 })
+
+
+describe('how the highlight reaches the viewer', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  async function renderViewer() {
+    const { render } = await import('@testing-library/preact')
+    const { PublicHighlightViewer } = await import('./public_highlight')
+    const { linkSecretFromHash } = await import('./stream_seal')
+    const retry = { manual: () => {}, auto: () => {}, nextAutoDelayMs: () => null }
+    return render(
+      <PublicHighlightViewer
+        boot={{
+          instanceId: 'inst-1', highlightId: 'hl-1', token: 'tok-1',
+          gfs: 'https://gfs.example.org',
+        }}
+        secret={linkSecretFromHash(pinnedHash())!}
+        retry={retry}
+      />,
+    )
+  }
+
+  it('says the stream comes straight from their home once the channel opens', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/gfs/highlights/ice-servers')) {
+        return new Response(JSON.stringify({ servers: [] }), { status: 200 })
+      }
+      if (url.endsWith('/gfs/highlight_rtc/offer')) {
+        return new Response(JSON.stringify({ session_id: 's-1' }), { status: 201 })
+      }
+      return new Response(JSON.stringify({ answer_sdp: null, ice_candidates: [] }), { status: 200 })
+    })
+    const channel: { onopen?: () => void } = {}
+    class FakePc {
+      iceConnectionState = 'new'
+      remoteDescription = null
+      addEventListener() {}
+      createDataChannel() { return channel }
+      async createOffer() { return { type: 'offer', sdp: 'v=0' } }
+      async setLocalDescription() {}
+      close() {}
+    }
+    vi.stubGlobal('RTCPeerConnection', FakePc)
+    const view = await renderViewer()
+    expect(view.container.querySelector('.highlight-transport')).toBeNull()
+    await vi.waitFor(() => expect(channel.onopen).toBeTypeOf('function'), { timeout: 4000 })
+    const { act } = await import('@testing-library/preact')
+    act(() => channel.onopen!())
+    await vi.waitFor(() => {
+      const badge = view.container.querySelector('.highlight-transport')
+      expect(badge?.textContent).toBe('Direct connection')
+      expect(badge?.getAttribute('data-transport')).toBe('direct')
+    })
+    view.unmount()
+    vi.unstubAllGlobals()
+  })
+
+  it('says it comes through the server, still encrypted, on the relay fallback', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/gfs/highlights/ice-servers')) {
+        return new Response(JSON.stringify({ servers: [] }), { status: 200 })
+      }
+      if (url.endsWith('/gfs/highlight_rtc/offer')) {
+        return new Response(JSON.stringify({ session_id: 's-1' }), { status: 201 })
+      }
+      if (url.includes('/gfs/highlight_rtc/relay/')) {
+        // The author streams through the GFS; nothing has arrived yet.
+        return new Response(new ReadableStream({ start() {} }), { status: 200 })
+      }
+      // The session is gone → the viewer goes to the relay at once.
+      return new Response('{"error":"not_found"}', { status: 404 })
+    })
+    class FakePc {
+      iceConnectionState = 'new'
+      remoteDescription = null
+      addEventListener() {}
+      createDataChannel() { return {} }
+      async createOffer() { return { type: 'offer', sdp: 'v=0' } }
+      async setLocalDescription() {}
+      close() {}
+    }
+    vi.stubGlobal('RTCPeerConnection', FakePc)
+    const view = await renderViewer()
+    await vi.waitFor(() => {
+      const badge = view.container.querySelector('.highlight-transport')
+      expect(badge?.textContent).toBe('Through the server · still encrypted')
+      expect(badge?.getAttribute('data-transport')).toBe('relay')
+    }, { timeout: 4000 })
+    view.unmount()
+    vi.unstubAllGlobals()
+  })
+})

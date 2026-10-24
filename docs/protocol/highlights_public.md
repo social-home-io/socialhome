@@ -266,6 +266,13 @@ the viewer GET returns the same uniform `503`. It is sent at once, except
 on the never-connects branch, which first waits the 30 s budget. See "Not a
 presence oracle" above.
 
+The viewer says which path the stream took, under the highlight, for as
+long as it plays: *Direct connection* once the DataChannel opens, or
+*Through the server · still encrypted* once the relay GET answers
+(`.highlight-transport`, `data-transport="direct" | "relay"`). On both
+paths the bytes are sealed to the viewer, so the label is about who carries
+the stream, not who can read it.
+
 ## DataChannel framing
 
 Single ordered DataChannel labelled `highlight-public-v1`. Every frame on

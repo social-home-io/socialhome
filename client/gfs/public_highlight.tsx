@@ -97,6 +97,10 @@ interface ViewerState {
   authorPicture: string | null
   /** The channel closed before ``stream_end``: some frames never came. */
   incomplete: boolean
+  /** How the stream reaches this page: the direct DataChannel to the
+   *  author's home, or piped through the GFS (still sealed to this viewer).
+   *  ``null`` until one of them is open. */
+  transport: 'direct' | 'relay' | null
 }
 
 /** Whether a signalling-session poll answered "this session is gone": the
@@ -187,6 +191,7 @@ export function PublicHighlightViewer(
     author: null,
     authorPicture: null,
     incomplete: false,
+    transport: null,
   })
 
   // Per-frame chunk buffer — kept in a ref-like store so the message
@@ -327,6 +332,7 @@ export function PublicHighlightViewer(
           setStatus('error', humanizeError(`HTTP ${r.status}`))
           return
         }
+        if (!cancelled) setState((s) => ({ ...s, transport: 'relay' }))
         const reader = r.body.getReader()
         let buf: Uint8Array = new Uint8Array(0)
         while (!cancelled) {
@@ -391,7 +397,11 @@ export function PublicHighlightViewer(
 
         const ch = pc.createDataChannel(CHANNEL_LABEL, { ordered: true })
         ch.binaryType = 'arraybuffer'
-        ch.onopen = () => { channelOpened = true; setStatus('loading', t('hl.loading')) }
+        ch.onopen = () => {
+          channelOpened = true
+          setStatus('loading', t('hl.loading'))
+          if (!cancelled) setState((s) => ({ ...s, transport: 'direct' }))
+        }
         ch.onclose = () => { if (channelOpened) onTransportClosed() }
         ch.onmessage = (ev) => {
           const buf = new Uint8Array(ev.data instanceof ArrayBuffer ? ev.data : new ArrayBuffer(0))
@@ -557,6 +567,11 @@ export function PublicHighlightViewer(
           <div class="caption">{cur.caption_text}</div>
         )}
       </div>
+      {state.transport && (
+        <p class="highlight-transport" data-transport={state.transport}>
+          {t(state.transport === 'direct' ? 'hl.via_direct' : 'hl.via_relay')}
+        </p>
+      )}
       {incomplete}
     </div>
   )
