@@ -156,6 +156,7 @@ class MomentPublicShareService:
             or moment.author_user_id != user_id
             or share.author_user_id != user_id
             or _unix(moment.expires_at) <= time.time()
+            or not await self._thread_is_public(moment)
         ):
             raise MomentNotFoundError(moment_id)
         base = viewer_base_url(self._base_url)
@@ -178,6 +179,16 @@ class MomentPublicShareService:
             ]
         )
         return f"{base}/{self._viewer.path}#{fragment}"
+
+    async def _thread_is_public(self, moment: Moment) -> bool:
+        """A reply goes public only under a public moment: its parent (the
+        thread's root — threads are flat) must be public too. Fail closed —
+        an unknown parent counts as not public, so a reply stored public
+        before that rule never gets a fresh copy on a GFS."""
+        if moment.parent_moment_id is None:
+            return True
+        parent = await self._moments.get(moment.parent_moment_id)
+        return parent is not None and parent.is_public
 
     async def _target(
         self, user_id: str, share: MomentPublicShare, gfs_id: str | None

@@ -262,6 +262,24 @@ async def test_only_the_author_of_a_live_public_moment_gets_a_link(env):
     assert env["media"].uploads == []
 
 
+async def test_a_public_reply_under_a_household_moment_gets_no_link(env):
+    """A reply stored public before replies followed their thread's root
+    keeps ``is_public`` — the link is refused all the same (fail closed):
+    a fresh share copy would put it on the GFS again."""
+    await env["moments"].save(_moment("m-root", is_public=False))
+    await _published(env, mid="m-reply", parent_moment_id="m-root")
+    with pytest.raises(MomentNotFoundError):
+        await env["svc"].link(user_id="u-noor", moment_id="m-reply")
+    assert env["media"].uploads == []
+
+
+async def test_a_public_reply_under_a_public_moment_gets_a_link(env):
+    await env["moments"].save(_moment("m-root"))
+    await _published(env, mid="m-reply", parent_moment_id="m-root")
+    url = await env["svc"].link(user_id="u-noor", moment_id="m-reply")
+    assert _fragment(url)["m"] == "m-reply"
+
+
 async def test_no_pinned_viewer_means_no_link(env):
     """A GFS-served page would read the key: there is no fallback."""
     await _published(env)

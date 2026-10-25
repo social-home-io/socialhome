@@ -1040,6 +1040,44 @@ async def test_a_member_deletes_only_what_they_can_read_and_wrote(client):
     assert (await client.delete("/api/moments/m-eve", headers=eve)).status == 200
 
 
+# ── A reply never goes further than the moment it answers ───────────────
+
+
+async def test_a_reply_to_a_household_moment_is_stored_not_public(client):
+    r = await client.post(
+        "/api/moments", json={"content": "household only"}, headers=_auth(client._tok)
+    )
+    root_id = (await r.json())["id"]
+    # A stale composer that pre-ticks "share publicly" on the reply.
+    r = await client.post(
+        "/api/moments",
+        json={"content": "reply", "parent_moment_id": root_id, "is_public": True},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    reply = await r.json()
+    assert reply["is_public"] is False
+    r = await client.get(f"/api/moments/{reply['id']}", headers=_auth(client._tok))
+    assert (await r.json())["moment"]["is_public"] is False
+
+
+async def test_a_reply_to_a_public_moment_may_be_public(client):
+    r = await client.post(
+        "/api/moments",
+        json={"content": "public root", "is_public": True},
+        headers=_auth(client._tok),
+    )
+    root = await r.json()
+    assert root["is_public"] is True
+    r = await client.post(
+        "/api/moments",
+        json={"content": "reply", "parent_moment_id": root["id"], "is_public": True},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    assert (await r.json())["is_public"] is True
+
+
 # ── Protected accounts never see GFS-delivered moments (§CP.R) ──────────
 
 
