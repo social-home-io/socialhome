@@ -14,7 +14,8 @@ import { api } from '@/api'
 import { Avatar } from '@/components/Avatar'
 import { openLightbox } from '@/components/ImageLightbox'
 import { MomentumArchiveSkeleton } from '@/components/Skeleton'
-import { showToast } from '@/components/Toast'
+import { LoadErrorState, StaleNotice } from '@/components/LoadErrorState'
+import { INITIAL_LOAD, clockTime, loadFailed, loadSucceeded, type LoadStatus } from '@/utils/loadStatus'
 import {
   namedPersonLabel,
   namedPersonPicture,
@@ -32,6 +33,20 @@ const moments = signal<Moment[]>([])
 const loading = signal<boolean>(true)
 const trending = signal<Array<{ tag: string; count: number }>>([])
 const activeTag = signal<string | null>(null)
+/** A failed load is never the empty archive (``utils/loadStatus``). */
+const status = signal<LoadStatus>(INITIAL_LOAD)
+
+/** Load (or refresh, on a ``moment.*`` frame) the archive for the tag. */
+function fetchAll(initial: boolean): Promise<void> {
+  const tagParam = activeTag.value ? { tag: activeTag.value } : undefined
+  return api.get('/api/moments/archive', tagParam)
+    .then((rows: Moment[]) => {
+      moments.value = rows ?? []
+      status.value = loadSucceeded(status.value)
+    })
+    .catch(() => { status.value = loadFailed(status.value) })
+    .finally(() => { if (initial) loading.value = false })
+}
 
 const grouped = computed<Map<string, Moment[]>>(() => {
   const m = new Map<string, Moment[]>()
@@ -53,19 +68,7 @@ export default function MomentumArchiveTab() {
     const params = new URLSearchParams(window.location.search)
     activeTag.value = params.get('tag') || null
     loading.value = true
-    const fetchAll = (initial: boolean) => {
-      const tagParam = activeTag.value ? { tag: activeTag.value } : undefined
-      return api.get('/api/moments/archive', tagParam)
-        .then((rows: Moment[]) => {
-          moments.value = rows ?? []
-          if (initial) loading.value = false
-        })
-        .catch((err: unknown) => {
-          if (initial) loading.value = false
-          showToast(t('moment.archive.load_failed', { error: String((err as Error)?.message ?? err) }),
-            'error')
-        })
-    }
+    status.value = INITIAL_LOAD
     const fetchTrending = () =>
       api.get<{ hashtags: Array<{ tag: string; count: number }> }>(
         '/api/moments/hashtags',
@@ -123,10 +126,32 @@ export default function MomentumArchiveTab() {
     </div>
   )
 
+  const retry = () => void fetchAll(false)
+  if (status.value.failed) {
+    return (
+      <div class="sh-momentum-archive">
+        <h2>{t('page_title.moments_archive')}</h2>
+        <LoadErrorState
+          message={t('moment.inbox.load_failed_title')}
+          detail={t('load.household_quiet')}
+          retryLabel={t('load.try_again')}
+          onRetry={retry}
+        />
+      </div>
+    )
+  }
+  const renderStale = status.value.staleSince !== null && (
+    <StaleNotice
+      message={t('moment.inbox.stale', { time: clockTime(status.value.staleSince) })}
+      onRetry={retry}
+    />
+  )
+
   if (days.length === 0) {
     return (
       <div class="sh-momentum-archive">
         <h2>{t('page_title.moments_archive')}</h2>
+        {renderStale}
         {renderActiveBanner}
         {renderTrendingRow}
         <div class="sh-empty-state">
@@ -146,6 +171,7 @@ export default function MomentumArchiveTab() {
           {t('moment.archive.lifetime')}
         </p>
       )}
+      {renderStale}
       {renderActiveBanner}
       {renderTrendingRow}
       {days.map(day => (

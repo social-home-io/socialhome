@@ -5,7 +5,7 @@
  * frames and refetches on any update affecting this moment id (new
  * reply, reaction change, deletion).
  */
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { useLocation, useRoute } from 'preact-iso'
 import { api } from '@/api'
@@ -19,6 +19,8 @@ import {
 } from '@/components/MomentumComposerDialog'
 import { MomentumDetailSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
+import { LoadErrorState } from '@/components/LoadErrorState'
+import { addBase } from '@/baseUrl'
 import { confirmDialog } from '@/components/confirm'
 import { openReport } from '@/components/ReportDialog'
 import { openPerson } from '@/components/PersonSheet'
@@ -39,6 +41,9 @@ import { renderHashtagged } from './hashtags'
 const QUICK_REACTIONS = ['❤️', '🔥', '😂', '😮', '😢', '👏'] as const
 
 const detail = signal<MomentDetail | null>(null)
+/** Why there is no moment to show: ``gone`` (404 — deleted, expired or
+ *  hidden) or ``failed`` (the read didn't come back). */
+const failure = signal<'gone' | 'failed' | null>(null)
 const loading = signal<boolean>(true)
 
 
@@ -48,25 +53,29 @@ export default function MomentumDetailPage() {
   const loc = useLocation()
   const momentId = params.momentId
   const me = currentUser.value?.user_id
+  const retryRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     loading.value = true
     detail.value = null
     void loadBlocks()  // hide replies from blocked authors
     void loadHouseholdUsers()  // resolve display names + avatars from raw user_ids
+    failure.value = null
     const refetch = (initial: boolean) =>
       api.get(`/api/moments/${momentId}`)
         .then((d: MomentDetail) => {
           detail.value = d
-          if (initial) loading.value = false
+          failure.value = null
         })
         .catch((err: unknown) => {
-          if (initial) {
-            showToast(t('moment.detail.load_failed', { error: String((err as Error)?.message ?? err) }),
-              'error')
-            loc.route('/momentum')
-          }
+          // 404 = deleted, expired or hidden — say so, also when it goes
+          // while open. Anything else is a failed load, not "gone"; a
+          // failed refresh keeps what is on screen.
+          if ((err as { status?: number })?.status === 404) failure.value = 'gone'
+          else if (detail.value === null) failure.value = 'failed'
         })
+        .finally(() => { if (initial) loading.value = false })
+    retryRef.current = () => void refetch(false)
     void refetch(true)
     const matches = (data: { moment_id?: string; parent_moment_id?: string | null }) =>
       data.moment_id === momentId || data.parent_moment_id === momentId
@@ -85,6 +94,36 @@ export default function MomentumDetailPage() {
   }, [momentId])
 
   if (loading.value) return <MomentumDetailSkeleton />
+  if (failure.value === 'gone') {
+    return (
+      <div class="sh-momentum-detail">
+        <div class="sh-empty-state" role="status">
+          <div aria-hidden="true">⌛</div>
+          <h2>{t('moment.detail.gone_title')}</h2>
+          <p>{t('moment.detail.gone_body')}</p>
+          <div class="sh-empty-state__cta-row">
+            <a class="sh-btn sh-btn--primary" href={addBase('/momentum')}
+              onClick={(ev) => { ev.preventDefault(); loc.route('/momentum') }}>
+              {t('moment.detail.back')}
+            </a>
+          </div>
+        </div>
+      </div>
+    )
+  }
+  if (failure.value === 'failed') {
+    return (
+      <div class="sh-momentum-detail">
+        <LoadErrorState
+          message={t('moment.detail.load_failed_title')}
+          detail={t('moment.detail.load_failed_body')}
+          retryLabel={t('load.try_again')}
+          onRetry={() => retryRef.current()}
+          headingLevel={2}
+        />
+      </div>
+    )
+  }
   if (!detail.value) return null
   const m = detail.value.moment
   const isAuthor = m.author_user_id === me

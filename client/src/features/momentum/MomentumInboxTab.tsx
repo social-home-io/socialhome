@@ -21,6 +21,8 @@ import { openMomentumComposer } from '@/components/MomentumComposerDialog'
 import { VideoMedia } from '@/components/VideoMedia'
 import { MomentumInboxSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
+import { LoadErrorState, StaleNotice } from '@/components/LoadErrorState'
+import { INITIAL_LOAD, clockTime, loadFailed, loadSucceeded, type LoadStatus } from '@/utils/loadStatus'
 import { openPerson } from '@/components/PersonSheet'
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
 import {
@@ -38,6 +40,19 @@ import { t, isOne, formatLocale } from '@/i18n/i18n'
 
 const moments = signal<Moment[]>([])
 const loading = signal<boolean>(true)
+/** A failed load is never "No moments yet" (``utils/loadStatus``). */
+const status = signal<LoadStatus>(INITIAL_LOAD)
+
+/** Load (or refresh, on a ``moment.*`` frame) the inbox. */
+function fetchInbox(initial: boolean): Promise<void> {
+  return api.get('/api/moments')
+    .then((rows: Moment[]) => {
+      moments.value = rows ?? []
+      status.value = loadSucceeded(status.value)
+    })
+    .catch(() => { status.value = loadFailed(status.value) })
+    .finally(() => { if (initial) loading.value = false })
+}
 
 const CONTENT_TRUNCATE_AT = 280
 const DEFAULT_REACTION = '❤️'
@@ -75,19 +90,9 @@ export default function MomentumInboxTab() {
 
   useEffect(() => {
     loading.value = true
+    status.value = INITIAL_LOAD
     void loadBlocks()
     void loadHouseholdUsers()  // resolve display names + avatars from raw user_ids
-    const fetchInbox = (initial: boolean) =>
-      api.get('/api/moments')
-        .then((rows: Moment[]) => {
-          moments.value = rows ?? []
-          if (initial) loading.value = false
-        })
-        .catch((err: unknown) => {
-          if (initial) loading.value = false
-          showToast(t('moment.inbox.load_failed', { error: String((err as Error)?.message ?? err) }),
-            'error')
-        })
     void fetchInbox(true)
     const dispose = [
       ws.on('moment.created',          () => { void fetchInbox(false) }),
@@ -145,7 +150,22 @@ export default function MomentumInboxTab() {
         <span class="sh-momentum-compose-prompt">{t('moment.inbox.prompt')}</span>
       </button>
 
-      {topLevel.length === 0 && (
+      {status.value.failed && (
+        <LoadErrorState
+          message={t('moment.inbox.load_failed_title')}
+          detail={t('load.household_quiet')}
+          retryLabel={t('load.try_again')}
+          onRetry={() => void fetchInbox(false)}
+        />
+      )}
+      {status.value.staleSince !== null && (
+        <StaleNotice
+          message={t('moment.inbox.stale', { time: clockTime(status.value.staleSince) })}
+          onRetry={() => void fetchInbox(false)}
+        />
+      )}
+
+      {!status.value.failed && topLevel.length === 0 && (
         <div class="sh-empty-state">
           <div aria-hidden="true">🌅</div>
           <h3>{t('moment.inbox.empty_title')}</h3>
@@ -155,7 +175,7 @@ export default function MomentumInboxTab() {
         </div>
       )}
 
-      <ul class="sh-momentum-list" aria-label={t('moment.inbox.list_aria')}>
+      {topLevel.length > 0 && <ul class="sh-momentum-list" aria-label={t('moment.inbox.list_aria')}>
         {topLevel.map(m => (
           <MomentRow
             key={m.id}
@@ -168,7 +188,7 @@ export default function MomentumInboxTab() {
             onTagClick={(t) => loc.route(`/momentum?tab=archive&tag=${encodeURIComponent(t)}`)}
           />
         ))}
-      </ul>
+      </ul>}
     </div>
   )
 }

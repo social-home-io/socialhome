@@ -17,6 +17,7 @@ import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
+import { Button } from '@/components/Button'
 import type { Highlight, HighlightFrame } from '@/types'
 import { t, isOne } from '@/i18n/i18n'
 import { resolveDisplayName } from '@/utils/avatar'
@@ -50,6 +51,9 @@ export function viaPostQuery(postId: string | null | undefined): string {
 
 const cache = signal<Record<string, HighlightDetailResponse | null>>({})
 const loading = signal<Record<string, boolean>>({})
+/** Reads that failed for another reason than 404 — shown with Try again,
+ *  never remembered as "ended". */
+const failed = signal<Record<string, boolean>>({})
 
 
 export function HighlightShareCard({ highlightId, note, spaceId = null, postId = null }: HighlightShareCardProps) {
@@ -66,23 +70,29 @@ export function HighlightShareCard({ highlightId, note, spaceId = null, postId =
   useEffect(() => {
     if (!highlightId) return
     if (highlightId in cache.value) return
-    if (loading.value[highlightId]) return
+    if (loading.value[highlightId] || failed.value[highlightId]) return
     loading.value = { ...loading.value, [highlightId]: true }
     api.get(`/api/highlights/${highlightId}${via}`)
       .then((d: HighlightDetailResponse) => {
         cache.value = { ...cache.value, [highlightId]: d }
       })
-      .catch(() => {
-        // 404 / 403 → cache null so we render the "ended" placeholder
-        // and don't retry on every re-render.
-        cache.value = { ...cache.value, [highlightId]: null }
+      .catch((err: unknown) => {
+        // 404 (ended, or not for this reader) → cache null so we render
+        // the "ended" placeholder and don't retry on every re-render.
+        // Anything else is a failed read: never cached as "ended" — the
+        // card offers Try again.
+        if ((err as { status?: number })?.status === 404) {
+          cache.value = { ...cache.value, [highlightId]: null }
+        } else {
+          failed.value = { ...failed.value, [highlightId]: true }
+        }
       })
       .finally(() => {
         const next = { ...loading.value }
         delete next[highlightId]
         loading.value = next
       })
-  }, [highlightId, via])
+  }, [highlightId, via, failed.value[highlightId ?? '']])
 
   if (!highlightId) {
     return (
@@ -99,6 +109,25 @@ export function HighlightShareCard({ highlightId, note, spaceId = null, postId =
   }
 
   const detail = cache.value[highlightId]
+  if (failed.value[highlightId] && !loading.value[highlightId]) {
+    const retry = () => {
+      const next = { ...failed.value }
+      delete next[highlightId]
+      failed.value = next  // the effect above reads again
+    }
+    return (
+      <div class="sh-highlight-share-card sh-highlight-share-card--failed">
+        <span class="sh-highlight-share-card-thumb sh-highlight-share-card-thumb--ended" aria-hidden="true">
+          ⚠️
+        </span>
+        <div class="sh-highlight-share-card-body">
+          <strong>{t('highlight.share_card.load_failed')}</strong>
+          {note && <p class="sh-muted">{note}</p>}
+          <Button variant="secondary" onClick={retry}>{t('load.try_again')}</Button>
+        </div>
+      </div>
+    )
+  }
   if (loading.value[highlightId] || detail === undefined) {
     return (
       <div class="sh-highlight-share-card sh-highlight-share-card--loading">

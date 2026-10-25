@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { render, waitFor, fireEvent } from '@testing-library/preact'
 
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -138,5 +138,41 @@ describe('MomentumDetailPage share link', () => {
     ;(await findByText(/Copy share link/)).click()
     await waitFor(() => expect(showToast).toHaveBeenCalled())
     expect(writeText).not.toHaveBeenCalled()
+  })
+})
+
+describe('MomentumDetailPage gone vs failed', () => {
+  const notFound = () => Object.assign(new Error('moment not found'), { status: 404 })
+
+  it('a moment that is gone says so and leads back, without a toast', async () => {
+    vi.mocked(showToast).mockClear()
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === '/api/moments/m-amaka') throw notFound()
+      return []
+    })
+    const { findByRole, container } = render(<MomentumDetailPage />)
+    const state = await findByRole('status')
+    expect(state.textContent).toContain("This moment isn't here any more")
+    expect(container.querySelector('a[href$="/momentum"]')?.textContent).toBe('Back to Momentum')
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+    expect(showToast).not.toHaveBeenCalled()
+  })
+
+  it('a failed load is not "gone": it says so and offers Try again', async () => {
+    let fail = true
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path !== '/api/moments/m-amaka') return []
+      if (fail) throw new Error('offline')
+      return {
+        moment: moment('m-amaka', 'ru-amaka', { author: { display_name: 'Amaka Okafor', picture_url: null } }),
+        replies: [], reactions: [],
+      } satisfies MomentDetail
+    })
+    const { findByRole, container } = render(<MomentumDetailPage />)
+    expect((await findByRole('alert')).textContent).toContain("Couldn't load this moment")
+    expect(container.textContent).not.toContain("isn't here any more")
+    fail = false
+    fireEvent.click(await findByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(container.textContent).toContain('Amaka Okafor'))
   })
 })
