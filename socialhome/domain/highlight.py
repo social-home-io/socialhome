@@ -28,6 +28,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from .errors import CodedError
+
 
 class HighlightAudience(StrEnum):
     """Audience kinds for a highlight (see ``highlights.audience_kind``)."""
@@ -35,6 +37,36 @@ class HighlightAudience(StrEnum):
     ALL_PAIRED = "all_paired"
     HOUSEHOLDS = "households"
     USERS = "users"
+
+
+class HighlightAudienceMismatchError(CodedError):
+    """A frame asked for a different audience than today's highlight has.
+
+    A day's frames share one audience (the ``highlights`` row). Appending
+    a frame meant for fewer — or more — people would silently show it to
+    today's audience instead, so the frame is refused (fail closed). The
+    ``audience_kind`` / ``audience_count`` params name today's audience so
+    the client can say who the day's frames go to.
+    """
+
+    status = 409
+    code = "HIGHLIGHT_AUDIENCE_MISMATCH"
+    detail = (
+        "Today's highlight is for different people. New frames go to "
+        "the same people as today's highlight."
+    )
+
+
+def same_audience(
+    kind_a: HighlightAudience,
+    ids_a: tuple[str, ...],
+    kind_b: HighlightAudience,
+    ids_b: tuple[str, ...],
+) -> bool:
+    """Two audiences reach exactly the same people (ids in any order)."""
+    if kind_a is not kind_b:
+        return False
+    return kind_a is HighlightAudience.ALL_PAIRED or set(ids_a) == set(ids_b)
 
 
 class HighlightFrameType(StrEnum):

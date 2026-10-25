@@ -185,6 +185,12 @@ class HighlightFramesCollectionView(BaseView):
         audience_ids: tuple[str, ...] = tuple(
             str(x) for x in audience_ids_raw if isinstance(x, str)
         )
+        if audience_ids_raw and audience_kind is None:
+            # Ids alone would be ignored and the frame join today's
+            # (possibly wider) highlight — refuse instead of guessing.
+            return error_response(
+                422, "VALIDATION_ERROR", "audience needs an audience_kind"
+            )
 
         svc = self.svc(highlight_service_key)
         highlight, frame = await svc.create_or_append_frame(

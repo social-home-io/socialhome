@@ -9,10 +9,18 @@
  * case, which dominates the inbox.
  *
  * This dialog is the streamlined entry: drop a photo or video, an
- * optional caption, hit Share. Audience defaults to "all paired
- * households" — the existing default in the full composer. A small
- * "Build a multi-frame story →" link in the dialog footer escalates to
- * the full composer for users who want the storyboard.
+ * optional caption, hit Share. A small "Build a multi-frame story →"
+ * link in the dialog footer escalates to the full composer for users who
+ * want the storyboard or a narrower audience.
+ *
+ * Audience: once the author has posted today, the frame joins today's
+ * highlight and its audience, and the dialog says who that is. The frame
+ * always names the audience the dialog showed — so one sent after UTC
+ * midnight starts the new day for the same people, and the server refuses
+ * it (409) if today's highlight is for other people. A new day's highlight
+ * goes to all paired households when that is the Settings default; with a
+ * "pick per highlight" default the dialog sends the author to the full
+ * composer instead of guessing. Share waits until today is known.
  *
  * Mirrors the ``MomentumComposerDialog`` + ``CalendarEventDialog``
  * pattern: module-level signals + ``openHighlightQuickShare()`` helper
@@ -29,6 +37,13 @@ import { UploadProgressBar, uploadWithProgress } from './UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
 import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
+import {
+  audienceBody,
+  defaultAudienceKind,
+  loadMyToday,
+  todayFixedNote,
+} from '@/features/highlights/todayAudience'
+import type { Highlight } from '@/types'
 
 const CAPTION_MAX = 140
 
@@ -42,6 +57,27 @@ const mediaUrl = signal<string>('')
  *  / ``<video>``. Never sent. */
 const mediaPreviewUrl = signal<string>('')
 const mediaType = signal<'image' | 'video' | null>(null)
+/** ``undefined`` while loading; ``null`` when the author hasn't posted
+ *  today; else today's highlight (its audience is fixed). */
+const today = signal<Highlight | null | undefined>(undefined)
+/** Today's highlight has a public link — its note says so. */
+const todayPublished = signal<boolean>(false)
+
+/** Read today's highlight. A failed read counts as "none today": the
+ *  frame then names the Settings default, and the server refuses it (409)
+ *  if today's highlight is for other people — never wider. */
+function loadToday(): void {
+  loadMyToday().then(
+    (mine) => {
+      today.value = mine?.highlight ?? null
+      todayPublished.value = mine?.published ?? false
+    },
+    () => {
+      today.value = null
+      todayPublished.value = false
+    },
+  )
+}
 
 /** Open the quick-share dialog. Resets all state — call this fresh
  *  every time, no carry-over from a previous abandoned share. */
@@ -51,7 +87,16 @@ export function openHighlightQuickShare(): void {
   mediaPreviewUrl.value = ''
   mediaType.value = null
   submitting.value = false
+  today.value = undefined
+  todayPublished.value = false
   open.value = true
+  loadToday()
+}
+
+/** A new day's highlight whose Settings default is "pick per highlight" —
+ *  quick share can't pick, the full composer can. */
+function needsComposer(): boolean {
+  return today.value === null && defaultAudienceKind() !== 'all_paired'
 }
 
 function closeDialog(): void {
@@ -108,25 +153,31 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
 
   const submit = async (e: Event) => {
     e.preventDefault()
-    if (!mediaUrl.value || submitting.value) return
+    const shown = today.value
+    if (!mediaUrl.value || submitting.value || shown === undefined || needsComposer()) return
     submitting.value = true
     try {
-      const r = await api.post('/api/highlights/frames', {
+      const body: Record<string, unknown> = {
         media_url:    mediaUrl.value,
         frame_type:   mediaType.value,
         caption_text: caption.value.trim() || null,
-        // Audience kind matches the full composer's default — everyone
-        // the household is paired with sees it. Users who want a
-        // narrower audience step up to the multi-frame builder.
-        audience_kind: 'all_paired',
-        audience:      [],
-      }) as { highlight: { id: string }; frame: { id: string } }
+      }
+      // Exactly the audience the dialog showed: today's, or a new day
+      // for all paired households (the Settings default).
+      Object.assign(body, shown !== null
+        ? audienceBody(shown.audience_kind, shown.audience)
+        : audienceBody('all_paired', []))
+      const r = await api.post('/api/highlights/frames', body) as
+        { highlight: { id: string }; frame: { id: string } }
       showToast(t('highlight.shared'), 'success')
       open.value = false
       onShared?.(r.highlight.id)
     } catch (err: unknown) {
       showToast(t('highlight.share_failed', { error: String((err as Error)?.message ?? err) }), 'error')
       submitting.value = false
+      // Today may have changed (another tab, a new day): show who the
+      // next try goes to before it is sent.
+      loadToday()
     }
   }
 
@@ -195,9 +246,15 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
           </span>
         </label>
 
-        <p class="sh-muted sh-highlight-quick-audience-note">
-          {t('highlight.quick.audience_note')}
-        </p>
+        {today.value !== undefined && (
+          <p class="sh-muted sh-highlight-quick-audience-note">
+            {today.value !== null
+              ? todayFixedNote(today.value, todayPublished.value)
+              : needsComposer()
+                ? t('highlight.quick.pick_in_composer')
+                : t('highlight.audience.new_all')}
+          </p>
+        )}
 
         <div class="sh-form-actions">
           <a
@@ -211,7 +268,7 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
           <Button
             type="submit"
             loading={submitting.value}
-            disabled={!mediaUrl.value}
+            disabled={!mediaUrl.value || today.value === undefined || needsComposer()}
           >
             {t('highlight.quick.share')}
           </Button>

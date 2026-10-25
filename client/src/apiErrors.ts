@@ -67,6 +67,8 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   // a trust-relay request too old to approve.
   PAIRING_CONFIRMED: () => t('error.pairing_confirmed'),
   REQUEST_EXPIRED: () => t('error.request_expired'),
+  // Highlights: a frame asked for other people than today's highlight.
+  HIGHLIGHT_AUDIENCE_MISMATCH: () => t('error.highlight_audience_mismatch'),
   SPACE_NOT_PUBLIC: () => t('error.space_not_public'),
   // Listing a space on a GFS: only a global space, on servers its owner
   // picks. Publishing a public space would make it global (a tier change).

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -13,12 +14,17 @@ from socialhome.domain.events import (
     HighlightFrameReactionChanged,
     HighlightFrameViewed,
 )
-from socialhome.domain.highlight import HighlightAudience, HighlightFrameType
+from socialhome.domain.highlight import (
+    HighlightAudience,
+    HighlightAudienceMismatchError,
+    HighlightFrameType,
+)
 from socialhome.domain.post import Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services import highlight_service as highlight_service_module
 from socialhome.services.highlight_service import (
     MAX_FRAMES_PER_HIGHLIGHT,
     NOT_FOUND_MESSAGE,
@@ -303,6 +309,84 @@ async def test_your_own_highlight_is_never_unseen(db, svc):
     await service.mark_frame_viewed(frame_id=frame.id, viewer_user_id="u2")
     (theirs,) = await service.list_visible("u2")
     assert theirs["unseen_count"] == 2
+
+
+# ── A day's audience is never silently widened ────────────────────────────
+
+
+async def _first_frame(service, kind, audience=()):
+    return await service.create_or_append_frame(
+        author_user_id="u1",
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/first.webp",
+        audience_kind=kind,
+        audience=audience,
+    )
+
+
+async def test_a_narrower_frame_never_joins_a_wider_highlight(db, svc):
+    """Today's highlight is for everyone; a frame meant only for Anna is
+    refused instead of being shown to everyone."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    captured: list[HighlightFrameAdded] = []
+    bus.subscribe(HighlightFrameAdded, lambda e: captured.append(e))
+    with pytest.raises(HighlightAudienceMismatchError) as exc:
+        await service.create_or_append_frame(
+            author_user_id="u1",
+            frame_type=HighlightFrameType.IMAGE,
+            media_url="/api/media/private.webp",
+            audience_kind=HighlightAudience.USERS,
+            audience=("u-anna",),
+        )
+    assert exc.value.status == 409
+    assert exc.value.code == "HIGHLIGHT_AUDIENCE_MISMATCH"
+    assert exc.value.params["audience_kind"] == "all_paired"
+    # Nothing written, nothing published.
+    assert len(await service._highlights.list_frames(highlight.id)) == 1
+    assert captured == []
+
+
+async def test_a_wider_frame_never_joins_a_narrower_highlight(db, svc):
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    with pytest.raises(HighlightAudienceMismatchError):
+        await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    with pytest.raises(HighlightAudienceMismatchError):
+        await _first_frame(service, HighlightAudience.USERS, ("u-anna", "u-lena"))
+    with pytest.raises(HighlightAudienceMismatchError):
+        await _first_frame(service, HighlightAudience.HOUSEHOLDS, ("u-anna",))
+
+
+async def test_the_same_audience_appends(db, svc):
+    """Same kind and the same ids in any order append to today's highlight."""
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    first, _ = await _first_frame(service, HighlightAudience.USERS, ("a", "b"))
+    second, frame = await _first_frame(service, HighlightAudience.USERS, ("b", "a"))
+    assert second.id == first.id and frame.sequence == 2
+
+
+async def test_a_frame_without_an_audience_joins_todays_highlight(db, svc):
+    """No audience asked for: the frame goes to today's people, whatever
+    the default in Settings says."""
+    service, _ = svc
+    await _seed_user(
+        db,
+        "u1",
+        "pascal",
+        prefs_json='{"highlights": {"default_audience": {"kind": "all_paired"}}}',
+    )
+    first, _ = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    second, frame = await service.create_or_append_frame(
+        author_user_id="u1",
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/next.webp",
+    )
+    assert second.id == first.id and frame.sequence == 2
+    assert second.audience_kind is HighlightAudience.USERS
 
 
 async def test_get_for_viewer_and_get_frame(db, svc):
@@ -767,3 +851,65 @@ async def test_frame_keeps_local_media_ref_verbatim(db, svc):
         media_url="/api/media/a.webp",
     )
     assert frame.media_url == "/api/media/a.webp"
+
+
+class _Clock(datetime):
+    """``datetime.now`` the test moves across UTC midnight."""
+
+    current = datetime(2026, 10, 25, 23, 59, 50, tzinfo=UTC)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.current
+
+
+async def test_a_frame_naming_todays_audience_after_midnight_keeps_it(
+    db, svc, monkeypatch
+):
+    """The composer shows "Today's highlight is for Anna" and sends that
+    audience with every frame; when the frame lands after UTC midnight the
+    new day's highlight is for Anna too — never the Settings default."""
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")  # Settings default: all_paired
+    monkeypatch.setattr(highlight_service_module, "datetime", _Clock)
+    _Clock.current = datetime(2026, 10, 25, 23, 59, 50, tzinfo=UTC)
+    first, _ = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    _Clock.current = datetime(2026, 10, 26, 0, 0, 5, tzinfo=UTC)
+    second, frame = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    assert second.id != first.id and second.highlight_date == "2026-10-26"
+    assert second.audience_kind is HighlightAudience.USERS
+    assert second.audience == ("u-anna",)
+    assert frame.sequence == 1
+
+
+async def test_concurrent_first_frames_never_fail_with_a_500(db, svc):
+    """Two first frames of the day racing on UNIQUE(author, date): the loser
+    reads the winner's highlight — appends with the same audience, a clean
+    409 with another — instead of an IntegrityError."""
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    await _seed_user(db, "u2", "anna")
+    results = await asyncio.gather(
+        _first_frame(service, HighlightAudience.ALL_PAIRED),
+        _first_frame(service, HighlightAudience.USERS, ("u-anna",)),
+        return_exceptions=True,
+    )
+    kinds = sorted(type(r).__name__ for r in results)
+    assert kinds == ["HighlightAudienceMismatchError", "tuple"], results
+    same = await asyncio.gather(
+        service.create_or_append_frame(
+            author_user_id="u2",
+            frame_type=HighlightFrameType.IMAGE,
+            media_url="/api/media/x.webp",
+            audience_kind=HighlightAudience.ALL_PAIRED,
+        ),
+        service.create_or_append_frame(
+            author_user_id="u2",
+            frame_type=HighlightFrameType.IMAGE,
+            media_url="/api/media/y.webp",
+            audience_kind=HighlightAudience.ALL_PAIRED,
+        ),
+        return_exceptions=True,
+    )
+    assert all(isinstance(r, tuple) for r in same), same
+    assert same[0][0].id == same[1][0].id

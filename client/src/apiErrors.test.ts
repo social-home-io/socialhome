@@ -11,6 +11,14 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("You can't start a conversation with yourself. Pick someone else.")
   })
 
+  it('translates a highlight frame refused for another audience', () => {
+    expect(apiErrorMessage(409, '/api/highlights/frames', {
+      code: 'HIGHLIGHT_AUDIENCE_MISMATCH',
+      detail: 'Today\'s highlight is for different people.',
+      params: { audience_kind: 'all_paired', audience_count: 0 },
+    })).toBe("Today's highlight is for other people. New frames go to the same people as today's highlight.")
+  })
+
   it('translates the GFS fallback refusal for a household not paired directly', () => {
     expect(apiErrorMessage(409, '/api/pairing/connections/p1', {
       code: 'GFS_RELAY_NOT_ALLOWED',

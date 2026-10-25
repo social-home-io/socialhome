@@ -43,9 +43,11 @@ from ..domain.events import (
 from ..domain.highlight import (
     Highlight,
     HighlightAudience,
+    HighlightAudienceMismatchError,
     HighlightFrame,
     HighlightFrameReplySnapshot,
     HighlightFrameType,
+    same_audience,
 )
 from ..domain.post import Post, PostType
 from ..media.cleanup import unlink_unreferenced
@@ -241,7 +243,9 @@ class HighlightService:
         prefs = parse_highlights_preferences(author.preferences_json)
 
         # Default audience flows from the author's preferences when the
-        # caller did not pin one explicitly.
+        # caller did not pin one explicitly (a new day's highlight only —
+        # a later frame joins today's highlight and its audience).
+        explicit = audience_kind is not None
         if audience_kind is None:
             kind = prefs.default_audience_kind
             ids: tuple[str, ...] = prefs.default_audience
@@ -272,6 +276,18 @@ class HighlightService:
             highlight_date=highlight_date,
             expires_at=expires_at,
         )
+        # A day's frames share one audience. A frame asked for different
+        # people never joins (and so silently widens or narrows) today's
+        # highlight — refused before anything is written.
+        if explicit and not same_audience(
+            highlight.audience_kind, highlight.audience, kind, ids
+        ):
+            raise HighlightAudienceMismatchError(
+                params={
+                    "audience_kind": highlight.audience_kind.value,
+                    "audience_count": len(highlight.audience),
+                }
+            )
 
         # Cap frames per highlight per day.
         existing = await self._highlights.list_frames(highlight.id)
