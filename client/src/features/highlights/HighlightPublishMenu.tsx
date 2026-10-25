@@ -18,6 +18,7 @@ import { signal } from '@preact/signals'
 import { api, ApiError } from '@/api'
 import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
+import { confirmDialog } from '@/components/confirm'
 import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { showToast } from '@/components/Toast'
 import { addBase } from '@/baseUrl'
@@ -38,6 +39,9 @@ interface PublishedToken {
 const open = signal(false)
 const highlightId = signal('')
 const connections = signal<GfsConnection[]>([])
+/** The GFS list read: a failure is said as such (with Retry), never as
+ *  "not connected to a GFS". */
+const loadState = signal<'loading' | 'ready' | 'error'>('loading')
 const selectedGfs = signal('')
 const label = signal('')
 const submitting = signal(false)
@@ -58,16 +62,40 @@ export function openPublishMenu(id: string, alreadyPublished: boolean): void {
   open.value = true
 }
 
+/** ``GET /api/gfs/connections`` answers a bare array of connections
+ *  (``routes/gfs.py``); only active ones can carry a public link. */
+async function loadConnections(): Promise<void> {
+  loadState.value = 'loading'
+  try {
+    const rows = await api.get<GfsConnection[]>('/api/gfs/connections')
+    const active = (Array.isArray(rows) ? rows : []).filter(c => c.status === 'active')
+    connections.value = active
+    if (active.length === 1) selectedGfs.value = active[0].id
+    loadState.value = 'ready'
+  } catch {
+    connections.value = []
+    loadState.value = 'error'
+  }
+}
+
+/** Whether the highlight already has public links — the viewer's
+ *  highlight row doesn't carry ``public_gfs_id``, so ask the author-only
+ *  ``GET …/publish`` (else "Remove all" only showed right after creating
+ *  a link). A failed read keeps what the opener passed. */
+async function loadPublished(id: string): Promise<void> {
+  try {
+    const res = await api.get<{ published?: unknown }>(`/api/highlights/${id}/publish`)
+    if (highlightId.value === id && typeof res?.published === 'boolean') {
+      isPublished.value = res.published
+    }
+  } catch { /* keep the opener's flag */ }
+}
+
 export function HighlightPublishMenu() {
   useEffect(() => {
     if (!open.value) return
-    void api.get<{ connections: GfsConnection[] }>('/api/gfs/connections')
-      .then((res) => {
-        const active = (res.connections ?? []).filter(c => c.status === 'active')
-        connections.value = active
-        if (active.length === 1) selectedGfs.value = active[0].id
-      })
-      .catch(() => { connections.value = [] })
+    void loadConnections()
+    void loadPublished(highlightId.value)
   }, [open.value])
 
   const alertRef = useRef<HTMLParagraphElement>(null)
@@ -118,6 +146,11 @@ export function HighlightPublishMenu() {
 
   const unpublishAll = async () => {
     if (submitting.value) return
+    const ok = await confirmDialog(t('highlight.publish.remove_all_confirm'), {
+      destructive: true,
+      confirmLabel: t('highlight.publish.remove_all_confirm_ok'),
+    })
+    if (!ok) return
     submitting.value = true
     try {
       await api.delete(`/api/highlights/${highlightId.value}/publish`)
@@ -145,14 +178,24 @@ export function HighlightPublishMenu() {
         <ProtectedNotice capability="public_links" />
       )}
 
-      {!isRestricted('public_links') && connections.value.length === 0 && (
+      {!isRestricted('public_links') && loadState.value === 'error' && (
+        <div class="sh-highlight-publish-load-error">
+          <p class="sh-form-error" role="alert">{t('highlight.publish.load_failed')}</p>
+          <Button variant="secondary" onClick={() => void loadConnections()}>
+            {t('common.retry')}
+          </Button>
+        </div>
+      )}
+
+      {!isRestricted('public_links') && loadState.value === 'ready' && connections.value.length === 0 && (
         <p class="sh-muted">
           {t('highlight.publish.no_gfs_before')}{' '}
-          <a href={addBase('/settings/connections')}>{t('highlight.publish.no_gfs_link')}</a>{t('highlight.publish.no_gfs_after')}
+          {/* GFS connections live on the Connections page (router.ts). */}
+          <a href={addBase('/connections')}>{t('highlight.publish.no_gfs_link')}</a>{t('highlight.publish.no_gfs_after')}
         </p>
       )}
 
-      {!isRestricted('public_links') && connections.value.length > 0 && !lastIssued.value && (
+      {!isRestricted('public_links') && loadState.value === 'ready' && connections.value.length > 0 && !lastIssued.value && (
         <form
           class="sh-highlight-publish-form"
           onSubmit={(e) => { e.preventDefault(); void submit() }}

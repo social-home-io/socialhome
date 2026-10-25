@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 import { ConfirmDialogHost, confirmDialog } from './confirm'
 
@@ -42,5 +44,17 @@ describe('confirmDialog', () => {
     confirmDialog('Second?')
     // The first promise resolves false because the second supersedes it.
     await expect(first).resolves.toBe(false)
+  })
+})
+
+describe('ConfirmDialogHost placement', () => {
+  it('is the last overlay, so a confirm shows over the dialog that asked', () => {
+    // Every overlay sits on the same modal z-index: DOM order decides.
+    // Mounted before the highlight publish menu, "Remove all" opened its
+    // confirm hidden behind the menu.
+    const app = readFileSync(join(__dirname, '..', 'App.tsx'), 'utf8')
+    const overlays = /overlays=\{<>([\s\S]*?)<\/>\}/.exec(app)![1]
+    const tags = [...overlays.matchAll(/<([A-Z]\w*)\b/g)].map(m => m[1])
+    expect(tags.at(-1)).toBe('ConfirmDialogHost')
   })
 })
