@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
 import { useLayoutEffect, useState } from 'preact/hooks'
-import { Modal } from './Modal'
+import { Modal, openDialogCount } from './Modal'
 
 describe('Modal', () => {
   it('renders nothing when closed', () => {
@@ -233,5 +233,33 @@ describe('Modal', () => {
     )
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(outer).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps Escape and arrow keys inside an open dialog: a page key handler never sees them', () => {
+    // A full-screen page (the highlight viewer) binds Escape / arrows on
+    // ``window``. Escape in a dialog over it closed the dialog AND left
+    // the page; an arrow in the dialog's text field changed the frame.
+    const onClose = vi.fn()
+    const pageKeys = vi.fn()
+    window.addEventListener('keydown', pageKeys)
+    const { getByRole } = render(
+      <Modal open={true} title="Report" onClose={onClose}><textarea aria-label="Note" /></Modal>
+    )
+    const note = getByRole('textbox', { name: 'Note' })
+    for (const key of ['Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']) {
+      fireEvent.keyDown(note, { key })
+    }
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(pageKeys).not.toHaveBeenCalled()
+    // Arrows keep their default: the caret still moves in the field.
+    expect(fireEvent.keyDown(note, { key: 'ArrowLeft' })).toBe(true)
+    window.removeEventListener('keydown', pageKeys)
+  })
+
+  it('counts open dialogs, so a page can pause while one is up', () => {
+    const { rerender } = render(<Modal open={true} title="A" onClose={() => {}}>a</Modal>)
+    expect(openDialogCount.value).toBe(1)
+    rerender(<Modal open={false} title="A" onClose={() => {}}>a</Modal>)
+    expect(openDialogCount.value).toBe(0)
   })
 })
