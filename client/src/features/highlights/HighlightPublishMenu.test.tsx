@@ -17,6 +17,8 @@ vi.mock('@/api', async () => {
 })
 const showToast = vi.fn()
 vi.mock('@/components/Toast', () => ({ showToast: (...a: unknown[]) => showToast(...a) }))
+const confirmDialog = vi.fn()
+vi.mock('@/components/confirm', () => ({ confirmDialog: (...a: unknown[]) => confirmDialog(...a) }))
 
 import { ApiError } from '@/api'
 import { HighlightPublishMenu, openPublishMenu } from './HighlightPublishMenu'
@@ -24,10 +26,11 @@ import { HighlightPublishMenu, openPublishMenu } from './HighlightPublishMenu'
 beforeEach(() => {
   apiPost.mockReset()
   apiGet.mockReset()
+  apiDelete.mockReset()
   showToast.mockReset()
-  apiGet.mockResolvedValue({
-    connections: [{ id: 'gfs-old', display_name: 'Old GFS', status: 'active' }],
-  })
+  confirmDialog.mockReset()
+  // ``GET /api/gfs/connections`` answers a bare array (routes/gfs.py).
+  apiGet.mockResolvedValue([{ id: 'gfs-old', display_name: 'Old GFS', status: 'active' }])
 })
 
 const tooOld = () => new ApiError(409, '/api/highlights/hl-1/publish', {
@@ -61,12 +64,10 @@ describe('HighlightPublishMenu on a GFS too old for encrypted links', () => {
   })
 
   it('with several GFSs: asks for another one and keeps create off for this one', async () => {
-    apiGet.mockResolvedValue({
-      connections: [
-        { id: 'gfs-old', display_name: 'Old GFS', status: 'active' },
-        { id: 'gfs-new', display_name: 'New GFS', status: 'active' },
-      ],
-    })
+    apiGet.mockResolvedValue([
+      { id: 'gfs-old', display_name: 'Old GFS', status: 'active' },
+      { id: 'gfs-new', display_name: 'New GFS', status: 'active' },
+    ])
     apiPost.mockRejectedValue(tooOld())
     openPublishMenu('hl-3', false)
     render(<HighlightPublishMenu />)
@@ -93,5 +94,70 @@ describe('HighlightPublishMenu on a GFS too old for encrypted links', () => {
     fireEvent.click(await screen.findByRole('button', { name: /create/i }))
     await waitFor(() => expect(showToast).toHaveBeenCalled())
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+describe('HighlightPublishMenu GFS list', () => {
+  it('offers the active GFS from the bare-array answer', async () => {
+    apiGet.mockResolvedValue([
+      { id: 'gfs-a', display_name: 'Alpha GFS', status: 'active' },
+      { id: 'gfs-p', display_name: 'Pending GFS', status: 'pending' },
+    ])
+    openPublishMenu('hl-4', false)
+    render(<HighlightPublishMenu />)
+    expect(await screen.findByDisplayValue('Alpha GFS')).toBeTruthy()
+    expect(screen.queryByText(/not connected to a GFS/)).toBeNull()
+    expect(screen.getByRole('button', { name: /create/i })).toHaveProperty('disabled', false)
+  })
+
+  it('with no GFS, links to Connections (a real route)', async () => {
+    apiGet.mockResolvedValue([])
+    openPublishMenu('hl-5', false)
+    render(<HighlightPublishMenu />)
+    const link = await screen.findByRole('link', { name: 'Connections' })
+    expect(link.getAttribute('href')).toMatch(/\/connections$/)
+    expect(link.getAttribute('href')).not.toMatch(/settings/)
+  })
+
+  it('a load failure is an error with Retry, not "not connected"', async () => {
+    apiGet.mockRejectedValue(new Error('offline'))
+    openPublishMenu('hl-6', false)
+    render(<HighlightPublishMenu />)
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toMatch(/Couldn't load your GFS connections/)
+    expect(screen.queryByText(/not connected to a GFS/)).toBeNull()
+    apiGet.mockResolvedValue([{ id: 'gfs-a', display_name: 'Alpha GFS', status: 'active' }])
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByDisplayValue('Alpha GFS')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+describe('HighlightPublishMenu remove all', () => {
+  it('is offered for a highlight published earlier', async () => {
+    apiGet.mockImplementation(async (path: string) => path === '/api/highlights/hl-9/publish'
+      ? { published: true, gfs_id: 'gfs-old', published_at: '2026-10-25T10:00:00Z' }
+      : [{ id: 'gfs-old', display_name: 'Old GFS', status: 'active' }])
+    openPublishMenu('hl-9', false)
+    render(<HighlightPublishMenu />)
+    expect(await screen.findByRole('button', { name: /remove all public links/i })).toBeTruthy()
+  })
+
+  it('asks first and keeps the links when cancelled', async () => {
+    confirmDialog.mockResolvedValue(false)
+    openPublishMenu('hl-7', true)
+    render(<HighlightPublishMenu />)
+    fireEvent.click(await screen.findByRole('button', { name: /remove all public links/i }))
+    await waitFor(() => expect(confirmDialog).toHaveBeenCalled())
+    expect(apiDelete).not.toHaveBeenCalled()
+  })
+
+  it('removes them once confirmed', async () => {
+    confirmDialog.mockResolvedValue(true)
+    apiDelete.mockResolvedValue(undefined)
+    openPublishMenu('hl-8', true)
+    render(<HighlightPublishMenu />)
+    fireEvent.click(await screen.findByRole('button', { name: /remove all public links/i }))
+    await waitFor(() => expect(apiDelete).toHaveBeenCalledWith('/api/highlights/hl-8/publish'))
   })
 })

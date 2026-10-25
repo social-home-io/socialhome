@@ -313,11 +313,13 @@ export function App() {
           <HighlightPickerDialog />
           <CallTypePickerDialog />
           <CallEmbedBlockedDialog />
-          <ConfirmDialogHost />
           <PersonSheet />
           <AliasDialog />
           <HighlightPublishMenu />
           <StatusEditorHost />
+          {/* Last: a confirm opens over the dialog that asked for it, and
+           *  overlays share one z-index, so DOM order decides. */}
+          <ConfirmDialogHost />
         </>}>
           <RouteProgress />
           <Router onLoadStart={routeLoadStart} onLoadEnd={routeLoadEnd}>
