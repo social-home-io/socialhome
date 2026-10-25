@@ -6,21 +6,32 @@ from __future__ import annotations
 import json
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from socialhome.crypto import b64url_encode, generate_identity_keypair, sign_ed25519
+from socialhome.crypto import (
+    b64url_encode,
+    derive_instance_id,
+    generate_identity_keypair,
+    sign_ed25519,
+)
+from socialhome.global_server import moment_delete_log as delete_log_mod
 from socialhome.global_server import moment_public_registry as registry_mod
 from socialhome.global_server.app_keys import (
+    gfs_db_key,
     gfs_fed_repo_key,
+    gfs_moment_delete_log_key,
     gfs_moment_public_registry_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.public import SlidingWindowCounter
 from socialhome.global_server.server import create_gfs_app
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 from socialhome.moment_public_seal import MAX_CIPHERTEXT_CHARS, seal_body
+from tests.moment_public_wire import delete_cert, now_iso
 
 
 def _config(tmp_dir):
@@ -893,3 +904,194 @@ async def test_register_accepts_a_user_id_at_the_cap(client, author):
     )
     resp = await client.post("/gfs/moments/users/register", json=body)
     assert resp.status == 201
+
+
+# ── Delete certificates (v_66) ─────────────────────────────────────────
+
+
+@pytest.fixture
+async def derived_author(client, follower):
+    """An author household whose id derives from its key (§4.1.2), with one
+    user registered and followed by ``inst-follower``."""
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    await client._app[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(
+            instance_id=iid,
+            display_name="Author",
+            public_key=kp.public_key.hex(),
+            status="active",
+        )
+    )
+    resp = await client.post(
+        "/gfs/moments/users/register",
+        json=_sign(
+            kp,
+            {
+                "user_id": "u-del",
+                "instance_id": iid,
+                "username": "dana",
+                "display_name": "Dana",
+                "home_instance_pk": kp.public_key.hex(),
+            },
+        ),
+    )
+    assert resp.status == 201
+    resp = await client.post(
+        "/gfs/moments/users/u-del/follow",
+        json=_sign(
+            follower,
+            {
+                "instance_id": "inst-follower",
+                "follower_user_id": "u-follower",
+                "follower_instance_id": "inst-follower",
+            },
+        ),
+    )
+    assert resp.status == 201
+    return SimpleNamespace(kp=kp, iid=iid, follower=follower)
+
+
+def _cert_body(a, **over) -> dict:
+    occurred_at = over.pop("occurred_at", None)
+    cert = delete_cert(
+        a.kp.private_key,
+        a.kp.public_key,
+        moment_id=over.pop("moment_id", "m-del"),
+        author_user_id=over.pop("author_user_id", "u-del"),
+        origin_instance_id=a.iid,
+        occurred_at=occurred_at,
+    )
+    cert.update(over)
+    return {"instance_id": a.iid, "cert": cert}
+
+
+async def _post_cert(client, kp, body: dict):
+    return await client.post("/gfs/moments/delete_cert", json=_sign(kp, body))
+
+
+async def test_a_delete_certificate_is_kept_once(client, derived_author):
+    a = derived_author
+    body = _cert_body(a)
+    resp = await _post_cert(client, a.kp, body)
+    assert resp.status == 200 and (await resp.json()) == {"kept": True}
+    # A replay is accepted and changes nothing.
+    resp = await _post_cert(client, a.kp, body)
+    assert resp.status == 200 and (await resp.json()) == {"kept": False}
+    rows = await client._app[gfs_db_key].fetchall(
+        "SELECT author_user_id, moment_id, cert FROM gfs_moment_delete_log"
+    )
+    assert [(r["author_user_id"], r["moment_id"]) for r in rows] == [("u-del", "m-del")]
+    # Exactly the certificate — no content, nothing the household didn't sign.
+    assert json.loads(rows[0]["cert"]) == body["cert"]
+
+
+async def test_a_certificate_nobody_could_need_is_not_kept(client, derived_author):
+    a = derived_author
+    resp = await client.post(
+        "/gfs/moments/users/u-del/unfollow",
+        json=_sign(
+            a.follower,
+            {
+                "instance_id": "inst-follower",
+                "follower_user_id": "u-follower",
+                "follower_instance_id": "inst-follower",
+            },
+        ),
+    )
+    assert resp.status == 200
+    resp = await _post_cert(client, a.kp, _cert_body(a))
+    assert resp.status == 200 and (await resp.json()) == {"kept": False}
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"origin_sig_suite": "ed25519+mldsa65"},  # unknown suite
+        {"moment_id": "m-other-after-signing"},  # altered after signing
+        {"content": "a leak"},  # anything beyond the certificate
+    ],
+)
+async def test_a_tampered_certificate_is_refused(client, derived_author, over):
+    a = derived_author
+    body = _cert_body(a)
+    body["cert"].update(over)
+    resp = await _post_cert(client, a.kp, body)
+    assert resp.status == 422
+
+
+async def test_a_certificate_forged_by_another_household_is_refused(
+    client, derived_author
+):
+    """A household signs a 'certificate' for someone else's moment with its
+    own key, or relays the author's genuine one: neither is the author
+    household's own post, so nothing is kept."""
+    a = derived_author
+    forged = _cert_body(SimpleNamespace(kp=a.follower, iid=a.iid))
+    forged["instance_id"] = "inst-follower"
+    assert (await _post_cert(client, a.follower, forged)).status == 422
+    relayed = _cert_body(a)
+    relayed["instance_id"] = "inst-follower"
+    assert (await _post_cert(client, a.follower, relayed)).status == 422
+
+
+async def test_a_certificate_for_an_author_of_another_household_is_403(
+    client, derived_author
+):
+    a = derived_author
+    resp = await _post_cert(client, a.kp, _cert_body(a, author_user_id="u-author"))
+    assert resp.status == 403
+
+
+async def test_an_old_or_future_certificate_is_refused(client, derived_author):
+    a = derived_author
+    for occurred_at in (now_iso(hours=-2), now_iso(hours=1), "not a time"):
+        resp = await _post_cert(client, a.kp, _cert_body(a, occurred_at=occurred_at))
+        assert resp.status == 409
+
+
+async def test_a_malformed_or_unsigned_body_is_refused(client, derived_author):
+    a = derived_author
+    body = _cert_body(a)
+    resp = await _post_cert(client, a.kp, {**body, "extra": 1})
+    assert resp.status == 422
+    resp = await _post_cert(client, a.kp, {"instance_id": a.iid, "cert": "x"})
+    assert resp.status == 422
+    resp = await client.post("/gfs/moments/delete_cert", json=body)
+    assert resp.status == 401
+    resp = await client.post(
+        "/gfs/moments/delete_cert",
+        data=b'{"x": "' + b"x" * 5000 + b'"}',
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status == 413
+
+
+async def test_a_household_past_its_certificate_budget_is_429(
+    client, derived_author, monkeypatch
+):
+    a = derived_author
+    monkeypatch.setattr(delete_log_mod, "DELETE_CERT_POSTS_PER_MINUTE", 1)
+    # A fresh window for this node.
+    client._app[gfs_moment_delete_log_key]._posts = SlidingWindowCounter(1)
+    assert (await _post_cert(client, a.kp, _cert_body(a))).status == 200
+    resp = await _post_cert(client, a.kp, _cert_body(a, moment_id="m-2"))
+    assert resp.status == 429 and resp.headers["Retry-After"] == "60"
+
+
+async def test_an_author_past_the_certificate_cap_is_429(
+    client, derived_author, monkeypatch
+):
+    a = derived_author
+    monkeypatch.setattr(delete_log_mod, "MAX_DELETE_CERTS_PER_AUTHOR", 1)
+    assert (await _post_cert(client, a.kp, _cert_body(a))).status == 200
+    resp = await _post_cert(client, a.kp, _cert_body(a, moment_id="m-2"))
+    assert resp.status == 429
+    assert (await resp.json())["error"] == "author_delete_quota"
+
+
+async def test_info_advertises_the_delete_log_and_month_long_media_signed(client):
+    info = await (await client.get("/gfs/info")).json()
+    assert info["capabilities"]["moment_delete_log"] is True
+    assert info["capabilities"]["moment_media_30d"] is True
+    assert info["capabilities_sig"]

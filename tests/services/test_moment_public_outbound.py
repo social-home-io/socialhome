@@ -14,6 +14,7 @@ import time
 
 import pytest
 
+from socialhome.crypto import derive_instance_id, ed25519_public_key
 from socialhome.domain.events import (
     MediaTranscodeFailed,
     MediaTranscodeReady,
@@ -24,7 +25,13 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.moment import Moment
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.moment_public_seal import ENVELOPE_FIELDS, item_key, open_body
+from socialhome.moment_origin import DELETE_CERT_FIELDS, delete_cert_refusal
+from socialhome.moment_public_seal import (
+    ENVELOPE_FIELDS,
+    item_key,
+    open_body,
+    verify_wire,
+)
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.moment_public_repo import (
     SqliteMomentPublicRegistrationRepo,
@@ -73,13 +80,18 @@ class _Keys:
 
 
 class _Gfs:
-    """Which connections proved ``encrypted_moments``."""
+    """Which connections proved ``encrypted_moments`` — and (v_66)
+    ``moment_delete_log``."""
 
-    def __init__(self, proven: set[str]) -> None:
+    def __init__(self, proven: set[str], delete_log: set[str] | None = None) -> None:
         self.proven = proven
+        self.delete_log = delete_log or set()
 
     async def encrypted_moments_supported(self, gfs_id: str) -> bool:
         return gfs_id in self.proven
+
+    async def moment_delete_log_supported(self, gfs_id: str) -> bool:
+        return gfs_id in self.delete_log
 
 
 def _opened(envelope: dict) -> dict:
@@ -327,6 +339,7 @@ async def test_delete_event_fans_tombstone_to_each_registered_gfs(outbound_setup
         moment_id="m-1",
         author_user_id="u1",
         origin_instance_id="inst-self",
+        is_public=True,
     )
     await s["bus"].publish(delete)
     assert len(s["session"].posts) == 2
@@ -342,6 +355,57 @@ async def test_delete_event_fans_tombstone_to_each_registered_gfs(outbound_setup
     }
     # v_64: when it was signed, inside the signed ciphertext.
     assert isinstance(sent_at, int) and abs(sent_at - time.time()) < 5
+
+
+async def test_a_private_moments_delete_reaches_no_gfs(outbound_setup):
+    """v_66: a moment no GFS ever carried is not named to one when it goes —
+    neither the sealed delete nor a certificate."""
+    s = outbound_setup
+    s["gfs"].delete_log = {"g1", "g2"}
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1", author_user_id="u1", origin_instance_id="inst-self"
+        )
+    )
+    assert s["session"].posts == []
+
+
+async def test_a_delete_certificate_goes_only_where_the_log_is_proven(
+    outbound_setup,
+):
+    """v_66: the delete's signed certificate goes to each GFS that proved
+    ``moment_delete_log`` — one signed body, the same for each — and a GFS
+    that didn't gets only the sealed delete. The certificate is the mesh
+    MOMENT_DELETED's origin signature: it verifies under the household's
+    identity key and names nothing but who deleted which moment when."""
+    s = outbound_setup
+    s["gfs"].delete_log = {"g2"}
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["regs"].upsert(user_id="u1", gfs_id="g2")
+    seed = b"\x01" * 32
+    pk = ed25519_public_key(seed)
+    s["sub"].attach_identity(own_instance_id=derive_instance_id(pk), signing_key=seed)
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="ignored",
+            is_public=True,
+        )
+    )
+    certs = [p for p in s["session"].posts if p[0].endswith("/delete_cert")]
+    assert [u for u, _ in certs] == ["https://gfs2.example/gfs/moments/delete_cert"]
+    body = certs[0][1]
+    assert set(body) == {"instance_id", "cert", "signature"}
+    assert verify_wire(body, pk.hex())
+    cert = body["cert"]
+    assert set(cert) == DELETE_CERT_FIELDS
+    assert cert["moment_id"] == "m-1" and cert["author_user_id"] == "u1"
+    assert cert["origin_instance_id"] == derive_instance_id(pk)
+    assert delete_cert_refusal(cert, identity_pk_hex=pk.hex()) is None
+    # Both servers still got the sealed delete.
+    assert sum(u.endswith("/gfs/moments/delete") for u, _ in s["session"].posts) == 2
 
 
 async def test_outbound_used_before_attach_skips_silently(db):
@@ -405,7 +469,10 @@ async def test_protected_author_can_still_retract_a_moment(outbound_setup):
     await s["regs"].upsert(user_id="u1", gfs_id="g1")
     await s["bus"].publish(
         MomentDeleted(
-            moment_id="m-1", author_user_id="u1", origin_instance_id="inst-self"
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="inst-self",
+            is_public=True,
         )
     )
     assert len(s["session"].posts) == 1
@@ -667,7 +734,10 @@ async def test_a_delete_withdraws_the_media(outbound_setup):
     await s["regs"].upsert(user_id="u1", gfs_id="g1")
     await s["bus"].publish(
         MomentDeleted(
-            moment_id="m-1", author_user_id="u1", origin_instance_id="inst-self"
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="inst-self",
+            is_public=True,
         )
     )
     assert ("withdraw", "m-1") in media.calls

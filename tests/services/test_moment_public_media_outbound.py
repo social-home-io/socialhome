@@ -18,6 +18,8 @@ from socialhome.moment_public_media import (
 from socialhome.moment_public_seal import verify_wire
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.services.moment_public_media_outbound import (
+    MEDIA_KEEP_LONG_S,
+    MEDIA_KEEP_SHORT_S,
     MomentPublicMediaOutbound,
 )
 
@@ -52,11 +54,16 @@ class _Session:
 
 
 class _Gfs:
-    def __init__(self, proven: set[str]) -> None:
+    def __init__(self, proven: set[str], month: set[str] | None = None) -> None:
         self.proven = proven
+        #: v_66 — servers that keep a blob up to 30 days.
+        self.month = month or set()
 
     async def encrypted_moment_media_supported(self, gfs_id: str) -> bool:
         return gfs_id in self.proven
+
+    async def moment_media_30d_supported(self, gfs_id: str) -> bool:
+        return gfs_id in self.month
 
 
 @pytest.fixture
@@ -130,6 +137,24 @@ async def test_a_picture_is_sealed_once_and_uploaded_where_proven(env):
     }
     assert verify_wire(signed, KP.public_key.hex())
     assert headers["X-SH-Author"] == "u-noor" and headers["X-SH-Instance"] == "inst-a"
+
+
+async def test_a_blob_lives_as_long_as_its_moment_where_the_gfs_allows(env):
+    """v_66 (F12): a share link's viewer fetches the file from the GFS for as
+    long as the moment lives, so a GFS that proved ``moment_media_30d`` is
+    asked for the moment's whole life (≤ 30 days); an older one — which
+    refuses more than 8 days — for a week at most."""
+    svc, gfs = env["svc"], env["svc"]._gfs
+    now = 1_800_000_000
+    in_20_days = now + 20 * 86_400
+    assert await svc.keep_until("g1", in_20_days, now=now) == now + MEDIA_KEEP_SHORT_S
+    gfs.month = {"g1"}
+    assert await svc.keep_until("g1", in_20_days, now=now) == in_20_days
+    assert await svc.keep_until("g1", now + 90 * 86_400, now=now) == (
+        now + MEDIA_KEEP_LONG_S
+    )
+    # A moment ending sooner keeps its own end, wherever it goes.
+    assert await svc.keep_until("g2", now + 3600, now=now) == now + 3600
 
 
 async def test_a_video_brings_its_poster(env):

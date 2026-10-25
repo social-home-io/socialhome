@@ -9451,6 +9451,55 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_65 follower moment retention gate in place ✓")
+    # v_66 — a moment's delete reaches every copy, even later: the mesh
+    # outbox keeps a MOMENT_DELETED 30 days, and a GFS that proves
+    # ``moment_delete_log`` keeps its signed certificate 30 days for followers
+    # that were away. Nothing is gated between households; the OURS
+    # round-trip above proves every pair is at >= v_66, the GFS must sign
+    # both new capabilities, and ``gfs-moment-late-delete`` leaves a
+    # certificate on the GFS.
+    if int(_Cap.MIN_FOR_LATE_MOMENT_DELETES) != 66 or _OURS < 66:
+        failures.append(
+            "MIN_FOR_LATE_MOMENT_DELETES moved off v_66 (or OURS fell below it) "
+            "— a delete would stop reaching a household away for days"
+        )
+    else:
+        print("  v_66 late moment deletes gate in place ✓")
+    if state.get("gfs") and _gfs_alive(state):
+        s, info = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/info")
+        caps = (info or {}).get("capabilities") or {} if s == 200 else {}
+        if (
+            caps.get("moment_delete_log") is not True
+            or caps.get("moment_media_30d") is not True
+            or not (info or {}).get("capabilities_sig")
+        ):
+            failures.append(
+                f"GFS /gfs/info does not sign moment_delete_log + moment_media_30d "
+                f"(HTTP {s}, caps={sorted(caps)!r})"
+            )
+        else:
+            print("  v_66 GFS signs moment_delete_log + moment_media_30d ✓")
+    gmld = state.get("gfs_moment_late_delete")
+    if gmld:
+        held = _rows(
+            "e",
+            "SELECT deleted_at FROM moments WHERE id = ?",
+            (gmld["moment_id"],),
+        )
+        certs = _gfs_rows(
+            "SELECT author_user_id FROM gfs_moment_delete_log WHERE moment_id = ?",
+            (gmld["moment_id"],),
+        )
+        if not held or held[0][0] is None:
+            failures.append(f"e: deleted public reply still live ({held!r})")
+        elif certs != [(gmld["user_id"],)]:
+            failures.append(f"GFS delete certificate rows are {certs!r}")
+        else:
+            print(
+                "  v_66 the GFS keeps the delete's certificate; e holds the tombstone ✓"
+            )
+    else:
+        print("  (v_66 late-delete check skipped — run 'gfs-moment-late-delete')")
     if int(_Cap.MIN_FOR_MULTI_GFS_PUBLISH) != 57 or _OURS < 57:
         failures.append(
             "MIN_FOR_MULTI_GFS_PUBLISH moved off v_57 (or OURS fell below it) — "
@@ -17679,6 +17728,120 @@ def cmd_gfs_public_pages() -> None:
     print("gfs-public-pages: ok")
 
 
+def cmd_gfs_moment_late_delete() -> None:
+    """v_66: a public moment's delete leaves its signed certificate on the GFS.
+
+    Prereqs: ``gfs-moment-profile`` (Noor on a publishes public moments, e
+    follows her through the GFS). Noor posts a public reply under her moment;
+    e gets it; Noor deletes it. Asserts:
+
+    * e drops the reply (the live delete);
+    * the GFS keeps exactly one certificate for it — the delete's origin
+      signature, naming the moment, Noor and a's household, and nothing
+      else (no content) — and refused nothing;
+    * the reply's text is in neither the GFS log nor its database.
+
+    ``verify`` then checks e still holds the tombstone and the GFS the
+    certificate (what a follower away for days would be handed on its next
+    reconnect).
+    """
+    state = _load()
+    gmp = state.get("gfs_moment_profile") if state else None
+    if not state or not gmp or not _gfs_alive(state):
+        raise SystemExit("gfs-moment-late-delete: run 'gfs-moment-profile' first")
+    a = state["instances"]["a"]
+    e = state["instances"]["e"]
+    a_url = f"http://127.0.0.1:{a['port']}"
+    e_url = f"http://127.0.0.1:{e['port']}"
+    _wait_for_gfs_ws(e["instance_id"])
+    gfs_off = _gfs_log_size()
+    s, login = _request(
+        f"{a_url}/api/auth/token",
+        method="POST",
+        body={"username": "noor", "password": "harness-pwd-noor"},
+    )
+    _must("gfs-moment-late-delete: noor login(a)", s, login)
+    tok = login["token"]
+    content = f"🍯 reply to be deleted {int(time.time())}"
+    s, reply = _request(
+        f"{a_url}/api/moments",
+        token=tok,
+        method="POST",
+        body={
+            "content": content,
+            "is_public": True,
+            "parent_moment_id": gmp["moment_id"],
+        },
+    )
+    _must("gfs-moment-late-delete: noor public reply", s, reply, ok=(201,))
+    reply_id = reply["id"]
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        s, _ = _request(f"{e_url}/api/moments/{reply_id}", token=e["token"])
+        if s == 200:
+            break
+        time.sleep(2)
+    else:
+        raise SystemExit(f"gfs-moment-late-delete: e never got reply {reply_id}")
+    s, out = _request(f"{a_url}/api/moments/{reply_id}", token=tok, method="DELETE")
+    _must("gfs-moment-late-delete: noor deletes the reply", s, out, ok=(200, 204))
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        s, _ = _request(f"{e_url}/api/moments/{reply_id}", token=e["token"])
+        if s == 404:
+            break
+        time.sleep(2)
+    else:
+        raise SystemExit(f"gfs-moment-late-delete: e still shows {reply_id} (HTTP {s})")
+    print("  e dropped the deleted public reply ✓")
+    rows: list = []
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        rows = _gfs_rows(
+            "SELECT author_user_id, cert FROM gfs_moment_delete_log WHERE moment_id = ?",
+            (reply_id,),
+        )
+        if rows:
+            break
+        time.sleep(1)
+    if len(rows) != 1 or rows[0][0] != gmp["user_id"]:
+        raise SystemExit(f"gfs-moment-late-delete: GFS certificate rows {rows!r}")
+    cert = json.loads(rows[0][1])
+    want = {
+        "moment_id",
+        "author_user_id",
+        "origin_instance_id",
+        "occurred_at",
+        "origin_identity_pk",
+        "origin_sig_suite",
+        "origin_sig",
+    }
+    if (
+        set(cert) != want
+        or cert["origin_instance_id"] != a["instance_id"]
+        or cert["origin_sig_suite"] != "ed25519"
+    ):
+        raise SystemExit(f"gfs-moment-late-delete: the certificate is {cert!r}")
+    refused = _gfs_log_lines_matching("delete_cert: refused", offset=gfs_off)
+    if refused:
+        raise SystemExit(f"gfs-moment-late-delete: the GFS refused {refused[:2]!r}")
+    if _gfs_log_lines_matching(content, offset=gfs_off):
+        raise SystemExit("gfs-moment-late-delete: the GFS log shows the reply text")
+    for db_file in ("gfs.db", "gfs.db-wal"):
+        try:
+            raw = (GFS_DIR / db_file).read_bytes()
+        except OSError:
+            continue
+        if content.encode() in raw:
+            raise SystemExit(f"gfs-moment-late-delete: the GFS's {db_file} holds it")
+    print(
+        "  the GFS keeps the delete's signed certificate (no content) for "
+        "followers away when it went out ✓"
+    )
+    state["gfs_moment_late_delete"] = {"moment_id": reply_id, "user_id": gmp["user_id"]}
+    _save(state)
+
+
 def cmd_gfs_moment_profile() -> None:
     """A public moment from a stranger reads by name, picture and bio.
 
@@ -18527,6 +18690,9 @@ def main() -> None:
         # in the pinned viewer (preview + refresh, all in the fragment) and its
         # JSON answers cross-origin.
         cmd_gfs_public_pages()
+        # ``gfs-moment-late-delete`` (v_66): a public reply's delete leaves its
+        # signed certificate on the GFS (no content) and e drops the reply.
+        cmd_gfs_moment_late_delete()
         # The closing check: every step's state still holds, and the log
         # audit is clean — offline steps' lines only inside their windows.
         cmd_verify()

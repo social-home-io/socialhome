@@ -811,6 +811,52 @@ Any change that lets a *receiving* household fetch a preview, forwards a
 member's cookies / identity with the request, or weakens the address guard
 is a §2-principle change requiring a new sign-off.
 
+### Sign-off: a GFS keeps signed delete certificates 30 days (v_66)
+
+Owner sign-off 4, 2026-10-25. So that a public moment's delete reaches a
+follower household that was away when it went out, the GFS keeps the
+delete's **certificate** for 30 days and hands it to that household when it
+reconnects (`POST /gfs/moments/delete_cert`, `moment_delete_certs`; see
+[`protocol/momentum_public.md`](./protocol/momentum_public.md#late-deletes-delete-certificates-v_66)).
+This is plaintext the GFS stores. What bounds it:
+
+1. **Nothing it didn't already see.** A certificate names the author, the
+   moment id, the author's household and the delete time, with that
+   household's identity key and signature — **no content**. The sealed
+   delete the GFS already relays shows it the same author, moment id and
+   household in plaintext, and the time of the POST. A moment that was
+   never public reaches no GFS at all when it is deleted.
+2. **Self-verifying, so the GFS can't abuse it.** It is the mesh delete's
+   own origin signature (no new key or format). The GFS checks it against
+   the key the author's household registered with; every follower checks
+   it again against the key it pinned when it followed. The GFS can only
+   withhold a certificate, as it can withhold any delete — never forge,
+   alter or retarget one.
+3. **Bounded.** Kept 30 days, one row per (author, moment), only while
+   someone follows that author there, ≤ 1 000 per author; pushed only to a
+   household that follows the author, only what it could have missed.
+4. **Households met via the GFS still never talk directly.** The
+   certificate travels author → GFS → follower like every public delete.
+
+### Sign-off: "delete removes saved copies" is best effort (v_66)
+
+Owner sign-off 3, 2026-10-25 (decision 6c). When an author deletes a moment,
+every copy is removed — the follower's, and (next release) one a person
+saved past the moment's expiry — **as far as the delete can reach**:
+
+* **30-day horizon.** The mesh keeps a delete queued 30 days per hop and a
+  GFS keeps its certificate 30 days. A household away longer, or reachable
+  only through a relay that dropped it, keeps its copy.
+* **Reachable households only.** A household the author's household can no
+  longer reach — unpaired, its GFS gone, banned — gets no delete. A
+  household that ignores deletes (modified software) is outside what any
+  protocol can enforce; a copy someone already has can be kept by them.
+* **The next release** adds dropping saved copies on unfollow / unpair.
+
+Any change that extends a copy's life past what a delete can reach, keeps
+certificates longer than 30 days, or puts content into a certificate is a
+§2-principle change requiring a new sign-off.
+
 ## No third-party fetches from user content
 
 Viewing content never makes the viewer's browser contact a host the

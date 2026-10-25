@@ -12,6 +12,8 @@ import os
 import time
 from datetime import UTC, datetime, timedelta
 
+from socialhome.domain.federation import FederationEventType
+from socialhome.moment_origin import delete_cert_of, sign_moment_origin
 from socialhome.moment_public_seal import seal_body, sign_wire
 
 #: The step key and key id the helpers seal under. The generation is minted
@@ -88,3 +90,28 @@ class StubMomentKeys:
         if self.import_gen is not None:
             self.missing.discard(str(delivery.get("author_user_id") or ""))
         return self.import_gen
+
+
+def delete_cert(
+    seed: bytes,
+    identity_pk: bytes,
+    *,
+    moment_id: str,
+    author_user_id: str,
+    origin_instance_id: str,
+    occurred_at: str | None = None,
+) -> dict[str, str]:
+    """A delete certificate (v_66) as the author household signs it: the
+    ``MOMENT_DELETED`` origin signature over its four fields."""
+    signed = sign_moment_origin(
+        seed=seed,
+        identity_pk=identity_pk,
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload={
+            "moment_id": moment_id,
+            "author_user_id": author_user_id,
+            "origin_instance_id": origin_instance_id,
+            "occurred_at": occurred_at or now_iso(),
+        },
+    )
+    return delete_cert_of(signed)

@@ -55,6 +55,16 @@ MAX_REMEMBERED: int = 2_000
 #: A video poster larger than this is not sent (posters are small WebP).
 MAX_POSTER_BYTES: int = 1024 * 1024
 
+#: Longest a blob (or a share copy) is asked to live on a GFS that proved
+#: ``moment_media_30d`` (v_66): a moment's longest life, so a share link's
+#: viewer still finds the picture as long as the moment lives.
+MEDIA_KEEP_LONG_S: int = 30 * 86_400
+
+#: …on an older GFS, which refuses more than 8 days. Followers fetch the file
+#: when the moment reaches them and keep their own copy, so only a share
+#: link outliving a week loses its picture there.
+MEDIA_KEEP_SHORT_S: int = 7 * 86_400
+
 
 @dataclass(slots=True)
 class PreparedMedia:
@@ -107,6 +117,21 @@ class MomentPublicMediaOutbound:
 
     async def supported(self, gfs_id: str) -> bool:
         return await self._gfs.encrypted_moment_media_supported(gfs_id)
+
+    async def keep_until(
+        self, gfs_id: str, moment_expires_at: int, *, now: int | None = None
+    ) -> int:
+        """How long *gfs_id* is asked to keep a blob of a moment that expires
+        at *moment_expires_at* (Unix seconds): as long as the moment, at most
+        :data:`MEDIA_KEEP_LONG_S` on a GFS that proved ``moment_media_30d``
+        and :data:`MEDIA_KEEP_SHORT_S` on any other."""
+        now = int(time.time()) if now is None else now
+        cap = (
+            MEDIA_KEEP_LONG_S
+            if await self._gfs.moment_media_30d_supported(gfs_id)
+            else MEDIA_KEEP_SHORT_S
+        )
+        return min(moment_expires_at, now + cap)
 
     # ── Seal ────────────────────────────────────────────────────────────
 
@@ -183,11 +208,14 @@ class MomentPublicMediaOutbound:
         expires_at: int,
     ) -> bool:
         """PUT every blob to *gfs_id* — only when it proved
-        ``encrypted_moment_media``. ``True`` when all were accepted."""
+        ``encrypted_moment_media``. ``True`` when all were accepted.
+        *expires_at* is the moment's own expiry; each GFS is asked to keep
+        the blob for as much of it as it allows (:meth:`keep_until`)."""
         if self._http_client is None or self._signing_key is None:
             return False
         if not await self.supported(gfs_id):
             return False
+        expires_at = await self.keep_until(gfs_id, expires_at)
         conn = await self._gfs_repo.get(gfs_id)
         if conn is None or conn.status != "active":
             return False

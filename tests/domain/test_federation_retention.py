@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_retention import (
+    LONG_LIVED,
+    LONG_LIVED_TTL,
     NEVER_DROP,
     RETENTION_DAYS,
     SHORT_LIVED,
@@ -14,6 +16,7 @@ from socialhome.domain.federation_retention import (
     retention_expires_at,
     supersede_key,
 )
+from socialhome.domain.moment import MOMENT_MAX_LIFETIME_DAYS
 
 
 def test_never_drop_event_has_no_expiry():
@@ -180,3 +183,20 @@ def test_every_call_signal_but_the_terminal_ones_is_short_lived():
         iso = retention_expires_at(t, now=base)
         assert iso is not None
         assert datetime.fromisoformat(iso) == base + timedelta(days=RETENTION_DAYS)
+
+
+def test_a_moment_delete_lives_thirty_days():
+    """v_66: a moment's delete must still arrive after a long absence — as
+    long as a moment can live — but not forever, and stays evictable."""
+    base = datetime(2026, 10, 25, tzinfo=UTC)
+    assert LONG_LIVED == {FederationEventType.MOMENT_DELETED}
+    iso = retention_expires_at(FederationEventType.MOMENT_DELETED, now=base)
+    assert datetime.fromisoformat(iso) == base + LONG_LIVED_TTL
+    assert (
+        LONG_LIVED_TTL == timedelta(days=MOMENT_MAX_LIFETIME_DAYS) == timedelta(days=30)
+    )
+    assert not LONG_LIVED & NEVER_DROP
+    assert not LONG_LIVED & SHORT_LIVED
+    # A moment's create keeps the ordinary week.
+    created = retention_expires_at(FederationEventType.MOMENT_CREATED, now=base)
+    assert datetime.fromisoformat(created) == base + timedelta(days=7)

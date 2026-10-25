@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from ..domain.federation_retention import NEVER_DROP, TERMINAL_GRACE
+from ..domain.federation_retention import LONG_LIVED, NEVER_DROP, TERMINAL_GRACE
 from ..repositories.outbox_repo import (
     PURGE_BATCH,
     AbstractOutboxRepo,
@@ -294,8 +294,11 @@ class OutboxProcessor:
             if new_attempts >= MAX_ATTEMPTS:
                 # §4.4.7: structural / security events keep retrying on
                 # the ceiling backoff — losing a ban or key revocation
-                # silently would create an attacker-friendly window.
-                if entry.event_type in NEVER_DROP:
+                # silently would create an attacker-friendly window. A
+                # LONG_LIVED event (v_66: a moment's delete) does the same
+                # until its 30-day ``expires_at``, when the retention sweep
+                # marks it failed.
+                if entry.event_type in NEVER_DROP or entry.event_type in LONG_LIVED:
                     log.info(
                         "OutboxProcessor: %s entry %s past MAX_ATTEMPTS"
                         " — pinning at ceiling backoff",

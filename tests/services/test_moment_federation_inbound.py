@@ -16,7 +16,7 @@ from socialhome.domain.events import (
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.moment import Moment
 from socialhome.domain.user import RemoteUser
-from socialhome.federation.moment_origin import sign_moment_origin
+from socialhome.moment_origin import sign_moment_origin
 from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,

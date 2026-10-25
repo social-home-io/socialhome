@@ -4,7 +4,7 @@ Marked ``@pytest.mark.security``.
 
 A protected account's moments reach its directly paired households and no
 further (§CP.R): its household marks them ``no_relay`` inside the origin
-signature (v_38, :mod:`socialhome.federation.moment_origin`), so a relay can
+signature (v_38, :mod:`socialhome.moment_origin`), so a relay can
 neither strip the mark nor forge it. Against the real application registry
 and SQLite:
 
@@ -29,7 +29,7 @@ from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.federation_capabilities import OURS
 from socialhome.federation.federation_service import FederationService
-from socialhome.federation.moment_origin import NO_RELAY_FIELD, sign_moment_origin
+from socialhome.moment_origin import NO_RELAY_FIELD, sign_moment_origin
 
 pytestmark = pytest.mark.security
 

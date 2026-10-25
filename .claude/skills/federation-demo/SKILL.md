@@ -584,7 +584,8 @@ app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
 admin-revoke-rotation → rotation-offline-catchup → space-chat → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
-gfs-moment-profile → gfs-highlight-link → gfs-public-pages → verify``
+gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
+gfs-moment-late-delete → verify``
 in that order. The tail brings the GFS up because ``local-community``'s
 last case (a GFS-only joiner), ``gfs-moment-profile`` and
 ``gfs-highlight-link`` need it; the closing ``verify`` runs the log
@@ -1747,6 +1748,24 @@ viewer does in WebCrypto) and expects the moment's text, the author's name
 and a media descriptor whose picture blob the GFS serves. The GFS log since
 the request must not contain ``k``, and the GFS's ``/moments/{user}`` page
 shows the profile only — not the moment's text.
+
+### ``gfs-moment-late-delete`` — a public delete leaves its signed certificate on the GFS (v_66)
+
+Part of ``all`` (after ``gfs-public-pages``). Prereqs when run on its own:
+``gfs-moment-profile``. Noor (a) posts a public reply under her moment; e
+gets it; Noor deletes it. e must drop the reply (the live delete), and the
+GFS must hold exactly one ``gfs_moment_delete_log`` row for it, naming
+Noor, whose certificate is exactly the seven fields (``moment_id,
+author_user_id, origin_instance_id, occurred_at, origin_identity_pk,
+origin_sig_suite, origin_sig``) with a's instance id and suite ``ed25519``
+— no content. The GFS must have refused no certificate (``delete_cert:
+refused``) and neither its log nor ``gfs.db`` / ``gfs.db-wal`` may hold the
+reply's text. ``verify`` pins ``MIN_FOR_LATE_MOMENT_DELETES`` at v_66,
+checks the GFS signs ``moment_delete_log`` + ``moment_media_30d`` in
+``/gfs/info``, and re-checks e's tombstone and the GFS's certificate — what
+a follower away for days is handed on its next reconnect (the push itself
+and the 30-day outbox retries are covered by
+``tests/protocol/test_moment_late_deletes.py``).
 
 ### ``gfs-highlight-link`` — a public highlight link opens the pinned viewer
 

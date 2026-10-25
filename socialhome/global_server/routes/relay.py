@@ -200,6 +200,16 @@ class GfsInfoView(GfsBaseView):
             # household uploads moment media only to a server that proved it;
             # an older one gets the moment without its file.
             "encrypted_moment_media": True,
+            # v_66 — ``POST /gfs/moments/delete_cert`` keeps a public moment's
+            # signed delete certificate 30 days and pushes it
+            # (``moment_delete_certs``) to a follower household that
+            # reconnects after missing the delete. A household posts
+            # certificates only to a server that proved this.
+            "moment_delete_log": True,
+            # v_66 — keeps an encrypted moment blob (and a share copy) as
+            # long as its moment lives, up to 30 days (an older server
+            # refuses more than 8). A household asks past a week only here.
+            "moment_media_30d": True,
             # #5b — ``POST /gfs/spaces/{id}/key_request``: a follower that
             # misses a space's content key asks for it, and one that says
             # so (``space_key_pull`` in its hello / subscribe ``accepts``)

@@ -2139,6 +2139,7 @@
   "capability.public_moment_media": "Photos and videos in public moments",
   "capability.public_moment_sent_at": "Time-stamped public moments",
   "capability.follower_moment_retention": "Choose how long followers keep your moments",
+  "capability.late_moment_deletes": "Deletes reach every copy of a moment",
   "space.settings_page.moderation.queue_meta": "Posts to review, join requests and reports",
   "space.settings_page.moderation.days": "days",
   "space.settings_page.danger.summary": "Archive, hand over or delete",

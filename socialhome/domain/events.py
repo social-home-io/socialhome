@@ -2418,12 +2418,17 @@ class MomentCreated(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class MomentDeleted(DomainEvent):
-    """A moment was deleted (by author or admin)."""
+    """A moment was deleted (by author or admin).
+
+    ``is_public`` — whether it was a public moment. Only then does any GFS
+    hear of the delete (v_66): a moment no GFS ever carried is not named to
+    one when it goes."""
 
     moment_id: str
     author_user_id: str
     origin_instance_id: str
     occurred_at: datetime = field(default_factory=_now)
+    is_public: bool = False
 
 
 @dataclass(slots=True, frozen=True)

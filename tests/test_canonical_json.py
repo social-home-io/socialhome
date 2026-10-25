@@ -18,7 +18,7 @@ import pathlib
 import orjson
 import pytest
 
-from socialhome import authority_sig
+from socialhome import authority_sig, moment_origin
 from socialhome.canonical_json import (
     canonical_bytes,
     canonical_str,
@@ -29,7 +29,6 @@ from socialhome.canonical_json import (
 from socialhome.crypto import ed25519_public_key
 from socialhome.domain import page_version
 from socialhome.domain.space_author_profile import profile_rev
-from socialhome.federation import moment_origin
 from socialhome.federation.federation_service import FederationEventType
 from socialhome.services import space_public_author
 
@@ -285,7 +284,7 @@ _SIGNING_MODULES = (
     "domain/gfs_member_publish.py",
     "domain/page_version.py",
     "domain/space_author_profile.py",
-    "federation/moment_origin.py",
+    "moment_origin.py",
     "federation/moderation_approval.py",
     "dashboard/auth.py",
     "dashboard/claim_seal.py",

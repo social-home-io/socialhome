@@ -31,7 +31,7 @@ from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.federation.federation_service import FederationService
-from socialhome.federation.moment_origin import sign_moment_origin
+from socialhome.moment_origin import sign_moment_origin
 
 pytestmark = pytest.mark.security
 

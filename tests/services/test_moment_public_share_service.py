@@ -8,7 +8,7 @@ import base64
 import dataclasses
 import json
 import os
-import time
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -159,8 +159,9 @@ async def test_the_author_gets_a_link_carrying_the_moments_item_key(env):
     # The share copy went to that GFS once; it opens with the item key.
     [(gfs, blobs, author, expires)] = env["media"].uploads
     assert (gfs, author) == ("g1", "u-noor")
-    # A share copy never outlives what a moment can (the GFS refuses more).
-    assert expires <= time.time() + 7 * 86_400 + 5
+    # v_66: the share copy is asked for the moment's own life — each GFS is
+    # then asked for as much of it as it keeps (``keep_until``).
+    assert expires == int(datetime(2099, 10, 22, 8, tzinfo=UTC).timestamp())
     blob = blobs[f["b"]]
     assert blob_id_of(blob) == f["b"]
     body = open_share(

@@ -3,15 +3,16 @@ and when. NEVER_DROP events (security / structural state the receiver must
 eventually see) never expire and retry indefinitely; all others get a 7-day
 TTL from enqueue, after which the receiver rebuilds state via the sync
 protocols rather than the outbox replaying a week-stale event. Call
-negotiation (:data:`SHORT_LIVED`) gets two minutes instead, and current
-state — online status, a space-map pin — is queued latest-only
-(:func:`supersede_key`)."""
+negotiation (:data:`SHORT_LIVED`) gets two minutes instead, a moment's
+delete (:data:`LONG_LIVED`, v_66) thirty days, and current state — online
+status, a space-map pin — is queued latest-only (:func:`supersede_key`)."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
 from .federation import FederationEventType
+from .moment import MOMENT_MAX_LIFETIME_DAYS
 
 #: Event types that must NEVER be marked ``failed`` regardless of attempt
 #: count (§4.4.7).  These carry security or structural state — admin key
@@ -88,6 +89,24 @@ _ONLINE_STATUS: frozenset[FederationEventType] = frozenset(
 )
 
 
+#: Events that must still arrive after a long absence, but not forever (v_66).
+#: A moment lives up to 30 days at a follower (v_65) — and the next release
+#: keeps saved copies past that — while the ordinary ladder gives up after
+#: ~10 h, so a ``MOMENT_DELETED`` to a household offline for a weekend was
+#: lost and the moment stayed on its screen. These keep retrying on the
+#: ceiling backoff (like :data:`NEVER_DROP`) until :data:`LONG_LIVED_TTL`
+#: from enqueue, and stay evictable under :data:`MAX_PENDING_PER_PEER`
+#: (unlike it). Every relay hop enqueues its own copy, so a delete crosses
+#: the 3-hop mesh even when the households between are offline for weeks.
+LONG_LIVED: frozenset[FederationEventType] = frozenset(
+    {FederationEventType.MOMENT_DELETED}
+)
+
+#: How long a :data:`LONG_LIVED` entry stays queued — a moment's longest
+#: life.
+LONG_LIVED_TTL: timedelta = timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
+
+
 def supersede_key(
     event_type: FederationEventType,
     *,
@@ -125,4 +144,6 @@ def retention_expires_at(
     base = now or datetime.now(UTC)
     if event_type in SHORT_LIVED:
         return (base + SHORT_LIVED_TTL).isoformat()
+    if event_type in LONG_LIVED:
+        return (base + LONG_LIVED_TTL).isoformat()
     return (base + timedelta(days=RETENTION_DAYS)).isoformat()

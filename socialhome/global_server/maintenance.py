@@ -24,6 +24,7 @@ from .domain import CHANNEL_IDLE_TTL_SECONDS, CHANNEL_UNUSED_TTL_SECONDS
 from .repositories import PAIR_TOKEN_RETENTION_SECONDS
 
 if TYPE_CHECKING:
+    from .moment_delete_log import MomentDeleteLog
     from .moment_media import GfsMomentMediaStore
     from .repositories import (
         AbstractGfsAdminRepo,
@@ -46,6 +47,7 @@ class GfsMaintenanceScheduler:
         "_highlight_repo",
         "_interval",
         "_invite_repo",
+        "_moment_delete_log",
         "_moment_media",
         "_stop",
         "_task",
@@ -60,8 +62,11 @@ class GfsMaintenanceScheduler:
         invite_repo: AbstractGfsInviteRepo | None = None,
         channel_repo: AbstractGfsChannelRepo | None = None,
         moment_media: GfsMomentMediaStore | None = None,
+        moment_delete_log: MomentDeleteLog | None = None,
         interval_seconds: float = 3600.0,  # once per hour
     ) -> None:
+        #: Moment delete certificates (v_66): pruned 30 days after written.
+        self._moment_delete_log = moment_delete_log
         #: Encrypted moment media (v_63): blobs past their moment's life.
         self._moment_media = moment_media
         self._admin_repo = admin_repo
@@ -179,6 +184,17 @@ class GfsMaintenanceScheduler:
             except Exception as exc:
                 log.warning(
                     "gfs maintenance: prune moment media failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+        if self._moment_delete_log is not None:
+            try:
+                certs = await self._moment_delete_log.prune(now)
+                if certs:
+                    log.debug("gfs maintenance: dropped %d old delete certs", certs)
+            except Exception as exc:
+                log.warning(
+                    "gfs maintenance: prune moment delete certs failed: %s",
                     exc,
                     exc_info=True,
                 )

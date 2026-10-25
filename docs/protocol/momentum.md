@@ -138,6 +138,24 @@ A (author)  ────►  B (paired)  ────►  C (B's paired)  ──
   tombstone it already holds (a replay — possible for the month a
   tombstone lives) goes no further, even after a restart wiped the
   seen-map. Deletes are not age-gated.
+* **Deletes keep trying for 30 days** (v_66). An outbox gives an ordinary
+  event 13 attempts over ~10 h, then drops it, so a ``MOMENT_DELETED`` to a
+  household offline for a weekend never arrived and the moment stayed on
+  its screen for up to a month. ``MOMENT_DELETED`` is now outbox
+  ``LONG_LIVED`` (``domain/federation_retention.py``): past the ladder it
+  keeps retrying on the 4 h ceiling until 30 days after it was queued, then
+  the retention sweep ends it. It is still evictable under the per-peer
+  cap (1 000 pending), unlike ``NEVER_DROP``. Every hop queues its own
+  copy, so a delete crosses all three hops even when the households between
+  were offline for weeks; a pure pass-through household relays it as
+  before, only when it changed something there. **Cost:** per delete, the
+  same ≤ 3-hop fan-out as before; a peer that stays offline costs at most
+  ~180 extra delivery attempts over 30 days (one per 4 h, ±30 % jitter),
+  each a re-signed envelope of < 1 KB. A household offline for 30 days with
+  1 000 deletes queued for it is ~1 000 rows of < 1 KB. Older (v_65) relays
+  give up after ~10 h as before; a delete reaching a public follower
+  through a GFS is covered by the GFS's certificate log
+  ([`momentum_public.md`](./momentum_public.md#late-deletes-delete-certificates-v_66)).
 * When ``hop_count >= MOMENT_MAX_HOPS`` (3), the relay short-circuits.
 
 **Cost.** In a fully-connected mesh of *n* households, re-relaying every
@@ -225,7 +243,7 @@ that posted them. Every relay re-sends a moment under its own envelope
 signature, so the §24.11 pipeline proves only the last hop; the origin
 household therefore signs each `MOMENT_CREATED` / `MOMENT_DELETED` it
 authors with its Ed25519 identity key
-(`socialhome/federation/moment_origin.py`, wire shape in
+(`socialhome/moment_origin.py`, wire shape in
 [`crypto.md`](../crypto.md)). The signature covers the event type, the
 suite and every stored field — never `hop_count` — and relays forward it
 verbatim.

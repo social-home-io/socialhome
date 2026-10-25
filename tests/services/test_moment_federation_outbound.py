@@ -14,7 +14,7 @@ from socialhome.domain.events import (
     MomentReactionChanged,
 )
 from socialhome.domain.federation import FederationEventType, RemoteInstance
-from socialhome.federation.moment_origin import NO_RELAY_FIELD, verify_moment_origin
+from socialhome.moment_origin import NO_RELAY_FIELD, verify_moment_origin
 from socialhome.services import moment_federation_outbound as outbound_mod
 from socialhome.services.moment_federation_outbound import (
     MomentFederationOutbound,

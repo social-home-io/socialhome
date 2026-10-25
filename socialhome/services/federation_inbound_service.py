@@ -109,7 +109,6 @@ from ..federation.host_equivalence import (
     acts_as_host,
     touches_owner_household,
 )
-from ..federation.moment_origin import carries_no_relay, check_relayed_moment_origin
 from ..federation.owner_bound_id import (
     MOMENT_KIND,
     SPACE_COMMENT_KIND,
@@ -134,6 +133,7 @@ from ..media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     reencode_peer_picture,
 )
+from ..moment_origin import carries_no_relay, check_relayed_moment_origin
 from ..utils.datetime import parse_iso8601_lenient
 from .dm_audience import local_audience
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
@@ -4260,7 +4260,7 @@ class FederationInboundService(ProtectionGateMixin):
         by the §24.11 envelope signature. A relayed one was re-sent under the
         relay's own envelope, so ``origin_instance_id`` is only the relay's
         claim until the origin's identity signature over the moment verifies
-        (v_35, :mod:`socialhome.federation.moment_origin`) — against the key
+        (v_35, :mod:`socialhome.moment_origin`) — against the key
         pinned for the origin, or a shipped key bound by
         ``derive_instance_id`` for a friend-of-friend origin we never paired
         with. The one exception is the legacy window: an unsigned relay from

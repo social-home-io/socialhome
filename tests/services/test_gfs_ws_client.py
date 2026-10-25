@@ -840,6 +840,8 @@ async def test_on_text_dispatch_covers_every_frame_type():
     # v_62: a sealed moment key goes to the moment inbound, a key request to
     # the author-side notice handler.
     await client._on_text(json.dumps({"type": "moment_key", "payload": {}}))
+    # v_66: delete certificates a reconnect brings go to the moment inbound.
+    await client._on_text(json.dumps({"type": "moment_delete_certs", "certs": []}))
     await client._on_text(json.dumps({"type": "moment_key_request"}))
     # Unknown type + non-dict + malformed JSON are all silently ignored.
     await client._on_text(json.dumps({"type": "who_knows"}))
@@ -847,7 +849,7 @@ async def test_on_text_dispatch_covers_every_frame_type():
     await client._on_text("{not json")
 
     assert len(got["highlight"]) == 1
-    assert len(got["moment_public"]) == 3
+    assert len(got["moment_public"]) == 4
     assert len(got["follow"]) == 2
 
 

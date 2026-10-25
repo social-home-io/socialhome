@@ -529,7 +529,7 @@ from __future__ import annotations
 #:   inside the encrypted payload: the origin household signs
 #:   ``moment-origin:v1:`` + canonical JSON of every stored field (plus the
 #:   event type and suite, never ``hop_count``) with its Ed25519 identity
-#:   key (``federation/moment_origin.py``). Relays forward the fields
+#:   key (``moment_origin.py``). Relays forward the fields
 #:   verbatim. A receiver handed a moment by a household other than its
 #:   claimed origin verifies against the key it pins for that origin, or a
 #:   shipped key bound by ``derive_instance_id(pk) == origin_instance_id``
@@ -1002,7 +1002,26 @@ from __future__ import annotations
 #:   author signed (no 30-day clamp), shows it to followers until then and
 #:   holds a never-seen delete for 7 days. Labelled "Choose how long
 #:   followers keep your moments".
-OURS: int = 65
+#: * **v_66** (2026-10-25) — **a moment's delete reaches every copy, even
+#:   later** (decision 6c, sign-offs 3 + 4). On the mesh a ``MOMENT_DELETED``
+#:   is outbox-``LONG_LIVED``: it keeps retrying on the 4 h ceiling for 30
+#:   days instead of giving up after ~10 h, and every relay hop queues its
+#:   own copy. Over a GFS the author household also posts the delete's
+#:   signed certificate (the same ``moment-origin:v1:`` signature — moment
+#:   id, author, origin, time; no content) to every GFS whose signed
+#:   ``/gfs/info`` proves ``moment_delete_log``; the GFS keeps it 30 days
+#:   (GFS migration 0024) and pushes ``moment_delete_certs`` to a follower
+#:   household on reconnect, which checks it against the author key it
+#:   pinned when it followed. A GFS that proves ``moment_media_30d`` keeps a
+#:   moment's blob as long as the moment (≤ 30 days) so a share link keeps
+#:   its picture. Only a public moment's delete reaches any GFS. **Fallback**:
+#:   gated on the GFS capability, never ``peer_supports`` (author → GFS →
+#:   follower; the mesh change is local to the sender's outbox). An older
+#:   GFS gets no certificate (its followers get the live delete or the 24 h
+#:   queue, as before) and blobs of a week at most; an older follower
+#:   ignores the unknown frame; an older relay gives up on a delete after
+#:   ~10 h as before. Labelled "Deletes reach every copy of a moment".
+OURS: int = 66
 
 
 class FederationCapability:
@@ -1522,6 +1541,13 @@ class FederationCapability:
     #: relayed broadcast can't be gated); it names the version that clamps.
     MIN_FOR_LONG_LIVED_MOMENTS = 65
 
+    #: v_66 — a moment's delete reaches every copy, even later: 30-day
+    #: outbox retries on the mesh, signed delete certificates kept 30 days on
+    #: a GFS that proved ``moment_delete_log``. Nothing is gated on it
+    #: between households (the GFS capability gates the certificate); it
+    #: names the version that keeps deletes queued and reads certificates.
+    MIN_FOR_LATE_MOMENT_DELETES = 66
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1767,6 +1793,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_LONG_LIVED_MOMENTS,
         "Choose how long followers keep your moments",
     ),
+    (
+        FederationCapability.MIN_FOR_LATE_MOMENT_DELETES,
+        "Deletes reach every copy of a moment",
+    ),
 ]
 
 
@@ -1843,6 +1873,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_ENCRYPTED_MOMENT_MEDIA: "public_moment_media",
     FederationCapability.MIN_FOR_PUBLIC_MOMENT_SENT_AT: "public_moment_sent_at",
     FederationCapability.MIN_FOR_LONG_LIVED_MOMENTS: "follower_moment_retention",
+    FederationCapability.MIN_FOR_LATE_MOMENT_DELETES: "late_moment_deletes",
 }
 
 

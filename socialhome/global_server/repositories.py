@@ -2254,6 +2254,81 @@ class SqliteGfsMomentMediaRepo:
         return [str(r["blob_id"]) for r in rows]
 
 
+# ─── Moment delete certificates (v_66) ───────────────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsMomentDeleteLogRepo(Protocol):
+    async def add(
+        self, *, author_user_id: str, moment_id: str, cert: str, now: int
+    ) -> bool: ...
+    async def count_for_author(self, author_user_id: str, *, since: int) -> int: ...
+    async def for_household(
+        self, instance_id: str, *, now: int, ttl_s: int, seen_slack_s: int, limit: int
+    ) -> list[str]: ...
+    async def prune(self, *, older_than: int) -> int: ...
+
+
+class SqliteGfsMomentDeleteLogRepo:
+    """Signed delete certificates of public moments (v_66), one row per
+    (author, moment), kept 30 days — what a follower household that was
+    offline when a delete went out is handed when it reconnects."""
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def add(
+        self, *, author_user_id: str, moment_id: str, cert: str, now: int
+    ) -> bool:
+        """Keep one certificate. ``False`` when that moment's delete is
+        already kept (a replay: nothing changes, its 30 days don't restart)."""
+        changed = await self._db.enqueue_rowcount(
+            "INSERT OR IGNORE INTO gfs_moment_delete_log(author_user_id,"
+            " moment_id, cert, created_at) VALUES(?,?,?,?)",
+            (author_user_id, moment_id, cert, now),
+        )
+        return changed > 0
+
+    async def count_for_author(self, author_user_id: str, *, since: int) -> int:
+        """Certificates of one author kept since *since* (the live ones)."""
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS c FROM gfs_moment_delete_log"
+            " WHERE author_user_id=? AND created_at >= ?",
+            (author_user_id, since),
+        )
+        return int(row["c"]) if row is not None else 0
+
+    async def for_household(
+        self, instance_id: str, *, now: int, ttl_s: int, seen_slack_s: int, limit: int
+    ) -> list[str]:
+        """The certificates *instance_id* may have missed, oldest first, at
+        most *limit*: of authors a user of that household follows here,
+        written after that follow began, within the last *ttl_s* — and since
+        the household was last marked seen (``relay_seen_at``, refreshed
+        hourly while its socket is open) minus *seen_slack_s*. A household
+        never marked seen gets the whole *ttl_s* window."""
+        rows = await self._db.fetchall(
+            "SELECT l.cert FROM gfs_moment_delete_log l"
+            " WHERE l.created_at >= ?"
+            " AND l.created_at >= COALESCE((SELECT ci.relay_seen_at - ?"
+            "   FROM client_instances ci WHERE ci.instance_id = ?), 0)"
+            " AND EXISTS (SELECT 1 FROM gfs_moment_follows f"
+            "   WHERE f.follower_instance_id = ?"
+            "   AND f.followed_user_id = l.author_user_id"
+            "   AND f.created_at <= l.created_at)"
+            " ORDER BY l.created_at, l.author_user_id, l.moment_id LIMIT ?",
+            (now - ttl_s, seen_slack_s, instance_id, instance_id, limit),
+        )
+        return [str(r["cert"]) for r in rows]
+
+    async def prune(self, *, older_than: int) -> int:
+        """Drop certificates written before *older_than*."""
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_moment_delete_log WHERE created_at < ?",
+            (older_than,),
+        )
+
+
 @runtime_checkable
 class AbstractGfsMomentKeyMailboxRepo(Protocol):
     async def put(self, mail: GfsMomentKeyMail) -> bool: ...

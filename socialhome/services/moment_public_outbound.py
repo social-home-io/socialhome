@@ -28,6 +28,14 @@ envelope re-posted later (:mod:`.moment_public_inbound`). It rides inside
 the ciphertext the signature covers: no new plaintext field, no extra
 message, ~25 bytes per moment.
 
+**Delete certificates (v_66).** A public moment's delete also goes, to
+every GFS that proved the signed ``moment_delete_log`` capability, as its
+signed certificate (``POST /gfs/moments/delete_cert``) — the same
+``moment-origin:v1:`` signature the mesh ``MOMENT_DELETED`` carries, over
+the moment id, author, origin and delete time; no content. The GFS keeps it
+30 days and hands it to a follower household that was offline when the
+delete went out. Only a public moment's delete reaches any GFS.
+
 Runs alongside :class:`MomentFederationOutbound`: the original
 moment also still goes to paired households via the existing relay,
 so a follower that is *both* household-paired and a GFS-follower
@@ -43,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
+from ..crypto import ed25519_public_key
 from ..domain.child_protection import ProtectedCapability
 from ..domain.events import (
     MediaTranscodeFailed,
@@ -52,8 +61,10 @@ from ..domain.events import (
     UserDeprovisioned,
     UserProvisioned,
 )
+from ..domain.federation import FederationEventType
 from ..domain.moment_public import public_author_bio, public_profile_rev
 from ..infrastructure.event_bus import EventBus
+from ..moment_origin import delete_cert_of, sign_moment_origin
 from ..moment_public_seal import item_key, seal_body, sign_wire
 from .protection_gate import ProtectionGateMixin
 
@@ -73,13 +84,6 @@ log = logging.getLogger(__name__)
 
 #: A remote author's moment re-reads the local user list at most this often.
 LOCAL_USERS_REREAD_S: float = 60.0
-
-#: Longest a moment's media blob is kept on a GFS. A moment may live up to
-#: 30 days (v_65), but a follower fetches the file when the moment reaches it
-#: — and refuses an envelope sent more than 25 h ago (v_64) — then keeps its
-#: own copy; so the blob only has to outlast delivery, never the moment. A
-#: week covers that with room to spare and matches what a GFS accepts.
-MEDIA_KEEP_AT_MOST_S: int = 7 * 86_400
 
 #: Public moments held for a video still transcoding, at most.
 MAX_WAITING_FOR_MEDIA: int = 200
@@ -280,11 +284,11 @@ class MomentPublicOutbound(ProtectionGateMixin):
         if prepared is not None:
             body["media"] = prepared.body
             assert self._media is not None
-            # A blob lives as long as its moment, at most a week — followers
-            # keep their own copy once fetched (a GFS refuses longer).
-            expires = min(
-                _unix(moment.expires_at), int(time.time()) + MEDIA_KEEP_AT_MOST_S
-            )
+            # A blob lives as long as its moment — up to 30 days on a GFS that
+            # keeps it that long (v_66), so a share link's viewer still finds
+            # it; a week on an older one (``MomentPublicMediaOutbound
+            # .keep_until``). Followers keep their own copy once fetched.
+            expires = _unix(moment.expires_at)
             for reg in regs:
                 # Uploaded before the moment, so followers can fetch at once.
                 if await self._media.upload(
@@ -327,7 +331,8 @@ class MomentPublicOutbound(ProtectionGateMixin):
             self._profile_sent[event.author_user_id] = (sent_rev, time.monotonic())
 
     async def _on_deleted(self, event: MomentDeleted) -> None:
-        if not await self._is_local(event.author_user_id):
+        # A moment no GFS ever carried is not named to one when it goes.
+        if not event.is_public or not await self._is_local(event.author_user_id):
             return
         regs = await self._regs.list_for_user(event.author_user_id)
         regs = [r for r in regs if await self._delivers_to(r.gfs_id)]
@@ -348,8 +353,43 @@ class MomentPublicOutbound(ProtectionGateMixin):
         )
         for reg in regs:
             await self._post_to_gfs(reg.gfs_id, envelope, kind="delete")
+        await self._post_delete_cert(event, [r.gfs_id for r in regs])
         if self._media is not None:
             await self._media.withdraw(event.author_user_id, event.moment_id)
+
+    async def _post_delete_cert(self, event: MomentDeleted, gfs_ids: list[str]) -> None:
+        """Hand the delete's signed certificate (v_66) to every GFS in
+        *gfs_ids* that proved ``moment_delete_log``, so a follower household
+        offline when the delete went out still gets it (for 30 days).
+
+        The certificate is the mesh ``MOMENT_DELETED``'s origin signature —
+        the same fields, the same ``occurred_at``, so the same bytes. Signed
+        once, the same body to every such GFS; any other gets nothing new.
+        """
+        if self._signing_key is None:
+            return
+        targets = [
+            g for g in gfs_ids if await self._gfs_service.moment_delete_log_supported(g)
+        ]
+        if not targets:
+            return
+        signed = sign_moment_origin(
+            seed=self._signing_key,
+            identity_pk=ed25519_public_key(self._signing_key),
+            event_type=FederationEventType.MOMENT_DELETED,
+            payload={
+                "moment_id": event.moment_id,
+                "author_user_id": event.author_user_id,
+                "origin_instance_id": self._own_instance_id,
+                "occurred_at": event.occurred_at.isoformat(),
+            },
+        )
+        body = sign_wire(
+            self._signing_key,
+            {"instance_id": self._own_instance_id, "cert": delete_cert_of(signed)},
+        )
+        for gfs_id in targets:
+            await self._post_to_gfs(gfs_id, body, kind="delete_cert")
 
     def _hold_for_media(self, media_url: str, event: MomentCreated) -> None:
         """Publish *event* once its video's transcode finishes (bounded)."""
@@ -446,7 +486,7 @@ class MomentPublicOutbound(ProtectionGateMixin):
         conn = await self._gfs.get(gfs_id)
         if conn is None or conn.status != "active":
             return
-        path = "/gfs/moments/publish" if kind == "publish" else "/gfs/moments/delete"
+        path = _PATHS[kind]
         try:
             async with self._http_client.post(
                 f"{conn.inbox_url}{path}",
@@ -468,6 +508,14 @@ class MomentPublicOutbound(ProtectionGateMixin):
                 kind,
                 exc,
             )
+
+
+#: Where each kind of post goes on a GFS.
+_PATHS: dict[str, str] = {
+    "publish": "/gfs/moments/publish",
+    "delete": "/gfs/moments/delete",
+    "delete_cert": "/gfs/moments/delete_cert",
+}
 
 
 def _unix(iso: str) -> int:

@@ -439,6 +439,13 @@ async def test_only_author_or_admin_can_delete(stack):
     await stack.moment_svc.delete_moment(m.id, actor_user_id=a.user_id)
     assert await stack.moment_repo.get(m.id) is None
     assert len(captured) == 1
+    # v_66: a private moment's delete says so — no GFS hears of it.
+    assert captured[0].is_public is False
+    public = await stack.moment_svc.create_moment(
+        author_user_id=b.user_id, content="public", is_public=True
+    )
+    await stack.moment_svc.delete_moment(public.id, actor_user_id=b.user_id)
+    assert captured[-1].is_public is True
 
 
 async def test_admin_can_delete_someone_elses_moment(stack):
