@@ -324,6 +324,10 @@ class MomentPublicInbound:
         if stored is not None:
             # Held already (a replay within the window, a second GFS, or the
             # household relay first): one moment is stored and announced once.
+            # A paired household's copy says nothing about public; this
+            # verified copy does, so a local reply to it may be public too.
+            if not stored.is_public:
+                await self._moments.mark_public(stored.id)
             log.debug(
                 "moment_public.inbound: moment %s already held — not re-stored",
                 env.get("moment_id"),

@@ -670,3 +670,20 @@ async def test_an_older_reply_stays_in_a_thread_you_can_still_read(db, repo):
     assert [r.id for r in replies] == ["r-stranger"]
     counts = await repo.count_engagement_for(["m-root"], viewer_user_id="u-me")
     assert counts["m-root"]["reply_count"] == 1
+
+
+async def test_mark_public_flags_a_received_moment_only(db, repo):
+    """``mark_public`` flips only a live moment received from another
+    household; a moment authored here and a tombstone keep theirs."""
+    await repo.save(replace(_moment(id="m-in"), received_via="household"))
+    await repo.save(_moment(id="m-own"))
+    await repo.save(replace(_moment(id="m-gone"), received_via="household"))
+    await db.enqueue(
+        "UPDATE moments SET deleted_at = datetime('now') WHERE id = 'm-gone'"
+    )
+    for moment_id in ("m-in", "m-own", "m-gone"):
+        await repo.mark_public(moment_id)
+    assert (await repo.get("m-in")).is_public is True
+    assert (await repo.get("m-own")).is_public is False
+    gone = await repo.get("m-gone", include_deleted=True)
+    assert gone is not None and gone.is_public is False

@@ -177,6 +177,7 @@ class AbstractMomentRepo(Protocol):
         *,
         max_hops: int = 3,
     ) -> Moment | None: ...
+    async def mark_public(self, moment_id: str) -> None: ...
     async def count_recent_for_author(
         self,
         author_user_id: str,
@@ -489,6 +490,18 @@ class SqliteMomentRepo:
             (author_user_id, limit),
         )
         return [m for m in (_row_to_moment(d) for d in rows_to_dicts(rows)) if m]
+
+    async def mark_public(self, moment_id: str) -> None:
+        """Mark a moment received from another household as public: the
+        author also published it through a GFS, and that verified copy
+        arrived after the paired one. Only that flag changes — content,
+        hops and where the row came from stay. Never a moment authored
+        here (``received_via='self'`` decides its own) or a tombstone."""
+        await self._db.enqueue(
+            "UPDATE moments SET is_public = 1"
+            " WHERE id = ? AND received_via != 'self' AND deleted_at IS NULL",
+            (moment_id,),
+        )
 
     async def get_readable(
         self,
