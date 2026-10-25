@@ -3,32 +3,44 @@
  * archive row so a ``#tag`` substring inside a moment's content
  * becomes a clickable link to ``/momentum?tab=archive&tag=<tag>``.
  *
- * The regex mirrors the server-side extractor in
- * ``socialhome/domain/moment.py`` (negative lookbehind on word
- * characters, ASCII tag charset, 32-char max). Keeping the two in
- * sync means the chip a user sees and the chip the server stored
- * are the same.
+ * The rule mirrors the server-side extractor in
+ * ``socialhome/domain/moment.py``: ``#`` + letters / marks / numbers /
+ * ``_`` in any script (``#Kürbisfest``, ``#東京``), not right after such
+ * a character (``issue#42`` is no tag), at most 32 code points (a longer
+ * run is no tag), stored NFC + lowercased. Keeping the two in sync means
+ * the chip a user sees and the tag the server stored are the same.
  */
 import type { ComponentChildren, MouseEventHandler } from 'preact'
 import { addBase } from '@/baseUrl'
 
-const HASHTAG_RE = /(?<!\w)#([A-Za-z0-9_]{1,32})/g
+/** Server: ``MOMENT_MAX_HASHTAG_LEN`` (code points). */
+const MAX_TAG_LEN = 32
+const HASHTAG_RE = /(?<![\p{L}\p{M}\p{N}_])#([\p{L}\p{M}\p{N}_]+)/gu
+
+/** The stored form of a tag (server: ``normalize_hashtag``). */
+export function normalizeHashtag(tag: string): string {
+  return tag.trim().replace(/^#+/, '').normalize('NFC').toLowerCase()
+}
 
 export function renderHashtagged(
   content: string,
   onClick: (tag: string, ev: MouseEvent) => void,
 ): ComponentChildren {
   if (!content) return content
+  // NFC first, like the server, so a decomposed "ü" is one tag char.
+  content = content.normalize('NFC')
   const out: ComponentChildren[] = []
   let last = 0
   let match: RegExpExecArray | null
   HASHTAG_RE.lastIndex = 0
   while ((match = HASHTAG_RE.exec(content)) !== null) {
+    const raw = match[1]
+    // A run longer than the cap is no tag (the server drops it too).
+    if ([...raw].length > MAX_TAG_LEN) continue
     if (match.index > last) {
       out.push(content.slice(last, match.index))
     }
-    const raw = match[1]
-    const tag = raw.toLowerCase()
+    const tag = normalizeHashtag(raw)
     const onClickHandler: MouseEventHandler<HTMLAnchorElement> = (ev) => {
       onClick(tag, ev as unknown as MouseEvent)
     }

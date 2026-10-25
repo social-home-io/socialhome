@@ -4,7 +4,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
-import { renderHashtagged } from './hashtags'
+import { normalizeHashtag, renderHashtagged } from './hashtags'
 
 describe('renderHashtagged', () => {
   it('passes through content with no hashtag', () => {
@@ -50,5 +50,41 @@ describe('renderHashtagged', () => {
     expect(links[0].textContent).toBe('#one')
     expect(links[1].textContent).toBe('#two')
     expect(container.textContent).toBe('#one and #two')
+  })
+
+  // Same cases as tests/domain/test_moment.py — the server's stored tag.
+  const tags = (content: string) => {
+    const { container } = render(<>{renderHashtagged(content, () => {})}</>)
+    return [...container.querySelectorAll('a.sh-hashtag')].map(a =>
+      new URL(a.getAttribute('href')!, 'http://x').searchParams.get('tag'))
+  }
+
+  it('keeps letters beyond ASCII in the tag ("#Kürbisfest" was "#k")', () => {
+    expect(tags('Bestes Wochenende!! #Kürbisfest #Fußball #herbst2026'))
+      .toEqual(['kürbisfest', 'fußball', 'herbst2026'])
+    expect(tags('#Ελλάδα #Москва #東京 #café_au_lait'))
+      .toEqual(['ελλάδα', 'москва', '東京', 'café_au_lait'])
+  })
+
+  it('composes a decomposed letter and keeps marks (Devanagari)', () => {
+    expect(tags('#Kürbisfest'.normalize('NFD'))).toEqual(['kürbisfest'])
+    expect(tags('#हिन्दी')).toEqual(['हिन्दी'])
+  })
+
+  it('ends a tag at punctuation or emoji and ignores a mid-word #', () => {
+    expect(tags('#fest! #fest2🎃 #a-b #x.y')).toEqual(['fest', 'fest2', 'a', 'x'])
+    expect(tags('issue#42 straße#nein ##ok')).toEqual(['ok'])
+  })
+
+  it('drops a run longer than 32 code points instead of cutting it', () => {
+    const ok = 'ü'.repeat(32)
+    const { container } = render(<>{renderHashtagged(`#${ok} #${ok}x`, () => {})}</>)
+    expect(tags(`#${ok} #${ok}x`)).toEqual([ok])
+    expect(container.textContent).toBe(`#${ok} #${ok}x`)
+  })
+
+  it('normalizes a ?tag= like the server', () => {
+    expect(normalizeHashtag(' #Kürbisfest ')).toBe('kürbisfest')
+    expect(normalizeHashtag('Kürbisfest'.normalize('NFD'))).toBe('kürbisfest')
   })
 })

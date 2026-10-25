@@ -28,7 +28,12 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..domain.moment import Moment, MomentReaction, extract_hashtags
+from ..domain.moment import (
+    Moment,
+    MomentReaction,
+    extract_hashtags,
+    normalize_hashtag,
+)
 from .base import row_to_dict, rows_to_dicts
 from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
 
@@ -324,7 +329,7 @@ class SqliteMomentRepo:
           with that hashtag — used by the Browse / archive page.
         """
         limit = max(1, min(int(limit), 100))
-        normalised_tag = tag.strip().lower().lstrip("#") if tag else None
+        normalised_tag = normalize_hashtag(tag) if tag else None
         # Clamp ``max_hops`` to [1, 3]: the wire cap is 3 and a
         # value below 1 would hide every row including the user's
         # own moments.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -194,6 +195,24 @@ async def test_list_visible_filters_by_tag(db, repo):
     # Untagged → all three (subject to other filters).
     all_visible = await repo.list_visible_to("u-me")
     assert {m.id for m in all_visible} == {"m-a", "m-b", "m-c"}
+
+
+async def test_tags_beyond_ascii_are_stored_and_filtered_whole(db, repo):
+    """``#Kürbisfest`` and ``#Fußball`` were stored as ``k`` / ``fu`` and
+    their filter pulled in every moment starting with those letters."""
+    await repo.save(
+        _moment(id="m-k", content="Bestes Wochenende!! #Kürbisfest #Fußball")
+    )
+    await repo.save(_moment(id="m-o", content="#Kino heute"))
+    assert await repo.list_hashtags_for("m-k") == ["fußball", "kürbisfest"]
+    for query in (
+        "Kürbisfest",
+        "#kürbisfest",
+        unicodedata.normalize("NFD", "Kürbisfest"),
+    ):
+        visible = await repo.list_visible_to("u-me", tag=query)
+        assert {m.id for m in visible} == {"m-k"}, query
+    assert await repo.list_visible_to("u-me", tag="k") == []
 
 
 async def test_list_top_hashtags_counts_and_orders(db, repo):

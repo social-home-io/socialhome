@@ -17,7 +17,7 @@ root parent_moment_id).
 
 from __future__ import annotations
 
-import re
+import unicodedata
 from dataclasses import dataclass
 
 #: Hard caps. Composer + service both enforce.
@@ -91,33 +91,58 @@ class MomentReaction:
 #: so a tag-spam moment doesn't inflate the trending list.
 MOMENT_MAX_HASHTAGS_PER_POST: int = 10
 
-#: Per-tag length cap (chars after the leading ``#``). Anything longer
-#: is dropped silently — same shape as the WhatsApp behaviour where
-#: the parser only takes contiguous word characters.
+#: Per-tag length cap (code points after the leading ``#``). A longer
+#: run is not a tag at all — dropped, never cut to a different tag.
 MOMENT_MAX_HASHTAG_LEN: int = 32
 
-#: ``#tag`` matcher. Word characters only — no spaces, punctuation,
-#: emoji. Matches the URL-safe charset so the SPA can route to
-#: ``/momentum/archive?tag=<tag>`` without escaping.
-_HASHTAG_RE = re.compile(rf"(?<!\w)#([A-Za-z0-9_]{{1,{MOMENT_MAX_HASHTAG_LEN}}})")
+
+def _is_tag_char(ch: str) -> bool:
+    """A tag is a run of letters, marks, numbers and ``_`` in any script
+    (Unicode categories L*, M*, N*). Marks count so a decomposed ``ü`` or
+    a Devanagari vowel sign doesn't end the tag. The SPA's
+    ``features/momentum/hashtags.tsx`` uses the same class
+    (``[\\p{L}\\p{M}\\p{N}_]``)."""
+    return ch == "_" or unicodedata.category(ch)[0] in "LMN"
+
+
+def normalize_hashtag(tag: str) -> str:
+    """The stored form of a tag: NFC, lowercased, without a leading
+    ``#``. The SPA does the same (``normalize('NFC').toLowerCase()``), so
+    a chip's ``?tag=`` matches the stored row."""
+    return unicodedata.normalize("NFC", tag.strip().lstrip("#")).lower()
 
 
 def extract_hashtags(content: str) -> list[str]:
-    """Return the unique lowercased hashtags found in ``content``.
+    """Return the unique normalised hashtags found in ``content``.
 
-    * Order is preserved by *first* occurrence in the source so the
-      trending query can use the natural insertion order if it ever
-      wants to surface "first-seen" semantics.
-    * Adjacent ``##foo`` only counts as one tag (``foo``); the negative
-      lookbehind on ``\\w`` prevents matching mid-word like ``b##foo``.
-    * Capped at :data:`MOMENT_MAX_HASHTAGS_PER_POST`.
+    * A tag is ``#`` + letters / marks / numbers / ``_`` in any script
+      (``#Kürbisfest``, ``#Fußball``, ``#東京``), ended by anything
+      else (space, punctuation, emoji). Stored NFC + lowercased
+      (:func:`normalize_hashtag`).
+    * A ``#`` inside a word (``issue#42``) starts no tag; ``##foo``
+      counts as ``foo``.
+    * A run longer than :data:`MOMENT_MAX_HASHTAG_LEN` is dropped.
+    * Order is preserved by *first* occurrence; capped at
+      :data:`MOMENT_MAX_HASHTAGS_PER_POST`.
     """
     if not content:
         return []
+    text = unicodedata.normalize("NFC", content)
     seen: set[str] = set()
     out: list[str] = []
-    for m in _HASHTAG_RE.finditer(content):
-        tag = m.group(1).lower()
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] != "#" or (i > 0 and _is_tag_char(text[i - 1])):
+            i += 1
+            continue
+        j = i + 1
+        while j < n and _is_tag_char(text[j]):
+            j += 1
+        raw = text[i + 1 : j]
+        i = j
+        if not raw or len(raw) > MOMENT_MAX_HASHTAG_LEN:
+            continue
+        tag = raw.lower()
         if tag in seen:
             continue
         seen.add(tag)
