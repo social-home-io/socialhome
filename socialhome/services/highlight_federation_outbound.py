@@ -12,6 +12,10 @@ Audience routing — Highlights are *not* space-scoped:
 * ``audience_kind = 'users'``      → resolve each ``audience`` user id
   to its home instance via :class:`AbstractUserRepo` and dedup.
 
+Each household's envelope carries only its own slice of the audience
+(its own picked people, itself, or nothing) — never who else the
+highlight was for. See :meth:`HighlightFederationOutbound._audience_per_target`.
+
 **Echo-loop guard.** :class:`FederationInboundService` republishes
 ``HighlightFrameAdded`` / ``HighlightRemoved`` / ``HighlightFrameRemoved`` on the
 local bus so :class:`RealtimeService` can fan to local viewers. To
@@ -244,13 +248,29 @@ class HighlightFederationOutbound(
         audience: tuple[str, ...],
     ) -> set[str]:
         """Return the set of peer instance_ids to send the event to."""
+        return set(await self._audience_per_target(kind, audience))
+
+    async def _audience_per_target(
+        self,
+        kind: str,
+        audience: tuple[str, ...],
+    ) -> dict[str, tuple[str, ...]]:
+        """Each peer the event goes to → the slice of the audience it may see.
+
+        A household learns only its own part of who a highlight is for:
+        the picked people homed on it (``users``), itself (``households``)
+        or nobody (``all_paired``). Receivers read the list only to gate
+        their own local users (``highlight_repo._IN_AUDIENCE_SQL``), so the
+        slice is exactly what they need — another household's people, the
+        author's housemates and the other picked households stay home.
+        """
         own = self._federation.own_instance_id
         if kind == "all_paired":
-            return set(await self.list_confirmed_peer_ids())
+            return {iid: () for iid in await self.list_confirmed_peer_ids()}
         if kind == "households":
-            return {iid for iid in audience if iid and iid != own}
+            return {iid: (iid,) for iid in audience if iid and iid != own}
         if kind == "users":
-            resolved: set[str] = set()
+            per_target: dict[str, list[str]] = {}
             for uid in audience:
                 try:
                     home = await self._user_repo.get_instance_for_user(uid)
@@ -263,10 +283,10 @@ class HighlightFederationOutbound(
                     )
                     continue
                 if home and home != own:
-                    resolved.add(home)
-            return resolved
+                    per_target.setdefault(home, []).append(uid)
+            return {iid: tuple(uids) for iid, uids in per_target.items()}
         log.debug("highlight-outbound: unknown audience_kind %r", kind)
-        return set()
+        return {}
 
     async def reaches(
         self, highlight: Highlight, *, instance_id: str, user_id: str
@@ -301,12 +321,17 @@ class HighlightFederationOutbound(
         payload: dict,
         author_user_id: str,
     ) -> None:
-        targets = await self._resolve_audience(audience_kind, audience)
-        for instance_id in targets:
+        targets = await self._audience_per_target(audience_kind, audience)
+        for instance_id, visible in targets.items():
             hidden = await self.hidden_for_peer(instance_id)
             if author_user_id in hidden:
                 continue
             if await self._guardian_blocks_household(author_user_id, instance_id):
                 # §CP.F2: a guardian blocked someone homed there.
                 continue
-            await self.send_to_instance(instance_id, event_type, payload)
+            body = payload
+            if "audience" in payload:
+                # Per-target copy: never the whole list (see
+                # :meth:`_audience_per_target`).
+                body = {**payload, "audience": list(visible)}
+            await self.send_to_instance(instance_id, event_type, body)

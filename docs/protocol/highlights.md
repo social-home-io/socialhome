@@ -19,17 +19,28 @@ peer instances based on an author-controlled audience.
 Plaintext fields on every envelope: `event_type`, `from_instance`,
 `to_instance`, `highlight_id`, and (where applicable) `frame_id`. Everything
 else — `frame_type`, `sequence`, `media_url`, `caption_text`,
-`caption_emoji`, `audience_user_ids` (only for `audience_kind=users`),
-`expires_at`, viewer / reactor user ids — rides inside the encrypted
-payload (§25.8.21).
+`caption_emoji`, `audience_kind`, `audience`, `expires_at`, viewer /
+reactor user ids — rides inside the encrypted payload (§25.8.21).
 
 ## Audience kinds
 
-| Kind         | Plaintext addressing                       | Encrypted allow-list |
-|--------------|--------------------------------------------|----------------------|
-| `all_paired` | one envelope per `confirmed` peer instance | none                 |
-| `households` | one envelope per author-picked peer        | none                 |
-| `users`      | one envelope per peer hosting any listed   | per-user user-id list — receivers gate before surfacing |
+| Kind         | Plaintext addressing                       | `audience` each household receives |
+|--------------|--------------------------------------------|------------------------------------|
+| `all_paired` | one envelope per `confirmed` peer instance | `[]`                               |
+| `households` | one envelope per author-picked peer        | `[<that household>]`               |
+| `users`      | one envelope per peer hosting any listed   | only the picked user ids homed on that household — receivers gate their local users on it before surfacing |
+
+**A household learns only its own part of the audience.** The author's
+household keeps the full list; `HIGHLIGHT_CREATED` and
+`HIGHLIGHT_FRAME_APPENDED` carry a per-household copy trimmed as above
+(`HighlightFederationOutbound._audience_per_target`), so no household
+learns which other people or households were picked, nor the author's
+housemates. Receivers read the list only to gate their own users
+(`highlight_repo._IN_AUDIENCE_SQL`; `all_paired` / `households` ignore
+it), so the trim needs no protocol version: an older receiver gets
+exactly the ids it uses. `HIGHLIGHT_FRAME_DELETED` / `HIGHLIGHT_DELETED`
+carry no audience. Release-blocker test:
+`tests/protocol/test_highlight_audience_minimization.py`.
 
 ## Day model
 

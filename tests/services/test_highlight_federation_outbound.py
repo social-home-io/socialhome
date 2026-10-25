@@ -156,6 +156,84 @@ async def test_households_audience_uses_listed_instance_ids(stack):
     assert sent == {"peer-a", "peer-b"}
 
 
+def _audience_by_target(fed) -> dict[str, list[str]]:
+    return {
+        c.kwargs["to_instance_id"]: c.kwargs["payload"]["audience"]
+        for c in fed.send_event.call_args_list
+    }
+
+
+@pytest.mark.parametrize("is_first", [True, False])
+async def test_users_audience_is_trimmed_to_the_targets_own_people(stack, is_first):
+    out, fed, fed_repo, user_repo = stack
+
+    async def _home(uid):
+        return {
+            "uid-author": "self",
+            "uid-housemate": "self",
+            "uid-bob": "peer-bob",
+            "uid-bea": "peer-bob",
+            "uid-carol": "peer-carol",
+        }.get(uid)
+
+    user_repo.get_instance_for_user = AsyncMock(side_effect=_home)
+    fed_repo.list_social_instances = AsyncMock(return_value=[])
+    audience = ("uid-housemate", "uid-bob", "uid-carol", "uid-bea", "uid-gone")
+    event = _frame_event(is_first=is_first, audience_kind="users", audience=audience)
+    await out._on_frame_added(event)
+    assert _audience_by_target(fed) == {
+        "peer-bob": ["uid-bob", "uid-bea"],
+        "peer-carol": ["uid-carol"],
+    }
+    # The author's own event keeps the whole list.
+    assert event.audience == audience
+
+
+@pytest.mark.parametrize("is_first", [True, False])
+async def test_households_audience_is_trimmed_to_the_target(stack, is_first):
+    out, fed, fed_repo, user_repo = stack
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(return_value=[])
+    await out._on_frame_added(
+        _frame_event(
+            is_first=is_first,
+            audience_kind="households",
+            audience=("peer-a", "peer-b", "self"),
+        ),
+    )
+    assert _audience_by_target(fed) == {"peer-a": ["peer-a"], "peer-b": ["peer-b"]}
+
+
+async def test_all_paired_audience_is_empty_for_every_target(stack):
+    out, fed, fed_repo, user_repo = stack
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[_peer("peer-a"), _peer("peer-b")],
+    )
+    # A stray list on an all_paired event never rides along.
+    await out._on_frame_added(
+        _frame_event(audience_kind="all_paired", audience=("peer-a", "uid-x")),
+    )
+    assert _audience_by_target(fed) == {"peer-a": [], "peer-b": []}
+
+
+async def test_trimmed_payloads_are_separate_copies(stack):
+    out, fed, fed_repo, user_repo = stack
+
+    async def _home(uid):
+        return {"uid-author": "self", "uid-bob": "peer-bob"}.get(uid) or ("peer-carol")
+
+    user_repo.get_instance_for_user = AsyncMock(side_effect=_home)
+    fed_repo.list_social_instances = AsyncMock(return_value=[])
+    await out._on_frame_added(
+        _frame_event(audience_kind="users", audience=("uid-bob", "uid-carol")),
+    )
+    payloads = [c.kwargs["payload"] for c in fed.send_event.call_args_list]
+    assert len(payloads) == 2
+    assert payloads[0] is not payloads[1]
+    assert payloads[0]["audience"] != payloads[1]["audience"]
+
+
 async def test_frame_removed_maps_to_frame_deleted(stack):
     out, fed, fed_repo, user_repo = stack
     user_repo.get_instance_for_user = AsyncMock(return_value="self")
