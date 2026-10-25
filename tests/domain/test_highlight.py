@@ -13,8 +13,8 @@ from socialhome.domain.highlight import (
     HighlightFrameReplySnapshot,
     HighlightFrameType,
     HighlightFrameView,
-    same_audience,
     audience_label,
+    same_audience,
 )
 
 
