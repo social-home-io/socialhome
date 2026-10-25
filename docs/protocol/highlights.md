@@ -46,8 +46,29 @@ that names an audience must name the same one (same kind, same ids in any
 order); otherwise `POST /api/highlights/frames` refuses it with `409
 HIGHLIGHT_AUDIENCE_MISMATCH` before anything is written, instead of
 showing the frame to today's audience. A frame that names no audience
-joins today's highlight. The composers show today's audience as fixed
-once the author has posted today and send later frames without one.
+joins today's highlight; `audience` ids without an `audience_kind` are
+refused with `422 VALIDATION_ERROR` (they would be ignored). Two first
+frames of the day racing on `UNIQUE(author_user_id, highlight_date)`
+don't fail: the loser reads the winner's row and appends (same audience)
+or gets the 409.
+
+The composers show today's audience as fixed once the author has posted
+today, and **every frame names the audience the composer showed** —
+never none. The day is the UTC date, so a frame that lands after UTC
+midnight (a slow multi-frame upload, a tab left open overnight) starts a
+new day: with the audience it was shown, that day is for the same
+people; without one it would take the Settings default (all paired
+households out of the box).
+
+"The same people" is the audience. A later frame joins today's
+highlight, so it also reaches whoever reads it through a share: a feed or
+space post that shared the highlight (`?via_post=` readers see every
+frame) and anyone holding its public link (the public stream lists the
+frames at view time). The composer's note says so — it names the public
+link when the author-only `GET /api/highlights/{id}/publish` reports one,
+and "wherever you shared it" otherwise (whether it was shared to a feed or
+space isn't on the author's highlight row, so the note doesn't claim
+either way).
 
 ## Retention
 

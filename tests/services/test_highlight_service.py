@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -23,6 +24,7 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services import highlight_service as highlight_service_module
 from socialhome.services.highlight_service import (
     MAX_FRAMES_PER_HIGHLIGHT,
     NOT_FOUND_MESSAGE,
@@ -849,3 +851,65 @@ async def test_frame_keeps_local_media_ref_verbatim(db, svc):
         media_url="/api/media/a.webp",
     )
     assert frame.media_url == "/api/media/a.webp"
+
+
+class _Clock(datetime):
+    """``datetime.now`` the test moves across UTC midnight."""
+
+    current = datetime(2026, 10, 25, 23, 59, 50, tzinfo=UTC)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.current
+
+
+async def test_a_frame_naming_todays_audience_after_midnight_keeps_it(
+    db, svc, monkeypatch
+):
+    """The composer shows "Today's highlight is for Anna" and sends that
+    audience with every frame; when the frame lands after UTC midnight the
+    new day's highlight is for Anna too — never the Settings default."""
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")  # Settings default: all_paired
+    monkeypatch.setattr(highlight_service_module, "datetime", _Clock)
+    _Clock.current = datetime(2026, 10, 25, 23, 59, 50, tzinfo=UTC)
+    first, _ = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    _Clock.current = datetime(2026, 10, 26, 0, 0, 5, tzinfo=UTC)
+    second, frame = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    assert second.id != first.id and second.highlight_date == "2026-10-26"
+    assert second.audience_kind is HighlightAudience.USERS
+    assert second.audience == ("u-anna",)
+    assert frame.sequence == 1
+
+
+async def test_concurrent_first_frames_never_fail_with_a_500(db, svc):
+    """Two first frames of the day racing on UNIQUE(author, date): the loser
+    reads the winner's highlight — appends with the same audience, a clean
+    409 with another — instead of an IntegrityError."""
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    await _seed_user(db, "u2", "anna")
+    results = await asyncio.gather(
+        _first_frame(service, HighlightAudience.ALL_PAIRED),
+        _first_frame(service, HighlightAudience.USERS, ("u-anna",)),
+        return_exceptions=True,
+    )
+    kinds = sorted(type(r).__name__ for r in results)
+    assert kinds == ["HighlightAudienceMismatchError", "tuple"], results
+    same = await asyncio.gather(
+        service.create_or_append_frame(
+            author_user_id="u2",
+            frame_type=HighlightFrameType.IMAGE,
+            media_url="/api/media/x.webp",
+            audience_kind=HighlightAudience.ALL_PAIRED,
+        ),
+        service.create_or_append_frame(
+            author_user_id="u2",
+            frame_type=HighlightFrameType.IMAGE,
+            media_url="/api/media/y.webp",
+            audience_kind=HighlightAudience.ALL_PAIRED,
+        ),
+        return_exceptions=True,
+    )
+    assert all(isinstance(r, tuple) for r in same), same
+    assert same[0][0].id == same[1][0].id

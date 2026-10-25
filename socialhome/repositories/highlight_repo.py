@@ -195,12 +195,16 @@ class SqliteHighlightRepo:
             created_at=datetime.now(UTC).isoformat(),
             expires_at=expires_at,
         )
+        # Two first frames of the day can race here: the loser's insert is
+        # a no-op and it returns the winner's row, so the service compares
+        # audiences (append or 409) instead of failing on UNIQUE.
         await self._db.enqueue(
             """
             INSERT INTO highlights(
                 id, author_user_id, highlight_date, audience_kind, audience_json,
                 created_at, expires_at
             ) VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(author_user_id, highlight_date) DO NOTHING
             """,
             (
                 highlight.id,
@@ -212,7 +216,11 @@ class SqliteHighlightRepo:
                 highlight.expires_at,
             ),
         )
-        return highlight
+        stored = await self._db.fetchone(
+            "SELECT * FROM highlights WHERE author_user_id=? AND highlight_date=?",
+            (author_user_id, highlight_date),
+        )
+        return _row_to_highlight(row_to_dict(stored)) or highlight
 
     async def get_highlight(self, highlight_id: str) -> Highlight | None:
         row = await self._db.fetchone(

@@ -8,11 +8,12 @@
  * today's highlight keyed by ``(author_user_id, highlight_date)``, so the
  * submit path just iterates over the staged frames sequentially.
  *
- * The first frame of the day carries the audience (highlight-level) and
- * starts from Settings › Highlights › Default audience. Once the author
- * has posted today, the audience is fixed: the picker is replaced by
- * "Today's highlight is for …" and frames go without an audience, since
- * the server refuses a frame for other people (``todayAudience.ts``). Per-frame ``caption_text`` is supported by
+ * The audience is highlight-level and starts from Settings › Highlights ›
+ * Default audience. Once the author has posted today, it is fixed: the
+ * picker is replaced by "Today's highlight is for …". Every frame names
+ * the audience shown — so a frame landing after UTC midnight starts the
+ * new day for the same people, and the server refuses a frame for other
+ * people than today's (``todayAudience.ts``). Per-frame ``caption_text`` is supported by
  * the schema today; the legacy ``caption_emoji`` field is no longer
  * surfaced in the UI — the per-frame :class:`EmojiPickButton` splices
  * glyphs straight into the caption text.
@@ -31,7 +32,7 @@ import { currentUser } from '@/store/auth'
 import type { Highlight, HighlightAudienceKind } from '@/types'
 import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
-import { defaultAudienceKind, describeAudience, loadMyToday } from './todayAudience'
+import { audienceBody, defaultAudienceKind, loadMyToday, todayFixedNote } from './todayAudience'
 
 /** A household the audience picker offers — a confirmed social peer. */
 interface RemoteHousehold {
@@ -122,6 +123,8 @@ const mineToday = signal<number>(0)
 /** Today's highlight when the author already posted today — its
  *  audience is fixed for every further frame. */
 const today = signal<Highlight | null>(null)
+/** Today's highlight has a public link — its note says so. */
+const todayPublished = signal<boolean>(false)
 const audienceKind = signal<HighlightAudienceKind>('all_paired')
 const audienceIds = signal<string[]>([])
 const submitting = signal<boolean>(false)
@@ -175,6 +178,10 @@ export default function HighlightComposerPage() {
     advanced.value = audienceKind.value === 'users'
     mineToday.value = 0
     today.value = null
+    todayPublished.value = false
+    // A successful post routes away with ``submitting`` still set; the
+    // next visit must not open on a spinning, disabled Post button.
+    submitting.value = false
 
     // Connected households + people for the picker, from one
     // ``/api/friends`` read. A failure is surfaced in the picker; the
@@ -190,6 +197,7 @@ export default function HighlightComposerPage() {
     loadMyToday().then(mine => {
       mineToday.value = mine?.frames ?? 0
       today.value = mine?.highlight ?? null
+      todayPublished.value = mine?.published ?? false
     }).catch(() => {})
   }, [])
 
@@ -282,21 +290,19 @@ export default function HighlightComposerPage() {
     if (frames.length === 0 || submitting.value) return
     submitting.value = true
     let lastHighlightId: string | null = null
-    const appending = today.value !== null
+    // Exactly the audience shown — today's, or the one picked for a new
+    // day — on every frame, so none can fall back to the Settings default.
+    const audience = today.value !== null
+      ? audienceBody(today.value.audience_kind, today.value.audience)
+      : audienceBody(audienceKind.value, audienceIds.value)
     for (let i = 0; i < frames.length; i++) {
       const f = frames[i]
-      const first = i === 0 && !appending
       try {
         const r = await api.post('/api/highlights/frames', {
           media_url:    f.url,
           frame_type:   f.type,
           caption_text: f.caption.trim() || null,
-          // Audience rides on the first frame of a new day only — later
-          // frames (and every frame once today's highlight exists) join
-          // today's highlight and its audience server-side.
-          audience_kind: first ? audienceKind.value : undefined,
-          audience:      first && audienceKind.value !== 'all_paired'
-            ? audienceIds.value : [],
+          ...audience,
         }) as { highlight: { id: string }; frame: { id: string } }
         lastHighlightId = r.highlight.id
       } catch (err: unknown) {
@@ -404,9 +410,7 @@ export default function HighlightComposerPage() {
         <fieldset class="sh-highlight-composer-audience">
           <legend class="sh-muted">{t('highlight.composer.audience')}</legend>
           <p class="sh-highlight-composer-audience-fixed">
-            {t('highlight.audience.today_fixed', {
-              who: describeAudience(today.value.audience_kind, today.value.audience, nameOf),
-            })}
+            {todayFixedNote(today.value, todayPublished.value, nameOf)}
           </p>
         </fieldset>
       ) : (

@@ -29,13 +29,17 @@ import { HighlightQuickShareDialog, openHighlightQuickShare } from './HighlightQ
 const TODAY = new Date().toISOString().slice(0, 10)
 
 /** ``GET /api/highlights`` with (or without) the author's highlight today. */
-function inbox(audience?: { kind: string, ids: string[] }) {
+function inbox(
+  audience?: { kind: string, ids: string[] },
+  { published = false, date = TODAY }: { published?: boolean, date?: string } = {},
+) {
   mockApi.get.mockImplementation(async (path: string) => {
+    if (path === '/api/highlights/h-today/publish') return { published }
     if (path !== '/api/highlights') throw new Error(`unexpected GET ${path}`)
     if (!audience) return []
     return [{
       highlight: {
-        id: 'h-today', author_user_id: 'u-me', highlight_date: TODAY,
+        id: 'h-today', author_user_id: 'u-me', highlight_date: date,
         audience_kind: audience.kind, audience: audience.ids,
       },
       frames: [{ id: 'f1' }],
@@ -71,18 +75,56 @@ describe('HighlightQuickShareDialog audience', () => {
     user.value = { user_id: 'u-me', username: 'pascal', preferences_json: '{}' }
   })
 
-  it('a frame for today joins today\'s audience and says who that is', async () => {
+  it('a frame for today names today\'s audience and says who that is', async () => {
     inbox({ kind: 'users', ids: ['u-anna'] })
     const view = await openWithPhoto()
     expect(view.container.textContent).toContain(
-      "Today's highlight is for 1 person. New frames go to the same people.",
+      "Today's highlight is for 1 person. New frames are added to it, so they also show wherever you shared it.",
     )
     fireEvent.click(shareButton(view))
     await waitFor(() => expect(mockApi.post).toHaveBeenCalled())
     const body = mockApi.post.mock.calls[0][1] as Record<string, unknown>
-    // No audience: never all_paired on top of a people-only highlight.
-    expect(body).not.toHaveProperty('audience_kind')
-    expect(body).not.toHaveProperty('audience')
+    // Exactly the audience it showed: never all_paired on top of a
+    // people-only highlight.
+    expect(body.audience_kind).toBe('users')
+    expect(body.audience).toEqual(['u-anna'])
+  })
+
+  it('a frame sent after UTC midnight still carries the audience the dialog showed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-10-25T23:59:50Z'))
+      inbox({ kind: 'users', ids: ['u-anna'] }, { date: '2026-10-25' })
+      const view = await openWithPhoto()
+      expect(view.container.textContent).toContain("Today's highlight is for 1 person.")
+      // The tab stays open past midnight: the server starts a new day, and
+      // without an audience it would take the Settings default (all paired).
+      vi.setSystemTime(new Date('2026-10-26T00:00:05Z'))
+      fireEvent.click(shareButton(view))
+      await waitFor(() => expect(mockApi.post).toHaveBeenCalled())
+      const body = mockApi.post.mock.calls[0][1] as Record<string, unknown>
+      expect(body.audience_kind).toBe('users')
+      expect(body.audience).toEqual(['u-anna'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says new frames also reach anyone with the public link', async () => {
+    inbox({ kind: 'all_paired', ids: [] }, { published: true })
+    const view = await openWithPhoto()
+    await waitFor(() => expect(view.container.textContent).toContain(
+      "Today's highlight is for all your paired households and has a public link. New frames are added to it, so anyone with the link sees them too.",
+    ))
+  })
+
+  it('Share waits until today\'s highlight is known', async () => {
+    let resolve: (v: unknown) => void = () => {}
+    mockApi.get.mockImplementation(() => new Promise(r => { resolve = r }))
+    const view = await openWithPhoto()
+    expect(shareButton(view).disabled).toBe(true)
+    await act(async () => { resolve([]) ; await new Promise(r => setTimeout(r, 0)) })
+    expect(shareButton(view).disabled).toBe(false)
   })
 
   it('a new day goes to all paired households when that is the default', async () => {

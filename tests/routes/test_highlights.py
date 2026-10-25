@@ -973,3 +973,21 @@ async def test_a_frame_for_other_people_than_today_is_refused(client):
     )
     assert joined.status == 201
     assert (await joined.json())["frame"]["sequence"] == 2
+
+
+async def test_audience_ids_without_a_kind_are_refused(client):
+    """``audience`` without ``audience_kind`` would be ignored and the frame
+    join a wider highlight: 422, nothing created."""
+    resp = await client.post(
+        "/api/highlights/frames",
+        json={
+            "frame_type": "image",
+            "media_url": "/api/media/a.webp",
+            "audience": ["u-anna"],
+        },
+        headers=_auth(client),
+    )
+    assert resp.status == 422
+    assert (await resp.json())["error"]["code"] == "VALIDATION_ERROR"
+    r = await client.get("/api/highlights", headers=_auth(client))
+    assert await r.json() == []

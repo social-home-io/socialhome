@@ -14,11 +14,13 @@
  * want the storyboard or a narrower audience.
  *
  * Audience: once the author has posted today, the frame joins today's
- * highlight and its audience (sent without one — the server refuses a
- * frame for other people), and the dialog says who that is. A new day's
- * highlight goes to all paired households when that is the Settings
- * default; with a "pick per highlight" default the dialog sends the
- * author to the full composer instead of guessing.
+ * highlight and its audience, and the dialog says who that is. The frame
+ * always names the audience the dialog showed — so one sent after UTC
+ * midnight starts the new day for the same people, and the server refuses
+ * it (409) if today's highlight is for other people. A new day's highlight
+ * goes to all paired households when that is the Settings default; with a
+ * "pick per highlight" default the dialog sends the author to the full
+ * composer instead of guessing. Share waits until today is known.
  *
  * Mirrors the ``MomentumComposerDialog`` + ``CalendarEventDialog``
  * pattern: module-level signals + ``openHighlightQuickShare()`` helper
@@ -36,9 +38,10 @@ import { describeUploadError } from '@/utils/uploadErrors'
 import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
 import {
+  audienceBody,
   defaultAudienceKind,
-  describeAudience,
   loadMyToday,
+  todayFixedNote,
 } from '@/features/highlights/todayAudience'
 import type { Highlight } from '@/types'
 
@@ -57,6 +60,24 @@ const mediaType = signal<'image' | 'video' | null>(null)
 /** ``undefined`` while loading; ``null`` when the author hasn't posted
  *  today; else today's highlight (its audience is fixed). */
 const today = signal<Highlight | null | undefined>(undefined)
+/** Today's highlight has a public link — its note says so. */
+const todayPublished = signal<boolean>(false)
+
+/** Read today's highlight. A failed read counts as "none today": the
+ *  frame then names the Settings default, and the server refuses it (409)
+ *  if today's highlight is for other people — never wider. */
+function loadToday(): void {
+  loadMyToday().then(
+    (mine) => {
+      today.value = mine?.highlight ?? null
+      todayPublished.value = mine?.published ?? false
+    },
+    () => {
+      today.value = null
+      todayPublished.value = false
+    },
+  )
+}
 
 /** Open the quick-share dialog. Resets all state — call this fresh
  *  every time, no carry-over from a previous abandoned share. */
@@ -67,13 +88,9 @@ export function openHighlightQuickShare(): void {
   mediaType.value = null
   submitting.value = false
   today.value = undefined
+  todayPublished.value = false
   open.value = true
-  loadMyToday().then(
-    (mine) => { today.value = mine?.highlight ?? null },
-    // Unknown: frames go without an audience, so the server joins today's
-    // highlight or uses the Settings default — never wider than either.
-    () => { today.value = undefined },
-  )
+  loadToday()
 }
 
 /** A new day's highlight whose Settings default is "pick per highlight" —
@@ -136,7 +153,8 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
 
   const submit = async (e: Event) => {
     e.preventDefault()
-    if (!mediaUrl.value || submitting.value || needsComposer()) return
+    const shown = today.value
+    if (!mediaUrl.value || submitting.value || shown === undefined || needsComposer()) return
     submitting.value = true
     try {
       const body: Record<string, unknown> = {
@@ -144,13 +162,11 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
         frame_type:   mediaType.value,
         caption_text: caption.value.trim() || null,
       }
-      // A new day's highlight for all paired households (the Settings
-      // default). Otherwise no audience: the frame joins today's
-      // highlight and goes to the same people.
-      if (today.value === null) {
-        body.audience_kind = 'all_paired'
-        body.audience = []
-      }
+      // Exactly the audience the dialog showed: today's, or a new day
+      // for all paired households (the Settings default).
+      Object.assign(body, shown !== null
+        ? audienceBody(shown.audience_kind, shown.audience)
+        : audienceBody('all_paired', []))
       const r = await api.post('/api/highlights/frames', body) as
         { highlight: { id: string }; frame: { id: string } }
       showToast(t('highlight.shared'), 'success')
@@ -159,6 +175,9 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
     } catch (err: unknown) {
       showToast(t('highlight.share_failed', { error: String((err as Error)?.message ?? err) }), 'error')
       submitting.value = false
+      // Today may have changed (another tab, a new day): show who the
+      // next try goes to before it is sent.
+      loadToday()
     }
   }
 
@@ -230,9 +249,7 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
         {today.value !== undefined && (
           <p class="sh-muted sh-highlight-quick-audience-note">
             {today.value !== null
-              ? t('highlight.audience.today_fixed', {
-                who: describeAudience(today.value.audience_kind, today.value.audience),
-              })
+              ? todayFixedNote(today.value, todayPublished.value)
               : needsComposer()
                 ? t('highlight.quick.pick_in_composer')
                 : t('highlight.audience.new_all')}
@@ -251,7 +268,7 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
           <Button
             type="submit"
             loading={submitting.value}
-            disabled={!mediaUrl.value || needsComposer()}
+            disabled={!mediaUrl.value || today.value === undefined || needsComposer()}
           >
             {t('highlight.quick.share')}
           </Button>

@@ -14,11 +14,14 @@ vi.mock('@/store/auth', () => ({
 }))
 
 import {
+  audienceBody,
   defaultAudienceKind,
   describeAudience,
   loadMyToday,
+  todayFixedNote,
   todayKey,
 } from './todayAudience'
+import type { Highlight } from '@/types'
 
 describe('todayAudience', () => {
   beforeEach(() => {
@@ -63,5 +66,26 @@ describe('todayAudience', () => {
     expect(mine?.frames).toBe(2)
     mockApi.get.mockResolvedValue([])
     expect(await loadMyToday()).toBeNull()
+  })
+
+  it('always names an audience, ids only where the kind uses them', () => {
+    expect(audienceBody('all_paired', ['x'])).toEqual({ audience_kind: 'all_paired', audience: [] })
+    expect(audienceBody('users', ['a'])).toEqual({ audience_kind: 'users', audience: ['a'] })
+  })
+
+  it('reads whether today has a public link, and says so', async () => {
+    const today = todayKey()
+    const h = { id: 'h', author_user_id: 'u-me', highlight_date: today, audience_kind: 'users', audience: ['a'] }
+    mockApi.get.mockImplementation(async (path: string) =>
+      path === '/api/highlights/h/publish' ? { published: true } : [{ highlight: h, frames: [{}] }])
+    expect((await loadMyToday())?.published).toBe(true)
+    mockApi.get.mockImplementation(async (path: string) => {
+      if (path === '/api/highlights/h/publish') throw new Error('offline')
+      return [{ highlight: h, frames: [{}] }]
+    })
+    expect((await loadMyToday())?.published).toBe(false)
+    const hl = h as unknown as Highlight
+    expect(todayFixedNote(hl, true)).toContain('has a public link')
+    expect(todayFixedNote(hl, false)).toContain('wherever you shared it')
   })
 })

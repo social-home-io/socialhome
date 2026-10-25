@@ -6,7 +6,10 @@
  * ``(author, highlight_date)`` and refuses a frame that asks for other
  * people (``409 HIGHLIGHT_AUDIENCE_MISMATCH``) instead of silently showing
  * it to today's audience. So once the author has posted today, both
- * composers show today's audience as fixed and send frames without one.
+ * composers show today's audience as fixed. Every frame names the audience
+ * the composer showed (``audienceBody``) — never none: a frame that lands
+ * after UTC midnight starts a new day, and without an audience the server
+ * would give it the Settings default instead of the people the author saw.
  * Before the first frame of the day, the starting audience follows
  * Settings › Highlights › Default audience.
  */
@@ -21,9 +24,12 @@ export function todayKey(now: Date = new Date()): string {
   return now.toISOString().slice(0, 10)
 }
 
-/** The author's highlight for today plus its frame count, or ``null``
- *  when they haven't posted today. Throws when the inbox can't load. */
-export async function loadMyToday(): Promise<{ highlight: Highlight, frames: number } | null> {
+/** The author's highlight for today: its frame count and whether it has
+ *  a public link (``published``). ``null`` when they haven't posted today.
+ *  Throws when the inbox can't load. */
+export async function loadMyToday(): Promise<
+  { highlight: Highlight, frames: number, published: boolean } | null
+> {
   const rows = (await api.get('/api/highlights')) as HighlightInboxItem[]
   const me = currentUser.value?.user_id
   if (!me) return null
@@ -31,7 +37,47 @@ export async function loadMyToday(): Promise<{ highlight: Highlight, frames: num
   const mine = (rows ?? []).find(
     s => s.highlight.author_user_id === me && s.highlight.highlight_date === key,
   )
-  return mine ? { highlight: mine.highlight, frames: mine.frames.length } : null
+  if (!mine) return null
+  return {
+    highlight: mine.highlight,
+    frames: mine.frames.length,
+    published: await hasPublicLink(mine.highlight.id),
+  }
+}
+
+/** Whether the author's highlight has a public link — the inbox row
+ *  doesn't carry it, the author-only ``GET …/publish`` does. ``false``
+ *  when it can't be read (the note then names shares in general). */
+async function hasPublicLink(id: string): Promise<boolean> {
+  try {
+    const res = await api.get(`/api/highlights/${id}/publish`) as { published?: unknown }
+    return res?.published === true
+  } catch {
+    return false
+  }
+}
+
+/** The audience fields of a ``POST /api/highlights/frames`` body: exactly
+ *  the audience the composer showed, sent with every frame. */
+export function audienceBody(
+  kind: HighlightAudienceKind,
+  ids: readonly string[],
+): { audience_kind: HighlightAudienceKind, audience: string[] } {
+  return { audience_kind: kind, audience: kind === 'all_paired' ? [] : [...ids] }
+}
+
+/** "Today's highlight is for {who}…" — later frames join it, so they also
+ *  reach a feed / space it was shared to and anyone with its public link. */
+export function todayFixedNote(
+  highlight: Highlight,
+  published: boolean,
+  nameOf?: (id: string) => string | undefined,
+): string {
+  const who = describeAudience(highlight.audience_kind, highlight.audience, nameOf)
+  return t(
+    published ? 'highlight.audience.today_fixed_public' : 'highlight.audience.today_fixed',
+    { who },
+  )
 }
 
 /** Settings › Highlights › Default audience — the kind a new day's
