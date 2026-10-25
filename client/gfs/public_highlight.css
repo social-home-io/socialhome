@@ -6,7 +6,7 @@
  * socialhome/global_server/routes/highlights.py; a pytest keeps the two
  * identical. One rule per line; this comment is dropped by the build.
  */
-html,body{margin:0;padding:0;background:#111;color:#eee;font-family:system-ui,sans-serif;height:100%;}
+html,body{margin:0;padding:0;background:#111;color:#eee;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',system-ui,sans-serif;height:100%;}
 #root{height:100vh;display:flex;}
 .highlight-viewer{display:flex;flex-direction:column;width:100%;}
 .highlight-author{display:flex;align-items:center;gap:12px;padding:12px 12px 0;}

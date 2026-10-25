@@ -206,7 +206,11 @@ class HighlightPublicLandingView(GfsBaseView):
 #: public-page CSP (``html_page.html_response``).
 _VIEWER_CSS = (
     "html,body{margin:0;padding:0;background:#111;color:#eee;"
-    "font-family:system-ui,sans-serif;height:100%;}"
+    # Colour emoji families before the generic family: on Linux the
+    # generic resolves to DejaVu, which draws 😂 😮 😢 as outlines.
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
+    "'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',system-ui,"
+    "sans-serif;height:100%;}"
     "#root{height:100vh;display:flex;}"
     ".highlight-viewer{display:flex;flex-direction:column;width:100%;}"
     # Who shared it (sealed author_profile frame): picture, name, bio.

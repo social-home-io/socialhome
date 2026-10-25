@@ -28,11 +28,16 @@ export function isFontId(id: unknown): id is FontId {
 /** The app's own body font — what ``system`` (no override) resolves to. */
 export const APP_FONT_STACK = 'var(--sh-font-family)'
 
+/** Colour emoji families, named before each generic family: on Linux /
+ *  ChromeOS the generic ``serif`` / ``sans-serif`` resolve to DejaVu,
+ *  which draws 😂 😮 😢 as monochrome outlines. */
+const EMOJI = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"'
+
 export const FONT_STACKS: Record<FontId, string> = {
   system:  APP_FONT_STACK,
-  serif:   'Georgia, "Times New Roman", serif',
-  rounded: '"Nunito Variable", "SF Pro Rounded", "Quicksand", system-ui, sans-serif',
-  mono:    'ui-monospace, Menlo, Consolas, monospace',
+  serif:   `Georgia, "Times New Roman", ${EMOJI}, serif`,
+  rounded: `"Nunito Variable", "SF Pro Rounded", "Quicksand", ${EMOJI}, system-ui, sans-serif`,
+  mono:    `ui-monospace, Menlo, Consolas, ${EMOJI}, monospace`,
 }
 
 /** The stack for a stored font id, or null for an unknown value. */
