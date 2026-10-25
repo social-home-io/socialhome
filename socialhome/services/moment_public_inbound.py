@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Any
 from cryptography.exceptions import InvalidTag
 
 from ..domain.events import MomentCreated, MomentDeleted
-from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
+from ..domain.moment import MOMENT_MAX_LIFETIME_DAYS, Moment, clamp_moment_expiry
 from ..domain.moment_public import (
     MomentPublicFollow,
     public_author_bio,
@@ -389,7 +389,10 @@ class MomentPublicInbound:
             parent_moment_id=env.get("parent_moment_id"),
             origin_instance_id=str(env.get("origin_instance_id") or ""),
             created_at=str(env["created_at"]),
-            expires_at=str(env["expires_at"]),
+            # v_65: kept at most 30 days whatever the author sealed.
+            expires_at=clamp_moment_expiry(
+                str(env["created_at"]), str(env["expires_at"])
+            ),
             is_public=True,
             received_via="gfs",
             received_via_gfs_id=gfs_id,
@@ -443,7 +446,7 @@ class MomentPublicInbound:
             author_user_id=author_user_id,
             origin_instance_id=origin_instance_id,
             expires_at=(
-                datetime.now(UTC) + timedelta(days=MOMENT_RETENTION_DAYS)
+                datetime.now(UTC) + timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
             ).isoformat(),
         )
         if existing is None:
@@ -509,12 +512,14 @@ def _unix_or_none(value: object) -> float | None:
 
 
 def _still_live(body: dict) -> bool:
-    """A create whose moment hasn't expired and isn't older than a moment can
-    live — else it is a replay (or junk), refused before anything is read
-    from it."""
+    """A create whose moment hasn't expired (its ``expires_at`` clamped to 30
+    days, v_65) and isn't older than a moment can live — else it is a replay
+    (or junk), refused before anything is read from it."""
     try:
         created = datetime.fromisoformat(str(body["created_at"]))
-        expires = datetime.fromisoformat(str(body["expires_at"]))
+        expires = datetime.fromisoformat(
+            clamp_moment_expiry(str(body["created_at"]), str(body["expires_at"]))
+        )
     except KeyError, ValueError:
         return False
     if created.tzinfo is None:
@@ -522,7 +527,7 @@ def _still_live(body: dict) -> bool:
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=UTC)
     now = datetime.now(UTC)
-    return expires > now and created > now - timedelta(days=MOMENT_RETENTION_DAYS)
+    return expires > now and created > now - timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
 
 
 def _row_binds(

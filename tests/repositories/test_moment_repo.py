@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from socialhome.domain.moment import Moment
+from socialhome.domain.moment import Moment, MomentTombstone
 from socialhome.repositories.moment_repo import SqliteMomentRepo
 
 
@@ -471,13 +471,23 @@ async def test_tombstone_an_unknown_id_holds_the_delete(db, repo):
         origin_instance_id="peer",
         expires_at=expires,
     )
-    assert removed is False
+    assert removed is MomentTombstone.RECORDED
+    assert removed.changed
     tomb = await repo.get("m-later", include_deleted=True)
     assert tomb is not None and tomb.deleted_at is not None
     assert (tomb.author_user_id, tomb.origin_instance_id) == ("u-remote", "peer")
     assert tomb.expires_at == expires
     await repo.save(_moment(id="m-later", author="u-remote"))
     assert await repo.get("m-later") is None
+    # The same delete again (a replay) changes nothing.
+    replay = await repo.tombstone(
+        "m-later",
+        author_user_id="u-remote",
+        origin_instance_id="peer",
+        expires_at=expires,
+    )
+    assert replay is MomentTombstone.ALREADY
+    assert not replay.changed
 
 
 async def test_tombstone_a_stored_moment_keeps_its_expiry(db, repo):
@@ -489,7 +499,7 @@ async def test_tombstone_a_stored_moment_keeps_its_expiry(db, repo):
         origin_instance_id="self",
         expires_at=_now_iso(7 * 24 * 60),
     )
-    assert removed is True
+    assert removed is MomentTombstone.REMOVED
     tomb = await repo.get("m-t", include_deleted=True)
     assert tomb is not None and tomb.expires_at == m.expires_at
     # A second delete is a no-op and reports nothing removed.
@@ -499,7 +509,7 @@ async def test_tombstone_a_stored_moment_keeps_its_expiry(db, repo):
         origin_instance_id="self",
         expires_at=_now_iso(),
     )
-    assert again is False
+    assert again is MomentTombstone.ALREADY
 
 
 async def test_delete_by_author_tombstones_live_moments(db, repo):
@@ -829,3 +839,66 @@ async def test_clear_media_only_on_an_archived_own_moment(db, repo):
     old = await repo.get("m-old")
     assert (old.media_url, old.media_type, old.content) == (None, None, "hello")
     assert (await repo.get("m-live")).media_url == "api/media/l.webp"
+
+
+# ── A follow through a GFS is a follow (decision 6d) ──────────────────────
+
+
+async def _follow_via_gfs(db, follower: str, followed: str) -> None:
+    await db.enqueue(
+        "INSERT OR IGNORE INTO users(user_id, username, display_name) VALUES(?, ?, ?)",
+        (follower, follower, follower),
+    )
+    await db.enqueue(
+        "INSERT OR IGNORE INTO gfs_connections(id, gfs_instance_id, display_name,"
+        " public_key, inbox_url, status, paired_at) VALUES('g1', 'gfs-1',"
+        " 'GFS One', ?, 'https://gfs1.example', 'active', datetime('now'))",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO moment_public_follows(follower_user_id, followed_user_id,"
+        " gfs_id, followed_instance_pk, followed_username, followed_display_name)"
+        " VALUES(?, ?, 'g1', ?, 'noor', 'Noor')",
+        (follower, followed, "bb" * 32),
+    )
+
+
+async def test_a_gfs_follower_keeps_the_moment_past_24_hours(db, repo):
+    """Before, only ``user_follows`` counted: someone who followed an author
+    through a GFS lost each moment after 24 h whatever the author chose."""
+    await repo.save(
+        _moment(
+            id="m-gfs",
+            author="u-noor",
+            content="#bees still here",
+            created_offset_min=-5 * 24 * 60,
+            expires_days=20,
+        )
+    )
+    assert await repo.list_visible_to("u-me") == []
+    assert await repo.get_readable("m-gfs", "u-me") is None
+    assert await repo.list_top_hashtags("u-me") == []
+    await _follow_via_gfs(db, "u-me", "u-noor")
+    assert [m.id for m in await repo.list_visible_to("u-me")] == ["m-gfs"]
+    assert await repo.get_readable("m-gfs", "u-me") is not None
+    assert await repo.list_top_hashtags("u-me") == [("bees", 1)]
+    # Someone else in the household who follows nobody still sees 24 h.
+    assert await repo.list_visible_to("u-other") == []
+
+
+async def test_a_follower_sees_an_author_chosen_month(db, repo):
+    """The window is the moment's ``expires_at`` — 29 days old and still
+    live for a follower when the author chose 30."""
+    await repo.save(
+        _moment(
+            id="m-month",
+            author="u-bob",
+            created_offset_min=-29 * 24 * 60,
+            expires_days=1,
+        )
+    )
+    await db.enqueue(
+        "INSERT INTO user_follows(follower_user_id, followed_user_id) VALUES(?, ?)",
+        ("u-me", "u-bob"),
+    )
+    assert [m.id for m in await repo.list_visible_to("u-me")] == ["m-month"]

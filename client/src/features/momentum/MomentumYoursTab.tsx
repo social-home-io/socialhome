@@ -24,6 +24,7 @@ import { showToast } from '@/components/Toast'
 import { INITIAL_LOAD, clockTime, loadFailed, loadSucceeded, type LoadStatus } from '@/utils/loadStatus'
 import { formatBytes } from '@/utils/bytes'
 import { addBase } from '@/baseUrl'
+import { getMomentsPreferences, momentRetentionLabel } from '@/utils/preferences'
 import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { t, isOne, formatLocale } from '@/i18n/i18n'
@@ -220,7 +221,11 @@ export default function MomentumYoursTab() {
   const header = (
     <>
       <h2>{t('moment.yours.heading')}</h2>
-      <p class="sh-muted">{t('moment.yours.intro')}</p>
+      <p class="sh-muted">
+        {t('moment.yours.intro', {
+          period: momentRetentionLabel(getMomentsPreferences().follower_retention_days),
+        })}
+      </p>
       {usage.value && <UsageLine u={usage.value} />}
     </>
   )

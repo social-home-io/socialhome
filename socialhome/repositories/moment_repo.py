@@ -19,7 +19,8 @@ replayed or late-arriving create for a deleted id cannot bring it back.
 
 The visibility query in :meth:`list_visible_to` does *all* the
 filtering in one statement: drop blocked authors, collapse the
-absolute 7-day retention to 24 h for non-followers, and apply the
+author-chosen retention (``expires_at``, 1–30 days) to 24 h for
+non-followers, and apply the
 ``before`` cursor for pagination.
 """
 
@@ -31,6 +32,7 @@ from ..db import AsyncDatabase
 from ..domain.moment import (
     Moment,
     MomentReaction,
+    MomentTombstone,
     extract_hashtags,
     normalize_hashtag,
 )
@@ -61,15 +63,32 @@ _OWN_ARCHIVED_SQL = "(m.received_via = 'self' AND m.deleted_at IS NULL)"
 #: tombstone (own or not) still goes at expiry.
 _PRUNABLE_SQL = "datetime(m.expires_at) < datetime('now') AND NOT " + _OWN_ARCHIVED_SQL
 
+#: The viewer follows the moment's author — on a paired household
+#: (``user_follows``) or through a GFS (``moment_public_follows``): both are
+#: a follow, so both keep the author's moments until their ``expires_at``
+#: (decision 6d). Binds the viewer twice.
+_FOLLOWS_AUTHOR_SQL = """
+    (
+        EXISTS (
+            SELECT 1 FROM user_follows
+             WHERE follower_user_id = ? AND followed_user_id = m.author_user_id
+        )
+        OR EXISTS (
+            SELECT 1 FROM moment_public_follows
+             WHERE follower_user_id = ? AND followed_user_id = m.author_user_id
+        )
+    )
+"""
+
 #: What the inbox shows a viewer — the one rule :meth:`list_visible_to` and
 #: :meth:`get_readable` share, so a detail read can never show what the
 #: inbox hides: no personal block (§Privacy) or guardian block (§CP.F2,
 #: either way) between viewer and author; younger than 24 h, or the viewer
-#: follows the author (then the full retention); not expired or deleted;
+#: follows the author (then until its ``expires_at``); not expired or deleted;
 #: within the viewer's ``max_hops``; and never a moment that arrived through a
 #: GFS (a stranger's public moment) for a protected account (§CP.R) — the
 #: row is household-wide, so the filter is per viewer. Binds the viewer
-#: five times, then the hop cap.
+#: :data:`_VISIBLE_VIEWER_BINDS` times, then the hop cap.
 _VISIBLE_SQL = f"""
     {_NOT_GFS_FOR_PROTECTED_SQL}
     AND m.author_user_id NOT IN (
@@ -78,15 +97,16 @@ _VISIBLE_SQL = f"""
     AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
     AND (
         (julianday('now') - julianday(m.created_at)) * 24 < 24
-        OR EXISTS (
-            SELECT 1 FROM user_follows
-             WHERE follower_user_id = ? AND followed_user_id = m.author_user_id
-        )
+        OR {_FOLLOWS_AUTHOR_SQL}
     )
     AND datetime(m.expires_at) > datetime('now')
     AND m.deleted_at IS NULL
     AND m.hop_count <= ?
 """
+
+#: How many times :data:`_VISIBLE_SQL` binds the viewer (every placeholder
+#: but the trailing hop cap).
+_VISIBLE_VIEWER_BINDS = _VISIBLE_SQL.count("?") - 1
 
 #: What one viewer may read: their own live moment (one written here also
 #: past its expiry — :data:`_OWN_ARCHIVED_SQL`), or anything the inbox
@@ -106,7 +126,7 @@ def _readable_params(viewer_user_id: str, max_hops: int) -> tuple:
     """Bindings for :data:`_READABLE_SQL`; ``max_hops`` clamped to the
     wire cap [1, 3] (below 1 would hide even the viewer's own)."""
     capped_hops = max(1, min(int(max_hops), 3))
-    return (viewer_user_id, *(viewer_user_id,) * 5, capped_hops)
+    return (viewer_user_id, *(viewer_user_id,) * _VISIBLE_VIEWER_BINDS, capped_hops)
 
 
 #: What one viewer may read of a *thread*: the inbox rule without its
@@ -158,7 +178,7 @@ class AbstractMomentRepo(Protocol):
         author_user_id: str,
         origin_instance_id: str,
         expires_at: str,
-    ) -> bool: ...
+    ) -> MomentTombstone: ...
     async def delete_by_author(self, author_user_id: str) -> int: ...
     async def list_visible_to(
         self,
@@ -349,7 +369,7 @@ class SqliteMomentRepo:
         author_user_id: str,
         origin_instance_id: str,
         expires_at: str,
-    ) -> bool:
+    ) -> MomentTombstone:
         """Record that ``moment_id`` was deleted, stored or not.
 
         A stored row is wiped in place and keeps its own ``expires_at`` (a
@@ -357,18 +377,24 @@ class SqliteMomentRepo:
         as long as it could be shown). An unknown id gets a content-free
         row expiring at ``expires_at`` — the caller passes the maximum
         moment lifetime, so the delete is held until any create for it
-        could arrive. Returns ``True`` iff a *live* moment was removed.
+        could arrive. Says what changed, in one transaction:
+        :attr:`MomentTombstone.REMOVED` (a live moment wiped),
+        :attr:`~MomentTombstone.RECORDED` (a new tombstone for an id never
+        held) or :attr:`~MomentTombstone.ALREADY` (nothing — a replay).
         """
 
-        def _run(conn) -> bool:
-            removed = _tombstone_rows(conn, "id=?", (moment_id,)) > 0
-            conn.execute(
+        def _run(conn) -> MomentTombstone:
+            if _tombstone_rows(conn, "id=?", (moment_id,)) > 0:
+                return MomentTombstone.REMOVED
+            cur = conn.execute(
                 "INSERT OR IGNORE INTO moments(id, author_user_id, content,"
                 " origin_instance_id, expires_at, received_via, deleted_at)"
                 " VALUES(?, ?, '', ?, ?, 'household', datetime('now'))",
                 (moment_id, author_user_id, origin_instance_id, expires_at),
             )
-            return removed
+            if cur.rowcount > 0:
+                return MomentTombstone.RECORDED
+            return MomentTombstone.ALREADY
 
         return await self._db.transact(_run)
 
@@ -402,7 +428,8 @@ class SqliteMomentRepo:
         * Author is not on the viewer's :table:`user_blocks`, and no
           guardian block (§CP.F2) separates the two.
         * EITHER the moment is < 24 h old, OR the viewer follows the
-          author (then up to 7 d, the absolute ``expires_at``).
+          author — directly or through a GFS — (then until the moment's
+          ``expires_at``, the author's choice of 1–30 days).
         * The row's ``hop_count`` is ≤ the viewer's ``max_hops``
           preference (default 3 = the wire cap, so all rows pass).
         * ``before`` is an ISO-8601 ``created_at`` cursor; ``NULL``
@@ -431,11 +458,7 @@ class SqliteMomentRepo:
              LIMIT ?
             """,
             (
-                viewer_user_id,
-                viewer_user_id,
-                viewer_user_id,
-                viewer_user_id,
-                viewer_user_id,
+                *(viewer_user_id,) * _VISIBLE_VIEWER_BINDS,
                 capped_hops,
                 before,
                 before,
@@ -728,11 +751,7 @@ class SqliteMomentRepo:
                AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
                AND (
                  (julianday('now') - julianday(m.created_at)) * 24 < 24
-                 OR EXISTS (
-                     SELECT 1 FROM user_follows
-                      WHERE follower_user_id = ?
-                        AND followed_user_id = m.author_user_id
-                 )
+                 OR {_FOLLOWS_AUTHOR_SQL}
                )
                AND datetime(m.expires_at) > datetime('now')
                AND m.deleted_at IS NULL
@@ -740,7 +759,7 @@ class SqliteMomentRepo:
              ORDER BY n DESC, mh.tag ASC
              LIMIT ?
             """,
-            (viewer_user_id,) * 5 + (limit,),
+            (viewer_user_id,) * _VISIBLE_VIEWER_BINDS + (limit,),
         )
         return [(r["tag"], int(r["n"])) for r in rows]
 
@@ -763,7 +782,7 @@ class SqliteMomentRepo:
         return [r["media_url"] for r in rows_to_dicts(rows) if r.get("media_url")]
 
     async def prune_expired(self) -> int:
-        """Drop rows past their absolute 7-day cap — others' moments and
+        """Drop rows past their ``expires_at`` — others' moments and
         every delete tombstone. A live moment written here stays in its
         author's archive (decision 6a). Reactions cascade.
 

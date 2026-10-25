@@ -36,7 +36,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: A public moment lives at most 7 days; a blob a day past that is refused.
+#: A blob is kept for delivery only: followers fetch it when the moment
+#: reaches them (an envelope is refused 25 h after it was sent) and keep
+#: their own copy, so a moment living up to 30 days (v_65) needs no longer
+#: blob here. Authors ask ≤ 7 days; a blob a day past that is refused.
 MAX_TTL_S: int = 8 * 86_400
 
 #: Live ciphertext one author may hold here.

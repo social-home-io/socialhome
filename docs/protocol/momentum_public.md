@@ -100,9 +100,20 @@ directory. Nothing more is claimed.
   doesn't match the frame drops it. A **plaintext envelope** (an older
   author household's) is refused, never stored. A create whose
   `expires_at` has passed or whose `created_at` is older than a moment can
-  live (7 days) is refused **before** anything is read from it — a replayed
+  live (30 days) is refused **before** anything is read from it — a replayed
   old envelope can neither re-store an expired moment nor roll a profile
   back (review finding M7).
+* **Lifetime (v_65).** A public moment lives as long as its author chose
+  for followers — `moments.follower_retention_days`, 1–30 days, 7 by
+  default — sealed as `expires_at`. A follower keeps it at most
+  `created_at + 30 days` (an in-range value byte for byte) and holds a
+  delete for a moment it never received 30 days. Following through a GFS
+  is a follow: the moment stays in the follower's inbox until `expires_at`,
+  not just 24 h (`moment_public_follows` counts like `user_follows`). An
+  older (v_64) follower keeps whatever the author sealed and holds a
+  never-seen delete 7 days. The GFS's own windows (the 25 h `sent_at`
+  check, the 24 h offline queue, the seen cache) are delivery windows, not
+  the moment's life, and are unchanged.
 * **Signed send time (v_64).** Every sealed body — create and delete —
   carries `sent_at`, the Unix second the author's household signed the
   envelope. It is inside the ciphertext the envelope signature covers (and
@@ -332,7 +343,7 @@ sequenceDiagram
       G->>B: WS incoming_public_moment (the same ciphertext)
     end
     B->>B: verify signature · step key (ratchet forward) · open (op + author must match)
-    B->>B: expired / older than 7 days? → refuse before reading anything
+    B->>B: expired / older than 30 days? → refuse before reading anything
     B->>B: profile included? → refresh name / bio / picture digest
     B->>B: persist moment (received_via='gfs') · MomentCreated on the bus
     Note right of B: relay_inbound() short-circuits on received_via=='gfs'
@@ -364,7 +375,7 @@ above therefore reaches households on **every** node
   24 h (`relay_seen_at`) but has none on any node gets the moment queued in
   the shared relay queue — the same ciphertext, as its own
   `incoming_public_moment[_delete]` frame — and gets it when it reconnects,
-  to any node (24 h = a moment's life; deleted on delivery; the per-household
+  to any node (24 h = the delivery window; deleted on delivery; the per-household
   relay caps of 250 items / 4 MiB apply). The peers answer the hint with
   `held` (the followers whose socket they hold), so the accepting node
   queues only for the ones nobody holds. A household not seen in 24 h is
@@ -560,7 +571,11 @@ author's household. Now the file itself travels — encrypted, once:
   a GFS whose signed `/gfs/info` proves `encrypted_moment_media`. The GFS
   checks the signer is the author's registered household, the body's
   SHA-256 is the address, the size is a padded bucket, and the expiry is no
-  later than 8 days out; it caps each author at 256 MB live and 60 blobs an
+  later than 8 days out (the author asks for the moment's expiry, at most a
+  week: a blob only has to outlast delivery — followers fetch it when the
+  moment reaches them, within the 25 h `sent_at` window, and keep their own
+  copy — so a moment living up to 30 days (v_65) needs no longer blob and
+  the GFS caps are unchanged); it caps each author at 256 MB live and 60 blobs an
   hour, and drops blobs when they expire, when the author deletes the moment
   (`POST /gfs/moments/media/{id}/delete`, signed) or deregisters.
 * **A video still transcoding** is held by the author's household until
@@ -573,7 +588,8 @@ author's household. Now the file itself travels — encrypted, once:
   `gm-<id>.<ext>` (a poster as `gm-<id>.webp`, the name a video's poster is
   derived by) and only then stores the moment. Anything that doesn't check
   out stores the moment **without** a file — never a broken or foreign one.
-  A delete removes the kept file; retention sweeps it with the moment.
+  A delete removes the kept file; retention sweeps it with the moment (at
+  its `expires_at` — up to 30 days, v_65).
 
 ```mermaid
 sequenceDiagram
@@ -599,7 +615,9 @@ the author's uplink carries **2 MB once per GFS** (before: nothing reached
 followers at all; a "stream it from home" design would be N × 2 MB = 20 GB
 from the household). The GFS serves N × 2 MB = 20 GB to followers that open
 it — fetched once per household, not per user, and only by households that
-can open it; it stores 2 MB until the moment expires. The moment frame
+can open it; it stores 2 MB until the moment expires (at most a week). Each
+follower household keeps its own 2 MB for the author's chosen lifetime
+(1–30 days, v_65). The moment frame
 itself grows by ~0.2 KB. Worst case per author: 256 MB live on a GFS,
 60 blobs/hour.
 

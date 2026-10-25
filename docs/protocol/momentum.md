@@ -27,14 +27,31 @@ encrypted payload (§25.8.21).
 
 ## Retention
 
-* Absolute on-disk cap: **7 days** (``moments.expires_at`` is
-  ``created_at + 7 days``).
+* **The author chooses how long followers keep their moments**
+  (decision 6d, v_65): ``moments.follower_retention_days`` in
+  ``users.preferences_json``, 1–30 days, **7 by default** (Settings ›
+  Privacy › Momentum). It sets ``moments.expires_at = created_at + N days``
+  on every new moment — top-level and replies — and ``expires_at`` travels
+  under the origin signature (``_SIGNED_FIELDS``), so every household and
+  GFS follower keeps the author's choice. A reply never outlives its
+  thread: its ``expires_at`` is at most its root's. A change applies to new
+  moments only.
+* **Receivers clamp** (v_65): a received ``expires_at`` is kept at most
+  ``created_at + 30 days`` (``MOMENT_MAX_LIFETIME_DAYS``) on both the
+  household path (``occurred_at``) and the GFS path (sealed
+  ``created_at``) — a signature proves who chose a value, not that it is
+  reasonable. An in-range value is kept byte for byte, and a relay
+  forwards the envelope unchanged (the clamp is local). A create whose
+  clamped expiry has passed is refused and not relayed. An older (v_64)
+  receiver keeps whatever the author signed.
 * Visibility cap: **24 hours** for moments where the local viewer
   doesn't follow the author. ``moment_repo.list_visible_to`` collapses
-  the absolute cap to 24 h via a ``user_follows`` lookup against the
-  viewer's row.
-* The retention scheduler runs hourly and deletes anything past the
-  absolute cap — others' moments and delete tombstones alike; reactions
+  the author's window to 24 h unless the viewer follows the author —
+  directly (``user_follows``) **or through a GFS**
+  (``moment_public_follows``); both are a follow. The same rule drives the
+  detail read, trending hashtags and reply counts.
+* The retention scheduler runs hourly and deletes anything past its
+  ``expires_at`` — others' moments and delete tombstones alike; reactions
   cascade.
 * **Your own moments stay in your archive** (decision 6a). A moment
   written on this household (``received_via = 'self'``) that its author
@@ -104,10 +121,23 @@ A (author)  ────►  B (paired)  ────►  C (B's paired)  ──
   ``hop_count`` and re-fans to every paired peer **except**
   ``origin_instance_id`` and the immediate ``from_instance``.
 * **Once per moment.** The relay remembers, per (event type,
-  ``moment_id``), the lowest hop it relayed at (in memory, 24 h,
+  ``moment_id``), the lowest hop it relayed at (in memory, 48 h,
   at most 20 000 entries). A later copy is relayed only when it arrives
   at a lower hop — relayed on, that one reaches further. Creates and
   deletes are tracked apart.
+* **Creates relay for 48 h** (v_65). A ``MOMENT_CREATED`` whose signed
+  ``occurred_at`` is more than 48 h ago (``MOMENT_RELAY_MAX_AGE_HOURS``),
+  or missing, is still stored here but not passed on. Mesh copies travel
+  in seconds and an outbox retries for well under a day; with moments that
+  live up to a month, an old signed create is a replay that must not
+  re-flood the mesh. The seen-map remembers for the same 48 h, so within
+  that window no copy is relayed twice.
+* **Deletes relay only when they changed something** (v_65). A
+  ``MOMENT_DELETED`` travels on only when this household removed a live
+  moment or recorded a new tombstone for one it never held; a delete for a
+  tombstone it already holds (a replay — possible for the month a
+  tombstone lives) goes no further, even after a restart wiped the
+  seen-map. Deletes are not age-gated.
 * When ``hop_count >= MOMENT_MAX_HOPS`` (3), the relay short-circuits.
 
 **Cost.** In a fully-connected mesh of *n* households, re-relaying every
@@ -238,18 +268,22 @@ forgotten until the moment could no longer be shown anyway:
   `deleted_at` set. The tombstone keeps the row's own `expires_at`.
 * **Held delete.** A delete for a moment this household has not stored
   yet inserts the tombstone directly, expiring after the maximum moment
-  lifetime (7 days from receipt; no create for it can outlive that). The
-  delete still travels on, so households that do hold the moment apply it
-  (pure pass-through households tombstone too, so they stop relaying a
-  replay).
+  lifetime (30 days from receipt, v_65 — no create for it can outlive
+  that; 7 days on an older build). The delete still travels on, so
+  households that do hold the moment apply it (pure pass-through
+  households tombstone too, so they stop relaying a replay). A delete that
+  finds the tombstone already there changed nothing and is not relayed
+  again.
 * **Refused create.** A `MOMENT_CREATED` for a tombstoned id is refused
   (INFO log): not stored, not relayed. The repo's upsert also never
   writes over a tombstone, so no path can bring one back.
 * **Sweep.** The retention scheduler removes expired tombstones with the
-  expired moments. A create that is itself past its `expires_at` is
-  refused (INFO) and not relayed, so the sweep never re-opens the window.
+  expired moments. A create that is itself past its `expires_at` (clamped
+  to 30 days after `occurred_at`) is refused (INFO) and not relayed, so the
+  sweep never re-opens the window.
 * Tombstones live in SQLite and survive a restart
-  (`tests/protocol/test_moment_delete_tombstone.py`).
+  (`tests/protocol/test_moment_delete_tombstone.py`; the lifetime clamp
+  and relay rules: `tests/protocol/test_moment_lifetime.py`).
 
 ### Media references
 

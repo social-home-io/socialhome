@@ -9,7 +9,7 @@ JSON.
 Routes:
 
 * ``POST   /api/moments``                     — create a moment (text + media + parent_moment_id?)
-* ``GET    /api/moments``                     — list visible moments (24h default; 7d for followers)
+* ``GET    /api/moments``                     — list visible moments (24h default; followers until expires_at)
 * ``GET    /api/moments/archive``             — full retention-window list (same data, full window);
   ``?scope=own`` — the caller's own archive (every moment they wrote here)
 * ``GET    /api/moments/archive/usage``       — the caller's archived media vs. the household cap
@@ -476,8 +476,8 @@ class MomentFollowsCollectionView(BaseView):
     """``GET|POST /api/moments/follows``.
 
     Follows live on the same surface as moments because they only
-    affect the Momentum retention window today (24h → 7d when the
-    viewer follows). Future surfaces can also consult ``user_follows``
+    affect the Momentum retention window today (24h → the author's chosen
+    1–30 days when the viewer follows). Future surfaces can also consult ``user_follows``
     without changing the route shape.
     """
 

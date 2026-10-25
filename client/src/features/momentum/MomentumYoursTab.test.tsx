@@ -15,7 +15,8 @@ vi.mock('@/ws', () => ({
 }))
 
 import { api } from '@/api'
-import type { Moment } from '@/types'
+import { currentUser } from '@/store/auth'
+import type { Moment, User } from '@/types'
 import MomentumYoursTab, { YOURS_PAGE, archiveStatus } from './MomentumYoursTab'
 
 const HOUR = 3_600_000
@@ -86,6 +87,18 @@ describe('MomentumYoursTab', () => {
     expect(rows[0].querySelector('[aria-label="1 reply"]')).toBeTruthy()
     fireEvent.click(rows[2].querySelector('a')!)
     expect(route).toHaveBeenCalledWith('/momentum/m-old')
+  })
+
+  it('the intro names how long your followers keep a moment (your choice)', async () => {
+    currentUser.value = {
+      user_id: 'u-me', username: 'me', display_name: 'Me',
+      preferences_json: JSON.stringify({ moments: { follower_retention_days: 30 } }),
+    } as unknown as User
+    serve(() => [mine('m1', HOUR)])
+    const { findByText } = render(<MomentumYoursTab />)
+    expect((await findByText(/people who follow you keep it for/)).textContent)
+      .toContain('keep it for 30 days.')
+    currentUser.value = null
   })
 
   it('shows your archive size against the household limit', async () => {

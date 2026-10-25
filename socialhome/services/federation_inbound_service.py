@@ -74,7 +74,12 @@ from ..domain.highlight import (
 )
 from ..domain.link_preview import card_survives_edit
 from ..domain.mention import Mention
-from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
+from ..domain.moment import (
+    MOMENT_MAX_LIFETIME_DAYS,
+    Moment,
+    MomentTombstone,
+    clamp_moment_expiry,
+)
 from ..domain.picture_hash import clean_picture_hash
 from ..domain.post import (
     FEED_POST_MAX_IMAGES,
@@ -3972,6 +3977,7 @@ class FederationInboundService(ProtectionGateMixin):
             hop_count = int(p.get("hop_count") or 1)
         except TypeError, ValueError:
             hop_count = 1
+        created_at = str(p.get("occurred_at") or _now_iso())
         moment = Moment(
             id=moment_id,
             author_user_id=author_user_id,
@@ -3983,8 +3989,11 @@ class FederationInboundService(ProtectionGateMixin):
             ),
             parent_moment_id=p.get("parent_moment_id"),
             origin_instance_id=origin_instance_id,
-            created_at=str(p.get("occurred_at") or _now_iso()),
-            expires_at=str(p.get("expires_at") or _now_iso()),
+            created_at=created_at,
+            # v_65: kept at most 30 days whatever the author signed.
+            expires_at=clamp_moment_expiry(
+                created_at, str(p.get("expires_at") or _now_iso())
+            ),
             hop_count=hop_count,
             received_via="household",
         )
@@ -4071,17 +4080,16 @@ class FederationInboundService(ProtectionGateMixin):
         # Deletes stick: the row stays as a tombstone until the moment
         # expires, so a replayed create is refused. A moment we never
         # stored (the delete outran its create on another relay path) is
-        # held the same way, for the longest a moment can live. Either way
-        # the delete travels on so households that hold it apply it too.
-        removed = await self._moment_repo.tombstone(
+        # held the same way, for the longest a moment can live (30 days).
+        outcome = await self._moment_repo.tombstone(
             moment_id,
             author_user_id=author_user_id,
             origin_instance_id=origin_instance_id,
             expires_at=(
-                datetime.now(UTC) + timedelta(days=MOMENT_RETENTION_DAYS)
+                datetime.now(UTC) + timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
             ).isoformat(),
         )
-        if removed:
+        if outcome is MomentTombstone.REMOVED:
             await self._bus.publish(
                 MomentDeleted(
                     moment_id=moment_id,
@@ -4089,6 +4097,13 @@ class FederationInboundService(ProtectionGateMixin):
                     origin_instance_id=origin_instance_id,
                 )
             )
+        if not outcome.changed:
+            # v_65: a delete already held here changes nothing, so it goes
+            # no further — a replayed delete can't re-flood the mesh for
+            # the month its tombstone lives. A new one travels on so
+            # households that hold the moment apply it too.
+            log.debug("MOMENT_DELETED for %s already held — not relayed", moment_id)
+            return
         await self._maybe_relay(
             event_type=event.event_type,
             payload=p,
@@ -4310,14 +4325,20 @@ class FederationInboundService(ProtectionGateMixin):
         exists, so a relay can re-send an old signed create. Refused while
         the delete's tombstone exists (until the moment's ``expires_at``);
         once the tombstone is swept the replay is past its own
-        ``expires_at`` and refused on that. Neither is applied or relayed.
+        ``expires_at`` — clamped to 30 days after its ``occurred_at`` (v_65)
+        — and refused on that. Neither is applied or relayed.
         """
         assert self._moment_repo is not None  # callers gate
         stored = await self._moment_repo.get(moment_id, include_deleted=True)
         reason: str | None = None
         if stored is not None and stored.deleted_at is not None:
             reason = "the moment was deleted"
-        elif _moment_expired(event.payload.get("expires_at")):
+        elif _moment_expired(
+            clamp_moment_expiry(
+                str(event.payload.get("occurred_at") or ""),
+                str(event.payload.get("expires_at") or ""),
+            )
+        ):
             reason = "the moment has expired"
         if reason is None:
             return False

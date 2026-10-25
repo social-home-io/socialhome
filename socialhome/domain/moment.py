@@ -3,9 +3,10 @@
 A *moment* is a one-shot household-broadcast post: ≤ 1 000 chars text
 plus an optional image or short (≤ 15 s) video. Moments fan out to
 every paired peer and their peers, up to 3 hops. They live 24 h by
-default; if a local viewer has explicitly followed the author the
-moment surfaces in their inbox up to 7 d (the same row, just a longer
-visible window — retention is per-viewer at the list-query layer).
+default; if a local viewer has explicitly followed the author (directly or
+through a GFS) the moment surfaces in their inbox until its ``expires_at``
+— the author's choice, 1–30 days, 7 by default (the same row, just a
+longer visible window — retention is per-viewer at the list-query layer).
 
 Replies are themselves moments and carry a ``parent_moment_id``. The
 reply inherits the parent's audience implicitly via the federation
@@ -17,8 +18,10 @@ root parent_moment_id).
 
 from __future__ import annotations
 
+import enum
 import unicodedata
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 #: Hard caps. Composer + service both enforce.
 MOMENT_MAX_CONTENT_LEN: int = 1_000
@@ -28,14 +31,31 @@ MOMENT_MAX_VIDEO_MS: int = 15_000
 #: receiver bumps and re-fans up to ``MAX_HOPS - 1``.
 MOMENT_MAX_HOPS: int = 3
 
-#: Absolute on-disk lifetime of a moment (``expires_at = created_at + 7 d``).
-#: Also the lifetime of a delete tombstone for a moment this household never
-#: stored — no genuine create can outlive it.
-MOMENT_RETENTION_DAYS: int = 7
+#: How long people who follow an author keep the author's moments when the
+#: author chose nothing (``moments.follower_retention_days``, decision 6d).
+#: Everyone else sees a moment for 24 hours.
+MOMENT_DEFAULT_RETENTION_DAYS: int = 7
+
+#: Shortest an author may choose.
+MOMENT_MIN_RETENTION_DAYS: int = 1
+
+#: Longest any moment lives on a household that did not write it
+#: (``expires_at ≤ created_at + 30 d``, v_65): the most an author may choose,
+#: the cap a receiver clamps a received ``expires_at`` to, and the lifetime
+#: of a delete tombstone for a moment this household never stored — no
+#: genuine create can outlive it.
+MOMENT_MAX_LIFETIME_DAYS: int = 30
+
+#: A relaying household passes a create on only while the moment is younger
+#: than this (by its signed ``occurred_at``, v_65). Mesh copies travel in
+#: seconds and an outbox retries for well under a day; anything older is a
+#: replay, and with moments that live a month a replay must not re-flood
+#: the mesh. The household still stores it (subject to the clamp).
+MOMENT_RELAY_MAX_AGE_HOURS: int = 48
 
 #: Household default for how much moment media each person keeps in their
 #: archive (decision 6a, owner sign-off 6, 2026-10-25). A moment written
-#: here outlives ``MOMENT_RETENTION_DAYS`` on this household only; past the
+#: here outlives its ``expires_at`` on this household only; past the
 #: cap its oldest pictures and videos go first (the text stays). 2 GiB is
 #: about a year of a heavy poster (5 photos a day ≈ 1.8 GB) and 10 GiB for
 #: a household of five — sized for a 32 GB Home Assistant box. ``0`` means
@@ -45,6 +65,64 @@ MOMENT_ARCHIVE_DEFAULT_CAP_BYTES: int = 2 * 1024**3
 #: Most archived files the retention tick drops per run (bounded work; the
 #: next hourly tick continues).
 MOMENT_ARCHIVE_MAX_DROPS_PER_TICK: int = 200
+
+
+def _parse_utc(value: object) -> datetime | None:
+    """An ISO 8601 time as aware UTC (naive = UTC), or ``None``."""
+    try:
+        when = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return when.replace(tzinfo=UTC) if when.tzinfo is None else when
+
+
+def clamp_moment_expiry(created_at: str, expires_at: str) -> str:
+    """``expires_at`` as a receiver keeps it: never later than
+    ``created_at`` + :data:`MOMENT_MAX_LIFETIME_DAYS` (v_65).
+
+    ``expires_at`` is under the author's origin signature, so a receiver
+    can't trust a relay to have checked it — but nothing stops an author's
+    own household from signing a year. The clamp holds every household to
+    the month a person can choose. An in-range value is returned
+    unchanged (byte for byte); an unparseable ``created_at`` leaves the
+    value to the caller's own expiry checks.
+    """
+    created = _parse_utc(created_at)
+    expires = _parse_utc(expires_at)
+    if created is None or expires is None:
+        return expires_at
+    latest = created + timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
+    return latest.isoformat() if expires > latest else expires_at
+
+
+def moment_too_old_to_relay(
+    occurred_at: object, *, now: datetime | None = None
+) -> bool:
+    """``True`` when a create's signed ``occurred_at`` is more than
+    :data:`MOMENT_RELAY_MAX_AGE_HOURS` ago (or missing / unparseable) — a
+    relaying household then keeps it but does not pass it on."""
+    created = _parse_utc(occurred_at) if occurred_at else None
+    if created is None:
+        return True
+    now = now or datetime.now(UTC)
+    return created < now - timedelta(hours=MOMENT_RELAY_MAX_AGE_HOURS)
+
+
+class MomentTombstone(enum.Enum):
+    """What recording a delete changed on this household."""
+
+    #: A live moment was wiped down to a tombstone.
+    REMOVED = "removed"
+    #: The moment was never held here; a content-free tombstone now is.
+    RECORDED = "recorded"
+    #: A tombstone was already held — nothing changed (a replayed delete).
+    ALREADY = "already"
+
+    @property
+    def changed(self) -> bool:
+        """Whether this household learnt something — only then is the
+        delete worth relaying on (v_65)."""
+        return self is not MomentTombstone.ALREADY
 
 
 @dataclass(slots=True, frozen=True)

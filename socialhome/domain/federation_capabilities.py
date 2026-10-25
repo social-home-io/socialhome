@@ -988,7 +988,21 @@ from __future__ import annotations
 #:   (``created_at`` / ``expires_at``); a v_63 follower ignores the field.
 #:   Nothing is ``peer_supports``-gated (author → GFS → follower); labelled
 #:   "Time-stamped public moments".
-OURS: int = 64
+#: * **v_65** (2026-10-25) — **authors choose how long followers keep their
+#:   moments** (decision 6d). A moment's signed ``expires_at`` is the
+#:   author's ``moments.follower_retention_days`` (1–30, default 7) instead
+#:   of a fixed 7 days. A v_65 receiver clamps any received ``expires_at``
+#:   to ``created_at + 30 d`` on both the household and the GFS path, holds
+#:   a delete tombstone for a never-seen moment 30 days, counts a GFS
+#:   follow as a follow, and as a relay passes on a ``MOMENT_CREATED`` only
+#:   within 48 h of its signed ``occurred_at`` and a ``MOMENT_DELETED`` only
+#:   when it changed something here. **Fallback**: none needed — nothing is
+#:   ``peer_supports``-gated (a relayed broadcast can't be gated, and the
+#:   field is not new): an older receiver keeps whatever ``expires_at`` the
+#:   author signed (no 30-day clamp), shows it to followers until then and
+#:   holds a never-seen delete for 7 days. Labelled "Choose how long
+#:   followers keep your moments".
+OURS: int = 65
 
 
 class FederationCapability:
@@ -1502,6 +1516,12 @@ class FederationCapability:
     #: names the version that sends and checks it.
     MIN_FOR_PUBLIC_MOMENT_SENT_AT = 64
 
+    #: v_65 — author-chosen moment lifetime (1–30 days), clamped to 30 days
+    #: by receivers, with the 48 h create / changed-only delete relay rules.
+    #: Nothing is gated on it (the signed ``expires_at`` is not new and a
+    #: relayed broadcast can't be gated); it names the version that clamps.
+    MIN_FOR_LONG_LIVED_MOMENTS = 65
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1743,6 +1763,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_PUBLIC_MOMENT_SENT_AT,
         "Time-stamped public moments",
     ),
+    (
+        FederationCapability.MIN_FOR_LONG_LIVED_MOMENTS,
+        "Choose how long followers keep your moments",
+    ),
 ]
 
 
@@ -1818,6 +1842,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS: "encrypted_public_moments",
     FederationCapability.MIN_FOR_ENCRYPTED_MOMENT_MEDIA: "public_moment_media",
     FederationCapability.MIN_FOR_PUBLIC_MOMENT_SENT_AT: "public_moment_sent_at",
+    FederationCapability.MIN_FOR_LONG_LIVED_MOMENTS: "follower_moment_retention",
 }
 
 

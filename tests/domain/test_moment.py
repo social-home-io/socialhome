@@ -1,4 +1,4 @@
-"""Tests for socialhome.domain.moment — the hashtag rule.
+"""Tests for socialhome.domain.moment — the hashtag rule and lifetime.
 
 The SPA's ``client/src/features/momentum/hashtags.tsx`` applies the same
 rule; ``hashtags.test.tsx`` mirrors these cases so a chip the user sees
@@ -8,11 +8,19 @@ is the tag the server stored.
 from __future__ import annotations
 
 import unicodedata
+from datetime import UTC, datetime, timedelta
 
 from socialhome.domain.moment import (
+    MOMENT_DEFAULT_RETENTION_DAYS,
     MOMENT_MAX_HASHTAG_LEN,
     MOMENT_MAX_HASHTAGS_PER_POST,
+    MOMENT_MAX_LIFETIME_DAYS,
+    MOMENT_MIN_RETENTION_DAYS,
+    MOMENT_RELAY_MAX_AGE_HOURS,
+    MomentTombstone,
+    clamp_moment_expiry,
     extract_hashtags,
+    moment_too_old_to_relay,
     normalize_hashtag,
 )
 
@@ -71,3 +79,61 @@ def test_normalize_hashtag_matches_the_extractor():
         "kürbisfest"
     )
     assert normalize_hashtag("") == ""
+
+
+# ── Lifetime (v_65) ─────────────────────────────────────────────────────
+
+
+_T0 = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+
+
+def test_an_expiry_in_range_is_kept_byte_for_byte():
+    expires = (_T0 + timedelta(days=12)).isoformat()
+    assert clamp_moment_expiry(_T0.isoformat(), expires) == expires
+
+
+def test_an_expiry_past_thirty_days_is_clamped():
+    clamped = clamp_moment_expiry(
+        _T0.isoformat(), (_T0 + timedelta(days=400)).isoformat()
+    )
+    assert datetime.fromisoformat(clamped) == _T0 + timedelta(
+        days=MOMENT_MAX_LIFETIME_DAYS
+    )
+
+
+def test_naive_times_are_utc():
+    clamped = clamp_moment_expiry("2026-10-01T12:00:00", "2027-10-01T12:00:00")
+    assert datetime.fromisoformat(clamped) == _T0 + timedelta(days=30)
+
+
+def test_exactly_thirty_days_is_kept():
+    expires = (_T0 + timedelta(days=30)).isoformat()
+    assert clamp_moment_expiry(_T0.isoformat(), expires) == expires
+
+
+def test_an_unparseable_time_is_left_to_the_callers_checks():
+    assert clamp_moment_expiry("junk", "2099-01-01T00:00:00") == "2099-01-01T00:00:00"
+    assert clamp_moment_expiry(_T0.isoformat(), "junk") == "junk"
+
+
+def test_relay_age_cutoff_is_48_hours():
+    now = _T0
+    assert not moment_too_old_to_relay((now - timedelta(hours=47)).isoformat(), now=now)
+    assert moment_too_old_to_relay((now - timedelta(hours=49)).isoformat(), now=now)
+    assert not moment_too_old_to_relay(now.isoformat(), now=now)
+    assert moment_too_old_to_relay(None, now=now)
+    assert moment_too_old_to_relay("", now=now)
+    assert moment_too_old_to_relay("junk", now=now)
+    assert MOMENT_RELAY_MAX_AGE_HOURS == 48
+
+
+def test_only_a_tombstone_that_changed_something_relays():
+    assert MomentTombstone.REMOVED.changed
+    assert MomentTombstone.RECORDED.changed
+    assert not MomentTombstone.ALREADY.changed
+
+
+def test_retention_bounds():
+    assert MOMENT_MIN_RETENTION_DAYS == 1
+    assert MOMENT_DEFAULT_RETENTION_DAYS == 7
+    assert MOMENT_MAX_LIFETIME_DAYS == 30

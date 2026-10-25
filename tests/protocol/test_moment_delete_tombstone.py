@@ -111,9 +111,11 @@ async def test_delete_before_create_leaves_the_moment_absent(env):  # noqa: F811
     assert [s[1] for s in _relayed(sent)] == [FET.MOMENT_DELETED]
     tomb = await _row(db, "m-new")
     assert tomb is not None and tomb["deleted_at"] is not None
-    # Capped at the maximum moment lifetime — the create is unknown here.
+    # Held for the maximum moment lifetime (30 days, v_65) — the create is
+    # unknown here, and no genuine create can outlive that.
     expires = datetime.fromisoformat(tomb["expires_at"])
-    assert expires <= datetime.now(UTC) + timedelta(days=7, minutes=1)
+    assert expires <= datetime.now(UTC) + timedelta(days=30, minutes=1)
+    assert expires >= datetime.now(UTC) + timedelta(days=30, minutes=-1)
     sent.clear()
 
     await _send(app, FET.MOMENT_CREATED, _signed_create())

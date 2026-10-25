@@ -6,15 +6,49 @@
  * defaults live in one place.
  */
 import { api } from '@/api'
+import { isOne, t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
 
 export type LandingPath = '/' | '/feed' | '/dashboard'
+
+export type MomentsHops = 1 | 2 | 3
 
 export interface MomentsPreferences {
   /** Per-user max-hops visibility (§Momentum-relay-policy). 1 = only
    *  moments authored by direct peers; 3 (default) = the wire cap, so
    *  every relayed moment is visible. */
-  max_hops?: 1 | 2 | 3
+  max_hops?: MomentsHops
+  /** How long people who follow this user keep their new moments, in
+   *  days (decision 6d). The server clamps to [1, 30] and defaults to 7
+   *  (``parse_moment_preferences``). */
+  follower_retention_days?: number
+}
+
+/** Server: ``MOMENT_DEFAULT_RETENTION_DAYS``. */
+export const MOMENT_RETENTION_DEFAULT = 7
+/** Server: ``MOMENT_MIN_RETENTION_DAYS`` / ``MOMENT_MAX_LIFETIME_DAYS``. */
+export const MOMENT_RETENTION_MIN = 1
+export const MOMENT_RETENTION_MAX = 30
+/** The presets the Settings picker offers. */
+export const MOMENT_RETENTION_CHOICES: readonly number[] = [1, 3, 7, 14, 30]
+
+/** "7 days" / "1 day" — the retention picker and the Yours tab. */
+export function momentRetentionLabel(days: number): string {
+  return t(isOne(days) ? 'settings.momentum.days_one' : 'settings.momentum.days', { n: String(days) })
+}
+
+/** The user's ``moments`` block with the server's defaults and clamps
+ *  applied, so the SPA shows what the server will act on. */
+export function getMomentsPreferences(): Required<MomentsPreferences> {
+  const raw = (getPreferences().moments ?? {}) as MomentsPreferences
+  const hops = Number(raw.max_hops)
+  const days = Number(raw.follower_retention_days)
+  return {
+    max_hops: (hops === 1 || hops === 2 ? hops : 3) as MomentsHops,
+    follower_retention_days: Number.isFinite(days) && raw.follower_retention_days != null
+      ? Math.min(MOMENT_RETENTION_MAX, Math.max(MOMENT_RETENTION_MIN, Math.trunc(days)))
+      : MOMENT_RETENTION_DEFAULT,
+  }
 }
 
 interface Preferences {
