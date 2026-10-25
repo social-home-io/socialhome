@@ -612,3 +612,57 @@ async def test_moment_empty_media_url_counts_as_no_media(stack):
         await stack.moment_svc.create_moment(
             author_user_id=a.user_id, content="", media_url=""
         )
+
+
+# ── Follower retention (decision 6d) ─────────────────────────────────────
+
+
+def _lifetime_days(m: Moment) -> float:
+    created = datetime.fromisoformat(m.created_at)
+    return (datetime.fromisoformat(m.expires_at) - created).total_seconds() / 86_400
+
+
+async def test_a_new_moment_lives_seven_days_by_default(stack):
+    a = await stack.provision("alice")
+    captured: list[MomentCreated] = []
+    stack.bus.subscribe(MomentCreated, captured.append)
+    m = await stack.moment_svc.create_moment(author_user_id=a.user_id, content="hi")
+    assert round(_lifetime_days(m), 3) == 7
+    # The signed wire value is the stored one.
+    assert captured[0].expires_at == m.expires_at
+
+
+@pytest.mark.parametrize(("chosen", "days"), [(1, 1), (14, 14), (30, 30), (90, 30)])
+async def test_the_author_chooses_how_long_followers_keep_it(stack, chosen, days):
+    a = await stack.provision("alice")
+    await stack.user_svc.patch_preferences(
+        "alice", {"moments": {"follower_retention_days": chosen}}
+    )
+    m = await stack.moment_svc.create_moment(author_user_id=a.user_id, content="hi")
+    assert round(_lifetime_days(m), 3) == days
+
+
+async def test_a_reply_never_outlives_its_thread(stack):
+    """Bob keeps moments 30 days, Alice 2: Bob's reply to Alice ends with
+    her moment, so it never stands alone once the root is gone."""
+    a = await stack.provision("alice")
+    b = await stack.provision("bob")
+    await stack.user_svc.patch_preferences(
+        "alice", {"moments": {"follower_retention_days": 2}}
+    )
+    await stack.user_svc.patch_preferences(
+        "bob", {"moments": {"follower_retention_days": 30}}
+    )
+    root = await stack.moment_svc.create_moment(author_user_id=a.user_id, content="q")
+    reply = await stack.moment_svc.create_moment(
+        author_user_id=b.user_id, content="a", parent_moment_id=root.id
+    )
+    assert reply.expires_at == root.expires_at
+    # A shorter choice than the root's stays the replier's.
+    await stack.user_svc.patch_preferences(
+        "bob", {"moments": {"follower_retention_days": 1}}
+    )
+    short = await stack.moment_svc.create_moment(
+        author_user_id=b.user_id, content="b", parent_moment_id=root.id
+    )
+    assert round(_lifetime_days(short), 3) == 1

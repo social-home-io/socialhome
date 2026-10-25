@@ -8,6 +8,7 @@ onward to its paired peers. Pure pass-through behaviour.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -97,8 +98,8 @@ def _moment_event(*, hop_count: int = 2):
         "author_user_id": "u-author-remote",
         "content": "passing through",
         "origin_instance_id": "inst-remote",
-        "occurred_at": "2026-05-06T12:00:00",
-        "expires_at": "2026-12-31T00:00:00",
+        "occurred_at": datetime.now(UTC).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
         "hop_count": hop_count,
     }
     return ev

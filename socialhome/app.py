@@ -5085,7 +5085,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # Highlights retention — drops expired + over-max highlights per author.
         await highlight_retention_scheduler.start()
 
-        # Momentum retention — drops moments past the absolute 7-day cap.
+        # Momentum retention — drops moments past their expires_at.
         await moment_retention_scheduler.start()
 
         # Page-lock + retention + draft cleanup schedulers.

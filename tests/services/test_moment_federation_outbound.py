@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,6 +21,10 @@ from socialhome.services.moment_federation_outbound import (
 )
 
 _KEY = generate_identity_keypair()
+
+
+def _ago(hours: float = 0.0) -> str:
+    return (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
 
 
 def _federation() -> MagicMock:
@@ -147,6 +152,7 @@ async def test_relay_forwards_the_origin_signature_verbatim(stack):
         "moment_id": "m-1",
         "author_user_id": "uid-far",
         "origin_instance_id": "peer-origin",
+        "occurred_at": _ago(),
         "hop_count": 1,
         "origin_sig": "sig",
         "origin_sig_suite": "ed25519",
@@ -235,6 +241,7 @@ async def test_relay_inbound_bumps_hop_and_excludes_origin_and_sender(stack):
         "moment_id": "m-1",
         "author_user_id": "uid-author",
         "origin_instance_id": "peer-origin",
+        "occurred_at": _ago(),
         "hop_count": 1,
     }
     await out.relay_inbound(
@@ -309,6 +316,7 @@ async def test_relay_inbound_still_relays_household_arrival(stack):
         "moment_id": "m-1",
         "author_user_id": "uid-remote",
         "origin_instance_id": "peer-origin",
+        "occurred_at": _ago(),
         "hop_count": 1,
         "received_via": "household",
     }
@@ -565,6 +573,7 @@ def _relayed(payload_over: dict | None = None) -> dict:
         "moment_id": "m-1",
         "author_user_id": "uid-author",
         "origin_instance_id": "peer-origin",
+        "occurred_at": _ago(),
         "hop_count": 1,
     }
     payload.update(payload_over or {})
@@ -731,3 +740,49 @@ async def test_a_moment_in_a_31_household_clique_costs_900_envelopes():
             event_type=event_type, payload=payload, from_instance=src
         )
     assert sent == (n - 1) + (n - 1) * (n - 2) == 900
+
+
+# ── v_65: a create older than 48 h is kept, not relayed ────────────────
+
+
+@pytest.mark.parametrize(
+    ("age_h", "relayed"),
+    [
+        (1, True),
+        (47, True),
+        (49, False),
+        (24 * 20, False),
+        (None, False),
+        ("not a date", False),
+    ],
+)
+async def test_a_create_is_relayed_only_within_48_hours(stack, age_h, relayed):
+    occurred_at = _ago(age_h) if isinstance(age_h, int) else age_h
+    out, fed, fed_repo, _user_repo = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_relayed({"occurred_at": occurred_at}),
+        from_instance="peer-sender",
+    )
+    assert (fed.send_event.await_count == 1) is relayed
+    # A refused old create leaves no seen-map mark.
+    assert bool(out._relayed) is relayed
+
+
+async def test_a_delete_is_not_age_gated(stack):
+    """Only creates are cut at 48 h: a delete for a month-old moment must
+    still reach the households that keep it (the inbound handler relays it
+    only when it changed something there)."""
+    out, fed, fed_repo, _user_repo = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload=_relayed({"occurred_at": _ago(24 * 29)}),
+        from_instance="peer-sender",
+    )
+    assert fed.send_event.await_count == 1
+
+
+def test_the_seen_map_remembers_as_long_as_a_create_relays():
+    assert outbound_mod.RELAY_SEEN_TTL_S == 48 * 3600.0

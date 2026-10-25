@@ -9439,6 +9439,18 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_64 signed send time on public moments in place ✓")
+    # v_65 — authors choose how long followers keep their moments (1–30 d);
+    # receivers clamp to 30 d and relay creates < 48 h old / deletes that
+    # changed something. Nothing is gated between households; the OURS
+    # round-trip above proves every pair is at >= v_65, and the deletes-stick
+    # step (3c-ter) round-trips a 3-day expiry from c to d.
+    if int(_Cap.MIN_FOR_LONG_LIVED_MOMENTS) != 65 or _OURS < 65:
+        failures.append(
+            "MIN_FOR_LONG_LIVED_MOMENTS moved off v_65 (or OURS fell below it) "
+            "— receivers would keep any moment lifetime a peer signs"
+        )
+    else:
+        print("  v_65 follower moment retention gate in place ✓")
     if int(_Cap.MIN_FOR_MULTI_GFS_PUBLISH) != 57 or _OURS < 57:
         failures.append(
             "MIN_FOR_MULTI_GFS_PUBLISH moved off v_57 (or OURS fell below it) — "
@@ -9982,9 +9994,19 @@ def cmd_verify() -> None:
     #     to d, c deletes it, and d must drop it and keep a tombstone row
     #     (``deleted_at`` set, content wiped) so a replayed create for the
     #     id is refused rather than resurrecting it.
+    #     v_65: c first chooses a non-default follower retention (3 days), so
+    #     the reply carries an author-chosen ``expires_at`` that must reach d
+    #     unchanged (it is under c's origin signature, and within 30 days).
     if carol_moment and "d" in state.get("instances", {}):
         c = state["instances"]["c"]
         d = state["instances"]["d"]
+        s, _pref = _request(
+            f"http://127.0.0.1:{c['port']}/api/me",
+            token=c["token"],
+            method="PATCH",
+            body={"preferences": {"moments": {"follower_retention_days": 3}}},
+        )
+        _must("follower retention 3 d(c)", s, _pref)
         reply_text = f"[c] reply that will be deleted {secrets.token_hex(3)}"
         s, r_resp = _request(
             f"http://127.0.0.1:{c['port']}/api/moments",
@@ -10012,6 +10034,33 @@ def cmd_verify() -> None:
         if not _d_has(reply_text):
             failures.append(f"d: c's relayed reply {reply_id!r} never arrived")
         else:
+            c_row = _rows(
+                "c",
+                "SELECT expires_at, created_at FROM moments WHERE id=?",
+                (reply_id,),
+            )
+            d_row = _rows("d", "SELECT expires_at FROM moments WHERE id=?", (reply_id,))
+            try:
+                c_exp = datetime.fromisoformat(c_row[0][0])
+                c_created = datetime.fromisoformat(c_row[0][1])
+                lifetime_h = (c_exp - c_created).total_seconds() / 3600
+            except IndexError, TypeError, ValueError:
+                lifetime_h = -1.0
+            if not 0 < lifetime_h <= 3 * 24 + 0.1:
+                failures.append(
+                    f"c: reply {reply_id!r} ignores the 3-day follower retention "
+                    f"(lifetime {lifetime_h:.1f} h, row={c_row!r})"
+                )
+            elif not d_row or d_row[0][0] != c_row[0][0]:
+                failures.append(
+                    f"d: c's reply {reply_id!r} expiry did not round-trip "
+                    f"(c={c_row[0][0]!r}, d={d_row!r}) — v_65 retention lost"
+                )
+            else:
+                print(
+                    "  v_65 author-chosen retention (3 d) round-trips c → d "
+                    f"({lifetime_h:.0f} h) ✓"
+                )
             s, _ = _request(
                 f"http://127.0.0.1:{c['port']}/api/moments/{reply_id}",
                 token=c["token"],
@@ -10034,6 +10083,13 @@ def cmd_verify() -> None:
                 )
             else:
                 print("  d drops c's deleted reply and keeps its tombstone ✓")
+        s, _pref = _request(
+            f"http://127.0.0.1:{c['port']}/api/me",
+            token=c["token"],
+            method="PATCH",
+            body={"preferences": {"moments": {}}},
+        )
+        _must("follower retention reset(c)", s, _pref)
 
     # 4. Space — Beta's space, both Alice and Carol invited.
     if "space_id" in state:

@@ -74,7 +74,11 @@ log = logging.getLogger(__name__)
 #: A remote author's moment re-reads the local user list at most this often.
 LOCAL_USERS_REREAD_S: float = 60.0
 
-#: Longest a moment's media blob is kept on a GFS (a moment lives ≤ 7 days).
+#: Longest a moment's media blob is kept on a GFS. A moment may live up to
+#: 30 days (v_65), but a follower fetches the file when the moment reaches it
+#: — and refuses an envelope sent more than 25 h ago (v_64) — then keeps its
+#: own copy; so the blob only has to outlast delivery, never the moment. A
+#: week covers that with room to spare and matches what a GFS accepts.
 MEDIA_KEEP_AT_MOST_S: int = 7 * 86_400
 
 #: Public moments held for a video still transcoding, at most.
@@ -276,8 +280,8 @@ class MomentPublicOutbound(ProtectionGateMixin):
         if prepared is not None:
             body["media"] = prepared.body
             assert self._media is not None
-            # A blob lives as long as its moment — never past the longest a
-            # moment lives (a GFS refuses more).
+            # A blob lives as long as its moment, at most a week — followers
+            # keep their own copy once fetched (a GFS refuses longer).
             expires = min(
                 _unix(moment.expires_at), int(time.time()) + MEDIA_KEEP_AT_MOST_S
             )

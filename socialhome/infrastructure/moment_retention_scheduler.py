@@ -1,8 +1,9 @@
-"""Background scheduler that prunes moments past the 7-day cap.
+"""Background scheduler that prunes moments past their ``expires_at``.
 
-The list-query already collapses visibility to 24h for non-followers
-and 7d for followers, so the scheduler only needs to drop rows past
-the absolute ``expires_at`` (= ``created_at + 7 days``). Reactions
+The list-query already collapses visibility to 24h for non-followers;
+followers see a moment until its ``expires_at`` (the author's choice,
+1–30 days, clamped to 30 on receipt), so the scheduler only needs to drop
+rows past it. Reactions
 cascade via the FK. A moment written here stays in its author's archive
 (decision 6a); the same tick then enforces the household's per-person
 archive cap (:meth:`MomentArchiveService.enforce_caps`, bounded work per

@@ -41,7 +41,11 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.moment import MOMENT_MAX_HOPS
+from ..domain.moment import (
+    MOMENT_MAX_HOPS,
+    MOMENT_RELAY_MAX_AGE_HOURS,
+    moment_too_old_to_relay,
+)
 from ..federation.moment_origin import (
     NO_RELAY_FIELD,
     carries_no_relay,
@@ -61,10 +65,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: How long a relayed moment is remembered. Mesh copies arrive within
-#: seconds; a copy redelivered by a peer's outbox later than this is
-#: relayed once more, which is bounded and harmless.
-RELAY_SEEN_TTL_S: float = 24 * 3600.0
+#: How long a relayed moment is remembered — as long as a create may be
+#: relayed at all (:data:`MOMENT_RELAY_MAX_AGE_HOURS`), so a copy
+#: redelivered by a peer's outbox inside that window is never relayed twice
+#: (until a restart or the size cap drops the entry: bounded and harmless).
+RELAY_SEEN_TTL_S: float = MOMENT_RELAY_MAX_AGE_HOURS * 3600.0
 
 #: Most moments remembered at once (oldest dropped first) — ~100 bytes
 #: each, so a few MB at worst.
@@ -237,7 +242,10 @@ class MomentFederationOutbound(
         bumping ``hop_count`` and excluding both the original origin
         and the immediate sender. No-op when the payload already hit
         ``MOMENT_MAX_HOPS``, OR when the source row arrived via a GFS
-        public-share fan-out (§Momentum-public no-redistribute rule).
+        public-share fan-out (§Momentum-public no-redistribute rule), OR
+        (v_65) when it is a create signed more than
+        :data:`MOMENT_RELAY_MAX_AGE_HOURS` ago. The inbound handler only
+        calls this for a delete that changed something here.
         """
         # No-redistribute rule for §Momentum-public: a moment that
         # arrived through a GFS public fan-out must not bleed back into
@@ -254,6 +262,18 @@ class MomentFederationOutbound(
         except TypeError, ValueError:
             hop = 0
         if hop <= 0 or hop >= MOMENT_MAX_HOPS:
+            return
+        # v_65: a moment lives up to 30 days, so an old signed create is a
+        # replay worth refusing to spread — kept here, not passed on past
+        # 48 h after its signed ``occurred_at``.
+        if event_type == FederationEventType.MOMENT_CREATED and moment_too_old_to_relay(
+            payload.get("occurred_at")
+        ):
+            log.debug(
+                "moment relay: create %s older than %d h — not relayed",
+                payload.get("moment_id"),
+                MOMENT_RELAY_MAX_AGE_HOURS,
+            )
             return
         seen_key = (event_type.value, str(payload.get("moment_id") or ""))
         if not self._relay_is_new(seen_key, hop):

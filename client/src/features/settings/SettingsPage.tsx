@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { HighlightsPreferencesPanel } from './HighlightsPreferencesPanel'
+import { MomentumPreferencesPanel } from './MomentumPreferencesPanel'
 import { useTitle } from '@/store/pageTitle'
 import { signal, useSignal } from '@preact/signals'
 import { currentUser } from '@/store/auth'
@@ -323,7 +324,7 @@ function PrivacyTab() {
       <SidebarVisibilityPanel />
       <SpaceLocationSharingPanel />
       <HighlightsPreferencesPanel />
-      <MomentumPanel />
+      <MomentumPreferencesPanel />
       <BlockedAccountsPanel />
       <FollowingPanel />
     </section>
@@ -571,46 +572,6 @@ function BlockedAccountsPanel() {
           ))}
         </ul>
       )}
-    </div>
-  )
-}
-
-function MomentumPanel() {
-  const prefs = (getPreferences().moments ?? {}) as { max_hops?: 1 | 2 | 3 }
-  const maxHops = useSignal<1 | 2 | 3>((prefs.max_hops ?? 3) as 1 | 2 | 3)
-  const save = async () => {
-    try {
-      await setPreference('moments', { max_hops: maxHops.value })
-      showToast(t('settings.momentum.saved'), 'success')
-    } catch {
-      showToast(t('settings.momentum.save_failed'), 'error')
-    }
-  }
-  return (
-    <div id="momentum" class="sh-settings-momentum-panel sh-settings-subcard">
-      <h3>{t('settings.momentum.title')}</h3>
-      <p class="sh-muted">
-        {t('settings.momentum.blurb')}
-      </p>
-      <label class="sh-form-row">
-        {t('settings.momentum.show_up_to')}
-        <select
-          value={String(maxHops.value)}
-          onChange={e => {
-            const v = Number(
-              (e.target as HTMLSelectElement).value,
-            ) as 1 | 2 | 3
-            maxHops.value = v
-          }}
-        >
-          <option value="1">{t('settings.momentum.hop_1')}</option>
-          <option value="2">{t('settings.momentum.hop_2')}</option>
-          <option value="3">{t('settings.momentum.hop_3')}</option>
-        </select>
-      </label>
-      <div class="sh-form-actions">
-        <Button onClick={save}>{t('common.save')}</Button>
-      </div>
     </div>
   )
 }

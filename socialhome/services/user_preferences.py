@@ -18,6 +18,11 @@ from typing import Any
 import orjson
 
 from ..domain.highlight import HighlightAudience
+from ..domain.moment import (
+    MOMENT_DEFAULT_RETENTION_DAYS,
+    MOMENT_MAX_LIFETIME_DAYS,
+    MOMENT_MIN_RETENTION_DAYS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -121,17 +126,25 @@ DEFAULT_MOMENT_MAX_HOPS: int = 3
 
 @dataclass(slots=True, frozen=True)
 class MomentPreferences:
-    """Per-user knobs for the Momentum pillar's visibility filter."""
+    """Per-user knobs for the Momentum pillar.
+
+    ``max_hops`` filters what the user sees; ``follower_retention_days``
+    is how long people who follow them keep their new moments (decision 6d)
+    — it sets the signed ``expires_at`` of every moment they write.
+    """
 
     max_hops: int
+    follower_retention_days: int = MOMENT_DEFAULT_RETENTION_DAYS
 
 
 def parse_moment_preferences(preferences_json: str | None) -> MomentPreferences:
     """Pull the ``moments`` block out of a user's preferences blob.
 
     Returns a well-formed :class:`MomentPreferences` for any input.
-    Out-of-range integers clamp to ``[1, 3]`` since the wire cap is 3
-    and a value < 1 would hide every moment including the user's own.
+    ``max_hops`` clamps to ``[1, 3]`` since the wire cap is 3 and a value
+    < 1 would hide every moment including the user's own;
+    ``follower_retention_days`` clamps to ``[1, 30]`` (30 is what every
+    v_65 receiver keeps at most).
     """
     blob: dict[str, Any] = {}
     try:
@@ -145,7 +158,13 @@ def parse_moment_preferences(preferences_json: str | None) -> MomentPreferences:
     if not isinstance(raw, dict):
         raw = {}
     max_hops = _coerce_int(raw.get("max_hops"), DEFAULT_MOMENT_MAX_HOPS, 1, 3)
-    return MomentPreferences(max_hops=max_hops)
+    retention = _coerce_int(
+        raw.get("follower_retention_days"),
+        MOMENT_DEFAULT_RETENTION_DAYS,
+        MOMENT_MIN_RETENTION_DAYS,
+        MOMENT_MAX_LIFETIME_DAYS,
+    )
+    return MomentPreferences(max_hops=max_hops, follower_retention_days=retention)
 
 
 # ─── Timetable home pins ────────────────────────────────────────────────────

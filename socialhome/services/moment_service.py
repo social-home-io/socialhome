@@ -7,8 +7,10 @@ and :class:`PreferencesService` to enforce the spec rules:
 * 1 top-level moment per author per 15 minutes (replies + reactions
   exempt — otherwise back-and-forth threads would die on the timer).
 * Replies are themselves moments; ``parent_moment_id`` links them.
-* Absolute 7-day retention on disk; the visibility query collapses
-  this to 24 h for non-followers.
+* The author chooses how long followers keep their moments (1–30 days,
+  7 by default — ``moments.follower_retention_days``, decision 6d); that
+  sets the signed ``expires_at``. The visibility query collapses it to
+  24 h for non-followers.
 
 The service publishes :class:`MomentCreated` / :class:`MomentDeleted`
 / :class:`MomentReactionChanged` on the bus so federation outbound +
@@ -29,7 +31,6 @@ from ..domain.events import (
 from ..domain.moment import (
     MOMENT_MAX_CONTENT_LEN,
     MOMENT_MAX_VIDEO_MS,
-    MOMENT_RETENTION_DAYS,
     Moment,
 )
 from ..federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
@@ -67,6 +68,16 @@ def _has_expired(moment: Moment) -> bool:
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=UTC)
     return expires <= datetime.now(UTC)
+
+
+def _expiry_key(value: str) -> datetime:
+    """Sort key for an ISO ``expires_at`` (naive = UTC; junk sorts last so
+    ``min`` keeps the other)."""
+    try:
+        when = datetime.fromisoformat(value)
+    except TypeError, ValueError:
+        return datetime.max.replace(tzinfo=UTC)
+    return when.replace(tzinfo=UTC) if when.tzinfo is None else when
 
 
 class MomentNotFoundError(KeyError):
@@ -159,6 +170,7 @@ class MomentService:
             duration_ms = None
 
         parent_author_user_id: str | None = None
+        root: Moment | None = None
         if parent_moment_id is not None:
             # Replying needs reading: a parent the author may not read is
             # the unknown-id 404, never a way to learn it exists.
@@ -176,7 +188,7 @@ class MomentService:
             # Threads stay flat: a reply to a reply attaches to the
             # original root so list_replies(root) returns the whole
             # conversation in a single query.
-            root: Moment | None = parent
+            root = parent
             if parent.parent_moment_id is not None:
                 root = await self._moments.get(parent.parent_moment_id)
                 parent_moment_id = parent.parent_moment_id
@@ -206,6 +218,13 @@ class MomentService:
                 )
 
         now = datetime.now(UTC)
+        expires_at = (
+            now + timedelta(days=await self._follower_retention_days(author_user_id))
+        ).isoformat()
+        if parent_moment_id is not None and root is not None:
+            # A reply never outlives its thread: once the root is gone from
+            # the households that hold it, the reply would stand alone.
+            expires_at = min(expires_at, root.expires_at, key=_expiry_key)
         moment = Moment(
             # Owner-bound (v_36): no other household can announce this id
             # first — as a moment or a delete — for its own user.
@@ -220,7 +239,7 @@ class MomentService:
             parent_moment_id=parent_moment_id,
             origin_instance_id=self._own_instance_id,
             created_at=now.isoformat(),
-            expires_at=(now + timedelta(days=MOMENT_RETENTION_DAYS)).isoformat(),
+            expires_at=expires_at,
             is_public=is_public,
             received_via="self",
         )
@@ -330,6 +349,14 @@ class MomentService:
             moment_id, viewer_user_id, max_hops=await self._max_hops(viewer_user_id)
         )
 
+    async def _follower_retention_days(self, author_user_id: str) -> int:
+        """How long the author's followers keep a new moment (decision 6d)."""
+        author = await self._users.get_by_user_id(author_user_id)
+        prefs = parse_moment_preferences(
+            author.preferences_json if author is not None else None
+        )
+        return prefs.follower_retention_days
+
     async def _max_hops(self, viewer_user_id: str) -> int:
         """The viewer's ``moments.max_hops`` preference (§Momentum-relay-policy)."""
         viewer = await self._users.get_by_user_id(viewer_user_id)
@@ -418,7 +445,7 @@ class MomentService:
     # ── Retention scheduler hook ───────────────────────────────────────
 
     async def expire_due(self) -> int:
-        """Drop moments past the absolute 7-day cap. Reactions cascade."""
+        """Drop moments past their ``expires_at``. Reactions cascade."""
         # Collect the backing media URLs before the prune so we can drop
         # the files too (the row delete alone would orphan them on disk).
         urls = (

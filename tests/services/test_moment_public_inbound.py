@@ -12,13 +12,14 @@ import json
 import os
 import time
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.domain.events import MomentCreated
-from socialhome.domain.moment import Moment
+from socialhome.domain.moment import MOMENT_MAX_LIFETIME_DAYS, Moment
 from socialhome.global_server.envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.moment_public_seal import item_key, seal_body, sign_wire
@@ -192,7 +193,7 @@ async def test_a_replayed_expired_moment_is_neither_stored_nor_a_profile(db):
         inbound,
         _moment(
             "m-ancient",
-            created_at=now_iso(hours=-24 * 9),
+            created_at=now_iso(hours=-24 * 31),
             expires_at=now_iso(hours=24),
             author_display_name="Noor Ancient",
         ),
@@ -670,3 +671,38 @@ async def test_a_public_moment_held_first_through_pairing_becomes_public(db):
     await repo.save(replace(got, id="m-other", is_public=False))
     await _create(inbound, _moment("m-other"), seed=_OTHER_SEED)
     assert (await repo.get("m-other")).is_public is False
+
+
+# ── v_65: how long a public moment is kept ─────────────────────────────
+
+
+async def test_a_public_moment_keeps_its_author_chosen_month(db):
+    inbound, _ = await _env(db)
+    expires = now_iso(hours=24 * 21)
+    await _create(inbound, _moment("m-long", expires_at=expires))
+    got = await SqliteMomentRepo(db).get("m-long")
+    assert got is not None and got.expires_at == expires
+
+
+async def test_a_public_moment_is_kept_thirty_days_at_most(db):
+    inbound, _ = await _env(db)
+    created = now_iso(hours=-1)
+    await _create(
+        inbound,
+        _moment("m-year", created_at=created, expires_at=now_iso(hours=24 * 365)),
+    )
+    got = await SqliteMomentRepo(db).get("m-year")
+    assert got is not None
+    assert datetime.fromisoformat(got.expires_at) == datetime.fromisoformat(
+        created
+    ) + timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
+
+
+async def test_a_public_delete_for_an_unseen_moment_is_held_thirty_days(db):
+    inbound, _ = await _env(db)
+    await _deliver_delete(inbound, _delete("m-unseen", sent_at=int(time.time())))
+    tomb = await SqliteMomentRepo(db).get("m-unseen", include_deleted=True)
+    assert tomb is not None and tomb.deleted_at is not None
+    held = datetime.fromisoformat(tomb.expires_at)
+    want = datetime.now(UTC) + timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
+    assert abs((held - want).total_seconds()) < 60

@@ -11,6 +11,7 @@ from socialhome.services.user_preferences import (
     DEFAULT_HIGHLIGHTS_RETENTION_DAYS,
     MAX_TIMETABLE_HOME_PINS,
     parse_highlights_preferences,
+    parse_moment_preferences,
     parse_timetable_home_pins,
 )
 
@@ -98,3 +99,29 @@ def test_timetable_home_pins_are_capped():
     pins = parse_timetable_home_pins(blob)
     assert len(pins) == MAX_TIMETABLE_HOME_PINS
     assert pins[0] == "tt-0"
+
+
+@pytest.mark.parametrize(
+    ("blob", "days"),
+    [
+        (None, 7),
+        ("{not json", 7),
+        ('{"moments": {}}', 7),
+        ('{"moments": {"follower_retention_days": 3}}', 3),
+        ('{"moments": {"follower_retention_days": 30}}', 30),
+        ('{"moments": {"follower_retention_days": 365}}', 30),
+        ('{"moments": {"follower_retention_days": 0}}', 1),
+        ('{"moments": {"follower_retention_days": "lots"}}', 7),
+        ('{"moments": {"follower_retention_days": null}}', 7),
+    ],
+)
+def test_moment_follower_retention_days(blob, days):
+    prefs = parse_moment_preferences(blob)
+    assert prefs.follower_retention_days == days
+    assert prefs.max_hops == 3
+
+
+def test_moment_preferences_keep_max_hops_beside_retention():
+    blob = orjson.dumps({"moments": {"max_hops": 1, "follower_retention_days": 14}})
+    prefs = parse_moment_preferences(blob.decode())
+    assert (prefs.max_hops, prefs.follower_retention_days) == (1, 14)
