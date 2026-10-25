@@ -38,7 +38,7 @@ describe('Settings › Momentum — how long followers keep your moments', () =>
     const { container, getByText } = render(<MomentumPreferencesPanel />)
     const retention = selects(container)[0] as HTMLSelectElement
     expect(retention.value).toBe('7')
-    expect(retention.selectedOptions[0].textContent).toBe('7 days (default)')
+    expect(retention.selectedOptions[0].textContent).toBe('7\u00a0days (default)')
     expect([...retention.options].map(o => o.value)).toEqual(['1', '3', '7', '14', '30'])
     expect(getByText(/Everyone else sees each moment for 24 hours/)).toBeTruthy()
     expect(getByText(/Your own archive keeps them/)).toBeTruthy()
@@ -71,7 +71,7 @@ describe('Settings › Momentum — how long followers keep your moments', () =>
     fireEvent.change(retention, { target: { value: '1' } })
     await waitFor(() => expect(getByRole('status').textContent).toMatch(/Couldn't save/))
     expect(retention.value).toBe('1')
-    expect(retention.selectedOptions[0].textContent).toBe('1 day')
+    expect(retention.selectedOptions[0].textContent).toBe('1\u00a0day')
   })
 
   it('a stored value that is not a preset shows as itself', () => {

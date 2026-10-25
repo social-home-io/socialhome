@@ -97,7 +97,7 @@ describe('MomentumYoursTab', () => {
     serve(() => [mine('m1', HOUR)])
     const { findByText } = render(<MomentumYoursTab />)
     expect((await findByText(/people who follow you keep it for/)).textContent)
-      .toContain('keep it for 30 days.')
+      .toContain('keep it for 30\u00a0days.')
     currentUser.value = null
   })
 
