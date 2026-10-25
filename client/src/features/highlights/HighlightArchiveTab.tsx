@@ -21,7 +21,8 @@ import { api } from '@/api'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { MonthGridSkeleton } from '@/components/Skeleton'
-import { showToast } from '@/components/Toast'
+import { LoadErrorState, StaleNotice } from '@/components/LoadErrorState'
+import { INITIAL_LOAD, clockTime, loadFailed, loadSucceeded, type LoadStatus } from '@/utils/loadStatus'
 import { formatDayKey } from '@/utils/calendar'
 import { currentWeekStart, weekdayOrder, type WeekStart } from '@/utils/week'
 import { ws } from '@/ws'
@@ -35,7 +36,19 @@ type DayKey = string  // 'YYYY-MM-DD'
 
 const inbox = signal<HighlightInboxItem[]>([])
 const loading = signal<boolean>(true)
-const loadError = signal<string | null>(null)
+/** A failed load is never an empty month (``utils/loadStatus``). */
+const status = signal<LoadStatus>(INITIAL_LOAD)
+
+/** Load (or refresh, on a ``highlight.*`` frame) every visible highlight. */
+function fetchInbox(initial: boolean): Promise<void> {
+  return api.get('/api/highlights')
+    .then((rows: HighlightInboxItem[]) => {
+      inbox.value = rows ?? []
+      status.value = loadSucceeded(status.value)
+    })
+    .catch(() => { status.value = loadFailed(status.value) })
+    .finally(() => { if (initial) loading.value = false })
+}
 
 /** Group every loaded highlight by ``highlight_date`` so the grid can ask
  *  ``byDay.get('2026-05-04')`` in O(1). Recomputed when inbox flips. */
@@ -107,18 +120,7 @@ export default function HighlightArchiveTab() {
 
   useEffect(() => {
     loading.value = true
-    loadError.value = null
-    const fetchInbox = (initial: boolean) =>
-      api.get('/api/highlights')
-        .then((rows: HighlightInboxItem[]) => {
-          inbox.value = rows ?? []
-          if (initial) loading.value = false
-        })
-        .catch((err: unknown) => {
-          loadError.value = (err as Error)?.message ?? t('highlight.archive.load_failed_short')
-          if (initial) loading.value = false
-          showToast(t('highlight.archive.load_failed', { error: loadError.value ?? '' }), 'error')
-        })
+    status.value = INITIAL_LOAD
     void fetchInbox(true)
     const dispose = [
       ws.on('highlight.frame_added',   () => { void fetchInbox(false) }),
@@ -129,6 +131,18 @@ export default function HighlightArchiveTab() {
   }, [])
 
   if (loading.value) return <MonthGridSkeleton />
+  if (status.value.failed) {
+    return (
+      <div class="sh-highlight-archive">
+        <LoadErrorState
+          message={t('highlight.inbox.load_failed_title')}
+          detail={t('load.household_quiet')}
+          retryLabel={t('load.try_again')}
+          onRetry={() => void fetchInbox(false)}
+        />
+      </div>
+    )
+  }
 
   // Month grid opening on the user's first day of the week (the same
   // ``week_start`` preference /calendar honours).
@@ -173,6 +187,13 @@ export default function HighlightArchiveTab() {
         <h2 style={{ margin: 0 }}>{monthLabel}</h2>
         <Button variant="secondary" onClick={goNext}>{t('highlight.archive.next')} ›</Button>
       </header>
+
+      {status.value.staleSince !== null && (
+        <StaleNotice
+          message={t('highlight.inbox.stale', { time: clockTime(status.value.staleSince) })}
+          onRetry={() => void fetchInbox(false)}
+        />
+      )}
 
       {monthEntirelyBeforeRetention && (
         <p class="sh-muted" style={{ marginTop: 0 }}>

@@ -20,7 +20,8 @@ import { HighlightsRingSkeleton } from '@/components/Skeleton'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { openHighlightQuickShare } from '@/components/HighlightQuickShareDialog'
-import { showToast } from '@/components/Toast'
+import { LoadErrorState, StaleNotice } from '@/components/LoadErrorState'
+import { INITIAL_LOAD, clockTime, loadFailed, loadSucceeded, type LoadStatus } from '@/utils/loadStatus'
 import { currentUser } from '@/store/auth'
 import { openPerson } from '@/components/PersonSheet'
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
@@ -36,6 +37,19 @@ import { t, isOne, formatLocale } from '@/i18n/i18n'
 
 const inbox = signal<HighlightInboxItem[]>([])
 const loading = signal<boolean>(true)
+/** A failed load is never "no highlights" (``utils/loadStatus``). */
+const status = signal<LoadStatus>(INITIAL_LOAD)
+
+/** Load (or refresh, on a ``highlight.*`` frame) the inbox. */
+function fetchInbox(initial: boolean): Promise<void> {
+  return api.get('/api/highlights')
+    .then((rows: HighlightInboxItem[]) => {
+      inbox.value = rows ?? []
+      status.value = loadSucceeded(status.value)
+    })
+    .catch(() => { status.value = loadFailed(status.value) })
+    .finally(() => { if (initial) loading.value = false })
+}
 
 
 function humaniseDate(iso: string): string {
@@ -64,19 +78,9 @@ export default function HighlightsInboxTab() {
 
   useEffect(() => {
     loading.value = true
+    status.value = INITIAL_LOAD
     void loadBlocks()  // populate the optimistic block-id set
     void loadHouseholdUsers()  // resolve display names + avatars from raw user_ids
-    const fetchInbox = (initial: boolean) =>
-      api.get('/api/highlights')
-        .then((rows: HighlightInboxItem[]) => {
-          inbox.value = rows ?? []
-          if (initial) loading.value = false
-        })
-        .catch((err: unknown) => {
-          if (initial) loading.value = false
-          showToast(t('highlight.inbox.load_failed', { error: String((err as Error)?.message ?? err) }),
-            'error')
-        })
     void fetchInbox(true)
     // Live updates — both local writes and federated arrivals fan a
     // narrow ``highlight.*`` frame; we just refetch so the audience filter
@@ -161,7 +165,22 @@ export default function HighlightsInboxTab() {
         {peerItems.map(ring)}
       </section>
 
-      {items.length === 0 && (
+      {status.value.failed && (
+        <LoadErrorState
+          message={t('highlight.inbox.load_failed_title')}
+          detail={t('load.household_quiet')}
+          retryLabel={t('load.try_again')}
+          onRetry={() => void fetchInbox(false)}
+        />
+      )}
+      {status.value.staleSince !== null && (
+        <StaleNotice
+          message={t('highlight.inbox.stale', { time: clockTime(status.value.staleSince) })}
+          onRetry={() => void fetchInbox(false)}
+        />
+      )}
+
+      {!status.value.failed && items.length === 0 && (
         <div class="sh-empty-state">
           <div aria-hidden="true">🌅</div>
           <h3>{t('highlight.inbox.empty_title')}</h3>

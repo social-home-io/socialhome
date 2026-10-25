@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { render, waitFor, fireEvent } from '@testing-library/preact'
 
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -8,7 +8,10 @@ vi.mock('preact-iso', () => ({
   useLocation: () => ({ route: vi.fn(), url: '/momentum?tab=archive', path: '/momentum' }),
 }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
-vi.mock('@/ws', () => ({ ws: { on: () => () => undefined } }))
+const wsHandlers = vi.hoisted(() => new Map<string, () => void>())
+vi.mock('@/ws', () => ({
+  ws: { on: (type: string, fn: () => void) => { wsHandlers.set(type, fn); return () => undefined } },
+}))
 
 import { api } from '@/api'
 import type { Moment } from '@/types'
@@ -69,5 +72,39 @@ describe('MomentumArchiveTab times', () => {
     const time = head.querySelector('time')!
     expect(time.getAttribute('datetime')).toBe('2026-10-19T10:00:00+00:00')
     expect(time.textContent).toBe('12:00 PM')
+  })
+})
+
+describe('MomentumArchiveTab when a load fails', () => {
+  beforeEach(() => { wsHandlers.clear(); vi.mocked(api.get).mockReset() })
+
+  it('a failed first load is an alert with Try again, not the empty archive', async () => {
+    let fail = true
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path !== '/api/moments/archive') return { hashtags: [] }
+      if (fail) throw new Error('offline')
+      return [moment('m1', '2026-10-19T10:00:00+00:00')]
+    })
+    const { findByRole, container } = render(<MomentumArchiveTab />)
+    expect((await findByRole('alert')).textContent).toContain("Couldn't load moments")
+    expect(container.querySelector('.sh-empty-state:not(.sh-load-error)')).toBeNull()
+    fail = false
+    fireEvent.click(await findByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(container.textContent).toContain('Amaka Okafor'))
+  })
+
+  it('a failed refresh keeps the archive with a note', async () => {
+    let fail = false
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path !== '/api/moments/archive') return { hashtags: [] }
+      if (fail) throw new Error('offline')
+      return [moment('m1', '2026-10-19T10:00:00+00:00')]
+    })
+    const { findByRole, container } = render(<MomentumArchiveTab />)
+    await waitFor(() => expect(container.textContent).toContain('Amaka Okafor'))
+    fail = true
+    wsHandlers.get('moment.created')!()
+    expect((await findByRole('status')).textContent).toContain("Couldn't refresh")
+    expect(container.textContent).toContain('Amaka Okafor')
   })
 })

@@ -1,12 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { render, waitFor, fireEvent } from '@testing-library/preact'
 
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }))
 vi.mock('preact-iso', () => ({ useLocation: () => ({ route: vi.fn(), url: '/' }) }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
-vi.mock('@/ws', () => ({ ws: { on: () => () => undefined } }))
+const wsHandlers = vi.hoisted(() => new Map<string, () => void>())
+vi.mock('@/ws', () => ({
+  ws: { on: (type: string, fn: () => void) => { wsHandlers.set(type, fn); return () => undefined } },
+}))
 
 import { api } from '@/api'
 import type { Moment } from '@/types'
@@ -78,5 +81,42 @@ describe('MomentumInboxTab authors', () => {
     expect(container.querySelector('.sh-momentum-row-via-gfs')?.textContent)
       .toContain('via GFS')
     expect(container.textContent).not.toContain('u-gfs-noor')
+  })
+})
+
+describe('MomentumInboxTab when a load fails', () => {
+  beforeEach(() => { wsHandlers.clear(); vi.mocked(api.get).mockReset() })
+
+  it('a failed first load is an alert with Try again, never "No moments yet"', async () => {
+    let fail = true
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path !== '/api/moments') return []
+      if (fail) throw new Error('offline')
+      return [moment('m-1', 'uid-bob', { author: { display_name: 'Bob', picture_url: null } })]
+    })
+    const { findByRole, container } = render(<MomentumInboxTab />)
+    const alert = await findByRole('alert')
+    expect(alert.textContent).toContain("Couldn't load moments")
+    expect(container.textContent).not.toContain('No moments yet')
+    fail = false
+    fireEvent.click(await findByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(container.textContent).toContain('Bob'))
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('a failed refresh keeps the list and says from when it is', async () => {
+    let fail = false
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path !== '/api/moments') return []
+      if (fail) throw new Error('offline')
+      return [moment('m-1', 'uid-bob', { author: { display_name: 'Bob', picture_url: null } })]
+    })
+    const { findByRole, container } = render(<MomentumInboxTab />)
+    await waitFor(() => expect(container.textContent).toContain('Bob'))
+    fail = true
+    wsHandlers.get('moment.created')!()
+    const note = await findByRole('status')
+    expect(note.textContent).toMatch(/Couldn't refresh\. Showing moments from \d/)
+    expect(container.textContent).toContain('Bob')
   })
 })

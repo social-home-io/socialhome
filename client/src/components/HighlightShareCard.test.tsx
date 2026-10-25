@@ -109,3 +109,30 @@ describe('HighlightShareCard', () => {
     expect(container.textContent).not.toContain('tvnxzll')
   })
 })
+
+describe('HighlightShareCard when the read fails', () => {
+  beforeEach(() => { apiMock.get.mockReset() })
+
+  it('a 404 is "ended"', async () => {
+    apiMock.get.mockRejectedValue(Object.assign(new Error('not found'), { status: 404 }))
+    const { container } = render(<HighlightShareCard highlightId="h-gone-404" />)
+    await waitFor(() => expect(container.textContent).toContain('Highlight has ended'))
+  })
+
+  it('a transient failure is never cached as "ended": it offers Try again', async () => {
+    let reads = 0
+    apiMock.get.mockImplementation(async (path: string) => {
+      if (!path.startsWith('/api/highlights/')) return []
+      reads += 1
+      if (reads === 1) throw new Error('offline')
+      return detail('h-flaky', 'u-pascal')
+    })
+    const { container, findByRole } = render(<HighlightShareCard highlightId="h-flaky" />)
+    await waitFor(() => expect(container.textContent).toContain("Couldn't load this highlight"))
+    expect(container.textContent).not.toContain('Highlight has ended')
+    fireEvent.click(await findByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(container.querySelector('.sh-highlight-share-card--ended')).toBeNull())
+    await waitFor(() => expect(reads).toBe(2))
+    await waitFor(() => expect(container.querySelector('button[aria-label^="Watch"]')).toBeTruthy())
+  })
+})

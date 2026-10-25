@@ -6,7 +6,10 @@ vi.mock('@/api', () => ({
 }))
 vi.mock('preact-iso', () => ({ useLocation: () => ({ route: vi.fn() }) }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
-vi.mock('@/ws', () => ({ ws: { on: () => () => undefined } }))
+const wsHandlers = vi.hoisted(() => new Map<string, () => void>())
+vi.mock('@/ws', () => ({
+  ws: { on: (type: string, fn: () => void) => { wsHandlers.set(type, fn); return () => undefined } },
+}))
 
 import { api } from '@/api'
 import HighlightArchiveTab, { buildMonthGrid } from './HighlightArchiveTab'
@@ -108,5 +111,22 @@ describe('HighlightArchiveTab day keys west of UTC', () => {
     await waitFor(() => expect(
       container.querySelector('.sh-highlight-archive-day-panel h3')!.textContent,
     ).toBe('Monday, May 4, 2026'))
+  })
+})
+
+describe('HighlightArchiveTab when a load fails', () => {
+  it('a failed load is an alert with Try again instead of an empty month', async () => {
+    let fail = true
+    vi.mocked(api.get).mockReset().mockImplementation(async () => {
+      if (fail) throw new Error('offline')
+      return []
+    })
+    const { findByRole, container } = render(<HighlightArchiveTab />)
+    expect((await findByRole('alert')).textContent).toContain("Couldn't load highlights")
+    expect(container.querySelector('.sh-highlight-archive-grid')).toBeNull()
+    fail = false
+    fireEvent.click(await findByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(container.querySelector('.sh-highlight-archive-grid')).not.toBeNull())
+    expect(container.querySelector('[role="alert"]')).toBeNull()
   })
 })

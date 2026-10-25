@@ -12,6 +12,8 @@ import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { Spinner } from '@/components/Spinner'
+import { LoadErrorState, StaleNotice } from '@/components/LoadErrorState'
+import { relativeDocsTime } from '@/utils/relativeTime'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
@@ -41,16 +43,27 @@ const filtered = computed<MomentPublicDirectoryUser[]>(() => {
   )
 })
 
+/** The last directory each GFS answered with, and when — kept so an
+ *  unreachable GFS still shows who was there, labelled with its age. */
+const directoryCache = new Map<string, { users: MomentPublicDirectoryUser[], at: number }>()
+/** The GFS whose directory read just failed (unreachable ≠ "no one
+ *  signed up"), else null. */
+const directoryFailed = signal<string | null>(null)
+/** Our own GFS connections didn't load — not the same as having none. */
+const connectionsFailed = signal(false)
+
 async function loadDirectory(gfsId: string): Promise<void> {
   loading.value = true
+  directory.value = directoryCache.get(gfsId)?.users ?? []
   try {
-    directory.value = await fetchGfsDirectory(gfsId)
-  } catch (err) {
-    showToast(
-      t('moment.discover.load_failed', { error: String((err as Error)?.message ?? err) }),
-      'error',
-    )
-    directory.value = []
+    const users = await fetchGfsDirectory(gfsId)
+    directoryCache.set(gfsId, { users, at: Date.now() })
+    if (selectedGfs.value === gfsId) {
+      directory.value = users
+      directoryFailed.value = null
+    }
+  } catch {
+    if (selectedGfs.value === gfsId) directoryFailed.value = gfsId
   } finally {
     loading.value = false
   }
@@ -58,15 +71,25 @@ async function loadDirectory(gfsId: string): Promise<void> {
 
 async function bootstrap(): Promise<void> {
   loading.value = true
+  connectionsFailed.value = false
+  directoryFailed.value = null
   try {
     // Active GFS only — a pending/suspended connection can't serve a
     // directory and would auto-select into a doomed fetch.
     const conns = await api.get<GfsConnection[]>('/api/gfs/connections')
     gfses.value = (conns ?? []).filter(c => c.status === 'active')
-    if (gfses.value.length > 0 && !selectedGfs.value) {
-      selectedGfs.value = gfses.value[0].id
+    if (!gfses.value.some(g => g.id === selectedGfs.value)) {
+      selectedGfs.value = gfses.value[0]?.id ?? null
     }
+  } catch {
+    connectionsFailed.value = true
+    loading.value = false
+    return
+  }
+  try {
     await loadFollows()
+  } catch { /* the Follow buttons fall back to "Follow"; not fatal */ }
+  try {
     if (selectedGfs.value) await loadDirectory(selectedGfs.value)
   } finally {
     loading.value = false
@@ -123,6 +146,20 @@ export default function PublicDiscoveryPage() {
     )
   }
 
+  if (connectionsFailed.value) {
+    return (
+      <div class="sh-momentum-discover">
+        <header class="sh-page-header"><h2>{t('page_title.discover_momentum')}</h2></header>
+        <LoadErrorState
+          message={t('moment.discover.connections_failed')}
+          detail={t('load.household_quiet')}
+          retryLabel={t('load.try_again')}
+          onRetry={() => void bootstrap()}
+        />
+      </div>
+    )
+  }
+
   if (gfses.value.length === 0) {
     return (
       <div class="sh-empty-state">
@@ -131,6 +168,10 @@ export default function PublicDiscoveryPage() {
       </div>
     )
   }
+
+  const unreachable = directoryFailed.value !== null && directoryFailed.value === selectedGfs.value
+  const cached = selectedGfs.value ? directoryCache.get(selectedGfs.value) : undefined
+  const gfsName = gfses.value.find(g => g.id === selectedGfs.value)?.display_name ?? 'GFS'
 
   return (
     <div class="sh-momentum-discover">
@@ -162,8 +203,19 @@ export default function PublicDiscoveryPage() {
         }
       />
 
+      {unreachable && (
+        <StaleNotice
+          urgent
+          message={cached
+            ? t('moment.discover.unreachable_cached', {
+              gfs: gfsName, age: relativeDocsTime(new Date(cached.at).toISOString()),
+            })
+            : t('moment.discover.unreachable', { gfs: gfsName })}
+          onRetry={() => { if (selectedGfs.value) void loadDirectory(selectedGfs.value) }}
+        />
+      )}
       {loading.value && <Spinner />}
-      {!loading.value && filtered.value.length === 0 && (
+      {!loading.value && !unreachable && filtered.value.length === 0 && (
         <p class="sh-muted">
           {searchQuery.value
             ? t('moment.discover.no_match')

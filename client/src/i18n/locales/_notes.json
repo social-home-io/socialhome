@@ -62,6 +62,8 @@
   "common.loading": "Generic spinner label.",
   "common.error": "Generic error label, surfaced in toasts and inline.",
   "common.retry": "Button that re-triggers the failed operation.",
+  "load.try_again": "Button on a failed load or refresh; loads the list again.",
+  "load.household_quiet": "Under a 'Couldn't load …' heading: the app could not reach the person's own Social Home. Say household, never server.",
   "common.not_now": "'Dismiss for now' — used in soft-promotion banners.",
 
   "search.scope.post": "Search filter: household feed posts (not space posts).",
@@ -520,5 +522,9 @@
   "highlight.publish.gfs_too_old": "Inline error in the share-a-highlight dialog: the chosen GFS runs an older version whose page can’t open encrypted highlight links. {name} is the GFS’s name. “Highlights” stays untranslated.",
   "error.gfs_too_old": "Generic error when a GFS is too old for the requested action; its operator has to update it.",
   "settings.privacy.profile_followers": "Privacy switch, on by default. Checked = the person's picture and bio are shown to followers of global spaces they post in (people outside their households who follow that space). Off = followers see the name only. 'global' is the space scope (de: global, nl: wereldwijd, fr: global, es: global); follower per the glossary (de: Follower, nl: volger, fr: abonné, es: seguidor).",
-  "settings.privacy.profile_followers_hint": "Helper line under the switch above: who the followers are, and what they see when it is off."
+  "settings.privacy.profile_followers_hint": "Helper line under the switch above: who the followers are, and what they see when it is off.",
+  "moment.inbox.stale": "{time} is a clock time such as 13:02.",
+  "highlight.inbox.stale": "{time} is a clock time such as 13:02.",
+  "moment.discover.unreachable": "{gfs} is the GFS's name. Shown instead of 'no one signed up' when the GFS did not answer.",
+  "moment.discover.unreachable_cached": "{age} is a relative time such as '2 h ago' or 'yesterday'."
 }
