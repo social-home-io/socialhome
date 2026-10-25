@@ -1,6 +1,10 @@
 {
   "notification.post.created": "{author} a publié une mise à jour",
   "notification.post.commented": "{author} a commenté votre publication",
+  "notification.moment.reacted": "{name} a réagi {emoji} à votre moment",
+  "notification.moment.replied": "{name} a répondu à votre moment",
+  "notification.user.followed": "{name} vous suit désormais",
+  "notification.someone": "Quelqu’un",
   "notification.task.assigned": "On vous a assigné : {title}",
   "notification.task.deadline_due": "Tâche due aujourd'hui : {title}",
   "notification.space.post.created": "Nouvelle publication dans {space_name}",

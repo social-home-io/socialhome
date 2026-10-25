@@ -127,6 +127,23 @@ describe('SettingsPage', () => {
       window.location.hash = ''
     }
   })
+
+  it.each(['#highlights', '#momentum'])(
+    '%s (the Highlights / Momentum "Settings" links) opens the Privacy tab with that section',
+    async (hash) => {
+      const { default: SettingsPage } = await import('./SettingsPage')
+      window.location.hash = hash
+      try {
+        const { getByRole, container } = render(<SettingsPage />)
+        await waitFor(() =>
+          expect(getByRole('tab', { name: 'Privacy' }).getAttribute('aria-selected')).toBe('true'))
+        expect(container.querySelector(hash)).toBeTruthy()
+        fireEvent.click(getByRole('tab', { name: 'Profile' }))
+      } finally {
+        window.location.hash = ''
+      }
+    },
+  )
 })
 
 describe('SettingsPage — where things live (decision 9, P8)', () => {

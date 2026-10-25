@@ -29,6 +29,7 @@ import {
 } from '@/store/momentPublic'
 import type { Moment } from '@/types'
 import { t, isOne } from '@/i18n/i18n'
+import { formatSeconds, readVideoDurationMs } from '@/utils/videoDuration'
 
 const MAX_CONTENT = 1_000
 const MAX_VIDEO_MS = 15_000
@@ -122,17 +123,14 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
       return
     }
     if (isVideo) {
-      const url = URL.createObjectURL(f)
-      const probe: HTMLVideoElement = document.createElement('video')
-      probe.preload = 'metadata'
-      probe.src = url
-      const dur = await new Promise<number>((resolve, reject) => {
-        probe.onloadedmetadata = () => resolve(probe.duration * 1_000)
-        probe.onerror = () => reject(new Error('Could not read video metadata'))
-      }).finally(() => URL.revokeObjectURL(url))
+      const dur = await readVideoDurationMs(f)
+      if (dur === null) {
+        showToast(t('moment.composer.video_unreadable'), 'error')
+        return
+      }
       if (dur > MAX_VIDEO_MS + 50) {
         showToast(
-          t('moment.composer.video_too_long', { max: String(MAX_VIDEO_MS / 1000), len: (dur / 1000).toFixed(1) }),
+          t('moment.composer.video_too_long', { max: String(MAX_VIDEO_MS / 1000), len: formatSeconds(dur) }),
           'error',
         )
         return
@@ -252,8 +250,8 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
               />
               {durationMs.value !== null && (
                 <span class="sh-momentum-composer-duration"
-                      aria-label={t('moment.composer.duration_aria', { len: (durationMs.value / 1000).toFixed(1), max: String(MAX_VIDEO_MS / 1000) })}>
-                  ⏱ {(durationMs.value / 1000).toFixed(1)}s
+                      aria-label={t('moment.composer.duration_aria', { len: formatSeconds(durationMs.value), max: String(MAX_VIDEO_MS / 1000) })}>
+                  <span aria-hidden="true">⏱ {t('moment.composer.duration', { len: formatSeconds(durationMs.value) })}</span>
                 </span>
               )}
               <button

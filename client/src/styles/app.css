@@ -19318,6 +19318,12 @@ a.sh-btn--ghost:hover {
  * outer ``.sh-settings-section`` already provides the warm-paper
  * outer card; ``.sh-settings-subcard`` is the inner divider treatment
  * (subtle border + dashed top, no second tape strip). */
+/* A /settings#<section> deep link lands with the heading below the
+ * sticky top bar, not under it. */
+.sh-settings-subcard[id] { scroll-margin-top: calc(var(--sh-topbar-height-mobile) + var(--sh-space-md)); }
+@media (min-width: 900px) {
+  .sh-settings-subcard[id] { scroll-margin-top: calc(var(--sh-topbar-height) + var(--sh-space-md)); }
+}
 .sh-settings-subcard {
   padding: var(--sh-space-md) 0;
   border-top: 1px dashed var(--sh-border);

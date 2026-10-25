@@ -47,7 +47,7 @@ describe('apiErrorMessage — known codes', () => {
       code: 'TIER_CHANGE_REQUIRED',
       detail: 'A public space is only visible to connected households.',
     })).toBe(
-      "A public space is only visible to households you're connected with. "
+      "A public space is only visible to households you're paired with. "
       + 'Make it global to list it on a GFS.',
     )
   })

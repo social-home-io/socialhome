@@ -68,6 +68,17 @@ const TAB_LABEL_KEYS: Record<SettingsTab, string> = {
   security: 'settings.tab.security',
 }
 
+/** ``/settings#<section>`` → the tab that holds that section:
+ *  "See what's limited" on a protected-account notice (#protection),
+ *  Friends' blocked › Manage (#privacy), and the Highlights / Momentum
+ *  pages' "Settings" links (#highlights, #momentum). */
+const HASH_TABS: Record<string, SettingsTab> = {
+  '#protection': 'profile',
+  '#privacy': 'privacy',
+  '#highlights': 'privacy',
+  '#momentum': 'privacy',
+}
+
 const errText = (err: unknown): string => String((err as Error)?.message ?? err)
 
 const activeTab = signal<SettingsTab>('profile')
@@ -114,14 +125,15 @@ export default function SettingsPage() {
     landingPath.value = getLandingPath()
     haNotifyService.value = getPreferences().ha_notify_service ?? ''
     syncOnlineStatusFromUser()
-    // "See what's limited" on a protected-account notice links here; the
-    // section lives on the Profile tab.
-    if (typeof window !== 'undefined' && window.location.hash === '#protection') {
-      activeTab.value = 'profile'
-    }
-    // Friends' "N people you blocked are hidden · Manage" links here.
-    if (typeof window !== 'undefined' && window.location.hash === '#privacy') {
-      activeTab.value = 'privacy'
+    // A deep link names a section; open the tab that holds it and bring
+    // the section into view (it only mounts once its tab is active).
+    const hash = typeof window !== 'undefined' ? window.location.hash : ''
+    const tab = HASH_TABS[hash]
+    if (tab) {
+      activeTab.value = tab
+      requestAnimationFrame(() => {
+        document.getElementById(hash.slice(1))?.scrollIntoView?.({ block: 'start' })
+      })
     }
   }, [])
 
