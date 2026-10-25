@@ -52,6 +52,7 @@ from ..domain.highlight import (
     HighlightFrameReaction,
     HighlightFrameType,
     HighlightFrameView,
+    audience_label,
 )
 from ..domain.report import (
     DuplicateReportError,
@@ -83,17 +84,21 @@ def _sign_payload(request: web.Request, payload):
 
 
 def _highlight_dict(
-    highlight: Highlight, *, author: PersonSummary | None = None
+    highlight: Highlight, viewer_user_id: str, *, author: PersonSummary | None = None
 ) -> dict:
     out: dict = {
         "id": highlight.id,
         "author_user_id": highlight.author_user_id,
         "highlight_date": highlight.highlight_date,
         "audience_kind": highlight.audience_kind.value,
-        "audience": list(highlight.audience),
+        "audience_label": audience_label(highlight, viewer_user_id).value,
         "created_at": highlight.created_at,
         "expires_at": highlight.expires_at,
     }
+    # The picked user / household ids are the author's alone: a viewer
+    # of a ``users`` highlight must not learn who else was picked.
+    if viewer_user_id == highlight.author_user_id:
+        out["audience"] = list(highlight.audience)
     # Who wrote it, as the caller may see them (``named_people``): the
     # SPA's household cache only knows local people, so a remote
     # friend's highlight would read "Someone" without this.
@@ -219,7 +224,7 @@ class HighlightFramesCollectionView(BaseView):
             _sign_payload(
                 self.request,
                 {
-                    "highlight": _highlight_dict(highlight),
+                    "highlight": _highlight_dict(highlight, ctx.user_id),
                     "frame": _frame_dict(frame, media_status=new_frame_status),
                 },
             ),
@@ -245,6 +250,7 @@ class HighlightsCollectionView(BaseView):
                 {
                     "highlight": _highlight_dict(
                         row["highlight"],
+                        ctx.user_id,
                         author=authors[row["highlight"].author_user_id],
                     ),
                     "frames": [
@@ -291,7 +297,7 @@ class HighlightDetailView(BaseView):
         )
         body = {
             "highlight": _highlight_dict(
-                highlight, author=people[highlight.author_user_id]
+                highlight, ctx.user_id, author=people[highlight.author_user_id]
             ),
             "frames": [
                 _frame_dict(f, media_status=_frame_status(statuses, f)) for f in frames

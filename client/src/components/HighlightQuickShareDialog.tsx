@@ -43,7 +43,7 @@ import {
   loadMyToday,
   todayFixedNote,
 } from '@/features/highlights/todayAudience'
-import type { Highlight } from '@/types'
+import type { OwnHighlight } from '@/types'
 
 const CAPTION_MAX = 140
 
@@ -59,7 +59,7 @@ const mediaPreviewUrl = signal<string>('')
 const mediaType = signal<'image' | 'video' | null>(null)
 /** ``undefined`` while loading; ``null`` when the author hasn't posted
  *  today; else today's highlight (its audience is fixed). */
-const today = signal<Highlight | null | undefined>(undefined)
+const today = signal<OwnHighlight | null | undefined>(undefined)
 /** Today's highlight has a public link — its note says so. */
 const todayPublished = signal<boolean>(false)
 

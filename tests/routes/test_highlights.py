@@ -991,3 +991,87 @@ async def test_audience_ids_without_a_kind_are_refused(client):
     assert (await resp.json())["error"]["code"] == "VALIDATION_ERROR"
     r = await client.get("/api/highlights", headers=_auth(client))
     assert await r.json() == []
+
+
+# ─── Who else was picked (audience vs audience_label) ────────────────────
+
+
+async def _shapes(
+    client, highlight_id: str, headers: dict, *, via_post: str | None = None
+) -> list[dict]:
+    """The highlight object as ``headers``' owner gets it: from the inbox
+    (unless reading through a share) and from the detail read."""
+    shapes = []
+    if via_post is None:
+        r = await client.get("/api/highlights", headers=headers)
+        assert r.status == 200
+        shapes += [
+            row["highlight"]
+            for row in await r.json()
+            if row["highlight"]["id"] == highlight_id
+        ]
+        assert len(shapes) == 1
+    q = f"?via_post={via_post}" if via_post else ""
+    r = await client.get(f"/api/highlights/{highlight_id}{q}", headers=headers)
+    assert r.status == 200, await r.text()
+    shapes.append((await r.json())["highlight"])
+    return shapes
+
+
+async def test_viewers_get_a_coarse_label_never_the_picked_ids(client):
+    """A ``users`` highlight names its people to the author only. Each
+    viewer gets ``audience_label`` — on the inbox, the detail and through
+    a share card — and no ``audience`` list at all."""
+    bob_uid, bob = await _local_user(client, "bob")
+    carol_uid, carol = await _local_user(client, "carol")
+    _, dave = await _local_user(client, "dave")
+    highlight_id, _ = await _highlight_for(client, [bob_uid, carol_uid])
+    post_id = await _share(client, highlight_id, {"scope": "household"})
+
+    viewer_shapes = [
+        *await _shapes(client, highlight_id, bob),
+        *await _shapes(client, highlight_id, carol),
+        *await _shapes(client, highlight_id, dave, via_post=post_id),
+    ]
+    for h in viewer_shapes:
+        assert "audience" not in h
+        assert h["audience_label"] == "people"
+        assert bob_uid not in str(h)
+        assert carol_uid not in str(h)
+
+    # The author still sees exactly whom they picked.
+    for h in await _shapes(client, highlight_id, _auth(client)):
+        assert sorted(h["audience"]) == sorted([bob_uid, carol_uid])
+        assert h["audience_label"] == "people"
+
+
+async def test_the_frame_post_answer_names_the_audience_to_its_author(client):
+    bob_uid, _ = await _local_user(client, "bob")
+    r = await client.post(
+        "/api/highlights/frames",
+        json={
+            "frame_type": "image",
+            "media_url": "/api/media/x.webp",
+            "audience_kind": "users",
+            "audience": [bob_uid],
+        },
+        headers=_auth(client),
+    )
+    assert r.status == 201
+    assert (await r.json())["highlight"]["audience"] == [bob_uid]
+
+
+async def test_a_highlight_for_one_person_reads_just_you(client):
+    bob_uid, bob = await _local_user(client, "bob")
+    highlight_id, _ = await _highlight_for(client, [bob_uid])
+    for h in await _shapes(client, highlight_id, bob):
+        assert h["audience_label"] == "just_you"
+        assert "audience" not in h
+
+
+async def test_a_paired_households_highlight_reads_paired(client):
+    await _remote_amaka(client)
+    await _remote_highlight(client, "h-amaka", "ru-amaka")
+    for h in await _shapes(client, "h-amaka", _auth(client)):
+        assert h["audience_label"] == "paired"
+        assert "audience" not in h

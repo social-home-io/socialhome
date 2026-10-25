@@ -175,6 +175,9 @@ export interface FeedPost {
 
 /** Audience kind for a highlight (matches backend ``HighlightAudience`` enum). */
 export type HighlightAudienceKind = 'all_paired' | 'households' | 'users'
+/** ``audience_label`` — paired households, the author's household only,
+ *  just the viewer, or picked people. */
+export type HighlightAudienceLabel = 'paired' | 'household' | 'just_you' | 'people'
 
 /** Single image/video frame inside a :class:`Highlight`. */
 export interface HighlightFrame {
@@ -199,9 +202,12 @@ export interface Highlight {
   /** ``YYYY-MM-DD`` UTC. */
   highlight_date: string
   audience_kind: HighlightAudienceKind
-  /** List of ``instance_id``s (for ``households``) or ``user_id``s
-   *  (for ``users``). Empty for ``all_paired``. */
-  audience: string[]
+  /** Who sees it, coarse — what a viewer may know. Never the ids. */
+  audience_label: HighlightAudienceLabel
+  /** The author's only: ``instance_id``s (for ``households``) or
+   *  ``user_id``s (for ``users``), empty for ``all_paired``. Absent for
+   *  every viewer — they must not learn who else was picked. */
+  audience?: string[]
   created_at: string
   expires_at: string
   /** When the author has opted into public sharing via a GFS, the
@@ -212,6 +218,9 @@ export interface Highlight {
    *  on another household included (``GET /api/highlights``). */
   author?: Omit<PersonSummary, 'user_id'>
 }
+
+/** The caller's own highlight: the server names its ``audience``. */
+export type OwnHighlight = Highlight & { audience: string[] }
 
 /** Inbox item: highlight + frames + how many frames the viewer has not seen. */
 export interface HighlightInboxItem {

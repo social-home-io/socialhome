@@ -21,7 +21,7 @@ import {
   todayFixedNote,
   todayKey,
 } from './todayAudience'
-import type { Highlight } from '@/types'
+import type { OwnHighlight } from '@/types'
 
 describe('todayAudience', () => {
   beforeEach(() => {
@@ -84,7 +84,7 @@ describe('todayAudience', () => {
       return [{ highlight: h, frames: [{}] }]
     })
     expect((await loadMyToday())?.published).toBe(false)
-    const hl = h as unknown as Highlight
+    const hl = h as unknown as OwnHighlight
     expect(todayFixedNote(hl, true)).toContain('has a public link')
     expect(todayFixedNote(hl, false)).toContain('wherever you shared it')
   })
