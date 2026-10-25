@@ -19555,6 +19555,24 @@ h2 + .sh-settings-subcard {
   gap: var(--sh-space-md);
   padding: 0 var(--sh-space-md) var(--sh-space-sm);
 }
+/* The viewer is black in both themes. Its chrome takes viewer-scoped ink
+ * tokens so the shared pieces in it — the ghost Close / "Publish public
+ * link" buttons, the muted date, the ⋯ chip, focus rings — read light on
+ * black in the light theme too (they took the page's dark ink: Close was
+ * 1.18:1). Dialogs the viewer opens (Seen by, publish, report) are not
+ * inside the header / footer and keep the page theme. */
+.sh-highlight-viewer-header,
+.sh-highlight-viewer-footer {
+  --sh-text: #FFFFFF;
+  --sh-text-muted: #C9C2B6;
+  --sh-bg: #000000;
+  --sh-bg-secondary: #2A2620;
+  --sh-bg-tertiary: #2A2620;
+  --sh-border: #6B6358;
+  --sh-border-strong: #A39A8C;
+  --sh-focus-ring: #FFFFFF;
+  color: var(--sh-text);
+}
 /* Scoped under the viewer because the highlight composer also has a
  * ``.sh-highlight-frame`` class (its per-frame editor row) further
  * down in this file with a cream background that would otherwise win
@@ -19687,24 +19705,40 @@ h2 + .sh-settings-subcard {
 .sh-seenby-emoji {
   font-size: 1.15rem;
 }
+/* A light pill: the outline emoji (😂 😮 😢) draw dark strokes that all but
+ * vanished on the old dark tray. Light in both themes, like the frame
+ * stage is black in both. */
 .sh-highlight-react-tray {
   position: absolute;
   bottom: 84px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  gap: var(--sh-space-sm);
-  background: rgba(0, 0, 0, 0.6);
+  gap: var(--sh-space-xs);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
   border-radius: var(--sh-radius-full);
-  padding: 8px 12px;
+  padding: 6px 10px;
   z-index: 3;
 }
 .sh-highlight-react-tray-btn {
+  color: #1A1814;
   background: none;
   border: none;
+  border-radius: 50%;
   font-size: 1.6rem;
+  line-height: 1;
   cursor: pointer;
   padding: 4px;
+  min-width: 44px;
+  min-height: 44px;
+}
+.sh-highlight-react-tray-btn:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+.sh-highlight-react-tray-btn:focus-visible {
+  outline: 2px solid #1A1814;
+  outline-offset: 1px;
 }
 
 /* Highlight archive — month-grid browser at /highlights/archive. Reuses

@@ -98,3 +98,44 @@ describe('space banners and hints', () => {
     expect(rule?.[1]).toMatch(/text-decoration\s*:\s*underline/)
   })
 })
+
+describe('highlight viewer chrome', () => {
+  // The viewer is black in both themes; its header / footer took the light
+  // theme's dark ink, so the ghost Close and "Publish public link" were
+  // 1.18:1. Viewer-scoped tokens keep every shared piece light on black.
+  const hex = (h: string): [number, number, number] =>
+    [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255) as [number, number, number]
+  const lum = ([r, g, b]: [number, number, number]) => {
+    const f = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+  }
+  const onBlack = (h: string) => (lum(hex(h)) + 0.05) / 0.05
+  const scope = rules().find(([sel]) =>
+    sel.replace(/\s+/g, ' ') === '.sh-highlight-viewer-header, .sh-highlight-viewer-footer')
+  const token = (name: string) =>
+    new RegExp(`${name}\\s*:\\s*(#[0-9A-Fa-f]{6})`).exec(scope?.[1] ?? '')?.[1] ?? '#000000'
+
+  it('scopes its own ink to the header and footer', () => {
+    expect(scope).toBeTruthy()
+    expect(token('--sh-bg')).toBe('#000000')
+  })
+
+  it('reads ≥ 4.5:1 on black for text, muted text and the focus ring', () => {
+    for (const name of ['--sh-text', '--sh-text-muted', '--sh-focus-ring']) {
+      expect(onBlack(token(name)), name).toBeGreaterThanOrEqual(4.5)
+    }
+  })
+
+  it('draws the ghost button outline ≥ 3:1 on black', () => {
+    expect(onBlack(token('--sh-border-strong'))).toBeGreaterThanOrEqual(3)
+  })
+
+  it('puts the quick reactions on a light pill', () => {
+    const tray = rules().find(([sel]) => sel === '.sh-highlight-react-tray')
+    const m = /background\s*:\s*rgba\(\s*(\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\s*\)/.exec(tray?.[1] ?? '')
+    expect(m).toBeTruthy()
+    const [r, g, b, a] = m!.slice(1).map(Number)
+    expect(Math.min(r, g, b)).toBeGreaterThanOrEqual(230)
+    expect(a).toBeGreaterThanOrEqual(0.9)
+  })
+})
