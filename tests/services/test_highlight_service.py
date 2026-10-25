@@ -13,7 +13,11 @@ from socialhome.domain.events import (
     HighlightFrameReactionChanged,
     HighlightFrameViewed,
 )
-from socialhome.domain.highlight import HighlightAudience, HighlightFrameType
+from socialhome.domain.highlight import (
+    HighlightAudience,
+    HighlightAudienceMismatchError,
+    HighlightFrameType,
+)
 from socialhome.domain.post import Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
@@ -303,6 +307,84 @@ async def test_your_own_highlight_is_never_unseen(db, svc):
     await service.mark_frame_viewed(frame_id=frame.id, viewer_user_id="u2")
     (theirs,) = await service.list_visible("u2")
     assert theirs["unseen_count"] == 2
+
+
+# ── A day's audience is never silently widened ────────────────────────────
+
+
+async def _first_frame(service, kind, audience=()):
+    return await service.create_or_append_frame(
+        author_user_id="u1",
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/first.webp",
+        audience_kind=kind,
+        audience=audience,
+    )
+
+
+async def test_a_narrower_frame_never_joins_a_wider_highlight(db, svc):
+    """Today's highlight is for everyone; a frame meant only for Anna is
+    refused instead of being shown to everyone."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    captured: list[HighlightFrameAdded] = []
+    bus.subscribe(HighlightFrameAdded, lambda e: captured.append(e))
+    with pytest.raises(HighlightAudienceMismatchError) as exc:
+        await service.create_or_append_frame(
+            author_user_id="u1",
+            frame_type=HighlightFrameType.IMAGE,
+            media_url="/api/media/private.webp",
+            audience_kind=HighlightAudience.USERS,
+            audience=("u-anna",),
+        )
+    assert exc.value.status == 409
+    assert exc.value.code == "HIGHLIGHT_AUDIENCE_MISMATCH"
+    assert exc.value.params["audience_kind"] == "all_paired"
+    # Nothing written, nothing published.
+    assert len(await service._highlights.list_frames(highlight.id)) == 1
+    assert captured == []
+
+
+async def test_a_wider_frame_never_joins_a_narrower_highlight(db, svc):
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    with pytest.raises(HighlightAudienceMismatchError):
+        await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    with pytest.raises(HighlightAudienceMismatchError):
+        await _first_frame(service, HighlightAudience.USERS, ("u-anna", "u-lena"))
+    with pytest.raises(HighlightAudienceMismatchError):
+        await _first_frame(service, HighlightAudience.HOUSEHOLDS, ("u-anna",))
+
+
+async def test_the_same_audience_appends(db, svc):
+    """Same kind and the same ids in any order append to today's highlight."""
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    first, _ = await _first_frame(service, HighlightAudience.USERS, ("a", "b"))
+    second, frame = await _first_frame(service, HighlightAudience.USERS, ("b", "a"))
+    assert second.id == first.id and frame.sequence == 2
+
+
+async def test_a_frame_without_an_audience_joins_todays_highlight(db, svc):
+    """No audience asked for: the frame goes to today's people, whatever
+    the default in Settings says."""
+    service, _ = svc
+    await _seed_user(
+        db,
+        "u1",
+        "pascal",
+        prefs_json='{"highlights": {"default_audience": {"kind": "all_paired"}}}',
+    )
+    first, _ = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    second, frame = await service.create_or_append_frame(
+        author_user_id="u1",
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/next.webp",
+    )
+    assert second.id == first.id and frame.sequence == 2
+    assert second.audience_kind is HighlightAudience.USERS
 
 
 async def test_get_for_viewer_and_get_frame(db, svc):

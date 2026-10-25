@@ -936,3 +936,40 @@ async def test_share_path_refuses_forged_deleted_and_mismatched_posts(client):
     r = await client.delete(f"/api/feed/posts/{real}", headers=_auth(client))
     assert r.status in (200, 204), await r.text()
     assert (await client.get(f"{url}?via_post={real}", headers=carol)).status == 404
+
+
+async def test_a_frame_for_other_people_than_today_is_refused(client):
+    """A frame for fewer people never joins today's all-paired highlight:
+    409 ``HIGHLIGHT_AUDIENCE_MISMATCH`` naming today's audience."""
+    first = await client.post(
+        "/api/highlights/frames",
+        json={
+            "frame_type": "image",
+            "media_url": "/api/media/a.webp",
+            "audience_kind": "all_paired",
+        },
+        headers=_auth(client),
+    )
+    assert first.status == 201, await first.text()
+    resp = await client.post(
+        "/api/highlights/frames",
+        json={
+            "frame_type": "image",
+            "media_url": "/api/media/b.webp",
+            "audience_kind": "users",
+            "audience": ["u-anna"],
+        },
+        headers=_auth(client),
+    )
+    assert resp.status == 409
+    err = (await resp.json())["error"]
+    assert err["code"] == "HIGHLIGHT_AUDIENCE_MISMATCH"
+    assert err["params"]["audience_kind"] == "all_paired"
+    # A frame that names no audience joins today's highlight.
+    joined = await client.post(
+        "/api/highlights/frames",
+        json={"frame_type": "image", "media_url": "/api/media/c.webp"},
+        headers=_auth(client),
+    )
+    assert joined.status == 201
+    assert (await joined.json())["frame"]["sequence"] == 2

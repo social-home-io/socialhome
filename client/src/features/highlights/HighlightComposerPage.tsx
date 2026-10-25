@@ -8,8 +8,11 @@
  * today's highlight keyed by ``(author_user_id, highlight_date)``, so the
  * submit path just iterates over the staged frames sequentially.
  *
- * The first frame carries the audience (highlight-level); later frames
- * inherit it server-side. Per-frame ``caption_text`` is supported by
+ * The first frame of the day carries the audience (highlight-level) and
+ * starts from Settings › Highlights › Default audience. Once the author
+ * has posted today, the audience is fixed: the picker is replaced by
+ * "Today's highlight is for …" and frames go without an audience, since
+ * the server refuses a frame for other people (``todayAudience.ts``). Per-frame ``caption_text`` is supported by
  * the schema today; the legacy ``caption_emoji`` field is no longer
  * surfaced in the UI — the per-frame :class:`EmojiPickButton` splices
  * glyphs straight into the caption text.
@@ -25,9 +28,10 @@ import { showToast } from '@/components/Toast'
 import { UploadProgressBar, uploadWithProgress } from '@/components/UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
 import { currentUser } from '@/store/auth'
-import type { HighlightAudienceKind, HighlightInboxItem } from '@/types'
+import type { Highlight, HighlightAudienceKind } from '@/types'
 import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
+import { defaultAudienceKind, describeAudience, loadMyToday } from './todayAudience'
 
 /** A household the audience picker offers — a confirmed social peer. */
 interface RemoteHousehold {
@@ -115,6 +119,9 @@ const stagedFrames = signal<StagedFrame[]>([])
 /** Frames already posted on today's highlight by the current user — read
  *  once on mount so the picker can refuse over the daily cap. */
 const mineToday = signal<number>(0)
+/** Today's highlight when the author already posted today — its
+ *  audience is fixed for every further frame. */
+const today = signal<Highlight | null>(null)
 const audienceKind = signal<HighlightAudienceKind>('all_paired')
 const audienceIds = signal<string[]>([])
 const submitting = signal<boolean>(false)
@@ -162,10 +169,12 @@ export default function HighlightComposerPage() {
   useEffect(() => {
     // Reset state on mount.
     stagedFrames.value = []
-    audienceKind.value = 'all_paired'
+    // A new day's highlight starts from the Settings default.
+    audienceKind.value = defaultAudienceKind()
     audienceIds.value = []
-    advanced.value = false
+    advanced.value = audienceKind.value === 'users'
     mineToday.value = 0
+    today.value = null
 
     // Connected households + people for the picker, from one
     // ``/api/friends`` read. A failure is surfaced in the picker; the
@@ -176,14 +185,11 @@ export default function HighlightComposerPage() {
     // ``MAX_FRAMES_PER_HIGHLIGHT`` frames per day; the server returns
     // ``HIGHLIGHT_FRAME_LIMIT`` past that. Surface the number locally so
     // multi-pick refuses the overflow without an upload round-trip.
-    api.get('/api/highlights').then((rows: HighlightInboxItem[]) => {
-      const me = currentUser.value?.user_id
-      if (!me) return
-      const todayKey = new Date().toISOString().slice(0, 10)
-      const mine = (rows ?? []).find(
-        s => s.highlight.author_user_id === me && s.highlight.highlight_date === todayKey,
-      )
-      mineToday.value = mine?.frames.length ?? 0
+    // The same read tells whether today's highlight exists — and so
+    // whether its audience is already fixed.
+    loadMyToday().then(mine => {
+      mineToday.value = mine?.frames ?? 0
+      today.value = mine?.highlight ?? null
     }).catch(() => {})
   }, [])
 
@@ -276,17 +282,20 @@ export default function HighlightComposerPage() {
     if (frames.length === 0 || submitting.value) return
     submitting.value = true
     let lastHighlightId: string | null = null
+    const appending = today.value !== null
     for (let i = 0; i < frames.length; i++) {
       const f = frames[i]
+      const first = i === 0 && !appending
       try {
         const r = await api.post('/api/highlights/frames', {
           media_url:    f.url,
           frame_type:   f.type,
           caption_text: f.caption.trim() || null,
-          // Audience rides on the first frame only — later frames
-          // inherit the highlight-level audience server-side.
-          audience_kind: i === 0 ? audienceKind.value : undefined,
-          audience:      i === 0 && audienceKind.value !== 'all_paired'
+          // Audience rides on the first frame of a new day only — later
+          // frames (and every frame once today's highlight exists) join
+          // today's highlight and its audience server-side.
+          audience_kind: first ? audienceKind.value : undefined,
+          audience:      first && audienceKind.value !== 'all_paired'
             ? audienceIds.value : [],
         }) as { highlight: { id: string }; frame: { id: string } }
         lastHighlightId = r.highlight.id
@@ -313,6 +322,13 @@ export default function HighlightComposerPage() {
 
   const left = framesLeft()
   const canPickMore = left > 0
+  const defaultKind = defaultAudienceKind()
+  const defaultMark = (kind: HighlightAudienceKind) => defaultKind === kind
+    ? <span class="sh-muted"> {t('highlight.composer.is_default')}</span>
+    : null
+  const nameOf = (id: string): string | undefined =>
+    people.value.find(p => p.user_id === id)?.display_name
+    ?? households.value.find(h => h.instance_id === id)?.display_name
 
   return (
     <form class="sh-form sh-highlight-composer" onSubmit={submit}>
@@ -384,95 +400,109 @@ export default function HighlightComposerPage() {
         </ol>
       )}
 
-      <fieldset class="sh-highlight-composer-audience">
-        <legend class="sh-muted">{t('highlight.composer.audience')}</legend>
-        <label class="sh-highlight-composer-audience-row">
-          <input
-            type="radio"
-            name="audience"
-            checked={audienceKind.value === 'all_paired'}
-            onChange={() => {
-              audienceKind.value = 'all_paired'
-              audienceIds.value = []
-            }}
-          />
-          {t('highlight.composer.audience_all')}
-        </label>
-        <label class="sh-highlight-composer-audience-row">
-          <input
-            type="radio"
-            name="audience"
-            checked={audienceKind.value === 'households'}
-            onChange={() => {
-              audienceKind.value = 'households'
-              audienceIds.value = []
-            }}
-          />
-          {t('highlight.composer.audience_households')}
-        </label>
-        {audienceKind.value === 'households' && (
-          <div class="sh-highlight-composer-audience-list">
-            {audienceError.value && <AudienceLoadError />}
-            {!audienceError.value && households.value.length === 0 && (
-              <p class="sh-muted">{t('highlight.composer.no_households')}</p>
-            )}
-            {households.value.map(h => (
-              <label key={h.instance_id} class="sh-highlight-composer-audience-row">
+      {today.value !== null ? (
+        <fieldset class="sh-highlight-composer-audience">
+          <legend class="sh-muted">{t('highlight.composer.audience')}</legend>
+          <p class="sh-highlight-composer-audience-fixed">
+            {t('highlight.audience.today_fixed', {
+              who: describeAudience(today.value.audience_kind, today.value.audience, nameOf),
+            })}
+          </p>
+        </fieldset>
+      ) : (
+        <fieldset class="sh-highlight-composer-audience">
+          <legend class="sh-muted">{t('highlight.composer.audience')}</legend>
+          <label class="sh-highlight-composer-audience-row">
+            <input
+              type="radio"
+              name="audience"
+              checked={audienceKind.value === 'all_paired'}
+              onChange={() => {
+                audienceKind.value = 'all_paired'
+                audienceIds.value = []
+              }}
+            />
+            {t('highlight.composer.audience_all')}
+            {defaultMark('all_paired')}
+          </label>
+          <label class="sh-highlight-composer-audience-row">
+            <input
+              type="radio"
+              name="audience"
+              checked={audienceKind.value === 'households'}
+              onChange={() => {
+                audienceKind.value = 'households'
+                audienceIds.value = []
+              }}
+            />
+            {t('highlight.composer.audience_households')}
+            {defaultMark('households')}
+          </label>
+          {audienceKind.value === 'households' && (
+            <div class="sh-highlight-composer-audience-list">
+              {audienceError.value && <AudienceLoadError />}
+              {!audienceError.value && households.value.length === 0 && (
+                <p class="sh-muted">{t('highlight.composer.no_households')}</p>
+              )}
+              {households.value.map(h => (
+                <label key={h.instance_id} class="sh-highlight-composer-audience-row">
+                  <input
+                    type="checkbox"
+                    checked={audienceIds.value.includes(h.instance_id)}
+                    onChange={() => toggleId(h.instance_id)}
+                  />
+                  {h.display_name}
+                </label>
+              ))}
+            </div>
+          )}
+          <button
+            type="button"
+            class="sh-link sh-highlight-composer-advanced-toggle"
+            onClick={() => { advanced.value = !advanced.value }}
+          >
+            {advanced.value ? t('highlight.composer.hide_people') : t('highlight.composer.show_people')}
+          </button>
+          {advanced.value && (
+            <>
+              <label class="sh-highlight-composer-audience-row">
                 <input
-                  type="checkbox"
-                  checked={audienceIds.value.includes(h.instance_id)}
-                  onChange={() => toggleId(h.instance_id)}
+                  type="radio"
+                  name="audience"
+                  checked={audienceKind.value === 'users'}
+                  onChange={() => {
+                    audienceKind.value = 'users'
+                    audienceIds.value = []
+                  }}
                 />
-                {h.display_name}
+                {t('highlight.composer.audience_people')}
+                {defaultMark('users')}
               </label>
-            ))}
-          </div>
-        )}
-        <button
-          type="button"
-          class="sh-link sh-highlight-composer-advanced-toggle"
-          onClick={() => { advanced.value = !advanced.value }}
-        >
-          {advanced.value ? t('highlight.composer.hide_people') : t('highlight.composer.show_people')}
-        </button>
-        {advanced.value && (
-          <>
-            <label class="sh-highlight-composer-audience-row">
-              <input
-                type="radio"
-                name="audience"
-                checked={audienceKind.value === 'users'}
-                onChange={() => {
-                  audienceKind.value = 'users'
-                  audienceIds.value = []
-                }}
-              />
-              {t('highlight.composer.audience_people')}
-            </label>
-            {audienceKind.value === 'users' && (
-              <div class="sh-highlight-composer-audience-list">
-                {audienceError.value && <AudienceLoadError />}
-                {!audienceError.value && people.value.length === 0 && (
-                  <p class="sh-muted">{t('highlight.composer.no_people')}</p>
-                )}
-                {people.value.map(p => (
-                  <label key={p.user_id} class="sh-highlight-composer-audience-row">
-                    <input
-                      type="checkbox"
-                      checked={audienceIds.value.includes(p.user_id)}
-                      onChange={() => toggleId(p.user_id)}
-                    />
-                    {p.display_name}
-                    {p.household_name && (
-                      <span class="sh-muted"> · {p.household_name}</span>
-                    )}
-                  </label>
-                ))}
-              </div>
-            )}
-          </>
-        )}
-      </fieldset>
+              {audienceKind.value === 'users' && (
+                <div class="sh-highlight-composer-audience-list">
+                  {audienceError.value && <AudienceLoadError />}
+                  {!audienceError.value && people.value.length === 0 && (
+                    <p class="sh-muted">{t('highlight.composer.no_people')}</p>
+                  )}
+                  {people.value.map(p => (
+                    <label key={p.user_id} class="sh-highlight-composer-audience-row">
+                      <input
+                        type="checkbox"
+                        checked={audienceIds.value.includes(p.user_id)}
+                        onChange={() => toggleId(p.user_id)}
+                      />
+                      {p.display_name}
+                      {p.household_name && (
+                        <span class="sh-muted"> · {p.household_name}</span>
+                      )}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </fieldset>
+      )}
 
       <div class="sh-form-actions">
         <Button

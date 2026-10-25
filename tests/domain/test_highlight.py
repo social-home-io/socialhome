@@ -12,6 +12,7 @@ from socialhome.domain.highlight import (
     HighlightFrameReplySnapshot,
     HighlightFrameType,
     HighlightFrameView,
+    same_audience,
 )
 
 
@@ -53,3 +54,16 @@ def test_reply_snapshot_is_frozen():
         pass
     else:
         raise AssertionError("HighlightFrameReplySnapshot must be frozen")
+
+
+def test_same_audience():
+    a, u, h = (
+        HighlightAudience.ALL_PAIRED,
+        HighlightAudience.USERS,
+        HighlightAudience.HOUSEHOLDS,
+    )
+    assert same_audience(a, (), a, ("ignored",))
+    assert same_audience(u, ("x", "y"), u, ("y", "x"))
+    assert not same_audience(u, ("x",), u, ("x", "y"))
+    assert not same_audience(u, ("x",), h, ("x",))
+    assert not same_audience(a, (), u, ())

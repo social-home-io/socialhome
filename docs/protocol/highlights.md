@@ -39,6 +39,16 @@ row + emits `HIGHLIGHT_CREATED`; subsequent frames append + emit
 `HIGHLIGHT_FRAME_APPENDED`. New day → new highlight row. The receiving instance
 upserts the highlight by id, then appends the frame.
 
+A day's frames share one audience — the highlight row's. The first frame
+of the day sets it (the request's `audience_kind` / `audience`, else the
+author's Settings default `highlights.default_audience`). A later frame
+that names an audience must name the same one (same kind, same ids in any
+order); otherwise `POST /api/highlights/frames` refuses it with `409
+HIGHLIGHT_AUDIENCE_MISMATCH` before anything is written, instead of
+showing the frame to today's audience. A frame that names no audience
+joins today's highlight. The composers show today's audience as fixed
+once the author has posted today and send later frames without one.
+
 ## Retention
 
 The author's `preferences_json.highlights.retention_days` and `.max_count`

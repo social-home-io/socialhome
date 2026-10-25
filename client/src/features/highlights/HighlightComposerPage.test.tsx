@@ -17,6 +17,7 @@ vi.mock('@/store/auth', () => ({
 }))
 
 import { api } from '@/api'
+import { currentUser } from '@/store/auth'
 import HighlightComposerPage, { audienceFromFriends } from './HighlightComposerPage'
 
 const get = api.get as ReturnType<typeof vi.fn>
@@ -105,5 +106,60 @@ describe('HighlightComposerPage audience picker', () => {
     await waitFor(() => expect(get).toHaveBeenCalledWith('/api/friends'))
     fireEvent.click(view.getByLabelText('Pick households'))
     expect(await view.findByText('No connected households yet.')).toBeTruthy()
+  })
+})
+
+describe('HighlightComposerPage today\'s audience', () => {
+  const me = currentUser.value as unknown as Record<string, unknown>
+  const today = new Date().toISOString().slice(0, 10)
+
+  function mockToday(audience: { kind: string, ids: string[] } | null) {
+    get.mockReset()
+    get.mockImplementation((path: string) => {
+      if (path === '/api/friends') return Promise.resolve(FRIENDS)
+      if (path === '/api/highlights') {
+        return Promise.resolve(audience ? [{
+          highlight: {
+            id: 'h1', author_user_id: 'u-me', highlight_date: today,
+            audience_kind: audience.kind, audience: audience.ids,
+          },
+          frames: [{ id: 'f1' }],
+          unseen_count: 0,
+        }] : [])
+      }
+      return Promise.reject(new Error(`unexpected GET ${path}`))
+    })
+  }
+
+  beforeEach(() => { delete me.preferences_json })
+
+  it('appending shows today\'s audience as fixed, by name, with no picker', async () => {
+    mockToday({ kind: 'users', ids: ['u-anna'] })
+    const view = render(<HighlightComposerPage />)
+    expect(await view.findByText(
+      "Today's highlight is for Anna. New frames go to the same people.",
+    )).toBeTruthy()
+    expect(view.queryByLabelText(/All paired households/)).toBeNull()
+    expect(view.queryByLabelText('Pick households')).toBeNull()
+  })
+
+  it('a new day starts from the Settings default and marks it', async () => {
+    me.preferences_json = '{"highlights": {"default_audience": {"kind": "households"}}}'
+    mockToday(null)
+    const view = render(<HighlightComposerPage />)
+    const households = await view.findByLabelText(/Pick households/) as HTMLInputElement
+    expect(households.checked).toBe(true)
+    expect(households.parentElement!.textContent).toContain('(your default)')
+    const all = view.getByLabelText(/All paired households/) as HTMLInputElement
+    expect(all.checked).toBe(false)
+    expect(all.parentElement!.textContent).not.toContain('default')
+  })
+
+  it('without a Settings default, all paired households is the marked default', async () => {
+    mockToday(null)
+    const view = render(<HighlightComposerPage />)
+    const all = await view.findByLabelText(/All paired households/) as HTMLInputElement
+    expect(all.checked).toBe(true)
+    expect(all.parentElement!.textContent).toContain('(your default)')
   })
 })
