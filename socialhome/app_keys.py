@@ -208,6 +208,7 @@ highlight_retention_scheduler_key: AppKey = AppKey("highlight_retention_schedule
 highlight_publication_service_key: AppKey = AppKey("highlight_publication_service")
 moment_repo_key: AppKey = AppKey("moment_repo")
 moment_service_key: AppKey = AppKey("moment_service")
+moment_archive_service_key: AppKey = AppKey("moment_archive_service")
 moment_retention_scheduler_key: AppKey = AppKey("moment_retention_scheduler")
 moment_public_registration_repo_key: AppKey = AppKey("moment_public_registration_repo")
 moment_public_follow_repo_key: AppKey = AppKey("moment_public_follow_repo")

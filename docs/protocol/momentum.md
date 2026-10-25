@@ -34,8 +34,27 @@ encrypted payload (§25.8.21).
   the absolute cap to 24 h via a ``user_follows`` lookup against the
   viewer's row.
 * The retention scheduler runs hourly and deletes anything past the
-  absolute cap — live moments and delete tombstones alike; reactions
+  absolute cap — others' moments and delete tombstones alike; reactions
   cascade.
+* **Your own moments stay in your archive** (decision 6a). A moment
+  written on this household (``received_via = 'self'``) that its author
+  hasn't deleted is never pruned here: past ``expires_at`` it leaves every
+  inbox and only its author can still open it
+  (``GET /api/moments/archive?scope=own``, ``GET /api/moments/{id}``).
+  Replies to it close at expiry (the households a reply would reach no
+  longer hold the moment). This is **local only**: every other household
+  prunes its copy at the signed ``expires_at`` as before, and nothing on
+  the wire changes. An own tombstone still goes at expiry, and so does a
+  public moment's share-link item key (``moment_public_shares``) — a
+  share link never outlives the moment.
+* **Household archive cap.** The admin sets a per-person cap on archived
+  media (``PUT /api/admin/moments/archive-cap``, ``instance_config`` key
+  ``moments.archive_cap_bytes``; default 2 GiB, ``0`` = no limit). The same
+  hourly tick drops the oldest archived pictures and videos of anyone past
+  it — at most 200 per tick: the text stays, ``media_url`` is cleared and
+  the file is removed once no other row references it. A moment others can
+  still see keeps its picture. Nobody is notified; the Yours tab says it
+  up front.
 
 ## Hashtags
 

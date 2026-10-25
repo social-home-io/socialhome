@@ -1,12 +1,12 @@
 /**
  * MomentumPage — host for the Momentum pillar (§Momentum).
  *
- * Two tabs: ``inbox`` (Twitter-style live moments) and ``archive``
- * (date-grouped retention-window list with optional ``?tag=``
- * hashtag filter). Tab state is URL-driven via ``?tab=``;
- * ``/momentum/archive[?tag=...]`` redirects to
- * ``/momentum?tab=archive[&tag=...]`` so old hashtag links and
- * external bookmarks survive.
+ * Two tabs: ``inbox`` (the moments you see) and ``yours`` (your own
+ * moments, kept for you — decision 6a). Tab state is URL-driven via
+ * ``?tab=``. A hashtag link (``/momentum?tag=<name>``) shows the moments
+ * with that tag under the Moments tab. Older links keep working:
+ * ``?tab=archive&tag=…`` is the tag view, ``?tab=archive`` alone is
+ * Yours, and ``/momentum/archive[?tag=…]`` redirects here.
  */
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -16,62 +16,66 @@ import { MomentumComposerDialog } from '@/components/MomentumComposerDialog'
 import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import MomentumInboxTab from './MomentumInboxTab'
-import MomentumArchiveTab from './MomentumArchiveTab'
+import MomentumTagTab from './MomentumTagTab'
+import MomentumYoursTab from './MomentumYoursTab'
 
-type MomentumTab = 'inbox' | 'archive'
+type MomentumTab = 'inbox' | 'yours'
 
-const TABS: readonly MomentumTab[] = ['inbox', 'archive'] as const
+const TABS: readonly MomentumTab[] = ['inbox', 'yours'] as const
 const tabLabels = (): Readonly<Record<MomentumTab, string>> => ({
-  inbox:   t('nav.momentum'),
-  archive: t('highlight.tab.archive'),
+  inbox: t('nav.momentum'),
+  yours: t('moment.tab.yours'),
 })
 
-const activeTab = signal<MomentumTab>('inbox')
-
-
-function tabFromUrl(url: string): MomentumTab {
-  const q = url.split('?')[1] ?? ''
-  const t = new URLSearchParams(q).get('tab')
-  return t === 'archive' ? 'archive' : 'inbox'
+export interface MomentumView {
+  tab: MomentumTab
+  /** The hashtag filter (Moments tab only), or ``null``. */
+  tag: string | null
 }
+
+/** Which tab (and tag) a ``/momentum`` URL shows. */
+export function momentumViewFromUrl(url: string): MomentumView {
+  const params = new URLSearchParams(url.split('?')[1] ?? '')
+  const tab = params.get('tab')
+  const tag = params.get('tag') || null
+  if (tab === 'yours') return { tab: 'yours', tag: null }
+  if (tag) return { tab: 'inbox', tag }
+  // The old Archive tab is your own moments now.
+  if (tab === 'archive') return { tab: 'yours', tag: null }
+  return { tab: 'inbox', tag: null }
+}
+
+const view = signal<MomentumView>({ tab: 'inbox', tag: null })
 
 
 export default function MomentumPage() {
-  useTitle(activeTab.value === 'archive' ? t('page_title.moments_archive') : t('nav.momentum'))
+  useTitle(view.value.tab === 'yours' ? t('page_title.moments_yours') : t('nav.momentum'))
   const loc = useLocation()
 
   useEffect(() => {
-    activeTab.value = tabFromUrl(loc.url)
+    view.value = momentumViewFromUrl(loc.url)
   }, [loc.url])
 
   const onSelectTab = (tab: MomentumTab) => {
-    activeTab.value = tab
-    // Preserve other query params (notably ``?tag=`` for hashtag
-    // filters) when switching tabs so the user keeps their context.
-    const [, query] = loc.url.split('?')
-    const params = new URLSearchParams(query ?? '')
-    if (tab === 'inbox') {
-      params.delete('tab')
-      params.delete('tag')  // tag is archive-scoped — drop it on Inbox.
-    } else {
-      params.set('tab', tab)
-    }
-    const next = params.toString()
-      ? `/momentum?${params.toString()}`
-      : '/momentum'
+    // A tag filter belongs to the Moments list; switching tabs drops it.
+    const next = tab === 'yours' ? '/momentum?tab=yours' : '/momentum'
+    view.value = { tab, tag: null }
     if (loc.url !== next) loc.route(next, true)
   }
 
+  const { tab, tag } = view.value
   return (
     <div class="sh-momentum-host">
       <TabHeader<MomentumTab>
-        activeTab={activeTab.value}
+        activeTab={tab}
         visibleTabs={TABS}
         labels={tabLabels()}
         ariaLabel={t('moment.sections_aria')}
         onSelectTab={onSelectTab}
       />
-      {activeTab.value === 'archive' ? <MomentumArchiveTab /> : <MomentumInboxTab />}
+      {tab === 'yours'
+        ? <MomentumYoursTab />
+        : tag ? <MomentumTagTab /> : <MomentumInboxTab />}
       <MomentumComposerDialog />
     </div>
   )

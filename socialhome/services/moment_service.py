@@ -58,6 +58,17 @@ MOMENT_RATE_WINDOW = timedelta(minutes=15)
 NOT_FOUND_MESSAGE = "moment not found"
 
 
+def _has_expired(moment: Moment) -> bool:
+    """``True`` once the moment's absolute ``expires_at`` has passed."""
+    try:
+        expires = datetime.fromisoformat(moment.expires_at)
+    except TypeError, ValueError:
+        return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=UTC)
+    return expires <= datetime.now(UTC)
+
+
 class MomentNotFoundError(KeyError):
     """Raised when a moment id can't be found locally — or the caller may
     not read it (the same error, word for word)."""
@@ -154,6 +165,14 @@ class MomentService:
             parent = await self._readable(parent_moment_id, author_user_id)
             if parent is None:
                 raise MomentNotFoundError(parent_moment_id)
+            # Only its author can still read a moment past its expiry (it
+            # stays in their archive, decision 6a); the households a reply
+            # would go to no longer hold it, so replies close with it.
+            if _has_expired(parent):
+                raise ValueError(
+                    "This moment has ended and is only in your archive now; "
+                    "replies are closed."
+                )
             # Threads stay flat: a reply to a reply attaches to the
             # original root so list_replies(root) returns the whole
             # conversation in a single query.
@@ -337,6 +356,20 @@ class MomentService:
             limit=limit,
             tag=tag,
             max_hops=await self._max_hops(viewer_user_id),
+        )
+
+    async def list_own_archive(
+        self,
+        *,
+        author_user_id: str,
+        before: str | None = None,
+        limit: int = 50,
+    ) -> list[Moment]:
+        """The caller's own archive (decision 6a): every moment and reply
+        they wrote here and haven't deleted, live or past expiry, newest
+        first, ``before`` cursor paging."""
+        return await self._moments.list_own_archive(
+            author_user_id, before=before, limit=limit
         )
 
     async def list_replies(

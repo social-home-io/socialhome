@@ -20645,6 +20645,108 @@ h2 + .sh-settings-subcard {
   border-radius: var(--sh-radius-sm);
   font-size: 0.875rem;
 }
+/* Tag view (/momentum?tag=…): the tag is the heading, Clear beside it. */
+.sh-momentum-tag-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+  flex-wrap: wrap;
+}
+.sh-momentum-tag-head h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.sh-momentum-tag-head a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+}
+
+/* Yours (/momentum?tab=yours): your own moments, kept for you. */
+.sh-momentum-archive > p {
+  margin: 0;
+}
+.sh-momentum-yours-row {
+  border-bottom: 1px solid var(--sh-border);
+  background: var(--sh-bg);
+}
+.sh-momentum-yours-link {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  color: inherit;
+  text-decoration: none;
+}
+.sh-momentum-yours-link:hover {
+  background: var(--sh-bg-secondary);
+}
+.sh-momentum-yours-link:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: -2px;
+}
+.sh-momentum-yours-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--sh-space-sm);
+  row-gap: 2px;
+}
+.sh-momentum-yours-status {
+  font-size: 0.85rem;
+}
+.sh-momentum-yours-link .sh-momentum-row-content {
+  margin: 0;
+}
+.sh-momentum-yours-gone {
+  margin: 0;
+  font-style: italic;
+}
+.sh-momentum-yours-media {
+  display: block;
+  width: auto;
+  max-width: min(100%, 420px);
+  max-height: 240px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  object-fit: cover;
+}
+.sh-momentum-yours-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs);
+}
+.sh-momentum-yours-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-full);
+  font-size: 0.8rem;
+  color: var(--sh-text-muted);
+}
+.sh-momentum-yours-counts {
+  display: inline-flex;
+  gap: var(--sh-space-sm);
+  margin-inline-start: auto;
+  font-size: 0.85rem;
+  color: var(--sh-text-muted);
+}
+.sh-momentum-yours-more {
+  display: flex;
+  justify-content: center;
+}
+.sh-momentum-detail-ended {
+  margin: 0;
+}
+.sh-admin-moment-cap {
+  margin-top: var(--sh-space-lg);
+}
+.sh-admin-moment-cap h3 {
+  margin: 0 0 var(--sh-space-xs);
+}
 .sh-hashtag {
   color: var(--sh-accent, currentColor);
   text-decoration: none;

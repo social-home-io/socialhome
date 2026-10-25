@@ -215,6 +215,8 @@ from .me_preferences import MePreferencesView
 from .me_space_location import MeSpaceLocationSharingView
 from .media import MediaServeView, MediaUploadView
 from .moments import (
+    MomentArchiveCapView,
+    MomentArchiveUsageView,
     MomentArchiveView,
     MomentCollectionView,
     MomentDetailView,
@@ -1064,6 +1066,8 @@ def setup_routes(app: web.Application) -> None:
     # the ``{id}`` detail route so aiohttp's literal-prefix match wins.
     app.router.add_view("/api/moments", MomentCollectionView)
     app.router.add_view("/api/moments/archive", MomentArchiveView)
+    app.router.add_view("/api/moments/archive/usage", MomentArchiveUsageView)
+    app.router.add_view("/api/admin/moments/archive-cap", MomentArchiveCapView)
     app.router.add_view("/api/moments/hashtags", MomentHashtagsView)
     app.router.add_view(
         "/api/moments/follows",

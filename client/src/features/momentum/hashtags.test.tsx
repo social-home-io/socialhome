@@ -30,7 +30,7 @@ describe('renderHashtagged', () => {
     const link = container.querySelector('a.sh-hashtag') as HTMLAnchorElement
     expect(link).not.toBeNull()
     expect(link.textContent).toBe('#Berlin')
-    expect(link.getAttribute('href')).toBe('/momentum?tab=archive&tag=berlin')
+    expect(link.getAttribute('href')).toBe('/momentum?tag=berlin')
     fireEvent.click(link)
     expect(onClick).toHaveBeenCalledWith('berlin', expect.anything())
   })

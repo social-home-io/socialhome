@@ -1,8 +1,8 @@
 /**
  * MomentumArchiveRedirect — preserves the legacy ``/momentum/archive``
- * URL by replacing it with ``/momentum?tab=archive`` on mount,
- * carrying any ``?tag=…`` filter forward so existing hashtag deep
- * links keep working.
+ * URL: a hashtag link (``?tag=…``) goes to ``/momentum?tag=…``, anything
+ * else to your own moments, ``/momentum?tab=yours`` (the Archive tab
+ * became Yours, decision 6a).
  */
 import { useEffect } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
@@ -14,8 +14,8 @@ export default function MomentumArchiveRedirect() {
     const params = new URLSearchParams(q)
     const tag = params.get('tag')
     const target = tag
-      ? `/momentum?tab=archive&tag=${encodeURIComponent(tag)}`
-      : '/momentum?tab=archive'
+      ? `/momentum?tag=${encodeURIComponent(tag)}`
+      : '/momentum?tab=yours'
     loc.route(target, true)
   }, [])
   return null

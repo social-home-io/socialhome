@@ -127,6 +127,9 @@ export default function MomentumDetailPage() {
   if (!detail.value) return null
   const m = detail.value.moment
   const isAuthor = m.author_user_id === me
+  // Past its expiry only its author still sees it (kept under Yours,
+  // decision 6a): replies close and the share link has ended.
+  const ended = Date.parse(m.expires_at) <= Date.now()
 
   const react = async (emoji: string) => {
     try {
@@ -224,7 +227,7 @@ export default function MomentumDetailPage() {
               {renderHashtagged(mm.content, (t, ev) => {
                 ev.preventDefault()
                 ev.stopPropagation()
-                loc.route(`/momentum?tab=archive&tag=${encodeURIComponent(t)}`)
+                loc.route(`/momentum?tag=${encodeURIComponent(t)}`)
               })}
             </p>
           )}
@@ -318,7 +321,7 @@ export default function MomentumDetailPage() {
           {renderHashtagged(m.content, (t, ev) => {
             ev.preventDefault()
             ev.stopPropagation()
-            loc.route(`/momentum?tab=archive&tag=${encodeURIComponent(t)}`)
+            loc.route(`/momentum?tag=${encodeURIComponent(t)}`)
           })}
         </p>
       )}
@@ -381,14 +384,19 @@ export default function MomentumDetailPage() {
         </div>
       </section>
 
+      {ended && (
+        <p class="sh-muted sh-momentum-detail-ended">{t('moment.detail.archived')}</p>
+      )}
       <footer class="sh-momentum-detail-actions">
-        <Button onClick={() => openMomentumComposer(m.id, { parentIsPublic: m.is_public === true })}>
-          💬 {t('highlight.viewer.reply')}
-        </Button>
+        {!ended && (
+          <Button onClick={() => openMomentumComposer(m.id, { parentIsPublic: m.is_public === true })}>
+            💬 {t('highlight.viewer.reply')}
+          </Button>
+        )}
         {!isAuthor && (
           <Button variant="ghost" onClick={report}>🚩 {t('report.action')}</Button>
         )}
-        {isAuthor && m.is_public && (
+        {isAuthor && m.is_public && !ended && (
           <Button
             variant="secondary"
             onClick={() => void copyShareLink()}
@@ -418,14 +426,16 @@ export default function MomentumDetailPage() {
             <ul class="sh-momentum-list">
               {visibleReplies.map(renderRow)}
             </ul>
-            <div class="sh-momentum-replies-cta">
-              <Button
-                variant="secondary"
-                onClick={() => openMomentumComposer(m.id, { parentIsPublic: m.is_public === true })}
-              >
-                💬 {t('moment.detail.add_reply')}
-              </Button>
-            </div>
+            {!ended && (
+              <div class="sh-momentum-replies-cta">
+                <Button
+                  variant="secondary"
+                  onClick={() => openMomentumComposer(m.id, { parentIsPublic: m.is_public === true })}
+                >
+                  💬 {t('moment.detail.add_reply')}
+                </Button>
+              </div>
+            )}
           </section>
         )
       })()}
