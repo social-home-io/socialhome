@@ -282,6 +282,29 @@ async def test_explicit_audience_kind_overrides_prefs(db, svc):
     assert highlight.audience == ("inst-b",)
 
 
+async def test_your_own_highlight_is_never_unseen(db, svc):
+    """Authors' views are never recorded (``mark_frame_viewed``), so
+    counting their own frames as unseen lit a glowing ring and a
+    "You 5" badge on their own highlight forever."""
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    await _seed_user(db, "u2", "anna")
+    for name in ("a", "b", "c"):
+        highlight, frame = await service.create_or_append_frame(
+            author_user_id="u1",
+            frame_type=HighlightFrameType.IMAGE,
+            media_url=f"/api/media/{name}.webp",
+        )
+    await service.mark_frame_viewed(frame_id=frame.id, viewer_user_id="u1")
+    (own,) = await service.list_visible("u1")
+    assert own["highlight"].id == highlight.id
+    assert own["unseen_count"] == 0
+    # Anyone else still sees what they haven't watched.
+    await service.mark_frame_viewed(frame_id=frame.id, viewer_user_id="u2")
+    (theirs,) = await service.list_visible("u2")
+    assert theirs["unseen_count"] == 2
+
+
 async def test_get_for_viewer_and_get_frame(db, svc):
     service, _ = svc
     await _seed_user(db, "u1", "pascal")

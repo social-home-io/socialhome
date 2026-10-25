@@ -446,8 +446,15 @@ class HighlightService:
         out: list[dict[str, Any]] = []
         for highlight in highlights:
             frames = await self._highlights.list_frames(highlight.id)
-            unseen = await self._highlights.count_unseen_frames(
-                highlight.id, viewer_user_id
+            # Your own highlight is never unseen: authors' views are not
+            # recorded (``mark_frame_viewed``), so counting them would
+            # keep the "new" ring and badge on your own highlight forever.
+            unseen = (
+                0
+                if highlight.author_user_id == viewer_user_id
+                else await self._highlights.count_unseen_frames(
+                    highlight.id, viewer_user_id
+                )
             )
             out.append(
                 {
