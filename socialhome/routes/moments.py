@@ -30,7 +30,6 @@ from ..app_keys import (
     media_signer_key,
     media_transcode_repo_key,
     moment_public_share_service_key,
-    moment_repo_key,
     moment_service_key,
     person_summary_service_key,
     report_service_key,
@@ -139,10 +138,12 @@ def _moment_status(statuses: dict[str, str], m: Moment) -> str | None:
     return statuses.get(fn, READY) if fn else READY
 
 
-async def _moment_list(view: BaseView, moments: list[Moment]) -> list[dict]:
+async def _moment_list(
+    view: BaseView, moments: list[Moment], viewer_user_id: str
+) -> list[dict]:
     """The inbox / archive body: counts, video status and named authors."""
-    counts = await view.svc(moment_repo_key).count_engagement_for(
-        [m.id for m in moments]
+    counts = await view.svc(moment_service_key).count_engagement(
+        [m.id for m in moments], viewer_user_id=viewer_user_id
     )
     statuses = await _video_statuses(view, moments)
     authors = await view.named_people(
@@ -191,7 +192,7 @@ class MomentCollectionView(BaseView):
             before=before,
             limit=limit,
         )
-        return self._json(await _moment_list(self, moments))
+        return self._json(await _moment_list(self, moments, ctx.user_id))
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -239,7 +240,7 @@ class MomentArchiveView(BaseView):
             limit=100,
             tag=tag,
         )
-        return self._json(await _moment_list(self, moments))
+        return self._json(await _moment_list(self, moments, ctx.user_id))
 
 
 class MomentHashtagsView(BaseView):
@@ -280,9 +281,8 @@ class MomentDetailView(BaseView):
         moment = await svc.get_for_viewer(moment_id, ctx.user_id)
         replies = await svc.list_replies(moment_id, viewer_user_id=ctx.user_id)
         reactions = await svc.list_reactions(moment_id)
-        repo = self.svc(moment_repo_key)
         ids = [moment.id, *[r.id for r in replies]]
-        counts = await repo.count_engagement_for(ids)
+        counts = await svc.count_engagement(ids, viewer_user_id=ctx.user_id)
         statuses = await _video_statuses(self, [moment, *replies])
         authors = await self.named_people(
             (m.author_user_id for m in (moment, *replies)),

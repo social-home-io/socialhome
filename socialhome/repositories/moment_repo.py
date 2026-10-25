@@ -77,6 +77,25 @@ _VISIBLE_SQL = f"""
     AND m.hop_count <= ?
 """
 
+#: What one viewer may read: their own live moment, or anything the inbox
+#: shows them (:data:`_VISIBLE_SQL`). The detail read, a thread's replies
+#: and its reply count share it, so none shows what the inbox hides.
+#: Bind with :func:`_readable_params`.
+_READABLE_SQL = f"""
+    (
+      (m.author_user_id = ? AND m.deleted_at IS NULL
+       AND datetime(m.expires_at) > datetime('now'))
+      OR ({_VISIBLE_SQL})
+    )
+"""
+
+
+def _readable_params(viewer_user_id: str, max_hops: int) -> tuple:
+    """Bindings for :data:`_READABLE_SQL`; ``max_hops`` clamped to the
+    wire cap [1, 3] (below 1 would hide even the viewer's own)."""
+    capped_hops = max(1, min(int(max_hops), 3))
+    return (viewer_user_id, *(viewer_user_id,) * 5, capped_hops)
+
 
 @runtime_checkable
 class AbstractMomentRepo(Protocol):
@@ -113,7 +132,11 @@ class AbstractMomentRepo(Protocol):
         limit: int = 50,
     ) -> list[Moment]: ...
     async def list_replies(
-        self, parent_moment_id: str, *, viewer_user_id: str | None = None
+        self,
+        parent_moment_id: str,
+        *,
+        viewer_user_id: str | None = None,
+        max_hops: int = 3,
     ) -> list[Moment]: ...
     async def get_readable(
         self,
@@ -153,6 +176,9 @@ class AbstractMomentRepo(Protocol):
     async def count_engagement_for(
         self,
         moment_ids: list[str],
+        *,
+        viewer_user_id: str | None = None,
+        max_hops: int = 3,
     ) -> dict[str, dict[str, int]]: ...
 
     # Hashtags ------------------------------------------------------------
@@ -443,28 +469,25 @@ class SqliteMomentRepo:
         it is live), or anyone the inbox would show it to
         (:data:`_VISIBLE_SQL`). ``None`` for an unknown id and a hidden one
         alike."""
-        capped_hops = max(1, min(int(max_hops), 3))
         row = await self._db.fetchone(
-            f"""
-            SELECT m.* FROM moments AS m
-             WHERE m.id = ?
-               AND (
-                 (m.author_user_id = ? AND m.deleted_at IS NULL
-                  AND datetime(m.expires_at) > datetime('now'))
-                 OR ({_VISIBLE_SQL})
-               )
-            """,
-            (moment_id, viewer_user_id, *(viewer_user_id,) * 5, capped_hops),
+            f"SELECT m.* FROM moments AS m WHERE m.id = ? AND {_READABLE_SQL}",
+            (moment_id, *_readable_params(viewer_user_id, max_hops)),
         )
         return _row_to_moment(row_to_dict(row)) if row is not None else None
 
     async def list_replies(
-        self, parent_moment_id: str, *, viewer_user_id: str | None = None
+        self,
+        parent_moment_id: str,
+        *,
+        viewer_user_id: str | None = None,
+        max_hops: int = 3,
     ) -> list[Moment]:
         """Replies in chronological order so the thread reads top-down.
 
-        With ``viewer_user_id``, without the GFS-delivered replies a
-        protected viewer never sees (§CP.R)."""
+        With ``viewer_user_id``, only the replies that viewer may read —
+        :data:`_READABLE_SQL`, the rule :meth:`get_readable` and the inbox
+        use: no personal or guardian block, within ``max_hops``, never a
+        GFS-delivered reply for a protected viewer (§CP.R)."""
         if viewer_user_id is None:
             rows = await self._db.fetchall(
                 "SELECT * FROM moments WHERE parent_moment_id=?"
@@ -474,9 +497,8 @@ class SqliteMomentRepo:
         else:
             rows = await self._db.fetchall(
                 f"SELECT m.* FROM moments AS m WHERE m.parent_moment_id=?"
-                f" AND m.deleted_at IS NULL AND {_NOT_GFS_FOR_PROTECTED_SQL}"
-                " ORDER BY m.created_at ASC",
-                (parent_moment_id, viewer_user_id),
+                f" AND {_READABLE_SQL} ORDER BY m.created_at ASC",
+                (parent_moment_id, *_readable_params(viewer_user_id, max_hops)),
             )
         return [m for m in (_row_to_moment(d) for d in rows_to_dicts(rows)) if m]
 
@@ -546,12 +568,19 @@ class SqliteMomentRepo:
     async def count_engagement_for(
         self,
         moment_ids: list[str],
+        *,
+        viewer_user_id: str | None = None,
+        max_hops: int = 3,
     ) -> dict[str, dict[str, int]]:
         """Aggregate reactions + replies for the given moment ids.
 
         Returns ``{moment_id: {"reaction_count": N, "reply_count": M}}``
         with zeros for ids that have no rows. One trip per table —
         cheap enough for the typical inbox page (≤ 50 ids).
+
+        With ``viewer_user_id``, ``reply_count`` counts only the replies
+        :meth:`list_replies` shows that viewer, so the count never
+        hints at a reply a block hides.
 
         The Twitter-style row layout shows these counts inline, so the
         SPA can render the chip row without a per-row follow-up fetch.
@@ -573,15 +602,20 @@ class SqliteMomentRepo:
         )
         for r in rxn_rows:
             out[r["moment_id"]]["reaction_count"] = int(r["n"])
+        if viewer_user_id is None:
+            readable, params = "m.deleted_at IS NULL", ()
+        else:
+            readable = _READABLE_SQL
+            params = _readable_params(viewer_user_id, max_hops)
         rep_rows = await self._db.fetchall(
             f"""
-            SELECT parent_moment_id AS moment_id, COUNT(*) AS n
-              FROM moments
-             WHERE parent_moment_id IN ({placeholders})
-               AND deleted_at IS NULL
-             GROUP BY parent_moment_id
+            SELECT m.parent_moment_id AS moment_id, COUNT(*) AS n
+              FROM moments AS m
+             WHERE m.parent_moment_id IN ({placeholders})
+               AND {readable}
+             GROUP BY m.parent_moment_id
             """,
-            tuple(moment_ids),
+            (*moment_ids, *params),
         )
         for r in rep_rows:
             out[r["moment_id"]]["reply_count"] = int(r["n"])

@@ -580,3 +580,65 @@ async def test_get_readable_follows_the_inbox_rule(db):
     assert [m.id for m in await repo.list_visible_to("u-me")] == []
     # The author always reads their own live moment.
     assert (await repo.get_readable("m1", "u-bob")).id == "m1"
+
+
+async def _thread(repo) -> None:
+    """``m-root`` with a reply each from u-blocked, u-bad (guardian-blocked
+    for u-kid), u-far (3 hops away) and u-ok."""
+    await repo.save(_moment(id="m-root", author="u-author"))
+    for author in ("u-blocked", "u-bad", "u-ok"):
+        await repo.save(
+            _moment(id=f"r-{author}", author=author, parent_moment_id="m-root")
+        )
+    await repo.save(
+        replace(
+            _moment(id="r-u-far", author="u-far", parent_moment_id="m-root"),
+            hop_count=3,
+        )
+    )
+
+
+async def test_replies_follow_the_inbox_rule(db, repo):
+    """A thread never shows a reply the inbox hides: a personal block, a
+    guardian block (either way), beyond the viewer's ``max_hops`` — and
+    the reply count on the parent agrees with the list."""
+    await _guardian_block(db, minor="u-kid", blocked="u-bad")
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?, ?)",
+        ("u-me", "u-blocked"),
+    )
+    await _thread(repo)
+
+    async def seen(viewer: str, max_hops: int = 3) -> set[str]:
+        replies = await repo.list_replies(
+            "m-root", viewer_user_id=viewer, max_hops=max_hops
+        )
+        counts = await repo.count_engagement_for(
+            ["m-root"], viewer_user_id=viewer, max_hops=max_hops
+        )
+        assert counts["m-root"]["reply_count"] == len(replies)
+        return {r.id for r in replies}
+
+    everyone = {"r-u-blocked", "r-u-bad", "r-u-ok", "r-u-far"}
+    assert await seen("u-me") == everyone - {"r-u-blocked"}
+    assert await seen("u-kid") == everyone - {"r-u-bad"}
+    assert await seen("u-other", max_hops=2) == everyone - {"r-u-far"}
+    # The guardian block holds the other way too.
+    await repo.save(_moment(id="r-kid", author="u-kid", parent_moment_id="m-root"))
+    assert "r-kid" not in await seen("u-bad")
+    # Without a viewer (federation / sync): the whole thread.
+    assert {r.id for r in await repo.list_replies("m-root")} == everyone | {"r-kid"}
+    counts = await repo.count_engagement_for(["m-root"])
+    assert counts["m-root"]["reply_count"] == 5
+
+
+async def test_your_own_reply_shows_whoever_you_blocked(db, repo):
+    """A viewer always sees their own live reply, as on the detail read."""
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?, ?)",
+        ("u-me", "u-author"),
+    )
+    await repo.save(_moment(id="m-root", author="u-author"))
+    await repo.save(_moment(id="r-me", author="u-me", parent_moment_id="m-root"))
+    replies = await repo.list_replies("m-root", viewer_user_id="u-me")
+    assert [r.id for r in replies] == ["r-me"]

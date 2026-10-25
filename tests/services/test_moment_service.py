@@ -423,7 +423,7 @@ async def test_list_replies_returns_chronological(stack):
         content="r2",
         parent_moment_id=root.id,
     )
-    replies = await stack.moment_svc.list_replies(root.id)
+    replies = await stack.moment_svc.list_replies(root.id, viewer_user_id=a.user_id)
     assert [m.id for m in replies] == [r1.id, r2.id]
 
 
