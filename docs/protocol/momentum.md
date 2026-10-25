@@ -39,11 +39,16 @@ encrypted payload (§25.8.21).
 
 ## Hashtags
 
-A moment's content is scanned at save time for ASCII ``#tag`` tokens
-(charset ``[A-Za-z0-9_]``, max 32 chars). Up to ten tags per post are
-lowercased and stored in ``moment_hashtags`` (composite PK
-``(moment_id, tag)``). The same regex runs on the SPA so the rendered
-chip and the indexed row stay in lockstep. Federated edits / relay
+A moment's content is scanned at save time for ``#tag`` tokens: ``#``
+followed by letters, marks, numbers or ``_`` in any script (Unicode
+categories L, M, N — ``#Kürbisfest``, ``#Fußball``, ``#東京``), not
+right after such a character (``issue#42`` is no tag). A run longer than
+32 code points is no tag. Up to ten tags per post are stored NFC +
+lowercased in ``moment_hashtags`` (composite PK ``(moment_id, tag)``);
+``?tag=`` is normalised the same way. The same rule runs on the SPA
+(``features/momentum/hashtags.tsx``) so the rendered chip and the
+indexed row stay in lockstep. Tags are derived per household from the
+content — nothing about them travels on the wire. Federated edits / relay
 updates rewrite the row set on each ``save`` so the trending list is
 always derived from the *current* content.
 
