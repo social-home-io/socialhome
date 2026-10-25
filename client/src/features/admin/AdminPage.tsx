@@ -35,6 +35,7 @@ import type { User } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 import { addBase } from '@/baseUrl'
 import { formatLocale, t } from '@/i18n/i18n'
+import { MomentArchiveCap } from './MomentArchiveCap'
 
 type TabId =
   | 'members' | 'ha-users' | 'spaces' | 'moderation'
@@ -865,6 +866,7 @@ function StorageTab() {
         </Button>
       </div>
       <p class="sh-muted">{t('admin.storage.hint')}</p>
+      <MomentArchiveCap />
     </section>
   )
 }

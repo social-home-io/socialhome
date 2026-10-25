@@ -176,3 +176,26 @@ describe('MomentumDetailPage gone vs failed', () => {
     await waitFor(() => expect(container.textContent).toContain('Amaka Okafor'))
   })
 })
+
+describe('MomentumDetailPage for your archived moment', () => {
+  it('says only you see it now, and offers no reply or share link', async () => {
+    currentUser.value = { user_id: 'u-me' } as never
+    const past = Date.now() - 20 * 86_400_000
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments/m-amaka'
+        ? {
+          moment: moment('m-amaka', 'u-me', {
+            created_at: new Date(past).toISOString(),
+            expires_at: new Date(past + 7 * 86_400_000).toISOString(),
+            is_public: true,
+          }),
+          replies: [], reactions: [],
+        } satisfies MomentDetail
+        : [])
+    const { findByText, queryByRole, getByRole } = render(<MomentumDetailPage />)
+    await findByText('Only you see this now. It stays under Yours.')
+    expect(queryByRole('button', { name: /Reply/ })).toBeNull()
+    expect(queryByRole('button', { name: /Copy link/ })).toBeNull()
+    expect(getByRole('button', { name: 'Delete' })).toBeTruthy()
+  })
+})

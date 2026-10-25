@@ -342,6 +342,7 @@ from .services.local_community import LocalAreaBudget
 from .services.map_tile_service import MapTileService
 from .services.media_orphan_sweep_service import MediaOrphanSweepService
 from .services.media_transcode_service import MediaTranscodeService
+from .services.moment_archive_service import MomentArchiveService
 from .services.moment_federation_outbound import MomentFederationOutbound
 from .services.moment_public_inbound import MomentPublicInbound
 from .services.moment_public_key_inbound import MomentPublicKeyInbound
@@ -3205,7 +3206,17 @@ def create_app(config: Config | None = None) -> web.Application:
         media_dir=pathlib.Path(config.media_path),
         media_refs=repos.media_reference,
     )
-    moment_retention_scheduler = MomentRetentionScheduler(moment_service)
+    # Your own moments stay in your archive (decision 6a); the household's
+    # per-person media cap is enforced on the same hourly retention tick.
+    moment_archive_service = MomentArchiveService(
+        moment_repo,
+        repos.instance_config,
+        media_dir=pathlib.Path(config.media_path),
+        media_refs=repos.media_reference,
+    )
+    moment_retention_scheduler = MomentRetentionScheduler(
+        moment_service, archive=moment_archive_service
+    )
 
     # ── Public Momentum via GFS (§Momentum-public) ─────────────────────
     moment_public_registration_repo = repos.moment_public_registration
@@ -3652,6 +3663,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.highlight_publication_service_key] = highlight_publication_service
     app[K.moment_repo_key] = moment_repo
     app[K.moment_service_key] = moment_service
+    app[K.moment_archive_service_key] = moment_archive_service
     app[K.moment_retention_scheduler_key] = moment_retention_scheduler
     app[K.moment_public_registration_repo_key] = moment_public_registration_repo
     app[K.moment_public_follow_repo_key] = moment_public_follow_repo

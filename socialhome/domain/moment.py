@@ -33,6 +33,19 @@ MOMENT_MAX_HOPS: int = 3
 #: stored — no genuine create can outlive it.
 MOMENT_RETENTION_DAYS: int = 7
 
+#: Household default for how much moment media each person keeps in their
+#: archive (decision 6a, owner sign-off 6, 2026-10-25). A moment written
+#: here outlives ``MOMENT_RETENTION_DAYS`` on this household only; past the
+#: cap its oldest pictures and videos go first (the text stays). 2 GiB is
+#: about a year of a heavy poster (5 photos a day ≈ 1.8 GB) and 10 GiB for
+#: a household of five — sized for a 32 GB Home Assistant box. ``0`` means
+#: no limit.
+MOMENT_ARCHIVE_DEFAULT_CAP_BYTES: int = 2 * 1024**3
+
+#: Most archived files the retention tick drops per run (bounded work; the
+#: next hourly tick continues).
+MOMENT_ARCHIVE_MAX_DROPS_PER_TICK: int = 200
+
 
 @dataclass(slots=True, frozen=True)
 class Moment:
@@ -74,6 +87,16 @@ class Moment:
     #: tombstone until ``expires_at`` so a replayed or late-arriving create
     #: for the same id is refused. Ordinary reads never return tombstones.
     deleted_at: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MomentArchiveUsage:
+    """How much moment media one person keeps here, against the cap.
+
+    ``cap_bytes == 0`` means the household set no limit."""
+
+    used_bytes: int
+    cap_bytes: int
 
 
 @dataclass(slots=True, frozen=True)

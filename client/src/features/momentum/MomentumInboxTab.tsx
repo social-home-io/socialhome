@@ -192,7 +192,7 @@ export default function MomentumInboxTab() {
             authorPicture={namedPersonPicture(m.author_user_id, m.author)}
             onOpen={() => loc.route(`/momentum/${m.id}`)}
             onReact={(ev) => void quickReact(m, ev)}
-            onTagClick={(t) => loc.route(`/momentum?tab=archive&tag=${encodeURIComponent(t)}`)}
+            onTagClick={(t) => loc.route(`/momentum?tag=${encodeURIComponent(t)}`)}
           />
         ))}
       </ul>}

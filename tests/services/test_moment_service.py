@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -127,24 +128,86 @@ async def test_delete_and_expiry_remove_media_file(stack, tmp_dir):
     await svc.delete_moment(m.id, actor_user_id=a.user_id)
     assert not (media_dir / "a.webm").exists()
 
-    # expiry path — insert an already-expired row with media, then prune
+    # expiry path — an already-expired copy received from another
+    # household, with media, then prune
     (media_dir / "b.webm").write_bytes(b"y")
+    (media_dir / "c.webm").write_bytes(b"z")
     expired = Moment(
         id="m-exp",
-        author_user_id=a.user_id,
+        author_user_id="u-peer",
         content="old",
         media_url="api/media/b.webm",
         media_type="video",
         duration_ms=1000,
         parent_moment_id=None,
-        origin_instance_id=stack.iid,
+        origin_instance_id="peer",
+        created_at=(datetime.now(UTC) - timedelta(days=9)).isoformat(),
+        expires_at=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
+        received_via="household",
+    )
+    await stack.moment_repo.save(expired)
+    # …and the author's own expired moment, kept in their archive.
+    await stack.moment_repo.save(
+        replace(
+            expired,
+            id="m-own",
+            author_user_id=a.user_id,
+            origin_instance_id=stack.iid,
+            media_url="api/media/c.webm",
+            received_via="self",
+        )
+    )
+    assert (media_dir / "b.webm").exists()
+    assert await svc.expire_due() == 1
+    assert not (media_dir / "b.webm").exists()
+    assert (media_dir / "c.webm").exists()
+    assert (await stack.moment_repo.get("m-own")) is not None
+
+
+def _archived(author_user_id: str, iid: str, id: str = "m-arch") -> Moment:
+    """The author's own moment, past its expiry (kept in their archive)."""
+    return Moment(
+        id=id,
+        author_user_id=author_user_id,
+        content="last week",
+        media_url=None,
+        media_type=None,
+        duration_ms=None,
+        parent_moment_id=None,
+        origin_instance_id=iid,
         created_at=(datetime.now(UTC) - timedelta(days=9)).isoformat(),
         expires_at=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
     )
-    await stack.moment_repo.save(expired)
-    assert (media_dir / "b.webm").exists()
-    await svc.expire_due()
-    assert not (media_dir / "b.webm").exists()
+
+
+async def test_the_author_opens_an_archived_moment_others_cannot(stack):
+    a = await stack.provision("alice")
+    b = await stack.provision("bob")
+    await stack.moment_repo.save(_archived(a.user_id, stack.iid))
+    got = await stack.moment_svc.get_for_viewer("m-arch", a.user_id)
+    assert got.content == "last week"
+    with pytest.raises(MomentNotFoundError):
+        await stack.moment_svc.get_for_viewer("m-arch", b.user_id)
+
+
+async def test_no_reply_to_an_archived_moment(stack):
+    """A reply would fan out to households that no longer hold the
+    moment — replies close when the moment ends."""
+    a = await stack.provision("alice")
+    await stack.moment_repo.save(_archived(a.user_id, stack.iid))
+    with pytest.raises(ValueError, match="archive"):
+        await stack.moment_svc.create_moment(
+            author_user_id=a.user_id, content="me again", parent_moment_id="m-arch"
+        )
+
+
+async def test_the_author_deletes_an_archived_moment(stack):
+    a = await stack.provision("alice")
+    await stack.moment_repo.save(_archived(a.user_id, stack.iid))
+    await stack.moment_svc.delete_moment("m-arch", actor_user_id=a.user_id)
+    assert await stack.moment_repo.get("m-arch") is None
+    # The tombstone keeps its past expiry, so the next sweep takes it.
+    assert await stack.moment_svc.expire_due() == 1
 
 
 async def test_empty_text_and_no_media_rejected(stack):

@@ -249,6 +249,9 @@ async def test_prune_expired_drops_past_cap(db, repo):
         origin_instance_id="self",
         created_at=_now_iso(-9 * 24 * 60),
         expires_at=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
+        # Received from another household: a moment written here would
+        # stay in its author's archive.
+        received_via="household",
     )
     await repo.save(fresh)
     await repo.save(expired)
@@ -403,7 +406,9 @@ async def test_expired_today_is_not_public(db, repo):
 
 async def test_prune_expired_collects_same_day_expiry(db, repo):
     """The retention sweep reclaims a moment that expired earlier today."""
-    await repo.save(_expiring("m-prune", expired=True))
+    await repo.save(
+        replace(_expiring("m-prune", expired=True), received_via="household")
+    )
     await repo.save(_expiring("m-keep", expired=False))
     assert await repo.prune_expired() == 1
     rows = await db.fetchall("SELECT id FROM moments")
@@ -687,3 +692,140 @@ async def test_mark_public_flags_a_received_moment_only(db, repo):
     assert (await repo.get("m-own")).is_public is False
     gone = await repo.get("m-gone", include_deleted=True)
     assert gone is not None and gone.is_public is False
+
+
+# ── Your own archive (decision 6a) ────────────────────────────────────────
+
+
+def _past(id: str, *, author: str = "u-me", via: str = "self", **kw) -> Moment:
+    """A moment that expired yesterday, written here or received."""
+    return replace(
+        _moment(id=id, author=author, created_offset_min=-8 * 24 * 60, **kw),
+        expires_at=(datetime.now(UTC) - timedelta(days=1)).isoformat(),
+        received_via=via,
+    )
+
+
+async def test_prune_keeps_your_own_live_moments(db, repo):
+    """Retention skips a moment written here: it stays in its author's
+    archive. Others' expired moments and your own tombstones still go."""
+    await repo.save(_past("m-own"))
+    await repo.save(_past("m-peer", author="u-peer", via="household"))
+    await repo.save(_past("m-gfs", author="u-far", via="gfs"))
+    await repo.save(_past("m-own-gone"))
+    await repo.delete("m-own-gone")
+    assert await repo.prune_expired() == 3
+    rows = await db.fetchall("SELECT id FROM moments")
+    assert {r["id"] for r in rows} == {"m-own"}
+
+
+async def test_expired_media_urls_skip_your_own_archive(db, repo):
+    await repo.save(replace(_past("m-own"), media_url="api/media/own.webp"))
+    await repo.save(
+        replace(
+            _past("m-peer", author="u-peer", via="household"),
+            media_url="api/media/peer.webp",
+        )
+    )
+    assert await repo.list_expired_media_urls() == ["api/media/peer.webp"]
+
+
+async def test_prune_sweeps_share_keys_of_archived_moments(db, repo):
+    """A moment kept in its author's archive no longer keeps the item key
+    a public share link needs — sharing ends with the moment."""
+    await repo.save(_past("m-own"))
+    await repo.save(_moment(id="m-live", author="u-me"))
+    for mid in ("m-own", "m-live"):
+        await db.enqueue(
+            "INSERT INTO moment_public_shares(moment_id, author_user_id,"
+            " item_key_sealed) VALUES(?, 'u-me', 'sealed')",
+            (mid,),
+        )
+    await repo.prune_expired()
+    rows = await db.fetchall("SELECT moment_id FROM moment_public_shares")
+    assert {r["moment_id"] for r in rows} == {"m-live"}
+    assert await repo.get("m-own") is not None
+
+
+async def test_author_reads_their_archived_moment_and_its_own_replies(db, repo):
+    await repo.save(_past("m-own"))
+    await repo.save(_past("r-own", parent_moment_id="m-own"))
+    assert (await repo.get_readable("m-own", "u-me")).id == "m-own"
+    assert await repo.get_readable("m-own", "u-other") is None
+    replies = await repo.list_replies("m-own", viewer_user_id="u-me")
+    assert [r.id for r in replies] == ["r-own"]
+    counts = await repo.count_engagement_for(["m-own"], viewer_user_id="u-me")
+    assert counts["m-own"]["reply_count"] == 1
+    # The inbox still ends at expiry.
+    assert [m.id for m in await repo.list_visible_to("u-me")] == []
+
+
+async def test_an_expired_received_moment_is_not_readable_by_its_author(db, repo):
+    """Only rows written here are archived; a copy that arrived from
+    elsewhere ends at its expiry, even for its author."""
+    await repo.save(_past("m-copy", via="household"))
+    assert await repo.get_readable("m-copy", "u-me") is None
+
+
+async def test_list_own_archive_pages_newest_first(db, repo):
+    for i in range(5):
+        await repo.save(_moment(id=f"m-{i}", author="u-me", created_offset_min=-i * 60))
+    await repo.save(_past("m-old"))
+    await repo.save(_moment(id="m-peer", author="u-peer"))
+    await repo.save(replace(_moment(id="m-copy", author="u-me"), received_via="gfs"))
+    await repo.save(_moment(id="m-gone", author="u-me", created_offset_min=-30))
+    await repo.delete("m-gone")
+    first = await repo.list_own_archive("u-me", limit=3)
+    assert [m.id for m in first] == ["m-0", "m-1", "m-2"]
+    rest = await repo.list_own_archive("u-me", before=first[-1].created_at, limit=3)
+    assert [m.id for m in rest] == ["m-3", "m-4", "m-old"]
+
+
+async def test_list_own_archive_includes_replies(db, repo):
+    await repo.save(_moment(id="m-root", author="u-peer"))
+    await repo.save(_moment(id="r-me", author="u-me", parent_moment_id="m-root"))
+    assert [m.id for m in await repo.list_own_archive("u-me")] == ["r-me"]
+
+
+async def test_list_own_media_oldest_first_per_author(db, repo):
+    await repo.save(replace(_past("m-a-old"), media_url="api/media/a1.webp"))
+    await repo.save(
+        replace(
+            _moment(id="m-a-new", author="u-me"),
+            media_url="api/media/a2.webp",
+            media_type="image",
+        )
+    )
+    await repo.save(_moment(id="m-a-text", author="u-me"))
+    await repo.save(replace(_past("m-b", author="u-bea"), media_url="api/media/b.webp"))
+    await repo.save(
+        replace(
+            _past("m-peer", author="u-peer", via="household"),
+            media_url="api/media/p.webp",
+        )
+    )
+    rows = await repo.list_own_media()
+    assert [(m.author_user_id, m.id) for m in rows] == [
+        ("u-bea", "m-b"),
+        ("u-me", "m-a-old"),
+        ("u-me", "m-a-new"),
+    ]
+    assert [m.id for m in await repo.list_own_media("u-me")] == ["m-a-old", "m-a-new"]
+
+
+async def test_clear_media_only_on_an_archived_own_moment(db, repo):
+    await repo.save(
+        replace(_past("m-old"), media_url="api/media/o.webp", media_type="image")
+    )
+    await repo.save(
+        replace(
+            _moment(id="m-live", author="u-me"),
+            media_url="api/media/l.webp",
+            media_type="image",
+        )
+    )
+    assert await repo.clear_media("m-old") is True
+    assert await repo.clear_media("m-live") is False
+    old = await repo.get("m-old")
+    assert (old.media_url, old.media_type, old.content) == (None, None, "hello")
+    assert (await repo.get("m-live")).media_url == "api/media/l.webp"

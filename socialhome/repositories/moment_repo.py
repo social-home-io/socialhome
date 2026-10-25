@@ -50,6 +50,17 @@ _NOT_GFS_FOR_PROTECTED_SQL = """
     )
 """
 
+#: A moment written on this household (``received_via = 'self'``) and not
+#: deleted: kept for its author past ``expires_at`` (decision 6a — "your
+#: moments stay in your archive"). Local only: other households prune their
+#: copy at the signed ``expires_at`` as before; nothing on the wire changes.
+_OWN_ARCHIVED_SQL = "(m.received_via = 'self' AND m.deleted_at IS NULL)"
+
+#: What :meth:`SqliteMomentRepo.prune_expired` removes: every row past its
+#: ``expires_at`` except a live moment kept in its author's archive. A
+#: tombstone (own or not) still goes at expiry.
+_PRUNABLE_SQL = "datetime(m.expires_at) < datetime('now') AND NOT " + _OWN_ARCHIVED_SQL
+
 #: What the inbox shows a viewer — the one rule :meth:`list_visible_to` and
 #: :meth:`get_readable` share, so a detail read can never show what the
 #: inbox hides: no personal block (§Privacy) or guardian block (§CP.F2,
@@ -77,14 +88,15 @@ _VISIBLE_SQL = f"""
     AND m.hop_count <= ?
 """
 
-#: What one viewer may read: their own live moment, or anything the inbox
+#: What one viewer may read: their own live moment (one written here also
+#: past its expiry — :data:`_OWN_ARCHIVED_SQL`), or anything the inbox
 #: shows them (:data:`_VISIBLE_SQL`). The detail read, a thread's replies
 #: and its reply count share it, so none shows what the inbox hides.
 #: Bind with :func:`_readable_params`.
 _READABLE_SQL = f"""
     (
       (m.author_user_id = ? AND m.deleted_at IS NULL
-       AND datetime(m.expires_at) > datetime('now'))
+       AND ({_OWN_ARCHIVED_SQL} OR datetime(m.expires_at) > datetime('now')))
       OR ({_VISIBLE_SQL})
     )
 """
@@ -107,7 +119,7 @@ def _readable_params(viewer_user_id: str, max_hops: int) -> tuple:
 _THREAD_READABLE_SQL = f"""
     (
       (m.author_user_id = ? AND m.deleted_at IS NULL
-       AND datetime(m.expires_at) > datetime('now'))
+       AND ({_OWN_ARCHIVED_SQL} OR datetime(m.expires_at) > datetime('now')))
       OR (
         {_NOT_GFS_FOR_PROTECTED_SQL}
         AND m.author_user_id NOT IN (
@@ -226,6 +238,17 @@ class AbstractMomentRepo(Protocol):
     # Retention -----------------------------------------------------------
     async def list_expired_media_urls(self) -> list[str]: ...
     async def prune_expired(self) -> int: ...
+    async def list_own_archive(
+        self,
+        author_user_id: str,
+        *,
+        before: str | None = None,
+        limit: int = 50,
+    ) -> list[Moment]: ...
+    async def list_own_media(
+        self, author_user_id: str | None = None
+    ) -> list[Moment]: ...
+    async def clear_media(self, moment_id: str) -> bool: ...
 
 
 class SqliteMomentRepo:
@@ -511,7 +534,8 @@ class SqliteMomentRepo:
         max_hops: int = 3,
     ) -> Moment | None:
         """``moment_id`` iff *viewer_user_id* may read it: its author (while
-        it is live), or anyone the inbox would show it to
+        it is live, or from their archive once expired), or anyone the inbox
+        would show it to
         (:data:`_VISIBLE_SQL`). ``None`` for an unknown id and a hidden one
         alike."""
         row = await self._db.fetchone(
@@ -729,29 +753,100 @@ class SqliteMomentRepo:
         files. The predicate matches ``prune_expired`` exactly, and the
         prune's ``DELETE`` runs a hair later (a superset), so every URL
         returned here is guaranteed to be pruned — we never report a URL
-        whose row survives.
+        whose row survives. A moment kept in its author's archive keeps
+        its file.
         """
         rows = await self._db.fetchall(
-            "SELECT media_url FROM moments "
-            "WHERE datetime(expires_at) < datetime('now') "
-            "AND media_url IS NOT NULL",
+            f"SELECT m.media_url FROM moments AS m WHERE {_PRUNABLE_SQL}"
+            " AND m.media_url IS NOT NULL",
         )
         return [r["media_url"] for r in rows_to_dicts(rows) if r.get("media_url")]
 
     async def prune_expired(self) -> int:
-        """Drop rows past their absolute 7-day cap — live moments and
-        delete tombstones alike. Reactions cascade."""
+        """Drop rows past their absolute 7-day cap — others' moments and
+        every delete tombstone. A live moment written here stays in its
+        author's archive (decision 6a). Reactions cascade.
+
+        A public moment's share-link item key (``moment_public_shares``)
+        goes at expiry too, archived or not: a share copy never outlives
+        the moment, so the key has nothing left to open."""
         row = await self._db.fetchone(
-            "SELECT COUNT(*) AS n FROM moments "
-            "WHERE datetime(expires_at) < datetime('now')",
+            f"SELECT COUNT(*) AS n FROM moments AS m WHERE {_PRUNABLE_SQL}",
         )
         n = int(row["n"]) if row else 0
-        if n == 0:
-            return 0
-        await self._db.enqueue(
-            "DELETE FROM moments WHERE datetime(expires_at) < datetime('now')",
-        )
+
+        def _run(conn) -> None:
+            conn.execute(
+                "DELETE FROM moment_public_shares WHERE moment_id IN ("
+                " SELECT id FROM moments"
+                " WHERE datetime(expires_at) < datetime('now'))"
+            )
+            if n:
+                conn.execute(
+                    "DELETE FROM moments WHERE id IN ("
+                    f" SELECT m.id FROM moments AS m WHERE {_PRUNABLE_SQL})"
+                )
+
+        await self._db.transact(_run)
         return n
+
+    # ── Your own archive (decision 6a) ─────────────────────────────────
+
+    async def list_own_archive(
+        self,
+        author_user_id: str,
+        *,
+        before: str | None = None,
+        limit: int = 50,
+    ) -> list[Moment]:
+        """Every moment *author_user_id* wrote here and hasn't deleted —
+        top-level moments and replies, live and past expiry — newest
+        first. ``before`` is the ``created_at`` cursor of the last row of
+        the previous page."""
+        limit = max(1, min(int(limit), 100))
+        rows = await self._db.fetchall(
+            f"""
+            SELECT m.* FROM moments AS m
+             WHERE m.author_user_id = ? AND {_OWN_ARCHIVED_SQL}
+               AND (? IS NULL OR m.created_at < ?)
+             ORDER BY m.created_at DESC
+             LIMIT ?
+            """,
+            (author_user_id, before, before, limit),
+        )
+        return [m for m in (_row_to_moment(d) for d in rows_to_dicts(rows)) if m]
+
+    async def list_own_media(self, author_user_id: str | None = None) -> list[Moment]:
+        """Archive moments that hold a file — one author's, or (``None``)
+        everyone's — grouped by author, oldest first: the order the
+        per-person archive cap drops pictures in."""
+        rows = await self._db.fetchall(
+            f"""
+            SELECT m.* FROM moments AS m
+             WHERE {_OWN_ARCHIVED_SQL} AND m.media_url IS NOT NULL
+               AND (? IS NULL OR m.author_user_id = ?)
+             ORDER BY m.author_user_id ASC, m.created_at ASC
+            """,
+            (author_user_id, author_user_id),
+        )
+        return [m for m in (_row_to_moment(d) for d in rows_to_dicts(rows)) if m]
+
+    async def clear_media(self, moment_id: str) -> bool:
+        """Drop the file reference of an archived moment (its text stays).
+
+        Only a moment past its expiry that is kept in its author's archive:
+        one other people can still see keeps its picture. ``True`` iff a
+        row changed; the caller removes the file once nothing references
+        it."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE moments AS m SET media_url = NULL, media_type = NULL,"
+            " duration_ms = NULL"
+            f" WHERE m.id = ? AND {_OWN_ARCHIVED_SQL}"
+            " AND m.media_url IS NOT NULL"
+            " AND datetime(m.expires_at) < datetime('now')",
+            (moment_id,),
+        )
+        return changed > 0
 
 
 def _tombstone_rows(conn, where: str, params: tuple) -> int:

@@ -10,7 +10,10 @@ Routes:
 
 * ``POST   /api/moments``                     — create a moment (text + media + parent_moment_id?)
 * ``GET    /api/moments``                     — list visible moments (24h default; 7d for followers)
-* ``GET    /api/moments/archive``             — full retention-window list (same data, full window)
+* ``GET    /api/moments/archive``             — full retention-window list (same data, full window);
+  ``?scope=own`` — the caller's own archive (every moment they wrote here)
+* ``GET    /api/moments/archive/usage``       — the caller's archived media vs. the household cap
+* ``PUT    /api/admin/moments/archive-cap``   — admin sets the per-person archive cap
 * ``GET    /api/moments/{id}``                — detail incl. replies + reactions
 * ``DELETE /api/moments/{id}``                — author / admin delete
 * ``PUT    /api/moments/{id}/reaction``       — set / change reaction
@@ -29,6 +32,7 @@ from aiohttp import web
 from ..app_keys import (
     media_signer_key,
     media_transcode_repo_key,
+    moment_archive_service_key,
     moment_public_share_service_key,
     moment_service_key,
     person_summary_service_key,
@@ -227,6 +231,13 @@ class MomentArchiveView(BaseView):
     Optional ``?tag=<name>`` restricts the result to moments tagged
     with that hashtag (lowercase, no leading ``#``). The Browse page
     uses this for the trending-tag chip row.
+
+    ``?scope=own`` (decision 6a) instead returns the caller's own archive:
+    every moment they wrote on this household and haven't deleted —
+    top-level moments and replies, live or past their expiry (kept here
+    for them only) — newest first, paged with ``before`` (the
+    ``created_at`` of the last row) and ``limit`` (default 50, ≤ 100).
+    Same per-item shape (author, counts). Any other ``scope`` is 422.
     """
 
     async def get(self) -> web.Response:
@@ -234,6 +245,20 @@ class MomentArchiveView(BaseView):
         if ctx is None:
             return error_response(401, "UNAUTHENTICATED", "Login required.")
         svc = self.svc(moment_service_key)
+        scope = self.request.query.get("scope")
+        if scope is not None and scope != "own":
+            return error_response(422, "INVALID_SCOPE", "scope must be 'own'.")
+        if scope == "own":
+            try:
+                limit = int(self.request.query.get("limit", 50))
+            except ValueError:
+                limit = 50
+            moments = await svc.list_own_archive(
+                author_user_id=ctx.user_id,
+                before=self.request.query.get("before"),
+                limit=limit,
+            )
+            return self._json(await _moment_list(self, moments, ctx.user_id))
         tag = self.request.query.get("tag")
         moments = await svc.list_inbox(
             viewer_user_id=ctx.user_id,
@@ -241,6 +266,40 @@ class MomentArchiveView(BaseView):
             tag=tag,
         )
         return self._json(await _moment_list(self, moments, ctx.user_id))
+
+
+def _usage_dict(used_bytes: int, cap_bytes: int) -> dict:
+    return {"used_bytes": used_bytes, "cap_bytes": cap_bytes}
+
+
+class MomentArchiveUsageView(BaseView):
+    """``GET /api/moments/archive/usage`` — ``{used_bytes, cap_bytes}``:
+    how much media the caller's own moments hold here, and the household's
+    per-person cap (``0`` = no limit). Past the cap the oldest archived
+    pictures go first."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        if ctx is None:
+            return error_response(401, "UNAUTHENTICATED", "Login required.")
+        usage = await self.svc(moment_archive_service_key).usage_for(ctx.user_id)
+        return self._json(_usage_dict(usage.used_bytes, usage.cap_bytes))
+
+
+class MomentArchiveCapView(BaseView):
+    """``PUT /api/admin/moments/archive-cap`` — body ``{cap_bytes: int}``
+    (≥ 0; ``0`` = no limit). Admins only (403 otherwise); 422 for a value
+    that isn't a whole number ≥ 0. Returns ``{cap_bytes}``."""
+
+    async def put(self) -> web.Response:
+        ctx = self.user
+        if ctx is None:
+            return error_response(401, "UNAUTHENTICATED", "Login required.")
+        body = await self.body()
+        cap = await self.svc(moment_archive_service_key).set_cap_bytes(
+            body.get("cap_bytes"), actor_is_admin=ctx.is_admin
+        )
+        return self._json({"cap_bytes": cap})
 
 
 class MomentHashtagsView(BaseView):

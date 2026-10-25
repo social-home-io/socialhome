@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from socialhome.app_keys import federation_repo_key, federation_service_key
+import pathlib
+
+from socialhome.app_keys import (
+    config_key,
+    federation_repo_key,
+    federation_service_key,
+)
 from socialhome.auth import sha256_token_hash
 from socialhome.domain.federation import (
     FederationEventType,
@@ -1203,3 +1209,152 @@ async def test_a_protected_member_never_sees_a_gfs_moment(client):
         "/api/moments/m-gfs/reaction", json={"emoji": "❤️"}, headers=h["kid"]
     )
     assert r.status == 404
+
+
+# ── Your own archive (decision 6a) ─────────────────────────────────────
+
+
+async def _own_row(
+    client,
+    moment_id: str,
+    author: str,
+    *,
+    age_days: float,
+    via: str = "self",
+    media: str | None = None,
+) -> None:
+    """A moment by ``author``, ``age_days`` old, expiring 7 days after."""
+    await client._db.enqueue(
+        "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+        " created_at, expires_at, received_via, media_url, media_type)"
+        " VALUES(?,?,?,?, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', ?),"
+        " strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', ?), ?, ?, ?)",
+        (
+            moment_id,
+            author,
+            f"text {moment_id}",
+            "here",
+            f"-{age_days * 86400:.0f} seconds",
+            f"{(7 - age_days) * 86400:+.0f} seconds",
+            via,
+            f"api/media/{media}" if media else None,
+            "image" if media else None,
+        ),
+    )
+
+
+async def _eve(client) -> dict:
+    """A second, non-admin member; returns her auth headers."""
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name)"
+        " VALUES('eve','uid-eve','Eve')"
+    )
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("t-eve", "uid-eve", "t", sha256_token_hash("eve-tok")),
+    )
+    return _auth("eve-tok")
+
+
+async def test_archive_scope_own_lists_your_moments_newest_first(client):
+    await _seed_target(client)
+    await _own_row(client, "m-new", client._uid, age_days=0.1)
+    await _own_row(client, "m-old", client._uid, age_days=20)
+    await _own_row(client, "m-copy", client._uid, age_days=1, via="household")
+    await _own_row(client, "m-bob", "uid-bob", age_days=0.2, via="household")
+    r = await client.post(
+        "/api/moments",
+        json={"content": "re", "parent_moment_id": "m-bob"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    r = await client.get("/api/moments/archive?scope=own", headers=_auth(client._tok))
+    assert r.status == 200
+    items = await r.json()
+    # Top-level moments and replies, written here, live or expired.
+    assert [m["content"] for m in items] == ["re", "text m-new", "text m-old"]
+    assert items[0]["parent_moment_id"] == "m-bob"
+    old = items[-1]
+    assert old["author"]["display_name"]
+    assert (old["reaction_count"], old["reply_count"]) == (0, 0)
+    # Without scope: the inbox window as before (no expired moment).
+    r = await client.get("/api/moments/archive", headers=_auth(client._tok))
+    ids = {m["id"] for m in await r.json()}
+    assert "m-old" not in ids and "m-bob" in ids
+
+
+async def test_archive_scope_own_pages_with_before(client):
+    for i in range(4):
+        await _own_row(client, f"m-{i}", client._uid, age_days=i + 0.5)
+    h = _auth(client._tok)
+    r = await client.get("/api/moments/archive?scope=own&limit=2", headers=h)
+    first = await r.json()
+    assert [m["id"] for m in first] == ["m-0", "m-1"]
+    r = await client.get(
+        "/api/moments/archive",
+        params={"scope": "own", "limit": "2", "before": first[-1]["created_at"]},
+        headers=h,
+    )
+    assert [m["id"] for m in await r.json()] == ["m-2", "m-3"]
+
+
+async def test_archive_scope_rejects_an_unknown_scope(client):
+    r = await client.get("/api/moments/archive?scope=all", headers=_auth(client._tok))
+    assert r.status == 422
+
+
+async def test_archive_scope_own_is_only_yours(client):
+    """Another person's archive never shows; the author opens their own
+    archived moment, anyone else gets the unknown-id 404."""
+    eve = await _eve(client)
+    await _own_row(client, "m-mine", client._uid, age_days=20)
+    r = await client.get("/api/moments/archive?scope=own", headers=eve)
+    assert await r.json() == []
+    assert (await _get(client, "m-mine"))[0] == 200
+    r = await client.get("/api/moments/m-mine", headers=eve)
+    assert r.status == 404
+    r = await client.get("/api/moments/archive?scope=own")
+    assert r.status == 401
+
+
+async def test_no_reply_to_an_archived_moment_is_422(client):
+    await _own_row(client, "m-mine", client._uid, age_days=20)
+    r = await client.post(
+        "/api/moments",
+        json={"content": "late", "parent_moment_id": "m-mine"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+
+
+async def test_archive_usage_and_the_admin_cap(client):
+    media = pathlib.Path(client.server.app[config_key].media_path)
+    media.mkdir(parents=True, exist_ok=True)
+    (media / "a.webp").write_bytes(b"x" * 1234)
+    await _own_row(client, "m-pic", client._uid, age_days=20, media="a.webp")
+    h = _auth(client._tok)
+    r = await client.get("/api/moments/archive/usage", headers=h)
+    assert r.status == 200
+    assert await r.json() == {"used_bytes": 1234, "cap_bytes": 2 * 1024**3}
+
+    r = await client.put(
+        "/api/admin/moments/archive-cap", json={"cap_bytes": 0}, headers=h
+    )
+    assert r.status == 200 and await r.json() == {"cap_bytes": 0}
+    r = await client.get("/api/moments/archive/usage", headers=h)
+    assert (await r.json())["cap_bytes"] == 0
+    for bad in (-5, "1", None, 1.5, True):
+        r = await client.put(
+            "/api/admin/moments/archive-cap", json={"cap_bytes": bad}, headers=h
+        )
+        assert r.status == 422, bad
+
+
+async def test_only_an_admin_sets_the_archive_cap(client):
+    eve = await _eve(client)
+    r = await client.put(
+        "/api/admin/moments/archive-cap", json={"cap_bytes": 10}, headers=eve
+    )
+    assert r.status == 403
+    assert (await client.get("/api/moments/archive/usage", headers=eve)).status == 200
+    assert (await client.get("/api/moments/archive/usage")).status == 401

@@ -1,11 +1,11 @@
 /**
- * MomentumArchiveTab — full retention-window list of moments
- * (§Momentum). Same API shape as the inbox but renders with date
- * headers so the calendar-style scroll works. Optional ``?tag``
- * URL filter narrows to a single hashtag; the chip row at the top
- * shows the trending tags inside the viewer's visibility window.
+ * MomentumTagTab — the moments tagged with one hashtag (§Momentum),
+ * inside the viewer's visibility window, grouped by day. The chip row at
+ * the top shows the trending tags so a person can hop between them.
  *
- * Mounted by :class:`MomentumPage` when ``?tab=archive`` is set.
+ * Mounted by :class:`MomentumPage` when the URL carries ``?tag=``
+ * (hashtag links: ``/momentum?tag=<name>``). Your own moments live under
+ * the Yours tab (``MomentumYoursTab``).
  */
 import { useEffect } from 'preact/hooks'
 import { signal, computed } from '@preact/signals'
@@ -36,7 +36,7 @@ const activeTag = signal<string | null>(null)
 /** A failed load is never the empty archive (``utils/loadStatus``). */
 const status = signal<LoadStatus>(INITIAL_LOAD)
 
-/** Load (or refresh, on a ``moment.*`` frame) the archive for the tag. */
+/** Load (or refresh, on a ``moment.*`` frame) the moments for the tag. */
 function fetchAll(initial: boolean): Promise<void> {
   const tagParam = activeTag.value ? { tag: activeTag.value } : undefined
   return api.get('/api/moments/archive', tagParam)
@@ -60,7 +60,7 @@ const grouped = computed<Map<string, Moment[]>>(() => {
 })
 
 
-export default function MomentumArchiveTab() {
+export default function MomentumTagTab() {
   const loc = useLocation()
 
   useEffect(() => {
@@ -94,11 +94,11 @@ export default function MomentumArchiveTab() {
         {trending.value.map(t => (
           <a
             key={t.tag}
-            href={addBase(`/momentum?tab=archive&tag=${encodeURIComponent(t.tag)}`)}
+            href={addBase(`/momentum?tag=${encodeURIComponent(t.tag)}`)}
             class={`sh-momentum-chip${tag === t.tag ? ' sh-momentum-chip--active' : ''}`}
             onClick={(ev) => {
               ev.preventDefault()
-              loc.route(`/momentum?tab=archive&tag=${encodeURIComponent(t.tag)}`)
+              loc.route(`/momentum?tag=${encodeURIComponent(t.tag)}`)
             }}
           >
             #{t.tag}
@@ -116,21 +116,21 @@ export default function MomentumArchiveTab() {
         💡 {t('moment.archive.hashtag_hint_before')}<code>#{t('moment.archive.hashtag_example')}</code>{t('moment.archive.hashtag_hint_after')}
       </p>
     )
-  const renderActiveBanner = tag && (
-    <div class="sh-momentum-filter-banner" role="status">
-      <span>{t('moment.archive.filtering_by')} <strong>#{tag}</strong></span>
+  // The tag is the page's heading; Clear goes back to every moment.
+  const heading = (
+    <div class="sh-momentum-tag-head">
+      <h2>{tag ? t('moment.tag.heading', { tag }) : t('nav.momentum')}</h2>
       <a
-        href={addBase('/momentum?tab=archive')}
-        onClick={(ev) => { ev.preventDefault(); loc.route('/momentum?tab=archive') }}
+        href={addBase('/momentum')}
+        onClick={(ev) => { ev.preventDefault(); loc.route('/momentum') }}
       >{t('moment.archive.clear')}</a>
     </div>
   )
-
   const retry = () => void fetchAll(false)
   if (status.value.failed) {
     return (
       <div class="sh-momentum-archive">
-        <h2>{t('page_title.moments_archive')}</h2>
+        {heading}
         <LoadErrorState
           message={t('moment.inbox.load_failed_title')}
           detail={t('load.household_quiet')}
@@ -150,9 +150,8 @@ export default function MomentumArchiveTab() {
   if (days.length === 0) {
     return (
       <div class="sh-momentum-archive">
-        <h2>{t('page_title.moments_archive')}</h2>
+        {heading}
         {renderStale}
-        {renderActiveBanner}
         {renderTrendingRow}
         <div class="sh-empty-state">
           <p>{tag
@@ -165,14 +164,8 @@ export default function MomentumArchiveTab() {
 
   return (
     <div class="sh-momentum-archive">
-      <h2>{t('page_title.moments_archive')}</h2>
-      {!tag && (
-        <p class="sh-muted">
-          {t('moment.archive.lifetime')}
-        </p>
-      )}
+      {heading}
       {renderStale}
-      {renderActiveBanner}
       {renderTrendingRow}
       {days.map(day => (
         <section key={day} class="sh-momentum-archive-day">
@@ -207,7 +200,7 @@ export default function MomentumArchiveTab() {
                         {renderHashtagged(m.content, (t, ev) => {
                           ev.preventDefault()
                           ev.stopPropagation()
-                          loc.route(`/momentum?tab=archive&tag=${encodeURIComponent(t)}`)
+                          loc.route(`/momentum?tag=${encodeURIComponent(t)}`)
                         })}
                       </p>
                     )}
