@@ -755,9 +755,10 @@ async def test_moment_detail_names_author_and_reply_authors(client):
     assert reply["author"]["display_name"]
 
 
-async def test_moment_reply_across_a_guardian_block_is_name_only(client):
+async def test_moment_reply_across_a_guardian_block_is_hidden(client):
     """A protected kid whose guardian blocked the viewer: the kid's reply
-    names them but carries no picture (§CP.F2)."""
+    is not in the viewer's thread, nor in its reply count (§CP.F2) — the
+    inbox rule, as for the kid's own moments."""
     await client._db.enqueue(
         "INSERT INTO users(username, user_id, display_name, picture_hash,"
         " child_protection_enabled) VALUES(?,?,?,?,1)",
@@ -775,9 +776,53 @@ async def test_moment_reply_across_a_guardian_block_is_name_only(client):
     await _seed_moment(client, "m-kid", "uid-kid", parent=root)
 
     r = await client.get(f"/api/moments/{root}", headers=_auth(client._tok))
-    [reply] = (await r.json())["replies"]
-    assert reply["author"]["display_name"] == "Kid"
-    assert reply["author"]["picture_url"] is None
+    body = await r.json()
+    assert body["replies"] == []
+    assert body["moment"]["reply_count"] == 0
+    [row] = [m for m in await _inbox(client) if m["id"] == root]
+    assert row["reply_count"] == 0
+
+
+async def _second_member(client, username: str) -> tuple[str, dict]:
+    """Seed another local member with a token; returns (user_id, headers)."""
+    uid = f"uid-{username}"
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        (username, uid, username.title()),
+    )
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        (f"t-{username}", uid, "t", sha256_token_hash(f"{username}-tok")),
+    )
+    return uid, _auth(f"{username}-tok")
+
+
+async def test_a_reply_by_someone_you_blocked_is_not_in_your_thread(client):
+    """Your own block hides their reply from the thread and its count, on
+    the detail read and in the inbox; others still see it."""
+    bob_uid, bob = await _second_member(client, "bob")
+    r = await client.post(
+        "/api/moments", json={"content": "root"}, headers=_auth(client._tok)
+    )
+    root = (await r.json())["id"]
+    await _seed_moment(client, "m-bob-reply", bob_uid, parent=root)
+    await client._db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?,?)",
+        (client._uid, bob_uid),
+    )
+
+    r = await client.get(f"/api/moments/{root}", headers=_auth(client._tok))
+    body = await r.json()
+    assert body["replies"] == []
+    assert body["moment"]["reply_count"] == 0
+    [row] = [m for m in await _inbox(client) if m["id"] == root]
+    assert row["reply_count"] == 0
+
+    # Bob, who blocked nobody, still sees his reply.
+    r = await client.get(f"/api/moments/{root}", headers=bob)
+    body = await r.json()
+    assert [m["id"] for m in body["replies"]] == ["m-bob-reply"]
+    assert body["moment"]["reply_count"] == 1
 
 
 async def test_moment_federation_payload_carries_no_names(client, monkeypatch):

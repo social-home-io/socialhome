@@ -307,13 +307,17 @@ class MomentService:
         return moment
 
     async def _readable(self, moment_id: str, viewer_user_id: str) -> Moment | None:
+        return await self._moments.get_readable(
+            moment_id, viewer_user_id, max_hops=await self._max_hops(viewer_user_id)
+        )
+
+    async def _max_hops(self, viewer_user_id: str) -> int:
+        """The viewer's ``moments.max_hops`` preference (§Momentum-relay-policy)."""
         viewer = await self._users.get_by_user_id(viewer_user_id)
         prefs = parse_moment_preferences(
             viewer.preferences_json if viewer is not None else None
         )
-        return await self._moments.get_readable(
-            moment_id, viewer_user_id, max_hops=prefs.max_hops
-        )
+        return prefs.max_hops
 
     async def list_inbox(
         self,
@@ -327,23 +331,34 @@ class MomentService:
         # parse the viewer's preferences once and forward the cap to
         # the repo so the inbox query hides moments that arrived at
         # a higher hop than the user wants to see.
-        viewer = await self._users.get_by_user_id(viewer_user_id)
-        prefs = parse_moment_preferences(
-            viewer.preferences_json if viewer is not None else None
-        )
         return await self._moments.list_visible_to(
             viewer_user_id,
             before=before,
             limit=limit,
             tag=tag,
-            max_hops=prefs.max_hops,
+            max_hops=await self._max_hops(viewer_user_id),
         )
 
     async def list_replies(
-        self, moment_id: str, *, viewer_user_id: str | None = None
+        self, moment_id: str, *, viewer_user_id: str
     ) -> list[Moment]:
+        """The replies *viewer_user_id* may read — the inbox rule, so a
+        thread never shows a reply a block (personal or guardian) hides."""
         return await self._moments.list_replies(
-            moment_id, viewer_user_id=viewer_user_id
+            moment_id,
+            viewer_user_id=viewer_user_id,
+            max_hops=await self._max_hops(viewer_user_id),
+        )
+
+    async def count_engagement(
+        self, moment_ids: list[str], *, viewer_user_id: str
+    ) -> dict[str, dict[str, int]]:
+        """Reaction + reply counts per moment; ``reply_count`` counts only
+        the replies :meth:`list_replies` would show *viewer_user_id*."""
+        return await self._moments.count_engagement_for(
+            moment_ids,
+            viewer_user_id=viewer_user_id,
+            max_hops=await self._max_hops(viewer_user_id),
         )
 
     async def list_reactions(self, moment_id: str):
