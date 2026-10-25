@@ -205,8 +205,21 @@ class HighlightPublicLandingView(GfsBaseView):
 #: The viewer page's inline ``<style>`` — admitted by its sha256 in the
 #: public-page CSP (``html_page.html_response``).
 _VIEWER_CSS = (
+    # The colour emoji alias, for emoji only: before the generic family
+    # (on Linux it resolves to DejaVu, which draws 😂 😮 😢 as outlines),
+    # and limited to emoji code points so Noto Color Emoji never draws
+    # digits, "#" or spaces. ``local()`` fetches nothing.
+    "@font-face{font-family:'SH Color Emoji';src:local('Apple Color Emoji'),"
+    "local('Segoe UI Emoji'),local('Noto Color Emoji');unicode-range:"
+    "U+200D,U+20E3,U+2194-2199,U+21A9-21AA,U+231A-231B,U+2328,"
+    "U+23CF,U+23E9-23F3,U+23F8-23FA,U+24C2,U+25AA-25AB,U+25B6,"
+    "U+25C0,U+25FB-25FE,U+2600-27BF,U+2934-2935,U+2B05-2B07,"
+    "U+2B1B-2B1C,U+2B50,U+2B55,U+3030,U+303D,U+3297,U+3299,U+FE0F,"
+    "U+1F000-1FAFF,U+E0020-E007F"
+    ";font-display:swap;}"
     "html,body{margin:0;padding:0;background:#111;color:#eee;"
-    "font-family:system-ui,sans-serif;height:100%;}"
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
+    "'SH Color Emoji',system-ui,sans-serif;height:100%;}"
     "#root{height:100vh;display:flex;}"
     ".highlight-viewer{display:flex;flex-direction:column;width:100%;}"
     # Who shared it (sealed author_profile frame): picture, name, bio.

@@ -18,6 +18,7 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { APP_FONT_STACK, FONT_STACKS } from '@/utils/themeFonts'
 
 // jsdom gives import.meta.url an http: scheme; vitest still injects __dirname.
 const STYLES = __dirname
@@ -101,5 +102,84 @@ describe('no third-party font host anywhere in the SPA source', () => {
       expect(tag).toMatch(/href="\/src\/assets\/fonts\//)
       expect(tag).toContain('crossorigin')
     }
+  })
+})
+
+/** The colour emoji fonts, behind one alias (``fonts.css``) whose
+ *  ``unicode-range`` holds emoji code points only. On Linux and ChromeOS
+ *  the generic ``sans-serif`` / ``serif`` resolve to DejaVu, which draws
+ *  U+1F600–1F64F (😂 😮 😢) as monochrome outlines, so a colour family has
+ *  to come before the generic one. Named directly, Noto Color Emoji would
+ *  then also draw digits, ``#``, ``*`` and spaces (it carries them for
+ *  keycaps) wherever no earlier font covers them — the public viewer, a
+ *  Serif theme without Georgia. The alias can only draw emoji. */
+const EMOJI_ALIAS = 'SH Color Emoji'
+const EMOJI_FONTS = ['Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji']
+const GENERIC_FAMILIES = new Set(['sans-serif', 'serif', 'monospace', 'system-ui'])
+
+function expectColourEmoji(stack: string, where: string): void {
+  const families = stack.split(',').map((f) => f.trim().replace(/^['"]|['"]$/g, ''))
+  const generic = families.findIndex((f) => GENERIC_FAMILIES.has(f))
+  const at = families.indexOf(EMOJI_ALIAS)
+  expect(at, `${where} lists ${EMOJI_ALIAS}`).toBeGreaterThan(-1)
+  if (generic > -1) expect(at, `${where}: ${EMOJI_ALIAS} before ${families[generic]}`).toBeLessThan(generic)
+  for (const font of EMOJI_FONTS) {
+    expect(families, `${where} names ${font} only through the alias`).not.toContain(font)
+  }
+}
+
+/** The ``unicode-range`` of the alias's ``@font-face`` in ``css``, as
+ *  [start, end] code point pairs. */
+function emojiAliasRanges(css: string, where: string): [number, number][] {
+  const face = (css.match(/@font-face\s*\{[^}]*\}/g) ?? []).find((f) => f.includes(`'${EMOJI_ALIAS}'`))
+  expect(face, `${where} declares @font-face '${EMOJI_ALIAS}'`).toBeTruthy()
+  for (const font of EMOJI_FONTS) expect(face, `${where}: local('${font}')`).toContain(`local('${font}')`)
+  const range = /unicode-range:\s*([^;}]+)/.exec(face!)?.[1] ?? ''
+  return range.split(',').map((r) => {
+    const [a, b] = r.trim().replace(/^U\+/i, '').split('-')
+    return [parseInt(a, 16), parseInt(b ?? a, 16)] as [number, number]
+  })
+}
+
+function expectEmojiOnly(css: string, where: string): void {
+  const ranges = emojiAliasRanges(css, where)
+  const covers = (cp: number) => ranges.some(([a, b]) => cp >= a && cp <= b)
+  for (const ch of ' 0123456789#*aZ.,ü') {
+    expect(covers(ch.codePointAt(0)!), `${where} alias must not draw ${JSON.stringify(ch)}`).toBe(false)
+  }
+  for (const ch of ['😂', '😮', '😢', '😊', '❤', '🔥', '👏', '☕', '🎃', '\u200d', '\ufe0f']) {
+    expect(covers(ch.codePointAt(0)!), `${where} alias draws ${ch}`).toBe(true)
+  }
+}
+
+function fontStackIn(css: string, pattern: string): string {
+  const m = new RegExp(`${pattern}:\\s*([^;]+);`).exec(css)
+  expect(m, pattern).not.toBeNull()
+  return m![1].replace(/\s+/g, ' ')
+}
+
+describe('emoji draw in colour everywhere', () => {
+  const tokens = readFileSync(join(STYLES, 'tokens.css'), 'utf8')
+
+  it('the body and display font tokens list a colour emoji family', () => {
+    expectColourEmoji(fontStackIn(tokens, '--sh-font-family'), '--sh-font-family')
+    expectColourEmoji(fontStackIn(tokens, '--sh-font-family-display'), '--sh-font-family-display')
+  })
+
+  it('every household / space theme font lists one too', () => {
+    for (const [id, stack] of Object.entries(FONT_STACKS)) {
+      if (stack === APP_FONT_STACK) continue // ``system`` = the token above
+      expectColourEmoji(stack, `theme font ${id}`)
+    }
+  })
+
+  it('the public highlight viewer (GFS + pinned page) lists one', () => {
+    const css = readFileSync(join(CLIENT, 'gfs', 'public_highlight.css'), 'utf8')
+    expectColourEmoji(fontStackIn(css, 'html,body\\{[^}]*?font-family'), 'public_highlight.css')
+    expectEmojiOnly(css, 'public_highlight.css')
+  })
+
+  it('the alias draws emoji only, never digits, # or spaces', () => {
+    expectEmojiOnly(readFileSync(FONTS_CSS, 'utf8'), 'fonts.css')
   })
 })

@@ -190,3 +190,18 @@
                  U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
                  U+2212, U+2215, U+FEFF, U+FFFD;
 }
+
+/* SH Color Emoji — the platform's colour emoji font, for emoji only.
+ * Stacks name it before their generic family: on Linux / ChromeOS
+ * ``sans-serif`` / ``serif`` resolve to DejaVu, which draws 😂 😮 😢 as
+ * monochrome outlines. Naming Noto Color Emoji directly would also hand
+ * it digits, ``#``, ``*`` and spaces (it carries them for keycaps)
+ * wherever no earlier font has them, so the alias's ``unicode-range``
+ * holds emoji code points only. ``local()`` fetches nothing.
+ * Guarded by fonts.test.ts. */
+@font-face {
+  font-family: 'SH Color Emoji';
+  src: local('Apple Color Emoji'), local('Segoe UI Emoji'), local('Noto Color Emoji');
+  unicode-range: U+200D, U+20E3, U+2194-2199, U+21A9-21AA, U+231A-231B, U+2328, U+23CF, U+23E9-23F3, U+23F8-23FA, U+24C2, U+25AA-25AB, U+25B6, U+25C0, U+25FB-25FE, U+2600-27BF, U+2934-2935, U+2B05-2B07, U+2B1B-2B1C, U+2B50, U+2B55, U+3030, U+303D, U+3297, U+3299, U+FE0F, U+1F000-1FAFF, U+E0020-E007F;
+  font-display: swap;
+}
