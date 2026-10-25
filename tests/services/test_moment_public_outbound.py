@@ -136,6 +136,7 @@ def _moment(
     is_public: bool = True,
     received_via: str = "self",
     received_via_gfs_id: str | None = None,
+    parent_moment_id: str | None = None,
 ) -> Moment:
     return Moment(
         id=moment_id,
@@ -144,7 +145,7 @@ def _moment(
         media_url=None,
         media_type=None,
         duration_ms=None,
-        parent_moment_id=None,
+        parent_moment_id=parent_moment_id,
         origin_instance_id="inst-self",
         created_at="2026-05-06T12:00:00Z",
         expires_at="2026-05-07T12:00:00Z",
@@ -242,6 +243,27 @@ async def test_non_public_moment_does_not_fan(outbound_setup):
     await s["regs"].upsert(user_id="u1", gfs_id="g1")
     await s["bus"].publish(_created_event())
     assert s["session"].posts == []
+
+
+async def test_a_public_reply_to_a_household_moment_is_not_published(outbound_setup):
+    """Defence in depth: even a reply row marked public (written before the
+    service forced it, or by any other path) never goes to a GFS while the
+    moment it answers isn't public."""
+    s = outbound_setup
+    await s["moments"].save(_moment(moment_id="root", is_public=False))
+    await s["moments"].save(_moment(moment_id="r-1", parent_moment_id="root"))
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event("r-1"))
+    assert s["session"].posts == []
+
+
+async def test_a_public_reply_to_a_public_moment_is_published(outbound_setup):
+    s = outbound_setup
+    await s["moments"].save(_moment(moment_id="root"))
+    await s["moments"].save(_moment(moment_id="r-1", parent_moment_id="root"))
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event("r-1"))
+    assert len(s["session"].posts) == 1
 
 
 async def test_gfs_received_moment_does_not_re_fan(outbound_setup):

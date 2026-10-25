@@ -22,7 +22,13 @@ uses.
   fan-out is *not* relayed back into the recipient's paired
   household mesh. The federation outbound (`MomentFederationOutbound.relay_inbound`)
   reads `received_via='gfs'` on the inbound payload and skips relay.
-* Replies fan out **both** through the GFS path and through the
+* A reply goes public only under a public moment. A reply to a moment
+  that isn't public is stored as not public whatever the composer sent
+  (`MomentService.create_moment` — the thread's root decides), and
+  `MomentPublicOutbound` checks the parent again before publishing; the
+  composer offers the toggle on a reply only when the parent is public
+  and never pre-ticks it ("share by default" is for new moments).
+* Public replies fan out **both** through the GFS path and through the
   replier's paired households (normal moment federation). A follower
   that does not hold the parent drops a GFS-delivered reply (INFO) — it
   would be out of context, and its parent reference cannot be stored.

@@ -157,6 +157,7 @@ class MomentService:
             # Threads stay flat: a reply to a reply attaches to the
             # original root so list_replies(root) returns the whole
             # conversation in a single query.
+            root: Moment | None = parent
             if parent.parent_moment_id is not None:
                 root = await self._moments.get(parent.parent_moment_id)
                 parent_moment_id = parent.parent_moment_id
@@ -165,6 +166,12 @@ class MomentService:
                 )
             else:
                 parent_author_user_id = parent.author_user_id
+            # A reply never goes further than the moment it answers: a
+            # reply to a moment that isn't public stays in the household
+            # whatever the composer asked (fail closed — a stale client
+            # that pre-ticks "share publicly" must not leak the thread).
+            if root is None or not root.is_public:
+                is_public = False
 
         # Rate-limit only top-level moments (replies are exempt).
         if parent_moment_id is None:
