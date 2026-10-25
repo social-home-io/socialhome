@@ -29,7 +29,7 @@ import { showToast } from '@/components/Toast'
 import { UploadProgressBar, uploadWithProgress } from '@/components/UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
 import { currentUser } from '@/store/auth'
-import type { Highlight, HighlightAudienceKind } from '@/types'
+import type { HighlightAudienceKind, OwnHighlight } from '@/types'
 import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
 import { audienceBody, defaultAudienceKind, loadMyToday, todayFixedNote } from './todayAudience'
@@ -122,7 +122,7 @@ const stagedFrames = signal<StagedFrame[]>([])
 const mineToday = signal<number>(0)
 /** Today's highlight when the author already posted today — its
  *  audience is fixed for every further frame. */
-const today = signal<Highlight | null>(null)
+const today = signal<OwnHighlight | null>(null)
 /** Today's highlight has a public link — its note says so. */
 const todayPublished = signal<boolean>(false)
 const audienceKind = signal<HighlightAudienceKind>('all_paired')

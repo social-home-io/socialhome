@@ -17,7 +17,7 @@ import { api } from '@/api'
 import { currentUser } from '@/store/auth'
 import { getPreferences } from '@/utils/preferences'
 import { t, isOne } from '@/i18n/i18n'
-import type { Highlight, HighlightAudienceKind, HighlightInboxItem } from '@/types'
+import type { HighlightAudienceKind, HighlightInboxItem, OwnHighlight } from '@/types'
 
 /** Today's date key as the server writes ``highlight_date`` (UTC). */
 export function todayKey(now: Date = new Date()): string {
@@ -28,7 +28,7 @@ export function todayKey(now: Date = new Date()): string {
  *  a public link (``published``). ``null`` when they haven't posted today.
  *  Throws when the inbox can't load. */
 export async function loadMyToday(): Promise<
-  { highlight: Highlight, frames: number, published: boolean } | null
+  { highlight: OwnHighlight, frames: number, published: boolean } | null
 > {
   const rows = (await api.get('/api/highlights')) as HighlightInboxItem[]
   const me = currentUser.value?.user_id
@@ -39,7 +39,9 @@ export async function loadMyToday(): Promise<
   )
   if (!mine) return null
   return {
-    highlight: mine.highlight,
+    // The author's own row always names its audience; fail closed to
+    // none (the server then refuses a mismatched frame) if it did not.
+    highlight: { ...mine.highlight, audience: mine.highlight.audience ?? [] },
     frames: mine.frames.length,
     published: await hasPublicLink(mine.highlight.id),
   }
@@ -69,7 +71,7 @@ export function audienceBody(
 /** "Today's highlight is for {who}…" — later frames join it, so they also
  *  reach a feed / space it was shared to and anyone with its public link. */
 export function todayFixedNote(
-  highlight: Highlight,
+  highlight: OwnHighlight,
   published: boolean,
   nameOf?: (id: string) => string | undefined,
 ): string {

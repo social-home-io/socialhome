@@ -69,6 +69,23 @@ def same_audience(
     return kind_a is HighlightAudience.ALL_PAIRED or set(ids_a) == set(ids_b)
 
 
+class HighlightAudienceLabel(StrEnum):
+    """Who sees a highlight, as a viewer may learn it — never the ids.
+
+    The picked user / household ids go to the author only; a viewer of a
+    ``users`` highlight must not learn who else was picked.
+    """
+
+    #: All paired households, or a chosen set of them.
+    PAIRED = "paired"
+    #: Only the author's own household.
+    HOUSEHOLD = "household"
+    #: Picked people, and the viewer is the only one.
+    JUST_YOU = "just_you"
+    #: Picked people (for the author, or a viewer among several).
+    PEOPLE = "people"
+
+
 class HighlightFrameType(StrEnum):
     """Media type of a single frame."""
 
@@ -100,6 +117,26 @@ class Highlight:
     #: ISO-8601 UTC of the original publish call. Persisted so the SPA
     #: can show "published 12 minutes ago" without an extra GFS round-trip.
     public_published_at: str | None = None
+
+
+def audience_label(highlight: Highlight, viewer_user_id: str) -> HighlightAudienceLabel:
+    """The coarse audience ``viewer_user_id`` may see for ``highlight``.
+
+    A ``households`` audience that lists no household goes to nobody
+    beyond the author's own household (the outbound fan-out resolves it
+    to no peer), so it never reaches another household.
+    """
+    match highlight.audience_kind:
+        case HighlightAudience.USERS:
+            if viewer_user_id != highlight.author_user_id and highlight.audience == (
+                viewer_user_id,
+            ):
+                return HighlightAudienceLabel.JUST_YOU
+            return HighlightAudienceLabel.PEOPLE
+        case HighlightAudience.HOUSEHOLDS if not highlight.audience:
+            return HighlightAudienceLabel.HOUSEHOLD
+        case _:
+            return HighlightAudienceLabel.PAIRED
 
 
 @dataclass(slots=True, frozen=True)
