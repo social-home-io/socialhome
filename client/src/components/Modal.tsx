@@ -1,5 +1,6 @@
 import type { ComponentChildren } from 'preact'
 import { useEffect, useId, useRef } from 'preact/hooks'
+import { signal } from '@preact/signals'
 import { t } from '@/i18n/i18n'
 import { restoreFocus } from '@/utils/focus'
 
@@ -40,6 +41,15 @@ interface ModalProps {
 
 /** Open dialogs, oldest first. Only the last entry reacts to keys. */
 const _stack: object[] = []
+
+/** How many dialogs are open — a page with its own clock (the highlight
+ *  viewer's frame timer) pauses while any is up. */
+export const openDialogCount = signal(0)
+
+/** Keys a page behind the dialog must never act on: Escape would close
+ *  the page as well as the dialog, an arrow would page through it while
+ *  the person moves the caret in a field. */
+const DIALOG_KEYS = new Set(['Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'])
 export function Modal({ open, onClose, title, children, class: extraClass, role = 'dialog', header }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const titleId = useId()
@@ -64,6 +74,7 @@ export function Modal({ open, onClose, title, children, class: extraClass, role 
     // Claim the top of the dialog stack for as long as we are open.
     const token = {}
     _stack.push(token)
+    openDialogCount.value = _stack.length
     const isTopmost = () => _stack[_stack.length - 1] === token
 
     // Move focus into the dialog — first focusable element on
@@ -87,6 +98,14 @@ export function Modal({ open, onClose, title, children, class: extraClass, role 
     function onKeyDown(ev: KeyboardEvent) {
       // A dialog underneath a newer one neither closes nor traps focus.
       if (!isTopmost()) return
+      // The dialog owns these keys: stop them before ``window`` (a page's
+      // own key handler) without blocking their default (caret moves).
+      // Not for a key aimed at a surface outside it (an image lightbox
+      // opened over the dialog binds its own arrows on ``window``).
+      const target = ev.target as Node | null
+      const ours = !target || target === document || target === document.body
+        || dialog!.contains(target)
+      if (ours && DIALOG_KEYS.has(ev.key)) ev.stopPropagation()
       if (ev.key === 'Escape') {
         ev.preventDefault()
         onCloseRef.current()
@@ -110,6 +129,7 @@ export function Modal({ open, onClose, title, children, class: extraClass, role 
       document.removeEventListener('keydown', onKeyDown)
       const at = _stack.indexOf(token)
       if (at !== -1) _stack.splice(at, 1)
+      openDialogCount.value = _stack.length
       // Restore focus to whatever triggered the dialog — unless a
       // surface that replaced it already took focus.
       restoreFocus(previouslyFocused, dialog)

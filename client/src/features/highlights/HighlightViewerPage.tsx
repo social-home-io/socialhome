@@ -15,7 +15,7 @@ import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
 import { isRestricted } from '@/components/ProtectedNotice'
 import { Avatar } from '@/components/Avatar'
-import { Modal } from '@/components/Modal'
+import { Modal, openDialogCount } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
 import { viaPostQuery } from '@/components/HighlightShareCard'
 import { currentUser } from '@/store/auth'
@@ -61,8 +61,12 @@ const FRAME_DURATION_MS = 6000  // image default; video uses its own length
 const detail = signal<HighlightDetail | null>(null)
 const loading = signal<boolean>(true)
 const currentIndex = signal<number>(0)
+/** Press-and-hold on the frame. */
 const paused = signal<boolean>(false)
-const reactionsOpen = signal<boolean>(false)
+/** The frame the reaction tray was opened on, or null when it's closed —
+ *  a reaction always goes to that frame, never to one the viewer moved
+ *  on to meanwhile. */
+const reactionsFrameId = signal<string | null>(null)
 /** Author-only "Seen by" sheet — when null, sheet is closed. Holds the
  *  frame_id so a later frame change reopens onto the right list. */
 const seenBySheetFrameId = signal<string | null>(null)
@@ -88,7 +92,7 @@ export default function HighlightViewerPage() {
     detail.value = null
     currentIndex.value = 0
     paused.value = false
-    reactionsOpen.value = false
+    reactionsFrameId.value = null
     seenBySheetFrameId.value = null
     // Resolve raw user_ids (author + viewer + reactor) to display names.
     void loadHouseholdUsers()
@@ -124,30 +128,56 @@ export default function HighlightViewerPage() {
     return () => { dispose.forEach(d => d()) }
   }, [highlightId, via])
 
-  // Auto-progress: stamp a per-frame timer that ticks the index.
-  // Stored as a ref so pause/resume can clear/recreate without losing
-  // the "remaining" budget. This is intentionally simple — perfect
-  // pause-resume to the millisecond is overkill for v1.
+  // The frame stands still while the person holds it, while the reaction
+  // tray is up, and while any dialog or sheet is open (Seen by, publish,
+  // report, delete confirm, person sheet) — nothing moves under them.
+  const curFrameId = detail.value?.frames[currentIndex.value]?.id
+  const trayOpen = reactionsFrameId.value !== null && reactionsFrameId.value === curFrameId
+  const stopped = paused.value || trayOpen || openDialogCount.value > 0
+
+  // A tray opened on an earlier frame never carries over to the next one.
+  useEffect(() => {
+    if (reactionsFrameId.value !== null && reactionsFrameId.value !== curFrameId) {
+      reactionsFrameId.value = null
+    }
+  }, [curFrameId])
+
+  // Auto-progress: a per-frame timer that ticks the index. A pause keeps
+  // what is left of the frame (``remainingRef``), so the timer resumes
+  // where the progress bar's paused animation stands.
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const frameStartRef = useRef<number>(Date.now())
+  const remainingRef = useRef<{ frameId: string, ms: number } | null>(null)
 
   useEffect(() => {
     if (!detail.value || loading.value) return
     const frame = detail.value.frames[currentIndex.value]
     if (!frame) return
-    frameStartRef.current = Date.now()
+    if (remainingRef.current?.frameId !== frame.id) {
+      remainingRef.current = {
+        frameId: frame.id,
+        ms: frame.duration_ms && frame.duration_ms > 0 ? frame.duration_ms : FRAME_DURATION_MS,
+      }
+    }
     if (timerRef.current) clearTimeout(timerRef.current)
-    if (paused.value) return
-    const dur = frame.duration_ms && frame.duration_ms > 0
-      ? frame.duration_ms
-      : FRAME_DURATION_MS
-    timerRef.current = setTimeout(() => {
-      advance()
-    }, dur)
+    if (stopped) return
+    const left = remainingRef.current
+    const startedAt = Date.now()
+    timerRef.current = setTimeout(() => { advance() }, left.ms)
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current)
+      left.ms = Math.max(0, left.ms - (Date.now() - startedAt))
     }
-  }, [currentIndex.value, detail.value?.highlight.id, paused.value, loading.value])
+  }, [currentIndex.value, detail.value?.highlight.id, stopped, loading.value])
+
+  // A video frame stops with the timer — else it plays on under a dialog
+  // and its ``ended`` advances the viewer anyway.
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    if (stopped) v.pause()
+    else void v.play()?.catch(() => {})
+  }, [stopped, curFrameId])
 
   // Mark each frame viewed exactly once on entry.
   useEffect(() => {
@@ -172,12 +202,19 @@ export default function HighlightViewerPage() {
 
   // Keyboard navigation — left/right arrows step through frames, Esc
   // closes the viewer. Bound on `window` so users don't have to focus
-  // the tap zones first.
+  // the tap zones first. Never while a dialog is open (it owns its keys),
+  // and never for a key typed in a field: the caret must move.
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
+      if (openDialogCount.value > 0 || isEditable(ev.target)) return
       if (ev.key === 'ArrowRight') { ev.preventDefault(); advance() }
       else if (ev.key === 'ArrowLeft') { ev.preventDefault(); goBack() }
-      else if (ev.key === 'Escape') { ev.preventDefault(); loc.route('/highlights') }
+      else if (ev.key === 'Escape') {
+        ev.preventDefault()
+        // Escape takes the tray down first, the viewer only after.
+        if (reactionsFrameId.value !== null) reactionsFrameId.value = null
+        else loc.route('/highlights')
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -204,10 +241,10 @@ export default function HighlightViewerPage() {
   const onTapLeft = (e: Event) => { e.preventDefault(); goBack() }
   const onTapRight = (e: Event) => { e.preventDefault(); advance() }
 
-  const react = async (emoji: string) => {
+  const react = async (frameId: string, emoji: string) => {
     try {
-      await api.put(`/api/highlights/frames/${frame.id}/reaction${via}`, { emoji })
-      reactionsOpen.value = false
+      await api.put(`/api/highlights/frames/${frameId}/reaction${via}`, { emoji })
+      if (reactionsFrameId.value === frameId) reactionsFrameId.value = null
       showToast(t('highlight.viewer.reaction_sent'), 'success')
     } catch (err: unknown) {
       showToast(t('highlight.viewer.reaction_failed', { error: String((err as Error)?.message ?? err) }), 'error')
@@ -251,7 +288,7 @@ export default function HighlightViewerPage() {
   return (
     <div
       class={
-        paused.value
+        stopped
           ? 'sh-highlight-viewer sh-highlight-viewer--paused'
           : 'sh-highlight-viewer'
       }
@@ -339,6 +376,7 @@ export default function HighlightViewerPage() {
             // the previous element + its currentTime, which made the
             // new frame stutter on entry.
             key={frame.id}
+            ref={videoRef}
             src={frame.media_url}
             class="sh-highlight-frame-media"
             autoPlay
@@ -373,10 +411,11 @@ export default function HighlightViewerPage() {
             {frame.caption_text}
           </p>
         )}
-        {/* "Paused" hint appears while the user is holding to pause —
-         *  reassures them the timer has actually stopped, and tells
-         *  first-time users that hold-to-pause is a thing. */}
-        {paused.value && (
+        {/* "Paused" hint appears while the frame stands still — held,
+         *  or under the reaction tray / a dialog. It reassures them the
+         *  timer has actually stopped, and tells first-time users that
+         *  hold-to-pause is a thing. */}
+        {stopped && (
           <span class="sh-highlight-paused-hint" aria-hidden="true">
             ⏸ {t('highlight.viewer.paused')}
           </span>
@@ -389,8 +428,9 @@ export default function HighlightViewerPage() {
             <button
               type="button"
               class="sh-highlight-react-btn"
-              onClick={() => { reactionsOpen.value = !reactionsOpen.value }}
+              onClick={() => { reactionsFrameId.value = trayOpen ? null : frame.id }}
               aria-label={t('highlight.viewer.react')}
+              aria-expanded={trayOpen}
             >
               😊 {t('highlight.viewer.react')}
             </button>
@@ -449,14 +489,14 @@ export default function HighlightViewerPage() {
         />
       )}
 
-      {reactionsOpen.value && (
+      {trayOpen && (
         <div class="sh-highlight-react-tray" role="group" aria-label={t('highlight.viewer.quick_reactions')}>
           {QUICK_REACTIONS.map(emoji => (
             <button
               key={emoji}
               type="button"
               class="sh-highlight-react-tray-btn"
-              onClick={() => void react(emoji)}
+              onClick={() => void react(frame.id, emoji)}
             >
               {emoji}
             </button>
@@ -467,6 +507,12 @@ export default function HighlightViewerPage() {
   )
 }
 
+
+/** A key aimed at a text field: its arrows move the caret, never a frame. */
+function isEditable(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return target.isContentEditable || !!target.closest('input, textarea, select, [contenteditable="true"]')
+}
 
 /** "3 reactions" / "1 reaction" in the UI language. */
 function reactionsLabel(n: number): string {

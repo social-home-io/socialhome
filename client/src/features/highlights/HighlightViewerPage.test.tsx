@@ -1,15 +1,16 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, waitFor } from '@testing-library/preact'
 
 const wsHandlers = vi.hoisted(() => new Map<string, (e: { data: unknown }) => void>())
 const routeQuery = vi.hoisted(() => ({ current: {} as Record<string, string> }))
+const routeSpy = vi.hoisted(() => vi.fn())
 
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }))
 vi.mock('preact-iso', () => ({
   useRoute: () => ({ params: { highlightId: 'h1' }, query: routeQuery.current }),
-  useLocation: () => ({ route: vi.fn(), url: '/' }),
+  useLocation: () => ({ route: routeSpy, url: '/' }),
 }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 vi.mock('@/ws', () => ({
@@ -143,5 +144,107 @@ describe('HighlightViewerPage opened from a share card', () => {
       '/api/highlights/frames/f1/reaction?via_post=p%201', { emoji: '❤️' },
     ))
     routeQuery.current = {}
+  })
+})
+
+describe('HighlightViewerPage with a dialog or sheet open', () => {
+  const two = [
+    frames[0],
+    { ...frames[0], id: 'f2', sequence: 2, media_url: 'api/media/y.webp' },
+  ]
+  const activeFrame = () => {
+    const segs = [...document.querySelectorAll('.sh-highlight-progress-seg')]
+    return segs.findIndex(s => s.classList.contains('sh-highlight-progress-seg--active'))
+  }
+  /** Let the detail fetch resolve under fake timers. */
+  const settle = async () => { await vi.advanceTimersByTimeAsync(0) }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    wsHandlers.clear()
+    routeSpy.mockReset()
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset().mockResolvedValue({})
+    vi.mocked(api.put).mockReset().mockResolvedValue({})
+    currentUser.value = { user_id: 'uid-me', username: 'me', display_name: 'Me' } as User
+  })
+  afterEach(() => { vi.useRealTimers() })
+
+  const open = async (author: string) => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => path === '/api/users' ? [] : {
+      highlight: highlight(author, { author: { display_name: 'Anna', picture_url: null } }),
+      frames: two,
+      views: { f1: [], f2: [] },
+      reactions: { f1: [], f2: [] },
+    })
+    const view = render(<HighlightViewerPage />)
+    await settle()
+    expect(activeFrame()).toBe(0)
+    return view
+  }
+
+  it('Escape closes the "Seen by" sheet and leaves the viewer open', async () => {
+    const { getByRole } = await open('uid-me')
+    fireEvent.click(getByRole('button', { name: /views|Seen by/i }))
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull()
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+    await settle()
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(routeSpy).not.toHaveBeenCalled()
+    // With no dialog left, Escape closes the viewer as before.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(routeSpy).toHaveBeenCalledWith('/highlights')
+  })
+
+  it('the frame timer stops while a dialog is open and picks up where it left off', async () => {
+    const { getByRole } = await open('uid-me')
+    await vi.advanceTimersByTimeAsync(4000)
+    fireEvent.click(getByRole('button', { name: /views|Seen by/i }))
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(activeFrame()).toBe(0)
+    expect(document.querySelector('.sh-highlight-viewer--paused')).not.toBeNull()
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+    await settle()
+    // 4 s of the 6 s frame were shown: 2 s are left, not a fresh 6 s.
+    await vi.advanceTimersByTimeAsync(1900)
+    expect(activeFrame()).toBe(0)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(activeFrame()).toBe(1)
+  })
+
+  it('the frame timer stops while the reaction tray is open', async () => {
+    const { getByRole } = await open('ru-anna')
+    fireEvent.click(getByRole('button', { name: /react/i }))
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(activeFrame()).toBe(0)
+  })
+
+  it('a reaction goes to the frame the tray was opened on', async () => {
+    const { getByRole, queryByRole } = await open('ru-anna')
+    fireEvent.click(getByRole('button', { name: /react/i }))
+    // The person steps on while the tray is up: it closes rather than
+    // send a reaction meant for frame 1 to frame 2.
+    fireEvent.keyDown(document.body, { key: 'ArrowRight' })
+    await settle()
+    expect(activeFrame()).toBe(1)
+    expect(queryByRole('button', { name: '❤️' })).toBeNull()
+    fireEvent.click(getByRole('button', { name: /react/i }))
+    fireEvent.click(getByRole('button', { name: '❤️' }))
+    await settle()
+    expect(api.put).toHaveBeenCalledTimes(1)
+    expect(api.put).toHaveBeenCalledWith('/api/highlights/frames/f2/reaction', { emoji: '❤️' })
+  })
+
+  it('keys typed in a field never page the viewer or block the caret', async () => {
+    await open('ru-anna')
+    const field = document.createElement('input')
+    document.body.append(field)
+    for (const key of ['ArrowRight', 'ArrowLeft', 'Escape']) {
+      expect(fireEvent.keyDown(field, { key })).toBe(true)  // not prevented
+    }
+    await settle()
+    expect(activeFrame()).toBe(0)
+    expect(routeSpy).not.toHaveBeenCalled()
+    field.remove()
   })
 })
