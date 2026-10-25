@@ -202,6 +202,17 @@ class MomentPublicOutbound(ProtectionGateMixin):
         # GFS-received moments are NEVER re-fanned (no-redistribute rule).
         if moment.received_via == "gfs":
             return
+        # A reply goes public only under a public moment — never on its own
+        # (the service forces this at create; checked again at the wire).
+        if moment.parent_moment_id is not None:
+            parent = await self._moments.get(moment.parent_moment_id)
+            if parent is None or not parent.is_public:
+                log.info(
+                    "public moment %s not published: it replies to a moment"
+                    " that isn't public",
+                    event.moment_id,
+                )
+                return
         regs = await self._regs.list_for_user(event.author_user_id)
         if not regs:
             return

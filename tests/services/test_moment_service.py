@@ -248,6 +248,63 @@ async def test_reply_to_reply_attaches_to_root(stack):
     assert r2.parent_moment_id == root.id
 
 
+# ── Replies never go public on their own ──────────────────────────────────
+
+
+async def test_reply_to_household_moment_is_never_public(stack):
+    """A reply can't publish what its parent keeps in the household: an
+    ``is_public`` reply to a non-public moment is stored (and so
+    published) as household-only."""
+    a = await stack.provision("alice")
+    b = await stack.provision("bob")
+    root = await stack.moment_svc.create_moment(
+        author_user_id=a.user_id, content="household only"
+    )
+    reply = await stack.moment_svc.create_moment(
+        author_user_id=b.user_id,
+        content="reply",
+        parent_moment_id=root.id,
+        is_public=True,
+    )
+    assert reply.is_public is False
+    stored = await stack.moment_repo.get(reply.id)
+    assert stored is not None and stored.is_public is False
+
+
+async def test_reply_to_reply_follows_the_root_publicness(stack):
+    """Threads are flat: the root decides, not the reply being answered."""
+    a = await stack.provision("alice")
+    b = await stack.provision("bob")
+    root = await stack.moment_svc.create_moment(
+        author_user_id=a.user_id, content="household only"
+    )
+    r1 = await stack.moment_svc.create_moment(
+        author_user_id=b.user_id, content="r1", parent_moment_id=root.id
+    )
+    r2 = await stack.moment_svc.create_moment(
+        author_user_id=b.user_id,
+        content="r2",
+        parent_moment_id=r1.id,
+        is_public=True,
+    )
+    assert r2.is_public is False
+
+
+async def test_reply_to_public_moment_may_be_public(stack):
+    a = await stack.provision("alice")
+    b = await stack.provision("bob")
+    root = await stack.moment_svc.create_moment(
+        author_user_id=a.user_id, content="public", is_public=True
+    )
+    reply = await stack.moment_svc.create_moment(
+        author_user_id=b.user_id,
+        content="reply",
+        parent_moment_id=root.id,
+        is_public=True,
+    )
+    assert reply.is_public is True
+
+
 # ── Reactions ─────────────────────────────────────────────────────────────
 
 

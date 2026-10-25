@@ -343,7 +343,7 @@ export default function MomentumDetailPage() {
       </section>
 
       <footer class="sh-momentum-detail-actions">
-        <Button onClick={() => openMomentumComposer(m.id)}>
+        <Button onClick={() => openMomentumComposer(m.id, { parentIsPublic: m.is_public === true })}>
           💬 {t('highlight.viewer.reply')}
         </Button>
         {!isAuthor && (
@@ -382,7 +382,7 @@ export default function MomentumDetailPage() {
             <div class="sh-momentum-replies-cta">
               <Button
                 variant="secondary"
-                onClick={() => openMomentumComposer(m.id)}
+                onClick={() => openMomentumComposer(m.id, { parentIsPublic: m.is_public === true })}
               >
                 💬 {t('moment.detail.add_reply')}
               </Button>

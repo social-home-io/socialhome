@@ -42,21 +42,48 @@ const mediaPreviewUrl = signal<string | null>(null)
 const mediaType = signal<'image' | 'video' | null>(null)
 const durationMs = signal<number | null>(null)
 const isPublic = signal<boolean>(false)
+/** Whether the moment being replied to is public (false for new moments). */
+const parentIsPublic = signal<boolean>(false)
 
 /** Open the composer dialog. Pass a moment id to compose a reply; omit
- *  for a new top-level moment. */
-export function openMomentumComposer(parentMomentId: string | null = null): void {
+ *  for a new top-level moment.
+ *
+ *  A reply may go public only under a public moment: pass
+ *  ``parentIsPublic: true`` to offer the toggle (never pre-ticked).
+ *  Unknown (a deep link) counts as not public — the toggle stays hidden
+ *  and the reply stays with the people who can see its parent. The
+ *  "share by default" setting applies to new top-level moments only. */
+export function openMomentumComposer(
+  parentMomentId: string | null = null,
+  opts: { parentIsPublic?: boolean } = {},
+): void {
   parentId.value = parentMomentId
+  parentIsPublic.value = parentMomentId !== null && opts.parentIsPublic === true
   content.value = ''
   mediaUrl.value = null
   mediaPreviewUrl.value = null
   mediaType.value = null
   durationMs.value = null
   submitting.value = false
+  isPublic.value = false
   open.value = true
+  if (parentMomentId !== null) {
+    void loadRegistrations()
+    return
+  }
   void loadRegistrations().then(() => {
-    isPublic.value = registrations.value.some((r) => r.default_share)
+    // Only while this is still the same top-level compose.
+    if (open.value && parentId.value === null) {
+      isPublic.value = registrations.value.some((r) => r.default_share)
+    }
   })
+}
+
+/** The "share publicly" toggle applies: registered, not protected, and —
+ *  for a reply — the parent is public. */
+function canSharePublic(): boolean {
+  if (registrations.value.length === 0 || isRestricted('public_moments')) return false
+  return parentId.value === null || parentIsPublic.value
 }
 
 function closeDialog(): void {
@@ -154,7 +181,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
       }
       if (parentId.value) body.parent_moment_id = parentId.value
       if (registrations.value.length > 0) {
-        body.is_public = isPublic.value && !isRestricted('public_moments')
+        body.is_public = canSharePublic() && isPublic.value
       }
       const m = await api.post('/api/moments', body) as Moment
       open.value = false
@@ -249,7 +276,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
           <UploadProgressBar />
         </div>
 
-        {registrations.value.length > 0 && !isRestricted('public_moments') && (
+        {canSharePublic() && (
           <label class="sh-momentum-composer-public">
             <input
               type="checkbox"

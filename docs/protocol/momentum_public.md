@@ -22,7 +22,22 @@ uses.
   fan-out is *not* relayed back into the recipient's paired
   household mesh. The federation outbound (`MomentFederationOutbound.relay_inbound`)
   reads `received_via='gfs'` on the inbound payload and skips relay.
-* Replies fan out **both** through the GFS path and through the
+* A reply goes public only under a public moment. A reply to a moment
+  that isn't public is stored as not public whatever the composer sent
+  (`MomentService.create_moment` — the thread's root decides), and
+  `MomentPublicOutbound` checks the parent again before publishing; the
+  composer offers the toggle on a reply only when the parent is public
+  and never pre-ticks it ("share by default" is for new moments). A
+  [share link](#share-links) for a reply checks the parent the same way
+  (`MomentPublicShareService.link`, fail closed), and migration `0123`
+  cleared `is_public` on this household's replies the old composer stored
+  public under a moment that isn't. "Public" is what this household
+  stores: a public moment that also arrived from a paired household can
+  be stored `is_public = 0` (the household copy and the GFS copy
+  overwrite each other's `is_public` on save), so a reply to it stays in
+  the household — a behaviour change from #1158, in the direction of
+  fewer people.
+* Public replies fan out **both** through the GFS path and through the
   replier's paired households (normal moment federation). A follower
   that does not hold the parent drops a GFS-delivered reply (INFO) — it
   would be out of context, and its parent reference cannot be stored.
@@ -265,7 +280,7 @@ verifies the author's signature directly.
 | POST   | `/api/moments/public/follows` | Follow another author. |
 | DELETE | `/api/moments/public/follows/{gfs_id}/{user_id}` | Unfollow. |
 | GET    | `/api/gfs/{gfs_id}/moments/users` | Proxy the GFS directory. |
-| POST   | `/api/moments/{moment_id}/share-link` | The author's own public moment only. Optional body `{gfs_id}`. Uploads the 4 KB share copy on first use (per GFS) and returns `{url}` — the [share link](#share-links). `404` for someone else's / unknown / non-public moment, `409 SHARE_LINK_UNAVAILABLE` without a viewer address or a GFS that keeps encrypted media. |
+| POST   | `/api/moments/{moment_id}/share-link` | The author's own public moment only. Optional body `{gfs_id}`. Uploads the 4 KB share copy on first use (per GFS) and returns `{url}` — the [share link](#share-links). `404` for someone else's / unknown / non-public moment or a reply under a moment that isn't public, `409 SHARE_LINK_UNAVAILABLE` without a viewer address or a GFS that keeps encrypted media. |
 
 ## Sequence: discover + follow (+ the key, v_62)
 
