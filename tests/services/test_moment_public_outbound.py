@@ -246,12 +246,14 @@ async def test_non_public_moment_does_not_fan(outbound_setup):
 
 
 async def test_a_public_reply_to_a_household_moment_is_not_published(outbound_setup):
-    """Defence in depth: even a reply row marked public (written before the
-    service forced it, or by any other path) never goes to a GFS while the
-    moment it answers isn't public."""
+    """Defence in depth: a public reply never goes to a GFS once the moment
+    it answers isn't public. The DB refuses storing such a reply (migration
+    0123), so the parent loses ``is_public`` after the reply is stored —
+    e.g. an inbound upsert of a moment first held from a GFS."""
     s = outbound_setup
-    await s["moments"].save(_moment(moment_id="root", is_public=False))
+    await s["moments"].save(_moment(moment_id="root"))
     await s["moments"].save(_moment(moment_id="r-1", parent_moment_id="root"))
+    await s["moments"].save(_moment(moment_id="root", is_public=False))
     await s["regs"].upsert(user_id="u1", gfs_id="g1")
     await s["bus"].publish(_created_event("r-1"))
     assert s["session"].posts == []

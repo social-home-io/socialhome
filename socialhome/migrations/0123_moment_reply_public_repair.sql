@@ -25,8 +25,34 @@
 --       reply then reads as a public top-level moment and a share link
 --       would put a fresh copy on a GFS; waiting for expiry (≤ 7 days)
 --       leaves that window open.
---   (3) Smallest change: one UPDATE of the affected rows, no schema change,
---       no index (``idx_moments_parent`` serves the parent lookup).
+--   (3) Smallest change: one UPDATE of the affected rows plus two
+--       triggers; no new column, table or index (``idx_moments_parent``
+--       and the primary key serve the parent lookups).
+--
+-- The guard (the invariant, in the database): one of this household's own
+-- replies is public only while its parent is stored here and public — a
+-- reply under a public parent stays allowed (owner decision 2026-10-25).
+-- ``BEFORE INSERT`` / ``BEFORE UPDATE`` triggers refuse anything else, like
+-- 0098 / 0100 / 0101 guard their columns. A CHECK constraint can't read
+-- another row, and a table rebuild was not needed. Writers audited:
+--   * ``MomentService.create`` stores a reply public only when its root is
+--     stored and public (#1158) — the only writer of ``received_via =
+--     'self'`` rows.
+--   * GFS inbound (``received_via = 'gfs'``, ``is_public = 1``) and
+--     household inbound (``'household'``) are not this household's own and
+--     are stored as received, whatever we hold of their parent.
+--   * The delete tombstone (``_tombstone_rows``) first detaches the replies
+--     (``parent_moment_id`` → NULL), then clears the deleted row's
+--     ``is_public``; the content-free tombstone insert is ``'household'``
+--     with ``is_public = 0``. The retention prune's ``ON DELETE SET NULL``
+--     detaches too. None of these can be refused.
+--   * Backup restore does not carry ``moments`` (not in
+--     ``EXPORTABLE_TABLES``).
+-- The update guard fires only on ``is_public`` / ``parent_moment_id`` /
+-- ``received_via`` writes. It does not guard the parent side: an inbound
+-- upsert may store a moment we hold from a GFS as not public, and refusing
+-- it would drop a legitimate write — the outbound and the share link
+-- re-check the parent at read time for that case.
 
 UPDATE moments
    SET is_public = 0
@@ -38,3 +64,31 @@ UPDATE moments
         WHERE root.id = moments.parent_moment_id
           AND root.is_public = 1
    );
+
+CREATE TRIGGER IF NOT EXISTS trg_moments_reply_public_insert
+BEFORE INSERT ON moments
+WHEN NEW.received_via = 'self'
+ AND NEW.parent_moment_id IS NOT NULL
+ AND NEW.is_public = 1
+ AND NOT EXISTS (
+     SELECT 1 FROM moments AS parent
+      WHERE parent.id = NEW.parent_moment_id
+        AND parent.is_public = 1
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'a reply can be public only under a public moment');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_moments_reply_public_update
+BEFORE UPDATE OF is_public, parent_moment_id, received_via ON moments
+WHEN NEW.received_via = 'self'
+ AND NEW.parent_moment_id IS NOT NULL
+ AND NEW.is_public = 1
+ AND NOT EXISTS (
+     SELECT 1 FROM moments AS parent
+      WHERE parent.id = NEW.parent_moment_id
+        AND parent.is_public = 1
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'a reply can be public only under a public moment');
+END;
