@@ -97,6 +97,38 @@ def _readable_params(viewer_user_id: str, max_hops: int) -> tuple:
     return (viewer_user_id, *(viewer_user_id,) * 5, capped_hops)
 
 
+#: What one viewer may read of a *thread*: the inbox rule without its
+#: 24-hour window. A reply drops out for a personal or guardian block, child
+#: protection (§CP.R), the viewer's ``max_hops`` or expiry — never because
+#: it is a day old and the viewer doesn't follow whoever wrote it, which
+#: would empty a thread whose root (a followed author's) is still readable
+#: and shrink its count. Binds the viewer, then the hop cap; bind with
+#: :func:`_thread_params`.
+_THREAD_READABLE_SQL = f"""
+    (
+      (m.author_user_id = ? AND m.deleted_at IS NULL
+       AND datetime(m.expires_at) > datetime('now'))
+      OR (
+        {_NOT_GFS_FOR_PROTECTED_SQL}
+        AND m.author_user_id NOT IN (
+            SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
+        )
+        AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
+        AND datetime(m.expires_at) > datetime('now')
+        AND m.deleted_at IS NULL
+        AND m.hop_count <= ?
+      )
+    )
+"""
+
+
+def _thread_params(viewer_user_id: str, max_hops: int) -> tuple:
+    """Bindings for :data:`_THREAD_READABLE_SQL`: the viewer for every
+    placeholder but the last, then ``max_hops`` clamped to [1, 3]."""
+    capped_hops = max(1, min(int(max_hops), 3))
+    return (*(viewer_user_id,) * (_THREAD_READABLE_SQL.count("?") - 1), capped_hops)
+
+
 @runtime_checkable
 class AbstractMomentRepo(Protocol):
     async def save(self, moment: Moment) -> Moment: ...
@@ -485,8 +517,8 @@ class SqliteMomentRepo:
         """Replies in chronological order so the thread reads top-down.
 
         With ``viewer_user_id``, only the replies that viewer may read —
-        :data:`_READABLE_SQL`, the rule :meth:`get_readable` and the inbox
-        use: no personal or guardian block, within ``max_hops``, never a
+        :data:`_THREAD_READABLE_SQL`, the inbox rule without its 24-hour
+        window: no personal or guardian block, within ``max_hops``, never a
         GFS-delivered reply for a protected viewer (§CP.R)."""
         if viewer_user_id is None:
             rows = await self._db.fetchall(
@@ -497,8 +529,8 @@ class SqliteMomentRepo:
         else:
             rows = await self._db.fetchall(
                 f"SELECT m.* FROM moments AS m WHERE m.parent_moment_id=?"
-                f" AND {_READABLE_SQL} ORDER BY m.created_at ASC",
-                (parent_moment_id, *_readable_params(viewer_user_id, max_hops)),
+                f" AND {_THREAD_READABLE_SQL} ORDER BY m.created_at ASC",
+                (parent_moment_id, *_thread_params(viewer_user_id, max_hops)),
             )
         return [m for m in (_row_to_moment(d) for d in rows_to_dicts(rows)) if m]
 
@@ -605,8 +637,8 @@ class SqliteMomentRepo:
         if viewer_user_id is None:
             readable, params = "m.deleted_at IS NULL", ()
         else:
-            readable = _READABLE_SQL
-            params = _readable_params(viewer_user_id, max_hops)
+            readable = _THREAD_READABLE_SQL
+            params = _thread_params(viewer_user_id, max_hops)
         rep_rows = await self._db.fetchall(
             f"""
             SELECT m.parent_moment_id AS moment_id, COUNT(*) AS n

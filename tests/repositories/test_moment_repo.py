@@ -642,3 +642,31 @@ async def test_your_own_reply_shows_whoever_you_blocked(db, repo):
     await repo.save(_moment(id="r-me", author="u-me", parent_moment_id="m-root"))
     replies = await repo.list_replies("m-root", viewer_user_id="u-me")
     assert [r.id for r in replies] == ["r-me"]
+
+
+async def test_an_older_reply_stays_in_a_thread_you_can_still_read(db, repo):
+    """Replies drop out for blocks, child protection, hops and expiry —
+    not for the inbox's 24-hour window. A reply from someone the viewer
+    doesn't follow stays in the thread (and its count) for as long as the
+    thread itself is readable, instead of vanishing after a day while the
+    followed author's moment is still there."""
+    await db.enqueue(
+        "INSERT INTO user_follows(follower_user_id, followed_user_id) VALUES(?, ?)",
+        ("u-me", "u-author"),
+    )
+    await repo.save(
+        _moment(id="m-root", author="u-author", created_offset_min=-3 * 24 * 60)
+    )
+    await repo.save(
+        _moment(
+            id="r-stranger",
+            author="u-stranger",
+            parent_moment_id="m-root",
+            created_offset_min=-2 * 24 * 60,
+        )
+    )
+    assert (await repo.get_readable("m-root", "u-me")).id == "m-root"
+    replies = await repo.list_replies("m-root", viewer_user_id="u-me")
+    assert [r.id for r in replies] == ["r-stranger"]
+    counts = await repo.count_engagement_for(["m-root"], viewer_user_id="u-me")
+    assert counts["m-root"]["reply_count"] == 1

@@ -293,9 +293,10 @@ instance.
   moments never surface — same plumbing the Highlights pillar uses.
   A thread follows the same rule per reply: ``list_replies`` and the
   ``reply_count`` from ``count_engagement_for`` take the viewer and
-  apply the inbox filter (personal block, guardian block both ways,
-  ``max_hops``, no GFS replies for a protected account), so a hidden
-  person's reply neither shows nor counts.
+  apply the inbox filter without its 24-hour window (personal block,
+  guardian block both ways, ``max_hops``, no GFS replies for a
+  protected account), so a hidden person's reply neither shows nor
+  counts, and an older reply stays as long as its thread is readable.
 * **Report.** ``POST /api/moments/{id}/report`` files a
   ``content_reports`` row with ``target_type='moment'``. The same
   table also accepts ``target_type='highlight'`` (filed via
