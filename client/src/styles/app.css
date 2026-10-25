@@ -20042,7 +20042,10 @@ h2 + .sh-settings-subcard {
   display: flex;
   align-items: center;
   gap: var(--sh-space-sm);
+  min-height: 36px;
 }
+/* A long name wraps; the box keeps its size. */
+.sh-highlight-composer-audience-row input { flex-shrink: 0; }
 .sh-highlight-composer-advanced-toggle {
   align-self: flex-start;
   background: none;

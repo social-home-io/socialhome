@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
+import { HighlightsPreferencesPanel } from './HighlightsPreferencesPanel'
 import { useTitle } from '@/store/pageTitle'
 import { signal, useSignal } from '@preact/signals'
 import { currentUser } from '@/store/auth'
@@ -570,98 +571,6 @@ function BlockedAccountsPanel() {
           ))}
         </ul>
       )}
-    </div>
-  )
-}
-
-interface HighlightsPrefs {
-  retention_days?: number
-  max_count?: number
-  default_audience?: { kind: 'all_paired' | 'households' | 'users' }
-}
-
-function HighlightsPreferencesPanel() {
-  // Read straight from the cached preferences each render — the
-  // `setPreference` helper updates the cache in place, so the form
-  // re-renders with the latest values when the user saves.
-  const prefs = (() => {
-    try {
-      const raw = (currentUser.value as unknown as { preferences_json?: string } | null)
-        ?.preferences_json
-      if (!raw) return {} as HighlightsPrefs
-      const parsed = JSON.parse(raw) as { highlights?: HighlightsPrefs }
-      return parsed.highlights ?? {}
-    } catch { return {} as HighlightsPrefs }
-  })()
-  const retentionDays = useSignal<number>(prefs.retention_days ?? 30)
-  const maxCount = useSignal<number>(prefs.max_count ?? 100)
-  const audienceKind = useSignal<'all_paired' | 'households' | 'users'>(
-    prefs.default_audience?.kind ?? 'all_paired',
-  )
-
-  const save = async () => {
-    try {
-      await setPreference('highlights', {
-        retention_days: retentionDays.value,
-        max_count: maxCount.value,
-        default_audience: { kind: audienceKind.value },
-      })
-      showToast(t('settings.highlights.saved'), 'success')
-    } catch {
-      showToast(t('settings.highlights.save_failed'), 'error')
-    }
-  }
-
-  return (
-    <div id="highlights" class="sh-settings-highlights-panel sh-settings-subcard">
-      <h3>{t('nav.highlights')}</h3>
-      <p class="sh-muted">
-        {t('settings.highlights.blurb')}
-      </p>
-      <label class="sh-form-row">
-        {t('settings.highlights.retention')}
-        <input
-          type="number"
-          min={1}
-          max={90}
-          value={retentionDays.value}
-          onInput={e => {
-            const n = Number((e.target as HTMLInputElement).value)
-            retentionDays.value = Number.isFinite(n) ? n : 30
-          }}
-        />
-      </label>
-      <label class="sh-form-row">
-        {t('settings.highlights.max_count')}
-        <input
-          type="number"
-          min={10}
-          max={500}
-          value={maxCount.value}
-          onInput={e => {
-            const n = Number((e.target as HTMLInputElement).value)
-            maxCount.value = Number.isFinite(n) ? n : 100
-          }}
-        />
-      </label>
-      <label class="sh-form-row">
-        {t('settings.highlights.audience')}
-        <select
-          value={audienceKind.value}
-          onChange={e => {
-            const v = (e.target as HTMLSelectElement).value as
-              'all_paired' | 'households' | 'users'
-            audienceKind.value = v
-          }}
-        >
-          <option value="all_paired">{t('settings.highlights.audience_all')}</option>
-          <option value="households">{t('settings.highlights.audience_households')}</option>
-          <option value="users">{t('settings.highlights.audience_users')}</option>
-        </select>
-      </label>
-      <div class="sh-form-actions">
-        <Button onClick={save}>{t('common.save')}</Button>
-      </div>
     </div>
   )
 }

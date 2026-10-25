@@ -218,6 +218,20 @@ describe('HighlightComposerPage today\'s audience', () => {
     expect(all.parentElement!.textContent).not.toContain('default')
   })
 
+  it('a new day pre-ticks the households chosen in Settings and sends exactly them', async () => {
+    me.preferences_json = '{"highlights": {"default_audience": {"kind": "households", "ids": ["inst-b", "inst-gone"]}}}'
+    mockToday(null)
+    const view = render(<HighlightComposerPage />)
+    const smiths = await view.findByLabelText(/The Smiths/) as HTMLInputElement
+    expect(smiths.checked).toBe(true)
+    const bodies = await postTwoFrames(view)
+    for (const body of bodies) {
+      expect(body.audience_kind).toBe('households')
+      // A household no longer paired is dropped, never sent.
+      expect(body.audience).toEqual(['inst-b'])
+    }
+  })
+
   it('without a Settings default, all paired households is the marked default', async () => {
     mockToday(null)
     const view = render(<HighlightComposerPage />)

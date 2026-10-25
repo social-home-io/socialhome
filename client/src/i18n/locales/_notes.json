@@ -527,5 +527,6 @@
   "highlight.inbox.stale": "{time} is a clock time such as 13:02.",
   "moment.discover.unreachable": "{gfs} is the GFS's name. Shown instead of 'no one signed up' when the GFS did not answer.",
   "moment.discover.unreachable_cached": "{age} is a relative time such as '2 h ago' or 'yesterday'.",
-  "moment.composer.duration": "Video length next to a stopwatch icon, e.g. '12.3 s'. {len} is already formatted for the language."
+  "moment.composer.duration": "Video length next to a stopwatch icon, e.g. '12.3 s'. {len} is already formatted for the language.",
+  "highlight.audience.new_default": "{who} is a list of names or a count such as '2 paired households'."
 }
