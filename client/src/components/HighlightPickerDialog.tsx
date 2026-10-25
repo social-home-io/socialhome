@@ -19,6 +19,7 @@ import { currentUser } from '@/store/auth'
 import type { HighlightInboxItem } from '@/types'
 import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
+import { highlightDateLabel } from '@/utils/highlightDate'
 
 const open = signal(false)
 const scope = signal<'household' | 'space'>('household')
@@ -141,7 +142,7 @@ export function HighlightPickerDialog() {
                       </span>
                     )}
                     <span class="sh-highlight-picker-meta">
-                      <strong>{item.highlight.highlight_date}</strong>
+                      <strong>{highlightDateLabel(item.highlight.highlight_date)}</strong>
                       <span class="sh-muted">
                         {t(isOne(item.frames.length) ? 'highlight.frames_one' : 'highlight.frames', { n: String(item.frames.length) })}
                       </span>

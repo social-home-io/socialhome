@@ -78,6 +78,7 @@ h1, h2, h3, h4, h5, h6 {
    * editorial without going stiff. */
   font-weight: 600;
   font-feature-settings: var(--sh-display-feat);
+  font-variant-numeric: lining-nums tabular-nums;
   font-variation-settings: var(--sh-display-axes);
   line-height: var(--sh-line-height-tight);
   letter-spacing: -0.012em;
@@ -2980,8 +2981,9 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   border: none;
   color: var(--sh-text-muted);
   cursor: pointer;
-  width: 32px;
-  height: 32px;
+  /* ≥ 36 px tap target on every device, not only coarse pointers. */
+  width: 36px;
+  height: 36px;
   border-radius: var(--sh-radius-full);
   font-size: 1.15rem;
   line-height: 1;
@@ -3124,6 +3126,7 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
 .sh-reaction-add {
   color: var(--sh-text-muted);
   font-weight: 600;
+  min-height: 36px;
   padding: 3px 10px 3px 8px;
   background: var(--sh-bg-secondary);
   border-style: dashed;
@@ -3152,6 +3155,7 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
 .sh-comment-btn {
   display: inline-flex;
   align-items: center;
+  min-height: 36px;
   gap: var(--sh-space-xs);
   background: transparent;
   border: none;
@@ -3596,8 +3600,8 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
 .sh-type-btn {
   background: transparent;
   border: none;
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   border-radius: var(--sh-radius-full);
   cursor: pointer;
   font-size: var(--sh-font-size-base);
@@ -14978,8 +14982,8 @@ a.sh-link-preview-link:focus-visible {
   border: 0;
   cursor: pointer;
   font-size: 1.1rem;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border-radius: var(--sh-radius-full);
   display: inline-flex;
   align-items: center;
@@ -20021,6 +20025,14 @@ h2 + .sh-settings-subcard {
   color: var(--sh-primary-text);
   cursor: pointer;
   padding: 4px 0;
+  min-height: 36px;
+}
+/* Text links that act as controls (the composer's Cancel, the drop
+ * zone's "choose media…"): a 36 px tall hit area around the words. */
+.sh-tap-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
 }
 
 /* Share-card (feed) */

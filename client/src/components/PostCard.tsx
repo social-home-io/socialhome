@@ -308,7 +308,6 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
                 highlightId={post.linked_highlight_id ?? null}
                 postId={post.id}
                 spaceId={scopedSpaceId}
-                note={post.content}
               />
             )}
             {post.type === 'location' && post.location && (

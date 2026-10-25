@@ -152,7 +152,8 @@
                             'Menlo', 'Cascadia Code', monospace;
   /* Variable-axis tuning copied from the marketing site so display
    * Fraunces feels hand-set rather than stock. */
-  --sh-display-feat: "ss01" on, "salt" on;
+  /* Lining, tabular figures: Fraunces' old-style digits made "(3)" read like "(5)". */
+  --sh-display-feat: "ss01" on, "salt" on, "lnum" on, "tnum" on;
   --sh-display-axes: "SOFT" 75, "WONK" 1, "opsz" 96;
   --sh-font-size-xs:    0.75rem;
   --sh-font-size-sm:    0.875rem;

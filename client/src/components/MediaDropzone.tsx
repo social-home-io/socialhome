@@ -128,7 +128,7 @@ export function MediaDropzone({
         is a no-op per the HTML spec, so we rely on the input's
         ``disabled`` attribute alone for the gating logic.
       */}
-      <label class="sh-link">
+      <label class="sh-link sh-tap-link">
         {pickLabel}
         <input
           type="file"

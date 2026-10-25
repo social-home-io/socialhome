@@ -183,3 +183,20 @@ describe('emoji draw in colour everywhere', () => {
     expectEmojiOnly(readFileSync(FONTS_CSS, 'utf8'), 'fonts.css')
   })
 })
+
+describe('counts in Fraunces headings read as the right number', () => {
+  // Fraunces' default (old-style) figures sit on the baseline at x-height:
+  // "Seen by (3)" read like "(5)". Headings use lining, tabular figures.
+  it('the display features turn on lining and tabular figures', () => {
+    const tokens = readFileSync(join(STYLES, 'tokens.css'), 'utf8')
+    const feat = /--sh-display-feat:\s*([^;]+);/.exec(tokens)?.[1] ?? ''
+    expect(feat).toMatch(/"lnum"\s+on/)
+    expect(feat).toMatch(/"tnum"\s+on/)
+  })
+
+  it('headings ask for lining figures even where a rule drops the token', () => {
+    const app = readFileSync(join(STYLES, 'app.css'), 'utf8')
+    const rule = /h1, h2, h3, h4, h5, h6 \{[^}]*\}/.exec(app)?.[0] ?? ''
+    expect(rule).toMatch(/font-variant-numeric:\s*lining-nums tabular-nums/)
+  })
+})

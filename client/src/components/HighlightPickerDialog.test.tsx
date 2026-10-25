@@ -56,6 +56,8 @@ describe('HighlightPickerDialog', () => {
     ])
     openHighlightPicker({ scope: 'household' })
     const { findByText } = render(<HighlightPickerDialog />)
-    expect(await findByText('2026-05-03')).toBeTruthy()
+    // The day in words, like the rest of Highlights — never the raw key.
+    expect(await findByText('May 3, 2026')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('2026-05-03')
   })
 })

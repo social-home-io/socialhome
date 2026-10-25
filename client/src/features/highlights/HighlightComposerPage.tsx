@@ -340,7 +340,7 @@ export default function HighlightComposerPage() {
     <form class="sh-form sh-highlight-composer" onSubmit={submit}>
       <header class="sh-highlights-header">
         <h2>{t('highlight.composer.title')}</h2>
-        <a href={addBase('/highlights')} class="sh-link">{t('common.cancel')}</a>
+        <a href={addBase('/highlights')} class="sh-link sh-tap-link">{t('common.cancel')}</a>
       </header>
 
       <MediaDropzone
