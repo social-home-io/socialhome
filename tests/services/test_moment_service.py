@@ -305,6 +305,44 @@ async def test_reply_to_public_moment_may_be_public(stack):
     assert reply.is_public is True
 
 
+async def test_reply_to_a_remote_moment_marked_public_may_be_public(stack):
+    """A public moment that reached us through pairing first is marked
+    public once its GFS copy arrives (``mark_public``); a reply to it can
+    then be public, like a reply to any public moment."""
+    b = await stack.provision("bob")
+    now = datetime.now(UTC)
+    await stack.moment_repo.save(
+        Moment(
+            id="m-remote",
+            author_user_id="u-noor",
+            content="bees",
+            media_url=None,
+            media_type=None,
+            duration_ms=None,
+            parent_moment_id=None,
+            origin_instance_id="inst-noor",
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(days=1)).isoformat(),
+            received_via="household",
+        )
+    )
+    first = await stack.moment_svc.create_moment(
+        author_user_id=b.user_id,
+        content="before",
+        parent_moment_id="m-remote",
+        is_public=True,
+    )
+    assert first.is_public is False
+    await stack.moment_repo.mark_public("m-remote")
+    stack_reply = await stack.moment_svc.create_moment(
+        author_user_id=b.user_id,
+        content="after",
+        parent_moment_id="m-remote",
+        is_public=True,
+    )
+    assert stack_reply.is_public is True
+
+
 # ── Reactions ─────────────────────────────────────────────────────────────
 
 

@@ -11,12 +11,14 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import replace
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.domain.events import MomentCreated
+from socialhome.domain.moment import Moment
 from socialhome.global_server.envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.moment_public_seal import item_key, seal_body, sign_wire
@@ -627,3 +629,44 @@ def test_the_age_window_covers_every_honest_delay():
     then for its key here; the window must not refuse it."""
     honest = ENVELOPE_QUEUE_TTL_SECONDS + HOLD_FOR_S + SENT_AT_MAX_SKEW_S
     assert SENT_AT_MAX_AGE_S >= honest
+
+
+async def test_a_public_moment_held_first_through_pairing_becomes_public(db):
+    """A paired household can deliver a moment before the GFS does; that
+    copy says nothing about public. When the GFS copy (signed, sealed,
+    live) then names it public, the held row is marked public — so a
+    local reply to it can be public too (owner decision 2026-10-25:
+    replies may be public when the moment they answer is) — without
+    being stored or announced a second time, and it keeps where it came
+    from (a protected account still sees a paired household's moment)."""
+    bus = EventBus()
+    seen: list = []
+    bus.subscribe(MomentCreated, lambda e: seen.append(e))
+    inbound, _follows = await _env(db)
+    inbound._bus = bus  # type: ignore[attr-defined]
+    body = _moment("m-both")
+    repo = SqliteMomentRepo(db)
+    await repo.save(
+        Moment(
+            id="m-both",
+            author_user_id="u-noor",
+            content="bees",
+            media_url=None,
+            media_type=None,
+            duration_ms=None,
+            parent_moment_id=None,
+            origin_instance_id="inst-noor",
+            created_at=body["created_at"],
+            expires_at=body["expires_at"],
+            received_via="household",
+        )
+    )
+    await _create(inbound, body)
+    got = await repo.get("m-both")
+    assert got is not None and got.is_public is True
+    assert got.received_via == "household"
+    assert seen == []
+    # A forged or sealed-to-someone-else copy never flips it.
+    await repo.save(replace(got, id="m-other", is_public=False))
+    await _create(inbound, _moment("m-other"), seed=_OTHER_SEED)
+    assert (await repo.get("m-other")).is_public is False

@@ -32,11 +32,14 @@ uses.
   (`MomentPublicShareService.link`, fail closed), and migration `0123`
   cleared `is_public` on this household's replies the old composer stored
   public under a moment that isn't. "Public" is what this household
-  stores: a public moment that also arrived from a paired household can
-  be stored `is_public = 0` (the household copy and the GFS copy
-  overwrite each other's `is_public` on save), so a reply to it stays in
-  the household — a behaviour change from #1158, in the direction of
-  fewer people.
+  stores. A public moment that reached it through a paired household
+  first is held as that household copy (`is_public = 0`); when the
+  verified GFS copy arrives it is not stored or announced again, but the
+  held row is marked public (`SqliteMomentRepo.mark_public` — only the
+  flag; a row authored here or a tombstone never changes), so a reply to
+  it can be public. A household that holds the moment only through
+  pairing (it follows nobody on a GFS) keeps it not public, and its
+  replies stay with paired households.
 * Public replies fan out **both** through the GFS path and through the
   replier's paired households (normal moment federation). A follower
   that does not hold the parent drops a GFS-delivered reply (INFO) — it
