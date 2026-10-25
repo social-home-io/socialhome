@@ -361,3 +361,15 @@ describe('PostCard link preview', () => {
     })
   })
 })
+
+describe('PostCard — a shared highlight', () => {
+  it('shows the sharer\'s note once, not again inside the card', () => {
+    const post = {
+      ...mockPost, id: 'p-hl', type: 'highlight_share', content: 'Unser Sonntag 💛',
+      linked_highlight_id: null,
+    } as unknown as FeedPost
+    const { container } = render(<PostCard post={post} />)
+    const text = container.textContent ?? ''
+    expect(text.split('Unser Sonntag').length - 1).toBe(1)
+  })
+})
