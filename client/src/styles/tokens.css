@@ -136,19 +136,17 @@
      Bundled with the SPA (styles/fonts.css), never fetched from a
      font CDN. Keep the system fallback chain so the first paint
      isn't held back while the WOFF2 loads (font-display: swap).
-     The colour emoji families sit before the generic family: on Linux
+     The colour emoji alias (fonts.css) sits before the generic family: on Linux
      / ChromeOS ``sans-serif`` / ``serif`` resolve to DejaVu, which
      draws 😂 😮 😢 as monochrome outlines (fonts.test.ts guards it). */
   --sh-font-family:         'Manrope', -apple-system, BlinkMacSystemFont,
-                            'Segoe UI', Roboto, 'Apple Color Emoji',
-                            'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
+                            'Segoe UI', Roboto, 'SH Color Emoji', sans-serif;
   /* Display = Fraunces serif. Matches the marketing site's editorial
    * voice (page hero, empty-state heroes, dialog titles) — without
    * this, the SPA reads as a generic Manrope-everywhere SaaS app even
    * though the wordmark already carries the Fraunces character. */
   --sh-font-family-display: 'Fraunces', 'Iowan Old Style', Georgia,
-                            'Apple Color Emoji', 'Segoe UI Emoji',
-                            'Noto Color Emoji', serif;
+                            'SH Color Emoji', serif;
   --sh-font-family-wordmark:'Fraunces', 'Iowan Old Style', Georgia, serif;
   --sh-font-family-mono:    'JetBrains Mono', ui-monospace, 'SF Mono',
                             'Menlo', 'Cascadia Code', monospace;

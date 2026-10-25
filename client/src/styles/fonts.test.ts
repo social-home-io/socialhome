@@ -105,20 +105,50 @@ describe('no third-party font host anywhere in the SPA source', () => {
   })
 })
 
-/** A colour emoji family, named before the generic family. On Linux and
- *  ChromeOS the generic ``sans-serif`` / ``serif`` resolve to DejaVu,
- *  which draws U+1F600–1F64F (😂 😮 😢) as monochrome outlines; with no
- *  emoji family in the stack those faces never reach Noto Color Emoji. */
-const EMOJI_FAMILIES = ['Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji']
+/** The colour emoji fonts, behind one alias (``fonts.css``) whose
+ *  ``unicode-range`` holds emoji code points only. On Linux and ChromeOS
+ *  the generic ``sans-serif`` / ``serif`` resolve to DejaVu, which draws
+ *  U+1F600–1F64F (😂 😮 😢) as monochrome outlines, so a colour family has
+ *  to come before the generic one. Named directly, Noto Color Emoji would
+ *  then also draw digits, ``#``, ``*`` and spaces (it carries them for
+ *  keycaps) wherever no earlier font covers them — the public viewer, a
+ *  Serif theme without Georgia. The alias can only draw emoji. */
+const EMOJI_ALIAS = 'SH Color Emoji'
+const EMOJI_FONTS = ['Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji']
 const GENERIC_FAMILIES = new Set(['sans-serif', 'serif', 'monospace', 'system-ui'])
 
 function expectColourEmoji(stack: string, where: string): void {
   const families = stack.split(',').map((f) => f.trim().replace(/^['"]|['"]$/g, ''))
   const generic = families.findIndex((f) => GENERIC_FAMILIES.has(f))
-  for (const emoji of EMOJI_FAMILIES) {
-    const at = families.indexOf(emoji)
-    expect(at, `${where} lists ${emoji}`).toBeGreaterThan(-1)
-    if (generic > -1) expect(at, `${where}: ${emoji} before ${families[generic]}`).toBeLessThan(generic)
+  const at = families.indexOf(EMOJI_ALIAS)
+  expect(at, `${where} lists ${EMOJI_ALIAS}`).toBeGreaterThan(-1)
+  if (generic > -1) expect(at, `${where}: ${EMOJI_ALIAS} before ${families[generic]}`).toBeLessThan(generic)
+  for (const font of EMOJI_FONTS) {
+    expect(families, `${where} names ${font} only through the alias`).not.toContain(font)
+  }
+}
+
+/** The ``unicode-range`` of the alias's ``@font-face`` in ``css``, as
+ *  [start, end] code point pairs. */
+function emojiAliasRanges(css: string, where: string): [number, number][] {
+  const face = (css.match(/@font-face\s*\{[^}]*\}/g) ?? []).find((f) => f.includes(`'${EMOJI_ALIAS}'`))
+  expect(face, `${where} declares @font-face '${EMOJI_ALIAS}'`).toBeTruthy()
+  for (const font of EMOJI_FONTS) expect(face, `${where}: local('${font}')`).toContain(`local('${font}')`)
+  const range = /unicode-range:\s*([^;}]+)/.exec(face!)?.[1] ?? ''
+  return range.split(',').map((r) => {
+    const [a, b] = r.trim().replace(/^U\+/i, '').split('-')
+    return [parseInt(a, 16), parseInt(b ?? a, 16)] as [number, number]
+  })
+}
+
+function expectEmojiOnly(css: string, where: string): void {
+  const ranges = emojiAliasRanges(css, where)
+  const covers = (cp: number) => ranges.some(([a, b]) => cp >= a && cp <= b)
+  for (const ch of ' 0123456789#*aZ.,ü') {
+    expect(covers(ch.codePointAt(0)!), `${where} alias must not draw ${JSON.stringify(ch)}`).toBe(false)
+  }
+  for (const ch of ['😂', '😮', '😢', '😊', '❤', '🔥', '👏', '☕', '🎃', '\u200d', '\ufe0f']) {
+    expect(covers(ch.codePointAt(0)!), `${where} alias draws ${ch}`).toBe(true)
   }
 }
 
@@ -146,5 +176,10 @@ describe('emoji draw in colour everywhere', () => {
   it('the public highlight viewer (GFS + pinned page) lists one', () => {
     const css = readFileSync(join(CLIENT, 'gfs', 'public_highlight.css'), 'utf8')
     expectColourEmoji(fontStackIn(css, 'html,body\\{[^}]*?font-family'), 'public_highlight.css')
+    expectEmojiOnly(css, 'public_highlight.css')
+  })
+
+  it('the alias draws emoji only, never digits, # or spaces', () => {
+    expectEmojiOnly(readFileSync(FONTS_CSS, 'utf8'), 'fonts.css')
   })
 })

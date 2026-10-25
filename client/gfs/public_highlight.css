@@ -6,7 +6,8 @@
  * socialhome/global_server/routes/highlights.py; a pytest keeps the two
  * identical. One rule per line; this comment is dropped by the build.
  */
-html,body{margin:0;padding:0;background:#111;color:#eee;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',system-ui,sans-serif;height:100%;}
+@font-face{font-family:'SH Color Emoji';src:local('Apple Color Emoji'),local('Segoe UI Emoji'),local('Noto Color Emoji');unicode-range:U+200D,U+20E3,U+2194-2199,U+21A9-21AA,U+231A-231B,U+2328,U+23CF,U+23E9-23F3,U+23F8-23FA,U+24C2,U+25AA-25AB,U+25B6,U+25C0,U+25FB-25FE,U+2600-27BF,U+2934-2935,U+2B05-2B07,U+2B1B-2B1C,U+2B50,U+2B55,U+3030,U+303D,U+3297,U+3299,U+FE0F,U+1F000-1FAFF,U+E0020-E007F;font-display:swap;}
+html,body{margin:0;padding:0;background:#111;color:#eee;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'SH Color Emoji',system-ui,sans-serif;height:100%;}
 #root{height:100vh;display:flex;}
 .highlight-viewer{display:flex;flex-direction:column;width:100%;}
 .highlight-author{display:flex;align-items:center;gap:12px;padding:12px 12px 0;}
