@@ -120,3 +120,29 @@ describe('MomentumInboxTab when a load fails', () => {
     expect(container.textContent).toContain('Bob')
   })
 })
+
+describe('MomentumInboxTab time without unit formatting', () => {
+  it('falls back to the translated short form, never a hard-coded "5m"', async () => {
+    const { setLocale } = await import('@/i18n/i18n')
+    await setLocale('de')
+    const RealNF = Intl.NumberFormat
+    const spy = vi.spyOn(Intl, 'NumberFormat').mockImplementation(((loc: string, opts?: Intl.NumberFormatOptions) => {
+      if (opts?.style === 'unit') throw new RangeError('unsupported')
+      return new RealNF(loc, opts)
+    }) as unknown as typeof Intl.NumberFormat)
+    try {
+      vi.mocked(api.get).mockReset().mockImplementation(async (path: string) => path === '/api/moments'
+        ? [moment('m-5', 'uid-bob', {
+          created_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+          author: { display_name: 'Bob', picture_url: null },
+        })]
+        : [])
+      const { container } = render(<MomentumInboxTab />)
+      await waitFor(() => expect(container.textContent).toContain('Bob'))
+      expect(container.textContent).toContain('vor 5 Min.')
+    } finally {
+      spy.mockRestore()
+      await setLocale('en')
+    }
+  })
+})

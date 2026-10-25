@@ -21,6 +21,7 @@ import { api, ApiError } from '@/api'
 import { FINAL_GFS_ERRORS, gfsConnectErrorText } from '@/features/connections/gfsErrors'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
+import { instanceConfig } from '@/store/instance'
 import { Button } from './Button'
 
 interface OnboardStep {
@@ -47,7 +48,11 @@ const STEPS: OnboardStep[] = [
             <span class="sh-onboard-avatar sh-onboard-avatar--c">L</span>
             <span class="sh-onboard-avatars-more">+2</span>
           </div>
-          <div class="sh-onboard-card-title">{t('onboarding.welcome.illus_household')}</div>
+          {/* This household's own name; a neutral label before the SPA
+           *  knows it — never a sample family name. */}
+          <div class="sh-onboard-card-title">
+            {instanceConfig.value?.instance_name?.trim() || t('onboarding.welcome.illus_household')}
+          </div>
           <div class="sh-onboard-card-meta">{t('onboarding.welcome.illus_meta')}</div>
         </div>
       </div>

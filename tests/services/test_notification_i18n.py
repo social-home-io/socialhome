@@ -14,9 +14,12 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
+    MomentCreated,
+    MomentReactionChanged,
     PostCreated,
     SpaceAdminSeedsRetiredAfterRestore,
     TaskAssigned,
+    UserFollowed,
 )
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.space import (
@@ -195,5 +198,77 @@ async def test_post_restore_admin_notice_is_translated_for_the_owner(tmp_dir):
             shipped.gettext("notification.space.admins_reconfirm", locale="de")
         ]
         assert "Backup" in notes[0].title
+    finally:
+        await db.shutdown()
+
+
+# ─── Momentum: named, in the recipient's language ───────────────────────
+
+
+async def test_moment_notifications_name_the_person_and_are_translated(tmp_dir):
+    """A reaction, reply or follow names the person — by the name this
+    household holds for them, never their raw user id — in the
+    recipient's language (shipped catalogs, every locale)."""
+    shipped = Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
+    keys = (
+        "notification.moment.reacted",
+        "notification.moment.replied",
+        "notification.user.followed",
+        "notification.someone",
+    )
+    for locale in ("en", "de", "es", "fr", "nl"):
+        for key in keys:
+            assert shipped.gettext(key, locale=locale) != key, (locale, key)
+    db = AsyncDatabase(tmp_dir / "m.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name, locale)"
+            " VALUES('bob', 'b-id', 'Bob', 'de'), ('anna', 'a-id', 'Anna', 'en')",
+        )
+        bus = EventBus()
+        repo = SqliteNotificationRepo(db)
+        NotificationService(
+            repo, SqliteUserRepo(db), SqliteSpaceRepo(db), bus, i18n=shipped
+        ).wire()
+        # Anna (named) reacts to Bob's moment; someone nobody here knows
+        # replies and follows him.
+        await bus.publish(
+            MomentReactionChanged(
+                moment_id="m-1",
+                reactor_user_id="a-id",
+                author_user_id="b-id",
+                emoji="🔥",
+            )
+        )
+        await bus.publish(
+            MomentCreated(
+                moment_id="m-2",
+                author_user_id="ru-unknown-7f3a",
+                content="hey",
+                media_url=None,
+                media_type=None,
+                duration_ms=None,
+                parent_moment_id="m-1",
+                parent_author_user_id="b-id",
+                origin_instance_id="peer",
+                expires_at="2026-12-01T00:00:00+00:00",
+            )
+        )
+        await bus.publish(
+            UserFollowed(follower_user_id="ru-unknown-7f3a", followed_user_id="b-id")
+        )
+        titles = {n.type: n.title for n in await repo.list("b-id")}
+        someone = shipped.gettext("notification.someone", locale="de")
+        assert titles["moment_reacted"] == shipped.gettext(
+            "notification.moment.reacted", locale="de", name="Anna", emoji="🔥"
+        )
+        assert titles["moment_replied"] == shipped.gettext(
+            "notification.moment.replied", locale="de", name=someone
+        )
+        assert titles["user_followed"] == shipped.gettext(
+            "notification.user.followed", locale="de", name=someone
+        )
+        assert not any("ru-unknown" in t for t in titles.values())
     finally:
         await db.shutdown()

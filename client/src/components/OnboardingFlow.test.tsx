@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, waitFor, screen } from '@testing-library/preact'
 
 const { apiMock, userMock } = vi.hoisted(() => ({
@@ -23,6 +23,7 @@ vi.mock('@/store/auth', () => ({ currentUser: userMock }))
 import { ApiError } from '@/api'
 import { setLocale } from '@/i18n/i18n'
 import { OnboardingFlow } from './OnboardingFlow'
+import { instanceConfig, type InstanceConfig } from '@/store/instance'
 
 const DEFAULT_PATH = '/api/gfs/connections/default'
 
@@ -92,7 +93,7 @@ describe('OnboardingFlow — tour', () => {
     try {
       render(<OnboardingFlow onComplete={() => {}} />)
       expect(await screen.findByRole('heading', { name: 'Willkommen bei Social Home' })).toBeTruthy()
-      expect(screen.getByText('Familie Vizeli')).toBeTruthy()
+      expect(screen.getByText('Dein Haushalt')).toBeTruthy()
       fireEvent.click(screen.getByRole('button', { name: 'Weiter' }))
       expect(await screen.findByRole('heading', {
         name: 'Ein Feed für die Menschen, mit denen du lebst',
@@ -290,5 +291,25 @@ describe('OnboardingFlow — GFS step choice', () => {
     fireEvent.click(screen.getByRole('button', { name: "Let's go" }))
     expect(onComplete).toHaveBeenCalled()
     expect(postsTo(DEFAULT_PATH)).toHaveLength(1)
+  })
+})
+
+describe('OnboardingFlow — the welcome card names this household', () => {
+  beforeEach(() => { userMock.value = { ...userMock.value!, is_admin: false } })
+  afterEach(() => { instanceConfig.value = null })
+
+  it('shows the household\'s own name when the SPA knows it', async () => {
+    instanceConfig.value = { instance_name: 'Berger' } as InstanceConfig
+    render(<OnboardingFlow onComplete={() => {}} />)
+    await screen.findByRole('heading', { name: 'Welcome to Social Home' })
+    expect(document.querySelector('.sh-onboard-card-title')?.textContent).toBe('Berger')
+  })
+
+  it('otherwise a neutral sample — never a real family name', async () => {
+    render(<OnboardingFlow onComplete={() => {}} />)
+    await screen.findByRole('heading', { name: 'Welcome to Social Home' })
+    const title = document.querySelector('.sh-onboard-card-title')?.textContent ?? ''
+    expect(title).toBe('Your household')
+    expect(document.body.textContent).not.toContain('Vizeli')
   })
 })

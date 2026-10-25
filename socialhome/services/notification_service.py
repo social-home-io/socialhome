@@ -837,6 +837,18 @@ class NotificationService(ProtectionGateMixin):
             dedupe_by_link=True,
         )
 
+    async def _person_name(self, user_id: str, locale: str | None) -> str:
+        """The name this household holds for *user_id* (a local member or
+        a known remote person), else "Someone" in the recipient's language
+        — never the raw user id."""
+        local = await self._users.get_by_user_id(user_id)
+        if local is not None and local.display_name:
+            return local.display_name
+        remote = await self._users.get_remote(user_id)
+        if remote is not None and remote.display_name:
+            return remote.display_name
+        return self._t("notification.someone", locale=locale, fallback="Someone")
+
     async def _display_name(self, user_id: str) -> str:
         local = await self._users.get_by_user_id(user_id)
         if local is not None:
@@ -1972,13 +1984,18 @@ class NotificationService(ProtectionGateMixin):
         author = await self._users.get_by_user_id(event.author_user_id)
         if author is None:
             return  # remote author — their instance fires the local notif
-        reactor = await self._users.get_by_user_id(event.reactor_user_id)
-        name = reactor.display_name if reactor is not None else event.reactor_user_id
+        locale = self._locale(author)
         await self._save_notif(
             new_notification(
                 user_id=event.author_user_id,
                 type="moment_reacted",
-                title=f"{name} reacted {event.emoji} to your moment",
+                title=self._t(
+                    "notification.moment.reacted",
+                    locale=locale,
+                    fallback="{name} reacted {emoji} to your moment",
+                    name=await self._person_name(event.reactor_user_id, locale),
+                    emoji=event.emoji,
+                ),
                 link_url=f"/momentum/{event.moment_id}",
             )
         )
@@ -2001,13 +2018,17 @@ class NotificationService(ProtectionGateMixin):
         recipient = await self._users.get_by_user_id(event.parent_author_user_id)
         if recipient is None:
             return  # parent author lives on a peer instance
-        replier = await self._users.get_by_user_id(event.author_user_id)
-        name = replier.display_name if replier is not None else event.author_user_id
+        locale = self._locale(recipient)
         await self._save_notif(
             new_notification(
                 user_id=event.parent_author_user_id,
                 type="moment_replied",
-                title=f"{name} replied to your moment",
+                title=self._t(
+                    "notification.moment.replied",
+                    locale=locale,
+                    fallback="{name} replied to your moment",
+                    name=await self._person_name(event.author_user_id, locale),
+                ),
                 link_url=f"/momentum/{event.parent_moment_id}",
             )
         )
@@ -2021,13 +2042,17 @@ class NotificationService(ProtectionGateMixin):
         recipient = await self._users.get_by_user_id(event.followed_user_id)
         if recipient is None:
             return
-        follower = await self._users.get_by_user_id(event.follower_user_id)
-        name = follower.display_name if follower is not None else event.follower_user_id
+        locale = self._locale(recipient)
         await self._save_notif(
             new_notification(
                 user_id=event.followed_user_id,
                 type="user_followed",
-                title=f"{name} started following you",
+                title=self._t(
+                    "notification.user.followed",
+                    locale=locale,
+                    fallback="{name} started following you",
+                    name=await self._person_name(event.follower_user_id, locale),
+                ),
                 link_url="/momentum",
             )
         )

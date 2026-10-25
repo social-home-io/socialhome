@@ -162,7 +162,7 @@
   "space.admin_authority.legend": "Section title: the owner lets space admins act on their behalf while the owner is offline.",
   "space.dissolve.button": "'Dissolve' = permanently delete the space for everyone.",
   "space.version_banner.body": "Followed by a comma-separated list of feature names (shown in English).",
-  "onboarding.welcome.illus_household": "Sample household name on an illustration card. Use the natural way to name a family in your language.",
+  "onboarding.welcome.illus_household": "Card title on the welcome illustration when the household's own name isn't known yet. Never a sample family name.",
   "onboarding.feed.illus_meta": "Sample post meta on an illustration: 'posted in <space name> · <time ago>'. 'Family' is a sample space name.",
   "onboarding.lists.illus_date": "Sample calendar date on an illustration card (a Sunday). Short weekday + date.",
   "onboarding.connect.illus_meta": "Sample caption under a pairing QR code: the code is encrypted and expires in 5 minutes (5:00 = mm:ss countdown).",
@@ -526,5 +526,6 @@
   "moment.inbox.stale": "{time} is a clock time such as 13:02.",
   "highlight.inbox.stale": "{time} is a clock time such as 13:02.",
   "moment.discover.unreachable": "{gfs} is the GFS's name. Shown instead of 'no one signed up' when the GFS did not answer.",
-  "moment.discover.unreachable_cached": "{age} is a relative time such as '2 h ago' or 'yesterday'."
+  "moment.discover.unreachable_cached": "{age} is a relative time such as '2 h ago' or 'yesterday'.",
+  "moment.composer.duration": "Video length next to a stopwatch icon, e.g. '12.3 s'. {len} is already formatted for the language."
 }

@@ -103,7 +103,7 @@ describe('HighlightComposerPage audience picker', () => {
     fireEvent.click(view.getByLabelText('Pick households'))
     const alert = await view.findByRole('alert')
     expect(alert.textContent).toMatch(/Couldn't load your connections/)
-    expect(view.queryByText('No connected households yet.')).toBeNull()
+    expect(view.queryByText('No paired households yet.')).toBeNull()
 
     mockGet(FRIENDS)
     fireEvent.click(view.getByRole('button', { name: 'Retry' }))
@@ -116,7 +116,7 @@ describe('HighlightComposerPage audience picker', () => {
     const view = render(<HighlightComposerPage />)
     await waitFor(() => expect(get).toHaveBeenCalledWith('/api/friends'))
     fireEvent.click(view.getByLabelText('Pick households'))
-    expect(await view.findByText('No connected households yet.')).toBeTruthy()
+    expect(await view.findByText('No paired households yet.')).toBeTruthy()
   })
 })
 

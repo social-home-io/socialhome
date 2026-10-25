@@ -79,9 +79,16 @@ function narrowUnit(n: number, unit: 'minute' | 'hour' | 'day'): string {
       style: 'unit', unit, unitDisplay: 'narrow',
     }).format(n)
   } catch {
-    return `${n}${unit[0]}`
+    // An engine without unit formatting: the translated short form.
+    return t(NARROW_FALLBACK[unit], { n: String(n) })
   }
 }
+
+const NARROW_FALLBACK = {
+  minute: 'time.minutes_ago_short',
+  hour: 'time.hours_ago_short',
+  day: 'time.days_ago_short',
+} as const
 
 
 export default function MomentumInboxTab() {

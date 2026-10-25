@@ -1,6 +1,10 @@
 {
   "notification.post.created": "{author} hat einen neuen Beitrag verfasst",
   "notification.post.commented": "{author} hat deinen Beitrag kommentiert",
+  "notification.moment.reacted": "{name} hat mit {emoji} auf deinen Moment reagiert",
+  "notification.moment.replied": "{name} hat auf deinen Moment geantwortet",
+  "notification.user.followed": "{name} folgt dir jetzt",
+  "notification.someone": "Jemand",
   "notification.task.assigned": "Dir wurde zugewiesen: {title}",
   "notification.task.deadline_due": "Aufgabe heute fällig: {title}",
   "notification.space.post.created": "Neuer Beitrag in {space_name}",
