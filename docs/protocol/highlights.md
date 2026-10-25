@@ -52,7 +52,10 @@ upserts the highlight by id, then appends the frame.
 
 A day's frames share one audience — the highlight row's. The first frame
 of the day sets it (the request's `audience_kind` / `audience`, else the
-author's Settings default `highlights.default_audience`). A later frame
+author's Settings default `highlights.default_audience` = `{kind, ids}` in
+`preferences_json`; Settings › Privacy › Highlights saves the chosen
+household / user ids with the kind, and the SPA composers start a new
+day from it and send it explicitly). A later frame
 that names an audience must name the same one (same kind, same ids in any
 order); otherwise `POST /api/highlights/frames` refuses it with `409
 HIGHLIGHT_AUDIENCE_MISMATCH` before anything is written, instead of

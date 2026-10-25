@@ -32,67 +32,20 @@ import { currentUser } from '@/store/auth'
 import type { HighlightAudienceKind, OwnHighlight } from '@/types'
 import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
-import { audienceBody, defaultAudienceKind, loadMyToday, todayFixedNote } from './todayAudience'
+import {
+  audienceBody,
+  audienceFromFriends,
+  defaultAudience,
+  defaultAudienceKind,
+  loadMyToday,
+  todayFixedNote,
+  type ConnectedPerson,
+  type FriendsPayload,
+  type RemoteHousehold,
+} from './todayAudience'
 
-/** A household the audience picker offers — a confirmed social peer. */
-interface RemoteHousehold {
-  instance_id: string
-  display_name: string
-}
-
-/** A person the per-person picker offers. ``household_name`` is null
- *  for members of our own household. */
-interface ConnectedPerson {
-  user_id: string
-  display_name: string
-  household_name: string | null
-}
-
-/** The slice of ``GET /api/friends`` (``routes/friends.py``) the picker
- *  reads. ``households`` is the *social* peer list
- *  (``list_social_instances``) — the same set the highlight outbound
- *  (``HighlightFederationOutbound._resolve_audience``) fans out to, so
- *  a household invited only through a space link is never offered. */
-interface FriendsPayload {
-  instance: {
-    members: { user_id: string, display_name: string, personal_alias?: string | null }[]
-  }
-  households: {
-    instance_id: string
-    display_name: string
-    members: { user_id: string, display_name: string, personal_alias?: string | null }[]
-  }[]
-}
-
-/** Flatten ``/api/friends`` into picker rows. The author is left out of
- *  the people list — they always see their own highlight. */
-export function audienceFromFriends(
-  payload: FriendsPayload,
-  selfUserId: string | null | undefined,
-): { households: RemoteHousehold[], people: ConnectedPerson[] } {
-  const households: RemoteHousehold[] = (payload.households ?? []).map(h => ({
-    instance_id: h.instance_id, display_name: h.display_name,
-  }))
-  const people: ConnectedPerson[] = []
-  for (const m of payload.instance?.members ?? []) {
-    if (m.user_id === selfUserId) continue
-    people.push({
-      user_id: m.user_id,
-      display_name: m.personal_alias || m.display_name,
-      household_name: null,
-    })
-  }
-  for (const h of payload.households ?? []) {
-    for (const m of h.members ?? []) {
-      people.push({
-        user_id: m.user_id,
-        display_name: m.personal_alias || m.display_name,
-        household_name: h.display_name,
-      })
-    }
-  }
-  return { households, people }
-}
+// Re-exported for callers / tests that read it from the composer.
+export { audienceFromFriends }
 
 /** A media file the user has uploaded but not yet posted. Each entry
  *  becomes one frame on submit. */
@@ -142,6 +95,14 @@ async function loadAudience(): Promise<void> {
     households.value = out.households
     people.value = out.people
     audienceError.value = null
+    // A default from Settings may name a household / person no longer
+    // paired: drop it, so a frame only ever goes to someone offered here.
+    const offered = new Set(audienceKind.value === 'households'
+      ? out.households.map(h => h.instance_id)
+      : out.people.map(p => p.user_id))
+    if (audienceKind.value !== 'all_paired') {
+      audienceIds.value = audienceIds.value.filter(id => offered.has(id))
+    }
   } catch (err: unknown) {
     households.value = []
     people.value = []
@@ -172,9 +133,11 @@ export default function HighlightComposerPage() {
   useEffect(() => {
     // Reset state on mount.
     stagedFrames.value = []
-    // A new day's highlight starts from the Settings default.
-    audienceKind.value = defaultAudienceKind()
-    audienceIds.value = []
+    // A new day's highlight starts from the Settings default — the kind
+    // and the households / people picked there.
+    const fresh = defaultAudience()
+    audienceKind.value = fresh.kind
+    audienceIds.value = fresh.ids
     advanced.value = audienceKind.value === 'users'
     mineToday.value = 0
     today.value = null

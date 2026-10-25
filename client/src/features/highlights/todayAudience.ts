@@ -82,13 +82,23 @@ export function todayFixedNote(
   )
 }
 
-/** Settings › Highlights › Default audience — the kind a new day's
- *  highlight starts with. ``all_paired`` when unset or unreadable. */
-export function defaultAudienceKind(): HighlightAudienceKind {
+/** Settings › Highlights › Who sees a new highlight — the audience a new
+ *  day's highlight starts with: the kind and, for chosen households /
+ *  people, their ids. ``all_paired`` when unset or unreadable. */
+export function defaultAudience(): { kind: HighlightAudienceKind, ids: string[] } {
   const hl = getPreferences().highlights as
-    { default_audience?: { kind?: unknown } } | undefined
-  const kind = hl?.default_audience?.kind
-  return kind === 'households' || kind === 'users' ? kind : 'all_paired'
+    { default_audience?: { kind?: unknown, ids?: unknown } } | undefined
+  const raw = hl?.default_audience
+  const kind = raw?.kind === 'households' || raw?.kind === 'users' ? raw.kind : 'all_paired'
+  const ids = kind !== 'all_paired' && Array.isArray(raw?.ids)
+    ? raw.ids.filter((x): x is string => typeof x === 'string' && x !== '')
+    : []
+  return { kind, ids }
+}
+
+/** Just the kind of :func:`defaultAudience`. */
+export function defaultAudienceKind(): HighlightAudienceKind {
+  return defaultAudience().kind
 }
 
 /** Who an audience reaches, as a phrase for "Today's highlight is for
@@ -108,4 +118,64 @@ export function describeAudience(
     return t(isOne(ids.length) ? 'highlight.audience.who_households_one' : 'highlight.audience.who_households', { n })
   }
   return t(isOne(ids.length) ? 'highlight.audience.who_people_one' : 'highlight.audience.who_people', { n })
+}
+
+/** A household the audience picker offers — a confirmed social peer. */
+export interface RemoteHousehold {
+  instance_id: string
+  display_name: string
+}
+
+/** A person the per-person picker offers. ``household_name`` is null
+ *  for members of our own household. */
+export interface ConnectedPerson {
+  user_id: string
+  display_name: string
+  household_name: string | null
+}
+
+/** The slice of ``GET /api/friends`` (``routes/friends.py``) the picker
+ *  reads. ``households`` is the *social* peer list
+ *  (``list_social_instances``) — the same set the highlight outbound
+ *  (``HighlightFederationOutbound._resolve_audience``) fans out to, so
+ *  a household invited only through a space link is never offered. */
+export interface FriendsPayload {
+  instance: {
+    members: { user_id: string, display_name: string, personal_alias?: string | null }[]
+  }
+  households: {
+    instance_id: string
+    display_name: string
+    members: { user_id: string, display_name: string, personal_alias?: string | null }[]
+  }[]
+}
+
+/** Flatten ``/api/friends`` into picker rows. The author is left out of
+ *  the people list — they always see their own highlight. */
+export function audienceFromFriends(
+  payload: FriendsPayload,
+  selfUserId: string | null | undefined,
+): { households: RemoteHousehold[], people: ConnectedPerson[] } {
+  const households: RemoteHousehold[] = (payload.households ?? []).map(h => ({
+    instance_id: h.instance_id, display_name: h.display_name,
+  }))
+  const people: ConnectedPerson[] = []
+  for (const m of payload.instance?.members ?? []) {
+    if (m.user_id === selfUserId) continue
+    people.push({
+      user_id: m.user_id,
+      display_name: m.personal_alias || m.display_name,
+      household_name: null,
+    })
+  }
+  for (const h of payload.households ?? []) {
+    for (const m of h.members ?? []) {
+      people.push({
+        user_id: m.user_id,
+        display_name: m.personal_alias || m.display_name,
+        household_name: h.display_name,
+      })
+    }
+  }
+  return { households, people }
 }

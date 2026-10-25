@@ -18,9 +18,10 @@
  * always names the audience the dialog showed — so one sent after UTC
  * midnight starts the new day for the same people, and the server refuses
  * it (409) if today's highlight is for other people. A new day's highlight
- * goes to all paired households when that is the Settings default; with a
- * "pick per highlight" default the dialog sends the author to the full
- * composer instead of guessing. Share waits until today is known.
+ * goes to the Settings default (all paired households, or the households /
+ * people picked there, named in the note); with chosen households / people
+ * but none picked, the dialog sends the author to the full composer
+ * instead of guessing. Share waits until today is known.
  *
  * Mirrors the ``MomentumComposerDialog`` + ``CalendarEventDialog``
  * pattern: module-level signals + ``openHighlightQuickShare()`` helper
@@ -39,7 +40,8 @@ import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
 import {
   audienceBody,
-  defaultAudienceKind,
+  defaultAudience,
+  describeAudience,
   loadMyToday,
   todayFixedNote,
 } from '@/features/highlights/todayAudience'
@@ -93,10 +95,20 @@ export function openHighlightQuickShare(): void {
   loadToday()
 }
 
-/** A new day's highlight whose Settings default is "pick per highlight" —
- *  quick share can't pick, the full composer can. */
+/** A new day's highlight whose Settings default names chosen households /
+ *  people but none are picked — quick share can't pick, the composer can. */
 function needsComposer(): boolean {
-  return today.value === null && defaultAudienceKind() !== 'all_paired'
+  if (today.value !== null) return false
+  const d = defaultAudience()
+  return d.kind !== 'all_paired' && d.ids.length === 0
+}
+
+/** Who a new day's highlight goes to: the Settings default. */
+function newDayNote(): string {
+  const d = defaultAudience()
+  return d.kind === 'all_paired'
+    ? t('highlight.audience.new_all')
+    : t('highlight.audience.new_default', { who: describeAudience(d.kind, d.ids) })
 }
 
 function closeDialog(): void {
@@ -162,11 +174,12 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
         frame_type:   mediaType.value,
         caption_text: caption.value.trim() || null,
       }
-      // Exactly the audience the dialog showed: today's, or a new day
-      // for all paired households (the Settings default).
+      // Exactly the audience the dialog showed: today's, or a new day's
+      // Settings default.
+      const fresh = defaultAudience()
       Object.assign(body, shown !== null
         ? audienceBody(shown.audience_kind, shown.audience)
-        : audienceBody('all_paired', []))
+        : audienceBody(fresh.kind, fresh.ids))
       const r = await api.post('/api/highlights/frames', body) as
         { highlight: { id: string }; frame: { id: string } }
       showToast(t('highlight.shared'), 'success')
@@ -252,7 +265,7 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
               ? todayFixedNote(today.value, todayPublished.value)
               : needsComposer()
                 ? t('highlight.quick.pick_in_composer')
-                : t('highlight.audience.new_all')}
+                : newDayNote()}
           </p>
         )}
 

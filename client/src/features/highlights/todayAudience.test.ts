@@ -15,6 +15,7 @@ vi.mock('@/store/auth', () => ({
 
 import {
   audienceBody,
+  defaultAudience,
   defaultAudienceKind,
   describeAudience,
   loadMyToday,
@@ -41,6 +42,15 @@ describe('todayAudience', () => {
     expect(defaultAudienceKind()).toBe('all_paired')
     user.value = { preferences_json: 'not json' }
     expect(defaultAudienceKind()).toBe('all_paired')
+  })
+
+  it('reads the whole Settings default — kind and the picked ids', () => {
+    expect(defaultAudience()).toEqual({ kind: 'all_paired', ids: [] })
+    user.value = { preferences_json: '{"highlights":{"default_audience":{"kind":"households","ids":["k","h",3,""]}}}' }
+    expect(defaultAudience()).toEqual({ kind: 'households', ids: ['k', 'h'] })
+    // all paired never carries ids.
+    user.value = { preferences_json: '{"highlights":{"default_audience":{"kind":"all_paired","ids":["k"]}}}' }
+    expect(defaultAudience()).toEqual({ kind: 'all_paired', ids: [] })
   })
 
   it('describes an audience by name when every id resolves, else by count', () => {

@@ -147,4 +147,19 @@ describe('HighlightQuickShareDialog audience', () => {
     expect(view.container.textContent).toContain('You choose who sees each new highlight.')
     expect(shareButton(view).disabled).toBe(true)
   })
+
+  it('a default with chosen households sends a new day to exactly them, and says so', async () => {
+    user.value = {
+      ...user.value,
+      preferences_json: '{"highlights": {"default_audience": {"kind": "households", "ids": ["inst-k", "inst-h"]}}}',
+    }
+    inbox()
+    const view = await openWithPhoto()
+    expect(view.container.textContent).toContain('Who sees it (your default in Settings): 2 paired households.')
+    fireEvent.click(shareButton(view))
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled())
+    const body = mockApi.post.mock.calls[0][1] as Record<string, unknown>
+    expect(body.audience_kind).toBe('households')
+    expect(body.audience).toEqual(['inst-k', 'inst-h'])
+  })
 })
