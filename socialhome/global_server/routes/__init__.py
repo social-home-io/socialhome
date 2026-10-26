@@ -95,6 +95,7 @@ from .member_publish import (
     SpaceEpochNoticeView,
 )
 from .moments_public import (
+    GfsMomentCountsView,
     GfsMomentDeleteCertView,
     GfsMomentFollowerStatsView,
     GfsMomentKeyRequestView,
@@ -316,6 +317,8 @@ def register_routes(
     )
     # v_68 — a follower household's sealed reaction, to the author only.
     app.router.add_view("/gfs/moments/users/{user_id}/react", GfsMomentReactView)
+    # v_69 — an author household's encrypted reaction totals, live only.
+    app.router.add_view("/gfs/moments/counts", GfsMomentCountsView)
     app.router.add_view(
         "/gfs/moments/users/{user_id}/follower_stats", GfsMomentFollowerStatsView
     )

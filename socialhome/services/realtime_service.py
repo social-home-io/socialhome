@@ -67,6 +67,7 @@ from ..domain.events import (
     MomentCreated,
     MomentDeleted,
     MomentReactionChanged,
+    MomentReactionTotalsUpdated,
     NotificationCreated,
     NotificationReadChanged,
     PageConflictEmitted,
@@ -462,6 +463,10 @@ class RealtimeService:
         self._bus.subscribe(
             MomentReactionChanged,
             self._on_moment_reaction_changed,
+        )
+        self._bus.subscribe(
+            MomentReactionTotalsUpdated,
+            self._on_moment_reaction_totals,
         )
         # Federation map — home location signals (§federation-map)
         self._bus.subscribe(
@@ -1845,6 +1850,28 @@ class RealtimeService:
                 "reactor_user_id": event.reactor_user_id,
                 "emoji": event.emoji,
             },
+        )
+
+    async def _on_moment_reaction_totals(
+        self,
+        event: MomentReactionTotalsUpdated,
+    ) -> None:
+        # v_69: the author's household sent newer totals for a moment held
+        # here — a refresh hint for the household's open views (the same
+        # frame type the SPA already refetches on). Counts only, never who.
+        # Nobody who blocked the author (or a guardian-block counterpart)
+        # gets it, and no protected account for a moment that came through
+        # a GFS (§CP.R) — as for ``moment.created``.
+        withheld = set(await self._blocked_or_counterparts(event.author_user_id))
+        if event.received_via == "gfs":
+            withheld.update(
+                u.user_id
+                for u in await self._user_repo.list_active()
+                if u.child_protection_enabled
+            )
+        await self._broadcast_household(
+            {"type": "moment.reaction_changed", "moment_id": event.moment_id},
+            withheld=frozenset(withheld),
         )
 
     # ─── Fan-out helpers ──────────────────────────────────────────────────

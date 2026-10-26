@@ -517,6 +517,50 @@ async def test_every_moment_says_where_a_reaction_reaches(client):
     assert all(m["reactions_reach"] == "author" for m in await r.json())
 
 
+async def test_every_moment_carries_its_reaction_counts_and_mine(client):
+    """v_69: per-emoji ``reaction_counts``, the caller's ``my_reaction`` and
+    ``reaction_totals_at`` (``null``: counted here — an own moment's
+    reactions are all here)."""
+    r = await client.post(
+        "/api/moments", json={"content": "counts"}, headers=_auth(client._tok)
+    )
+    moment_id = (await r.json())["id"]
+    r = await client.put(
+        f"/api/moments/{moment_id}/reaction",
+        json={"emoji": "🔥"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    r = await client.get(f"/api/moments/{moment_id}", headers=_auth(client._tok))
+    m = (await r.json())["moment"]
+    assert m["reaction_count"] == 1
+    assert m["reaction_counts"] == {"🔥": 1}
+    assert m["my_reaction"] == "🔥"
+    assert m["reaction_totals_at"] is None
+    r = await client.get("/api/moments", headers=_auth(client._tok))
+    [item] = [x for x in await r.json() if x["id"] == moment_id]
+    assert item["reaction_counts"] == {"🔥": 1} and item["my_reaction"] == "🔥"
+
+
+async def test_totals_are_not_shown_where_reactions_stay_here(client):
+    """A moment whose reactions can't reach its author shows the reactions
+    held here, even if totals arrived — the two would disagree."""
+    db = client._db
+    await db.enqueue(
+        "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+        " expires_at, received_via, hop_count, reaction_summary)"
+        " VALUES('m-far', 'u-far', 'far', 'inst-far',"
+        " datetime('now', '+2 days'), 'household', 1, ?)",
+        ('{"rev":1,"counts":{"🔥":9},"total":9}',),
+    )
+    r = await client.get("/api/moments/m-far", headers=_auth(client._tok))
+    assert r.status == 200, await r.text()
+    m = (await r.json())["moment"]
+    assert m["reactions_reach"] == "household"
+    assert (m["reaction_count"], m["reaction_counts"]) == (0, {})
+    assert m["reaction_totals_at"] is None
+
+
 async def test_delete_moment_round_trip(client):
     r = await client.post(
         "/api/moments",

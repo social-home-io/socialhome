@@ -13,6 +13,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from socialhome.domain.moment import (
+    MOMENT_COUNTS_MAX_EMOJIS,
+    MOMENT_COUNTS_MAX_TOTAL,
     MOMENT_DEFAULT_RETENTION_DAYS,
     MOMENT_MAX_HASHTAG_LEN,
     MOMENT_MAX_HASHTAGS_PER_POST,
@@ -23,12 +25,16 @@ from socialhome.domain.moment import (
     REACTION_REACH_AUTHOR,
     REACTION_REACH_HOUSEHOLD,
     MomentReactionInvalidError,
+    MomentReactionSummary,
     MomentTombstone,
     clamp_moment_expiry,
     extract_hashtags,
     is_valid_moment_reaction,
+    merged_reaction_view,
     moment_too_old_to_relay,
     normalize_hashtag,
+    reaction_counts_valid,
+    summarize_reactions,
 )
 
 
@@ -166,3 +172,56 @@ def test_reaction_error_and_reach_values():
     assert MomentReactionInvalidError.status == 422
     assert MomentReactionInvalidError.code == "INVALID_REACTION"
     assert (REACTION_REACH_AUTHOR, REACTION_REACH_HOUSEHOLD) == ("author", "household")
+
+
+# ── Reaction totals (v_69) ────────────────────────────────────────────────
+
+
+def test_summarize_reactions_keeps_the_top_eight_and_the_total():
+    tally = {e: n for n, e in enumerate("🍎🍐🍊🍋🍌🍉🍇🍓🫐🍈", start=1)}
+    counts, total = summarize_reactions(tally)
+    assert len(counts) == MOMENT_COUNTS_MAX_EMOJIS
+    assert total == sum(range(1, 11))
+    assert "🍎" not in counts and "🍐" not in counts  # the least used go
+    assert list(counts.values()) == sorted(counts.values(), reverse=True)
+    assert summarize_reactions({}) == ({}, 0)
+    # Ties are ordered by emoji — the same tally gives the same bytes.
+    assert list(summarize_reactions({"👏": 1, "🔥": 1})[0]) == ["👏", "🔥"]
+
+
+@pytest.mark.parametrize(
+    "counts,total,ok",
+    [
+        ({"🔥": 2}, 3, True),
+        ({}, 0, True),
+        ({"🔥": 2}, 1, False),  # more than the total
+        ({"🔥": 2, "👏": 2}, 3, False),  # sums past the total
+        ({"🔥": 0}, 1, False),
+        ({"hi": 1}, 1, False),
+        ({"🔥": True}, 1, False),
+        ({"🔥": 1}, True, False),
+        ({"🔥": 1}, -1, False),
+        ({"🔥": 1}, MOMENT_COUNTS_MAX_TOTAL + 1, False),
+        ([("🔥", 1)], 1, False),
+        ({e: 1 for e in "🍎🍐🍊🍋🍌🍉🍇🍓🫐"}, 9, False),  # 9 emoji
+    ],
+)
+def test_reaction_counts_valid(counts, total, ok):
+    assert reaction_counts_valid(counts, total) is ok
+
+
+def test_merged_reaction_view():
+    summary = MomentReactionSummary(rev=1_000, counts=(("🔥", 4),), total=5)
+    assert merged_reaction_view(summary=None, local={"👏": 2}) == (
+        {"👏": 2},
+        2,
+        None,
+    )
+    # The author household's totals, exactly — the reactions held here (and
+    # the viewer's own, newer or not) are never added on top: a changed
+    # emoji would count twice (adversarial review #1184).
+    assert merged_reaction_view(summary=summary, local={"👏": 1}) == (
+        {"🔥": 4},
+        5,
+        1_000,
+    )

@@ -1052,7 +1052,25 @@ from __future__ import annotations
 #:   authors never get the frame (they ship no key). Nothing is
 #:   ``peer_supports``-gated (author and follower are not paired).
 #:   Labelled "Reactions reach authors you follow through a GFS".
-OURS: int = 68
+#: * **v_69** (2026-10-26) — **everyone sees the full reaction count**
+#:   (decision 10). Only the author's household holds every reaction (paired,
+#:   2–3 hop and GFS followers' all reach it since v_67 / v_68), so it
+#:   re-broadcasts a moment's totals — per-emoji counts (top 8) and the
+#:   total, never who — at fixed checkpoints after the moment was made and
+#:   only when they changed: new mesh event ``MOMENT_REACTIONS_COUNTED``
+#:   (signed by its identity key, ``moment-counts:v1:``,
+#:   ``counts_sig_suite: "ed25519"``) at +10 min, +6 h and (while followers
+#:   still keep it) +3 days, relayed like a create to households that hold
+#:   or relayed the moment; and ``POST /gfs/moments/counts`` (the encrypted
+#:   public-moment envelope, ``op: "counts"``, today's key step) at +10 min,
+#:   +3 h and +24 h to a GFS that proves the signed ``moment_counts``
+#:   capability, pushed only to connected followers that declared
+#:   ``ops: ["counts"]`` — never queued. **Fallback**: the mesh event goes
+#:   only to v_69 peers (``peer_supports``) — an older household keeps
+#:   showing the reactions it holds; an older GFS proves no capability and
+#:   gets nothing (its followers keep their own counts). Labelled "Everyone
+#:   sees the full reaction count".
+OURS: int = 69
 
 
 class FederationCapability:
@@ -1595,6 +1613,13 @@ class FederationCapability:
     #: constant names the version.
     MIN_FOR_GFS_MOMENT_REACTIONS = 68
 
+    #: v_69 — everyone sees the full reaction count: the author's household
+    #: sends ``MOMENT_REACTIONS_COUNTED`` (and relays pass it on) only to a
+    #: peer at least this version; an older one would drop the unknown event.
+    #: The GFS path is gated on the GFS's signed ``moment_counts`` capability
+    #: and the follower's declared ``ops``, never on ``peer_supports``.
+    MIN_FOR_MOMENT_REACTION_COUNTS = 69
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1852,6 +1877,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_GFS_MOMENT_REACTIONS,
         "Reactions reach authors you follow through a GFS",
     ),
+    (
+        FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS,
+        "Everyone sees the full reaction count",
+    ),
 ]
 
 
@@ -1931,6 +1960,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_LATE_MOMENT_DELETES: "late_moment_deletes",
     FederationCapability.MIN_FOR_ROUTED_MOMENT_REACTIONS: "routed_moment_reactions",
     FederationCapability.MIN_FOR_GFS_MOMENT_REACTIONS: "gfs_moment_reactions",
+    FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS: "moment_reaction_counts",
 }
 
 

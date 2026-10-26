@@ -8,7 +8,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from socialhome.domain.moment import Moment, MomentReactionRoute, MomentTombstone
+from socialhome.domain.moment import (
+    Moment,
+    MomentReactionRoute,
+    MomentReactionSummary,
+    MomentTombstone,
+)
 from socialhome.repositories.moment_repo import SqliteMomentRepo
 
 
@@ -1257,3 +1262,71 @@ async def test_apply_reaction_at_keeps_a_removal_watermark(db, repo):
     assert [r.emoji for r in await repo.list_reactions("m-1")] == ["🔥"]
     rows = await db.fetchall("SELECT reactor_user_id FROM moment_reaction_removals", ())
     assert [r[0] for r in rows] == ["u-x"]
+
+
+# ── Reaction totals (v_69) ────────────────────────────────────────────────
+
+
+def _summary(rev: int = 1_000) -> MomentReactionSummary:
+    return MomentReactionSummary(rev=rev, counts=(("🔥", 2),), total=3)
+
+
+async def test_reaction_summary_round_trips_newer_only(db, repo):
+    await repo.save(replace(_moment(id="m-s"), received_via="household"))
+    kw = {"author_user_id": "u-author", "origin_instance_id": "self"}
+    assert await repo.set_reaction_summary("m-s", _summary(1_000), **kw)
+    assert not await repo.set_reaction_summary("m-s", _summary(999), **kw)
+    assert not await repo.set_reaction_summary("m-s", _summary(1_000), **kw)
+    assert await repo.set_reaction_summary("m-s", _summary(2_000), **kw)
+    got = await repo.get_reaction_summaries(["m-s", "m-none"])
+    assert got == {"m-s": _summary(2_000)}
+    # A re-save of the content row keeps it.
+    await repo.save(replace(_moment(id="m-s", content="v2"), received_via="household"))
+    assert (await repo.get_reaction_summaries(["m-s"]))["m-s"].rev == 2_000
+
+
+async def test_reaction_summary_only_for_its_author_and_origin_live_remote(db, repo):
+    await repo.save(_moment(id="m-own"))  # written here
+    await repo.save(replace(_moment(id="m-r"), received_via="gfs"))
+    ok = {"author_user_id": "u-author", "origin_instance_id": "self"}
+    assert not await repo.set_reaction_summary("m-own", _summary(), **ok)
+    assert not await repo.set_reaction_summary(
+        "m-r", _summary(), author_user_id="u-other", origin_instance_id="self"
+    )
+    assert not await repo.set_reaction_summary(
+        "m-r", _summary(), author_user_id="u-author", origin_instance_id="x"
+    )
+    assert await repo.set_reaction_summary("m-r", _summary(), **ok)
+    await repo.delete("m-r")
+    assert await repo.get_reaction_summaries(["m-r"]) == {}
+    assert not await repo.set_reaction_summary("m-r", _summary(5_000), **ok)
+
+
+async def test_an_unreadable_summary_is_skipped(db, repo):
+    await repo.save(replace(_moment(id="m-bad"), received_via="household"))
+    await db.enqueue(
+        "UPDATE moments SET reaction_summary=? WHERE id='m-bad'",
+        ('{"rev":1,"counts":{"x":1},"total":1}',),
+    )
+    assert await repo.get_reaction_summaries(["m-bad"]) == {}
+
+
+async def test_reaction_tallies_and_my_reactions(db, repo):
+    await repo.save(_moment(id="m-t"))
+    await repo.set_reaction("m-t", "u-1", "🔥")
+    await repo.set_reaction("m-t", "u-2", "🔥")
+    await repo.set_reaction("m-t", "u-3", "👏")
+    assert await repo.reaction_tallies(["m-t", "m-none"]) == {"m-t": {"🔥": 2, "👏": 1}}
+    mine = await repo.my_reactions(["m-t"], "u-3")
+    assert mine["m-t"][0] == "👏" and mine["m-t"][1]
+    assert await repo.my_reactions(["m-t"], "u-9") == {}
+
+
+async def test_list_own_live_since(db, repo):
+    await repo.save(_moment(id="m-new"))
+    await repo.save(_moment(id="m-old", created_offset_min=-5 * 24 * 60))
+    await repo.save(replace(_moment(id="m-remote"), received_via="household"))
+    await repo.save(_moment(id="m-gone"))
+    await repo.delete("m-gone")
+    since = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    assert [m.id for m in await repo.list_own_live_since(since)] == ["m-new"]

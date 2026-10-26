@@ -352,6 +352,7 @@ from .services.moment_public_media_outbound import MomentPublicMediaOutbound
 from .services.moment_public_outbound import MomentPublicOutbound
 from .services.moment_public_service import MomentPublicService
 from .services.moment_public_share_service import MomentPublicShareService
+from .services.moment_reaction_counts import MomentReactionCounts
 from .services.moment_reaction_gfs import MomentReactionGfs
 from .services.moment_reaction_router import MomentReactionRouter
 from .services.moment_service import MomentService
@@ -1475,6 +1476,18 @@ def _wire_federation_stack(
     moment_reaction_router.attach_child_protection(app[K.child_protection_service_key])
     moment_reaction_router.attach_to(federation_service)
     moment_federation_outbound.attach_reaction_router(moment_reaction_router)
+    # v_69 — everyone sees the full reaction count: this household's
+    # moments' totals at checkpoints (started at startup), and the totals
+    # other households send for theirs (MOMENT_REACTIONS_COUNTED inbound).
+    moment_reaction_counts = MomentReactionCounts(
+        bus=bus,
+        federation_service=federation_service,
+        moment_repo=moment_repo,
+        user_repo=user_repo,
+        outbound=moment_federation_outbound,
+    )
+    moment_reaction_counts.attach_child_protection(app[K.child_protection_service_key])
+    moment_reaction_counts.attach_to(federation_service)
 
     # §24.11 authorship: the users a space-content payload names must be
     # seated on the household that signed it. Writes naming a user (or
@@ -2148,6 +2161,7 @@ def _wire_federation_stack(
     app[K.household_instance_ban_repo_key] = household_instance_ban_repo
     app[K.relay_policy_key] = relay_policy
     app[K.moment_reaction_router_key] = moment_reaction_router
+    app[K.moment_reaction_counts_key] = moment_reaction_counts
 
     return SimpleNamespace(
         federation_service=federation_service,
@@ -2159,6 +2173,7 @@ def _wire_federation_stack(
         household_instance_ban_repo=household_instance_ban_repo,
         relay_policy=relay_policy,
         moment_reaction_router=moment_reaction_router,
+        moment_reaction_counts=moment_reaction_counts,
     )
 
 
@@ -4225,6 +4240,11 @@ def create_app(config: Config | None = None) -> web.Application:
         # ``moment_reaction`` frame is opened and checked by the router.
         fed.moment_reaction_router.attach_gfs(moment_reaction_gfs)
         moment_public_inbound.attach_reactions(fed.moment_reaction_router)
+        # v_69: public moments' totals go through their GFSs too, and the
+        # totals a followed author's household sends are kept.
+        fed.moment_reaction_counts.attach_gfs(moment_public_outbound)
+        moment_public_inbound.attach_counts(fed.moment_reaction_counts)
+        await fed.moment_reaction_counts.start()
         # Cross-household private-space invites (§D1b) need a live
         # ``FederationService``. Wire it now that ``_wire_federation_stack``
         # has returned the real one — see the matching deferral note
@@ -5313,6 +5333,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # Before the HTTP session closes: queued sealed moment keys ride it.
         await moment_public_key_outbound.stop()
         await moment_public_outbound.stop()
+        # The totals checkpoint loop (v_69) — before the session closes.
+        if (reaction_counts := app.get(K.moment_reaction_counts_key)) is not None:
+            await reaction_counts.stop()
         # Sends any reaction still waiting for its 3 s debounce (v_67).
         if (reaction_router := app.get(K.moment_reaction_router_key)) is not None:
             await reaction_router.stop()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace as dc_replace
 from datetime import UTC, date, datetime
 
 import pytest
@@ -33,6 +34,7 @@ from socialhome.domain.events import (
     GalleryItemDeleted,
     GalleryItemUploaded,
     HouseholdZonesChanged,
+    MomentReactionTotalsUpdated,
     PageConflictEmitted,
     PageProposalSettled,
     PeerTransportChanged,
@@ -1547,3 +1549,32 @@ async def test_the_blockers_own_frames_still_reach_the_blocked_person():
     bus, socks = await _blocked_env()
     await bus.publish(UserStatusChanged(user_id="u2", status=UserStatus(text="y")))
     assert any("user.status_changed" in m for m in socks["u1"].sent)
+
+
+# ── v_69: reaction totals arrive for a moment held here ──────────────────
+
+
+async def test_reaction_totals_hint_the_household_but_not_who_blocked_the_author():
+    bus = EventBus()
+    ws = WebSocketManager()
+    kid = dc_replace(_user("u-kid", "kid"), child_protection_enabled=True)
+    users = _FakeUserRepo([_user("u1"), _user("u2"), kid], blocks={("u2", "u-noor")})
+    svc = RealtimeService(bus, ws, user_repo=users, space_repo=_FakeSpaceRepo({}))
+    svc.wire()
+    socks = {uid: _FakeWS() for uid in ("u1", "u2", "u-kid")}
+    for uid, sock in socks.items():
+        await ws.register(uid, sock)
+    await bus.publish(
+        MomentReactionTotalsUpdated(moment_id="m-1", author_user_id="u-noor")
+    )
+    assert '"moment.reaction_changed"' in socks["u1"].sent[0]
+    assert "reactor" not in socks["u1"].sent[0]  # never who
+    assert socks["u2"].sent == []  # blocked the author
+    assert socks["u-kid"].sent  # a household moment reaches a protected account
+    socks["u-kid"].sent.clear()
+    await bus.publish(
+        MomentReactionTotalsUpdated(
+            moment_id="m-2", author_user_id="u-noor", received_via="gfs"
+        )
+    )
+    assert socks["u-kid"].sent == []  # …a GFS one never does (§CP.R)

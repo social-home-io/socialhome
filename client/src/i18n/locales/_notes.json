@@ -4,6 +4,7 @@
   "moment.yours.until_others": "{time} is a weekday, date and clock time ('Sun 26 Oct, 14:49'). 'it' is the moment.",
   "moment.yours.until_followers": "{time} is a weekday, date and clock time. 'it' is the moment.",
   "moment.detail.archived": "'Yours' is the Momentum tab name (moment.tab.yours) — use the same word.",
+  "moment.detail.reactions_totals": "{time} is a relative time in the UI language ('just now', '22 minutes ago', 'yesterday', '3 days ago', 'Oct 20'). Counts only: the author's household counts every reaction it got; never who reacted.",
   "admin.storage.moments_hint": "Household admin setting: a per-person size limit for the moment archive.",
   "__comment": "Translator context notes (spec §30.2). Keys mirror en.json; values are short hints shown to translators in the Weblate editor. This file is NOT rendered in the UI. When a key in en.json has no matching entry here, Weblate falls back to the English source as sole context.",
   "friends.seen": "Second line under a person who is offline. {when} is a relative time ('3h ago', 'yesterday').",

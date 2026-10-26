@@ -82,6 +82,7 @@ BOUND: dict[FederationEventType, str] = {
     FET.MOMENT_REACTED: _MOMENT,
     FET.MOMENT_REACTION_REMOVED: _MOMENT,
     FET.MOMENT_REACTION_ROUTED: "test_moment_reaction_routed.py",
+    FET.MOMENT_REACTIONS_COUNTED: "test_moment_reaction_counts.py",
     FET.CALL_HANGUP: _CALL,
     FET.CALL_END: _CALL,
     FET.CALL_DECLINE: _CALL,

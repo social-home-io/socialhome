@@ -47,9 +47,26 @@ Wire shapes (every one suite-tagged; receivers refuse unknown suites):
   whether it is an add or a removal (timing can hint at the moment —
   ``docs/principles.md``).
 
-Pure and dependency-light (only ``cryptography``, ``orjson`` + :mod:`socialhome.crypto`,
-like :mod:`socialhome.authority_sig`), so the content-blind GFS process can
-import the wire shapes without the household stack.
+* **Reaction totals (v_69)** ``POST /gfs/moments/counts`` with exactly the
+  envelope fields above — the sealed body is ``{op: "counts",
+  author_user_id, rev, counts, total, sent_at}`` (per-emoji counts, never
+  who), under the item key of *today's* step for that moment (followers keep
+  only the newest step, as for a delete). Sent by the author's household
+  only, at fixed checkpoints and only when the totals changed, to a GFS that
+  proves ``moment_counts``; the GFS pushes it as
+  ``{type: "incoming_public_moment_counts", payload: <envelope>}`` to
+  connected followers that declared ``ops: ["counts"]`` — never queued. A
+  follower without that step's key drops it (it asks for no key). The
+  sealed body is padded (``_pad``, inside the AEAD) to exactly
+  :data:`COUNTS_BODY_BYTES`, so the ciphertext is one length whatever the
+  totals say: the GFS can't tell one reaction from a million, or one emoji
+  from eight.
+
+Pure and dependency-light (only ``cryptography``, ``orjson``,
+:mod:`socialhome.crypto` and the pure padding helper of
+:mod:`socialhome.domain.space_item`, like :mod:`socialhome.authority_sig`),
+so the content-blind GFS process can import the wire shapes without the
+household stack.
 """
 
 from __future__ import annotations
@@ -64,6 +81,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .canonical_json import canonical_bytes
 from .crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
+from .domain.space_item import pad_json_object
 
 #: The one moment-content suite this build speaks: AES-256-GCM, 96-bit
 #: random nonce, ``nonce:ct`` in base64url. AES-256 already resists Grover
@@ -108,6 +126,22 @@ ENVELOPE_FIELDS: frozenset[str] = frozenset(
 FRAME_MOMENT: str = "incoming_public_moment"
 FRAME_MOMENT_DELETE: str = "incoming_public_moment_delete"
 MOMENT_FRAME_TYPES: frozenset[str] = frozenset({FRAME_MOMENT, FRAME_MOMENT_DELETE})
+
+#: v_69 — the frame an author's encrypted reaction totals reach a connected
+#: follower household under (``{"type": ..., "payload": <envelope>}``), and
+#: the ``op`` its sealed body names. Never queued for an offline household.
+FRAME_MOMENT_COUNTS: str = "incoming_public_moment_counts"
+MOMENT_OP_COUNTS: str = "counts"
+
+#: v_69 — the exact plaintext size a sealed totals body is padded to, so
+#: every totals ciphertext is the same length. The largest body — eight
+#: 32-byte emoji at 1 000 000 each, a 13-digit ``rev``, a 32-character
+#: author id — is 499 bytes; the rest is room for a longer author id.
+COUNTS_BODY_BYTES: int = 640
+
+#: v_69 — the ``ops`` a follower household may declare (``moment_suites``):
+#: extra frames it takes. A GFS refuses a declaration naming others.
+KNOWN_MOMENT_OPS: frozenset[str] = frozenset({MOMENT_OP_COUNTS})
 
 #: v_68 — the WebSocket frame type a follower household's sealed reaction
 #: reaches the author's household under: ``{"type": ..., "from_instance":
@@ -250,11 +284,16 @@ def seal_body(
     key_step: int,
     moment_id: str,
     body: dict[str, Any],
+    pad_to: int | None = None,
 ) -> dict[str, Any]:
     """Encrypt *body* (a JSON object) for one moment.
 
     Returns the encrypted part of an envelope: ``{moment_id, key_gen,
     key_step, seal_suite, ciphertext}``. A fresh random nonce per call.
+    With *pad_to* the plaintext is padded to exactly that many bytes
+    (:func:`~socialhome.domain.space_item.pad_json_object`, a ``_pad`` key
+    an opener ignores); a body that doesn't fit raises :class:`ValueError`
+    — never sent at a length of its own.
     """
     if len(step_key) != MOMENT_KEY_BYTES:
         raise ValueError("moment key must be 32 bytes")
@@ -262,7 +301,12 @@ def seal_body(
         raise ValueError("moment id missing or too long")
     suite = MOMENT_SEAL_SUITE_AESGCM256
     nonce = os.urandom(_NONCE_BYTES)
-    plaintext = orjson.dumps(body, option=orjson.OPT_SORT_KEYS)
+    if pad_to is None:
+        plaintext = orjson.dumps(body, option=orjson.OPT_SORT_KEYS)
+    else:
+        plaintext = pad_json_object(body, buckets=(pad_to,))
+        if len(plaintext) != pad_to:
+            raise ValueError(f"sealed body over its {pad_to}-byte size")
     ct = AESGCM(item_key(step_key, moment_id)).encrypt(
         nonce, plaintext, _aad(author_user_id, key_gen, key_step, moment_id, suite)
     )
@@ -406,16 +450,20 @@ def verify_wire(body: dict[str, Any], pubkey_hex: str | None) -> bool:
 __all__ = [
     "AUTHOR_KEYWRAP_PK_FIELD",
     "AUTHOR_KEYWRAP_SUITE_FIELD",
+    "COUNTS_BODY_BYTES",
     "DELIVERY_FIELDS",
     "ENVELOPE_FIELDS",
+    "FRAME_MOMENT_COUNTS",
     "FRAME_MOMENT_REACTION",
     "KEY_SUITE_AESGCM_256",
+    "KNOWN_MOMENT_OPS",
     "MAX_CIPHERTEXT_CHARS",
     "MAX_MOMENT_ID_CHARS",
     "MAX_RATCHET_STEPS",
     "MAX_REACT_BODY_BYTES",
     "MAX_REACT_SEALED_CHARS",
     "MOMENT_KEY_BYTES",
+    "MOMENT_OP_COUNTS",
     "MOMENT_SEAL_SUITE_AESGCM256",
     "RATCHET_STEP_S",
     "REACT_BODY_FIELDS",

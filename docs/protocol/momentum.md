@@ -16,7 +16,9 @@ to a thread root.
 
 `MOMENT_CREATED`, `MOMENT_DELETED`, `MOMENT_REACTED`,
 `MOMENT_REACTION_REMOVED`, `MOMENT_REACTION_ROUTED` (v_67 — a reaction
-carried back to an author further away, [below](#routed-reactions-v_67)).
+carried back to an author further away, [below](#routed-reactions-v_67)),
+`MOMENT_REACTIONS_COUNTED` (v_69 — the author household's reaction totals,
+[below](#reaction-totals-v_69)).
 
 Plaintext fields on every envelope: `event_type`, `from_instance`,
 `to_instance`, `moment_id`, `origin_instance_id`, `hop_count`. Routing
@@ -28,7 +30,9 @@ data only — everything else (`content`, `media_url`, `media_type`,
 the encrypted payload (§25.8.21). A `MOMENT_REACTION_ROUTED` carries only
 `moment_id`, `origin_instance_id`, `rt`, `rt_suite` and an opaque `sealed`
 reaction — who reacted and with what is sealed end to end to the origin
-household; the relays between see neither.
+household; the relays between see neither. A `MOMENT_REACTIONS_COUNTED`
+carries its per-emoji counts and total inside the encrypted payload too —
+never who reacted.
 
 ## Retention
 
@@ -522,6 +526,143 @@ sequenceDiagram
     A->>A: apply in occurred_at order<br/>publish MomentReactionChanged → author notified
 ```
 
+## Reaction totals (v_69)
+
+Owner decision 10 (2026-10-25): **everyone sees the full reaction count.**
+Since v_67 / v_68 a reaction reaches the author's household from paired,
+2–3-hop and GFS followers alike — so only that household holds a moment's
+full count; every other household holds only its own people's reactions.
+The author's household therefore re-broadcasts the **totals**: per-emoji
+counts (the 8 most used) and the total over every emoji — **never who
+reacted**.
+
+**When — fixed checkpoints, only on change.** The author's household looks
+at its own live moments once a minute
+(`MomentReactionCounts.tick`) and sends a moment's totals at
+**+10 min, +6 h and +3 days** after it was made — the last only while
+followers still keep the moment (`expires_at` past it) — and **only when
+they changed** since its last send on the mesh. A moment nobody reacted to
+sends nothing. **Paced:** at most 8 mesh updates a tick (ticks ≥ 60 s
+apart — under every receiver's 10-a-minute budget per origin, with room
+for delivery jitter); more due at once wait for the next ticks, a
+restart's catch-up after live checkpoints. A checkpoint counts as sent only
+once handed to the outbox — a send that fails stays due and is tried again
+next tick. What was last sent is kept in memory only; after a restart each
+own live moment of the last 24 h that has reactions gets one checkpoint
+(its latest due one), older ones wait for their next — so a restart costs
+at most one update per moment of the last day, spread at 8 a minute (60
+such moments: ~8 minutes). Public moments also go through their GFSs, on
+their own checkpoints
+([`momentum_public.md`](momentum_public.md#reaction-totals-through-the-gfs-v_69)).
+
+**Wire.** New event `MOMENT_REACTIONS_COUNTED`, hop-encrypted like every
+federation payload (§25.8.21 — the counts are content):
+
+```
+{moment_id, author_user_id, origin_instance_id, rev, counts: {emoji: n, …},
+ total, hop_count, origin_identity_pk, counts_sig_suite: "ed25519",
+ counts_sig [, no_relay: true]}
+```
+
+`rev` is the send time in Unix ms (it only ever grows). `counts_sig` is the
+origin household's Ed25519 **identity** key over `b"moment-counts:v1:"` +
+canonical JSON of every field but `hop_count` and `counts_sig`
+([`crypto.md`](../crypto.md)). Sent with a
+latest-only outbox key per (peer, moment): a newer update replaces one still
+queued for an offline peer.
+
+**Receiver.** Keeps the totals (`moments.reaction_summary`, migration 0127)
+only when: the shape is exact (≤ 8 emoji, each one emoji of ≤ 32 bytes,
+counts ≤ total); the origin is not this household and the author not one of
+its people; the signature verifies against the key pinned for the origin, or
+a shipped key that derives to it (§4.1.2) — an unknown suite is refused,
+never defaulted; `rev` is at most 5 min ahead and at most 25 h old; the
+moment is held here, live (not a tombstone, not expired), by that author
+**and** that origin; and `rev` is newer than the one kept (read from the
+database, so it holds across a restart). **Budgets come last:** a household
+takes at most 10 new (moment, rev) a minute per origin and 4 per moment a
+day (3 checkpoints + a restart), charged only for totals it actually kept
+or relayed — once per rev, not per copy, and per signing origin (a
+household naming another origin's moment id spends only its own budget).
+Every refusal above happens before a budget is touched, so a neighbour
+replaying genuine old, older-than-kept or unheld totals spends nobody's
+budget. A delete's tombstone wipes the totals (trigger) and refuses new
+ones. Realtime: the household's open
+views get a `moment.reaction_changed` hint (no reactor), except anyone who
+blocked the author.
+
+**Relay.** Like a create (`relay_inbound`): every verified copy is offered,
+the seen-map relays it once per **(moment, rev)** (or again from closer),
+only when this household holds the moment from the mesh or relayed its
+create — as **that origin's** moment (a household that never passed the
+moment on has nobody downstream who holds it; totals signed by another
+household for that moment id are refused outright) — only while `rev` is
+under 25 h old and newer than the last one it passed on, never a `no_relay` one
+(a protected account's moment — its totals go to paired households only and
+a receiver refuses one relayed), only below hop 3, and **only to v_69 peers**
+(`peer_supports(…, MIN_FOR_MOMENT_REACTION_COUNTS)`) under the same hide
+list, guardian blocks and relay policy as the moment. A copy that came only
+through a GFS is never relayed to the mesh.
+
+**Who receives totals.** The author's household sends them to **every**
+confirmed v_69 peer, and each relay to every v_69 peer of its own — the
+same audience a create reaches, plus any household paired since the moment
+was made. A household that neither holds the moment nor relayed its create
+drops them (nothing kept, nothing relayed, no budget spent), but it can read
+that one update: the moment's id, author and totals — never who reacted.
+Narrowing the first hop to the households that got the create would not
+narrow the relays, so it is not done.
+
+**API.** For a moment from another household whose reactions reach the
+author (`reactions_reach: "author"`) the API returns the author household's
+totals once it sent any — `reaction_count`, `reaction_counts` and
+`reaction_totals_at` (its `rev`) — **exactly**, and the caller's own
+reaction (`my_reaction`, from the rows here) marked separately, never added
+on top: **never over-counted, at most one checkpoint stale.** A reaction
+row keeps only its latest emoji and time, so one changed or made after the
+totals can't be told from one already in them — adding it counted a changed
+emoji twice (and a `rev` skewed up to 5 min did the same, or added a ninth
+emoji). The next checkpoint brings the caller's reaction into the numbers.
+Everywhere else — this household's own moments (every reaction is here), a
+moment whose reactions stay here (`reactions_reach: "household"` keeps its
+note), or no totals yet — the reactions held here.
+
+```mermaid
+sequenceDiagram
+    participant A as Author household (origin)
+    participant B as Paired household (v_69)
+    participant C as 2 hops away (v_69)
+    participant O as Paired household (v_68)
+    Note over A: +10 min: totals changed since the last send
+    A->>B: MOMENT_REACTIONS_COUNTED {M, rev, counts, total, hop 1, counts_sig}
+    Note over A,O: never sent to a v_68 peer
+    B->>B: verify counts_sig (origin key), moment held, rev newer → keep
+    B->>C: same payload, hop 2 (B relayed M's create)
+    C->>C: verify, keep — no relay to A or B
+    Note over A: +6 h: unchanged → nothing sent
+```
+
+**Cost** (measured with the real encoders). A totals envelope is
+**1.09 KB** (one emoji) to **1.21 KB** (eight, the cap); a text moment's
+create ~1.6 KB.
+
+* *31 households, fully paired:* the origin sends 30, each relays once to 28
+  → **870 envelopes ≈ 0.95 MB per update**; the moment itself ≈ 1.4 MB. At
+  most 3 updates a moment and only on change — typically 2 ≈ 1.9 MB ≈ 1.4
+  moment-equivalents. Per-reaction relaying instead: 60 reactions × 870 ≈
+  52 000 envelopes (≈ 57 MB).
+* *Sparse mesh (degree ~4):* 4 + 12 + 36 = 52 (≤ ~100 with overlaps)
+  envelopes ≈ **57–110 KB per update**.
+* *Worst case per origin:* the receiver budgets cap what any origin can make
+  a household take and relay — 10 new revs a minute, 4 per moment a day —
+  and a relay replaying genuine old totals costs one signature check each,
+  no budget and no relay.
+* *Residual — a burst through an offline peer's outbox.* The author paces
+  its sends, but a peer offline for a while gets every queued update
+  (latest-only per moment) when it comes back, in one outbox drain. Past 10
+  a minute from one origin the rest are refused there and wait for those
+  moments' next checkpoint — stale, never wrong.
+
 ## Mermaid sequence — local author posts a moment
 
 ```mermaid
@@ -591,7 +732,8 @@ instance.
   local rows. `0057_moment_tombstone.sql` adds `moments.deleted_at`
   (delete tombstones). `0124_moment_saves.sql` adds `moment_saves`
   (saved moments, decision 6b). `0125_moment_reaction_route.sql` adds
-  `moments.reaction_route` (v_67).
+  `moments.reaction_route` (v_67). `0127_moment_reaction_summary.sql` adds
+  `moments.reaction_summary` (v_69).
 - Domain: `socialhome/domain/moment.py` (caps + dataclasses);
   events at `socialhome/domain/events.py`.
 - Repo: `socialhome/repositories/moment_repo.py`.
@@ -601,6 +743,11 @@ instance.
 - Reactions through a GFS (v_68): `services/moment_reaction_gfs.py`
   (follower side), `MomentReactionRouter.on_gfs_reaction` (author side) —
   see [`momentum_public.md`](momentum_public.md#reactions-through-the-gfs-v_68)
+- Reaction totals (v_69): signature ``socialhome/moment_counts.py``;
+  checkpoints, receiver and GFS hand-off
+  ``socialhome/services/moment_reaction_counts.py`` (registers
+  ``MOMENT_REACTIONS_COUNTED``); relay in
+  ``MomentFederationOutbound.relay_inbound`` / ``fan_counts``.
 - Routed reactions (v_67): wire + crypto
   ``socialhome/federation/moment_reaction_route.py``; reactor / relay /
   origin ``socialhome/services/moment_reaction_router.py``.
@@ -612,7 +759,9 @@ instance.
 - Realtime push:
   ``socialhome/services/realtime_service.py`` — broadcasts
   ``moment.created`` / ``moment.deleted`` to the household and
-  ``moment.reaction_changed`` only to the author's WS sessions.
+  ``moment.reaction_changed`` only to the author's WS sessions — and (v_69)
+  a reactor-free ``moment.reaction_changed`` to the household when newer
+  totals arrive for a moment held here.
 - Routes: `socialhome/routes/moments.py`.
 - Retention scheduler:
   `socialhome/infrastructure/moment_retention_scheduler.py`.

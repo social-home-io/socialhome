@@ -562,6 +562,103 @@ points at that moment, and quick successive posts hint at an add and its
 removal. It could withhold or delay one, as it can any moment; it can't
 forge, alter or replay one past the author's checks.
 
+## Reaction totals through the GFS (v_69)
+
+Owner decision 10 (2026-10-25), GFS part — the mesh part is in
+[`momentum.md`](momentum.md#reaction-totals-v_69). Only the author's
+household holds every reaction to its public moment, so it sends the
+**totals** — per-emoji counts (8 most used) and the total, never who — to
+the GFSs its followers read the moment on:
+
+* **When:** at **+10 min, +3 h and +24 h** after the moment was made (the
+  last only while it is still in its window) and **only when they changed**
+  since the last GFS send; after a restart, one checkpoint for each own live
+  public moment of the last 24 h that has reactions. At most 8 posts a tick
+  (≥ 60 s apart — under the GFS's 10 a minute); the rest wait for the next
+  ticks. A checkpoint counts as sent to a GFS only on a `2xx`: one that
+  answered `429` or failed is posted again after 5 min — only that GFS, at
+  most 3 posts a checkpoint — then left to the next checkpoint, which goes to
+  every GFS even if the totals didn't change since.
+* **Where:** every GFS the author is registered on that proves the signed
+  `encrypted_moments` **and** `moment_counts` capabilities; an older GFS gets
+  nothing (its followers keep their own counts).
+* **Shape:** `POST /gfs/moments/counts` with exactly the eight envelope
+  fields of a publish — the totals are sealed: `{op: "counts",
+  author_user_id, rev, counts, total, sent_at}` under the item key of
+  **today's** step for that moment id (followers keep only the newest step
+  key, as for a delete). The body is **padded to exactly 640 bytes**
+  (`COUNTS_BODY_BYTES`, a `_pad` key inside the AEAD; the largest possible
+  body — eight 32-byte emoji at 1 000 000 each — is 499), so every totals
+  ciphertext is the same length: the GFS reads no count, and can't tell one
+  reaction from a million, or one emoji from eight, by size either.
+* **GFS:** checks the shape, that the signer is the household the author
+  registered from, that the step is today's, and its seen cache (a retried
+  post is a no-op that spends nothing); then its budgets, cluster-wide:
+  **10 a minute per author household** (each node its share) and **3 a day
+  per moment** (every node also counts the updates it is forwarded, so the
+  cap holds whichever node a post lands on). It pushes
+  `{type: "incoming_public_moment_counts", payload: <envelope>}` only to the
+  follower households that declared `ops: ["counts"]` and are **connected**
+  — on this node, and on the others through the cluster audience
+  `count_followers` — and **never queues it**: a follower offline now gets
+  the next checkpoint, or keeps its own count. Bounded residuals of the
+  cluster-wide day cap: two posts of one moment landing on two nodes at the
+  same moment both pass before either is forwarded (≤ one extra per node,
+  and the author sends at most 3 + a retried one anyway); a node whose
+  forward buffer is full forwards nothing, so the others don't count that
+  one; and during a rolling upgrade an older node ignores the
+  `count_followers` audience — it pushes nothing to its followers and counts
+  nothing, so the cap is per node (≤ 3 × nodes a day) until it is upgraded.
+  None of these reaches a follower that didn't ask, or queues anything.
+* **Follower:** declares `ops: ["counts"]` (in its follow and its suites
+  declaration) only to a GFS that proved `moment_counts` — an older one
+  refuses the unknown key — and declares again once a server it follows
+  through starts proving it. It keeps totals only when the envelope verifies
+  against the author's pinned key, opens under a step key **it already
+  holds** — without one it drops the update and asks for no key (no request
+  storm; the next moment brings it) — names `op: "counts"` and that author,
+  was sent within 25 h, and the moment is held here by that author and
+  household (live, older totals only) — the same
+  `moments.reaction_summary` as the mesh, compared by `rev`.
+
+### Sequence: totals reach connected followers
+
+```mermaid
+sequenceDiagram
+    participant A as Author household
+    participant G as GFS node 1
+    participant G2 as GFS node 2
+    participant F as Follower (ops: counts, online)
+    participant F2 as Follower (offline)
+    Note over A: +10 min, totals changed
+    A->>G: POST /gfs/moments/counts {8 envelope fields}
+    G->>G: author's household? today's step? seen? budgets
+    G-->>A: 202
+    G->>F: incoming_public_moment_counts {payload}
+    G->>G2: NODE_DRAIN_HINT relays [("count_followers", author)]
+    G2->>G2: push to its connected followers — never queued
+    Note over F2: gets nothing — the next checkpoint, or its own count
+    F->>F: verify, open with the step key it holds, keep if newer
+```
+
+### Bounds and cost
+
+Measured with the real encoders: a counts post is **1.22 KB** and a pushed
+frame **1.27 KB**, whatever the totals (padded; unpadded they were
+0.55–0.70 KB and their length told the GFS roughly how many emoji and how
+big). An author with **10 000 follower households** and 200 reactions in the
+first hour: the moment is ~12 MB through the GFS; each totals update ≤
+10 000 × 1.27 KB ≈ **12.7 MB** (≈ 7.6 MB with 60 % connected), at most 3 a
+moment and only on change — typically 2 ≈ 25 MB. A refused post is retried
+to that GFS only (≤ 2 more 1.22 KB posts a checkpoint, no push). Pushing
+every reaction instead: 200 × 10 000 × 1.27 KB ≈ 2.5 GB. The GFS keeps no totals at rest; the seen
+cache and the per-moment counters are in memory, bounded like the publish
+cache.
+
+**What the GFS learns** ([`principles.md`](../principles.md)): that moment
+M has at least one reaction and its totals changed before checkpoint *k* (an
+update came) — not the counts, and not their size.
+
 ## Event types
 
 | Event type (federation) | Direction | Purpose |
@@ -583,6 +680,7 @@ verifies the author's signature directly.
 | `follow_changed` | GFS → author SH | A follower came or went. `action: "add"` (v_62) carries `follower: {instance_id, identity_public_key, keywrap_public_key, kem_suite, keywrap_sig, moment_suites}`; `action: "remove"` carries `follower_instance_id` and `household_still_follows`. |
 | `moment_key_request` | GFS → author SH (v_62) | A follower household lacks the key for `want_gen` and the mailbox had none: `{followed_user_id, want_gen, follower_user_ids, follower}`. Only for a household that follows; ≤ 2 a minute per (household, author). |
 | `moment_reaction` | GFS → author SH (v_68) | `{from_instance, sealed}` — a follower household's sealed reaction (or removal) to one of the author's public moments; `from_instance` is the household the GFS authenticated. To the author's household only (this node, the node holding its socket, or its 24 h queue). See [Reactions through the GFS](#reactions-through-the-gfs-v_68). An older household ignores the frame. |
+| `incoming_public_moment_counts` | GFS → follower SH (v_69) | `{payload: <envelope>}` — an author household's encrypted reaction totals (`op: "counts"`), only to connected follower households that declared `ops: ["counts"]`; never queued. See [Reaction totals](#reaction-totals-through-the-gfs-v_69). An older household ignores the frame. |
 | `moment_key` | GFS → follower SH (v_62) | One sealed key `{author_user_id, instance_id, to, key_gen, key_step, key_suite, sealed: {kem_suite, eph_pk, ciphertext}, signature}`, pushed to the `to` household only — at once, or from the mailbox when it reconnects. |
 
 ## Wire endpoints
@@ -593,7 +691,7 @@ verifies the author's signature directly.
 |---|---|---|
 | POST   | `/gfs/moments/users/register` | Signed body — register a user. `user_id` ≤ 128 printable chars (the cluster `followers` audience key bound). |
 | POST   | `/gfs/moments/users/{user_id}/deregister` | Signed body — drop a registration. |
-| POST   | `/gfs/moments/users/{user_id}/follow` | Signed body — record a follower; v_62 optional `moment_suites: {kem: [...], seal: [...]}` (≤ 8 names of ≤ 64 chars each; 422 otherwise). |
+| POST   | `/gfs/moments/users/{user_id}/follow` | Signed body — record a follower; v_62 optional `moment_suites: {kem: [...], seal: [...]}` (≤ 8 names of ≤ 64 chars each; 422 otherwise); v_69 optional `ops` (only `"counts"`; any other name, or `ops` to an older server, is 422). |
 | POST   | `/gfs/moments/users/{user_id}/unfollow` | Signed body — drop a follower. |
 | POST   | `/gfs/moments/users/{user_id}/picture` | Signed body — push avatar bytes. |
 | POST   | `/gfs/moments/publish` | Signed, encrypted envelope — fan out. Anything but the eight envelope fields: `422 encryption_required`. |
@@ -601,10 +699,11 @@ verifies the author's signature directly.
 | POST   | `/gfs/moments/delete_cert` | v_66. Signed by the author's household: `{instance_id, cert}` — the delete's origin certificate (`moment_id, author_user_id, origin_instance_id, occurred_at, origin_identity_pk, origin_sig_suite, origin_sig`). Kept 30 days for followers that were away. `422 invalid_cert` (shape, key, suite, signature), `403 instance_mismatch`, `409 stale_cert` (delete time not within the last 25 h), `413` past 4 KB, `429 rate_limited` / `author_delete_quota`. Returns `{kept}`. |
 | PUT / GET | `/gfs/moments/media/{blob_id}` | v_63. `PUT` header-signed by the author's household: one encrypted, padded blob addressed by its SHA-256 (≤ 8 MB + overhead; expiry ≤ 31 days ahead since v_66 — `moment_media_30d`, 8 before; 422 for a wrong address / size / expiry, 429 over the author's quota). `GET` anonymous, immutable, CORS `*`: the ciphertext. |
 | POST   | `/gfs/moments/media/{blob_id}/delete` | v_63. Signed by the author's household: withdraw a blob (its moment was deleted). |
-| POST   | `/gfs/moments/suites` | v_62. Signed by a follower household: `{instance_id, moment_suites: {kem, seal}}` — what it can open, recorded on every follow it holds here (a follow made before it upgraded declared nothing). Sent once per process per server on (re)connect, only when a local user follows someone there. Returns `{updated}`. |
+| POST   | `/gfs/moments/suites` | v_62. Signed by a follower household: `{instance_id, moment_suites: {kem, seal[, ops]}}` (v_69 `ops: ["counts"]` only to a server proving `moment_counts`, declared again once it does) — what it can open, recorded on every follow it holds here (a follow made before it upgraded declared nothing). Sent once per process per server on (re)connect, only when a local user follows someone there. Returns `{updated}`. |
 | POST   | `/gfs/moments/keys` | v_62. Signed by the author's household: `{instance_id, deliveries: [≤ 100 sealed keys]}`. Each is kept (latest per author + household) and pushed to its `to` household only while it follows the author. |
 | POST   | `/gfs/moments/users/{user_id}/key_request` | v_62. Signed by a follower household: `{instance_id, want_gen}`. Always `202`; answered from the mailbox, or forwarded to the author, only for a follower, throttled. |
 | POST   | `/gfs/moments/users/{user_id}/react` | v_68. Signed by a follower household: exactly `{instance_id, sealed}` — a sealed reaction to one of the author's public moments, pushed (`moment_reaction`) to the author's household only. `202` (whether the author was online is not said), `403 not_following` (not a follower household here, or the author's own), `422 invalid_reaction` (any other field, a malformed seal), `413` past 4 KB, `429 rate_limited` (30 / min per household + author, 120 / min per household, cluster-wide). Advertised as the signed `moment_reactions` capability. |
+| POST   | `/gfs/moments/counts` | v_69. Signed by the author's household: exactly the eight envelope fields (`op: "counts"` sealed under today's step). Pushed as `incoming_public_moment_counts` to connected followers that declared `ops: ["counts"]` — never queued. `202` (also for a retried post), `403 instance_mismatch`, `409 stale_envelope` (an earlier day's step), `413` past 4 KB, `422 encryption_required`, `429 rate_limited` (10 / min per author household, 3 / day per moment, cluster-wide). Advertised as the signed `moment_counts` capability. |
 | POST   | `/gfs/moments/users/{user_id}/follower_stats` | v_62. Signed by the author's household: `{followers, households, households_unable}` — counts only. |
 | GET    | `/gfs/moments/users` | Public JSON directory. |
 | GET    | `/gfs/moments/users/{user_id}` | Public JSON per-user detail. |

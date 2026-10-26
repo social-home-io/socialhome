@@ -80,7 +80,11 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from ..canonical_json import canonical_str
-from ..moment_public_seal import FRAME_MOMENT_REACTION, MOMENT_FRAME_TYPES
+from ..moment_public_seal import (
+    FRAME_MOMENT_COUNTS,
+    FRAME_MOMENT_REACTION,
+    MOMENT_FRAME_TYPES,
+)
 from .envelope_relay import (
     ENVELOPE_INSTANCE_ID_RE,
     RELAY_FAN_OUT_CONCURRENCY,
@@ -104,9 +108,14 @@ log = logging.getLogger(__name__)
 #: instance id) — a single-recipient push the origin had no socket for.
 #: ``all``: every household connected to the receiving node (key:
 #: :data:`AUDIENCE_ALL_KEY`) — a GFS-wide notice such as a rename.
+#: ``count_followers`` (v_69): the follower households of a public-Momentum
+#: author that declared ``ops: ["counts"]`` (key: the author's user id) — an
+#: author's reaction totals, pushed live only (never queued). An older node
+#: ignores the unknown kind: its followers miss that update, nothing else.
 AUDIENCE_SPACE: str = "space"
 AUDIENCE_CHANNEL: str = "channel"
 AUDIENCE_FOLLOWERS: str = "followers"
+AUDIENCE_COUNT_FOLLOWERS: str = "count_followers"
 AUDIENCE_INSTANCE: str = "instance"
 AUDIENCE_ALL: str = "all"
 AUDIENCE_KINDS: frozenset[str] = frozenset(
@@ -114,6 +123,7 @@ AUDIENCE_KINDS: frozenset[str] = frozenset(
         AUDIENCE_SPACE,
         AUDIENCE_CHANNEL,
         AUDIENCE_FOLLOWERS,
+        AUDIENCE_COUNT_FOLLOWERS,
         AUDIENCE_INSTANCE,
         AUDIENCE_ALL,
     }
@@ -133,6 +143,7 @@ HIGHLIGHT_SIGNAL_FRAME_TYPE: str = "highlight_signal"
 #: The other kinds are space items, pushed as ``{"type": "relay", …frame}``.
 TYPED_FRAME_TYPES: dict[str, frozenset[str]] = {
     AUDIENCE_FOLLOWERS: MOMENT_FRAME_TYPES,
+    AUDIENCE_COUNT_FOLLOWERS: frozenset({FRAME_MOMENT_COUNTS}),
     AUDIENCE_INSTANCE: frozenset(
         {
             "follow_changed",
@@ -149,7 +160,14 @@ TYPED_FRAME_TYPES: dict[str, frozenset[str]] = {
 #: copy, by the origin or a receiver. A public-highlight signal belongs to a
 #: viewer waiting right now; replayed on the author's next hello it would
 #: only answer a session long gone.
-EPHEMERAL_FRAME_TYPES: frozenset[str] = frozenset({HIGHLIGHT_SIGNAL_FRAME_TYPE})
+EPHEMERAL_FRAME_TYPES: frozenset[str] = frozenset(
+    {
+        HIGHLIGHT_SIGNAL_FRAME_TYPE,
+        # v_69 — reaction totals are for followers connected now; a missed
+        # one is superseded by the next checkpoint (or never needed).
+        FRAME_MOMENT_COUNTS,
+    }
+)
 
 #: How long :meth:`ClusterRelayFanOut.deliver_to_household` waits to hear
 #: whether another node holds the household's socket: the coalescing delay
@@ -377,6 +395,7 @@ class ClusterRelayFanOut:
         "_clock",
         "_cluster",
         "_dropped",
+        "_observers",
         "_pending_targets",
         "_relay",
         "_seen",
@@ -407,6 +426,9 @@ class ClusterRelayFanOut:
         #: A kind whose items are remembered longer, in the cache its origin
         #: service keeps (public moments: as long as their key step lasts).
         self._seen_by_kind: dict[str, SeenPayloadCache] = {}
+        #: A kind whose new inbound items its origin service counts (v_69:
+        #: an author's reaction totals, against a cluster-wide budget).
+        self._observers: dict[str, Callable[[dict], None]] = {}
         #: Inbound pushes and origin-side offline queueing, awaited in close.
         self._tasks: set[asyncio.Task[None]] = set()
         #: Offline candidates held by forwarded items not yet settled.
@@ -432,17 +454,23 @@ class ClusterRelayFanOut:
         resolve: AudienceResolver,
         *,
         seen: SeenPayloadCache | None = None,
+        observe: Callable[[dict], None] | None = None,
     ) -> None:
         """Resolve audiences of *kind* with *resolve* on the receiving side.
 
         With *seen*, items of *kind* are deduped in that cache instead of
         this relay's ten-minute one — the origin service's own, so an item
-        this node forwarded or was forwarded counts as seen there too."""
+        this node forwarded or was forwarded counts as seen there too. With
+        *observe*, each new inbound item of *kind* (not seen here before) is
+        shown to it — so a budget the origin node charged is charged on
+        every node (v_69)."""
         if kind not in AUDIENCE_KINDS:
             raise ValueError(f"unknown audience kind: {kind!r}")
         self._audiences[kind] = resolve
         if seen is not None:
             self._seen_by_kind[kind] = seen
+        if observe is not None:
+            self._observers[kind] = observe
 
     def _seen_for(self, kind: str) -> SeenPayloadCache:
         return self._seen_by_kind.get(kind, self._seen)
@@ -650,6 +678,9 @@ class ClusterRelayFanOut:
                 if seen.seen(digest):
                     continue
                 seen.record(digest)
+                observe = self._observers.get(item.kind)
+                if observe is not None:
+                    observe(item.frame)
             push = [t for t in local if t != item.skip]
             if push:
                 jobs.append((push, item))

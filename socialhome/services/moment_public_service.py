@@ -38,7 +38,7 @@ from ..repositories.moment_public_repo import (
 )
 from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
 from ..repositories.user_repo import AbstractUserRepo
-from .moment_public_key_inbound import OWN_MOMENT_SUITES
+from .moment_public_key_inbound import OWN_MOMENT_OPS, OWN_MOMENT_SUITES
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
@@ -102,8 +102,10 @@ class MomentPublicService(ProtectionGateMixin):
         #: The GFS capability proofs (v_62 ``encrypted_moments``) the
         #: sharing settings report per server.
         self._capabilities: GfsConnectionService | None = None
-        #: GFS ids this process already declared its moment suites to.
-        self._suites_declared: set[str] = set()
+        #: (GFS id, declared ``ops`` too) this process already declared its
+        #: moment suites as — a server that proves ``moment_counts`` later
+        #: (an upgrade) is declared to once more, with ``ops`` (v_69).
+        self._suites_declared: set[tuple[str, bool]] = set()
 
     def attach_capabilities(self, gfs_service: GfsConnectionService) -> None:
         self._capabilities = gfs_service
@@ -115,6 +117,16 @@ class MomentPublicService(ProtectionGateMixin):
         if self._capabilities is None:
             return False
         return await self._capabilities.encrypted_moments_supported(gfs_id)
+
+    async def _suites_for(self, gfs_id: str) -> dict[str, list[str]]:
+        """What this household declares to *gfs_id*: its suites, plus (v_69)
+        the extra frames it takes — ``ops: ["counts"]`` — only to a server
+        that proved ``moment_counts`` (an older one refuses the key)."""
+        if self._capabilities is not None and (
+            await self._capabilities.moment_counts_supported(gfs_id)
+        ):
+            return {**OWN_MOMENT_SUITES, "ops": list(OWN_MOMENT_OPS)}
+        return OWN_MOMENT_SUITES
 
     async def follower_households_unable(
         self, *, user_id: str, gfs_id: str
@@ -147,11 +159,15 @@ class MomentPublicService(ProtectionGateMixin):
         them no public moments. One small signed request per connection;
         missing keys are then asked for when moments arrive. ``True`` when
         the GFS took it. Never raises."""
-        if gfs_id in self._suites_declared or self._signing_key is None:
+        if self._signing_key is None:
             return False
         if not await self._follows.any_through(gfs_id):
             return False
         if not await self.encrypted_delivery(gfs_id):
+            return False
+        suites = await self._suites_for(gfs_id)
+        declared = (gfs_id, "ops" in suites)
+        if declared in self._suites_declared:
             return False
         conn = await self._gfs.get(gfs_id)
         if conn is None or conn.status != "active" or self._http_client is None:
@@ -159,7 +175,7 @@ class MomentPublicService(ProtectionGateMixin):
         signed = self._sign_body(
             {
                 "instance_id": self._require_instance_id(),
-                "moment_suites": OWN_MOMENT_SUITES,
+                "moment_suites": suites,
             }
         )
         try:
@@ -179,7 +195,7 @@ class MomentPublicService(ProtectionGateMixin):
         except aiohttp.ClientError as exc:
             log.warning("moment_public: declaring suites to %s failed: %s", gfs_id, exc)
             return False
-        self._suites_declared.add(gfs_id)
+        self._suites_declared.add(declared)
         return True
 
     def attach_key_outbound(self, key_outbound: MomentPublicKeyOutbound) -> None:
@@ -324,7 +340,8 @@ class MomentPublicService(ProtectionGateMixin):
             "followed_user_id": followed_user_id,
             # v_62: what this household can open — an author seals its
             # moment key only to a household that declared it.
-            "moment_suites": OWN_MOMENT_SUITES,
+            # v_69: plus ``ops`` where the server takes it.
+            "moment_suites": await self._suites_for(gfs_id),
         }
         signed = self._sign_body(body)
         try:

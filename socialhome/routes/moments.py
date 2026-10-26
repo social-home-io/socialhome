@@ -46,6 +46,7 @@ from ..domain.moment import (
     REACTION_REACH_AUTHOR,
     Moment,
     MomentReaction,
+    MomentReactionTotals,
     SavedMoment,
     is_valid_moment_reaction,
 )
@@ -84,6 +85,7 @@ def _moment_dict(
     author: PersonSummary | None = None,
     save: tuple[bool, bool] | None = None,
     reach: str = REACTION_REACH_AUTHOR,
+    totals: MomentReactionTotals | None = None,
 ) -> dict:
     saved_by_me, can_save = save if save is not None else (False, False)
     base: dict = {
@@ -115,6 +117,15 @@ def _moment_dict(
     if counts is not None:
         base["reaction_count"] = counts.get("reaction_count", 0)
         base["reply_count"] = counts.get("reply_count", 0)
+    if totals is not None:
+        # v_69: everyone sees the full count — the author household's totals
+        # where they reach it (``reaction_totals_at`` = when it sent them,
+        # Unix ms), else the reactions held here (``null``). Per-emoji counts
+        # and the caller's own emoji; never who else reacted.
+        base["reaction_count"] = totals.total
+        base["reaction_counts"] = totals.counts
+        base["reaction_totals_at"] = totals.totals_rev
+        base["my_reaction"] = totals.my_reaction
     # Video moments transcode in the background — surface a live
     # ``media_status`` so the SPA shows a "Processing…" placeholder.
     if m.media_type == "video":
@@ -177,6 +188,9 @@ async def _moment_list(
     )
     saves = await svc.save_flags(moments, viewer_user_id=viewer_user_id)
     reach = await svc.reaction_reach(moments)
+    totals = await svc.reaction_totals(
+        moments, viewer_user_id=viewer_user_id, reach=reach
+    )
     statuses = await _video_statuses(view, moments)
     authors = await view.named_people(
         (m.author_user_id for m in moments), gfs_via=_gfs_via(moments)
@@ -190,6 +204,7 @@ async def _moment_list(
             author=authors[m.author_user_id],
             save=saves.get(m.id),
             reach=reach.get(m.id, REACTION_REACH_AUTHOR),
+            totals=totals.get(m.id),
         )
         if saved_at is not None:
             item["saved_at"] = saved_at[m.id]
@@ -404,6 +419,9 @@ class MomentDetailView(BaseView):
         counts = await svc.count_engagement(ids, viewer_user_id=ctx.user_id)
         saves = await svc.save_flags([moment, *replies], viewer_user_id=ctx.user_id)
         reach = await svc.reaction_reach([moment, *replies])
+        totals = await svc.reaction_totals(
+            [moment, *replies], viewer_user_id=ctx.user_id, reach=reach
+        )
         statuses = await _video_statuses(self, [moment, *replies])
         authors = await self.named_people(
             (m.author_user_id for m in (moment, *replies)),
@@ -420,6 +438,7 @@ class MomentDetailView(BaseView):
                         author=authors[moment.author_user_id],
                         save=saves.get(moment.id),
                         reach=reach.get(moment.id, REACTION_REACH_AUTHOR),
+                        totals=totals.get(moment.id),
                     ),
                     "replies": [
                         _moment_dict(
@@ -429,6 +448,7 @@ class MomentDetailView(BaseView):
                             author=authors[r.author_user_id],
                             save=saves.get(r.id),
                             reach=reach.get(r.id, REACTION_REACH_AUTHOR),
+                            totals=totals.get(r.id),
                         )
                         for r in replies
                     ],

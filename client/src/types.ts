@@ -279,6 +279,15 @@ export interface Moment {
    *  household gets it; ``household`` — it is seen in this household only
    *  (no route to the author). */
   reactions_reach?:   'author' | 'household'
+  /** Per-emoji reaction counts (v_69) — the author household's totals
+   *  where they reach it (everyone's reactions, never who), else the
+   *  reactions held here. ``reaction_count`` is their total. */
+  reaction_counts?:   Record<string, number>
+  /** When the author's household sent the totals (Unix ms); ``null`` when
+   *  the counts are this household's own. */
+  reaction_totals_at?: number | null
+  /** The caller's own reaction, if any. */
+  my_reaction?:       string | null
   /** When the caller saved it — set on ``?scope=saved`` items only; the
    *  Saved list pages on it. */
   saved_at?:          string

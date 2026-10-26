@@ -372,6 +372,7 @@ class GfsConnectionService:
         "_member_publish_strict",
         "_member_publish_trusted",
         "_member_servers",
+        "_moment_counts",
         "_moment_delete_log",
         "_moment_media_30d",
         "_moment_reactions",
@@ -498,6 +499,10 @@ class GfsConnectionService:
         # …and ``moment_reactions`` (v_68): the GFS takes a follower's sealed
         # reaction and pushes it to the author's household only.
         self._moment_reactions: dict[str, bool] = {}
+        # …and ``moment_counts`` (v_69): the GFS takes an author's encrypted
+        # reaction totals and pushes them to connected followers that
+        # declared ``ops: ["counts"]`` — never queued.
+        self._moment_counts: dict[str, bool] = {}
         # …and ``space_key_pull`` (#5b): the GFS takes a follower's
         # ``/gfs/spaces/{id}/key_request``. Asked only once proved.
         self._space_key_pull: dict[str, bool] = {}
@@ -738,6 +743,7 @@ class GfsConnectionService:
             self._moment_delete_log,
             self._moment_media_30d,
             self._moment_reactions,
+            self._moment_counts,
             self._space_key_pull,
             self._space_item_followers,
             self._payload_zlib1,
@@ -3238,6 +3244,20 @@ class GfsConnectionService:
             return False
         return await self._signed_capability_supported(
             conn, "moment_reactions", self._moment_reactions
+        )
+
+    async def moment_counts_supported(self, gfs_id: str) -> bool:
+        """Whether the GFS *gfs_id* proved ``moment_counts`` (v_69) under a
+        valid signature: it takes an author household's encrypted reaction
+        totals (``POST /gfs/moments/counts``) and pushes them to connected
+        followers that declared ``ops: ["counts"]`` (and it takes ``ops`` in
+        a declaration at all — an older one refuses the key). Totals, and
+        the ``ops`` declaration, go only to such a server."""
+        conn = await self._repo.get(gfs_id)
+        if conn is None or conn.status != "active" or not conn.inbox_url:
+            return False
+        return await self._signed_capability_supported(
+            conn, "moment_counts", self._moment_counts
         )
 
     async def space_item_followers_supported(self, conn: GfsConnection) -> bool:

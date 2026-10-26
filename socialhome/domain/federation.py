@@ -473,6 +473,11 @@ class FederationEventType(str, enum.Enum):
     # carried back hop by hop along the moment's return tokens to an author
     # the reactor's household is not paired with.
     MOMENT_REACTION_ROUTED = "moment_reaction_routed"
+    # v_69 — the author's household re-broadcasts a moment's reaction totals
+    # (per-emoji counts, never who), signed by it, at fixed checkpoints and
+    # only on change; relayed like ``MOMENT_CREATED`` to households that hold
+    # or relayed the moment.
+    MOMENT_REACTIONS_COUNTED = "moment_reactions_counted"
 
     # ── Public Momentum (§Momentum-public) — GFS → author back-channel for
     # follower bookkeeping. The public moment itself rides as a WS frame
