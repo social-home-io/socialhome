@@ -128,6 +128,18 @@ function provenance(m: Moment): string | null {
     : t('moment.card.paired_unnamed')
 }
 
+/** The card as the head of the moment page (``/momentum/{id}``): no thread
+ *  preview and no Reply link (the replies and the reply field follow it),
+ *  counted chips on your own moment too. */
+export interface MomentCardPage {
+  /** Between the media and the reactions: the author's status band. */
+  status?: ComponentChildren
+  /** "Anna and Lena reacted", beside the chips. */
+  reactedBy?: string | null
+  /** ⋯ Reply: the page's own reply field. */
+  onReply: () => void
+}
+
 interface Props {
   m: Moment
   me: string | undefined
@@ -135,11 +147,14 @@ interface Props {
   onPatch: (id: string, patch: Partial<Moment>) => void
   /** The author deleted it. */
   onDeleted: (id: string) => void
+  /** Shown as the moment page's head instead of a list card. */
+  page?: MomentCardPage
 }
 
-export function MomentCard({ m, me, onPatch, onDeleted }: Props) {
+export function MomentCard({ m, me, onPatch, onDeleted, page }: Props) {
   const loc = useLocation()
-  const expanded = useSignal(false)
+  // The moment page shows the whole text.
+  const expanded = useSignal(page !== undefined)
   const whoSees = useSignal(false)
   const mine = m.author_user_id === me
   const authorName = mine ? t('moment.card.you') : namedPersonLabel(m.author_user_id, m.author)
@@ -151,6 +166,9 @@ export function MomentCard({ m, me, onPatch, onDeleted }: Props) {
     ...(m.author?.bio ? { bio: m.author.bio } : {}),
   })
   const where = provenance(m)
+  // The page counts your own moment's reactions as chips, like anyone's.
+  const listMode = reactionMode(m, me)
+  const mode: ReactionMode = page && listMode === 'own' ? 'counted' : listMode
   const longContent = m.content.length > CONTENT_TRUNCATE_AT
   const text = longContent && !expanded.value
     ? m.content.slice(0, CONTENT_TRUNCATE_AT) + '…'
@@ -184,11 +202,16 @@ export function MomentCard({ m, me, onPatch, onDeleted }: Props) {
   }
 
   const items: MenuItem[] = [
-    { key: 'reply', label: t('moment.card.reply'), onSelect: () => loc.route(`/momentum/${m.id}/reply`) },
+    {
+      key: 'reply',
+      label: t('moment.card.reply'),
+      onSelect: () => (page ? page.onReply() : loc.route(`/momentum/${m.id}/reply`)),
+    },
   ]
   if (m.content) items.push({ key: 'copy', label: t('moment.card.copy_text'), onSelect: () => void copyText() })
   if (mine) {
-    items.push({ key: 'who', label: t('moment.card.who_sees'), onSelect: () => { whoSees.value = true } })
+    // On the page the status band already says who sees it.
+    if (!page) items.push({ key: 'who', label: t('moment.card.who_sees'), onSelect: () => { whoSees.value = true } })
     items.push({ key: 'delete', label: t('common.delete'), danger: true, onSelect: () => void remove() })
   } else {
     if (m.saved_by_me || m.can_save) {
@@ -213,9 +236,13 @@ export function MomentCard({ m, me, onPatch, onDeleted }: Props) {
             <bdi class="sh-moment-card__name" dir="auto">{authorName}</bdi>
           </PersonButton>
           <span class="sh-moment-card__meta">
-            <a href={addBase(`/momentum/${m.id}`)} class="sh-moment-card__time">
-              <time dateTime={m.created_at}>{relativeTime(m.created_at)}</time>
-            </a>
+            {page
+              ? <time dateTime={m.created_at}>{relativeTime(m.created_at)}</time>
+              : (
+                <a href={addBase(`/momentum/${m.id}`)} class="sh-moment-card__time">
+                  <time dateTime={m.created_at}>{relativeTime(m.created_at)}</time>
+                </a>
+              )}
             {where && (
               <span title={m.received_via === 'gfs' ? t('moment.inbox.via_gfs') : undefined}>
                 {' · '}<bdi dir="auto">{where}</bdi>
@@ -256,22 +283,29 @@ export function MomentCard({ m, me, onPatch, onDeleted }: Props) {
       )}
       {m.media_type === 'video' && m.media_url && <MomentVideo m={m} />}
 
+      {page?.status}
+
       <footer class="sh-moment-card__foot">
-        <Reactions m={m} me={me} onPatch={onPatch} />
-        <a class="sh-moment-card__reply-btn" href={addBase(`/momentum/${m.id}/reply`)}>
-          <ReplyIcon />
-          <span>{t('moment.card.reply')}</span>
-        </a>
+        <Reactions m={m} onPatch={onPatch} mode={mode} />
+        {page?.reactedBy && (
+          <span class="sh-moment-card__reactedby" data-testid="moment-reacted-by">{page.reactedBy}</span>
+        )}
+        {!page && (
+          <a class="sh-moment-card__reply-btn" href={addBase(`/momentum/${m.id}/reply`)}>
+            <ReplyIcon />
+            <span>{t('moment.card.reply')}</span>
+          </a>
+        )}
       </footer>
-      {reactionMode(m, me) === 'counted' && m.reactions_reach === 'household' && (
+      {mode === 'counted' && m.reactions_reach === 'household' && (
         <p id={`sh-moment-reach-${m.id}`} class="sh-muted sh-moment-card__reach">
           {t('moment.detail.reactions_household_only')}
         </p>
       )}
 
-      {m.reply_count > 0 && <Thread m={m} me={me} />}
+      {!page && m.reply_count > 0 && <Thread m={m} me={me} />}
 
-      {mine && (
+      {mine && !page && (
         <Modal open={whoSees.value} onClose={() => { whoSees.value = false }}
           title={t('moment.card.who_sees')}>
           <p>{t(currentUser.value?.protected ? 'moment.card.who_sees_protected' : 'moment.card.who_sees_body')}</p>
@@ -291,8 +325,7 @@ function ReplyIcon() {
   )
 }
 
-function Reactions({ m, me, onPatch }: Pick<Props, 'm' | 'me' | 'onPatch'>) {
-  const mode = reactionMode(m, me)
+function Reactions({ m, onPatch, mode }: Pick<Props, 'm' | 'onPatch'> & { mode: ReactionMode }) {
   const counts = m.reaction_counts ?? {}
   const total = m.reaction_count
 

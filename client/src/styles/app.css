@@ -26188,3 +26188,225 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
   text-align: center;
   font-size: var(--sh-font-size-sm);
 }
+
+/* ── Moment page (UX r3 PR 10): one column, the card as its head ── */
+.sh-momentum-detail {
+  width: 100%;
+  max-width: 52rem;
+  margin-inline: auto;
+  gap: var(--sh-space-sm);
+}
+.sh-moment-back {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  min-height: 40px;
+  padding-inline: 4px 10px;
+  margin-inline-start: -4px;
+  border-radius: var(--sh-radius-md);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  text-decoration: none;
+}
+.sh-moment-back:hover { color: var(--sh-text); background: var(--sh-bg-secondary); }
+.sh-moment-back:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 2px; }
+.sh-moment-parent-gone {
+  margin: 0;
+  padding-block: var(--sh-space-sm);
+  padding-inline: var(--sh-space-md);
+  border: 1px dashed var(--sh-border-strong);
+  border-radius: var(--sh-radius-md);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+}
+/* Who sees your moment — neutral, an inset panel inside the card. */
+.sh-moment-status {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sh-space-sm);
+  margin-block: 4px;
+  padding-block: 10px;
+  padding-inline: 12px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+}
+.sh-moment-status__icon {
+  flex: none;
+  display: inline-flex;
+  padding-block-start: 1px;
+  color: var(--sh-text-muted);
+}
+.sh-moment-status--public .sh-moment-status__icon { color: var(--sh-primary-text); }
+.sh-moment-status__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.sh-moment-status__title {
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
+.sh-moment-status__sub {
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.sh-moment-status__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sh-space-xs);
+  margin-block-start: 6px;
+}
+.sh-moment-status__actions .sh-btn { min-height: 36px; }
+.sh-moment-card__reactedby {
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
+.sh-moment-replies {
+  display: flex;
+  flex-direction: column;
+  margin-block-start: var(--sh-space-sm);
+}
+.sh-moment-replies__h {
+  margin: 0;
+  padding-block-end: var(--sh-space-xs);
+  border-block-end: 1px solid var(--sh-border);
+  font-size: var(--sh-font-size-lg, 1.15rem);
+}
+.sh-moment-replies__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.sh-moment-reply {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sh-space-sm);
+  padding-block: 10px;
+  padding-inline: 4px;
+  border-block-end: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-sm);
+  scroll-margin-block: 96px;
+}
+.sh-moment-reply:focus { outline: none; }
+.sh-moment-reply:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: -2px; }
+/* The reply a notification pointed at. */
+.sh-moment-reply--picked {
+  background: var(--sh-primary-soft);
+  box-shadow: inset 3px 0 0 var(--sh-primary);
+}
+[dir='rtl'] .sh-moment-reply--picked { box-shadow: inset -3px 0 0 var(--sh-primary); }
+.sh-moment-reply--picked .sh-moment-reply__time,
+.sh-moment-reply--picked .sh-moment-reply__rx { color: var(--sh-primary-on-soft); }
+.sh-moment-reply__body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+.sh-moment-reply__head {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+}
+.sh-moment-reply__namebtn {
+  display: flex;
+  min-width: 0;
+  font-weight: 700;
+}
+.sh-moment-reply__name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-moment-reply__time {
+  flex: none;
+  white-space: pre;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-xs);
+}
+.sh-moment-reply__text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  line-height: 1.45;
+}
+.sh-moment-reply__rx {
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-xs);
+}
+.sh-moment-reply__menu { flex: none; align-self: flex-start; }
+.sh-moment-reply__more.sh-post-overflow { width: 40px; height: 40px; }
+.sh-moment-reply__menu .sh-post-menu button { min-height: 40px; }
+/* The ⋯ menus open toward the page, from the inline-end edge, in RTL too
+ * (the shared menu is pinned with a physical ``right``). */
+.sh-moment-reply__menu .sh-post-menu,
+.sh-moment-card__menu .sh-post-menu { inset-inline-start: auto; inset-inline-end: 0; }
+/* The reply field at the end of the page. */
+.sh-moment-replyfield {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-block-start: var(--sh-space-sm);
+}
+.sh-moment-replyfield__row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sh-space-sm);
+  padding-block: 6px;
+  padding-inline: 8px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg-tertiary);
+}
+.sh-moment-replyfield__row > .sh-avatar { flex: none; margin-block-end: 4px; }
+.sh-moment-replyfield__input {
+  flex: 1;
+  min-width: 0;
+  min-height: 40px;
+  max-height: 10rem;
+  padding-block: 9px;
+  padding-inline: 12px;
+  border: 1px solid transparent;
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font: inherit;
+  line-height: 1.4;
+  resize: none;
+  field-sizing: content;
+}
+.sh-moment-replyfield__input:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 1px; }
+.sh-moment-replyfield__row .sh-btn { flex: none; min-height: 40px; }
+.sh-moment-replyfield__hint {
+  margin: 0;
+  padding-inline: 4px;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-xs);
+  line-height: 1.4;
+}
+.sh-moment-replyfield__public {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 44px;
+  padding-inline: 4px;
+  cursor: pointer;
+}
+.sh-moment-replyfield__public-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-moment-replyfield__public-text span { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }

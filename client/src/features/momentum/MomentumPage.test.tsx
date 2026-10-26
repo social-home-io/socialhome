@@ -17,6 +17,7 @@ vi.mock('./MomentumYoursTab', () => ({ default: () => <div data-testid="yours" /
 
 import { api } from '@/api'
 import MomentumPage, { momentumViewFromUrl } from './MomentumPage'
+import { momentumBackTarget, _resetMomentumListForTests } from './backLink'
 
 describe('momentumViewFromUrl', () => {
   it('Yours has its own path', () => {
@@ -61,6 +62,16 @@ describe('MomentumPage tabs', () => {
     expect(links[0].getAttribute('aria-current')).toBeNull()
     expect(nav.querySelector('[role="tab"]')).toBeNull()
     expect(getByTestId('yours')).toBeTruthy()
+  })
+
+  it('remembers the tab and tag for the moment page\'s back link', () => {
+    _resetMomentumListForTests()
+    where.url = '/momentum?tag=herbst'; where.path = '/momentum'
+    render(<MomentumPage />)
+    expect(momentumBackTarget()).toBe('/momentum?tag=herbst')
+    where.url = '/momentum?tab=yours'; where.path = '/momentum'
+    render(<MomentumPage />)
+    expect(momentumBackTarget()).toBe('/momentum/yours')
   })
 
   it('an old ?tab=yours link is replaced by /momentum/yours', async () => {

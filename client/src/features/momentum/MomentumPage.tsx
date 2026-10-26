@@ -21,6 +21,7 @@ import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import MomentumInboxTab from './MomentumInboxTab'
 import MomentumYoursTab from './MomentumYoursTab'
+import { noteMomentumList } from './backLink'
 
 export type MomentumTab = 'moments' | 'yours'
 
@@ -61,6 +62,8 @@ const tabLabel = (tab: MomentumTab): string =>
 export default function MomentumPage() {
   const loc = useLocation()
   const view = momentumViewFromUrl(loc.url)
+  // A moment opened from here goes back to this tab and tag.
+  noteMomentumList(view.redirect ?? loc.url)
   useTitle(view.tab === 'yours' ? t('page_title.moments_yours') : t('nav.momentum'))
 
   useEffect(() => {

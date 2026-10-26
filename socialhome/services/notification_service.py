@@ -2042,7 +2042,10 @@ class NotificationService(ProtectionGateMixin):
                     fallback="{name} replied to your moment",
                     name=await self._person_name(event.author_user_id, locale),
                 ),
-                link_url=f"/momentum/{event.parent_moment_id}",
+                # The parent, with this reply picked out and scrolled to.
+                link_url=(
+                    f"/momentum/{event.parent_moment_id}?reply={event.moment_id}"
+                ),
             )
         )
 

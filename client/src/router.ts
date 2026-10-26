@@ -53,7 +53,8 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/momentum/public/discover': lazy(() => import('@/features/momentum/PublicDiscoveryPage')),
   '/momentum/public/sharing':  lazy(() => import('@/features/momentum/PublicSharingSettings')),
   '/momentum/:momentId':    lazy(() => import('@/features/momentum/MomentumDetailPage')),
-  '/momentum/:momentId/reply': lazy(() => import('@/features/momentum/MomentumComposerRedirect')),
+  // The moment page with its reply field focused — the one reply entry point.
+  '/momentum/:momentId/reply': lazy(() => import('@/features/momentum/MomentumDetailPage')),
   '/parent':         lazy(() => import('@/features/child-protection/ParentDashboard')),
   '/setup':          lazy(() => import('@/features/setup/SetupPage')),
 }

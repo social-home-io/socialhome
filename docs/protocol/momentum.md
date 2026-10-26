@@ -740,6 +740,13 @@ who live on a peer instance get the notification on *their*
 instance after the federation event lands, not on the actor's
 instance.
 
+A reply notification links to the moment it answers with the reply
+picked out (``/momentum/{parent_id}?reply={reply_id}``): the moment page
+scrolls to it. Opening a reply's own ``/momentum/{reply_id}`` goes there
+too; when the moment is gone the page shows the reply alone, saying so.
+``/momentum/{id}/reply`` is the moment page with its reply field focused —
+the one place a reply is written.
+
 ## Block + report
 
 * **Block.** The viewer's personal block list (``user_blocks``) is
