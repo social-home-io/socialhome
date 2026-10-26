@@ -1286,6 +1286,73 @@ async def test_enqueue_relay_refuses_an_item_bigger_than_a_cap(gfs_db):
     assert not await _relay(queue, "a" * 32, "r" * 5, rows=0)
 
 
+_KIND = '{"type":"moment_reaction"'
+
+
+async def _kind(queue, to, n, *, now=0, rows=10, per=10**6, total=10**6, cap=2):
+    return await queue.enqueue_relay(
+        to,
+        f'{_KIND},"n":{n}}}',
+        created_at=now,
+        expires_at=now + 100,
+        max_per_recipient=rows,
+        max_bytes_per_recipient=per,
+        max_total_bytes=total,
+        kind_prefix=_KIND,
+        max_kind_per_recipient=cap,
+        max_kind_row_bytes=200,
+    )
+
+
+async def test_enqueue_relay_a_capped_kind_evicts_only_its_own_kind(gfs_db):
+    # #1179 F1: a capped kind (sealed reactions) is held to its own row cap
+    # and makes room only from its own kind — never a moment or space item.
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    assert await _relay(queue, "a" * 32, '{"item":0}', rows=4)
+    for i in range(5):
+        assert await _kind(queue, "a" * 32, i, rows=4)
+    assert await _relay(queue, "a" * 32, '{"item":1}', rows=4)
+    rows = [r.sealed for r in await _relay_rows(queue, "a" * 32)]
+    assert {"item": 0} in rows and {"item": 1} in rows
+    assert [r["n"] for r in rows if "n" in r] == [3, 4]
+
+
+async def test_enqueue_relay_a_capped_kind_never_evicts_other_kinds(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    for i in range(3):
+        assert await _relay(queue, "a" * 32, f'{{"item":{i}}}', rows=3)
+    # The recipient is full of other kinds: the capped item is dropped.
+    assert not await _kind(queue, "a" * 32, 0, rows=3)
+    # Server-wide: it never evicts another recipient's row either.
+    blob = '{"x":"' + "h" * 90 + '"}'
+    assert await _relay(queue, "b" * 32, blob)
+    total = await queue.relay_bytes(0)
+    assert not await _kind(queue, "c" * 32, 1, total=total + 10)
+    assert [r.sealed for r in await _relay_rows(queue, "a" * 32)] == [
+        {"item": 0},
+        {"item": 1},
+        {"item": 2},
+    ]
+    assert len(await _relay_rows(queue, "b" * 32)) == 1
+    assert await _relay_rows(queue, "c" * 32) == []
+
+
+async def test_enqueue_relay_refuses_a_capped_kind_row_over_its_size(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    assert not await queue.enqueue_relay(
+        "a" * 32,
+        _KIND + ',"pad":"' + "p" * 300 + '"}',
+        created_at=0,
+        expires_at=100,
+        max_per_recipient=10,
+        max_bytes_per_recipient=10**6,
+        max_total_bytes=10**6,
+        kind_prefix=_KIND,
+        max_kind_per_recipient=2,
+        max_kind_row_bytes=200,
+    )
+
+
 _RELAY_SUM_QUERIES = (
     (
         "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"

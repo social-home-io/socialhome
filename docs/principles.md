@@ -921,12 +921,20 @@ What the GFS learns, and what it doesn't:
 
 1. **The GFS learns that follower household F sent author A's household a
    reaction or a removal, and when and how often.** It already knows F
-   follows A (the follow graph) and authenticates F's post. It does **not**
-   learn which person reacted, with which emoji, to which moment, or whether
-   it was an add or a removal: the reaction is signed by F's household,
-   padded to one size and sealed end to end to A's household key-wrap key;
-   the post carries exactly `{instance_id, sealed}` and the GFS refuses
-   anything else.
+   follows A (the follow graph) and authenticates F's post. It is **not
+   told** which person reacted, with which emoji, to which moment, or
+   whether it was an add or a removal: the reaction is signed by F's
+   household, padded to one size and sealed end to end to A's household
+   key-wrap key; the post carries exactly `{instance_id, sealed}` and the
+   GFS refuses anything else.
+
+   **Residual — timing.** The GFS can still *guess* from timing what it is
+   not told. It knows each public moment of A's it pushed to F, and when: a
+   post soon after one push, or while A has only one live moment, points at
+   that moment; two posts in quick succession hint at an add and its
+   removal (or a change of emoji). The 3 s coalescing per (moment, person)
+   blunts the last, not the first. No moment id, person or emoji ever
+   reaches it — only the inference its own push log allows.
 2. **Nothing new about A or F reaches anyone else.** The frame goes to A's
    household only; `from_instance` is F, which the GFS authenticated and A
    learns from the signed reaction anyway. The GFS tells F nothing back —
@@ -942,9 +950,10 @@ What the GFS learns, and what it doesn't:
    key-wrap key, named inside its signed, encrypted moments; the follower
    keeps it next to the identity key it already pins for that author.
 
-Anything that lets the GFS read who reacted, with what, or to which moment,
-or that delivers a reaction to anyone but the author's household, is a
-§2-principle change requiring a new sign-off.
+Anything that lets the GFS read who reacted, with what, or to which moment
+(rather than guess it from timing, item 1), or that delivers a reaction to
+anyone but the author's household, is a §2-principle change requiring a new
+sign-off.
 
 ## No third-party fetches from user content
 

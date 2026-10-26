@@ -467,7 +467,10 @@ came. Built only from keys households already hold:
   author's household names inside each public moment's sealed body
   (`author_keywrap_pk` + `author_keywrap_suite` — under the envelope
   signature, so a GFS can't swap it; an unknown suite is ignored, never
-  defaulted), posted as `{instance_id, sealed}` signed with the household's
+  defaulted). The follower stores the key **with** its suite
+  (`moment_public_follows.followed_keywrap_suite`) and seals only under a
+  suite it supports — a stored key under any other suite is not used and
+  the reaction stays home. Posted as `{instance_id, sealed}` signed with the household's
   wire signature (`sign_wire`). The GFS sees only that and pushes
   `{from_instance, sealed}`; the author additionally requires
   `from_instance == reactor_instance_id`. No new key, KDF or suite.

@@ -85,7 +85,11 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
-from ..moment_public_seal import FRAME_MOMENT_REACTION, MOMENT_FRAME_TYPES
+from ..moment_public_seal import (
+    FRAME_MOMENT_REACTION,
+    MAX_REACT_BODY_BYTES,
+    MOMENT_FRAME_TYPES,
+)
 from .public import ClientIpResolver, build_window_limiter
 
 if TYPE_CHECKING:
@@ -250,6 +254,24 @@ def queued_relay_push(row: dict) -> dict:
 #: evicted is caught up through space sync.
 RELAY_QUEUE_MAX_PER_RECIPIENT: int = 250
 RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT: int = 4 * 1024 * 1024
+
+#: v_68 — sealed reactions held for one author household at once (they live
+#: the queue's 24 h). Any household that follows a public author can send
+#: them and the GFS can't open them, so they are a capped kind of RELAY row
+#: (``enqueue_relay``): past this the author household's OLDEST queued
+#: reaction makes room, and a reaction never evicts its public moments or
+#: space items — when those fill the household's caps, or the server-wide
+#: one is reached, the reaction is dropped instead (#1179 F1). 60 rows of at
+#: most :data:`QUEUED_REACTION_MAX_BYTES` is ~240 KiB, under a quarter of
+#: :data:`RELAY_QUEUE_MAX_PER_RECIPIENT` and 6 % of its bytes.
+RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT: int = 60
+
+#: How a queued reaction row starts (written by
+#: :meth:`GfsEnvelopeRelay.queue_relay_many` with ``type`` first), and its
+#: largest size — a react body is at most ``MAX_REACT_BODY_BYTES``; the
+#: queued frame swaps its signature for ``from_instance``.
+QUEUED_REACTION_PREFIX: str = '{"type":"' + FRAME_MOMENT_REACTION + '"'
+QUEUED_REACTION_MAX_BYTES: int = MAX_REACT_BODY_BYTES
 
 #: Server-wide ceiling on bytes held in queued RELAY rows. The per-recipient
 #: caps bound one household; this bounds the sum. Past it, room is made by
@@ -680,13 +702,19 @@ class GfsEnvelopeRelay:
         hint the cluster. Returns how many were queued. *frame* is a space
         item without its ``type``, or a typed frame of
         :data:`QUEUED_TYPED_FRAME_TYPES` (a public moment), which drains
-        unchanged."""
+        unchanged. A sealed reaction is queued as a capped kind
+        (:data:`RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT`): it never evicts
+        anything but an older reaction, and is dropped when it can't fit."""
         if not targets:
             return 0
+        reaction = frame.get("type") == FRAME_MOMENT_REACTION
+        if reaction:
+            # ``type`` first, so the row starts with QUEUED_REACTION_PREFIX.
+            frame = {"type": FRAME_MOMENT_REACTION, **frame}
         blob = orjson.dumps(frame).decode()  # once, however many targets
         queued = 0
         for target in targets:
-            if await self._queue_relay_blob(target, blob):
+            if await self._queue_relay_blob(target, blob, reaction=reaction):
                 queued += 1
         return queued
 
@@ -701,8 +729,19 @@ class GfsEnvelopeRelay:
         frame alone exceeds a cap (logged)."""
         return await self._queue_relay_blob(target, orjson.dumps(frame).decode())
 
-    async def _queue_relay_blob(self, target: str, blob: str) -> bool:
+    async def _queue_relay_blob(
+        self, target: str, blob: str, *, reaction: bool = False
+    ) -> bool:
         now = int(time.time())
+        kind: dict[str, Any] = (
+            {
+                "kind_prefix": QUEUED_REACTION_PREFIX,
+                "max_kind_per_recipient": RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT,
+                "max_kind_row_bytes": QUEUED_REACTION_MAX_BYTES,
+            }
+            if reaction
+            else {}
+        )
         queued = await self._queue_repo.enqueue_relay(
             target,
             blob,
@@ -711,7 +750,15 @@ class GfsEnvelopeRelay:
             max_per_recipient=RELAY_QUEUE_MAX_PER_RECIPIENT,
             max_bytes_per_recipient=RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT,
             max_total_bytes=RELAY_QUEUE_MAX_TOTAL_BYTES,
+            **kind,
         )
+        if not queued and reaction:
+            log.info(
+                "gfs.envelope: no room for a queued reaction for %s beside its "
+                "moments and space items — dropped",
+                target,
+            )
+            return False
         if not queued:
             log.warning(
                 "gfs.envelope: a relay frame for %s exceeds the relay queue "

@@ -143,14 +143,6 @@ MAX_MAILBOX_PUSH_ON_CONNECT: int = 500
 REACTIONS_PER_AUTHOR_PER_MINUTE: int = 30
 REACTIONS_PER_HOUSEHOLD_PER_MINUTE: int = 120
 
-#: v_68 — sealed reactions queued (24 h) for one author household that no
-#: node holds a socket for, per hour, across the cluster. They share the
-#: household's relay queue (250 rows, its oldest evicted) with its public
-#: moments and space items, so reactions must not crowd those out; past it
-#: a reaction for an offline author is dropped (the follower is still told
-#: ``202``: whether the author is online is not said).
-QUEUED_REACTIONS_PER_AUTHOR_HOUSEHOLD_PER_HOUR: int = 120
-
 #: v_68 — how long a node remembers a relayed sealed reaction (by digest),
 #: and how many: a follower's retry of a post whose answer it lost is not
 #: pushed twice and spends no budget. The author's household refuses a
@@ -200,7 +192,6 @@ class MomentPublicRegistry:
         "_key_requests",
         "_mailbox",
         "_publishes",
-        "_reaction_queue",
         "_reaction_seen",
         "_reactions_author",
         "_reactions_household",
@@ -250,14 +241,12 @@ class MomentPublicRegistry:
         self._key_requests = SlidingWindowCounter(KEY_REQUESTS_PER_MINUTE)
         self._publishes = SlidingWindowCounter(MOMENT_PUBLISHES_PER_MINUTE)
         #: v_68 — sealed reactions: per (follower household, author) and per
-        #: follower household a minute, queued copies per author household
-        #: an hour, and the digests relayed lately.
+        #: follower household a minute, and the digests relayed lately. How
+        #: many wait queued for an offline author household is bounded by
+        #: the queue itself (``RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT``).
         self._reactions_author = SlidingWindowCounter(REACTIONS_PER_AUTHOR_PER_MINUTE)
         self._reactions_household = SlidingWindowCounter(
             REACTIONS_PER_HOUSEHOLD_PER_MINUTE
-        )
-        self._reaction_queue = SlidingWindowCounter(
-            QUEUED_REACTIONS_PER_AUTHOR_HOUSEHOLD_PER_HOUR, window_s=3600.0
         )
         self._reaction_seen = SeenPayloadCache(
             ttl_s=REACTION_SEEN_TTL_S, cap=REACTION_SEEN_MAX
@@ -709,7 +698,10 @@ class MomentPublicRegistry:
         :data:`REACTIONS_PER_HOUSEHOLD_PER_MINUTE` per household — charged
         only for a reaction not relayed already, so a retried post spends
         nothing. Pushed to the author household's socket here, or on the
-        node holding it, or queued 24 h (bounded) when no node does."""
+        node holding it, or queued 24 h when no node does — as a capped kind
+        of relay row (``RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT``) that only
+        ever displaces an older queued reaction, never the household's
+        queued moments or space items (#1179 F1)."""
         reg = await self._users.get(followed_user_id)
         if (
             reg is None
@@ -743,42 +735,28 @@ class MomentPublicRegistry:
                 "from_instance": follower_instance_id,
                 "sealed": sealed,
             },
-            nodes=nodes,
         )
         return "accepted"
 
-    async def _push_reaction(
-        self, author_instance_id: str, push: dict, *, nodes: int
-    ) -> None:
+    async def _push_reaction(self, author_instance_id: str, push: dict) -> None:
         """Push *push* to the author household's socket here; else forward it
-        once to the other nodes, and queue it (24 h) when none of them holds
-        the socket — within :data:`QUEUED_REACTIONS_PER_AUTHOR_HOUSEHOLD_PER_HOUR`."""
+        once to the other nodes, and queue it (24 h) only when none of them
+        holds the socket. Nothing is charged for a reaction that was
+        delivered: the queue's own per-household reaction cap
+        (``RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT``, in the shared database,
+        so cluster-wide) is the only bound on queued copies (#1179 F2)."""
         if await self._ws_registry.send(author_instance_id, push):
             return
-        queue_for = (
-            [author_instance_id]
-            if self._reaction_queue.allow(
-                author_instance_id,
-                limit=node_share(QUEUED_REACTIONS_PER_AUTHOR_HOUSEHOLD_PER_HOUR, nodes),
-            )
-            else []
-        )
         fields = {k: v for k, v in push.items() if k != "type"}
         if self._fan_out_fwd is not None and self._fan_out_fwd.forward(
             kind=AUDIENCE_INSTANCE,
             key=author_instance_id,
             frame=typed_frame(FRAME_MOMENT_REACTION, fields),
-            queue_for=queue_for,
+            queue_for=[author_instance_id],
         ):
             return
-        if queue_for and self._relay is not None:
+        if self._relay is not None:
             await self._relay.queue_relay_many([author_instance_id], push)
-        elif not queue_for:
-            log.info(
-                "moment_public.reactions: %s is offline and over its queued "
-                "reaction budget — a reaction is dropped",
-                author_instance_id,
-            )
 
     # ── Internal ────────────────────────────────────────────────────────
 

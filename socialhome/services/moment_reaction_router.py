@@ -75,7 +75,7 @@ from ..domain.moment import (
     MomentReactionRoute,
     clamp_moment_expiry,
 )
-from ..federation.keywrap_seal import UnsupportedKemSuite
+from ..federation.keywrap_seal import SUPPORTED_KEM_SUITES, UnsupportedKemSuite
 from ..federation.moment_reaction_route import (
     MAX_ID_CHARS,
     RETURN_TOKEN_SUITE_AESGCM_256,
@@ -551,6 +551,19 @@ class MomentReactionRouter(ProtectionGateMixin):
         if found is None:
             return
         moment, route = found
+        if (
+            isinstance(route, MomentGfsReactionTarget)
+            and route.keywrap_suite not in SUPPORTED_KEM_SUITES
+        ):
+            # Sealed only under the suite the author named its key under,
+            # and only one this build implements — never an assumed X25519.
+            log.warning(
+                "moment %s: the author's key names an unsupported key-wrap "
+                "suite %r — reaction not sent",
+                moment_id,
+                route.keywrap_suite,
+            )
+            return
         user = await self._users.get_by_user_id(reactor_user_id)
         if user is None:
             return
@@ -830,11 +843,14 @@ class MomentReactionRouter(ProtectionGateMixin):
             return "a guardian block separates them"
         if await self._is_protected(moment.author_user_id):
             return "moment is for paired households only (no_relay)"
-        # The reactor household's budget is charged only for a reaction that
-        # passed every other check: a relay re-sending one genuine sealed
-        # reaction (a replay) must not starve that household's real ones
-        # (#1178 F2). The per-neighbour limit ran before any crypto.
-        if not self._limiter.is_allowed(
+        # The reactor household's budget is only looked at here; it is
+        # charged in ``_apply``, and only for a reaction that changed
+        # something. A replay — refused above while the replay cache holds
+        # it, and after a restart (the cache is in memory) a no-op against
+        # the stored reaction and removal — must not starve that household's
+        # real ones (#1178 F2, #1179 F3). The per-neighbour / per-GFS limits
+        # ran before any crypto and stay the flood backstop.
+        if not self._limiter.has_room(
             f"r:{reactor_home}",
             limit=ORIGIN_PER_REACTOR_PER_MIN,
             window_s=_WINDOW_S,
@@ -856,6 +872,11 @@ class MomentReactionRouter(ProtectionGateMixin):
         )
         if not changed:
             return
+        self._limiter.is_allowed(
+            f"r:{inner['reactor_instance_id']}",
+            limit=ORIGIN_PER_REACTOR_PER_MIN,
+            window_s=_WINDOW_S,
+        )
         moment = await self._moments.get(moment_id)
         if moment is None:  # pragma: no cover — deleted in between
             return

@@ -30,9 +30,12 @@ it travels differs:
   refuses a replay and anything over 25 h old on its own.
 
 **Privacy (signed off 2026-10-25).** The GFS learns that this household sent
-the author's household a reaction or a removal, and when and how often —
-never who, with what, to which moment, or whether it was an add or a
-removal (the seal is padded to one size). ``docs/principles.md``.
+the author's household a reaction or a removal, and when and how often. It
+is not told who, with what, to which moment, or whether it was an add or a
+removal (the seal is padded to one size) — but it knows which of the
+author's moments it pushed here and when, so a post soon after one, or while
+the author has a single live moment, points at it, and quick successive
+posts hint at an add and its removal (residual, ``docs/principles.md``).
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ import aiohttp
 
 from ..domain.moment import Moment, MomentGfsReactionTarget
 from ..domain.moment_public import is_path_safe_id
+from ..federation.keywrap_seal import SUPPORTED_KEM_SUITES
 from ..moment_public_seal import sign_wire
 from .gfs_publish_retry import PublishOutcome, parse_retry_after_s
 from .moment_delete_cert_retry import DeleteCertRetryQueue
@@ -146,19 +150,25 @@ class MomentReactionGfs:
         conn = await self._gfs_repo.get(gfs_id)
         if conn is None or conn.status != "active":
             return None
+        # The key with the suite it was named under; only a suite this
+        # build can seal to (an unknown one: the reaction stays home).
         keywrap = next(
             (
-                f.followed_keywrap_pk
+                (f.followed_keywrap_pk, f.followed_keywrap_suite)
                 for f in await self._follows.followers_of(moment.author_user_id)
-                if f.gfs_id == gfs_id and f.followed_keywrap_pk
+                if f.gfs_id == gfs_id
+                and f.followed_keywrap_pk
+                and f.followed_keywrap_suite in SUPPORTED_KEM_SUITES
             ),
             None,
         )
-        if keywrap is None:
+        if keywrap is None or keywrap[1] is None:
             return None
         if not await self._gfs.moment_reactions_supported(gfs_id):
             return None
-        return MomentGfsReactionTarget(gfs_id=gfs_id, keywrap_pk=keywrap)
+        return MomentGfsReactionTarget(
+            gfs_id=gfs_id, keywrap_pk=keywrap[0], keywrap_suite=keywrap[1]
+        )
 
     async def send(
         self,

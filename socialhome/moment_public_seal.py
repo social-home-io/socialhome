@@ -43,8 +43,9 @@ Wire shapes (every one suite-tagged; receivers refuse unknown suites):
   author's household names inside every sealed create body
   (``author_keywrap_pk`` + ``author_keywrap_suite``). The GFS pushes it to
   the author's household as ``{type: "moment_reaction", from_instance,
-  sealed}`` and never learns who reacted, with what, to which moment, or
-  whether it is an add or a removal.
+  sealed}`` and is never told who reacted, with what, to which moment, or
+  whether it is an add or a removal (timing can hint at the moment —
+  ``docs/principles.md``).
 
 Pure and dependency-light (only ``cryptography``, ``orjson`` + :mod:`socialhome.crypto`,
 like :mod:`socialhome.authority_sig`), so the content-blind GFS process can

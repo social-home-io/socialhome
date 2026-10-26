@@ -573,8 +573,8 @@ class MomentPublicInbound:
         (v_68) — what a reaction to their public moments is sealed to. Under
         an unknown suite, or malformed, it is ignored: that author's moments
         keep their reactions here, as with an older author."""
-        keywrap = _keywrap_pk_of(body)
-        if keywrap is None:
+        named = _keywrap_of(body)
+        if named is None:
             if body.get(AUTHOR_KEYWRAP_PK_FIELD) is not None:
                 log.info(
                     "moment_public.inbound: author %s names a key-wrap key this"
@@ -582,12 +582,17 @@ class MomentPublicInbound:
                     follow.followed_user_id,
                 )
             return
-        if keywrap == follow.followed_keywrap_pk:
+        keywrap, suite = named
+        if (keywrap, suite) == (
+            follow.followed_keywrap_pk,
+            follow.followed_keywrap_suite,
+        ):
             return
         await self._follows.set_keywrap(
             followed_user_id=follow.followed_user_id,
             gfs_id=gfs_id,
             keywrap_pk=keywrap,
+            keywrap_suite=suite,
         )
 
     async def _refresh_profile(
@@ -618,18 +623,21 @@ class MomentPublicInbound:
         )
 
 
-def _keywrap_pk_of(body: dict) -> str | None:
+def _keywrap_of(body: dict) -> tuple[str, str] | None:
     """The author household's key-wrap key a sealed public-moment create body
-    names (v_68, ``author_keywrap_pk``), as 64 lowercase hex chars — or
-    ``None`` when it names none, names it under a KEM suite this build does
-    not implement (refused, never read under a default), or is malformed."""
+    names (v_68, ``author_keywrap_pk``) as 64 lowercase hex chars, with the
+    KEM suite it is named under (``author_keywrap_suite``) — kept together,
+    so the key is never read under an assumed suite. ``None`` when it names
+    none, names it under a suite this build does not implement (refused,
+    never read under a default), or is malformed."""
     pk = body.get(AUTHOR_KEYWRAP_PK_FIELD)
-    if pk is None or body.get(AUTHOR_KEYWRAP_SUITE_FIELD) not in SUPPORTED_KEM_SUITES:
+    suite = body.get(AUTHOR_KEYWRAP_SUITE_FIELD)
+    if pk is None or not isinstance(suite, str) or suite not in SUPPORTED_KEM_SUITES:
         return None
     if not isinstance(pk, str) or len(pk) != 64:
         return None
     try:
-        return bytes.fromhex(pk).hex()
+        return bytes.fromhex(pk).hex(), suite
     except ValueError:
         return None
 

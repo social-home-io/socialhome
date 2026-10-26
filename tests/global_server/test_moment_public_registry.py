@@ -758,22 +758,23 @@ async def test_a_forward_refused_queues_the_reaction_here(gfs_setup, gfs_db):
     assert relay.queued == [(["inst-author"], _REACTION)]
 
 
-async def test_over_the_queue_budget_an_offline_authors_reaction_is_dropped(
-    gfs_setup, gfs_db, monkeypatch, caplog
+async def test_a_reaction_forwarded_to_another_node_charges_no_queue_budget(
+    gfs_setup, gfs_db
 ):
-    monkeypatch.setattr(
-        registry_mod, "QUEUED_REACTIONS_PER_AUTHOR_HOUSEHOLD_PER_HOUR", 1
-    )
-    reg, relay, _cluster, _mb = await _cluster_world(gfs_setup, gfs_db)
-    with caplog.at_level("INFO"):
-        for n in range(2):
-            await reg.relay_reaction(
-                follower_instance_id="inst-follower",
-                followed_user_id="u-author",
-                sealed={**_SEALED, "ciphertext": f"n:{n}"},
-            )
-    assert len(relay.queued) == 1
-    assert "over its queued reaction budget" in caplog.text
+    """#1179 F2: the registry keeps no queued-reaction budget of its own —
+    every reaction that found no socket here names the author's household
+    as the offline candidate, and only a row actually queued counts (the
+    queue's own reaction cap, ``RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT``)."""
+    fan_out = _FanOut()
+    reg, relay, _cluster, _mb = await _cluster_world(gfs_setup, gfs_db, fan_out=fan_out)
+    for n in range(25):
+        await reg.relay_reaction(
+            follower_instance_id="inst-follower",
+            followed_user_id="u-author",
+            sealed={**_SEALED, "ciphertext": f"n:{n}"},
+        )
+    assert [f["queue_for"] for f in fan_out.forwarded] == [["inst-author"]] * 25
+    assert relay.queued == []
 
 
 async def test_the_reaction_budgets_are_shared_across_the_cluster(

@@ -752,7 +752,9 @@ async def test_a_verified_create_keeps_the_authors_keywrap_key(db):
     kw = "ab" * 32
     await _create(inbound, _moment(author_keywrap_pk=kw, author_keywrap_suite="x25519"))
     for uid in ("u1", "u2"):
-        assert (await _follow(follows, uid)).followed_keywrap_pk == kw
+        follow = await _follow(follows, uid)
+        assert follow.followed_keywrap_pk == kw
+        assert follow.followed_keywrap_suite == "x25519"  # stored with its suite
 
 
 async def test_a_forged_or_unusable_keywrap_key_is_not_kept(db):

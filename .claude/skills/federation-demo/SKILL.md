@@ -1765,7 +1765,8 @@ the request must not contain ``k``, and the GFS's ``/moments/{user}`` page
 shows the profile only — not the moment's text.
 
 **Reactions through the GFS (v_68).** e keeps a's key-wrap key from the
-signed moment (``moment_public_follows.followed_keywrap_pk``) and its
+signed moment (``moment_public_follows.followed_keywrap_pk``, with its
+``followed_keywrap_suite``) and its
 ``GET /api/moments/{id}`` says ``reactions_reach: "author"``. e reacts 👏,
 takes it back, then reacts 🔥 — each sealed to a's key-wrap key and posted to
 ``POST /gfs/moments/users/{author}/react`` on the GFS the moment came

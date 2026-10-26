@@ -439,7 +439,9 @@ async def test_origin_orders_adds_and_removals_by_when_they_were_made(env):
 async def test_origin_rate_limits_one_reactor_household(env):
     app, _db, _sent, own, anna, router, _c = env
     for i in range(61):
-        inner = _inner(own, anna, emoji="👏", at_ms=_now_ms(-100 + i))
+        # Each one changes the reaction — only a change is charged (#1179 F3).
+        emoji = "👏" if i % 2 else "🔥"
+        inner = _inner(own, anna, emoji=emoji, at_ms=_now_ms(-100 + i))
         await _dispatch(
             app,
             FET.MOMENT_REACTION_ROUTED,
@@ -769,9 +771,34 @@ async def test_replays_do_not_drain_the_reactor_households_budget(env):
 def _restart(router) -> None:
     """What an origin restart forgets: every in-memory cache."""
     router._seen.clear()
+    router._limiter.reset()
     removed = getattr(router, "_removed", None)
     if removed is not None:
         removed.clear()
+
+
+async def test_replays_after_a_restart_do_not_drain_the_reactor_households_budget(
+    env,
+):
+    """#1179 F3: the replay cache is in memory, so after a restart a relay's
+    replays of a household's genuine reactions pass every check — but each
+    is older than what is stored, changes nothing, and costs that household
+    nothing: its next real reaction still lands."""
+    app, db, _sent, own, anna, router, _c = env
+    captured = [
+        _routed(app, own, _inner(own, anna, emoji="👏", at_ms=_now_ms(-600 + i)))
+        for i in range(60)
+    ]
+    for routed in captured:
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, routed)
+    _restart(router)
+    for routed in captured:  # identical bytes, replayed
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, routed)
+    fresh = _inner(own, anna, emoji="🔥", at_ms=_now_ms(-1))
+    await _dispatch(
+        app, FET.MOMENT_REACTION_ROUTED, _routed(app, own, fresh), from_instance=OTHER
+    )
+    assert await _reactions(db) == [("m-anna", RITA, "🔥")]
 
 
 async def test_a_replayed_add_does_not_bring_back_a_removal_after_a_restart(env):

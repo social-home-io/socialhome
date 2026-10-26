@@ -467,9 +467,15 @@ seal, the same checks at the author — only the transport differs.
   household it authenticated, which it already knows — on this node, or
   forwarded once to the node holding that socket (cluster `instance`
   audience), or queued 24 h in that household's relay queue when no node
-  holds it (≤ 120 queued reactions an hour per author household, so they
-  can't crowd its public moments and space items out of the 250-row queue;
-  past it a reaction for an offline author is dropped). `202` either way:
+  holds it. Queued reactions are a capped kind of relay row: at most 60
+  per author household at a time (`RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT`,
+  ~240 KiB, over the queue's 24 h life), the oldest queued reaction making
+  room for a newer one — and a reaction **never evicts** that household's
+  queued public moments or space items: when those fill its 250-row / 4 MiB
+  queue, or the server-wide relay cap is reached, the reaction is dropped
+  instead (#1179 F1 — anyone who follows a public author can send
+  reactions the GFS can't open). Nothing is charged for a reaction that
+  reached the author's socket on any node (#1179 F2). `202` either way:
   whether the author is online is not told back.
 * **Author household.** Hands the seal to the routed-reaction origin
   checks: it opens with this household's key-wrap key, the reactor's
@@ -483,8 +489,11 @@ seal, the same checks at the author — only the transport differs.
   the reactor's own household (a follower can't pass off another
   household's reaction), and the moment is public (only a public moment
   ever crossed a GFS). ≤ 600 frames a minute per GFS connection before any
-  crypto; the reactor household's ≤ 60 a minute is charged only after every
-  other check passed (#1178 F2). Nothing goes back.
+  crypto; the reactor household's ≤ 60 a minute is checked after every
+  other check passed and charged only for a reaction that changed something
+  (#1178 F2, #1179 F3): a replay — refused while the in-memory replay cache
+  holds it, and after a restart a no-op against the stored reaction and
+  removal watermark — costs that household nothing. Nothing goes back.
 
 ### Sequence: a follower reacts to a public moment
 
@@ -509,12 +518,12 @@ sequenceDiagram
     G->>N: NODE_DRAIN_HINT (instance audience, A)
     N->>A: WS moment_reaction {from_instance: F, sealed}
   else no node holds it
-    G->>G: queue 24 h (≤ 120 an hour per author household)
+    G->>G: queue 24 h (≤ 60 reactions per author household, never evicting its moments / space items)
     Note over A: reconnects
     G->>A: WS moment_reaction (drained)
   end
   A->>A: open · verify · F is the reactor's household · public · live · not blocked / banned · not a replay · newer
-  A->>A: apply_reaction_at · MomentReactionChanged
+  A->>A: apply_reaction_at · charge the reactor's budget only if it changed · MomentReactionChanged
 ```
 
 ### Bounds and cost
@@ -528,8 +537,10 @@ sequenceDiagram
   changes by one person within 3 s is one post.
 * **Per create:** +~75 bytes inside each public moment's ciphertext.
 * **Hostile:** one follower household is held to 120 posts a minute
-  (30 per author), the queue to 120 an hour per author household, the
-  author's household to 600 opened a minute per GFS.
+  (30 per author); an offline author household's queue holds at most 60
+  reactions (~240 KiB) beside — never instead of — its moments and space
+  items, so any number of followers flooding it only churns reactions; the
+  author's household opens 600 a minute per GFS.
 
 **Older households and servers.** Gated on the GFS's signed capability and
 on the key's presence, never on a peer version (author and follower are not
@@ -543,10 +554,13 @@ node queues it.
 **Residual (signed off 2026-10-25, see
 [`principles.md`](../principles.md#sign-off-a-gfs-learns-that-a-follower-household-reacted-to-an-author-v_68)).**
 The GFS learns that follower household F sent author A's household a
-reaction or a removal, and when and how often — never which person, which
-emoji, which moment, or whether it was an add or a removal (the seal is
-padded to one size). It could withhold or delay one, as it can any moment;
-it can't forge, alter or replay one past the author's checks.
+reaction or a removal, and when and how often. It is not told which person,
+which emoji, which moment, or whether it was an add or a removal (the seal
+is padded to one size) — but it knows which of A's moments it pushed to F
+and when, so a post soon after one, or while A has a single live moment,
+points at that moment, and quick successive posts hint at an add and its
+removal. It could withhold or delay one, as it can any moment; it can't
+forge, alter or replay one past the author's checks.
 
 ## Event types
 

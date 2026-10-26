@@ -18302,11 +18302,11 @@ def _gfs_moment_reaction(state: dict, moment_id: str, author_uid: str) -> None:
     e_user = e.get("user_id")
     kw = _rows(
         "e",
-        "SELECT followed_keywrap_pk FROM moment_public_follows"
-        " WHERE followed_user_id = ?",
+        "SELECT followed_keywrap_pk, followed_keywrap_suite"
+        " FROM moment_public_follows WHERE followed_user_id = ?",
         (author_uid,),
     )
-    if not kw or not kw[0][0]:
+    if not kw or not kw[0][0] or kw[0][1] != "x25519":
         raise SystemExit(
             f"gfs-moment-profile: e kept no key-wrap key for a's author ({kw!r})"
         )

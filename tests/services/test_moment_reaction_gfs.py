@@ -113,15 +113,25 @@ def _moment(**over) -> Moment:
     return Moment(**fields)
 
 
-async def _with_key(follows, gfs_id: str = "g1") -> None:
-    await follows.set_keywrap(followed_user_id="u-noor", gfs_id=gfs_id, keywrap_pk=KW)
+async def _with_key(follows, gfs_id: str = "g1", suite: str = "x25519") -> None:
+    await follows.set_keywrap(
+        followed_user_id="u-noor", gfs_id=gfs_id, keywrap_pk=KW, keywrap_suite=suite
+    )
 
 
 async def test_the_target_is_the_gfs_the_moment_came_through(env):
     gfs, follows, _caps, _s = env
     assert await gfs.target(_moment()) is None  # no key from the author yet
     await _with_key(follows)
-    assert await gfs.target(_moment()) == MomentGfsReactionTarget("g1", KW)
+    assert await gfs.target(_moment()) == MomentGfsReactionTarget("g1", KW, "x25519")
+
+
+async def test_a_key_under_a_suite_this_build_cannot_seal_to_is_not_used(env):
+    """#1179: the key is stored with its suite and sealed to only under a
+    supported one — never read as an X25519 key by default."""
+    gfs, follows, _caps, _s = env
+    await _with_key(follows, suite="x25519+mlkem768")
+    assert await gfs.target(_moment()) is None
 
 
 @pytest.mark.parametrize(
@@ -158,7 +168,7 @@ async def test_without_identity_nothing_is_targeted(db):
     )
     assert await gfs.target(_moment()) is None
     await gfs.send(
-        MomentGfsReactionTarget("g1", KW),
+        MomentGfsReactionTarget("g1", KW, "x25519"),
         author_user_id="u-noor",
         sealed=SEALED,
         retry_key="m-1|u1",
@@ -170,7 +180,7 @@ async def test_without_identity_nothing_is_targeted(db):
 async def test_the_post_is_exactly_the_household_and_the_seal(env):
     gfs, _follows, _caps, session = env
     await gfs.send(
-        MomentGfsReactionTarget("g1", KW),
+        MomentGfsReactionTarget("g1", KW, "x25519"),
         author_user_id="u-noor",
         sealed=SEALED,
         retry_key="m-1|u1",
@@ -194,7 +204,7 @@ async def test_a_failed_post_is_retried_only_when_a_retry_can_help(
     gfs, _follows, _caps, session = env
     session.status = status
     await gfs.send(
-        MomentGfsReactionTarget("g1", KW),
+        MomentGfsReactionTarget("g1", KW, "x25519"),
         author_user_id="u-noor",
         sealed=SEALED,
         retry_key="m-1|u1",
@@ -206,7 +216,7 @@ async def test_a_failed_post_is_retried_only_when_a_retry_can_help(
 async def test_a_newer_change_replaces_the_pending_one(env):
     gfs, _follows, _caps, session = env
     session.status = 503
-    target = MomentGfsReactionTarget("g1", KW)
+    target = MomentGfsReactionTarget("g1", KW, "x25519")
     for _ in range(2):
         await gfs.send(
             target,
@@ -231,7 +241,7 @@ async def test_a_retry_resends_the_same_bytes(env):
     gfs, _follows, _caps, session = env
     session.status = 503
     await gfs.send(
-        MomentGfsReactionTarget("g1", KW),
+        MomentGfsReactionTarget("g1", KW, "x25519"),
         author_user_id="u-noor",
         sealed=SEALED,
         retry_key="m-1|u1",
@@ -254,7 +264,7 @@ async def test_a_transport_error_is_transient(env):
 
     gfs._http_client = _Broken()  # type: ignore[assignment]
     await gfs.send(
-        MomentGfsReactionTarget("g1", KW),
+        MomentGfsReactionTarget("g1", KW, "x25519"),
         author_user_id="u-noor",
         sealed=SEALED,
         retry_key="m-1|u1",
@@ -265,7 +275,7 @@ async def test_a_transport_error_is_transient(env):
 
 async def test_no_session_or_a_gone_gfs_is_final(db, env):
     gfs, _follows, _caps, _session = env
-    target = MomentGfsReactionTarget("g-gone", KW)
+    target = MomentGfsReactionTarget("g-gone", KW, "x25519")
     await gfs.send(
         target,
         author_user_id="u-noor",
@@ -281,7 +291,7 @@ async def test_no_session_or_a_gone_gfs_is_final(db, env):
     )
     bare.attach_identity(own_instance_id="inst-me", signing_key=SEED)
     await bare.send(
-        MomentGfsReactionTarget("g1", KW),
+        MomentGfsReactionTarget("g1", KW, "x25519"),
         author_user_id="u-noor",
         sealed=SEALED,
         retry_key="m-1|u1",
@@ -295,7 +305,7 @@ async def test_start_and_stop(env):
     await gfs.start()
     session.status = 503
     await gfs.send(
-        MomentGfsReactionTarget("g1", KW),
+        MomentGfsReactionTarget("g1", KW, "x25519"),
         author_user_id="u-noor",
         sealed=SEALED,
         retry_key="m-1|u1",

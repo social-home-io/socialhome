@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import UTC, datetime, timedelta
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -61,6 +62,7 @@ from socialhome.federation.moment_reaction_route import (
     verify_reaction,
 )
 from socialhome.global_server import moment_public_registry as registry_mod
+from socialhome.global_server import public as public_mod
 from socialhome.global_server.app_keys import (
     gfs_envelope_relay_key,
     gfs_fed_repo_key,
@@ -69,7 +71,10 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.cluster_relay import TYPED_FRAME_TYPES
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
-from socialhome.global_server.envelope_relay import QUEUED_TYPED_FRAME_TYPES
+from socialhome.global_server.envelope_relay import (
+    QUEUED_TYPED_FRAME_TYPES,
+    RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT,
+)
 from socialhome.global_server.server import create_gfs_app
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 from socialhome.moment_public_seal import (
@@ -256,6 +261,27 @@ async def test_a_replayed_add_does_not_undo_a_removal_after_a_restart(env):
     assert await _reactions(db) == []
 
 
+async def test_gfs_replays_after_a_restart_do_not_starve_the_reactor(env):
+    """#1179 F3: a GFS holding a household's genuine sealed reactions
+    replays them after the author's household restarted (its replay cache
+    and limiter are in memory). Each passes every check but is older than
+    what is stored — a no-op that costs the reactor household nothing — so
+    its next real reaction still lands."""
+    app, db, _sent, own, anna, router = env
+    captured = [
+        _frame(app, _inner(own, anna, emoji="👏", at_ms=_now_ms(-600 + i)))
+        for i in range(60)
+    ]
+    for frame in captured:
+        await _deliver(app, frame)
+    router._seen.clear()  # the author's household restarts
+    router._limiter.reset()
+    for frame in captured:
+        await _deliver(app, frame)  # the GFS replays them
+    await _deliver(app, _frame(app, _inner(own, anna, emoji="🔥", at_ms=_now_ms())))
+    assert await _reactions(db) == [("m-anna", RITA, "🔥")]
+
+
 async def test_adds_and_removals_apply_in_the_order_they_were_made(env):
     app, db, _sent, own, anna, _router = env
     for emoji, at in (("👏", -60), ("🔥", -120), (None, -30), ("😂", -45)):
@@ -358,12 +384,14 @@ async def _gfs_moment(app, db, *, keywrap: bool = True, gfs_id: str = "g1") -> N
     await db.enqueue(
         "INSERT INTO moment_public_follows(follower_user_id, followed_user_id,"
         " gfs_id, followed_instance_pk, followed_username, followed_display_name,"
-        " followed_keywrap_pk) VALUES(?, 'u-noor', ?, ?, 'noor', 'Noor', ?)",
+        " followed_keywrap_pk, followed_keywrap_suite)"
+        " VALUES(?, 'u-noor', ?, ?, 'noor', 'Noor', ?, ?)",
         (
             anna,
             gfs_id,
             AUTHOR_KEY.public_key.hex(),
             AUTHOR_KW.public_key.hex() if keywrap else None,
+            "x25519" if keywrap else None,
         ),
     )
     await db.enqueue(
@@ -715,20 +743,82 @@ async def test_an_offline_author_gets_the_reaction_when_it_reconnects(
     ]
 
 
-async def test_queued_reactions_for_an_offline_author_are_bounded(
+def _fake_clock(monkeypatch) -> list[float]:
+    """Drive the GFS rate limiters' clock (``public.time.monotonic``)."""
+    clock = [1_000_000.0]
+    monkeypatch.setattr(
+        public_mod,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=time.time),
+    )
+    return clock
+
+
+async def test_reactions_never_evict_an_offline_authors_moments_or_space_items(
     gfs, world, frames, monkeypatch
 ):
-    monkeypatch.setattr(
-        registry_mod, "QUEUED_REACTIONS_PER_AUTHOR_HOUSEHOLD_PER_HOUR", 1
-    )
+    """#1179 F1: any household that follows a public author can post
+    reactions the GFS can't open. For an author household that is offline
+    they are queued as a capped kind: at most
+    ``RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT`` (the newest), and never at
+    the cost of its queued public moments or space items — however many
+    are sent (here 540, over twice the household's 250-row queue)."""
+    clock = _fake_clock(monkeypatch)
+    relay = gfs._app[gfs_envelope_relay_key]
     frames.offline.add("inst-author")
-    for n in range(3):
+    moment = {"type": "incoming_public_moment", "payload": {"sentinel": True}}
+    space_item = {"space_id": "s-1", "event_type": "space_item", "payload": "ct"}
+    assert await relay.queue_relay("inst-author", moment)
+    assert await relay.queue_relay("inst-author", space_item)
+    sent = []
+    for _minute in range(18):  # 30 a minute: the per-(household, author) limit
+        for _ in range(30):
+            sealed = _sealed(len(sent))
+            resp = await _react(
+                gfs, world, body={"instance_id": "inst-follower", "sealed": sealed}
+            )
+            assert resp.status == 202
+            sent.append(sealed)
+        clock[0] += 61
+    frames.offline.clear()
+    frames.clear()
+    await relay.drain("inst-author")
+    drained = [f for _iid, f in frames]
+    assert moment in drained
+    assert {**space_item, "type": "relay"} in drained
+    reactions = [f["sealed"] for f in drained if f["type"] == FRAME_MOMENT_REACTION]
+    assert reactions == sent[-RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT:]
+
+
+async def test_reactions_delivered_on_another_node_spend_no_queue_room(
+    gfs, world, frames, monkeypatch
+):
+    """#1179 F2: a reaction the node holding the author's socket delivered
+    queued nothing, so it uses up nothing — after any number of them, a
+    reaction for the author once it is offline everywhere is still queued."""
+    clock = _fake_clock(monkeypatch)
+    registry = gfs._app[gfs_moment_public_registry_key]
+    fan_out = _FanOut()  # another node holds the author's socket
+    registry._fan_out_fwd = fan_out
+    frames.offline.add("inst-author")
+    for n in range(150):
         resp = await _react(
             gfs, world, body={"instance_id": "inst-follower", "sealed": _sealed(n)}
         )
         assert resp.status == 202
+        if n % 30 == 29:
+            clock[0] += 61
+    assert all(f["queue_for"] == ["inst-author"] for f in fan_out.forwarded)
+    fan_out.accept = False  # now connected nowhere: queued here
+    sealed = _sealed(999)
+    resp = await _react(
+        gfs, world, body={"instance_id": "inst-follower", "sealed": sealed}
+    )
+    assert resp.status == 202
     frames.offline.clear()
+    frames.clear()
     assert await gfs._app[gfs_envelope_relay_key].drain("inst-author") == 1
+    assert frames[0][1]["sealed"] == sealed
 
 
 class _FanOut:

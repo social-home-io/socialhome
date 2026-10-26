@@ -171,6 +171,9 @@ class MomentPublicFollow:
     #: signed envelopes: a reaction to their public moments is sealed to it.
     #: ``None`` until one carried it (an older author household).
     followed_keywrap_pk: str | None = None
+    #: …and the KEM suite it was named under (``author_keywrap_suite``);
+    #: ``None`` exactly when the key is (migration 0126 CHECK).
+    followed_keywrap_suite: str | None = None
 
     @property
     def public_name(self) -> str | None:

@@ -1,6 +1,8 @@
 """Migration 0126 — a public-moment follow keeps the author household's
-key-wrap key (v_68), NULL until a signed envelope names it; the CHECK keeps
-it a lowercase hex key of a sane length."""
+key-wrap key (v_68) and the KEM suite it was named under, both NULL until a
+signed envelope names them; the CHECKs keep the key a lowercase hex key of a
+sane length and never let a key be stored without its suite (or a suite
+without a key)."""
 
 from __future__ import annotations
 
@@ -11,6 +13,10 @@ import pytest
 from tests.migration_chain import apply_through
 
 _VERSION = 126
+
+_SET = (
+    "UPDATE moment_public_follows SET followed_keywrap_pk=?, followed_keywrap_suite=?"
+)
 
 
 @pytest.fixture
@@ -45,17 +51,20 @@ def conn(tmp_path):
 
 def test_an_existing_follow_survives_without_a_key(conn):
     row = conn.execute(
-        "SELECT followed_display_name, followed_keywrap_pk FROM moment_public_follows"
+        "SELECT followed_display_name, followed_keywrap_pk, followed_keywrap_suite"
+        " FROM moment_public_follows"
     ).fetchone()
-    assert tuple(row) == ("Noor", None)
+    assert tuple(row) == ("Noor", None, None)
 
 
-def test_a_hex_key_is_stored(conn):
-    conn.execute("UPDATE moment_public_follows SET followed_keywrap_pk=?", ("ab" * 32,))
+def test_a_hex_key_is_stored_with_its_suite(conn):
+    conn.execute(_SET, ("ab" * 32, "x25519"))
     row = conn.execute(
-        "SELECT followed_keywrap_pk FROM moment_public_follows"
+        "SELECT followed_keywrap_pk, followed_keywrap_suite FROM moment_public_follows"
     ).fetchone()
-    assert row[0] == "ab" * 32
+    assert tuple(row) == ("ab" * 32, "x25519")
+    # A longer (PQ-hybrid) key under its own suite tag fits too.
+    conn.execute(_SET, ("ab" * 1216, "x25519+mlkem768"))
 
 
 @pytest.mark.parametrize(
@@ -64,4 +73,15 @@ def test_a_hex_key_is_stored(conn):
 )
 def test_anything_but_a_lowercase_hex_key_is_refused(conn, bad):
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE moment_public_follows SET followed_keywrap_pk=?", (bad,))
+        conn.execute(_SET, (bad, "x25519"))
+
+
+@pytest.mark.parametrize(
+    ("pk", "suite"),
+    [("ab" * 32, None), (None, "x25519"), ("ab" * 32, ""), ("ab" * 32, "s" * 33)],
+)
+def test_a_key_is_never_stored_without_its_suite(conn, pk, suite):
+    """#1179: the key's suite is stored with it, so a key never has to be
+    read under an assumed suite."""
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(_SET, (pk, suite))

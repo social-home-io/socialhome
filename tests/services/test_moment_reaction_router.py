@@ -574,15 +574,18 @@ def test_seen_cache_is_bounded_and_expires(router, monkeypatch):
 class _Gfs:
     """``MomentReactionGfs`` stand-in."""
 
-    def __init__(self, ok: bool = True) -> None:
+    def __init__(self, ok: bool = True, suite: str = "x25519") -> None:
         self.ok = ok
+        self.suite = suite
         self.sent: list[dict] = []
 
     async def target(self, moment):
         if not self.ok or moment.received_via != "gfs":
             return None
         return MomentGfsReactionTarget(
-            gfs_id=moment.received_via_gfs_id, keywrap_pk=ORIGIN_KW.public_key.hex()
+            gfs_id=moment.received_via_gfs_id,
+            keywrap_pk=ORIGIN_KW.public_key.hex(),
+            keywrap_suite=self.suite,
         )
 
     async def send(self, target, **kwargs):
@@ -633,6 +636,21 @@ async def test_a_gfs_moment_reaction_is_sealed_and_posted_through_its_gfs(router
     assert router.fed.sent == []  # nothing on the mesh
     inner = open_reaction(sealed=sent["sealed"], keywrap_priv=ORIGIN_KW.private_key)
     assert (inner["emoji"], inner["origin_instance_id"]) == ("🔥", "origin")
+
+
+async def test_a_gfs_target_under_an_unknown_suite_is_never_sealed_to(router, caplog):
+    """#1179: the author's key is sealed to only under a suite this build
+    supports — an unknown one is never read as X25519; nothing is sent."""
+    anna = _local_user(router)
+    gfs = _Gfs(suite="x25519+mlkem768")
+    router.r.attach_gfs(gfs)
+    router.moments.rows["m-g"] = _gfs_moment()
+    await router.r.queue_reaction(
+        moment_id="m-g", reactor_user_id=anna, emoji="👏", occurred_at=datetime.now(UTC)
+    )
+    await asyncio.sleep(0.05)
+    assert gfs.sent == []
+    assert "unsupported key-wrap suite" in caplog.text
 
 
 async def test_a_gfs_moment_stays_home_without_the_transport_or_a_target(router):
