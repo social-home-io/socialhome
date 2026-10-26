@@ -1542,6 +1542,8 @@ def _wire_federation_stack(
         routing_repo=dm_routing_repo,
         dm_media_outbox_repo=dm_media_outbox_repo,
         space_media_outbox_repo=space_media_outbox_repo,
+        # Saved moments from an unpaired household go with the pairing.
+        moment_repo=moment_repo,
     )
     pairing_handlers = PairingInboundHandlers(
         bus=bus,
@@ -3199,12 +3201,17 @@ def create_app(config: Config | None = None) -> web.Application:
     # in the startup hook (see ``moment_service.attach_instance_id``).
     # ``moment_repo`` is shared with the federation inbound handler so
     # remote-author rows land in the same table.
+    # Saving someone's moment (decision 6b) is offered only where its
+    # author's delete can reach the copy: a paired v_66+ household
+    # (``federation_repo``) or a GFS that keeps delete certificates.
     moment_service = MomentService(
         moment_repo,
         user_repo,
         bus,
         media_dir=pathlib.Path(config.media_path),
         media_refs=repos.media_reference,
+        federation_repo=repos.federation,
+        gfs_delete_log=gfs_connection_service,
     )
     # Your own moments stay in your archive (decision 6a); the household's
     # per-person media cap is enforced on the same hourly retention tick.

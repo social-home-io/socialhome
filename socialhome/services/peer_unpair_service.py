@@ -22,6 +22,12 @@ envelopes for the peer, the mesh hints it announced to us
 ``peer_user_visibility`` cascade), and a :class:`PeerUnpaired` event for
 the realtime bridge.
 
+Saved moments that came from the household (``received_via =
+'household'`` and that ``origin_instance_id``) lose their saves as soon as
+the pairing ends for us — at :meth:`PeerUnpairService.purge` and when an
+unpair tombstone is built (owner sign-off 3): a save is offered only while
+the author's delete can reach the copy, and an unpaired household's can't.
+
 Deliberately **not** touched: space membership (``space_instances`` /
 remote members). A space is shared by its members, not by the pairing —
 two households can stay co-members of a space and keep receiving its
@@ -69,6 +75,7 @@ if TYPE_CHECKING:
     from ..repositories.dm_media_outbox_repo import AbstractDmMediaOutboxRepo
     from ..repositories.dm_routing_repo import AbstractDmRoutingRepo
     from ..repositories.federation_repo import AbstractFederationRepo
+    from ..repositories.moment_repo import AbstractMomentRepo
     from ..repositories.outbox_repo import AbstractOutboxRepo
     from ..repositories.space_media_outbox_repo import AbstractSpaceMediaOutboxRepo
 
@@ -119,6 +126,7 @@ class PeerUnpairService:
         "_federation",
         "_federation_repo",
         "_in_progress",
+        "_moment_repo",
         "_notify_timeout_s",
         "_outbox_repo",
         "_routing_repo",
@@ -135,6 +143,7 @@ class PeerUnpairService:
         routing_repo: AbstractDmRoutingRepo,
         dm_media_outbox_repo: AbstractDmMediaOutboxRepo,
         space_media_outbox_repo: AbstractSpaceMediaOutboxRepo,
+        moment_repo: AbstractMomentRepo | None = None,
         notify_timeout_s: float = UNPAIR_NOTIFY_TIMEOUT_S,
     ) -> None:
         self._bus = bus
@@ -144,6 +153,7 @@ class PeerUnpairService:
         self._routing_repo = routing_repo
         self._dm_media_outbox_repo = dm_media_outbox_repo
         self._space_media_outbox_repo = space_media_outbox_repo
+        self._moment_repo = moment_repo
         self._notify_timeout_s = notify_timeout_s
         #: Tombstones :meth:`_tombstone` is still building (status flipped,
         #: UNPAIR not queued yet) — :meth:`sweep_tombstones` must not take
@@ -243,6 +253,7 @@ class PeerUnpairService:
         await self._dm_media_outbox_repo.delete_for_instance(instance_id)
         await self._space_media_outbox_repo.delete_for_instance(instance_id)
         await self._routing_repo.forget_discovered_via(instance_id)
+        await self._drop_saved_moments(instance_id)
         expires_at = (datetime.now(UTC) + UNPAIR_RETRY_MAX_AGE).isoformat()
         queued = await self._federation.queue_event(
             to_instance_id=instance_id,
@@ -290,6 +301,16 @@ class PeerUnpairService:
         await self._dm_media_outbox_repo.delete_for_instance(instance_id)
         await self._space_media_outbox_repo.delete_for_instance(instance_id)
         await self._routing_repo.forget_discovered_via(instance_id)
+        await self._drop_saved_moments(instance_id)
+
+    async def _drop_saved_moments(self, instance_id: str) -> None:
+        """Drop the saves of moments that came from *instance_id* (sign-off
+        3) — its later deletes no longer reach us."""
+        if self._moment_repo is None:
+            return
+        dropped = await self._moment_repo.drop_saves_from_origin(instance_id)
+        if dropped:
+            log.info("unpair: dropped %d saved moments from %s", dropped, instance_id)
 
     async def _notify_peer(self, instance_id: str) -> bool:
         # The payload is empty: the receiver unpairs the *signer*

@@ -1358,3 +1358,142 @@ async def test_only_an_admin_sets_the_archive_cap(client):
     assert r.status == 403
     assert (await client.get("/api/moments/archive/usage", headers=eve)).status == 200
     assert (await client.get("/api/moments/archive/usage")).status == 401
+
+
+# ── Saves (decision 6b) ─────────────────────────────────────────────────
+
+
+async def _paired_v66(client, *, version: int = 66) -> None:
+    """Amaka's household, paired, on ``version``."""
+    await _remote_amaka(client)
+    await client._db.enqueue(
+        "UPDATE remote_instances SET proto_version=? WHERE id='peer-o'", (version,)
+    )
+
+
+async def _mesh_row(
+    client, moment_id: str, *, origin: str = "peer-o", age_hours: float = 1
+) -> None:
+    await client._db.enqueue(
+        "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+        " created_at, expires_at, received_via) VALUES(?,?,?,?,"
+        " strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', ?),"
+        " strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+6 days'), 'household')",
+        (
+            moment_id,
+            "ru-amaka",
+            f"text {moment_id}",
+            origin,
+            f"-{age_hours * 3600:.0f} seconds",
+        ),
+    )
+
+
+async def test_save_and_unsave_a_moment(client):
+    await _paired_v66(client)
+    await _mesh_row(client, "m-1")
+    h = _auth(client._tok)
+    r = await client.get("/api/moments", headers=h)
+    [row] = [m for m in await r.json() if m["id"] == "m-1"]
+    assert (row["saved_by_me"], row["can_save"]) == (False, True)
+
+    r = await client.put("/api/moments/m-1/save", headers=h)
+    assert r.status == 200
+    assert await r.json() == {"moment_id": "m-1", "saved": True}
+    r = await client.put("/api/moments/m-1/save", headers=h)  # idempotent
+    assert r.status == 200
+
+    _, body = await _get(client, "m-1")
+    assert (body["moment"]["saved_by_me"], body["moment"]["can_save"]) == (True, True)
+
+    r = await client.delete("/api/moments/m-1/save", headers=h)
+    assert r.status == 200
+    assert await r.json() == {"moment_id": "m-1", "saved": False}
+    r = await client.delete("/api/moments/m-1/save", headers=h)
+    assert r.status == 200
+    _, body = await _get(client, "m-1")
+    assert body["moment"]["saved_by_me"] is False
+
+
+async def test_saving_your_own_moment_is_422(client):
+    await _own_row(client, "m-mine", client._uid, age_days=0.1)
+    r = await client.put("/api/moments/m-mine/save", headers=_auth(client._tok))
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "OWN_MOMENT"
+    _, body = await _get(client, "m-mine")
+    assert body["moment"]["can_save"] is False
+
+
+async def test_save_is_422_where_a_delete_could_not_reach_the_copy(client):
+    """An older household (v_65) or one we aren't paired with."""
+    await _paired_v66(client, version=65)
+    await _mesh_row(client, "m-old-peer")
+    await _mesh_row(client, "m-fof", origin="inst-far")
+    h = _auth(client._tok)
+    for mid in ("m-old-peer", "m-fof"):
+        r = await client.put(f"/api/moments/{mid}/save", headers=h)
+        assert r.status == 422, mid
+        assert (await r.json())["error"]["code"] == "SAVE_UNAVAILABLE"
+        _, body = await _get(client, mid)
+        assert body["moment"]["can_save"] is False
+
+
+async def test_save_of_an_unreadable_moment_is_the_unknown_id_404(client):
+    await _paired_v66(client)
+    await _mesh_row(client, "m-hidden")
+    await client._db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?,?)",
+        (client._uid, "ru-amaka"),
+    )
+    r = await client.put("/api/moments/m-hidden/save", headers=_auth(client._tok))
+    assert r.status == 404
+    assert await r.json() == (await _unknown_404(client))[1]
+    assert (await client.put("/api/moments/m-1/save")).status == 401
+    assert (await client.delete("/api/moments/m-1/save")).status == 401
+
+
+async def test_archive_scope_saved_lists_your_saves_newest_first(client):
+    await _paired_v66(client)
+    eve = await _eve(client)
+    h = _auth(client._tok)
+    for i in range(3):
+        await _mesh_row(client, f"m-{i}", age_hours=i + 1)
+    for mid in ("m-2", "m-0", "m-1"):
+        assert (await client.put(f"/api/moments/{mid}/save", headers=h)).status == 200
+    # Past expiry the saved copy stays — for the saver only.
+    await client._db.enqueue(
+        "UPDATE moments SET expires_at=strftime('%Y-%m-%dT%H:%M:%f+00:00',"
+        " 'now', '-1 hour') WHERE id='m-2'"
+    )
+    r = await client.get("/api/moments/archive?scope=saved&limit=2", headers=h)
+    assert r.status == 200
+    first = await r.json()
+    assert [m["id"] for m in first] == ["m-1", "m-0"]
+    assert all(m["saved_by_me"] and m["saved_at"] for m in first)
+    assert first[0]["author"]["display_name"]
+    r = await client.get(
+        "/api/moments/archive",
+        params={"scope": "saved", "limit": "2", "before": first[-1]["saved_at"]},
+        headers=h,
+    )
+    assert [m["id"] for m in await r.json()] == ["m-2"]
+    assert (await _get(client, "m-2"))[0] == 200
+    r = await client.get("/api/moments/archive?scope=saved", headers=eve)
+    assert await r.json() == []
+    assert (await client.get("/api/moments/m-2", headers=eve)).status == 404
+    assert (await client.get("/api/moments/archive?scope=saved")).status == 401
+
+
+async def test_unfollow_drops_your_saves_of_that_author(client):
+    await _paired_v66(client)
+    await _mesh_row(client, "m-1")
+    h = _auth(client._tok)
+    r = await client.post(
+        "/api/moments/follows", json={"user_id": "ru-amaka"}, headers=h
+    )
+    assert r.status == 201
+    assert (await client.put("/api/moments/m-1/save", headers=h)).status == 200
+    r = await client.delete("/api/moments/follows/ru-amaka", headers=h)
+    assert r.status == 200
+    r = await client.get("/api/moments/archive?scope=saved", headers=h)
+    assert await r.json() == []

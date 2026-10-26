@@ -902,3 +902,271 @@ async def test_a_follower_sees_an_author_chosen_month(db, repo):
         ("u-me", "u-bob"),
     )
     assert [m.id for m in await repo.list_visible_to("u-me")] == ["m-month"]
+
+
+# ── Saves (decision 6b) ───────────────────────────────────────────────────
+
+
+async def _user(db, user_id: str, *, protected: bool = False) -> None:
+    await db.enqueue(
+        "INSERT OR IGNORE INTO users(user_id, username, display_name,"
+        " child_protection_enabled) VALUES(?, ?, ?, ?)",
+        (user_id, user_id, user_id, int(protected)),
+    )
+
+
+def _yesterday() -> str:
+    return (datetime.now(UTC) - timedelta(days=1)).isoformat()
+
+
+async def test_a_saved_moment_survives_expiry_with_its_media(db, repo):
+    await _user(db, "u-me")
+    await repo.save(
+        replace(_moment(id="m-keep", author="u-peer"), received_via="household")
+    )
+    assert await repo.add_save("u-me", "m-keep") is True
+    await db.enqueue(
+        "UPDATE moments SET expires_at=?, media_url='api/media/k.webp',"
+        " media_type='image' WHERE id='m-keep'",
+        (_yesterday(),),
+    )
+    await repo.save(_past("m-other", author="u-peer", via="household"))
+    assert await repo.list_expired_media_urls() == []
+    assert await repo.prune_expired() == 1
+    kept = await repo.get("m-keep")
+    assert kept is not None and kept.media_url == "api/media/k.webp"
+
+
+async def test_saver_reads_a_saved_moment_after_expiry_others_do_not(db, repo):
+    await _user(db, "u-me")
+    await _user(db, "u-bob")
+    await repo.save(
+        replace(_moment(id="m-keep", author="u-peer"), received_via="household")
+    )
+    await repo.add_save("u-me", "m-keep")
+    await db.enqueue(
+        "UPDATE moments SET expires_at=? WHERE id='m-keep'", (_yesterday(),)
+    )
+    assert (await repo.get_readable("m-keep", "u-me")).id == "m-keep"
+    assert await repo.get_readable("m-keep", "u-bob") is None
+    # The inbox still ends at expiry; the Saved list has it.
+    assert await repo.list_visible_to("u-me") == []
+    saved = await repo.list_saved("u-me")
+    assert [s.moment.id for s in saved] == ["m-keep"]
+    assert saved[0].user_id == "u-me" and saved[0].saved_at
+
+
+async def test_a_saved_moment_outlives_the_24h_window_of_a_non_follower(db, repo):
+    await _user(db, "u-me")
+    await repo.save(
+        replace(
+            _moment(id="m-day", author="u-peer", created_offset_min=-30 * 60),
+            received_via="household",
+        )
+    )
+    assert await repo.get_readable("m-day", "u-me") is None
+    await db.enqueue(
+        "INSERT INTO moment_saves(user_id, moment_id, saved_at)"
+        " VALUES('u-me', 'm-day', ?)",
+        (_now_iso(),),
+    )
+    assert (await repo.get_readable("m-day", "u-me")).id == "m-day"
+
+
+async def test_a_blocked_authors_saved_moment_is_hidden(db, repo):
+    await _user(db, "u-me")
+    await repo.save(
+        replace(_moment(id="m-keep", author="u-peer"), received_via="household")
+    )
+    await repo.add_save("u-me", "m-keep")
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?, ?)",
+        ("u-me", "u-peer"),
+    )
+    await db.enqueue(
+        "UPDATE moments SET expires_at=? WHERE id='m-keep'", (_yesterday(),)
+    )
+    assert await repo.get_readable("m-keep", "u-me") is None
+    assert await repo.list_saved("u-me") == []
+
+
+async def test_a_protected_saver_never_reads_a_saved_gfs_moment(db, repo):
+    await _user(db, "u-kid")
+    await repo.save(replace(_moment(id="m-far", author="u-far"), received_via="gfs"))
+    await repo.add_save("u-kid", "m-far")
+    await db.enqueue(
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id='u-kid'"
+    )
+    assert await repo.get_readable("m-far", "u-kid") is None
+    assert await repo.list_saved("u-kid") == []
+
+
+async def test_a_save_never_points_at_a_tombstone(db, repo):
+    await _user(db, "u-me")
+    await repo.save(_moment(id="m-gone", author="u-peer"))
+    await repo.delete("m-gone")
+    assert await repo.add_save("u-me", "m-gone") is False
+    assert await repo.add_save("u-me", "m-unknown") is False
+    assert await repo.list_saved("u-me") == []
+
+
+async def test_every_delete_path_removes_saves(db, repo):
+    """The author's delete arriving over the mesh or a GFS certificate
+    (``tombstone``), a local delete (``delete``) and ``USER_REMOVED``
+    (``delete_by_author``) all drop the saves in the same transaction."""
+    await _user(db, "u-me")
+    for mid, author in (("m-a", "u-a"), ("m-b", "u-b"), ("m-c", "u-c")):
+        await repo.save(
+            replace(_moment(id=mid, author=author), received_via="household")
+        )
+        await repo.add_save("u-me", mid)
+    await repo.tombstone(
+        "m-a", author_user_id="u-a", origin_instance_id="self", expires_at=_now_iso(60)
+    )
+    await repo.delete("m-b")
+    await repo.delete_by_author("u-c")
+    assert await db.fetchall("SELECT moment_id FROM moment_saves") == []
+
+
+async def test_add_and_remove_save_are_idempotent(db, repo):
+    await _user(db, "u-me")
+    await repo.save(_moment(id="m-1", author="u-peer"))
+    assert await repo.add_save("u-me", "m-1") is True
+    first = await repo.list_saved("u-me")
+    assert await repo.add_save("u-me", "m-1") is True
+    assert (await repo.list_saved("u-me"))[0].saved_at == first[0].saved_at
+    assert await repo.saved_ids("u-me", ["m-1", "m-2"]) == {"m-1"}
+    assert await repo.saved_ids("u-me", []) == set()
+    await repo.remove_save("u-me", "m-1")
+    await repo.remove_save("u-me", "m-1")
+    assert await repo.saved_ids("u-me", ["m-1"]) == set()
+
+
+async def test_list_saved_pages_newest_saved_first(db, repo):
+    await _user(db, "u-me")
+    for i in range(4):
+        await repo.save(_moment(id=f"m-{i}", author="u-peer", created_offset_min=-i))
+    for i, mid in enumerate(["m-2", "m-0", "m-3", "m-1"]):
+        await db.enqueue(
+            "INSERT INTO moment_saves(user_id, moment_id, saved_at) VALUES(?, ?, ?)",
+            ("u-me", mid, _now_iso(i)),
+        )
+    first = await repo.list_saved("u-me", limit=2)
+    assert [s.moment.id for s in first] == ["m-1", "m-3"]
+    rest = await repo.list_saved("u-me", before=first[-1].saved_at, limit=2)
+    assert [s.moment.id for s in rest] == ["m-0", "m-2"]
+
+
+async def test_unfollow_drops_saves_of_that_authors_moments(db, repo):
+    await _user(db, "u-me")
+    await repo.save(_moment(id="m-a", author="u-a"))
+    await repo.save(_moment(id="m-b", author="u-b"))
+    await db.enqueue(
+        "INSERT INTO user_follows(follower_user_id, followed_user_id) VALUES"
+        " ('u-me', 'u-a'), ('u-me', 'u-b')"
+    )
+    await repo.add_save("u-me", "m-a")
+    await repo.add_save("u-me", "m-b")
+    await db.enqueue(
+        "DELETE FROM user_follows WHERE follower_user_id='u-me'"
+        " AND followed_user_id='u-a'"
+    )
+    assert await repo.saved_ids("u-me", ["m-a", "m-b"]) == {"m-b"}
+
+
+async def test_gfs_unfollow_drops_saves_unless_still_followed(db, repo):
+    await _follow_via_gfs(db, "u-me", "u-far")
+    await repo.save(replace(_moment(id="m-far", author="u-far"), received_via="gfs"))
+    await repo.add_save("u-me", "m-far")
+    # Also followed through a paired household: the GFS unfollow keeps it.
+    await db.enqueue(
+        "INSERT INTO user_follows(follower_user_id, followed_user_id)"
+        " VALUES ('u-me', 'u-far')"
+    )
+    await db.enqueue("DELETE FROM moment_public_follows")
+    assert await repo.saved_ids("u-me", ["m-far"]) == {"m-far"}
+    await db.enqueue("DELETE FROM user_follows")
+    assert await repo.saved_ids("u-me", ["m-far"]) == set()
+
+
+async def test_removing_a_gfs_connection_drops_its_followed_saves(db, repo):
+    await _follow_via_gfs(db, "u-me", "u-far")
+    await repo.save(replace(_moment(id="m-far", author="u-far"), received_via="gfs"))
+    await repo.add_save("u-me", "m-far")
+    await db.enqueue("DELETE FROM gfs_connections WHERE id='g1'")
+    assert await repo.saved_ids("u-me", ["m-far"]) == set()
+
+
+async def test_drop_saves_from_origin_only_household_copies(db, repo):
+    await _user(db, "u-me")
+    for mid, origin, via in (
+        ("m-b", "inst-b", "household"),
+        ("m-c", "inst-c", "household"),
+        ("m-g", "inst-b", "gfs"),
+    ):
+        await repo.save(
+            replace(
+                _moment(id=mid, author="u-b"),
+                origin_instance_id=origin,
+                received_via=via,
+            )
+        )
+        await repo.add_save("u-me", mid)
+    assert await repo.drop_saves_from_origin("inst-b") == 1
+    assert await repo.saved_ids("u-me", ["m-b", "m-c", "m-g"]) == {"m-c", "m-g"}
+
+
+async def test_list_saved_media_and_clear_saved_media(db, repo):
+    """Saved files of moments not written here, per saver, oldest save
+    first. A saver's cap clears the file only when nobody else saved it."""
+    await _user(db, "u-me")
+    await _user(db, "u-bob")
+    for mid in ("m-1", "m-2"):
+        await repo.save(
+            replace(
+                _past(mid, author="u-peer", via="household"),
+                media_url=f"api/media/{mid}.webp",
+                media_type="image",
+            )
+        )
+    await repo.save(
+        replace(
+            _past("m-own", author="u-mia"),
+            media_url="api/media/o.webp",
+            media_type="image",
+        )
+    )
+    await repo.save(
+        replace(
+            _moment(id="m-live", author="u-peer"),
+            media_url="api/media/l.webp",
+            media_type="image",
+            received_via="household",
+        )
+    )
+    await db.enqueue(
+        "INSERT INTO moment_saves(user_id, moment_id, saved_at) VALUES"
+        " ('u-me', 'm-2', ?), ('u-me', 'm-1', ?), ('u-bob', 'm-2', ?),"
+        " ('u-me', 'm-own', ?), ('u-me', 'm-live', ?)",
+        (_now_iso(-4), _now_iso(-3), _now_iso(-2), _now_iso(-1), _now_iso(0)),
+    )
+    rows = await repo.list_saved_media()
+    assert [(s.user_id, s.moment.id) for s in rows] == [
+        ("u-bob", "m-2"),
+        ("u-me", "m-2"),
+        ("u-me", "m-1"),
+        ("u-me", "m-live"),
+    ]
+    assert [s.moment.id for s in await repo.list_saved_media("u-me")] == [
+        "m-2",
+        "m-1",
+        "m-live",
+    ]
+    # m-2 is also Bob's: u-me's cap cannot take it from him.
+    assert await repo.clear_saved_media("m-2", "u-me") is False
+    assert await repo.clear_saved_media("m-1", "u-bob") is False
+    # A live moment keeps its picture for everyone who still sees it.
+    assert await repo.clear_saved_media("m-live", "u-me") is False
+    assert await repo.clear_saved_media("m-1", "u-me") is True
+    one = await repo.get("m-1")
+    assert (one.media_url, one.content) == (None, "hello")

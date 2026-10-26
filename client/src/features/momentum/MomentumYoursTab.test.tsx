@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor, fireEvent } from '@testing-library/preact'
+import { render, waitFor, fireEvent, within } from '@testing-library/preact'
 
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }))
 const route = vi.hoisted(() => vi.fn())
+const where = vi.hoisted(() => ({ url: '/momentum?tab=yours' }))
 vi.mock('preact-iso', () => ({
-  useLocation: () => ({ route, url: '/momentum?tab=yours', path: '/momentum' }),
+  useLocation: () => ({ route, url: where.url, path: '/momentum' }),
 }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 const wsHandlers = vi.hoisted(() => new Map<string, () => void>())
@@ -17,7 +18,7 @@ vi.mock('@/ws', () => ({
 import { api } from '@/api'
 import { currentUser } from '@/store/auth'
 import type { Moment, User } from '@/types'
-import MomentumYoursTab, { YOURS_PAGE, archiveStatus } from './MomentumYoursTab'
+import MomentumYoursTab, { YOURS_PAGE, archiveStatus, yoursShowFromUrl } from './MomentumYoursTab'
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -66,8 +67,44 @@ describe('archiveStatus', () => {
   })
 })
 
+describe('yoursShowFromUrl', () => {
+  it('shows your posts unless the URL asks for the saved ones', () => {
+    expect(yoursShowFromUrl('/momentum?tab=yours')).toBe('posted')
+    expect(yoursShowFromUrl('/momentum?tab=yours&show=saved')).toBe('saved')
+    expect(yoursShowFromUrl('/momentum?tab=yours&show=nope')).toBe('posted')
+  })
+})
+
 describe('MomentumYoursTab', () => {
-  beforeEach(() => { wsHandlers.clear(); vi.mocked(api.get).mockReset(); route.mockReset() })
+  beforeEach(() => {
+    wsHandlers.clear()
+    vi.mocked(api.get).mockReset()
+    route.mockReset()
+    where.url = '/momentum?tab=yours'
+  })
+
+  it('switches between your posts and the moments you saved', async () => {
+    serve(() => [mine('m1', HOUR)])
+    const { findByText, getByRole } = render(<MomentumYoursTab />)
+    await findByText('text m1')
+    const posted = getByRole('button', { name: 'Posted' })
+    expect(posted.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(getByRole('button', { name: 'Saved' }))
+    expect(route).toHaveBeenCalledWith('/momentum?tab=yours&show=saved', true)
+  })
+
+  it('the Saved view lists scope=saved and the usage counts saved pictures too', async () => {
+    where.url = '/momentum?tab=yours&show=saved'
+    serve((params) => (params?.scope === 'saved'
+      ? [mine('m-saved', 3 * DAY, { author_user_id: 'ru-amaka', saved_by_me: true, saved_at: new Date().toISOString() })]
+      : [mine('m-own', HOUR)]))
+    const { findByText, getByRole, queryByText } = render(<MomentumYoursTab />)
+    await findByText('text m-saved')
+    expect(queryByText('text m-own')).toBeNull()
+    const which = within(getByRole('group', { name: 'Which moments' }))
+    expect(which.getByRole('button', { name: 'Saved' }).getAttribute('aria-pressed')).toBe('true')
+    expect((await findByText(/the ones you saved/)).textContent).toContain('350 MB of 2 GB')
+  })
 
   it('lists your own moments from scope=own with who sees them', async () => {
     serve(() => [

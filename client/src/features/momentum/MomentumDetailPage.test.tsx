@@ -199,3 +199,40 @@ describe('MomentumDetailPage for your archived moment', () => {
     expect(getByRole('button', { name: 'Delete' })).toBeTruthy()
   })
 })
+
+describe('MomentumDetailPage save', () => {
+  it('offers Save on someone else’s moment and says a saved one stays after it ended', async () => {
+    const detail: MomentDetail = {
+      moment: moment('m-amaka', 'ru-amaka', {
+        expires_at: new Date(Date.now() - 3_600_000).toISOString(),
+        saved_by_me: true,
+        can_save: true,
+        author: { display_name: 'Amaka Okafor', picture_url: null },
+      }),
+      replies: [],
+      reactions: [],
+    }
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments/m-amaka' ? detail : [])
+    const { findByRole, container } = render(<MomentumDetailPage />)
+    const btn = await findByRole('button', { name: /Saved/ })
+    expect(btn.getAttribute('aria-pressed')).toBe('true')
+    expect(container.textContent).toContain('You saved this. It stays with you until the author deletes it.')
+    expect(container.textContent).not.toContain('Only you see this now')
+  })
+
+  it('never offers Save on your own moment', async () => {
+    currentUser.value = { user_id: 'u-me', username: 'me' } as never
+    const detail: MomentDetail = {
+      moment: moment('m-amaka', 'u-me', { can_save: false }),
+      replies: [],
+      reactions: [],
+    }
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments/m-amaka' ? detail : [])
+    const { findByText, container } = render(<MomentumDetailPage />)
+    await findByText('hello from m-amaka')
+    expect(container.querySelector('button[aria-pressed]')).toBeNull()
+    currentUser.value = null
+  })
+})

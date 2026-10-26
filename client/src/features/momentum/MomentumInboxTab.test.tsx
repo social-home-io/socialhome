@@ -146,3 +146,25 @@ describe('MomentumInboxTab time without unit formatting', () => {
     }
   })
 })
+
+describe('MomentumInboxTab save chip', () => {
+  it('offers Save where the server says so, never on your own or unsavable moments', async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => (path === '/api/moments'
+      ? [
+          moment('m-ok', 'ru-amaka', { can_save: true }),
+          moment('m-saved', 'ru-amaka', { saved_by_me: true, can_save: true }),
+          moment('m-old-peer', 'ru-chidi', { can_save: false }),
+        ]
+      : []))
+    vi.mocked(api.put).mockResolvedValue({ moment_id: 'm-ok', saved: true })
+    const { container, getAllByRole } = render(<MomentumInboxTab />)
+    await waitFor(() => expect(container.textContent).toContain('hello from m-ok'))
+    const rows = [...container.querySelectorAll('.sh-momentum-row')]
+    const toggle = (row: Element) => row.querySelector('button[aria-pressed]')
+    expect(toggle(rows[0])?.getAttribute('aria-pressed')).toBe('false')
+    expect(toggle(rows[1])?.getAttribute('aria-pressed')).toBe('true')
+    expect(toggle(rows[2])).toBeNull()
+    fireEvent.click(getAllByRole('button', { name: 'Save' })[0])
+    await waitFor(() => expect(api.put).toHaveBeenCalledWith('/api/moments/m-ok/save', {}))
+  })
+})

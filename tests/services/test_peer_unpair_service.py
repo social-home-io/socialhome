@@ -417,3 +417,52 @@ async def test_purge_drops_row_first_then_every_outbox_and_hint(env):
     assert env["space_media"].targets == set()
     assert env["routing"].discovered_via == {}
     assert env["published"] == []
+
+
+# ── Saved moments from the household go with the pairing (sign-off 3) ──────
+
+
+class _FakeMomentRepo:
+    def __init__(self, log: _Log) -> None:
+        self._log = log
+
+    async def drop_saves_from_origin(self, iid):
+        self._log.append(("drop_saves", iid))
+        return 1
+
+
+def _with_moments(env) -> PeerUnpairService:
+    return PeerUnpairService(
+        bus=EventBus(),
+        federation=env["fed"],
+        federation_repo=env["repo"],
+        outbox_repo=env["outbox"],
+        routing_repo=env["routing"],
+        dm_media_outbox_repo=env["dm_media"],
+        space_media_outbox_repo=env["space_media"],
+        moment_repo=_FakeMomentRepo(env["log"]),  # type: ignore[arg-type]
+        notify_timeout_s=0.05,
+    )
+
+
+async def test_unpair_drops_saves_of_moments_from_that_household(env):
+    env["repo"].instances["peer-a"] = _inst("peer-a")
+    assert await _with_moments(env).unpair("peer-a") is True
+    assert ("drop_saves", "peer-a") in env["log"]
+
+
+async def test_an_unpair_tombstone_drops_the_saves_at_once(env):
+    """The peer is offline: the pairing ends for us now, so its later
+    deletes can't be vouched for — the saves go with the tombstone."""
+    env["repo"].instances["peer-b"] = _inst("peer-b")
+    env["fed"].result = "fail"
+    assert await _with_moments(env).unpair("peer-b") is False
+    calls = [c for c, _ in env["log"]]
+    assert "delete_instance" not in calls
+    assert ("drop_saves", "peer-b") in env["log"]
+
+
+async def test_the_peers_unpair_drops_the_saves(env):
+    env["repo"].instances["peer-c"] = _inst("peer-c")
+    await _with_moments(env).forget("peer-c")
+    assert ("drop_saves", "peer-c") in env["log"]

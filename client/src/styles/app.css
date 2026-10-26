@@ -20741,6 +20741,41 @@ h2 + .sh-settings-subcard {
   display: flex;
   justify-content: center;
 }
+
+/* Save someone's moment (decision 6b): the toggle and the Saved list. */
+.sh-momentum-chip[aria-pressed] {
+  min-height: 36px;
+}
+.sh-momentum-chip--saved,
+.sh-momentum-chip--saved:hover:not(:disabled) {
+  color: var(--sh-primary-text);
+  font-weight: 600;
+}
+.sh-momentum-chip:focus-visible,
+.sh-momentum-save:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
+.sh-momentum-save.is-saved {
+  border-color: var(--sh-primary);
+}
+.sh-momentum-yours-switch {
+  margin-block: var(--sh-space-xs);
+}
+.sh-momentum-saved-intro {
+  margin: 0 0 var(--sh-space-sm);
+}
+.sh-momentum-saved-head {
+  align-items: center;
+}
+.sh-momentum-saved-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-xs);
+  padding: 0 var(--sh-space-md) var(--sh-space-xs);
+}
 .sh-momentum-detail-ended {
   margin: 0;
 }

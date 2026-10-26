@@ -11,6 +11,10 @@
  * Data: ``GET /api/moments/archive?scope=own`` (newest first, ``before``
  * cursor paging) and ``GET /api/moments/archive/usage``.
  *
+ * A Posted | Saved switch (``?tab=yours&show=saved``) swaps the list for
+ * the moments you saved (decision 6b, :class:`MomentumSavedList`); the
+ * usage line counts both.
+ *
  * Mounted by :class:`MomentumPage` for ``?tab=yours``.
  */
 import { useEffect } from 'preact/hooks'
@@ -20,6 +24,7 @@ import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { MomentumArchiveSkeleton } from '@/components/Skeleton'
 import { LoadErrorState, StaleNotice } from '@/components/LoadErrorState'
+import { SegmentedSwitch } from '@/components/SegmentedSwitch'
 import { showToast } from '@/components/Toast'
 import { INITIAL_LOAD, clockTime, loadFailed, loadSucceeded, type LoadStatus } from '@/utils/loadStatus'
 import { formatBytes } from '@/utils/bytes'
@@ -28,9 +33,19 @@ import { getMomentsPreferences, momentRetentionLabel } from '@/utils/preferences
 import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { t, isOne, formatLocale } from '@/i18n/i18n'
+import MomentumSavedList from './MomentumSavedList'
 
 /** Rows per page of ``?scope=own``. */
 export const YOURS_PAGE = 30
+
+export type YoursShow = 'posted' | 'saved'
+const SHOWS: readonly YoursShow[] = ['posted', 'saved'] as const
+
+/** Which list ``?tab=yours`` shows: ``&show=saved`` = the moments you saved. */
+export function yoursShowFromUrl(url: string): YoursShow {
+  const params = new URLSearchParams(url.split('?')[1] ?? '')
+  return params.get('show') === 'saved' ? 'saved' : 'posted'
+}
 
 const DAY_MS = 24 * 3_600_000
 
@@ -215,20 +230,41 @@ export default function MomentumYoursTab() {
     return () => { dispose.forEach(d => d()) }
   }, [])
 
-  if (loading.value) return <MomentumArchiveSkeleton />
-
-  const retry = () => void fetchFirst(false)
+  const show = yoursShowFromUrl(loc.url)
   const header = (
     <>
       <h2>{t('moment.yours.heading')}</h2>
-      <p class="sh-muted">
-        {t('moment.yours.intro', {
-          period: momentRetentionLabel(getMomentsPreferences().follower_retention_days),
-        })}
-      </p>
+      <SegmentedSwitch<YoursShow>
+        options={SHOWS}
+        value={show}
+        labels={{ posted: t('moment.yours.show_posted'), saved: t('moment.yours.show_saved') }}
+        ariaLabel={t('moment.yours.show_aria')}
+        class="sh-momentum-yours-switch"
+        onChange={(next) => loc.route(next === 'saved' ? '/momentum?tab=yours&show=saved' : '/momentum?tab=yours', true)}
+      />
+      {show === 'posted' && (
+        <p class="sh-muted">
+          {t('moment.yours.intro', {
+            period: momentRetentionLabel(getMomentsPreferences().follower_retention_days),
+          })}
+        </p>
+      )}
       {usage.value && <UsageLine u={usage.value} />}
     </>
   )
+
+  if (show === 'saved') {
+    return (
+      <div class="sh-momentum-archive">
+        {header}
+        <MomentumSavedList />
+      </div>
+    )
+  }
+
+  if (loading.value) return <MomentumArchiveSkeleton />
+
+  const retry = () => void fetchFirst(false)
 
   if (status.value.failed) {
     return (

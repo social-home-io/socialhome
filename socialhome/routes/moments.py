@@ -11,13 +11,16 @@ Routes:
 * ``POST   /api/moments``                     — create a moment (text + media + parent_moment_id?)
 * ``GET    /api/moments``                     — list visible moments (24h default; followers until expires_at)
 * ``GET    /api/moments/archive``             — full retention-window list (same data, full window);
-  ``?scope=own`` — the caller's own archive (every moment they wrote here)
+  ``?scope=own`` — the caller's own archive (every moment they wrote here);
+  ``?scope=saved`` — the moments the caller saved (decision 6b)
 * ``GET    /api/moments/archive/usage``       — the caller's archived media vs. the household cap
 * ``PUT    /api/admin/moments/archive-cap``   — admin sets the per-person archive cap
 * ``GET    /api/moments/{id}``                — detail incl. replies + reactions
 * ``DELETE /api/moments/{id}``                — author / admin delete
 * ``PUT    /api/moments/{id}/reaction``       — set / change reaction
 * ``DELETE /api/moments/{id}/reaction``       — clear own reaction
+* ``PUT    /api/moments/{id}/save``           — save someone's moment (decision 6b)
+* ``DELETE /api/moments/{id}/save``           — remove it from your saved moments
 * ``POST   /api/moments/{id}/report``         — wrap content_reports
 * ``GET    /api/moments/follows``             — list of who I follow (name,
   signed picture, household and my nickname for each)
@@ -39,7 +42,7 @@ from ..app_keys import (
     report_service_key,
     user_service_key,
 )
-from ..domain.moment import Moment, MomentReaction
+from ..domain.moment import Moment, MomentReaction, SavedMoment
 from ..domain.report import (
     DuplicateReportError,
     ReportRateLimitedError,
@@ -73,7 +76,9 @@ def _moment_dict(
     counts: dict[str, int] | None = None,
     media_status: str | None = None,
     author: PersonSummary | None = None,
+    save: tuple[bool, bool] | None = None,
 ) -> dict:
+    saved_by_me, can_save = save if save is not None else (False, False)
     base: dict = {
         "id": m.id,
         "author_user_id": m.author_user_id,
@@ -92,6 +97,10 @@ def _moment_dict(
         "is_public": m.is_public,
         "received_via": m.received_via,
         "received_via_gfs_id": m.received_via_gfs_id,
+        # Decision 6b: whether the caller saved it, and whether Save is
+        # offered (only where the author's delete can still reach the copy).
+        "saved_by_me": saved_by_me,
+        "can_save": can_save,
     }
     if counts is not None:
         base["reaction_count"] = counts.get("reaction_count", 0)
@@ -143,27 +152,56 @@ def _moment_status(statuses: dict[str, str], m: Moment) -> str | None:
 
 
 async def _moment_list(
-    view: BaseView, moments: list[Moment], viewer_user_id: str
+    view: BaseView,
+    moments: list[Moment],
+    viewer_user_id: str,
+    *,
+    saved_at: dict[str, str] | None = None,
 ) -> list[dict]:
-    """The inbox / archive body: counts, video status and named authors."""
-    counts = await view.svc(moment_service_key).count_engagement(
+    """The inbox / archive body: counts, video status, named authors and
+    the caller's save state. ``saved_at`` (the Saved list) adds each
+    item's ``saved_at`` — the paging cursor."""
+    svc = view.svc(moment_service_key)
+    counts = await svc.count_engagement(
         [m.id for m in moments], viewer_user_id=viewer_user_id
     )
+    saves = await svc.save_flags(moments, viewer_user_id=viewer_user_id)
     statuses = await _video_statuses(view, moments)
     authors = await view.named_people(
         (m.author_user_id for m in moments), gfs_via=_gfs_via(moments)
     )
-    return view.sign_media(
-        [
-            _moment_dict(
-                m,
-                counts=counts.get(m.id),
-                media_status=_moment_status(statuses, m),
-                author=authors[m.author_user_id],
-            )
-            for m in moments
-        ]
+    items = []
+    for m in moments:
+        item = _moment_dict(
+            m,
+            counts=counts.get(m.id),
+            media_status=_moment_status(statuses, m),
+            author=authors[m.author_user_id],
+            save=saves.get(m.id),
+        )
+        if saved_at is not None:
+            item["saved_at"] = saved_at[m.id]
+        items.append(item)
+    return view.sign_media(items)
+
+
+async def _saved_list(
+    view: BaseView, saved: list[SavedMoment], viewer_user_id: str
+) -> list[dict]:
+    """The Saved list body: the inbox item plus ``saved_at``."""
+    return await _moment_list(
+        view,
+        [s.moment for s in saved],
+        viewer_user_id,
+        saved_at={s.moment.id: s.saved_at for s in saved},
     )
+
+
+def _limit(view: BaseView, default: int = 50) -> int:
+    try:
+        return int(view.request.query.get("limit", default))
+    except ValueError:
+        return default
 
 
 def _reaction_dict(r: MomentReaction) -> dict:
@@ -237,7 +275,12 @@ class MomentArchiveView(BaseView):
     top-level moments and replies, live or past their expiry (kept here
     for them only) — newest first, paged with ``before`` (the
     ``created_at`` of the last row) and ``limit`` (default 50, ≤ 100).
-    Same per-item shape (author, counts). Any other ``scope`` is 422.
+    Same per-item shape (author, counts).
+
+    ``?scope=saved`` (decision 6b) returns the moments the caller saved and
+    may still read, newest save first, paged with ``before`` (the
+    ``saved_at`` of the last row) and ``limit``. Each item is the inbox
+    item plus ``saved_at``. Any other ``scope`` is 422.
     """
 
     async def get(self) -> web.Response:
@@ -246,19 +289,24 @@ class MomentArchiveView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "Login required.")
         svc = self.svc(moment_service_key)
         scope = self.request.query.get("scope")
-        if scope is not None and scope != "own":
-            return error_response(422, "INVALID_SCOPE", "scope must be 'own'.")
+        if scope is not None and scope not in ("own", "saved"):
+            return error_response(
+                422, "INVALID_SCOPE", "scope must be 'own' or 'saved'."
+            )
         if scope == "own":
-            try:
-                limit = int(self.request.query.get("limit", 50))
-            except ValueError:
-                limit = 50
             moments = await svc.list_own_archive(
                 author_user_id=ctx.user_id,
                 before=self.request.query.get("before"),
-                limit=limit,
+                limit=_limit(self),
             )
             return self._json(await _moment_list(self, moments, ctx.user_id))
+        if scope == "saved":
+            saved = await svc.list_saved(
+                user_id=ctx.user_id,
+                before=self.request.query.get("before"),
+                limit=_limit(self),
+            )
+            return self._json(await _saved_list(self, saved, ctx.user_id))
         tag = self.request.query.get("tag")
         moments = await svc.list_inbox(
             viewer_user_id=ctx.user_id,
@@ -342,6 +390,7 @@ class MomentDetailView(BaseView):
         reactions = await svc.list_reactions(moment_id)
         ids = [moment.id, *[r.id for r in replies]]
         counts = await svc.count_engagement(ids, viewer_user_id=ctx.user_id)
+        saves = await svc.save_flags([moment, *replies], viewer_user_id=ctx.user_id)
         statuses = await _video_statuses(self, [moment, *replies])
         authors = await self.named_people(
             (m.author_user_id for m in (moment, *replies)),
@@ -356,6 +405,7 @@ class MomentDetailView(BaseView):
                         counts=counts.get(moment.id),
                         media_status=_moment_status(statuses, moment),
                         author=authors[moment.author_user_id],
+                        save=saves.get(moment.id),
                     ),
                     "replies": [
                         _moment_dict(
@@ -363,6 +413,7 @@ class MomentDetailView(BaseView):
                             counts=counts.get(r.id),
                             media_status=_moment_status(statuses, r),
                             author=authors[r.author_user_id],
+                            save=saves.get(r.id),
                         )
                         for r in replies
                     ],
@@ -409,6 +460,33 @@ class MomentReactionView(BaseView):
         moment_id = self.match("id")
         await svc.clear_reaction(moment_id, reactor_user_id=ctx.user_id)
         return self._json({"moment_id": moment_id, "emoji": None})
+
+
+class MomentSaveView(BaseView):
+    """``PUT|DELETE /api/moments/{id}/save`` — keep someone's moment past
+    its expiry until its author deletes it (decision 6b).
+
+    ``PUT`` is idempotent: the unknown-id 404 for a moment the caller can't
+    read, 422 ``OWN_MOMENT`` for their own (already archived), 422
+    ``SAVE_UNAVAILABLE`` where the author's delete couldn't reach the copy
+    (``can_save`` on the item says so up front). ``DELETE`` always answers
+    200 — removing a save says nothing about the moment."""
+
+    async def put(self) -> web.Response:
+        ctx = self.user
+        if ctx is None:
+            return error_response(401, "UNAUTHENTICATED", "Login required.")
+        moment_id = self.match("id")
+        await self.svc(moment_service_key).save_moment(moment_id, user_id=ctx.user_id)
+        return self._json({"moment_id": moment_id, "saved": True})
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        if ctx is None:
+            return error_response(401, "UNAUTHENTICATED", "Login required.")
+        moment_id = self.match("id")
+        await self.svc(moment_service_key).unsave_moment(moment_id, user_id=ctx.user_id)
+        return self._json({"moment_id": moment_id, "saved": False})
 
 
 class MomentReportView(BaseView):

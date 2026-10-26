@@ -115,6 +115,8 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   RSVP_PAST: () => t('error.rsvp_past'),
   POLL_CLOSED: () => t('error.poll_closed'),
   MOMENT_RATE_LIMIT: () => t('error.moment_rate_limit'),
+  OWN_MOMENT: () => t('error.moment_own_save'),
+  SAVE_UNAVAILABLE: () => t('error.moment_save_unavailable'),
   // Bazaar.
   BID_TOO_LOW: (_b, p) => {
     const floor = Number(p.floor_amount)
