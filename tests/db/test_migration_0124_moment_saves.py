@@ -39,6 +39,7 @@ def conn(tmp_path):
     apply_through(c, _VERSION)
     assert [tuple(r) for r in c.execute("SELECT * FROM moments ORDER BY id")] == before
     yield c
+    c.close()
 
 
 def _save(c, user: str, moment: str) -> None:
