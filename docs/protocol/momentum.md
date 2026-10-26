@@ -95,8 +95,11 @@ what, and no protocol version changes.
   media sweep skip the row; the file stays because the row still names it.
 * **Who reads it.** The saver alone can open a saved moment past the 24 h
   window and past ``expires_at`` (``get_readable``); block, guardian-block,
-  protected-account (§CP.R — never a GFS-delivered moment) and
-  ``max_hops`` filters still apply, so a blocked author's saved moment is
+  protected-account (§CP.R — only moments from its household and paired
+  households, see [Protected accounts](#protected-accounts-cpr)) and
+  ``max_hops`` filters still apply (a protected account's save made before
+  protection was turned on stays hidden; saving a 2–3-hop moment is the
+  unknown-id 404), so a blocked author's saved moment is
   hidden (and back on unblock). Replies still close at expiry.
 * **Offered only where a delete can still reach the copy** — the server
   enforces it (``422 SAVE_UNAVAILABLE``) and returns ``can_save`` per item
@@ -261,10 +264,38 @@ The recipient instance writes the inbound ``hop_count`` onto the
 ``moments`` row; ``list_visible_to`` adds ``AND m.hop_count <= ?``
 against the viewer's preference so the inbox respects it.
 
+``hop_count`` is outside the origin signature (each relay bumps it), so the
+receiver never trusts a low one from a relay: a copy whose sender is not its
+``origin_instance_id`` is stored at hop **≥ 2** whatever it claims (the
+relay still forwards the payload as it came). Hop 1 therefore always means
+"sent by its origin" — a moment written here (``received_via='self'``) or
+by a member of a directly paired household.
+
+### Protected accounts (§CP.R)
+
+A protected (child) account sees moments from its **own household and its
+directly paired households only** — the same circle its own ``no_relay``
+moments reach (v_38; owner decision 14, 2026-10-25). Never one relayed from
+2–3 hops away (``hop_count > 1``), never one that came through a GFS
+(``received_via='gfs'``), whatever its ``max_hops``.
+
+It is a read-time, per-viewer filter (``moment_repo._PROTECTED_CIRCLE_SQL``
+— the row is household-wide, an adult housemate still sees it; no migration,
+nothing on the wire changes), applied on every moment read: the inbox and
+archive (``?tag=`` too), the detail read (the unknown-id 404 — so reacting
+to or saving one is refused like an unknown id), a thread's replies and its
+``reply_count``, trending tags, and the Saved list. The live
+``moment.created`` and ``moment.reaction_changed`` frames skip a protected
+account's sockets for such a moment (``MomentCreated`` /
+``MomentReactionTotalsUpdated`` carry ``hop_count``), and a reply from
+outside the circle never notifies a protected parent author. Enabling or
+lifting protection takes effect on the next read.
+
 ### Pure pass-through
 
 If **no local user** can see an inbound moment under their
-``max_hops`` and per-viewer ``user_blocks``, the recipient instance
+``max_hops``, per-viewer ``user_blocks`` and child protection (a protected
+account counts only for a hop-1 moment), the recipient instance
 **skips the local persist** but **still relays** onward. This
 keeps the household acting as a transparent forwarder when no one
 locally subscribes — saves disk + retention work without breaking
@@ -700,7 +731,9 @@ bell when:
 | ``MomentCreated`` (with parent)| The parent moment author | ``moment_replied``  |
 | ``UserFollowed``               | The followed user        | ``user_followed``   |
 
-Cleared reactions (``emoji is None``) don't fire a new
+A protected parent author is not notified of a reply from outside its
+household and paired households (``hop_count > 1`` or through a GFS) — the
+reply is hidden from it too. Cleared reactions (``emoji is None``) don't fire a new
 notification — the original reaction was the signal. Self-
 reactions, self-replies, and self-follows are silent. Recipients
 who live on a peer instance get the notification on *their*
@@ -715,8 +748,8 @@ instance.
   A thread follows the same rule per reply: ``list_replies`` and the
   ``reply_count`` from ``count_engagement_for`` take the viewer and
   apply the inbox filter without its 24-hour window (personal block,
-  guardian block both ways, ``max_hops``, no GFS replies for a
-  protected account), so a hidden person's reply neither shows nor
+  guardian block both ways, ``max_hops``, only household and paired
+  replies for a protected account), so a hidden person's reply neither shows nor
   counts, and an older reply stays as long as its thread is readable.
 * **Report.** ``POST /api/moments/{id}/report`` files a
   ``content_reports`` row with ``target_type='moment'``. The same

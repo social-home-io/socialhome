@@ -1809,15 +1809,13 @@ class RealtimeService:
     async def _on_moment_created(self, event: MomentCreated) -> None:
         # Whole-household broadcast — the SPA refetches ``/api/moments``
         # to pick up the audience-filtered shape (block-aware, etc.). A
-        # stranger's moment that came through a GFS never reaches a
-        # protected account's sockets (§CP.R), not even as a refresh hint.
-        withheld: frozenset[str] = frozenset()
-        if event.received_via == "gfs":
-            withheld = frozenset(
-                u.user_id
-                for u in await self._user_repo.list_active()
-                if u.child_protection_enabled
-            )
+        # moment from outside the household and its paired households (a
+        # stranger's through a GFS, or one relayed from 2+ hops away) never
+        # reaches a protected account's sockets (§CP.R, decision 14), not
+        # even as a refresh hint.
+        withheld = await self._protected_unless_in_circle(
+            event.received_via, event.hop_count
+        )
         await self._broadcast_household(
             {
                 "type": "moment.created",
@@ -1860,18 +1858,30 @@ class RealtimeService:
         # here — a refresh hint for the household's open views (the same
         # frame type the SPA already refetches on). Counts only, never who.
         # Nobody who blocked the author (or a guardian-block counterpart)
-        # gets it, and no protected account for a moment that came through
-        # a GFS (§CP.R) — as for ``moment.created``.
+        # gets it, and no protected account for a moment from outside its
+        # household and paired households (§CP.R) — as for ``moment.created``.
         withheld = set(await self._blocked_or_counterparts(event.author_user_id))
-        if event.received_via == "gfs":
-            withheld.update(
-                u.user_id
-                for u in await self._user_repo.list_active()
-                if u.child_protection_enabled
-            )
+        withheld.update(
+            await self._protected_unless_in_circle(event.received_via, event.hop_count)
+        )
         await self._broadcast_household(
             {"type": "moment.reaction_changed", "moment_id": event.moment_id},
             withheld=frozenset(withheld),
+        )
+
+    async def _protected_unless_in_circle(
+        self, received_via: str | None, hop_count: int
+    ) -> frozenset[str]:
+        """The protected accounts (§CP.R) to keep a moment's frames from: all
+        of them when it came through a GFS or from 2+ hops away — a protected
+        account sees moments from its household and directly paired
+        households only (owner decision 14) — else nobody."""
+        if received_via != "gfs" and hop_count <= 1:
+            return frozenset()
+        return frozenset(
+            u.user_id
+            for u in await self._user_repo.list_active()
+            if u.child_protection_enabled
         )
 
     # ─── Fan-out helpers ──────────────────────────────────────────────────

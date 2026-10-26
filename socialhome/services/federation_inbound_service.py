@@ -3987,6 +3987,13 @@ class FederationInboundService(ProtectionGateMixin):
             hop_count = int(p.get("hop_count") or 1)
         except TypeError, ValueError:
             hop_count = 1
+        if event.from_instance != origin_instance_id:
+            # ``hop_count`` is outside the origin signature and each relay
+            # bumps it: a copy not sent by its origin is at least 2 hops
+            # away whatever it claims — kept out of a protected account's
+            # circle (§CP.R) and the viewers' ``max_hops``. The relay below
+            # still gets the payload as it came.
+            hop_count = max(hop_count, 2)
         created_at = str(p.get("occurred_at") or _now_iso())
         moment = Moment(
             id=moment_id,
@@ -4052,6 +4059,7 @@ class FederationInboundService(ProtectionGateMixin):
                     parent_author_user_id=parent_author_user_id,
                     origin_instance_id=moment.origin_instance_id,
                     expires_at=moment.expires_at,
+                    hop_count=moment.hop_count,
                 )
             )
         # 3-hop relay: forward to the rest of *our* paired peers. The

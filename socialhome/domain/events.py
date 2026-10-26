@@ -2414,6 +2414,10 @@ class MomentCreated(DomainEvent):
     #: ``"gfs"`` for a stranger's public moment that arrived through a GFS
     #: — protected accounts never get its frame (§CP.R). ``None`` otherwise.
     received_via: str | None = None
+    #: How far away it was written: 1 here or on a paired household, 2–3
+    #: when relayed. A protected account gets no frame (nor a reply
+    #: notification) for one from 2+ hops away (§CP.R, decision 14).
+    hop_count: int = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -2456,6 +2460,9 @@ class MomentReactionTotalsUpdated(DomainEvent):
     author_user_id: str
     #: How the moment landed here (``household`` / ``gfs``).
     received_via: str = "household"
+    #: The held row's ``hop_count`` — no protected account is hinted about
+    #: one from 2+ hops away (§CP.R).
+    hop_count: int = 1
     occurred_at: datetime = field(default_factory=_now)
 
 

@@ -679,6 +679,7 @@ class MomentReactionCounts(ProtectionGateMixin):
                     moment_id=moment_id,
                     author_user_id=author_user_id,
                     received_via=moment.received_via if moment else "household",
+                    hop_count=moment.hop_count if moment else 1,
                 )
             )
         return kept

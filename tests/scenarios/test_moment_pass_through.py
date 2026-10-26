@@ -143,3 +143,47 @@ async def test_banned_source_drops_envelope_entirely(env):
     await env["inbound"]._on_moment_created(_moment_event(hop_count=1))
     assert await env["moments"].get("m-pass") is None
     env["federation"].send_event.assert_not_called()
+
+
+# ── §CP.R decision 14: protected accounts don't change the relay ─────────
+
+
+async def _protected_only(db) -> None:
+    """The household's one user is a protected account with the default
+    (widest) ``max_hops``."""
+    await db.enqueue(
+        "UPDATE users SET child_protection_enabled=1, preferences_json='{}'"
+        " WHERE user_id='u-self'"
+    )
+
+
+async def test_a_protected_only_household_passes_a_far_moment_through(db, env):
+    """Nobody here may see a 2-hop moment (a protected account sees its
+    household and paired households only): not stored — still relayed."""
+    await _protected_only(db)
+    await env["inbound"]._on_moment_created(_moment_event(hop_count=2))
+    assert await env["moments"].get("m-pass") is None
+    sent = [c.kwargs for c in env["federation"].send_event.call_args_list]
+    assert sent and all(c["payload"]["hop_count"] == 3 for c in sent)
+
+
+async def test_a_protected_only_household_keeps_and_relays_a_paired_moment(db, env):
+    await _protected_only(db)
+    await env["inbound"]._on_moment_created(_moment_event(hop_count=1))
+    assert await env["moments"].get_readable("m-pass", "u-self") is not None
+    sent = [c.kwargs for c in env["federation"].send_event.call_args_list]
+    assert sent and all(c["payload"]["hop_count"] == 2 for c in sent)
+
+
+async def test_a_mixed_household_stores_a_far_moment_for_the_adult_only(db, env):
+    """An adult housemate may see it: stored and relayed — the protected
+    account's reads still leave it out."""
+    await _protected_only(db)
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name, state)"
+        " VALUES('u-adult','bob','Bob','active')"
+    )
+    await env["inbound"]._on_moment_created(_moment_event(hop_count=2))
+    assert await env["moments"].get_readable("m-pass", "u-adult") is not None
+    assert await env["moments"].get_readable("m-pass", "u-self") is None
+    assert env["federation"].send_event.called

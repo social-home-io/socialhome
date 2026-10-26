@@ -641,7 +641,8 @@ async def test_replies_follow_the_inbox_rule(db, repo):
 
     everyone = {"r-u-blocked", "r-u-bad", "r-u-ok", "r-u-far"}
     assert await seen("u-me") == everyone - {"r-u-blocked"}
-    assert await seen("u-kid") == everyone - {"r-u-bad"}
+    # A protected account: no guardian-blocked reply, none from 3 hops away.
+    assert await seen("u-kid") == everyone - {"r-u-bad", "r-u-far"}
     assert await seen("u-other", max_hops=2) == everyone - {"r-u-far"}
     # The guardian block holds the other way too.
     await repo.save(_moment(id="r-kid", author="u-kid", parent_moment_id="m-root"))
@@ -1330,3 +1331,110 @@ async def test_list_own_live_since(db, repo):
     await repo.delete("m-gone")
     since = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
     assert [m.id for m in await repo.list_own_live_since(since)] == ["m-new"]
+
+
+# ── Protected accounts: household + paired households only (decision 14) ──
+
+
+async def _circle(db, repo) -> None:
+    """A protected kid and an adult housemate; a moment from the household,
+    one from a paired household (hop 1), one each from 2 and 3 hops away
+    and one that came through a GFS — all tagged ``#fun``."""
+    await _user(db, "u-kid", protected=True)
+    await _user(db, "u-me")
+    await _user(db, "u-mom")
+    rows = [
+        ("m-home", "u-mom", "self", 1),
+        ("m-hop1", "u-paired", "household", 1),
+        ("m-hop2", "u-fof", "household", 2),
+        ("m-hop3", "u-far", "household", 3),
+        ("m-gfs", "u-stranger", "gfs", 1),
+    ]
+    for i, (mid, author, via, hop) in enumerate(rows):
+        await repo.save(
+            replace(
+                _moment(id=mid, author=author, content="#fun", created_offset_min=-i),
+                received_via=via,
+                hop_count=hop,
+            )
+        )
+
+
+_CIRCLE = ["m-home", "m-hop1"]
+_EVERYONE = ["m-home", "m-hop1", "m-hop2", "m-hop3", "m-gfs"]
+
+
+async def test_a_protected_inbox_holds_household_and_paired_moments_only(db, repo):
+    await _circle(db, repo)
+    assert [m.id for m in await repo.list_visible_to("u-kid")] == _CIRCLE
+    assert [m.id for m in await repo.list_visible_to("u-kid", tag="fun")] == _CIRCLE
+    assert [m.id for m in await repo.list_visible_to("u-me")] == _EVERYONE
+
+
+async def test_a_protected_account_cannot_read_a_far_moment_by_id(db, repo):
+    await _circle(db, repo)
+    for mid in _EVERYONE:
+        kid = await repo.get_readable(mid, "u-kid")
+        assert (kid is not None) is (mid in _CIRCLE), mid
+        assert await repo.get_readable(mid, "u-me") is not None, mid
+
+
+async def test_a_protected_thread_shows_and_counts_circle_replies_only(db, repo):
+    await _user(db, "u-kid", protected=True)
+    await _user(db, "u-me")
+    await repo.save(_moment(id="m-root", author="u-mom"))
+    for mid, via, hop in (
+        ("r-hop1", "household", 1),
+        ("r-hop2", "household", 2),
+        ("r-hop3", "household", 3),
+        ("r-gfs", "gfs", 1),
+    ):
+        await repo.save(
+            replace(
+                _moment(id=mid, author=f"u-{mid}", parent_moment_id="m-root"),
+                received_via=via,
+                hop_count=hop,
+            )
+        )
+    kid = await repo.list_replies("m-root", viewer_user_id="u-kid")
+    assert [m.id for m in kid] == ["r-hop1"]
+    assert len(await repo.list_replies("m-root", viewer_user_id="u-me")) == 4
+    counts = await repo.count_engagement_for(["m-root"], viewer_user_id="u-kid")
+    assert counts["m-root"]["reply_count"] == 1
+    counts = await repo.count_engagement_for(["m-root"], viewer_user_id="u-me")
+    assert counts["m-root"]["reply_count"] == 4
+
+
+async def test_protected_trending_tags_count_circle_moments_only(db, repo):
+    await _circle(db, repo)
+    assert await repo.list_top_hashtags("u-kid") == [("fun", 2)]
+    assert await repo.list_top_hashtags("u-me") == [("fun", 5)]
+
+
+async def test_a_protected_accounts_save_of_a_far_moment_stays_hidden(db, repo):
+    """Saved before protection was turned on (saving one now is refused —
+    the save path needs a readable moment): the Saved list and the detail
+    read both hide it."""
+    await _circle(db, repo)
+    for mid in _EVERYONE:
+        await db.enqueue(
+            "INSERT INTO moment_saves(user_id, moment_id, saved_at) VALUES(?, ?, ?)",
+            ("u-kid", mid, _now_iso()),
+        )
+    saved = {s.moment.id for s in await repo.list_saved("u-kid")}
+    assert saved == {"m-home", "m-hop1"}
+    await db.enqueue(
+        "UPDATE moments SET expires_at=? WHERE id='m-hop2'", (_yesterday(),)
+    )
+    assert await repo.get_readable("m-hop2", "u-kid") is None
+
+
+async def test_a_far_moment_is_not_stored_for_a_protected_only_household(db, repo):
+    """Nobody here may see a 2-hop moment when every local user is
+    protected — the inbound handler skips the store (and still relays)."""
+    await _user(db, "u-kid", protected=True)
+    assert await repo.has_visible_recipient(author_user_id="u-a", hop_count=1)
+    assert not await repo.has_visible_recipient(author_user_id="u-a", hop_count=2)
+    assert not await repo.has_visible_recipient(author_user_id="u-a", hop_count=3)
+    await _user(db, "u-me")
+    assert await repo.has_visible_recipient(author_user_id="u-a", hop_count=2)

@@ -1095,7 +1095,7 @@ public moments, so it never reaches this path (§CP.R).
 
 A received public moment is one household-wide row. A protected (child)
 account (§CP.R) never sees it — the per-viewer visibility rule
-(`moment_repo._NOT_GFS_FOR_PROTECTED_SQL`, part of the inbox rule the detail
+(`moment_repo._PROTECTED_CIRCLE_SQL`, part of the inbox rule the detail
 read shares) leaves it out of the inbox, the archive, trending tags, a
 moment's replies and the detail read (the unknown-id 404), and the
 `moment.created` WebSocket frame (`MomentCreated.received_via = "gfs"`)
