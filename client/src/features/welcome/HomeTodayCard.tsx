@@ -7,7 +7,8 @@
  *   a count badge — a visible marker, not a glow alone (C16).
  * - **"Momentum · N new"** — moments by others since you last had
  *   Momentum open (``store/momentumSeen``; the last 24 hours on a fresh
- *   browser), with who posted them. Read-only use of ``GET /api/moments``.
+ *   browser), with who posted them. Read-only use of
+ *   ``GET /api/moments?top_level=1``: a reply is not a new moment.
  * - **Hidden when nothing is new**, and while loading or after a failed
  *   load: Home is a glance, the pages have their own error states.
  *   A section the person turned off (``hide_highlights`` /
@@ -42,6 +43,7 @@ export function newMoments(
   const since = seenAt ?? now - TODAY_WINDOW_MS
   return moments.filter(m => (
     m.author_user_id !== me
+    && !m.parent_moment_id
     && Date.parse(normaliseTimestamp(m.created_at)) > since
     && Date.parse(normaliseTimestamp(m.expires_at)) > now
   ))
@@ -106,7 +108,7 @@ export function HomeTodayCard() {
     const load = () => {
       Promise.all([
         noHighlights ? Promise.resolve([]) : api.get('/api/highlights') as Promise<HighlightInboxItem[]>,
-        noMomentum ? Promise.resolve([]) : api.get('/api/moments') as Promise<Moment[]>,
+        noMomentum ? Promise.resolve([]) : api.get('/api/moments?top_level=1') as Promise<Moment[]>,
       ])
         .then(([highlights, moments]) => {
           if (live) setData({ highlights: highlights ?? [], moments: moments ?? [] })

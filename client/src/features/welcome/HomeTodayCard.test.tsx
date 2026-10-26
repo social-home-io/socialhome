@@ -52,6 +52,8 @@ beforeEach(() => {
   vi.mocked(api.get).mockReset()
   vi.mocked(api.get).mockImplementation(async (path: string) => {
     if (path === '/api/highlights') return highlights
+    // Roots only (#1187): the server drops replies on ``top_level=1``.
+    if (path === '/api/moments?top_level=1') return moments.filter(m => !m.parent_moment_id)
     if (path === '/api/moments') return moments
     throw new Error(`unexpected ${path}`)
   })
@@ -106,6 +108,20 @@ describe('HomeTodayCard', () => {
     expect(row.textContent).not.toContain('Sophie')
     fireEvent.click(row)
     expect(momentumSeenAt('me')).toBeGreaterThan(Date.now() - 1000)
+  })
+
+  it('replies are not new moments: only top-level moments count', async () => {
+    markMomentumSeen('me', Date.now() - 3 * H)
+    moments = [
+      moment('m1', 'ru-a', 'Anna', 1 * H),
+      { ...moment('r1', 'ru-t', 'Thomas', 1 * H), parent_moment_id: 'm0' },
+      { ...moment('r2', 'ru-s', 'Sophie', 2 * H), parent_moment_id: 'm1' },
+    ]
+    const { findByRole } = render(<HomeTodayCard />)
+    const row = await findByRole('link', { name: /Momentum · 1 new/ })
+    expect(row.textContent).toContain('Anna')
+    expect(row.textContent).not.toContain('Thomas')
+    expect(api.get).toHaveBeenCalledWith('/api/moments?top_level=1')
   })
 
   it('without a visit on record, the last 24 hours are new; long name lists are shortened', async () => {

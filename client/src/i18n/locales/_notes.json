@@ -549,5 +549,7 @@
   "moment.composer.post_at": "Button label while the person must wait. {time} is a clock time, e.g. 13:24. Keep it short: it sits next to Cancel on a phone.",
   "moment.composer.public_on": "{gfs} is the name of a GFS server (e.g. Demo GFS). Keep \"GFS\" untranslated.",
   "moment.composer.public_on_many": "{n} = number of GFS servers (2 or more). Keep \"GFS\" untranslated.",
-  "moment.composer.reach_more": "{days} is already a translated duration such as \"30 days\" (settings.momentum.days). The quoted name is the label of settings.momentum.show_up_to."
+  "moment.composer.reach_more": "{days} is already a translated duration such as \"30 days\" (settings.momentum.days). The quoted name is the label of settings.momentum.show_up_to.",
+  "highlight.viewer.share_note": "Shown under 'Share to Feed or a space…': sharing opens all of today's frames to everyone who can read the post, which can be more people than the highlight's audience.",
+  "highlight.viewer.menu_heading": "Heading of the viewer's ⋯ sheet; the highlight is paused while the sheet is open."
 }

@@ -38,7 +38,8 @@ import { ws } from '@/ws'
 import type { HighlightFrame, HighlightInboxItem } from '@/types'
 import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
-import { audienceChip, todayView, type AudienceIcon, type TodayPerson } from './today'
+import { audienceChip, todayView, type TodayPerson } from './today'
+import { CHIP_ICON, SVG } from './icons'
 
 const inbox = signal<HighlightInboxItem[]>([])
 const loading = signal<boolean>(true)
@@ -57,32 +58,6 @@ function fetchInbox(initial: boolean): Promise<void> {
 }
 
 // ── Small pieces ────────────────────────────────────────────────────────
-
-const SVG = {
-  viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2,
-  'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false',
-} as const
-
-const CHIP_ICON: Record<AudienceIcon, preact.JSX.Element> = {
-  households: (
-    <svg {...SVG} width={14} height={14}>
-      <circle cx="9" cy="8" r="3" /><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" />
-      <circle cx="17" cy="9" r="2.5" /><path d="M17 14c2.5 0 4 1.8 4 4.5" />
-    </svg>
-  ),
-  home: (
-    <svg {...SVG} width={14} height={14}><path d="M4 11l8-7 8 7v9H4z" /><path d="M10 20v-5h4v5" /></svg>
-  ),
-  lock: (
-    <svg {...SVG} width={14} height={14}><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>
-  ),
-  people: (
-    <svg {...SVG} width={14} height={14}>
-      <circle cx="8" cy="8" r="3" /><circle cx="16" cy="8" r="3" />
-      <path d="M2 20c0-3 2.7-5 6-5M22 20c0-3-2.7-5-6-5M9 20c0-2.5 1.3-4 3-4s3 1.5 3 4" />
-    </svg>
-  ),
-}
 
 const ICON = {
   eye: (<svg {...SVG} width={16} height={16}><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></svg>),

@@ -13,6 +13,7 @@
   "notification.dm.contact_requested": "{name} would like to message you",
   "notification.dm.received": "New message from {sender}",
   "notification.post.commented": "{author} commented on your post",
+  "notification.highlight.reacted": "{name} reacted {emoji} to your highlight",
   "notification.moment.reacted": "{name} reacted {emoji} to your moment",
   "notification.moment.replied": "{name} replied to your moment",
   "notification.user.followed": "{name} started following you",

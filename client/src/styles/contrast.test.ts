@@ -110,12 +110,11 @@ describe('highlight viewer chrome', () => {
     return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
   }
   const onBlack = (h: string) => (lum(hex(h)) + 0.05) / 0.05
-  const scope = rules().find(([sel]) =>
-    sel.replace(/\s+/g, ' ') === '.sh-highlight-viewer-header, .sh-highlight-viewer-footer')
+  const scope = rules().find(([sel]) => sel === '.sh-hlv')
   const token = (name: string) =>
     new RegExp(`${name}\\s*:\\s*(#[0-9A-Fa-f]{6})`).exec(scope?.[1] ?? '')?.[1] ?? '#000000'
 
-  it('scopes its own ink to the header and footer', () => {
+  it('scopes its own ink to the whole viewer, its sheets included', () => {
     expect(scope).toBeTruthy()
     expect(token('--sh-bg')).toBe('#000000')
   })
@@ -130,12 +129,14 @@ describe('highlight viewer chrome', () => {
     expect(onBlack(token('--sh-border-strong'))).toBeGreaterThanOrEqual(3)
   })
 
-  it('puts the quick reactions on a light pill', () => {
-    const tray = rules().find(([sel]) => sel === '.sh-highlight-react-tray')
-    const m = /background\s*:\s*rgba\(\s*(\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\s*\)/.exec(tray?.[1] ?? '')
-    expect(m).toBeTruthy()
-    const [r, g, b, a] = m!.slice(1).map(Number)
-    expect(Math.min(r, g, b)).toBeGreaterThanOrEqual(230)
-    expect(a).toBeGreaterThanOrEqual(0.9)
+  it('draws the reaction tray in white ink, your reaction ringed', () => {
+    // Colour emoji come from the font token (#1164); white ink keeps a
+    // monochrome fallback glyph visible on the dark buttons.
+    const btn = rules().find(([sel]) => sel === '.sh-hlv__emobtn')
+    expect(btn?.[1]).toMatch(/color\s*:\s*#FFFFFF/)
+    const on = rules().find(([sel]) => sel === '.sh-hlv__emobtn.is-on')
+    expect(on?.[1]).toMatch(/box-shadow\s*:\s*inset 0 0 0 3px #F08A4B/)
+    // The ring against the dark "on" fill and the black page: ≥ 3:1.
+    expect(onBlack('#F08A4B')).toBeGreaterThanOrEqual(3)
   })
 })

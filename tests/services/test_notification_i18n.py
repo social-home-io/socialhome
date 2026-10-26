@@ -14,6 +14,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
+    HighlightFrameReactionChanged,
     MomentCreated,
     MomentReactionChanged,
     PostCreated,
@@ -214,6 +215,7 @@ async def test_moment_notifications_name_the_person_and_are_translated(tmp_dir):
         "notification.moment.reacted",
         "notification.moment.replied",
         "notification.user.followed",
+        "notification.highlight.reacted",
         "notification.someone",
     )
     for locale in ("en", "de", "es", "fr", "nl"):
@@ -258,7 +260,19 @@ async def test_moment_notifications_name_the_person_and_are_translated(tmp_dir):
         await bus.publish(
             UserFollowed(follower_user_id="ru-unknown-7f3a", followed_user_id="b-id")
         )
+        await bus.publish(
+            HighlightFrameReactionChanged(
+                highlight_id="h-1",
+                frame_id="f-1",
+                reactor_user_id="a-id",
+                author_user_id="b-id",
+                emoji="❤️",
+            )
+        )
         titles = {n.type: n.title for n in await repo.list("b-id")}
+        assert titles["highlight_reacted"] == shipped.gettext(
+            "notification.highlight.reacted", locale="de", name="Anna", emoji="❤️"
+        )
         someone = shipped.gettext("notification.someone", locale="de")
         assert titles["moment_reacted"] == shipped.gettext(
             "notification.moment.reacted", locale="de", name="Anna", emoji="🔥"

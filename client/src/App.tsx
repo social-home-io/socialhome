@@ -7,6 +7,7 @@ import { basePath } from '@/baseUrl'
 import { t } from '@/i18n/i18n'
 import { isAuthed, currentUser, loadCurrentUser, token } from '@/store/auth'
 import { noteRoute } from '@/store/momentumSeen'
+import { noteViewerRoute } from '@/features/highlights/viewerReturn'
 import { instanceConfig, loadInstanceConfig } from '@/store/instance'
 import { usesIngressAuth } from '@/platform'
 import { isGuardian, loadGuardian } from '@/store/guardian'
@@ -326,7 +327,10 @@ export function App() {
           <Router
             onLoadStart={routeLoadStart}
             onLoadEnd={routeLoadEnd}
-            onRouteChange={(url: string) => noteRoute(url, currentUser.value?.user_id)}
+            onRouteChange={(url: string) => {
+              noteRoute(url, currentUser.value?.user_id)
+              noteViewerRoute(url)
+            }}
           >
             {Object.entries(routes).map(([path, Component]) => {
               // preact-iso's ``lazy()`` returns an AsyncComponent with

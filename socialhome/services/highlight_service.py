@@ -504,6 +504,15 @@ class HighlightService:
         )
         return highlight, await self._highlights.list_frames(highlight.id)
 
+    async def my_reactions(
+        self, viewer_user_id: str, frames: list[HighlightFrame]
+    ) -> dict[str, str]:
+        """``{frame_id: emoji}`` — the viewer's own reaction on each of
+        ``frames`` (already read through :meth:`get_for_viewer`)."""
+        return await self._highlights.reactions_by(
+            viewer_user_id, [f.id for f in frames]
+        )
+
     async def get_frame(self, frame_id: str) -> HighlightFrame | None:
         return await self._highlights.get_frame(frame_id)
 

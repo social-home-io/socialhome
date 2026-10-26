@@ -621,3 +621,37 @@ async def test_count_viewers_counts_each_person_once(db, repo):
     await repo.mark_viewed(f2.id, "u3")
     assert await repo.count_viewers(highlight.id) == 2
     assert await repo.count_viewers("no-such-highlight") == 0
+
+
+async def test_reactions_by_reads_one_persons_emoji_per_frame(db, repo):
+    """The viewer's own reaction per frame (``my_reaction``): one read
+    for every frame, other people's reactions and other frames left out."""
+    await _seed_user(db)
+    highlight = await repo.find_or_create_today(
+        author_user_id="u1",
+        audience_kind=HighlightAudience.ALL_PAIRED,
+        audience=(),
+        highlight_date="2026-05-04",
+        expires_at=_expires(),
+    )
+    f1 = await repo.append_frame(
+        highlight_id=highlight.id,
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/a.webp",
+    )
+    f2 = await repo.append_frame(
+        highlight_id=highlight.id,
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/b.webp",
+    )
+    await repo.set_reaction(f1.id, "u2", "❤️")
+    await repo.set_reaction(f1.id, "u3", "🔥")
+    await repo.set_reaction(f2.id, "u3", "😂")
+
+    assert await repo.reactions_by("u2", [f1.id, f2.id]) == {f1.id: "❤️"}
+    assert await repo.reactions_by("u3", [f1.id, f2.id]) == {
+        f1.id: "🔥",
+        f2.id: "😂",
+    }
+    assert await repo.reactions_by("u3", [f2.id]) == {f2.id: "😂"}
+    assert await repo.reactions_by("u2", []) == {}

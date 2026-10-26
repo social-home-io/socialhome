@@ -55,6 +55,7 @@ from ..domain.events import (
     DmMessageDeleted,
     DmMessageUpdated,
     EventReminderDue,
+    HighlightFrameReactionChanged,
     MomentCreated,
     MomentReactionChanged,
     NotificationCreated,
@@ -444,6 +445,11 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(MomentReactionChanged, self.on_moment_reaction_changed)
         self._bus.subscribe(MomentCreated, self.on_moment_created)
         self._bus.subscribe(UserFollowed, self.on_user_followed)
+        # Highlights — a reaction on your frame (a household member's, or
+        # one a paired household's HIGHLIGHT_FRAME_REACTED brought in).
+        self._bus.subscribe(
+            HighlightFrameReactionChanged, self.on_highlight_reaction_changed
+        )
         # Space location feature enabled — nudge members to opt in.
         self._bus.subscribe(
             SpaceLocationFeatureEnabled,
@@ -2037,6 +2043,46 @@ class NotificationService(ProtectionGateMixin):
                     name=await self._person_name(event.author_user_id, locale),
                 ),
                 link_url=f"/momentum/{event.parent_moment_id}",
+            )
+        )
+
+    # ── Highlights (§Highlights) ──────────────────────────────────────
+
+    async def on_highlight_reaction_changed(
+        self,
+        event: HighlightFrameReactionChanged,
+    ) -> None:
+        """Notify the highlight's author when someone reacts to a frame.
+
+        A local row from an event that already arrives — the reactor's
+        household sends ``HIGHLIGHT_FRAME_REACTED`` to the author's home
+        only, so nothing new crosses the wire. Same rules as a moment
+        reaction: a cleared reaction, your own, a blocked reactor and an
+        author on another household (their household notifies them) stay
+        silent.
+        """
+        if event.emoji is None:
+            return
+        if event.reactor_user_id == event.author_user_id:
+            return
+        if await self._hidden_from(event.author_user_id, event.reactor_user_id):
+            return
+        author = await self._users.get_by_user_id(event.author_user_id)
+        if author is None:
+            return
+        locale = self._locale(author)
+        await self._save_notif(
+            new_notification(
+                user_id=event.author_user_id,
+                type="highlight_reacted",
+                title=self._t(
+                    "notification.highlight.reacted",
+                    locale=locale,
+                    fallback="{name} reacted {emoji} to your highlight",
+                    name=await self._person_name(event.reactor_user_id, locale),
+                    emoji=event.emoji,
+                ),
+                link_url=f"/highlights/{event.highlight_id}",
             )
         )
 
