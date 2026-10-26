@@ -257,6 +257,84 @@ async def test_moment_created_relay_path_legacy_origin_unsigned(db, bus, inbound
     relay.relay_inbound.assert_awaited_once()
 
 
+def _relayed_create(hop_count: int) -> dict:
+    """A create signed by its origin ``peer-a``, as a relay forwards it."""
+    signed = sign_moment_origin(
+        seed=ORIGIN_KEY.private_key,
+        identity_pk=ORIGIN_KEY.public_key,
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_create_payload(),
+    )
+    return {**signed, "hop_count": hop_count}
+
+
+async def test_a_relayed_moment_is_stored_and_announced_at_its_hop(db, bus, inbound):
+    """A moment from 2 hops away keeps ``hop_count`` 2 on the row and on
+    ``MomentCreated`` — what keeps it from a protected account (§CP.R)."""
+    svc, _relay = inbound
+    _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=True)
+    captured: list[MomentCreated] = []
+    bus.subscribe(MomentCreated, captured.append)
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED,
+            _relayed_create(2),
+            from_instance="peer-relayer",
+        )
+    )
+    assert (await svc._moment_repo.get("m-fed-1")).hop_count == 2
+    assert [e.hop_count for e in captured] == [2]
+
+
+async def test_a_relay_cannot_pass_a_far_moment_off_as_a_paired_one(db, bus, inbound):
+    """``hop_count`` is outside the origin signature, so a relay could claim
+    1. A copy whose sender is not its origin is at least 2 hops away — it
+    is stored (and announced) at hop 2, never in a protected account's
+    circle. The relay still gets the payload as it came."""
+    svc, relay = inbound
+    _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=True)
+    captured: list[MomentCreated] = []
+    bus.subscribe(MomentCreated, captured.append)
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED,
+            _relayed_create(1),
+            from_instance="peer-relayer",
+        )
+    )
+    assert (await svc._moment_repo.get("m-fed-1")).hop_count == 2
+    assert [e.hop_count for e in captured] == [2]
+    assert relay.relay_inbound.await_args.kwargs["payload"]["hop_count"] == 1
+
+
+async def test_a_protected_only_household_relays_a_far_moment_without_storing_it(
+    db, bus, inbound
+):
+    """Pure pass-through: when every local user is protected, nobody here
+    may see a 2-hop moment, so it is not stored or announced — but it is
+    still relayed onward. A moment from a paired household is stored."""
+    svc, relay = inbound
+    _attach_federation(svc, pinned=ORIGIN_KEY.public_key, signs=True)
+    await db.enqueue("UPDATE users SET child_protection_enabled=1")
+    captured: list[MomentCreated] = []
+    bus.subscribe(MomentCreated, captured.append)
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED,
+            _relayed_create(2),
+            from_instance="peer-relayer",
+        )
+    )
+    assert await svc._moment_repo.get("m-fed-1") is None
+    assert captured == []
+    relay.relay_inbound.assert_awaited_once()
+    await svc._on_moment_created(
+        _event(FederationEventType.MOMENT_CREATED, _relayed_create(1))
+    )
+    assert (await svc._moment_repo.get("m-fed-1")).hop_count == 1
+    assert [e.hop_count for e in captured] == [1]
+
+
 @pytest.mark.parametrize("wired", [True, False], ids=["origin signs", "no fed"])
 async def test_moment_created_relay_path_unsigned_refused(db, bus, inbound, wired):
     svc, relay = inbound

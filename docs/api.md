@@ -1105,6 +1105,13 @@ answer), and lifted the moment protection is disabled:
 | `api_tokens` | `POST /api/me/tokens` | A personal token is a bearer credential an external tool holds. Signing in is unaffected (browser sessions mint through the platform adapter). |
 | `calendar_feeds` | `POST /api/spaces/{id}/calendar/feed-token`; serving an existing feed token | The feed URL is its own credential and exposes the account's schedule to whoever holds it. |
 
+**What it sees.** Moments come only from the account's own household and
+its directly paired households (the circle its own moments reach): one
+relayed from 2–3 hops away or delivered through a GFS is left out of every
+`/api/moments*` read (inbox, archive, detail — the unknown-id `404` —,
+replies and their count, hashtags, saved) and its WebSocket frames. See
+`docs/protocol/momentum.md` → *Protected accounts*.
+
 **What was set up before.** Turning protection on also closes what the
 account had already opened to the outside. Everything is revoked or closed,
 not suspended — lifting protection restores the capabilities, not the old

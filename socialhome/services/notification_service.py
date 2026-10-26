@@ -2018,6 +2018,13 @@ class NotificationService(ProtectionGateMixin):
         recipient = await self._users.get_by_user_id(event.parent_author_user_id)
         if recipient is None:
             return  # parent author lives on a peer instance
+        if recipient.child_protection_enabled and (
+            event.received_via == "gfs" or event.hop_count > 1
+        ):
+            # §CP.R (decision 14): a protected account sees moments from its
+            # household and paired households only — a reply from further
+            # away never reaches it, not as a notification naming its author.
+            return
         locale = self._locale(recipient)
         await self._save_notif(
             new_notification(

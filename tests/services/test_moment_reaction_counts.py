@@ -313,12 +313,16 @@ def _payload(rev, **over):
 
 async def test_receiver_keeps_newer_totals_publishes_and_relays(svc):
     counts, repo, out, bus, clock = svc
-    repo.held["m-far"] = _moment("m-far", via="household", author="u-noor")
+    repo.held["m-far"] = replace(
+        _moment("m-far", via="household", author="u-noor"), hop_count=2
+    )
     clock[0] = _ms(1000)
     await counts._on_counted(_event(_payload(_ms(900))))
     assert repo.summaries["m-far"].total == 1
     assert isinstance(bus.events[0], MomentReactionTotalsUpdated)
     assert bus.events[0].received_via == "household"
+    # The held row's hop keeps the hint from a protected account (§CP.R).
+    assert bus.events[0].hop_count == 2
     assert out.relayed[0]["holds_moment"] is True
     await counts._on_counted(_event(_payload(_ms(800))))  # older
     assert repo.summaries["m-far"].rev == _ms(900)

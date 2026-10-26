@@ -1,6 +1,7 @@
-"""A stranger's moment that came through a GFS never reaches a protected
-account's sockets (§CP.R) — not even the ``moment.created`` refresh hint.
-A household moment still reaches everyone."""
+"""A protected account's sockets (§CP.R) only get the ``moment.created``
+refresh hint for a moment from its household or a paired household (owner
+decision 14): never one that came through a GFS, never one relayed from 2–3
+hops away. A paired household's moment still reaches everyone."""
 
 from __future__ import annotations
 
@@ -53,7 +54,7 @@ async def env():
     return bus, socks
 
 
-def _event(received_via):
+def _event(received_via, hop_count=1):
     return MomentCreated(
         moment_id="m1",
         author_user_id="u-stranger",
@@ -66,6 +67,7 @@ def _event(received_via):
         origin_instance_id="inst-x",
         expires_at="2099-01-01T00:00:00+00:00",
         received_via=received_via,
+        hop_count=hop_count,
     )
 
 
@@ -85,3 +87,10 @@ async def test_a_household_moment_frame_reaches_everyone(env):
     bus, socks = env
     await bus.publish(_event(None))
     assert _got(socks) == {"adult", "kid"}
+
+
+@pytest.mark.parametrize("hop_count", [2, 3])
+async def test_a_far_moment_frame_skips_protected_accounts(env, hop_count):
+    bus, socks = env
+    await bus.publish(_event(None, hop_count))
+    assert _got(socks) == {"adult"}

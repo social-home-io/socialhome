@@ -1578,3 +1578,10 @@ async def test_reaction_totals_hint_the_household_but_not_who_blocked_the_author
         )
     )
     assert socks["u-kid"].sent == []  # …a GFS one never does (§CP.R)
+    await bus.publish(
+        MomentReactionTotalsUpdated(
+            moment_id="m-3", author_user_id="u-noor", hop_count=2
+        )
+    )
+    assert socks["u-kid"].sent == []  # …nor one from 2+ hops away (decision 14)
+    assert len(socks["u1"].sent) == 3

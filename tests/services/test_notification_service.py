@@ -22,6 +22,7 @@ from socialhome.domain.events import (
     DmMessageCreated,
     DmMessageDeleted,
     DmMessageUpdated,
+    MomentCreated,
     PostEdited,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceConfigChanged,
@@ -1728,8 +1729,6 @@ async def test_moment_clear_reaction_silent(stack):
 
 
 async def test_moment_reply_notifies_parent_author(stack):
-    from socialhome.domain.events import MomentCreated
-
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     # Top-level moment from anna — does NOT notify anyone.
@@ -1765,6 +1764,41 @@ async def test_moment_reply_notifies_parent_author(stack):
     )
     notifs = await stack.notif_repo.list(a.user_id, limit=10)
     assert any(n.type == "moment_replied" for n in notifs)
+
+
+@pytest.mark.parametrize(
+    ("hop_count", "received_via", "notified"),
+    [(1, None, True), (2, None, False), (3, None, False), (1, "gfs", False)],
+    ids=["paired", "2 hops", "3 hops", "gfs"],
+)
+async def test_a_protected_author_hears_of_replies_from_its_circle_only(
+    stack, hop_count, received_via, notified
+):
+    """§CP.R (decision 14): a protected account sees moments from its
+    household and paired households only — a reply from further away must
+    not reach it as a notification naming a stranger either."""
+    kid = await stack.provision_user("kid")
+    await stack.db.enqueue(
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id=?", (kid.user_id,)
+    )
+    await stack.bus.publish(
+        MomentCreated(
+            moment_id="m-reply",
+            author_user_id="u-remote",
+            content="hey",
+            media_url=None,
+            media_type=None,
+            duration_ms=None,
+            parent_moment_id="m-root",
+            parent_author_user_id=kid.user_id,
+            origin_instance_id="inst-far",
+            expires_at="2099-12-01T00:00:00+00:00",
+            received_via=received_via,
+            hop_count=hop_count,
+        )
+    )
+    notifs = await stack.notif_repo.list(kid.user_id, limit=10)
+    assert any(n.type == "moment_replied" for n in notifs) is notified
 
 
 async def test_user_followed_notifies_recipient(stack):

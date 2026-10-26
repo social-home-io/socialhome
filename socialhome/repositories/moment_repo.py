@@ -51,12 +51,17 @@ from ..domain.moment import (
 from .base import row_to_dict, rows_to_dicts
 from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
 
-#: A protected account (§CP.R) never sees a moment that arrived through a GFS
-#: (``received_via = 'gfs'`` — a stranger's public moment another member of
-#: the household follows). Binds the viewer once.
-_NOT_GFS_FOR_PROTECTED_SQL = """
+#: A protected account (§CP.R) sees moments from its own household and its
+#: directly paired households only — the circle its own ``no_relay`` moments
+#: reach (owner decision 14, 2026-10-25). Never one that arrived through a
+#: GFS (``received_via = 'gfs'`` — a stranger's public moment another member
+#: of the household follows), never one relayed from 2–3 hops away
+#: (``hop_count > 1``; the inbound handler stores a relayed copy at hop ≥ 2
+#: whatever the relay claims). Moments written here are hop 1. Read-time, per
+#: viewer: the row is household-wide. Binds the viewer once.
+_PROTECTED_CIRCLE_SQL = """
     NOT (
-        m.received_via = 'gfs'
+        (m.received_via = 'gfs' OR m.hop_count > 1)
         AND EXISTS (
             SELECT 1 FROM users
              WHERE user_id = ? AND child_protection_enabled = 1
@@ -109,12 +114,13 @@ _FOLLOWS_AUTHOR_SQL = """
 #: inbox hides: no personal block (§Privacy) or guardian block (§CP.F2,
 #: either way) between viewer and author; younger than 24 h, or the viewer
 #: follows the author (then until its ``expires_at``); not expired or deleted;
-#: within the viewer's ``max_hops``; and never a moment that arrived through a
-#: GFS (a stranger's public moment) for a protected account (§CP.R) — the
-#: row is household-wide, so the filter is per viewer. Binds the viewer
+#: within the viewer's ``max_hops``; and, for a protected account (§CP.R),
+#: only a moment from its household or a paired one
+#: (:data:`_PROTECTED_CIRCLE_SQL`) — the row is household-wide, so the
+#: filter is per viewer. Binds the viewer
 #: :data:`_VISIBLE_VIEWER_BINDS` times, then the hop cap.
 _VISIBLE_SQL = f"""
-    {_NOT_GFS_FOR_PROTECTED_SQL}
+    {_PROTECTED_CIRCLE_SQL}
     AND m.author_user_id NOT IN (
         SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
     )
@@ -134,15 +140,16 @@ _VISIBLE_VIEWER_BINDS = _VISIBLE_SQL.count("?") - 1
 
 #: A moment the viewer saved (decision 6b): readable past the 24 h window
 #: and past its expiry, for them only — still never across a personal or
-#: guardian block (§CP.F2), never a GFS-delivered one for a protected
-#: account (§CP.R), within the viewer's ``max_hops``. Binds the viewer
+#: guardian block (§CP.F2), never one from outside a protected account's
+#: circle (§CP.R — a save made before protection was turned on stays
+#: hidden), within the viewer's ``max_hops``. Binds the viewer
 #: :data:`_SAVED_VIEWER_BINDS` times, then the hop cap.
 _SAVED_READABLE_SQL = f"""
     EXISTS (
         SELECT 1 FROM moment_saves AS s
          WHERE s.moment_id = m.id AND s.user_id = ?
     )
-    AND {_NOT_GFS_FOR_PROTECTED_SQL}
+    AND {_PROTECTED_CIRCLE_SQL}
     AND m.author_user_id NOT IN (
         SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
     )
@@ -203,7 +210,7 @@ _THREAD_READABLE_SQL = f"""
       (m.author_user_id = ? AND m.deleted_at IS NULL
        AND ({_OWN_ARCHIVED_SQL} OR datetime(m.expires_at) > datetime('now')))
       OR (
-        {_NOT_GFS_FOR_PROTECTED_SQL}
+        {_PROTECTED_CIRCLE_SQL}
         AND m.author_user_id NOT IN (
             SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
         )
@@ -600,6 +607,10 @@ class SqliteMomentRepo:
         * The author is NOT on their :table:`user_blocks` row.
         * Their ``moments.max_hops`` preference (read from
           ``users.preferences_json``) is ≥ ``hop_count``.
+        * They are not a protected account (§CP.R), or the moment is from a
+          paired household (``hop_count`` 1) — a protected account sees no
+          moment from further away, so a household of only protected
+          accounts passes a 2–3-hop moment on without storing it.
 
         The preference is parsed inline via SQLite's ``json_extract``
         so we don't have to load every user just to compute the
@@ -618,9 +629,10 @@ class SqliteMomentRepo:
                    json_extract(u.preferences_json, '$.moments.max_hops'),
                    3
                ) >= ?
+               AND (u.child_protection_enabled = 0 OR ? <= 1)
              LIMIT 1
             """,
-            (author_user_id, int(hop_count)),
+            (author_user_id, int(hop_count), int(hop_count)),
         )
         return row is not None
 
@@ -694,8 +706,9 @@ class SqliteMomentRepo:
 
         With ``viewer_user_id``, only the replies that viewer may read —
         :data:`_THREAD_READABLE_SQL`, the inbox rule without its 24-hour
-        window: no personal or guardian block, within ``max_hops``, never a
-        GFS-delivered reply for a protected viewer (§CP.R)."""
+        window: no personal or guardian block, within ``max_hops``, for a
+        protected viewer only a reply from its household or a paired one
+        (§CP.R)."""
         if viewer_user_id is None:
             rows = await self._db.fetchall(
                 "SELECT * FROM moments WHERE parent_moment_id=?"
@@ -1069,7 +1082,7 @@ class SqliteMomentRepo:
             SELECT mh.tag AS tag, COUNT(*) AS n
               FROM moment_hashtags AS mh
               JOIN moments AS m ON m.id = mh.moment_id
-             WHERE {_NOT_GFS_FOR_PROTECTED_SQL}
+             WHERE {_PROTECTED_CIRCLE_SQL}
                AND m.author_user_id NOT IN (
                  SELECT blocked_user_id FROM user_blocks
                   WHERE blocker_user_id = ?
