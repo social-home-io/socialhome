@@ -157,7 +157,7 @@ def _to_reg(row: dict) -> MomentPublicRegistration:
 _FOLLOW_COLS = (
     "follower_user_id, followed_user_id, gfs_id, followed_instance_pk, "
     "followed_username, followed_display_name, created_at, "
-    "followed_bio, followed_picture_digest"
+    "followed_bio, followed_picture_digest, followed_keywrap_pk"
 )
 
 
@@ -202,6 +202,9 @@ class AbstractMomentPublicFollowRepo(Protocol):
         display_name: str,
         bio: str | None,
         picture_digest: str | None,
+    ) -> None: ...
+    async def set_keywrap(
+        self, *, followed_user_id: str, gfs_id: str, keywrap_pk: str
     ) -> None: ...
 
 
@@ -341,6 +344,20 @@ class SqliteMomentPublicFollowRepo:
             (display_name, bio, picture_digest, followed_user_id, gfs_id),
         )
 
+    async def set_keywrap(
+        self, *, followed_user_id: str, gfs_id: str, keywrap_pk: str
+    ) -> None:
+        """Keep the author household's key-wrap key (v_68, hex) on every
+        local follow of them through ``gfs_id`` — what a reaction to their
+        public moments is sealed to. Only rows holding another value are
+        written."""
+        await self._db.enqueue(
+            "UPDATE moment_public_follows SET followed_keywrap_pk=? "
+            "WHERE followed_user_id=? AND gfs_id=? "
+            "AND followed_keywrap_pk IS NOT ?",
+            (keywrap_pk, followed_user_id, gfs_id, keywrap_pk),
+        )
+
 
 def _to_follow(row: dict) -> MomentPublicFollow:
     return MomentPublicFollow(
@@ -353,6 +370,7 @@ def _to_follow(row: dict) -> MomentPublicFollow:
         created_at=row["created_at"],
         followed_bio=row["followed_bio"],
         followed_picture_digest=row["followed_picture_digest"],
+        followed_keywrap_pk=row["followed_keywrap_pk"],
     )
 
 

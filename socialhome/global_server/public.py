@@ -311,16 +311,20 @@ class SlidingWindowCounter:
     allowed hit re-inserts its key, so iteration order IS recency order.
     """
 
-    __slots__ = ("_hits", "_limit", "_max_keys")
+    __slots__ = ("_hits", "_limit", "_max_keys", "_window_s")
 
     def __init__(
         self,
         limit: int,
         *,
         max_keys: int = RATE_LIMIT_MAX_TRACKED_IPS,
+        window_s: float = RATE_LIMIT_WINDOW_SECONDS,
     ) -> None:
         self._limit = limit
         self._max_keys = max_keys
+        #: The sliding window (seconds) — a minute unless a budget is
+        #: counted over longer (the GFS's hourly queued-reaction budget).
+        self._window_s = window_s
         self._hits: dict[str, list[float]] = {}
 
     def allow(
@@ -330,7 +334,7 @@ class SlidingWindowCounter:
         (*limit* overrides the constructor's for this call)."""
         stamp = time.monotonic() if now is None else now
         previous = self._hits.pop(key, ())
-        hits = [t for t in previous if stamp - t < RATE_LIMIT_WINDOW_SECONDS]
+        hits = [t for t in previous if stamp - t < self._window_s]
         if len(hits) >= (self._limit if limit is None else limit):
             self._hits[key] = hits
             return False
@@ -350,7 +354,7 @@ class SlidingWindowCounter:
         if not hits:
             return False
         stamp = time.monotonic() if now is None else now
-        live = sum(1 for t in hits if stamp - t < RATE_LIMIT_WINDOW_SECONDS)
+        live = sum(1 for t in hits if stamp - t < self._window_s)
         return live >= self._limit
 
     def _evict(self) -> None:

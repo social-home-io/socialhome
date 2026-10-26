@@ -85,7 +85,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
-from ..moment_public_seal import MOMENT_FRAME_TYPES
+from ..moment_public_seal import FRAME_MOMENT_REACTION, MOMENT_FRAME_TYPES
 from .public import ClientIpResolver, build_window_limiter
 
 if TYPE_CHECKING:
@@ -228,8 +228,9 @@ QUEUE_KIND_RELAY: str = RELAY_FRAME_TYPE
 #: household no node holds a socket for (``MomentPublicRegistry``). Every
 #: other row is a space item and goes out as ``{"type": "relay", …}``. An
 #: older node drains such a row as ``{"type": "relay", **row}``, in which the
-#: row's own ``type`` wins — the same frame.
-QUEUED_TYPED_FRAME_TYPES: frozenset[str] = MOMENT_FRAME_TYPES
+#: row's own ``type`` wins — the same frame. v_68 adds a follower's sealed
+#: reaction queued for an author's household that was offline.
+QUEUED_TYPED_FRAME_TYPES: frozenset[str] = MOMENT_FRAME_TYPES | {FRAME_MOMENT_REACTION}
 
 
 def queued_relay_push(row: dict) -> dict:

@@ -415,6 +415,139 @@ expiry past 8 days. The author's household then asks again for a week (the
 same blob, the rest of that moment's blobs too) instead of failing the
 publish; only a share link outliving that week loses its picture.
 
+## Reactions through the GFS (v_68)
+
+A reaction to a public moment that came through a GFS stayed in the
+follower's household: the author and the follower are not paired, and
+households met through a GFS never talk directly. Owner decision 9,
+sign-off 1 (2026-10-25): **the reaction goes back through the GFS the moment
+came on, sealed end to end to the author's household.** It is the same
+sealed reaction as the mesh's routed reactions
+([`momentum.md` § Routed reactions](momentum.md#routed-reactions-v_67)) —
+the same `moment-reaction:v1:` household signature, padding and key-wrap
+seal, the same checks at the author — only the transport differs.
+
+* **The author's key-wrap key.** Every sealed create body names the author
+  household's existing static key-wrap key: `author_keywrap_pk` (64 hex) +
+  `author_keywrap_suite` (`"x25519"`, the `kem_suite` vocabulary). Inside the
+  ciphertext the envelope signature covers, so the GFS sees nothing new and
+  can't swap it (~75 bytes per moment). A follower keeps it from a create
+  that verified against the pinned `followed_instance_pk` and opened, on the
+  follow rows of that author through that GFS
+  (`moment_public_follows.followed_keywrap_pk`, migration `0126`); an
+  unknown suite or a malformed key is ignored — never read under a default —
+  and that author's moments keep their reactions at home.
+* **Follower household.** A reaction (or its removal) to a public moment
+  that came through a GFS (`received_via = 'gfs'`) is coalesced per
+  (moment, person) for 3 s, signed, padded to 1 KB and sealed to that key,
+  then posted — only to the GFS the moment came on
+  (`received_via_gfs_id`), only when that GFS's signed `/gfs/info` proves
+  `moment_reactions`, and only when the author's household named its key —
+  as `POST /gfs/moments/users/{author}/react` with exactly `{instance_id,
+  sealed}`, signed by the household. A paired origin still takes the direct
+  `MOMENT_REACTED` path under the per-pair hide list. A post that fails for
+  a reason a later try can fix (transport error, 404 from an older node
+  mid-upgrade, 408, 429 with its `Retry-After`, 5xx) is retried with backoff
+  (1 min, 5 min, 15 min, then hourly) for up to 24 h — in memory (no outbox:
+  it is keyed by a paired household), ≤ 1 000 queued, ≤ 500 per GFS, the
+  latest state per (moment, person) replacing the pending one, the same
+  signed bytes each time. 403 / 422 are final. Otherwise the reaction stays
+  in the household and the API says `reactions_reach: "household"`.
+* **GFS.** Takes it only from a household that follows the author there
+  (any of its users; never the author's own household — else `403
+  not_following`), only in that exact shape (anything next to the seal —
+  a moment id, an emoji, a user — is `422 invalid_reaction`: the GFS must
+  have nothing to read), body ≤ 4 KB, `sealed.ciphertext` ≤ 3 000 chars.
+  It can't open the seal. Limits, cluster-wide (each node its
+  `node_share`): ≤ 30 a minute per (follower household, author), ≤ 120 a
+  minute per follower household (`429 rate_limited`, `Retry-After: 60`); a
+  retried post of the same seal within 10 minutes is answered `202`, not
+  pushed again and not charged. It pushes `moment_reaction {from_instance,
+  sealed}` to the **author's household only** — `from_instance` is the
+  household it authenticated, which it already knows — on this node, or
+  forwarded once to the node holding that socket (cluster `instance`
+  audience), or queued 24 h in that household's relay queue when no node
+  holds it (≤ 120 queued reactions an hour per author household, so they
+  can't crowd its public moments and space items out of the 250-row queue;
+  past it a reaction for an offline author is dropped). `202` either way:
+  whether the author is online is not told back.
+* **Author household.** Hands the seal to the routed-reaction origin
+  checks: it opens with this household's key-wrap key, the reactor's
+  household key derives to its instance id (and equals the pinned key when
+  paired), the user id derives from that key and its anchor, the signature
+  verifies under a known suite, the moment is live and authored here, the
+  reactor is neither local, blocked by the author, behind a guardian block
+  nor on a banned household, the reaction is under 25 h old and not a
+  replay, and it is newer than the stored reaction and removal watermark
+  (`moment_reaction_removals`). Plus, for a GFS frame: `from_instance` is
+  the reactor's own household (a follower can't pass off another
+  household's reaction), and the moment is public (only a public moment
+  ever crossed a GFS). ≤ 600 frames a minute per GFS connection before any
+  crypto; the reactor household's ≤ 60 a minute is charged only after every
+  other check passed (#1178 F2). Nothing goes back.
+
+### Sequence: a follower reacts to a public moment
+
+```mermaid
+sequenceDiagram
+  participant F as Follower SH
+  participant G as GFS (the one the moment came on)
+  participant N as Other GFS node
+  participant A as Author SH
+
+  A->>G: POST /gfs/moments/publish (sealed body names author_keywrap_pk)
+  G->>F: WS incoming_public_moment
+  F->>F: verify (pinned key) · open · keep followed_keywrap_pk
+  Note over F: a person reacts (or removes it) — 3 s debounce
+  F->>F: sign moment-reaction:v1 · pad to 1 KB · seal to author_keywrap_pk
+  F->>G: POST /gfs/moments/users/{author}/react {instance_id, sealed} (signed)
+  G->>G: F follows the author here? not A itself? shape? not a retry? limits?
+  G-->>F: 202 (online or not is not said)
+  alt A's socket is on this node
+    G->>A: WS moment_reaction {from_instance: F, sealed}
+  else on another node
+    G->>N: NODE_DRAIN_HINT (instance audience, A)
+    N->>A: WS moment_reaction {from_instance: F, sealed}
+  else no node holds it
+    G->>G: queue 24 h (≤ 120 an hour per author household)
+    Note over A: reconnects
+    G->>A: WS moment_reaction (drained)
+  end
+  A->>A: open · verify · F is the reactor's household · public · live · not blocked / banned · not a replay · newer
+  A->>A: apply_reaction_at · MomentReactionChanged
+```
+
+### Bounds and cost
+
+* **Per reaction:** one post of ~1.7 KB (the ~1.4 K-char padded seal, the
+  household id and its signature) and one push of ~1.6 KB, to one
+  household. No fan-out.
+* **Worst realistic case:** a popular author's moment gets 200 reactions
+  from 200 follower households — 200 × (~1.7 KB up + ~1.6 KB push) ≈
+  0.65 MB through the GFS, 0.32 MB into the author's household; a burst of
+  changes by one person within 3 s is one post.
+* **Per create:** +~75 bytes inside each public moment's ciphertext.
+* **Hostile:** one follower household is held to 120 posts a minute
+  (30 per author), the queue to 120 an hour per author household, the
+  author's household to 600 opened a minute per GFS.
+
+**Older households and servers.** Gated on the GFS's signed capability and
+on the key's presence, never on a peer version (author and follower are not
+paired). An older author names no key — reactions to its moments stay home.
+An older GFS proves no `moment_reactions` — nothing is posted to it. An
+older follower ignores the new body fields. An older author never gets the
+frame (it named no key). An older node of a cluster that gets the forwarded
+item refuses the unknown frame type (reports nothing held), so the origin
+node queues it.
+
+**Residual (signed off 2026-10-25, see
+[`principles.md`](../principles.md#sign-off-a-gfs-learns-that-a-follower-household-reacted-to-an-author-v_68)).**
+The GFS learns that follower household F sent author A's household a
+reaction or a removal, and when and how often — never which person, which
+emoji, which moment, or whether it was an add or a removal (the seal is
+padded to one size). It could withhold or delay one, as it can any moment;
+it can't forge, alter or replay one past the author's checks.
+
 ## Event types
 
 | Event type (federation) | Direction | Purpose |
@@ -435,6 +568,7 @@ verifies the author's signature directly.
 | `moment_delete_certs` | GFS → follower SH (v_66) | `{certs: [≤ 50 delete certificates]}` on reconnect — only of authors that household follows, what it is owed past its per-author delivery cursor, ≤ 200 a push (≤ 100 of one author), a push a minute until drained. See [Late deletes](#late-deletes-delete-certificates-v_66). An older household ignores the frame. |
 | `follow_changed` | GFS → author SH | A follower came or went. `action: "add"` (v_62) carries `follower: {instance_id, identity_public_key, keywrap_public_key, kem_suite, keywrap_sig, moment_suites}`; `action: "remove"` carries `follower_instance_id` and `household_still_follows`. |
 | `moment_key_request` | GFS → author SH (v_62) | A follower household lacks the key for `want_gen` and the mailbox had none: `{followed_user_id, want_gen, follower_user_ids, follower}`. Only for a household that follows; ≤ 2 a minute per (household, author). |
+| `moment_reaction` | GFS → author SH (v_68) | `{from_instance, sealed}` — a follower household's sealed reaction (or removal) to one of the author's public moments; `from_instance` is the household the GFS authenticated. To the author's household only (this node, the node holding its socket, or its 24 h queue). See [Reactions through the GFS](#reactions-through-the-gfs-v_68). An older household ignores the frame. |
 | `moment_key` | GFS → follower SH (v_62) | One sealed key `{author_user_id, instance_id, to, key_gen, key_step, key_suite, sealed: {kem_suite, eph_pk, ciphertext}, signature}`, pushed to the `to` household only — at once, or from the mailbox when it reconnects. |
 
 ## Wire endpoints
@@ -456,6 +590,7 @@ verifies the author's signature directly.
 | POST   | `/gfs/moments/suites` | v_62. Signed by a follower household: `{instance_id, moment_suites: {kem, seal}}` — what it can open, recorded on every follow it holds here (a follow made before it upgraded declared nothing). Sent once per process per server on (re)connect, only when a local user follows someone there. Returns `{updated}`. |
 | POST   | `/gfs/moments/keys` | v_62. Signed by the author's household: `{instance_id, deliveries: [≤ 100 sealed keys]}`. Each is kept (latest per author + household) and pushed to its `to` household only while it follows the author. |
 | POST   | `/gfs/moments/users/{user_id}/key_request` | v_62. Signed by a follower household: `{instance_id, want_gen}`. Always `202`; answered from the mailbox, or forwarded to the author, only for a follower, throttled. |
+| POST   | `/gfs/moments/users/{user_id}/react` | v_68. Signed by a follower household: exactly `{instance_id, sealed}` — a sealed reaction to one of the author's public moments, pushed (`moment_reaction`) to the author's household only. `202` (whether the author was online is not said), `403 not_following` (not a follower household here, or the author's own), `422 invalid_reaction` (any other field, a malformed seal), `413` past 4 KB, `429 rate_limited` (30 / min per household + author, 120 / min per household, cluster-wide). Advertised as the signed `moment_reactions` capability. |
 | POST   | `/gfs/moments/users/{user_id}/follower_stats` | v_62. Signed by the author's household: `{followers, households, households_unable}` — counts only. |
 | GET    | `/gfs/moments/users` | Public JSON directory. |
 | GET    | `/gfs/moments/users/{user_id}` | Public JSON per-user detail. |
@@ -1104,6 +1239,13 @@ the GFS serves immutable, cacheable ciphertext.
   (migration `0119_moment_public_shares.sql`); viewer
   `client/gfs/public_moment.tsx`, `client/gfs/moment_link.ts`,
   `client/gfs/moment_seal.ts` in the pinned viewer bundle.
+* Reactions through the GFS (v_68): follower side
+  `socialhome/services/moment_reaction_gfs.py` (target, post, retry),
+  sealing + author-side checks `socialhome/services/moment_reaction_router.py`
+  (`on_gfs_reaction`), key kept by `moment_public_inbound.py`
+  (`moment_public_follows.followed_keywrap_pk`, migration
+  `0126_moment_public_follow_keywrap.sql`), GFS
+  `MomentPublicRegistry.relay_reaction` + `GfsMomentReactView`.
 * Privacy filter:
   `socialhome/repositories/moment_repo.py:list_public_for`.
 

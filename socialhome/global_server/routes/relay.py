@@ -210,6 +210,12 @@ class GfsInfoView(GfsBaseView):
             # long as its moment lives, up to 30 days (an older server
             # refuses more than 8). A household asks past a week only here.
             "moment_media_30d": True,
+            # v_68 — ``POST /gfs/moments/users/{id}/react`` takes a follower
+            # household's sealed reaction (it can't open it) and pushes a
+            # ``moment_reaction`` frame to the author's household only —
+            # cluster relay, 24 h queue. A follower posts reactions only to
+            # a server that proved this; an older one gets none.
+            "moment_reactions": True,
             # #5b — ``POST /gfs/spaces/{id}/key_request``: a follower that
             # misses a space's content key asks for it, and one that says
             # so (``space_key_pull`` in its hello / subscribe ``accepts``)

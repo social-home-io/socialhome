@@ -1036,7 +1036,23 @@ from __future__ import annotations
 #:   (``peer_supports``); otherwise the reaction stays in its household, as
 #:   before. Older households ignore the new create fields. Labelled
 #:   "Reactions reach authors further away".
-OURS: int = 67
+#: * **v_68** (2026-10-26) — **reactions reach authors you follow through a
+#:   GFS** (decision 9, sign-off 1). A public moment's sealed body carries
+#:   the author household's key-wrap key (``author_keywrap_pk`` +
+#:   ``author_keywrap_suite``, under the envelope signature); a follower
+#:   household seals a reaction to it — the same ``moment-reaction:v1:``
+#:   sealed reaction as v_67 — and posts ``{instance_id, sealed}`` to
+#:   ``POST /gfs/moments/users/{author}/react`` on the GFS the moment came
+#:   through, only when that GFS proves the signed ``moment_reactions``
+#:   capability. The GFS checks the follow, rate-limits and pushes a
+#:   ``moment_reaction`` frame to the author's household only (cluster
+#:   relay, 24 h queue). **Fallback**: an older author ships no key and an
+#:   older GFS proves no capability — the reaction stays in its household,
+#:   as before; older followers ignore the new body fields and older
+#:   authors never get the frame (they ship no key). Nothing is
+#:   ``peer_supports``-gated (author and follower are not paired).
+#:   Labelled "Reactions reach authors you follow through a GFS".
+OURS: int = 68
 
 
 class FederationCapability:
@@ -1571,6 +1587,14 @@ class FederationCapability:
     #: return token and passes the reaction one hop back).
     MIN_FOR_ROUTED_MOMENT_REACTIONS = 67
 
+    #: v_68 — reactions reach authors followed through a GFS: a public
+    #: moment's sealed body carries the author household's key-wrap key and
+    #: a follower posts its sealed reaction to the GFS the moment came
+    #: through. Gated on the GFS's signed ``moment_reactions`` capability and
+    #: the key's presence, never on ``peer_supports`` (no pairing); this
+    #: constant names the version.
+    MIN_FOR_GFS_MOMENT_REACTIONS = 68
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1824,6 +1848,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ROUTED_MOMENT_REACTIONS,
         "Reactions reach authors further away",
     ),
+    (
+        FederationCapability.MIN_FOR_GFS_MOMENT_REACTIONS,
+        "Reactions reach authors you follow through a GFS",
+    ),
 ]
 
 
@@ -1902,6 +1930,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_LONG_LIVED_MOMENTS: "follower_moment_retention",
     FederationCapability.MIN_FOR_LATE_MOMENT_DELETES: "late_moment_deletes",
     FederationCapability.MIN_FOR_ROUTED_MOMENT_REACTIONS: "routed_moment_reactions",
+    FederationCapability.MIN_FOR_GFS_MOMENT_REACTIONS: "gfs_moment_reactions",
 }
 
 

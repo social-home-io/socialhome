@@ -275,6 +275,18 @@ class MomentReactionRoute:
     token_suite: str
 
 
+@dataclass(slots=True, frozen=True)
+class MomentGfsReactionTarget:
+    """How a reaction to a public moment that came through a GFS gets to its
+    author's household (v_68): posted to ``gfs_id`` — the GFS the moment
+    arrived on, which proved ``moment_reactions`` — sealed to ``keywrap_pk``,
+    the author household's static X25519 key-wrap key (hex) from its signed
+    envelope."""
+
+    gfs_id: str
+    keywrap_pk: str
+
+
 #: Cap on how many tags survive per moment. Twitter is generous on
 #: tags-in-a-tweet but most quality timelines stay below 5; clamp here
 #: so a tag-spam moment doesn't inflate the trending list.

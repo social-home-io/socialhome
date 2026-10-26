@@ -674,6 +674,16 @@ def test_rate_limit_counter_drops_expired_hits():
     assert counter.allow("a", now=1061.0)
 
 
+def test_rate_limit_counter_takes_a_longer_window():
+    """A budget counted over an hour (the GFS's queued-reaction budget,
+    v_68) keeps its hits for that long."""
+    counter = SlidingWindowCounter(limit=1, window_s=3600.0)
+    assert counter.allow("a", now=1000.0)
+    assert not counter.allow("a", now=1061.0)
+    assert counter.exhausted("a", now=4599.0)
+    assert counter.allow("a", now=4601.0)
+
+
 def test_rate_limit_counter_exhausted_is_a_read_only_peek():
     """``exhausted`` answers "would the next hit be refused?" without
     recording a hit or refreshing the key's recency."""

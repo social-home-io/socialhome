@@ -463,6 +463,14 @@ came. Built only from keys households already hold:
   `derive_user_id(reactor_identity_pk, reactor_anchor) == reactor_user_id`
   and the signature verifies. Relays see only the hop-encrypted
   `{moment_id, origin_instance_id, rt, rt_suite, sealed}`.
+* **Through a GFS (v_68).** The same sealed reaction, to the key-wrap key the
+  author's household names inside each public moment's sealed body
+  (`author_keywrap_pk` + `author_keywrap_suite` — under the envelope
+  signature, so a GFS can't swap it; an unknown suite is ignored, never
+  defaulted), posted as `{instance_id, sealed}` signed with the household's
+  wire signature (`sign_wire`). The GFS sees only that and pushes
+  `{from_instance, sealed}`; the author additionally requires
+  `from_instance == reactor_instance_id`. No new key, KDF or suite.
 
 Every suite is tagged and an unknown one is refused. The PQ path is the
 existing one: `x25519+mlkem768` for the seal, `ed25519+mldsa65` for the

@@ -167,8 +167,10 @@ class GfsWebSocketClient:
 
         Receives ``incoming_public_moment`` and
         ``incoming_public_moment_delete`` frames pushed by the GFS
-        broker, and ``moment_key`` (v_62 — a followed author's sealed
-        moment content key). The handler verifies the envelope's
+        broker, ``moment_key`` (v_62 — a followed author's sealed
+        moment content key), ``moment_delete_certs`` (v_66) and
+        ``moment_reaction`` (v_68 — a follower's sealed reaction to a local
+        author's public moment). The handler verifies the envelope's
         signature, opens it, and persists the moment locally with
         ``received_via='gfs'``.
         """
@@ -448,6 +450,8 @@ class GfsWebSocketClient:
             "incoming_public_moment_delete",
             "moment_key",
             "moment_delete_certs",
+            # v_68 — a follower's sealed reaction to a local author.
+            "moment_reaction",
         ):
             if self._on_moment_public is None:
                 log.debug(

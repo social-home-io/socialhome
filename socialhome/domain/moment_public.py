@@ -167,6 +167,10 @@ class MomentPublicFollow:
     #: every signed envelope. ``None`` when unknown.
     followed_bio: str | None = None
     followed_picture_digest: str | None = None
+    #: v_68 — the author household's static key-wrap key (hex), from its
+    #: signed envelopes: a reaction to their public moments is sealed to it.
+    #: ``None`` until one carried it (an older author household).
+    followed_keywrap_pk: str | None = None
 
     @property
     def public_name(self) -> str | None:

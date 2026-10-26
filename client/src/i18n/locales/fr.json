@@ -1832,6 +1832,7 @@
   "capability.follower_moment_retention": "Choisir combien de temps vos abonnés gardent vos moments",
   "capability.late_moment_deletes": "Les suppressions atteignent chaque copie d’un moment",
   "capability.routed_moment_reactions": "Les réactions atteignent les auteurs plus éloignés",
+  "capability.gfs_moment_reactions": "Les réactions atteignent les auteurs que vous suivez via un GFS",
   "space.settings_page.moderation.queue_meta": "Publications à vérifier, demandes et signalements",
   "space.settings_page.moderation.days": "jours",
   "space.settings_page.danger.summary": "Archiver, transférer ou supprimer",

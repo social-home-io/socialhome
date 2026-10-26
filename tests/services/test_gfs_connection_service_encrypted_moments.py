@@ -72,3 +72,16 @@ async def test_the_delete_log_and_month_long_media_need_their_own_proofs(env):
     svc._forget_listing("g1")
     assert "g1" not in svc._moment_delete_log
     assert "g1" not in svc._moment_media_30d
+
+
+async def test_reactions_need_their_own_proof(env):
+    """v_68: a sealed reaction is posted only to a server that proved
+    ``moment_reactions`` — encrypted moments alone are not enough."""
+    svc = await _svc(env)
+    svc._encrypted_moments["g1"] = True
+    assert await svc.moment_reactions_supported("g1") is False
+    svc._moment_reactions["g1"] = True
+    assert await svc.moment_reactions_supported("g1") is True
+    assert await svc.moment_reactions_supported("nope") is False
+    svc._forget_listing("g1")
+    assert "g1" not in svc._moment_reactions

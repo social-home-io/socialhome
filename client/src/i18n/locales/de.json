@@ -1837,6 +1837,7 @@
   "capability.follower_moment_retention": "Wähle, wie lange Follower deine Momente behalten",
   "capability.late_moment_deletes": "Löschungen erreichen jede Kopie eines Moments",
   "capability.routed_moment_reactions": "Reaktionen erreichen auch weiter entfernte Autoren",
+  "capability.gfs_moment_reactions": "Reaktionen erreichen Autoren, denen du über einen GFS folgst",
   "space.settings_page.moderation.queue_meta": "Beiträge zum Prüfen, Beitrittsanfragen und Meldungen",
   "space.settings_page.moderation.days": "Tagen",
   "space.settings_page.danger.summary": "Archivieren, übergeben oder löschen",

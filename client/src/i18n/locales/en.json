@@ -2141,6 +2141,7 @@
   "capability.follower_moment_retention": "Choose how long followers keep your moments",
   "capability.late_moment_deletes": "Deletes reach every copy of a moment",
   "capability.routed_moment_reactions": "Reactions reach authors further away",
+  "capability.gfs_moment_reactions": "Reactions reach authors you follow through a GFS",
   "space.settings_page.moderation.queue_meta": "Posts to review, join requests and reports",
   "space.settings_page.moderation.days": "days",
   "space.settings_page.danger.summary": "Archive, hand over or delete",

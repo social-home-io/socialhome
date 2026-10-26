@@ -36,6 +36,13 @@ the moment id, author, origin and delete time; no content. The GFS keeps it
 30 days and hands it to a follower household that was offline when the
 delete went out. Only a public moment's delete reaches any GFS.
 
+**The author household's key-wrap key (v_68).** Every sealed create body
+carries ``author_keywrap_pk`` + ``author_keywrap_suite`` — the household's
+existing static key-wrap key (~75 bytes), under the envelope signature — so
+a follower household can seal a reaction to the author's household and post
+it through the GFS (:mod:`.moment_reaction_gfs`). Older followers ignore
+the extra body keys; the GFS sees nothing new.
+
 Runs alongside :class:`MomentFederationOutbound`: the original
 moment also still goes to paired households via the existing relay,
 so a follower that is *both* household-paired and a GFS-follower
@@ -63,9 +70,16 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.moment_public import public_author_bio, public_profile_rev
+from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..infrastructure.event_bus import EventBus
 from ..moment_origin import delete_cert_of, sign_moment_origin
-from ..moment_public_seal import item_key, seal_body, sign_wire
+from ..moment_public_seal import (
+    AUTHOR_KEYWRAP_PK_FIELD,
+    AUTHOR_KEYWRAP_SUITE_FIELD,
+    item_key,
+    seal_body,
+    sign_wire,
+)
 from .gfs_publish_retry import PublishOutcome
 from .moment_delete_cert_retry import DeleteCertRetryQueue, classify_cert_status
 from .protection_gate import ProtectionGateMixin
@@ -104,6 +118,7 @@ class MomentPublicOutbound(ProtectionGateMixin):
         "_gfs_service",
         "_http_client",
         "_keys",
+        "_keywrap_pk",
         "_media",
         "_moments",
         "_own_instance_id",
@@ -143,6 +158,9 @@ class MomentPublicOutbound(ProtectionGateMixin):
         self._http_client = http_client
         self._signing_key: bytes | None = None
         self._own_instance_id: str = ""
+        #: v_68 — this household's static key-wrap key (hex), sealed into
+        #: every create body. ``None`` until attached: creates carry none.
+        self._keywrap_pk: str | None = None
         # Cached set of locally-hosted user_ids, re-read on a miss (a user
         # added since) so we don't fan out for events whose author lives
         # on another instance.
@@ -179,9 +197,17 @@ class MomentPublicOutbound(ProtectionGateMixin):
         if self._http_client is None:
             self._http_client = session
 
-    def attach_identity(self, *, own_instance_id: str, signing_key: bytes) -> None:
+    def attach_identity(
+        self,
+        *,
+        own_instance_id: str,
+        signing_key: bytes,
+        keywrap_public_key: bytes | None = None,
+    ) -> None:
         self._own_instance_id = own_instance_id
         self._signing_key = signing_key
+        if keywrap_public_key is not None:
+            self._keywrap_pk = keywrap_public_key.hex()
 
     def wire(self) -> None:
         self._bus.subscribe(MomentCreated, self._on_created)
@@ -279,6 +305,11 @@ class MomentPublicOutbound(ProtectionGateMixin):
             "created_at": moment.created_at,
             "expires_at": moment.expires_at,
         }
+        if self._keywrap_pk is not None:
+            # v_68: what a follower seals its reaction to (inside the
+            # ciphertext the envelope signature covers — the GFS reads none).
+            body[AUTHOR_KEYWRAP_PK_FIELD] = self._keywrap_pk
+            body[AUTHOR_KEYWRAP_SUITE_FIELD] = KEM_SUITE_X25519
         # One ciphertext per picture the servers mirror — normally exactly
         # one for every GFS. A follower's picture proxy fetches by digest
         # from its own GFS, so a GFS that doesn't mirror the current picture

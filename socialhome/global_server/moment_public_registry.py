@@ -60,11 +60,13 @@ import orjson
 from ..moment_public_seal import (
     FRAME_MOMENT,
     FRAME_MOMENT_DELETE,
+    FRAME_MOMENT_REACTION,
     MOMENT_SEAL_SUITE_AESGCM256,
     RATCHET_STEP_S,
 )
 from .cluster_relay import (
     AUDIENCE_FOLLOWERS,
+    AUDIENCE_INSTANCE,
     typed_frame,
 )
 from .domain import (
@@ -133,6 +135,29 @@ MAX_FOLLOWER_USERS_NAMED: int = 50
 #: next connect — or the follower asks.
 MAX_MAILBOX_PUSH_ON_CONNECT: int = 500
 
+#: v_68 — sealed reactions one follower household may send toward one
+#: author per minute, and in all per minute, across the cluster (each node
+#: allows its :func:`~.public.node_share`). A household coalesces each
+#: person's changes to one moment over 3 s, so 30 is a busy household
+#: reacting to a burst of one author's moments; 120 several such authors.
+REACTIONS_PER_AUTHOR_PER_MINUTE: int = 30
+REACTIONS_PER_HOUSEHOLD_PER_MINUTE: int = 120
+
+#: v_68 — sealed reactions queued (24 h) for one author household that no
+#: node holds a socket for, per hour, across the cluster. They share the
+#: household's relay queue (250 rows, its oldest evicted) with its public
+#: moments and space items, so reactions must not crowd those out; past it
+#: a reaction for an offline author is dropped (the follower is still told
+#: ``202``: whether the author is online is not said).
+QUEUED_REACTIONS_PER_AUTHOR_HOUSEHOLD_PER_HOUR: int = 120
+
+#: v_68 — how long a node remembers a relayed sealed reaction (by digest),
+#: and how many: a follower's retry of a post whose answer it lost is not
+#: pushed twice and spends no budget. The author's household refuses a
+#: replay for 25 h on its own.
+REACTION_SEEN_TTL_S: float = 600.0
+REACTION_SEEN_MAX: int = 50_000
+
 
 def envelope_step_current(key_gen: int, key_step: int, now: float) -> bool:
     """Whether *now* falls in the day of the envelope's key step (± the
@@ -175,6 +200,10 @@ class MomentPublicRegistry:
         "_key_requests",
         "_mailbox",
         "_publishes",
+        "_reaction_queue",
+        "_reaction_seen",
+        "_reactions_author",
+        "_reactions_household",
         "_relay",
         "_seen",
         "_tasks",
@@ -220,6 +249,19 @@ class MomentPublicRegistry:
         self._seen = SeenPayloadCache(ttl_s=MOMENT_SEEN_TTL_S, cap=MOMENT_SEEN_MAX)
         self._key_requests = SlidingWindowCounter(KEY_REQUESTS_PER_MINUTE)
         self._publishes = SlidingWindowCounter(MOMENT_PUBLISHES_PER_MINUTE)
+        #: v_68 — sealed reactions: per (follower household, author) and per
+        #: follower household a minute, queued copies per author household
+        #: an hour, and the digests relayed lately.
+        self._reactions_author = SlidingWindowCounter(REACTIONS_PER_AUTHOR_PER_MINUTE)
+        self._reactions_household = SlidingWindowCounter(
+            REACTIONS_PER_HOUSEHOLD_PER_MINUTE
+        )
+        self._reaction_queue = SlidingWindowCounter(
+            QUEUED_REACTIONS_PER_AUTHOR_HOUSEHOLD_PER_HOUR, window_s=3600.0
+        )
+        self._reaction_seen = SeenPayloadCache(
+            ttl_s=REACTION_SEEN_TTL_S, cap=REACTION_SEEN_MAX
+        )
         self._tasks: set[asyncio.Task] = set()
 
     # ── Registration ────────────────────────────────────────────────────
@@ -645,6 +687,98 @@ class MomentPublicRegistry:
                 "follower": follower,
             },
         )
+
+    # ── Reactions (v_68) ────────────────────────────────────────────────
+
+    async def relay_reaction(
+        self,
+        *,
+        follower_instance_id: str,
+        followed_user_id: str,
+        sealed: dict[str, str],
+    ) -> str:
+        """Pass a follower household's sealed reaction to the author's
+        household. ``"accepted"``, ``"not_following"`` or ``"rate_limited"``.
+
+        Only from a household that follows *followed_user_id* here (any of
+        its users), never from the author's own household. The GFS can't
+        open *sealed* (it is sealed to the author household's key-wrap key)
+        and learns only that this follower household sent the author's
+        household a reaction or a removal, and when. Limits, cluster-wide:
+        :data:`REACTIONS_PER_AUTHOR_PER_MINUTE` per (household, author) and
+        :data:`REACTIONS_PER_HOUSEHOLD_PER_MINUTE` per household — charged
+        only for a reaction not relayed already, so a retried post spends
+        nothing. Pushed to the author household's socket here, or on the
+        node holding it, or queued 24 h (bounded) when no node does."""
+        reg = await self._users.get(followed_user_id)
+        if (
+            reg is None
+            or reg.status != "active"
+            or reg.instance_id == follower_instance_id
+            or not await self._follows.follower_user_ids_at(
+                followed_user_id, follower_instance_id, limit=1
+            )
+        ):
+            return "not_following"
+        digest = SeenPayloadCache.digest(sealed)
+        if self._reaction_seen.seen(digest):
+            log.debug("moment_public.reactions: a retried reaction — not re-sent")
+            return "accepted"
+        nodes = self._cluster.live_node_count() if self._cluster is not None else 1
+        if not self._reactions_author.allow(
+            f"{follower_instance_id}|{followed_user_id}",
+            limit=node_share(REACTIONS_PER_AUTHOR_PER_MINUTE, nodes),
+        ) or not self._reactions_household.allow(
+            follower_instance_id,
+            limit=node_share(REACTIONS_PER_HOUSEHOLD_PER_MINUTE, nodes),
+        ):
+            return "rate_limited"
+        self._reaction_seen.record(digest)
+        await self._push_reaction(
+            reg.instance_id,
+            {
+                "type": FRAME_MOMENT_REACTION,
+                # The household this server authenticated — the author
+                # checks it names the reactor's own household.
+                "from_instance": follower_instance_id,
+                "sealed": sealed,
+            },
+            nodes=nodes,
+        )
+        return "accepted"
+
+    async def _push_reaction(
+        self, author_instance_id: str, push: dict, *, nodes: int
+    ) -> None:
+        """Push *push* to the author household's socket here; else forward it
+        once to the other nodes, and queue it (24 h) when none of them holds
+        the socket — within :data:`QUEUED_REACTIONS_PER_AUTHOR_HOUSEHOLD_PER_HOUR`."""
+        if await self._ws_registry.send(author_instance_id, push):
+            return
+        queue_for = (
+            [author_instance_id]
+            if self._reaction_queue.allow(
+                author_instance_id,
+                limit=node_share(QUEUED_REACTIONS_PER_AUTHOR_HOUSEHOLD_PER_HOUR, nodes),
+            )
+            else []
+        )
+        fields = {k: v for k, v in push.items() if k != "type"}
+        if self._fan_out_fwd is not None and self._fan_out_fwd.forward(
+            kind=AUDIENCE_INSTANCE,
+            key=author_instance_id,
+            frame=typed_frame(FRAME_MOMENT_REACTION, fields),
+            queue_for=queue_for,
+        ):
+            return
+        if queue_for and self._relay is not None:
+            await self._relay.queue_relay_many([author_instance_id], push)
+        elif not queue_for:
+            log.info(
+                "moment_public.reactions: %s is offline and over its queued "
+                "reaction budget — a reaction is dropped",
+                author_instance_id,
+            )
 
     # ── Internal ────────────────────────────────────────────────────────
 
