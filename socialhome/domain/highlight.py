@@ -57,6 +57,27 @@ class HighlightAudienceMismatchError(CodedError):
     )
 
 
+class HighlightNotTodayError(CodedError):
+    """Only today's highlight can change who sees it.
+
+    An earlier day's highlight keeps the audience it was posted with: its
+    frames are history, and re-sending a whole archive to newly added
+    households is not what "change for all of today" promises.
+    """
+
+    status = 409
+    code = "HIGHLIGHT_NOT_TODAY"
+    detail = "Only today's highlight can change who sees it."
+
+
+class HighlightAudienceEmptyError(CodedError):
+    """``users`` audience with nobody picked — it would reach no one."""
+
+    status = 422
+    code = "HIGHLIGHT_AUDIENCE_EMPTY"
+    detail = "Pick at least one person."
+
+
 def same_audience(
     kind_a: HighlightAudience,
     ids_a: tuple[str, ...],

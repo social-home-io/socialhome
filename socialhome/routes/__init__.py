@@ -188,6 +188,7 @@ from .highlight_publications import (
     HighlightPublishView,
 )
 from .highlights import (
+    HighlightAudienceView,
     HighlightDetailView,
     HighlightDmReplyView,
     HighlightFrameDetailView,
@@ -1051,6 +1052,7 @@ def setup_routes(app: web.Application) -> None:
         HighlightFrameReactionView,
     )
     app.router.add_view("/api/highlights/{id}/share", HighlightShareView)
+    app.router.add_view("/api/highlights/{id}/audience", HighlightAudienceView)
     app.router.add_view(
         "/api/highlights/frames/{id}/dm-reply",
         HighlightDmReplyView,

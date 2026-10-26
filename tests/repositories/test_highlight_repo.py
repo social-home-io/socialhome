@@ -655,3 +655,32 @@ async def test_reactions_by_reads_one_persons_emoji_per_frame(db, repo):
     }
     assert await repo.reactions_by("u3", [f2.id]) == {f2.id: "😂"}
     assert await repo.reactions_by("u2", []) == {}
+
+
+async def test_set_audience_changes_only_the_audience(db, repo):
+    """Change for all of today: the row's audience moves, nothing else."""
+    await _seed_user(db)
+    created = await repo.find_or_create_today(
+        author_user_id="u1",
+        audience_kind=HighlightAudience.ALL_PAIRED,
+        audience=(),
+        highlight_date="2026-05-05",
+        expires_at=_expires(),
+    )
+    updated = await repo.set_audience(
+        created.id, HighlightAudience.USERS, ("u-anna", "u-lena")
+    )
+    assert updated is not None
+    assert updated.audience_kind is HighlightAudience.USERS
+    assert updated.audience == ("u-anna", "u-lena")
+    stored = await repo.get_highlight(created.id)
+    assert stored == updated
+    assert (stored.highlight_date, stored.expires_at, stored.created_at) == (
+        created.highlight_date,
+        created.expires_at,
+        created.created_at,
+    )
+
+
+async def test_set_audience_of_an_unknown_highlight_is_none(repo):
+    assert await repo.set_audience("nope", HighlightAudience.ALL_PAIRED, ()) is None

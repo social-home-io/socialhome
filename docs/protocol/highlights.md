@@ -64,7 +64,8 @@ joins today's highlight; `audience` ids without an `audience_kind` are
 refused with `422 VALIDATION_ERROR` (they would be ignored). Two first
 frames of the day racing on `UNIQUE(author_user_id, highlight_date)`
 don't fail: the loser reads the winner's row and appends (same audience)
-or gets the 409.
+or gets the 409. To change who sees the day, the author changes it for
+every frame (see [Changing today's audience](#changing-todays-audience)).
 
 The composers show today's audience as fixed once the author has posted
 today, and **every frame names the audience the composer showed** —
@@ -83,6 +84,83 @@ link when the author-only `GET /api/highlights/{id}/publish` reports one,
 and "wherever you shared it" otherwise (whether it was shared to a feed or
 space isn't on the author's highlight row, so the note doesn't claim
 either way).
+
+## Changing today's audience
+
+The audience is set with the day's first frame and is the same for every
+frame (one row per author per day). The composer shows it as locked once
+the author has posted today: "Goes to: <audience> — you chose this at
+08:12. New frames go to the same people." The one way to change it is
+explicit — **Change for all of today…** (owner decision 1):
+`PATCH /api/highlights/{id}/audience` `{audience_kind, audience}`, author
+only, today's highlight only (`409 HIGHLIGHT_NOT_TODAY` otherwise). The
+sheet says what changes for everyone, and that watching can't be undone:
+people who already watched keep what they saw.
+
+`HighlightService.change_audience` updates the row and publishes
+`HighlightAudienceChanged` (old and new audience, the day's frames).
+Locally, members outside the new audience lose it at once — every read
+goes through `_IN_AUDIENCE_SQL` on the row. The outbound compares the
+per-household slices before and after
+(`HighlightFederationOutbound._audience_per_target`) and tells each
+household only what changed for it, with the events every receiver already
+applies:
+
+| Household | Sent | Receiver does (any version since #158) |
+|---|---|---|
+| drops out | `HIGHLIGHT_DELETED` (no audience) | deletes the highlight, its frames, views and reactions (`_on_highlight_deleted`); no later frame is addressed to it |
+| stays, slice changed (kind, or its own picked people) | `HIGHLIGHT_CREATED` re-sent: the row with its new trimmed slice, plus the first frame | upserts the audience (`save_highlight` `ON CONFLICT(id) DO UPDATE`), re-gates its users at read time; the frame upsert is a no-op |
+| new | `HIGHLIGHT_CREATED` (first frame) + `HIGHLIGHT_FRAME_APPENDED` per later frame, in order | stores the day as if it had been there from the start |
+| stays, slice unchanged | nothing | — |
+
+Hidden authors (§Privacy) and guardian blocks (§CP.F2) gate every send as
+for any frame. The per-household trim (#1173) holds for every envelope.
+Only today's frames travel — never an earlier day.
+
+**No protocol version.** These are the existing event types with their
+existing payload shapes. Every receiver since the Highlights pillar (#158)
+deletes on `HIGHLIGHT_DELETED` and upserts the audience on
+`HIGHLIGHT_CREATED`, so an older peer applies a narrowing, a re-gate and a
+widening exactly as a current one. No sync stream carries highlights, so
+`SYNC_RECORD_LINES` is untouched.
+
+**Cost per change** (once per author action, never on a timer): one small
+envelope (~0.3 kB) per dropped or re-gated household, plus ≤ 30 frame
+envelopes per newly added household. Worst realistic case: widening a
+30-frame day from one household to 20 paired households = 19 × 30 = 570
+envelopes (~0.5 kB each, ≈ 0.3 MB) — the cost of posting the day again,
+once. Media isn't re-sent by this flow.
+
+What a change can't reach: someone who reads it through a feed / space
+share (`?via_post=`) or a public link — those follow the share, not the
+audience. The composer's lock card says so when the highlight has a
+public link ("wherever you shared it" otherwise).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Author<br/>(HFS A)
+    participant SA as HighlightService<br/>(A)
+    participant Out as HighlightFederationOutbound<br/>(A)
+    participant B as Bob's HFS<br/>(stays)
+    participant D as Dora's HFS<br/>(drops out)
+    participant E as Emil's HFS<br/>(new)
+
+    U->>SA: PATCH /api/highlights/{id}/audience<br/>{audience_kind, audience}
+    SA->>SA: author? today? set_audience
+    SA->>Out: HighlightAudienceChanged<br/>(old, new, frames)
+    Out->>Out: per-household slices before / after
+    Out->>D: HIGHLIGHT_DELETED
+    Note over D: delete highlight + frames
+    Out->>B: HIGHLIGHT_CREATED (new slice, frame 1)
+    Note over B: upsert audience,<br/>re-gate users at read time
+    Out->>E: HIGHLIGHT_CREATED (frame 1)
+    Out->>E: HIGHLIGHT_FRAME_APPENDED × (n − 1)
+    SA-->>U: 200 {highlight}
+    Note over U,E: later frames go to B and E only
+```
+
+`tests/protocol/test_highlight_audience_change.py`.
 
 ## Retention
 
@@ -200,7 +278,9 @@ A frame whose `media_url` is not a local media reference
   (``HighlightFrameAdded`` / ``HighlightFrameRemoved`` / ``HighlightRemoved``)
   fan ``highlight.frame_added`` / ``highlight.frame_removed`` /
   ``highlight.removed`` WS frames to the whole household so the SPA
-  refetches ``/api/highlights`` (audience-filtered server-side).
+  refetches ``/api/highlights`` (audience-filtered server-side);
+  ``HighlightAudienceChanged`` fans ``highlight.audience_changed`` the
+  same way (it names neither audience).
   Back-channel events (``HighlightFrameViewed`` /
   ``HighlightFrameReactionChanged``) fan ``highlight.frame_viewed`` /
   ``highlight.frame_reaction_changed`` only to the *author's* WS
@@ -224,7 +304,9 @@ A frame whose `media_url` is not a local media reference
   `socialhome/infrastructure/highlight_retention_scheduler.py` (copies the
   `_stop: asyncio.Event` template from `replay_cache_scheduler.py`).
 - Frontend: `client/src/features/highlights/` (4 pages — inbox, viewer,
-  composer, archive), `client/src/components/HighlightShareCard.tsx`, and
+  composer, archive; the composer is the one way to post — every entry
+  point opens `/highlights/new` — with the lock card and the "Change for
+  all of today…" sheet), `client/src/components/HighlightShareCard.tsx`, and
   `client/src/components/HighlightPickerDialog.tsx` for sharing into a feed.
   The viewer's own Share (`viewerSheets.tsx`) asks first when the feed or
   space reaches more people than the highlight's audience

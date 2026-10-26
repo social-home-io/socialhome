@@ -10,14 +10,17 @@ import pytest
 
 from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.events import (
+    HighlightAudienceChanged,
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
     HighlightFrameViewed,
 )
 from socialhome.domain.highlight import (
     HighlightAudience,
+    HighlightAudienceEmptyError,
     HighlightAudienceMismatchError,
     HighlightFrameType,
+    HighlightNotTodayError,
 )
 from socialhome.domain.post import Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
@@ -937,3 +940,141 @@ async def test_concurrent_first_frames_never_fail_with_a_500(db, svc):
     )
     assert all(isinstance(r, tuple) for r in same), same
     assert same[0][0].id == same[1][0].id
+
+
+# ─── Change for all of today (owner decision 1) ─────────────────────────
+
+
+async def _audience_changes(bus) -> list:
+    captured: list[HighlightAudienceChanged] = []
+    bus.subscribe(HighlightAudienceChanged, lambda e: captured.append(e))
+    return captured
+
+
+async def test_the_author_changes_todays_audience_for_every_frame(db, svc):
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, first = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    _, second = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    captured = await _audience_changes(bus)
+
+    changed = await service.change_audience(
+        highlight_id=highlight.id,
+        actor_user_id="u1",
+        audience_kind=HighlightAudience.USERS,
+        audience=("u-anna",),
+    )
+    assert changed.audience_kind is HighlightAudience.USERS
+    assert changed.audience == ("u-anna",)
+    stored = await service._highlights.get_highlight(highlight.id)
+    assert stored.audience == ("u-anna",)
+    [event] = captured
+    assert (event.old_audience_kind, event.old_audience) == ("all_paired", ())
+    assert (event.audience_kind, event.audience) == ("users", ("u-anna",))
+    assert [f.id for f in event.frames] == [first.id, second.id]
+    assert event.highlight_date == highlight.highlight_date
+    assert event.expires_at == highlight.expires_at
+    # Later frames name the new audience and join today's highlight.
+    again, frame = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    assert again.id == highlight.id and frame.sequence == 3
+
+
+async def test_all_paired_drops_picked_ids(db, svc):
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    changed = await service.change_audience(
+        highlight_id=highlight.id,
+        actor_user_id="u1",
+        audience_kind="all_paired",
+        audience=("u-anna",),
+    )
+    assert changed.audience_kind is HighlightAudience.ALL_PAIRED
+    assert changed.audience == ()
+
+
+async def test_the_same_audience_changes_nothing(db, svc):
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.USERS, ("a", "b"))
+    captured = await _audience_changes(bus)
+    same = await service.change_audience(
+        highlight_id=highlight.id,
+        actor_user_id="u1",
+        audience_kind=HighlightAudience.USERS,
+        audience=("b", "a"),
+    )
+    assert same.audience == ("a", "b")
+    assert captured == []
+
+
+async def test_nobody_picked_is_refused(db, svc):
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    captured = await _audience_changes(bus)
+    with pytest.raises(HighlightAudienceEmptyError) as exc:
+        await service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u1",
+            audience_kind=HighlightAudience.USERS,
+            audience=(),
+        )
+    assert exc.value.status == 422
+    assert captured == []
+    # "Your household only" is households with none listed — allowed.
+    own = await service.change_audience(
+        highlight_id=highlight.id,
+        actor_user_id="u1",
+        audience_kind=HighlightAudience.HOUSEHOLDS,
+        audience=(),
+    )
+    assert own.audience_kind is HighlightAudience.HOUSEHOLDS
+
+
+async def test_only_the_author_changes_the_audience(db, svc):
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    await _seed_user(db, "u2", "anna")
+    await _seed_user(db, "u3", "lena")
+    highlight, _ = await _first_frame(service, HighlightAudience.USERS, ("u2",))
+    captured = await _audience_changes(bus)
+    # Anna can read it: she is told no. Lena can't: the unknown-id 404.
+    with pytest.raises(HighlightForbiddenError):
+        await service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u2",
+            audience_kind=HighlightAudience.ALL_PAIRED,
+            audience=(),
+        )
+    with pytest.raises(HighlightNotFoundError):
+        await service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u3",
+            audience_kind=HighlightAudience.ALL_PAIRED,
+            audience=(),
+        )
+    stored = await service._highlights.get_highlight(highlight.id)
+    assert stored.audience == ("u2",)
+    assert captured == []
+
+
+async def test_an_earlier_days_highlight_keeps_its_audience(db, svc):
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
+    await db.enqueue(
+        "UPDATE highlights SET highlight_date=? WHERE id=?", (yesterday, highlight.id)
+    )
+    captured = await _audience_changes(bus)
+    with pytest.raises(HighlightNotTodayError) as exc:
+        await service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u1",
+            audience_kind=HighlightAudience.ALL_PAIRED,
+            audience=(),
+        )
+    assert exc.value.status == 409
+    assert exc.value.code == "HIGHLIGHT_NOT_TODAY"
+    assert captured == []

@@ -1,25 +1,29 @@
 /**
- * HighlightComposerPage — pick media + caption + audience and post one
- * or more frames as a single highlight.
+ * HighlightComposerPage — the one way to post a highlight (Home's "You"
+ * ring, Highlights' "+ New" and every other entry point open
+ * ``/highlights/new``).
  *
- * Match the WhatsApp-Status experience: pick several photos / videos
- * in one shot, write a caption per frame, hit Post. The server's
- * ``POST /api/highlights/frames`` route already creates-or-appends to
- * today's highlight keyed by ``(author_user_id, highlight_date)``, so the
- * submit path just iterates over the staged frames sequentially.
+ * Strip first: the frames you're adding sit at the top (numbered, a
+ * 36 px ✕ each, "Preparing video…" while a video transcodes instead of a
+ * preview that 404s), then the selected frame's preview — capped at
+ * 240×320 on phones — then Earlier / Later (or drag a tile) and the
+ * selected frame's caption.
  *
- * The audience is highlight-level and starts from Settings › Highlights ›
- * Default audience. Once the author has posted today, it is fixed: the
- * picker is replaced by "Today's highlight is for …". Every frame names
- * the audience shown — so a frame landing after UTC midnight starts the
- * new day for the same people, and the server refuses a frame for other
- * people than today's (``todayAudience.ts``). Per-frame ``caption_text`` is supported by
- * the schema today; the legacy ``caption_emoji`` field is no longer
- * surfaced in the UI — the per-frame :class:`EmojiPickButton` splices
- * glyphs straight into the caption text.
+ * The audience is the day's, not the frame's (owner decision 1):
+ *
+ * * **First frame of the day** — "Who can see today's highlight", the
+ *   Settings default preselected; "Choose households or people…" needs
+ *   at least one pick (B21). The retention line reads the author's own
+ *   setting ("Stays 7 days (your setting)"), never a fixed number.
+ * * **Adding to today's** — a lock card: "Goes to: <who>. You chose this
+ *   with today's first frame (08:12). New frames go to the same people."
+ *   plus where else it shows (public link / shares, #1159), and "Change
+ *   for all of today…", which opens :mod:`AudienceChangeSheet`.
+ *
+ * Every frame names the audience shown (``audienceBody``) so a frame
+ * landing after UTC midnight starts the new day for the same people.
  */
-import { useEffect, useRef } from 'preact/hooks'
-import { signal } from '@preact/signals'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { Button } from '@/components/Button'
@@ -29,16 +33,25 @@ import { showToast } from '@/components/Toast'
 import { UploadProgressBar, uploadWithProgress } from '@/components/UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
 import { currentUser } from '@/store/auth'
-import type { HighlightAudienceKind, OwnHighlight } from '@/types'
+import { failedMedia, mediaFilename, readyMedia } from '@/store/mediaReady'
+import type { OwnHighlight } from '@/types'
 import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
+import { AudienceChangeSheet } from './AudienceChangeSheet'
+import { AudiencePicker } from './AudiencePicker'
 import {
   audienceBody,
   audienceFromFriends,
-  defaultAudience,
-  defaultAudienceKind,
+  audienceOfChoice,
+  choiceIsComplete,
+  defaultChoice,
+  describeAudience,
+  directoryFromFriends,
   loadMyToday,
-  todayFixedNote,
+  lockShareNote,
+  retentionDays,
+  type AudienceChoice,
+  type AudienceDirectory,
   type ConnectedPerson,
   type FriendsPayload,
   type RemoteHousehold,
@@ -47,191 +60,182 @@ import {
 // Re-exported for callers / tests that read it from the composer.
 export { audienceFromFriends }
 
-/** A media file the user has uploaded but not yet posted. Each entry
- *  becomes one frame on submit. */
+/** A media file uploaded but not yet posted — one frame on submit. */
 interface StagedFrame {
-  /** Local-only id for the keyed render + ref map. */
-  id:       string
-  /** Canonical ``/api/media/{filename}`` URL that lands in the post. */
-  url:      string
-  /** Short-lived signed URL for the local ``<img>`` / ``<video>`` preview. */
-  preview:  string
-  type:     'image' | 'video'
-  /** Original filename — used for the remove × aria-label. */
-  name:     string
-  /** Per-frame caption (140 chars max). */
-  caption:  string
+  /** Local-only id for the keyed render. */
+  id: string
+  /** Canonical ``api/media/{filename}`` URL that lands in the frame. */
+  url: string
+  /** Short-lived signed URL for the local preview. */
+  preview: string
+  type: 'image' | 'video'
+  /** Original filename — the ✕'s aria-label. */
+  name: string
+  caption: string
+  /** A video still transcoding when it was uploaded. */
+  processing: boolean
 }
 
 const CAPTION_MAX = 140
-/** Server-enforced cap (``MAX_FRAMES_PER_HIGHLIGHT`` in
- *  ``socialhome/services/highlight_service.py``). Surfaced here so a
- *  multi-pick can refuse the overflow before the upload starts. */
+/** Server cap (``MAX_FRAMES_PER_HIGHLIGHT``) — a multi-pick refuses the
+ *  overflow before uploading. */
 const MAX_FRAMES_PER_HIGHLIGHT = 30
+const EMPTY_DIRECTORY: AudienceDirectory = { ownName: '', housemates: [], households: [] }
 
-const stagedFrames = signal<StagedFrame[]>([])
-/** Frames already posted on today's highlight by the current user — read
- *  once on mount so the picker can refuse over the daily cap. */
-const mineToday = signal<number>(0)
-/** Today's highlight when the author already posted today — its
- *  audience is fixed for every further frame. */
-const today = signal<OwnHighlight | null>(null)
-/** Today's highlight has a public link — its note says so. */
-const todayPublished = signal<boolean>(false)
-const audienceKind = signal<HighlightAudienceKind>('all_paired')
-const audienceIds = signal<string[]>([])
-const submitting = signal<boolean>(false)
-const advanced = signal<boolean>(false)
-const households = signal<RemoteHousehold[]>([])
-const people = signal<ConnectedPerson[]>([])
-/** Why the household / people lists couldn't load — shown in the picker
- *  with a Retry so an outage doesn't read as "no connections". */
-const audienceError = signal<string | null>(null)
-
-async function loadAudience(): Promise<void> {
-  try {
-    const payload = await api.get('/api/friends') as FriendsPayload
-    const out = audienceFromFriends(payload, currentUser.value?.user_id)
-    households.value = out.households
-    people.value = out.people
-    audienceError.value = null
-    // A default from Settings may name a household / person no longer
-    // paired: drop it, so a frame only ever goes to someone offered here.
-    const offered = new Set(audienceKind.value === 'households'
-      ? out.households.map(h => h.instance_id)
-      : out.people.map(p => p.user_id))
-    if (audienceKind.value !== 'all_paired') {
-      audienceIds.value = audienceIds.value.filter(id => offered.has(id))
-    }
-  } catch (err: unknown) {
-    households.value = []
-    people.value = []
-    audienceError.value = (err as Error)?.message ?? String(err)
-  }
+/** Is this staged video still being prepared? Reads the ``media.ready`` /
+ *  ``media.failed`` stores, so the tile updates when the worker is done. */
+function preparing(f: StagedFrame): boolean {
+  if (!f.processing) return false
+  const fn = mediaFilename(f.url)
+  return !readyMedia.value.has(fn) && !failedMedia.value.has(fn)
 }
 
-
-function AudienceLoadError() {
-  return (
-    <div role="alert">
-      <p class="sh-muted">
-        {t('highlight.composer.audience_failed', { error: audienceError.value ?? '' })}
-      </p>
-      <Button type="button" variant="secondary" onClick={() => void loadAudience()}>
-        {t('common.retry')}
-      </Button>
-    </div>
-  )
+function timeOf(iso: string | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime())
+    ? ''
+    : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 }
 
 export default function HighlightComposerPage() {
   const loc = useLocation()
-  // Per-frame textarea refs so the emoji picker can splice at the
-  // caret rather than the end. Keyed by the local-only ``StagedFrame.id``.
-  const captionRefs = useRef(new Map<string, HTMLTextAreaElement>())
+  const captionRef = useRef<HTMLTextAreaElement | null>(null)
+  const [frames, setFrames] = useState<StagedFrame[]>([])
+  const [selected, setSelected] = useState<string | null>(null)
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [choice, setChoice] = useState<AudienceChoice>(() => defaultChoice())
+  const [today, setToday] = useState<OwnHighlight | null>(null)
+  const [posted, setPosted] = useState(0)
+  const [published, setPublished] = useState(false)
+  const [households, setHouseholds] = useState<RemoteHousehold[]>([])
+  const [people, setPeople] = useState<ConnectedPerson[]>([])
+  const [directory, setDirectory] = useState<AudienceDirectory>(EMPTY_DIRECTORY)
+  const [ownCount, setOwnCount] = useState(1)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [changing, setChanging] = useState(false)
+  const defaultMode = useRef(defaultChoice().mode)
+
+  const loadAudience = async (): Promise<void> => {
+    try {
+      const payload = await api.get('/api/friends') as FriendsPayload
+      const me = currentUser.value?.user_id
+      const out = audienceFromFriends(payload, me)
+      setHouseholds(out.households)
+      setPeople(out.people)
+      setDirectory(directoryFromFriends(payload, me))
+      setOwnCount(Math.max(1, payload.instance?.members?.length ?? 1))
+      setLoadError(null)
+      // A Settings default may name a household / person no longer
+      // paired: drop it, so a frame only goes to someone offered here.
+      const hh = new Set(out.households.map(h => h.instance_id))
+      const pp = new Set(out.people.map(p => p.user_id))
+      setChoice(c => ({
+        ...c,
+        households: c.households.filter(id => hh.has(id)),
+        users: c.users.filter(id => pp.has(id)),
+      }))
+    } catch (err: unknown) {
+      setHouseholds([])
+      setPeople([])
+      setLoadError((err as Error)?.message ?? String(err))
+    }
+  }
 
   useEffect(() => {
-    // Reset state on mount.
-    stagedFrames.value = []
-    // A new day's highlight starts from the Settings default — the kind
-    // and the households / people picked there.
-    const fresh = defaultAudience()
-    audienceKind.value = fresh.kind
-    audienceIds.value = fresh.ids
-    advanced.value = audienceKind.value === 'users'
-    mineToday.value = 0
-    today.value = null
-    todayPublished.value = false
-    // A successful post routes away with ``submitting`` still set; the
-    // next visit must not open on a spinning, disabled Post button.
-    submitting.value = false
-
-    // Connected households + people for the picker, from one
-    // ``/api/friends`` read. A failure is surfaced in the picker; the
-    // default "all connected households" audience still works.
     void loadAudience()
-
-    // Today's frame count for the cap. Authors can post up to
-    // ``MAX_FRAMES_PER_HIGHLIGHT`` frames per day; the server returns
-    // ``HIGHLIGHT_FRAME_LIMIT`` past that. Surface the number locally so
-    // multi-pick refuses the overflow without an upload round-trip.
-    // The same read tells whether today's highlight exists — and so
-    // whether its audience is already fixed.
+    // Today's highlight, if any: its audience is locked, its frames count
+    // against the daily cap.
     loadMyToday().then(mine => {
-      mineToday.value = mine?.frames ?? 0
-      today.value = mine?.highlight ?? null
-      todayPublished.value = mine?.published ?? false
+      setPosted(mine?.frames ?? 0)
+      setToday(mine?.highlight ?? null)
+      setPublished(mine?.published ?? false)
     }).catch(() => {})
   }, [])
 
-  const framesLeft = (): number => Math.max(
-    0, MAX_FRAMES_PER_HIGHLIGHT - mineToday.value - stagedFrames.value.length,
-  )
-
-  const uploadOne = async (file: File): Promise<StagedFrame | null> => {
-    try {
-      const result = await uploadWithProgress(file)
-      return {
-        id:      crypto.randomUUID(),
-        url:     result.url,
-        preview: result.signed_url,
-        type:    file.type.startsWith('video/') ? 'video' : 'image',
-        name:    file.name,
-        caption: '',
-      }
-    } catch (err: unknown) {
-      showToast(describeUploadError(err, { file }), 'error')
-      return null
-    }
-  }
+  const framesLeft = Math.max(0, MAX_FRAMES_PER_HIGHLIGHT - posted - frames.length)
+  const current = frames.find(f => f.id === selected) ?? frames[0] ?? null
+  const index = current ? frames.indexOf(current) : -1
+  const numberOf = (i: number) => posted + i + 1
 
   const acceptFiles = async (files: File[]): Promise<void> => {
     if (files.length === 0) return
-    const left = framesLeft()
-    if (left <= 0) {
-      showToast(
-        t('highlight.composer.limit_reached', { n: String(MAX_FRAMES_PER_HIGHLIGHT) }),
-        'error',
-      )
+    if (framesLeft <= 0) {
+      showToast(t('highlight.composer.limit_reached', { n: String(MAX_FRAMES_PER_HIGHLIGHT) }), 'error')
       return
     }
-    const accepted = files.slice(0, left)
+    const accepted = files.slice(0, framesLeft)
     if (files.length > accepted.length) {
       showToast(
-        t(isOne(left) ? 'highlight.composer.more_left_one' : 'highlight.composer.more_left', { n: String(left) }),
+        t(isOne(framesLeft) ? 'highlight.composer.more_left_one' : 'highlight.composer.more_left',
+          { n: String(framesLeft) }),
         'info',
       )
     }
-    for (const f of accepted) {
-      const staged = await uploadOne(f)
-      if (staged) {
-        stagedFrames.value = [...stagedFrames.value, staged]
+    for (const file of accepted) {
+      try {
+        const result = await uploadWithProgress(file)
+        const staged: StagedFrame = {
+          id: crypto.randomUUID(),
+          url: result.url,
+          preview: result.signed_url,
+          type: file.type.startsWith('video/') ? 'video' : 'image',
+          name: file.name,
+          caption: '',
+          processing: result.media_status === 'processing',
+        }
+        setFrames(prev => [...prev, staged])
+        setSelected(staged.id)
+      } catch (err: unknown) {
+        showToast(describeUploadError(err, { file }), 'error')
       }
     }
   }
 
+  const onPicked = (e: Event) => {
+    const input = e.target as HTMLInputElement
+    const files = Array.from(input.files ?? [])
+    input.value = ''
+    void acceptFiles(files)
+  }
+
   const removeFrame = (id: string) => {
-    stagedFrames.value = stagedFrames.value.filter(f => f.id !== id)
-    captionRefs.current.delete(id)
+    setFrames(prev => {
+      const i = prev.findIndex(f => f.id === id)
+      const next = prev.filter(f => f.id !== id)
+      if (selected === id || selected === null) {
+        setSelected(next[Math.min(i, next.length - 1)]?.id ?? null)
+      }
+      return next
+    })
   }
 
-  const updateCaption = (id: string, value: string) => {
-    stagedFrames.value = stagedFrames.value.map(f =>
-      f.id === id ? { ...f, caption: value.slice(0, CAPTION_MAX) } : f,
-    )
+  const move = (id: string, to: number) => {
+    setFrames(prev => {
+      const from = prev.findIndex(f => f.id === id)
+      if (from < 0 || to < 0 || to >= prev.length || from === to) return prev
+      const next = [...prev]
+      const [f] = next.splice(from, 1)
+      next.splice(to, 0, f)
+      return next
+    })
+    setSelected(id)
   }
 
-  const spliceEmojiIntoFrame = (frameId: string, emoji: string) => {
-    const ta = captionRefs.current.get(frameId)
-    const idx = stagedFrames.value.findIndex(f => f.id === frameId)
-    if (idx < 0) return
-    const cur = stagedFrames.value[idx].caption
+  const setCaption = (value: string) => {
+    if (!current) return
+    const caption = value.slice(0, CAPTION_MAX)
+    setFrames(prev => prev.map(f => (f.id === current.id ? { ...f, caption } : f)))
+  }
+
+  const insertEmoji = (emoji: string) => {
+    if (!current) return
+    const ta = captionRef.current
+    const cur = current.caption
     const start = ta?.selectionStart ?? cur.length
-    const end   = ta?.selectionEnd   ?? start
-    const next = (cur.slice(0, start) + emoji + cur.slice(end)).slice(0, CAPTION_MAX)
-    stagedFrames.value = stagedFrames.value.map((f, i) =>
-      i === idx ? { ...f, caption: next } : f,
-    )
+    const end = ta?.selectionEnd ?? start
+    setCaption(cur.slice(0, start) + emoji + cur.slice(end))
     if (ta) {
       requestAnimationFrame(() => {
         ta.focus()
@@ -241,40 +245,47 @@ export default function HighlightComposerPage() {
     }
   }
 
-  const toggleId = (id: string) => {
-    const set = new Set(audienceIds.value)
-    if (set.has(id)) set.delete(id); else set.add(id)
-    audienceIds.value = Array.from(set)
+  const onStripDrop = (e: DragEvent, target: number | null) => {
+    e.preventDefault()
+    const files = Array.from(e.dataTransfer?.files ?? [])
+    if (files.length > 0) {
+      void acceptFiles(files)
+    } else if (dragId !== null) {
+      move(dragId, target ?? frames.length - 1)
+    }
+    setDragId(null)
   }
+
+  const complete = today !== null || choiceIsComplete(choice)
+  const preparingCount = frames.filter(preparing).length
 
   const submit = async (e: Event) => {
     e.preventDefault()
-    const frames = stagedFrames.value
-    if (frames.length === 0 || submitting.value) return
-    submitting.value = true
+    if (frames.length === 0 || submitting || !complete) return
+    setSubmitting(true)
     let lastHighlightId: string | null = null
     // Exactly the audience shown — today's, or the one picked for a new
     // day — on every frame, so none can fall back to the Settings default.
-    const audience = today.value !== null
-      ? audienceBody(today.value.audience_kind, today.value.audience)
-      : audienceBody(audienceKind.value, audienceIds.value)
+    const picked = audienceOfChoice(choice)
+    const audience = today !== null
+      ? audienceBody(today.audience_kind, today.audience)
+      : audienceBody(picked.kind, picked.ids)
     for (let i = 0; i < frames.length; i++) {
       const f = frames[i]
       try {
         const r = await api.post('/api/highlights/frames', {
-          media_url:    f.url,
-          frame_type:   f.type,
+          media_url: f.url,
+          frame_type: f.type,
           caption_text: f.caption.trim() || null,
           ...audience,
-        }) as { highlight: { id: string }; frame: { id: string } }
+        }) as { highlight: { id: string }, frame: { id: string } }
         lastHighlightId = r.highlight.id
       } catch (err: unknown) {
         showToast(
           t('highlight.composer.frame_failed', { n: String(i + 1), error: String((err as Error)?.message ?? err) }),
           'error',
         )
-        // Stop the loop with already-posted frames intact; the user
-        // can navigate to the partial highlight and decide.
+        // Stop with the frames already posted intact.
         break
       }
     }
@@ -285,203 +296,260 @@ export default function HighlightComposerPage() {
       )
       loc.route(`/highlights/${lastHighlightId}`)
     } else {
-      submitting.value = false
+      setSubmitting(false)
     }
   }
 
-  const left = framesLeft()
-  const canPickMore = left > 0
-  const defaultKind = defaultAudienceKind()
-  const defaultMark = (kind: HighlightAudienceKind) => defaultKind === kind
-    ? <span class="sh-muted"> {t('highlight.composer.is_default')}</span>
-    : null
   const nameOf = (id: string): string | undefined =>
-    people.value.find(p => p.user_id === id)?.display_name
-    ?? households.value.find(h => h.instance_id === id)?.display_name
+    people.find(p => p.user_id === id)?.display_name
+    ?? households.find(h => h.instance_id === id)?.display_name
 
-  return (
-    <form class="sh-form sh-highlight-composer" onSubmit={submit}>
-      <header class="sh-highlights-header">
-        <h2>{t('highlight.composer.title')}</h2>
-        <a href={addBase('/highlights')} class="sh-link sh-tap-link">{t('common.cancel')}</a>
-      </header>
+  const days = retentionDays()
+  const statusLine = frames.length === 0
+    ? t('highlight.composer.status_empty')
+    : [
+      today !== null
+        ? t(isOne(frames.length) ? 'highlight.composer.status_new_one' : 'highlight.composer.status_new', { n: String(frames.length) })
+        : t(isOne(frames.length) ? 'highlight.composer.status_frames_one' : 'highlight.composer.status_frames', { n: String(frames.length) }),
+      preparingCount > 0
+        ? t(isOne(preparingCount) ? 'highlight.composer.status_preparing_one' : 'highlight.composer.status_preparing', { n: String(preparingCount) })
+        : null,
+    ].filter(Boolean).join(' · ')
 
-      <MediaDropzone
+  const addTile = (
+    <label class={`sh-hlc-strip__add${framesLeft <= 0 ? ' sh-hlc-strip__add--off' : ''}`}>
+      <span aria-hidden="true" class="sh-hlc-strip__plus">+</span>
+      <span>{t('highlight.composer.add_tile')}</span>
+      <input
+        type="file"
         multiple
         accept="image/*,video/*"
-        disabled={!canPickMore}
-        hint={t('highlight.composer.drop_hint')}
-        pickLabel={t('highlight.quick.pick_label')}
-        draggingHint={t('highlight.composer.dragging')}
-        onFiles={acceptFiles}
+        class="sr-only"
+        disabled={framesLeft <= 0}
+        aria-label={t('highlight.composer.add_aria')}
+        onChange={onPicked}
       />
-      <UploadProgressBar />
-      <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-        {canPickMore
-          ? t(isOne(left) ? 'highlight.composer.up_to_left_one' : 'highlight.composer.up_to_left', { n: String(left) })
-          : t('highlight.composer.limit_reached', { n: String(MAX_FRAMES_PER_HIGHLIGHT) })}
-      </p>
+    </label>
+  )
 
-      {stagedFrames.value.length > 0 && (
-        <ol class="sh-highlight-frames">
-          {stagedFrames.value.map((f, i) => (
-            <li key={f.id} class="sh-highlight-frame">
-              <div class={`sh-highlight-frame-thumb${f.type === 'video' ? ' sh-highlight-frame-thumb--video' : ''}`}>
-                {f.type === 'image' ? (
-                  <img src={f.preview} alt="" />
-                ) : (
-                  <video src={f.preview} controls muted preload="metadata" />
-                )}
-              </div>
-              <div class="sh-highlight-frame-body">
-                <div class="sh-highlight-frame-meta">
-                  <strong>{t('highlight.composer.frame_of', { n: String(i + 1), total: String(stagedFrames.value.length) })}</strong>
-                  <button
-                    type="button"
-                    class="sh-link sh-highlight-frame-remove"
-                    aria-label={t('composer.remove_image', { name: f.name })}
-                    onClick={() => removeFrame(f.id)}
-                  >✕</button>
-                </div>
-                <div class="sh-highlight-frame-caption-row">
-                  <textarea
-                    ref={(el: HTMLTextAreaElement | null) => {
-                      if (el) captionRefs.current.set(f.id, el)
-                      else captionRefs.current.delete(f.id)
-                    }}
-                    rows={2}
-                    maxLength={CAPTION_MAX}
-                    placeholder={t('highlight.quick.caption_placeholder')}
-                    value={f.caption}
-                    onInput={e => updateCaption(
-                      f.id, (e.target as HTMLTextAreaElement).value,
-                    )}
-                  />
-                  <EmojiPickButton
-                    openKey={`highlight-frame-${f.id}`}
-                    ariaLabel={t('highlight.composer.emoji_aria', { n: String(i + 1) })}
-                    onInsert={(emoji) => spliceEmojiIntoFrame(f.id, emoji)}
-                  />
-                </div>
-              </div>
-            </li>
-          ))}
-        </ol>
-      )}
+  return (
+    <form class="sh-hlc" onSubmit={submit}>
+      <a href={addBase('/highlights')} class="sh-hlc__back sh-tap-link">
+        <span aria-hidden="true">‹</span> {t('nav.highlights')}
+      </a>
+      <h1 class="sh-hlc__title">
+        {today !== null ? t('highlight.composer.title_append') : t('highlight.composer.title_new')}
+      </h1>
 
-      {today.value !== null ? (
-        <fieldset class="sh-highlight-composer-audience">
-          <legend class="sh-muted">{t('highlight.composer.audience')}</legend>
-          <p class="sh-highlight-composer-audience-fixed">
-            {todayFixedNote(today.value, todayPublished.value, nameOf)}
-          </p>
-        </fieldset>
-      ) : (
-        <fieldset class="sh-highlight-composer-audience">
-          <legend class="sh-muted">{t('highlight.composer.audience')}</legend>
-          <label class="sh-highlight-composer-audience-row">
-            <input
-              type="radio"
-              name="audience"
-              checked={audienceKind.value === 'all_paired'}
-              onChange={() => {
-                audienceKind.value = 'all_paired'
-                audienceIds.value = []
-              }}
+      <div class="sh-hlc__body">
+        <div class="sh-hlc__preview">
+          {current === null ? (
+            <MediaDropzone
+              multiple
+              accept="image/*,video/*"
+              disabled={framesLeft <= 0}
+              hint={t('highlight.composer.drop_hint')}
+              pickLabel={t('highlight.quick.pick_label')}
+              draggingHint={t('highlight.composer.dragging')}
+              onFiles={acceptFiles}
             />
-            {t('highlight.composer.audience_all')}
-            {defaultMark('all_paired')}
-          </label>
-          <label class="sh-highlight-composer-audience-row">
-            <input
-              type="radio"
-              name="audience"
-              checked={audienceKind.value === 'households'}
-              onChange={() => {
-                audienceKind.value = 'households'
-                audienceIds.value = []
-              }}
-            />
-            {t('highlight.composer.audience_households')}
-            {defaultMark('households')}
-          </label>
-          {audienceKind.value === 'households' && (
-            <div class="sh-highlight-composer-audience-list">
-              {audienceError.value && <AudienceLoadError />}
-              {!audienceError.value && households.value.length === 0 && (
-                <p class="sh-muted">{t('highlight.composer.no_households')}</p>
+          ) : (
+            <div class="sh-hlc__stage">
+              {current.type === 'image' ? (
+                <img src={current.preview} alt="" />
+              ) : preparing(current) ? (
+                <div class="sh-hlc__preparing" role="status">
+                  {t('highlight.composer.preparing')}
+                </div>
+              ) : (
+                <video src={current.preview} controls muted playsInline preload="metadata" />
               )}
-              {households.value.map(h => (
-                <label key={h.instance_id} class="sh-highlight-composer-audience-row">
-                  <input
-                    type="checkbox"
-                    checked={audienceIds.value.includes(h.instance_id)}
-                    onChange={() => toggleId(h.instance_id)}
-                  />
-                  {h.display_name}
-                </label>
-              ))}
+              {current.caption && (
+                <p class="sh-hlc__stage-caption" dir="auto">{current.caption}</p>
+              )}
             </div>
           )}
-          <button
-            type="button"
-            class="sh-link sh-highlight-composer-advanced-toggle"
-            onClick={() => { advanced.value = !advanced.value }}
+        </div>
+
+        <div class="sh-hlc__side">
+          <div
+            class="sh-hlc-strip"
+            onDragOver={e => e.preventDefault()}
+            onDrop={e => onStripDrop(e, null)}
           >
-            {advanced.value ? t('highlight.composer.hide_people') : t('highlight.composer.show_people')}
-          </button>
-          {advanced.value && (
-            <>
-              <label class="sh-highlight-composer-audience-row">
-                <input
-                  type="radio"
-                  name="audience"
-                  checked={audienceKind.value === 'users'}
-                  onChange={() => {
-                    audienceKind.value = 'users'
-                    audienceIds.value = []
-                  }}
-                />
-                {t('highlight.composer.audience_people')}
-                {defaultMark('users')}
-              </label>
-              {audienceKind.value === 'users' && (
-                <div class="sh-highlight-composer-audience-list">
-                  {audienceError.value && <AudienceLoadError />}
-                  {!audienceError.value && people.value.length === 0 && (
-                    <p class="sh-muted">{t('highlight.composer.no_people')}</p>
+            {posted > 0 && (
+              <div class="sh-hlc-strip__posted">
+                <span aria-hidden="true" class="sh-hlc-strip__stack" />
+                <span>{t('highlight.composer.posted_stack', { n: String(posted) })}</span>
+              </div>
+            )}
+            {frames.map((f, i) => (
+              <div
+                key={f.id}
+                class={`sh-hlc-strip__tile${current?.id === f.id ? ' sh-hlc-strip__tile--on' : ''}`}
+                draggable
+                onDragStart={() => setDragId(f.id)}
+                onDragEnd={() => setDragId(null)}
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => { e.stopPropagation(); onStripDrop(e, i) }}
+              >
+                <button
+                  type="button"
+                  class="sh-hlc-strip__pick"
+                  aria-pressed={current?.id === f.id}
+                  aria-label={t('highlight.composer.select_frame', { n: String(numberOf(i)), name: f.name })}
+                  onClick={() => setSelected(f.id)}
+                >
+                  {f.type === 'image' ? (
+                    <img src={f.preview} alt="" />
+                  ) : preparing(f) ? (
+                    <span class="sh-hlc-strip__preparing">{t('highlight.composer.preparing')}</span>
+                  ) : (
+                    <video src={f.preview} muted preload="metadata" />
                   )}
-                  {people.value.map(p => (
-                    <label key={p.user_id} class="sh-highlight-composer-audience-row">
-                      <input
-                        type="checkbox"
-                        checked={audienceIds.value.includes(p.user_id)}
-                        onChange={() => toggleId(p.user_id)}
-                      />
-                      {p.display_name}
-                      {p.household_name && (
-                        <span class="sh-muted"> · {p.household_name}</span>
-                      )}
-                    </label>
-                  ))}
-                </div>
+                </button>
+                <span class="sh-hlc-strip__num" aria-hidden="true">{numberOf(i)}</span>
+                <button
+                  type="button"
+                  class="sh-hlc-strip__remove"
+                  aria-label={t('composer.remove_image', { name: f.name })}
+                  onClick={() => removeFrame(f.id)}
+                >✕</button>
+              </div>
+            ))}
+            {addTile}
+          </div>
+          <UploadProgressBar />
+
+          {current !== null && (
+            <>
+              <div class="sh-hlc__order">
+                <span class="sh-muted">
+                  {t('highlight.composer.frame_of', { n: String(numberOf(index)), total: String(posted + frames.length) })}
+                </span>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={index <= 0}
+                  aria-label={t('highlight.composer.move_earlier', { n: String(numberOf(index)) })}
+                  onClick={() => move(current.id, index - 1)}
+                >
+                  <span aria-hidden="true">‹</span> {t('highlight.composer.earlier')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={index >= frames.length - 1}
+                  aria-label={t('highlight.composer.move_later', { n: String(numberOf(index)) })}
+                  onClick={() => move(current.id, index + 1)}
+                >
+                  {t('highlight.composer.later')} <span aria-hidden="true">›</span>
+                </Button>
+              </div>
+              {frames.length > 1 && (
+                <p class="sh-muted sh-hlc__hint">{t('highlight.composer.reorder_hint')}</p>
               )}
+
+              <label class="sh-hlc__caption">
+                <span class="sh-hlc__label">
+                  {t('highlight.composer.caption_for', { n: String(numberOf(index)) })}
+                </span>
+                <span class="sh-hlc__caption-row">
+                  <textarea
+                    ref={captionRef}
+                    rows={2}
+                    dir="auto"
+                    maxLength={CAPTION_MAX}
+                    placeholder={t('highlight.quick.caption_placeholder')}
+                    value={current.caption}
+                    onInput={e => setCaption((e.target as HTMLTextAreaElement).value)}
+                  />
+                  <EmojiPickButton
+                    openKey={`highlight-frame-${current.id}`}
+                    ariaLabel={t('highlight.composer.emoji_aria', { n: String(numberOf(index)) })}
+                    onInsert={insertEmoji}
+                  />
+                </span>
+              </label>
             </>
           )}
-        </fieldset>
-      )}
 
-      <div class="sh-form-actions">
+          {today !== null ? (
+            <section class="sh-hlc-lock" aria-labelledby="sh-hlc-lock-title">
+              <span class="sh-hlc-lock__icon" aria-hidden="true">🔒</span>
+              <div class="sh-hlc-lock__text">
+                <p id="sh-hlc-lock-title" class="sh-hlc-lock__who">
+                  {t('highlight.lock.goes_to', { who: describeAudience(today.audience_kind, today.audience, nameOf) })}
+                </p>
+                <p class="sh-muted">
+                  {t('highlight.lock.chose_at', { time: timeOf(today.created_at) })}
+                  {' '}{lockShareNote(published)}
+                </p>
+                <Button type="button" variant="secondary" onClick={() => setChanging(true)}>
+                  {t('highlight.lock.change')}
+                </Button>
+              </div>
+            </section>
+          ) : (
+            <fieldset class="sh-hlc__audience">
+              <legend class="sh-hlc__label">{t('highlight.composer.audience_title')}</legend>
+              <AudiencePicker
+                name="sh-hlc-audience"
+                value={choice}
+                onChange={setChoice}
+                households={households}
+                people={people}
+                ownName={directory.ownName}
+                ownCount={ownCount}
+                loadError={loadError}
+                onRetry={() => void loadAudience()}
+                sub={mode => (mode === defaultMode.current && mode !== 'choose'
+                  ? t('highlight.composer.default_sub')
+                  : undefined)}
+              />
+              <p class="sh-muted sh-hlc__retention">
+                <span aria-hidden="true">🕒 </span>
+                {t(isOne(days) ? 'highlight.composer.retention_one' : 'highlight.composer.retention', { n: String(days) })}
+              </p>
+            </fieldset>
+          )}
+        </div>
+      </div>
+
+      <div class="sh-hlc__bar">
+        <span class="sh-hlc__status" aria-live="polite">{statusLine}</span>
+        <a href={addBase('/highlights')} class="sh-link sh-tap-link sh-hlc__cancel">{t('common.cancel')}</a>
         <Button
           type="submit"
-          loading={submitting.value}
-          disabled={stagedFrames.value.length === 0 || submitting.value}
+          loading={submitting}
+          disabled={frames.length === 0 || submitting || !complete}
         >
-          {stagedFrames.value.length > 1
-            ? t('highlight.composer.post_frames', { n: String(stagedFrames.value.length) })
-            : t('highlight.composer.post')}
+          {today !== null ? t('highlight.composer.add') : t('highlight.composer.share')}
         </Button>
       </div>
+
+      {today !== null && (
+        <AudienceChangeSheet
+          open={changing}
+          highlight={today}
+          frames={posted}
+          households={households}
+          people={people}
+          directory={directory}
+          ownCount={ownCount}
+          loadError={loadError}
+          onRetry={() => void loadAudience()}
+          onClose={() => setChanging(false)}
+          onChanged={h => {
+            setToday(h)
+            setChanging(false)
+            showToast(
+              t('highlight.change.done', { who: describeAudience(h.audience_kind, h.audience, nameOf) }),
+              'success',
+            )
+          }}
+        />
+      )}
     </form>
   )
 }

@@ -45,6 +45,9 @@ export interface UploadResult {
    *  ``<video src>`` for the immediate post-upload preview. */
   signed_url: string
   filename: string
+  /** ``'processing'`` for a video still transcoding: its file doesn't
+   *  exist yet, so a preview would 404 until ``media.ready``. */
+  media_status?: 'processing'
 }
 
 export async function uploadWithProgress(
@@ -87,7 +90,9 @@ export async function uploadWithProgress(
         // moment must carry — the server refuses anything else (422
         // ``INVALID_MEDIA_URL``). A response without one is a failed
         // upload, never a bare filename the create call would refuse.
-        let data: { url?: unknown; signed_url?: unknown; filename?: unknown } | null = null
+        let data: {
+          url?: unknown; signed_url?: unknown; filename?: unknown; media_status?: unknown
+        } | null = null
         try { data = JSON.parse(xhr.responseText) } catch { data = null }
         if (!data || typeof data.url !== 'string' || !data.url) {
           emit('failed', 100)
@@ -103,6 +108,7 @@ export async function uploadWithProgress(
             ? data.signed_url
             : data.url,
           filename: typeof data.filename === 'string' ? data.filename : '',
+          ...(data.media_status === 'processing' ? { media_status: 'processing' as const } : {}),
         })
       } else {
         emit('failed', 100)

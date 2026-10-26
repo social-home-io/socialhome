@@ -12,6 +12,12 @@ Audience routing — Highlights are *not* space-scoped:
 * ``audience_kind = 'users'``      → resolve each ``audience`` user id
   to its home instance via :class:`AbstractUserRepo` and dedup.
 
+:class:`HighlightAudienceChanged` ("Change for all of today") is told with
+the same events: ``HIGHLIGHT_DELETED`` to households that drop out, a
+re-sent ``HIGHLIGHT_CREATED`` to households whose slice changed, and the
+day's frames to newly added households only — see
+:meth:`HighlightFederationOutbound._on_audience_changed`.
+
 Each household's envelope carries only its own slice of the audience
 (its own picked people, itself, or nothing) — never who else the
 highlight was for. See :meth:`HighlightFederationOutbound._audience_per_target`.
@@ -31,6 +37,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
+    HighlightAudienceChanged,
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
     HighlightFrameRemoved,
@@ -38,7 +45,7 @@ from ..domain.events import (
     HighlightRemoved,
 )
 from ..domain.federation import FederationEventType
-from ..domain.highlight import Highlight
+from ..domain.highlight import Highlight, HighlightFrame
 from ..infrastructure.event_bus import EventBus
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
 from .protection_gate import ProtectionGateMixin
@@ -94,6 +101,7 @@ class HighlightFederationOutbound(
         self._bus.subscribe(HighlightFrameAdded, self._on_frame_added)
         self._bus.subscribe(HighlightFrameRemoved, self._on_frame_removed)
         self._bus.subscribe(HighlightRemoved, self._on_highlight_removed)
+        self._bus.subscribe(HighlightAudienceChanged, self._on_audience_changed)
         # Back-channel events flow viewer → author. The echo-loop guard
         # gates on "is the *actor* (viewer / reactor) local?" — same
         # idea as the author-side gate above, just on a different field.
@@ -164,6 +172,109 @@ class HighlightFederationOutbound(
             },
             author_user_id=event.author_user_id,
         )
+
+    async def _on_audience_changed(self, event: HighlightAudienceChanged) -> None:
+        """Change for all of today, told to each household with the events
+        it already understands (no new event type, no protocol version):
+
+        * a household that **drops out** gets ``HIGHLIGHT_DELETED`` — the
+          receiver deletes the highlight and its frames, and no later frame
+          is addressed to it;
+        * a household that **stays** but whose slice changed (the kind, or
+          its own picked people) gets ``HIGHLIGHT_CREATED`` re-sent with its
+          new slice — receivers upsert the audience on it
+          (``save_highlight``) and re-gate their users at read time;
+        * a household that is **new** gets the day: ``HIGHLIGHT_CREATED``
+          with the first frame, then ``HIGHLIGHT_FRAME_APPENDED`` for each
+          later one (≤ ``MAX_FRAMES_PER_HIGHLIGHT``), in order.
+
+        A household whose slice is unchanged gets nothing. Cost per change:
+        one small envelope per dropped or re-gated household, plus ≤ 30
+        frame envelopes per newly added household — once per author action.
+        """
+        if not await self._is_local_author(event.author_user_id):
+            return
+        before = await self._audience_per_target(
+            event.old_audience_kind, event.old_audience
+        )
+        after = await self._audience_per_target(event.audience_kind, event.audience)
+        kind_changed = event.old_audience_kind != event.audience_kind
+        frames = event.frames
+        for instance_id in before.keys() - after.keys():
+            if not await self._may_send(event.author_user_id, instance_id):
+                continue
+            await self.send_to_instance(
+                instance_id,
+                FederationEventType.HIGHLIGHT_DELETED,
+                {
+                    "highlight_id": event.highlight_id,
+                    "author_user_id": event.author_user_id,
+                    "occurred_at": event.occurred_at.isoformat(),
+                },
+            )
+        for instance_id, visible in after.items():
+            is_new = instance_id not in before
+            if (
+                not is_new
+                and not kind_changed
+                and (set(before[instance_id]) == set(visible))
+            ):
+                continue
+            if is_new and not frames:
+                # Nothing to show yet: a later frame's APPENDED carries the
+                # parent fields and the receiver creates it then.
+                continue
+            if not await self._may_send(event.author_user_id, instance_id):
+                continue
+            # New: the whole day. Kept: the row again (with its first frame,
+            # so the envelope is the CREATED every receiver already knows).
+            sending = frames if is_new else frames[:1]
+            if not sending:
+                await self.send_to_instance(
+                    instance_id,
+                    FederationEventType.HIGHLIGHT_CREATED,
+                    self._highlight_payload(event, visible),
+                )
+                continue
+            for n, frame in enumerate(sending):
+                await self.send_to_instance(
+                    instance_id,
+                    FederationEventType.HIGHLIGHT_CREATED
+                    if n == 0
+                    else FederationEventType.HIGHLIGHT_FRAME_APPENDED,
+                    {
+                        **self._highlight_payload(event, visible),
+                        **self._frame_payload(frame),
+                    },
+                )
+
+    @staticmethod
+    def _highlight_payload(
+        event: HighlightAudienceChanged, visible: tuple[str, ...]
+    ) -> dict:
+        """The highlight-row fields of a CREATED / APPENDED body, with the
+        receiving household's own slice of the new audience."""
+        return {
+            "highlight_id": event.highlight_id,
+            "author_user_id": event.author_user_id,
+            "highlight_date": event.highlight_date,
+            "audience_kind": event.audience_kind,
+            "audience": list(visible),
+            "expires_at": event.expires_at,
+            "occurred_at": event.occurred_at.isoformat(),
+        }
+
+    @staticmethod
+    def _frame_payload(frame: HighlightFrame) -> dict:
+        return {
+            "frame_id": frame.id,
+            "sequence": frame.sequence,
+            "frame_type": frame.frame_type.value,
+            "media_url": frame.media_url,
+            "caption_text": frame.caption_text,
+            "caption_emoji": frame.caption_emoji,
+            "duration_ms": frame.duration_ms,
+        }
 
     # ── Back-channel: viewer/reactor → author ────────────────────────────
 
@@ -312,6 +423,13 @@ class HighlightFederationOutbound(
             highlight.author_user_id, instance_id
         )
 
+    async def _may_send(self, author_user_id: str, instance_id: str) -> bool:
+        """The author isn't hidden from *instance_id* (§Privacy) and no
+        guardian block covers someone homed there (§CP.F2)."""
+        if author_user_id in await self.hidden_for_peer(instance_id):
+            return False
+        return not await self._guardian_blocks_household(author_user_id, instance_id)
+
     async def _fan_to_audience(
         self,
         *,
@@ -323,11 +441,7 @@ class HighlightFederationOutbound(
     ) -> None:
         targets = await self._audience_per_target(audience_kind, audience)
         for instance_id, visible in targets.items():
-            hidden = await self.hidden_for_peer(instance_id)
-            if author_user_id in hidden:
-                continue
-            if await self._guardian_blocks_household(author_user_id, instance_id):
-                # §CP.F2: a guardian blocked someone homed there.
+            if not await self._may_send(author_user_id, instance_id):
                 continue
             body = payload
             if "audience" in payload:

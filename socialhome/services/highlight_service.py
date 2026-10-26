@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 import orjson
 
 from ..domain.events import (
+    HighlightAudienceChanged,
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
     HighlightFrameRemoved,
@@ -43,10 +44,12 @@ from ..domain.events import (
 from ..domain.highlight import (
     Highlight,
     HighlightAudience,
+    HighlightAudienceEmptyError,
     HighlightAudienceMismatchError,
     HighlightFrame,
     HighlightFrameReplySnapshot,
     HighlightFrameType,
+    HighlightNotTodayError,
     same_audience,
 )
 from ..domain.post import Post, PostType
@@ -325,6 +328,68 @@ class HighlightService:
             )
         )
         return highlight, frame
+
+    # ── Change for all of today (owner decision 1) ─────────────────────
+
+    async def change_audience(
+        self,
+        *,
+        highlight_id: str,
+        actor_user_id: str,
+        audience_kind: HighlightAudience | str,
+        audience: tuple[str, ...] | list[str],
+    ) -> Highlight:
+        """Point today's highlight — every frame of it — at a new audience.
+
+        Author only, today's highlight only (the UTC day the composer
+        appends to). Publishes :class:`HighlightAudienceChanged` with the
+        audience before and after and the day's frames; the federation
+        outbound turns that into removals for households that drop out and
+        the day's frames for households that are new. Local viewers outside
+        the new audience lose it at read time (``_IN_AUDIENCE_SQL``).
+        People who already watched keep what they saw — nothing can undo a
+        view. The same audience again is a no-op (nothing published).
+        """
+        highlight = await self._require_readable(highlight_id, actor_user_id)
+        if highlight.author_user_id != actor_user_id:
+            raise HighlightForbiddenError(
+                "only the author can change who sees their highlight"
+            )
+        if highlight.highlight_date != datetime.now(UTC).strftime("%Y-%m-%d"):
+            raise HighlightNotTodayError()
+        kind = (
+            audience_kind
+            if isinstance(audience_kind, HighlightAudience)
+            else HighlightAudience(audience_kind)
+        )
+        # Dedup, keep the order picked; all_paired names nobody.
+        ids = (
+            ()
+            if kind is HighlightAudience.ALL_PAIRED
+            else tuple(dict.fromkeys(i for i in audience if i))
+        )
+        if kind is HighlightAudience.USERS and not ids:
+            raise HighlightAudienceEmptyError()
+        if same_audience(highlight.audience_kind, highlight.audience, kind, ids):
+            return highlight
+        updated = await self._highlights.set_audience(highlight.id, kind, ids)
+        if updated is None:  # pragma: no cover — deleted mid-request
+            raise HighlightNotFoundError(NOT_FOUND_MESSAGE)
+        frames = await self._highlights.list_frames(highlight.id)
+        await self._bus.publish(
+            HighlightAudienceChanged(
+                highlight_id=highlight.id,
+                author_user_id=highlight.author_user_id,
+                highlight_date=highlight.highlight_date,
+                expires_at=highlight.expires_at or "",
+                old_audience_kind=highlight.audience_kind.value,
+                old_audience=highlight.audience,
+                audience_kind=kind.value,
+                audience=ids,
+                frames=tuple(frames),
+            )
+        )
+        return updated
 
     # ── View / react ───────────────────────────────────────────────────
 

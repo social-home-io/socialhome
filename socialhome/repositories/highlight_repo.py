@@ -83,6 +83,12 @@ class AbstractHighlightRepo(Protocol):
         duration_ms: int | None = None,
     ) -> HighlightFrame: ...
     async def get_highlight(self, highlight_id: str) -> Highlight | None: ...
+    async def set_audience(
+        self,
+        highlight_id: str,
+        audience_kind: HighlightAudience,
+        audience: builtins.tuple[str, ...],
+    ) -> Highlight | None: ...
     async def get_frame(self, frame_id: str) -> HighlightFrame | None: ...
     async def list_frames(self, highlight_id: str) -> builtins.list[HighlightFrame]: ...
     async def list_visible_to(
@@ -235,6 +241,21 @@ class SqliteHighlightRepo:
             (highlight_id,),
         )
         return _row_to_highlight(row_to_dict(row))
+
+    async def set_audience(
+        self,
+        highlight_id: str,
+        audience_kind: HighlightAudience,
+        audience: tuple[str, ...],
+    ) -> Highlight | None:
+        """Point the whole highlight at a new audience ("Change for all of
+        today"). Only the audience moves; the updated row, or ``None`` for
+        an unknown id."""
+        await self._db.enqueue(
+            "UPDATE highlights SET audience_kind=?, audience_json=? WHERE id=?",
+            (audience_kind.value, dump_json(list(audience)), highlight_id),
+        )
+        return await self.get_highlight(highlight_id)
 
     async def list_visible_to(self, viewer_user_id: str) -> list[Highlight]:
         # The receiver dropped envelopes outside the audience already, so

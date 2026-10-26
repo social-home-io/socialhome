@@ -33,6 +33,7 @@ from socialhome.domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
+    HighlightAudienceChanged,
     HouseholdZonesChanged,
     MomentReactionTotalsUpdated,
     PageConflictEmitted,
@@ -1585,3 +1586,30 @@ async def test_reaction_totals_hint_the_household_but_not_who_blocked_the_author
     )
     assert socks["u-kid"].sent == []  # …nor one from 2+ hops away (decision 14)
     assert len(socks["u1"].sent) == 3
+
+
+async def test_a_highlight_audience_change_tells_the_household_to_refetch(env):
+    """Change for all of today: local viewers refetch ``/api/highlights``
+    (audience-filtered). The frame names neither audience."""
+    _svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u2", sock)
+    await bus.publish(
+        HighlightAudienceChanged(
+            highlight_id="h-1",
+            author_user_id="u1",
+            highlight_date="2026-05-05",
+            expires_at="2026-06-04T00:00:00+00:00",
+            old_audience_kind="all_paired",
+            old_audience=(),
+            audience_kind="users",
+            audience=("u3",),
+            frames=(),
+        )
+    )
+    [frame] = [json.loads(m) for m in sock.sent]
+    assert frame == {
+        "type": "highlight.audience_changed",
+        "highlight_id": "h-1",
+        "author_user_id": "u1",
+    }

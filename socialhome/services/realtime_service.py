@@ -53,6 +53,7 @@ from ..domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
+    HighlightAudienceChanged,
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
     HighlightFrameRemoved,
@@ -449,6 +450,9 @@ class RealtimeService:
         self._bus.subscribe(HighlightFrameAdded, self._on_highlight_frame_added)
         self._bus.subscribe(HighlightFrameRemoved, self._on_highlight_frame_removed)
         self._bus.subscribe(HighlightRemoved, self._on_highlight_removed)
+        self._bus.subscribe(
+            HighlightAudienceChanged, self._on_highlight_audience_changed
+        )
         # Highlight view / reaction back-channel — only the author needs
         # the update so we narrow the broadcast to their WS sessions.
         self._bus.subscribe(HighlightFrameViewed, self._on_highlight_frame_viewed)
@@ -1768,6 +1772,20 @@ class RealtimeService:
         await self._broadcast_household(
             {
                 "type": "highlight.removed",
+                "highlight_id": event.highlight_id,
+                "author_user_id": event.author_user_id,
+            }
+        )
+
+    async def _on_highlight_audience_changed(
+        self, event: HighlightAudienceChanged
+    ) -> None:
+        # Change for all of today: who reads it here may have changed, so
+        # every local session refetches the audience-filtered list. The
+        # frame names neither audience.
+        await self._broadcast_household(
+            {
+                "type": "highlight.audience_changed",
                 "highlight_id": event.highlight_id,
                 "author_user_id": event.author_user_id,
             }

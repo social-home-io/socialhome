@@ -19,10 +19,15 @@ import {
   defaultAudienceKind,
   describeAudience,
   loadMyToday,
-  todayFixedNote,
+  lockShareNote,
   todayKey,
+  choiceFromAudience,
+  audienceOfChoice,
+  choiceIsComplete,
+  defaultChoice,
+  audienceChange,
+  type AudienceDirectory,
 } from './todayAudience'
-import type { OwnHighlight } from '@/types'
 
 describe('todayAudience', () => {
   beforeEach(() => {
@@ -57,6 +62,7 @@ describe('todayAudience', () => {
     const names: Record<string, string> = { a: 'Anna', b: 'Bob' }
     expect(describeAudience('all_paired', [])).toBe('all your paired households')
     expect(describeAudience('users', [])).toBe('only you')
+    expect(describeAudience('households', [])).toBe('your household only')
     expect(describeAudience('users', ['a', 'b'], id => names[id])).toBe('Anna, Bob')
     expect(describeAudience('users', ['a', 'x'], id => names[id])).toBe('2 people')
     expect(describeAudience('users', ['a'])).toBe('1 person')
@@ -94,8 +100,84 @@ describe('todayAudience', () => {
       return [{ highlight: h, frames: [{}] }]
     })
     expect((await loadMyToday())?.published).toBe(false)
-    const hl = h as unknown as OwnHighlight
-    expect(todayFixedNote(hl, true)).toContain('has a public link')
-    expect(todayFixedNote(hl, false)).toContain('wherever you shared it')
+    expect(lockShareNote(true)).toContain('public link')
+    expect(lockShareNote(false)).toContain('wherever you shared it')
+  })
+})
+
+describe('audience choice', () => {
+  beforeEach(() => { user.value = { user_id: 'u-me' } })
+
+  it('maps an audience to the three options and back', () => {
+    expect(choiceFromAudience('all_paired', [])).toMatchObject({ mode: 'all' })
+    expect(choiceFromAudience('households', [])).toMatchObject({ mode: 'household' })
+    expect(choiceFromAudience('households', ['h1'])).toMatchObject({
+      mode: 'choose', chooseKind: 'households', households: ['h1'],
+    })
+    expect(choiceFromAudience('users', ['u1'])).toMatchObject({
+      mode: 'choose', chooseKind: 'users', users: ['u1'],
+    })
+    for (const [kind, ids] of [
+      ['all_paired', []], ['households', []], ['households', ['h1']], ['users', ['u1', 'u2']],
+    ] as const) {
+      expect(audienceOfChoice(choiceFromAudience(kind, [...ids]))).toEqual({ kind, ids: [...ids] })
+    }
+  })
+
+  it('choosing needs at least one pick (B21)', () => {
+    expect(choiceIsComplete(choiceFromAudience('all_paired', []))).toBe(true)
+    expect(choiceIsComplete(choiceFromAudience('households', []))).toBe(true)
+    const none = { ...choiceFromAudience('households', ['h1']), households: [] }
+    expect(choiceIsComplete(none)).toBe(false)
+    expect(choiceIsComplete({ ...none, chooseKind: 'users', users: ['u1'] })).toBe(true)
+  })
+
+  it('a new day starts from Settings; "chosen, nobody picked" asks', () => {
+    expect(defaultChoice()).toMatchObject({ mode: 'all' })
+    user.value = { preferences_json: '{"highlights":{"default_audience":{"kind":"users","ids":["u1"]}}}' }
+    expect(defaultChoice()).toMatchObject({ mode: 'choose', chooseKind: 'users', users: ['u1'] })
+    user.value = { preferences_json: '{"highlights":{"default_audience":{"kind":"households"}}}' }
+    const ask = defaultChoice()
+    expect(ask).toMatchObject({ mode: 'choose', chooseKind: 'households', households: [] })
+    expect(choiceIsComplete(ask)).toBe(false)
+  })
+})
+
+describe('audienceChange — what changes for everyone', () => {
+  const dir: AudienceDirectory = {
+    ownName: 'Berger',
+    housemates: [{ user_id: 'u-anna', display_name: 'Anna' }],
+    households: [
+      {
+        instance_id: 'h-smith', display_name: 'The Smiths',
+        members: [{ user_id: 'u-bob', display_name: 'Bob' }, { user_id: 'u-bea', display_name: 'Bea' }],
+      },
+      { instance_id: 'h-dora', display_name: 'Dora’s', members: [{ user_id: 'u-dora', display_name: 'Dora' }] },
+      { instance_id: 'h-empty', display_name: 'Quiet house', members: [] },
+    ],
+  }
+
+  it('narrowing to your household: every paired household loses it', () => {
+    const out = audienceChange('all_paired', [], 'households', [], dir)
+    expect(out.gains).toEqual([])
+    expect(out.losses).toEqual(['The Smiths', 'Dora’s', 'Quiet house'])
+  })
+
+  it('widening from one household: the others gain it', () => {
+    const out = audienceChange('households', ['h-smith'], 'all_paired', [], dir)
+    expect(out.gains).toEqual(['Dora’s', 'Quiet house'])
+    expect(out.losses).toEqual([])
+  })
+
+  it('people: names whole households when everyone there changes, else people', () => {
+    const out = audienceChange('users', ['u-bob', 'u-bea', 'u-anna'], 'users', ['u-bea', 'u-dora'], dir)
+    expect(out.gains).toEqual(['Dora’s'])
+    expect(out.losses).toEqual(['Anna', 'Bob'])
+    const whole = audienceChange('users', ['u-anna'], 'users', ['u-anna', 'u-bob', 'u-bea'], dir)
+    expect(whole.gains).toEqual(['The Smiths'])
+  })
+
+  it('the same people again changes nothing', () => {
+    expect(audienceChange('users', ['u-bob'], 'users', ['u-bob'], dir)).toEqual({ gains: [], losses: [] })
   })
 })
