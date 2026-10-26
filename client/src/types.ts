@@ -291,6 +291,12 @@ export interface Moment {
   /** When the caller saved it — set on ``?scope=saved`` items only; the
    *  Saved list pages on it. */
   saved_at?:          string
+  /** How far away it was written: 1 = this household or a paired one,
+   *  2–3 = relayed that many hops. */
+  hop_count?:         number
+  /** ``GET /api/moments?top_level=1`` only: the newest reply the caller
+   *  may read (no counts on it), or ``null``. */
+  latest_reply?:      Moment | null
 }
 
 /** Author-side public-Momentum registration row. */

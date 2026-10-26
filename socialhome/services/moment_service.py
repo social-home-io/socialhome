@@ -427,7 +427,10 @@ class MomentService:
         before: str | None = None,
         limit: int = 50,
         tag: str | None = None,
+        top_level: bool = False,
     ) -> list[Moment]:
+        """The moments *viewer_user_id* sees, newest first; ``top_level``
+        leaves replies out (each thread once, under its root — B13)."""
         # Per-user max-hops visibility (§Momentum-relay-policy):
         # parse the viewer's preferences once and forward the cap to
         # the repo so the inbox query hides moments that arrived at
@@ -437,6 +440,18 @@ class MomentService:
             before=before,
             limit=limit,
             tag=tag,
+            max_hops=await self._max_hops(viewer_user_id),
+            top_level=top_level,
+        )
+
+    async def latest_replies(
+        self, moment_ids: list[str], *, viewer_user_id: str
+    ) -> dict[str, Moment]:
+        """Each root's newest reply *viewer_user_id* may read — the one a
+        list card nests under its root (same rule as :meth:`list_replies`)."""
+        return await self._moments.latest_replies(
+            moment_ids,
+            viewer_user_id,
             max_hops=await self._max_hops(viewer_user_id),
         )
 

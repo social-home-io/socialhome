@@ -25,6 +25,22 @@ interface Props {
   onChange?: (saved: boolean) => void
 }
 
+/** ``PUT`` / ``DELETE /api/moments/{id}/save`` with its toast either way;
+ *  ``true`` once the server agreed. Shared by the toggle and the card's ⋯
+ *  menu. */
+export async function setMomentSaved(momentId: string, next: boolean): Promise<boolean> {
+  try {
+    if (next) await api.put(`/api/moments/${momentId}/save`, {})
+    else await api.delete(`/api/moments/${momentId}/save`)
+    showToast(t(next ? 'moment.save.toast_saved' : 'moment.save.toast_removed'), 'success')
+    return true
+  } catch (err: unknown) {
+    const error = String((err as Error)?.message ?? err)
+    showToast(t(next ? 'moment.save.failed' : 'moment.save.remove_failed', { error }), 'error')
+    return false
+  }
+}
+
 export function MomentSaveToggle({ moment, variant = 'button', onChange }: Props) {
   const saved = useSignal<boolean>(moment.saved_by_me === true)
   const busy = useSignal<boolean>(false)
@@ -41,14 +57,10 @@ export function MomentSaveToggle({ moment, variant = 'button', onChange }: Props
     busy.value = true
     const next = !saved.value
     try {
-      if (next) await api.put(`/api/moments/${moment.id}/save`, {})
-      else await api.delete(`/api/moments/${moment.id}/save`)
-      saved.value = next
-      showToast(t(next ? 'moment.save.toast_saved' : 'moment.save.toast_removed'), 'success')
-      onChange?.(next)
-    } catch (err: unknown) {
-      const error = String((err as Error)?.message ?? err)
-      showToast(t(next ? 'moment.save.failed' : 'moment.save.remove_failed', { error }), 'error')
+      if (await setMomentSaved(moment.id, next)) {
+        saved.value = next
+        onChange?.(next)
+      }
     } finally {
       busy.value = false
     }

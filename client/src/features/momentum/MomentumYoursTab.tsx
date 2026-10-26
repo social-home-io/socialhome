@@ -11,11 +11,11 @@
  * Data: ``GET /api/moments/archive?scope=own`` (newest first, ``before``
  * cursor paging) and ``GET /api/moments/archive/usage``.
  *
- * A Posted | Saved switch (``?tab=yours&show=saved``) swaps the list for
+ * A Posted | Saved switch (``/momentum/yours?show=saved``) swaps the list for
  * the moments you saved (decision 6b, :class:`MomentumSavedList`); the
  * usage line counts both.
  *
- * Mounted by :class:`MomentumPage` for ``?tab=yours``.
+ * Mounted by :class:`MomentumPage` for ``/momentum/yours``.
  */
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -41,7 +41,7 @@ export const YOURS_PAGE = 30
 export type YoursShow = 'posted' | 'saved'
 const SHOWS: readonly YoursShow[] = ['posted', 'saved'] as const
 
-/** Which list ``?tab=yours`` shows: ``&show=saved`` = the moments you saved. */
+/** Which list ``/momentum/yours`` shows: ``&show=saved`` = the moments you saved. */
 export function yoursShowFromUrl(url: string): YoursShow {
   const params = new URLSearchParams(url.split('?')[1] ?? '')
   return params.get('show') === 'saved' ? 'saved' : 'posted'
@@ -240,7 +240,7 @@ export default function MomentumYoursTab() {
         labels={{ posted: t('moment.yours.show_posted'), saved: t('moment.yours.show_saved') }}
         ariaLabel={t('moment.yours.show_aria')}
         class="sh-momentum-yours-switch"
-        onChange={(next) => loc.route(next === 'saved' ? '/momentum?tab=yours&show=saved' : '/momentum?tab=yours', true)}
+        onChange={(next) => loc.route(next === 'saved' ? '/momentum/yours?show=saved' : '/momentum/yours', true)}
       />
       {show === 'posted' && (
         <p class="sh-muted">

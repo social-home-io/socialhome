@@ -18,12 +18,12 @@ describe('router', () => {
     //   /highlights, /highlights/new, /highlights/:highlightId — Highlights pillar (§Highlights)
     //   /highlights/archive — month-grid history browser (§Highlights)
     //   /momentum, /momentum/new, /momentum/:id, /momentum/:id/reply,
-    //     /momentum/archive — Momentum pillar (§Momentum)
+    //     /momentum/archive, /momentum/yours — Momentum pillar (§Momentum)
     //   /organize        — replaces standalone /tasks /shopping /stickies
     //                      (3 routes collapsed into 1 hub).
     //   /apps            — Social Home Apps browse/install page (§Apps)
     //   /apps/:appId     — sandboxed AppHost iframe launcher (§Apps)
-    expect(Object.keys(routes).length).toBe(43)
+    expect(Object.keys(routes).length).toBe(44)
   })
 
   it('a space and its sections are ONE route, after the fixed space sub-pages', () => {
@@ -38,6 +38,12 @@ describe('router', () => {
       expect(keys.indexOf(fixed)).toBeGreaterThan(-1)
       expect(keys.indexOf(fixed)).toBeLessThan(space)
     }
+  })
+
+  it('Yours is a Momentum address of its own, ahead of the moment page', () => {
+    const keys = Object.keys(routes)
+    expect(routes['/momentum/yours']).toBeTruthy()
+    expect(keys.indexOf('/momentum/yours')).toBeLessThan(keys.indexOf('/momentum/:momentId'))
   })
 
   it('the settings sections are one route, so a section jump keeps the page', () => {

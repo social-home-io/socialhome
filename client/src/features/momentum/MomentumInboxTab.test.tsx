@@ -4,16 +4,20 @@ import { render, waitFor, fireEvent } from '@testing-library/preact'
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }))
-vi.mock('preact-iso', () => ({ useLocation: () => ({ route: vi.fn(), url: '/' }) }))
+vi.mock('preact-iso', () => ({ useLocation: () => ({ route: vi.fn(), url: '/momentum' }) }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 const wsHandlers = vi.hoisted(() => new Map<string, () => void>())
 vi.mock('@/ws', () => ({
   ws: { on: (type: string, fn: () => void) => { wsHandlers.set(type, fn); return () => undefined } },
 }))
-
 import { api } from '@/api'
-import type { Moment } from '@/types'
-import MomentumInboxTab from './MomentumInboxTab'
+import type { Moment, User } from '@/types'
+import { currentUser } from '@/store/auth'
+import MomentumInboxTab, { INBOX_PAGE } from './MomentumInboxTab'
+
+function signIn(isProtected = false) {
+  currentUser.value = { user_id: 'uid-me', username: 'me', display_name: 'Me', protected: isProtected } as User
+}
 
 function moment(id: string, author: string, extra: Partial<Moment> = {}): Moment {
   return {
@@ -25,76 +29,76 @@ function moment(id: string, author: string, extra: Partial<Moment> = {}): Moment
   }
 }
 
-describe('MomentumInboxTab authors', () => {
-  beforeEach(() => {
-    vi.mocked(api.get).mockImplementation(async (path: string) => {
-      if (path === '/api/moments') {
-        return [
-          moment('m-amaka', 'ru-amaka', {
-            author: {
-              display_name: 'Amaka Okafor',
-              picture_url: 'api/users/ru-amaka/picture?v=1&sig=s',
-            },
-          }),
-          moment('m-kid', 'uid-kid', {
-            author: { display_name: 'Kid', picture_url: null },
-          }),
-          moment('m-ghost', 'ru-forgotten', {
-            author: { display_name: null, picture_url: null },
-          }),
+type Get = (path: string, params?: Record<string, string>) => Promise<unknown>
+const onGet = (fn: Get) => vi.mocked(api.get).mockImplementation(fn as never)
+
+describe('MomentumInboxTab list', () => {
+  beforeEach(() => { wsHandlers.clear(); vi.mocked(api.get).mockReset(); signIn() })
+
+  it('asks for top-level moments only and names authors from the server', async () => {
+    onGet(async (path) => path === '/api/moments'
+      ? [
+          moment('m-amaka', 'ru-amaka', { author: { display_name: 'Amaka Okafor', picture_url: null } }),
+          moment('m-ghost', 'ru-forgotten', { author: { display_name: null, picture_url: null } }),
         ]
-      }
-      return []
-    })
-  })
-
-  it('names a friend from another household by the server\'s author', async () => {
-    const { container } = render(<MomentumInboxTab />)
+      : [])
+    const { container } = render(<MomentumInboxTab tag={null} />)
     await waitFor(() => expect(container.textContent).toContain('Amaka Okafor'))
-    const authors = [...container.querySelectorAll('.sh-momentum-row-author')]
-      .map(e => e.textContent)
-    expect(authors).toEqual(['Amaka Okafor', 'Kid', 'Someone'])
-    expect(container.textContent).not.toContain('ru-amaka')
+    expect(api.get).toHaveBeenCalledWith('/api/moments', { top_level: '1', limit: String(INBOX_PAGE) })
+    const names = [...container.querySelectorAll('.sh-moment-card__name')].map(e => e.textContent)
+    expect(names).toEqual(['Amaka Okafor', 'Someone'])
     expect(container.textContent).not.toContain('ru-forgotten')
-    const pictures = [...container.querySelectorAll('.sh-momentum-row > img')]
-      .map(i => i.getAttribute('src'))
-    // Only Amaka's picture: the guardian-blocked kid's is withheld.
-    expect(pictures).toEqual(['api/users/ru-amaka/picture?v=1&sig=s'])
   })
 
-  it('names a GFS-followed author and labels the row as arriving via GFS', async () => {
-    vi.mocked(api.get).mockImplementation(async (path: string) =>
-      path === '/api/moments'
-        ? [moment('m-noor', 'u-gfs-noor', {
-            received_via: 'gfs',
-            received_via_gfs_id: 'g1',
-            author: {
-              display_name: 'Noor Haddad',
-              picture_url: 'api/gfs/g1/moments/users/u-gfs-noor/picture?v=0123&sig=s',
-              household: null,
-              bio: 'Beekeeper.',
-            },
-          })]
-        : [])
-    const { container } = render(<MomentumInboxTab />)
-    await waitFor(() => expect(container.textContent).toContain('Noor Haddad'))
-    expect(container.querySelector('.sh-momentum-row-via-gfs')?.textContent)
-      .toContain('via GFS')
-    expect(container.textContent).not.toContain('u-gfs-noor')
+  it('a tag filter goes to the server with the list', async () => {
+    onGet(async () => [moment('m-1', 'uid-bob')])
+    const { container } = render(<MomentumInboxTab tag="herbst" />)
+    await waitFor(() => expect(container.textContent).toContain('hello from m-1'))
+    expect(api.get).toHaveBeenCalledWith('/api/moments', { top_level: '1', limit: String(INBOX_PAGE), tag: 'herbst' })
+  })
+
+  it('Load older pages with the before cursor; a short page ends with the honest footer', async () => {
+    const full = Array.from({ length: INBOX_PAGE }, (_, i) =>
+      moment(`m-${i}`, 'uid-bob', { created_at: new Date(Date.now() - i * 60_000).toISOString() }))
+    onGet(async (_path, params) => params?.before ? [moment('m-old', 'uid-bob')] : full)
+    const { container, findByRole } = render(<MomentumInboxTab tag={null} />)
+    const older = await findByRole('button', { name: 'Load older' })
+    expect(container.textContent).not.toContain('kept for as long as')
+    fireEvent.click(older)
+    await waitFor(() => expect(container.textContent).toContain('hello from m-old'))
+    expect(api.get).toHaveBeenLastCalledWith('/api/moments', {
+      top_level: '1', limit: String(INBOX_PAGE), before: full[full.length - 1].created_at,
+    })
+    expect(container.querySelector('.sh-momentum-end')?.textContent).toBe(
+      "That's everything from the last 24 hours. Moments from people you follow are kept for as long as their authors chose.")
+  })
+
+  it('the composer entry says where a moment goes — narrower for a protected account', async () => {
+    onGet(async () => [])
+    const first = render(<MomentumInboxTab tag={null} />)
+    await waitFor(() => expect(first.container.textContent).toContain('No moments yet'))
+    const entry = first.getByRole('button', { name: /Share a moment/ })
+    expect(entry.textContent).toContain('Paired households and theirs, up to 3 hops · 24 h')
+    first.unmount()
+    signIn(true)
+    const kid = render(<MomentumInboxTab tag={null} />)
+    await waitFor(() => expect(kid.container.textContent).toContain('No moments yet'))
+    expect(kid.getByRole('button', { name: /Share a moment/ }).textContent)
+      .toContain('Your household and paired households')
   })
 })
 
 describe('MomentumInboxTab when a load fails', () => {
-  beforeEach(() => { wsHandlers.clear(); vi.mocked(api.get).mockReset() })
+  beforeEach(() => { wsHandlers.clear(); vi.mocked(api.get).mockReset(); signIn() })
 
   it('a failed first load is an alert with Try again, never "No moments yet"', async () => {
     let fail = true
-    vi.mocked(api.get).mockImplementation(async (path: string) => {
+    onGet(async (path) => {
       if (path !== '/api/moments') return []
       if (fail) throw new Error('offline')
       return [moment('m-1', 'uid-bob', { author: { display_name: 'Bob', picture_url: null } })]
     })
-    const { findByRole, container } = render(<MomentumInboxTab />)
+    const { findByRole, container } = render(<MomentumInboxTab tag={null} />)
     const alert = await findByRole('alert')
     expect(alert.textContent).toContain("Couldn't load moments")
     expect(container.textContent).not.toContain('No moments yet')
@@ -106,12 +110,12 @@ describe('MomentumInboxTab when a load fails', () => {
 
   it('a failed refresh keeps the list and says from when it is', async () => {
     let fail = false
-    vi.mocked(api.get).mockImplementation(async (path: string) => {
+    onGet(async (path) => {
       if (path !== '/api/moments') return []
       if (fail) throw new Error('offline')
       return [moment('m-1', 'uid-bob', { author: { display_name: 'Bob', picture_url: null } })]
     })
-    const { findByRole, container } = render(<MomentumInboxTab />)
+    const { findByRole, container } = render(<MomentumInboxTab tag={null} />)
     await waitFor(() => expect(container.textContent).toContain('Bob'))
     fail = true
     wsHandlers.get('moment.created')!()
@@ -131,65 +135,18 @@ describe('MomentumInboxTab time without unit formatting', () => {
       return new RealNF(loc, opts)
     }) as unknown as typeof Intl.NumberFormat)
     try {
-      vi.mocked(api.get).mockReset().mockImplementation(async (path: string) => path === '/api/moments'
+      onGet(async (path) => path === '/api/moments'
         ? [moment('m-5', 'uid-bob', {
           created_at: new Date(Date.now() - 5 * 60_000).toISOString(),
           author: { display_name: 'Bob', picture_url: null },
         })]
         : [])
-      const { container } = render(<MomentumInboxTab />)
+      const { container } = render(<MomentumInboxTab tag={null} />)
       await waitFor(() => expect(container.textContent).toContain('Bob'))
       expect(container.textContent).toContain('vor 5 Min.')
     } finally {
       spy.mockRestore()
       await setLocale('en')
     }
-  })
-})
-
-describe('MomentumInboxTab save chip', () => {
-  it('offers Save where the server says so, never on your own or unsavable moments', async () => {
-    vi.mocked(api.get).mockImplementation(async (path: string) => (path === '/api/moments'
-      ? [
-          moment('m-ok', 'ru-amaka', { can_save: true }),
-          moment('m-saved', 'ru-amaka', { saved_by_me: true, can_save: true }),
-          moment('m-old-peer', 'ru-chidi', { can_save: false }),
-        ]
-      : []))
-    vi.mocked(api.put).mockResolvedValue({ moment_id: 'm-ok', saved: true })
-    const { container, getAllByRole } = render(<MomentumInboxTab />)
-    await waitFor(() => expect(container.textContent).toContain('hello from m-ok'))
-    const rows = [...container.querySelectorAll('.sh-momentum-row')]
-    const toggle = (row: Element) => row.querySelector('button[aria-pressed]')
-    expect(toggle(rows[0])?.getAttribute('aria-pressed')).toBe('false')
-    expect(toggle(rows[1])?.getAttribute('aria-pressed')).toBe('true')
-    expect(toggle(rows[2])).toBeNull()
-    fireEvent.click(getAllByRole('button', { name: 'Save' })[0])
-    await waitFor(() => expect(api.put).toHaveBeenCalledWith('/api/moments/m-ok/save', {}))
-  })
-})
-
-describe('MomentumInboxTab reaction reach (v_67)', () => {
-  it('still offers React where a reaction stays here, and says so', async () => {
-    vi.mocked(api.get).mockImplementation(async (path: string) => (path === '/api/moments'
-      ? [
-          moment('m-far', 'ru-amaka', { reactions_reach: 'author' }),
-          moment('m-home', 'ru-chidi', { reactions_reach: 'household' }),
-        ]
-      : []))
-    const { container } = render(<MomentumInboxTab />)
-    await waitFor(() => expect(container.textContent).toContain('hello from m-home'))
-    const rows = [...container.querySelectorAll('.sh-momentum-row')]
-    const react = (row: Element) => row.querySelectorAll('.sh-momentum-chip')[1] as HTMLButtonElement
-    expect(react(rows[0]).disabled).toBe(false)
-    expect(rows[0].querySelector('.sh-momentum-row-reach')).toBeNull()
-    expect(react(rows[0]).getAttribute('aria-describedby')).toBeNull()
-    expect(react(rows[1]).disabled).toBe(false)
-    // A visible cue — not only a hover title — for touch and keyboard users,
-    // and the React chip is described by it (#1178 review).
-    const note = rows[1].querySelector('.sh-momentum-row-reach')!
-    expect(note.textContent).toBe('Reactions here are seen in your household only.')
-    expect(react(rows[1]).getAttribute('aria-describedby')).toBe(note.id)
-    expect(react(rows[1]).getAttribute('title')).toBeNull()
   })
 })

@@ -1579,3 +1579,86 @@ async def test_unfollow_drops_your_saves_of_that_author(client):
     assert r.status == 200
     r = await client.get("/api/moments/archive?scope=saved", headers=h)
     assert await r.json() == []
+
+
+# ── The Moments list: top-level, newest reply, paging (B13 / B14) ───────
+
+
+async def _thread_rows(client) -> None:
+    """Three roots (1, 2, 3 h old) by Bob, each with a reply; the
+    oldest root gets a second, newer reply."""
+    await _seed_target(client)
+    for i in range(3):
+        await _moment_row(client, f"m-{i}", "uid-bob", age_hours=i + 1)
+        await client._db.enqueue(
+            "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+            " created_at, expires_at, parent_moment_id) VALUES(?,?,?,?,"
+            " datetime('now', ?), datetime('now', '+6 days'), ?)",
+            (
+                f"r-{i}",
+                client._uid,
+                f"reply {i}",
+                "self",
+                f"-{(i + 1) * 3600 - 60} seconds",
+                f"m-{i}",
+            ),
+        )
+    await client._db.enqueue(
+        "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+        " created_at, expires_at, parent_moment_id) VALUES(?,?,?,?,"
+        " datetime('now', '-60 seconds'), datetime('now', '+6 days'), ?)",
+        ("r-2b", "uid-bob", "newest on m-2", "self", "m-2"),
+    )
+
+
+async def test_list_top_level_pages_and_nests_newest_reply(client):
+    await _thread_rows(client)
+    h = _auth(client._tok)
+    r = await client.get(
+        "/api/moments", params={"top_level": "1", "limit": "2"}, headers=h
+    )
+    assert r.status == 200
+    first = await r.json()
+    assert [m["id"] for m in first] == ["m-0", "m-1"]
+    assert first[0]["reply_count"] == 1
+    reply = first[0]["latest_reply"]
+    assert reply["id"] == "r-0" and reply["content"] == "reply 0"
+    assert reply["author_user_id"] == client._uid
+    assert reply["author"]["display_name"]
+    # Provenance for the card: how far away the moment was written.
+    assert first[0]["hop_count"] == 1
+    r = await client.get(
+        "/api/moments",
+        params={"top_level": "1", "limit": "2", "before": first[-1]["created_at"]},
+        headers=h,
+    )
+    rest = await r.json()
+    assert [m["id"] for m in rest] == ["m-2"]
+    assert rest[0]["reply_count"] == 2
+    assert rest[0]["latest_reply"]["id"] == "r-2b"
+
+
+async def test_list_without_top_level_still_lists_replies(client):
+    await _thread_rows(client)
+    r = await client.get("/api/moments", headers=_auth(client._tok))
+    items = await r.json()
+    assert {"r-0", "r-1", "r-2", "r-2b"} <= {m["id"] for m in items}
+    assert all("latest_reply" not in m for m in items)
+
+
+async def test_list_top_level_by_tag_and_my_reaction(client):
+    h = _auth(client._tok)
+    r = await client.post("/api/moments", json={"content": "Herbst #herbst"}, headers=h)
+    tagged = (await r.json())["id"]
+    await _seed_target(client)
+    await _moment_row(client, "m-other", "uid-bob")
+    await client.put(f"/api/moments/{tagged}/reaction", json={"emoji": "🔥"}, headers=h)
+    r = await client.get(
+        "/api/moments", params={"top_level": "1", "tag": "herbst"}, headers=h
+    )
+    items = await r.json()
+    assert [m["id"] for m in items] == [tagged]
+    assert items[0]["my_reaction"] == "🔥"
+    assert items[0]["reaction_counts"] == {"🔥": 1}
+    assert items[0]["latest_reply"] is None
+    assert (await client.get("/api/moments?top_level=1")).status == 401
