@@ -26,6 +26,12 @@ describe('apiErrorMessage — known codes', () => {
     expect(apiErrorMessage(422, '/api/highlights/h1/audience', {
       code: 'HIGHLIGHT_AUDIENCE_EMPTY', detail: 'Pick at least one person.',
     })).toBe('Pick at least one household or person.')
+    expect(apiErrorMessage(409, '/api/highlights/h1/audience', {
+      code: 'HIGHLIGHT_AUDIENCE_PEER_TOO_OLD', detail: 'Some paired households need to update.',
+    })).toBe(
+      "Some paired households need to update Social Home before you can take today's highlight away"
+      + ' from people there. Adding people works now.',
+    )
   })
 
   it('translates the two refusals of saving a moment', () => {

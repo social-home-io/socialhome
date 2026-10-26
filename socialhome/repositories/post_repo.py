@@ -71,6 +71,7 @@ class AbstractPostRepo(Protocol):
     # Posts ---------------------------------------------------------------
     async def save(self, post: Post) -> Post: ...
     async def get(self, post_id: str) -> Post | None: ...
+    async def has_highlight_share(self, highlight_id: str, author: str) -> bool: ...
     async def list_feed(
         self,
         *,
@@ -196,6 +197,16 @@ class SqlitePostRepo:
             ),
         )
         return post
+
+    async def has_highlight_share(self, highlight_id: str, author: str) -> bool:
+        """Whether *author* shared *highlight_id* to the household feed and
+        the post is still up (the change sheet says who can still open it)."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM feed_posts WHERE linked_highlight_id=? AND author=?"
+            " AND type='highlight_share' AND deleted=0 LIMIT 1",
+            (highlight_id, author),
+        )
+        return row is not None
 
     async def get(self, post_id: str) -> Post | None:
         row = await self._db.fetchone(

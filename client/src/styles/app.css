@@ -20586,6 +20586,8 @@ span.sh-hlv__who { cursor: default; }
 }
 .sh-hlc-change__summary p { margin: 0; overflow-wrap: anywhere; }
 .sh-hlc-change__error { color: var(--sh-danger); margin-block: var(--sh-space-sm) 0; }
+/* "Also remove the public link" — a full-width tap target in the summary. */
+.sh-hlc-change__unlink { min-height: 44px; }
 @media (max-width: 720px) {
   /* Strip first: the side column's children join the page flow and the
    * strip moves above the preview. */

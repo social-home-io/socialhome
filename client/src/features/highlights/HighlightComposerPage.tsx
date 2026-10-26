@@ -532,6 +532,7 @@ export default function HighlightComposerPage() {
         <AudienceChangeSheet
           open={changing}
           highlight={today}
+          published={published}
           frames={posted}
           households={households}
           people={people}
@@ -540,8 +541,9 @@ export default function HighlightComposerPage() {
           loadError={loadError}
           onRetry={() => void loadAudience()}
           onClose={() => setChanging(false)}
-          onChanged={h => {
+          onChanged={(h, stillPublished) => {
             setToday(h)
+            setPublished(stillPublished)
             setChanging(false)
             showToast(
               t('highlight.change.done', { who: describeAudience(h.audience_kind, h.audience, nameOf) }),

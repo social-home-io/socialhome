@@ -19,6 +19,7 @@ from socialhome.domain.highlight import (
     HighlightAudience,
     HighlightAudienceEmptyError,
     HighlightAudienceMismatchError,
+    HighlightAudiencePeerTooOldError,
     HighlightFrameType,
     HighlightNotTodayError,
 )
@@ -1078,3 +1079,69 @@ async def test_an_earlier_days_highlight_keeps_its_audience(db, svc):
     assert exc.value.status == 409
     assert exc.value.code == "HIGHLIGHT_NOT_TODAY"
     assert captured == []
+
+
+async def test_a_change_the_gate_refuses_stores_and_sends_nothing(db, svc):
+    """v_70: a narrowing that would take people away from a household too
+    old to keep the removal is refused before anything is written."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    captured = await _audience_changes(bus)
+    asked: list[tuple] = []
+
+    async def _gate(old_kind, old, kind, new) -> bool:
+        asked.append((old_kind, old, kind, new))
+        return False
+
+    service.attach_audience_gate(_gate)
+    with pytest.raises(HighlightAudiencePeerTooOldError) as exc:
+        await service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u1",
+            audience_kind=HighlightAudience.HOUSEHOLDS,
+            audience=("peer-b",),
+        )
+    assert exc.value.status == 409
+    assert asked == [("all_paired", (), "households", ("peer-b",))]
+    stored = await service._highlights.get_highlight(highlight.id)
+    assert stored.audience_kind is HighlightAudience.ALL_PAIRED
+    assert captured == []
+
+
+async def test_a_frame_and_a_change_never_interleave(db, svc):
+    """Appending a frame and changing the audience serialize per author: the
+    frame's event names the audience it is stored under."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    order: list[str] = []
+    gate_open = asyncio.Event()
+
+    async def _slow_gate(*_a) -> bool:
+        order.append("change: gate")
+        await gate_open.wait()
+        return True
+
+    service.attach_audience_gate(_slow_gate)
+    frames: list[HighlightFrameAdded] = []
+    bus.subscribe(HighlightFrameAdded, lambda e: frames.append(e))
+    change = asyncio.create_task(
+        service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u1",
+            audience_kind=HighlightAudience.HOUSEHOLDS,
+            audience=("peer-b",),
+        )
+    )
+    await asyncio.sleep(0)
+    append = asyncio.create_task(
+        _first_frame(service, HighlightAudience.HOUSEHOLDS, ("peer-b",))
+    )
+    await asyncio.sleep(0.01)
+    assert frames == []  # the frame waits for the change
+    gate_open.set()
+    await change
+    await append
+    [event] = frames
+    assert (event.audience_kind, event.audience) == ("households", ("peer-b",))

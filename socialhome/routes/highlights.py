@@ -12,6 +12,7 @@ Routes:
 * ``GET    /api/highlights``                              — list visible highlights
 * ``GET    /api/highlights/{id}``                         — highlight detail
 * ``DELETE /api/highlights/{id}``                         — delete whole highlight
+* ``GET    /api/highlights/{id}/audience``                — audience + where else it opens
 * ``PATCH  /api/highlights/{id}/audience``                — change for all of today
 * ``DELETE /api/highlights/frames/{id}``                  — delete one frame
 * ``POST   /api/highlights/frames/{id}/view``             — mark viewed
@@ -357,14 +358,40 @@ class HighlightDetailView(BaseView):
 
 
 class HighlightAudienceView(BaseView):
-    """``PATCH /api/highlights/{id}/audience`` — change who sees today's
-    highlight, every frame of it (owner decision 1).
+    """``GET / PATCH /api/highlights/{id}/audience`` — who sees today's
+    highlight, and change it for every frame of it (owner decision 1).
+
+    ``GET`` (author only) answers ``{audience_kind, audience, published,
+    shared: {household, spaces: [{id, name}]}}`` — where else it opens
+    outside the audience, so the change sheet never overpromises.
 
     Author only (a reader gets 403, anyone else the unknown-id 404), today's
     highlight only (409 ``HIGHLIGHT_NOT_TODAY``); ``users`` with nobody
     picked is 422 ``HIGHLIGHT_AUDIENCE_EMPTY``. Body ``{audience_kind,
     audience}``; answers ``{highlight}`` as the author sees it.
     """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        if ctx is None or ctx.user_id is None:
+            return error_response(401, "UNAUTHENTICATED", "auth required")
+        highlight, reach = await self.svc(highlight_service_key).reach_of(
+            highlight_id=self.match("id"), actor_user_id=ctx.user_id
+        )
+        return self._json(
+            {
+                "audience_kind": highlight.audience_kind.value,
+                "audience": list(highlight.audience),
+                "published": reach.published,
+                "shared": {
+                    "household": reach.shared_household,
+                    "spaces": [
+                        {"id": space_id, "name": name}
+                        for space_id, name in reach.shared_spaces
+                    ],
+                },
+            }
+        )
 
     async def patch(self) -> web.Response:
         ctx = self.user

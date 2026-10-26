@@ -23,6 +23,7 @@ wiring of an author household and two receiving households, the rules:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
@@ -37,8 +38,12 @@ from socialhome.app_keys import (
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from socialhome.domain.highlight import HighlightNotTodayError
+from socialhome.domain.highlight import (
+    HighlightAudiencePeerTooOldError,
+    HighlightNotTodayError,
+)
 from socialhome.federation.federation_service import FederationService
+from socialhome.repositories.highlight_repo import SqliteHighlightRepo
 from socialhome.services.highlight_service import (
     HighlightForbiddenError,
     HighlightNotFoundError,
@@ -70,11 +75,14 @@ def _config(tmp_dir, name: str) -> Config:
     )
 
 
-async def _seed_peer(db, instance_id: str, user_ids: tuple[str, ...]) -> None:
+async def _seed_peer(
+    db, instance_id: str, user_ids: tuple[str, ...], proto_version: int = 70
+) -> None:
     await db.enqueue(
         "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
         " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
-        " local_inbox_id, status, source) VALUES(?,?,?,?,?,?,?,?,?)",
+        " local_inbox_id, status, source, proto_version)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?)",
         (
             instance_id,
             instance_id,
@@ -85,6 +93,7 @@ async def _seed_peer(db, instance_id: str, user_ids: tuple[str, ...]) -> None:
             f"wh-{instance_id}",
             "confirmed",
             "manual",
+            proto_version,
         ),
     )
     for user_id in user_ids:
@@ -372,3 +381,160 @@ async def test_the_per_household_trim_holds_after_a_change(net):
         if ev in frame_events:
             assert sorted(payload["audience"]) == sorted(PEOPLE[to]), (to, payload)
     assert "u-carl" not in str([p for _, _, p in sent])
+
+
+# ── Adversarial review of #1191: races and stale envelopes ──────────────
+
+
+async def test_a_stale_frame_after_narrowing_does_not_resurrect_it(net):
+    """A frame envelope sent before the change — held in the outbox while
+    Dora's household was offline — lands after ``HIGHLIGHT_DELETED``: the
+    receiver remembers the removal and refuses it."""
+    highlight, _ = await net.post_frame(1, "all_paired", [])
+    await net.deliver()
+    await net.post_frame(2, "all_paired", [])
+    stale = [s for s in net.sent if s[0] == DORA_HOME]  # queued, not delivered
+    net.sent[:] = [s for s in net.sent if s[0] != DORA_HOME]
+    await net.deliver()
+    await net.change(highlight.id, "households", [BOB_HOME])
+    await net.deliver()
+    assert await net.held(DORA_HOME, highlight.id) == (0, 0)
+    net.sent.extend(stale)  # an outbox retry, ordered by next_attempt_at only
+    await net.deliver()
+    assert await net.held(DORA_HOME, highlight.id) == (0, 0)
+    _, dora_client, dora = net.receivers[DORA_HOME]
+    r = await dora_client.get(f"/api/highlights/{highlight.id}", headers=dora["u-dora"])
+    assert r.status == 404
+
+
+async def test_a_stale_first_frame_after_narrowing_does_not_resurrect_it(net):
+    """The same for a ``HIGHLIGHT_CREATED`` that never left the outbox."""
+    highlight, _ = await net.post_frame(1, "all_paired", [])
+    stale = [s for s in net.sent if s[0] == DORA_HOME]
+    net.sent[:] = [s for s in net.sent if s[0] != DORA_HOME]
+    await net.deliver()
+    await net.change(highlight.id, "households", [BOB_HOME])
+    await net.deliver()
+    net.sent.extend(stale)
+    await net.deliver()
+    assert await net.held(DORA_HOME, highlight.id) == (0, 0)
+
+
+async def test_widening_again_after_a_removal_reaches_the_household(net):
+    """A removal is remembered only against older envelopes: widening
+    again later gives Dora's household the day once more."""
+    highlight, _ = await net.post_frame(1, "all_paired", [])
+    await net.deliver()
+    await net.change(highlight.id, "households", [BOB_HOME])
+    await net.deliver()
+    await net.change(highlight.id, "all_paired", [])
+    await net.deliver()
+    assert await net.held(DORA_HOME, highlight.id) == (1, 1)
+    await net.post_frame(2, "all_paired", [])
+    await net.deliver()
+    assert await net.held(DORA_HOME, highlight.id) == (1, 2)
+
+
+async def test_a_stale_resent_slice_does_not_roll_the_audience_back(net):
+    """Bob + Bea → Bea → Bob + Bea → Bea: the second re-sent envelope is
+    delivered before the first; the older slice must not win."""
+    highlight, _ = await net.post_frame(1, "users", ["u-bob", "u-bea"])
+    await net.deliver()
+    await net.change(highlight.id, "users", ["u-bea"])
+    older = list(net.sent)
+    net.sent.clear()
+    await net.change(highlight.id, "users", ["u-bob", "u-bea"])
+    await net.change(highlight.id, "users", ["u-bea"])
+    await net.deliver()
+    net.sent.extend(older)  # an older re-send, delivered last
+    await net.change(highlight.id, "users", ["u-bea"])  # no-op, sends nothing
+    await net.deliver()
+    _, bob_client, headers = net.receivers[BOB_HOME]
+    r = await bob_client.get(
+        f"/api/highlights/{highlight.id}", headers=headers["u-bob"]
+    )
+    assert r.status == 404
+    net.sent.clear()
+    # Same with the newest slice delivered first and an older, wider one after.
+    await net.change(highlight.id, "users", ["u-bob", "u-bea"])
+    wider = list(net.sent)
+    net.sent.clear()
+    await net.change(highlight.id, "users", ["u-bea"])
+    await net.deliver()
+    net.sent.extend(wider)
+    await net.deliver()
+    r = await bob_client.get(
+        f"/api/highlights/{highlight.id}", headers=headers["u-bob"]
+    )
+    assert r.status == 404
+
+
+async def test_a_frame_racing_a_narrowing_skips_the_dropped_household(net, monkeypatch):
+    """The audience changes while a frame is being appended: the frame is
+    addressed with the audience it is stored under, never a stale one."""
+    highlight, _ = await net.post_frame(1, "all_paired", [])
+    await net.deliver()
+    orig = SqliteHighlightRepo.append_frame
+    fired: dict[str, asyncio.Task] = {}
+
+    async def racing(self, **kw):
+        if not fired:
+            fired["x"] = asyncio.create_task(
+                net.change(highlight.id, "households", [BOB_HOME])
+            )
+            await asyncio.sleep(0.05)
+        return await orig(self, **kw)
+
+    monkeypatch.setattr(SqliteHighlightRepo, "append_frame", racing)
+    await net.post_frame(2, "all_paired", [])
+    await fired["x"]
+    await net.deliver()
+    assert await net.held(DORA_HOME, highlight.id) == (0, 0)
+    assert await net.held(BOB_HOME, highlight.id) == (1, 2)
+
+
+async def test_a_frame_racing_a_widening_reaches_the_new_household(net, monkeypatch):
+    highlight, _ = await net.post_frame(1, "households", [BOB_HOME])
+    await net.deliver()
+    orig = SqliteHighlightRepo.append_frame
+    fired: dict[str, asyncio.Task] = {}
+
+    async def racing(self, **kw):
+        if not fired:
+            fired["x"] = asyncio.create_task(net.change(highlight.id, "all_paired", []))
+            await asyncio.sleep(0.05)
+        return await orig(self, **kw)
+
+    monkeypatch.setattr(SqliteHighlightRepo, "append_frame", racing)
+    await net.post_frame(2, "households", [BOB_HOME])
+    await fired["x"]
+    await net.deliver()
+    assert await net.held(DORA_HOME, highlight.id) == (1, 2)
+
+
+async def test_a_narrowing_waits_for_a_household_below_v70(net):
+    """Dora's household is on v_69: it would apply a removal but keep no
+    record of it, so a frame still on its way would bring the highlight
+    back. Widening to it is sent as to anyone; taking it away again is
+    refused (nothing stored, nothing sent)."""
+    await net.author[db_key].enqueue(
+        "UPDATE remote_instances SET proto_version=69 WHERE id=?", (DORA_HOME,)
+    )
+    highlight, _ = await net.post_frame(1, "households", [BOB_HOME])
+    await net.deliver()
+    await net.change(highlight.id, "all_paired", [])
+    await net.deliver()
+    assert await net.held(DORA_HOME, highlight.id) == (1, 1)
+
+    with pytest.raises(HighlightAudiencePeerTooOldError):
+        await net.change(highlight.id, "households", [BOB_HOME])
+    assert net.sent == []
+    stored = await net.author[highlight_service_key]._highlights.get_highlight(
+        highlight.id
+    )
+    assert stored.audience_kind.value == "all_paired"
+
+    # A change that takes nobody from Dora's household still goes ahead.
+    await net.change(highlight.id, "households", [BOB_HOME, DORA_HOME])
+    await net.deliver()
+    assert await net.held(DORA_HOME, highlight.id) == (1, 1)

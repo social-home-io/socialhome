@@ -45,6 +45,7 @@ from ..domain.events import (
     HighlightRemoved,
 )
 from ..domain.federation import FederationEventType
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.highlight import Highlight, HighlightFrame
 from ..infrastructure.event_bus import EventBus
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
@@ -140,6 +141,7 @@ class HighlightFederationOutbound(
             event_type=ev_type,
             payload=payload,
             author_user_id=event.author_user_id,
+            outbox_key=_frame_key(event.highlight_id, event.frame_id),
         )
 
     async def _on_frame_removed(self, event: HighlightFrameRemoved) -> None:
@@ -156,6 +158,7 @@ class HighlightFederationOutbound(
                 "occurred_at": event.occurred_at.isoformat(),
             },
             author_user_id=event.author_user_id,
+            removal=True,
         )
 
     async def _on_highlight_removed(self, event: HighlightRemoved) -> None:
@@ -171,6 +174,9 @@ class HighlightFederationOutbound(
                 "occurred_at": event.occurred_at.isoformat(),
             },
             author_user_id=event.author_user_id,
+            removal=True,
+            drop_queued_for=event.highlight_id,
+            outbox_key=_removal_key(event.highlight_id),
         )
 
     async def _on_audience_changed(self, event: HighlightAudienceChanged) -> None:
@@ -201,7 +207,10 @@ class HighlightFederationOutbound(
         kind_changed = event.old_audience_kind != event.audience_kind
         frames = event.frames
         for instance_id in before.keys() - after.keys():
-            if not await self._may_send(event.author_user_id, instance_id):
+            # Its queued envelopes for this highlight go first — delivered
+            # after the removal they would bring the highlight back.
+            await self._drop_queued_for(instance_id, event.highlight_id)
+            if not await self._may_remove(event.author_user_id, instance_id):
                 continue
             await self.send_to_instance(
                 instance_id,
@@ -209,8 +218,12 @@ class HighlightFederationOutbound(
                 {
                     "highlight_id": event.highlight_id,
                     "author_user_id": event.author_user_id,
+                    # v_70: how long the receiver remembers the removal
+                    # when its CREATED hasn't landed yet.
+                    "expires_at": event.expires_at,
                     "occurred_at": event.occurred_at.isoformat(),
                 },
+                outbox_key=_removal_key(event.highlight_id),
             )
         for instance_id, visible in after.items():
             is_new = instance_id not in before
@@ -226,14 +239,21 @@ class HighlightFederationOutbound(
                 continue
             if not await self._may_send(event.author_user_id, instance_id):
                 continue
+            if is_new:
+                # It gets the whole day now: whatever is still queued for it
+                # (a removal from an earlier narrowing, older frames) is
+                # replaced by what follows.
+                await self._drop_queued_for(instance_id, event.highlight_id)
             # New: the whole day. Kept: the row again (with its first frame,
-            # so the envelope is the CREATED every receiver already knows).
+            # so the envelope is the CREATED every receiver already knows —
+            # keyed like the original, so it replaces a queued older slice).
             sending = frames if is_new else frames[:1]
             if not sending:
                 await self.send_to_instance(
                     instance_id,
                     FederationEventType.HIGHLIGHT_CREATED,
                     self._highlight_payload(event, visible),
+                    outbox_key=_frame_key(event.highlight_id, ""),
                 )
                 continue
             for n, frame in enumerate(sending):
@@ -246,6 +266,7 @@ class HighlightFederationOutbound(
                         **self._highlight_payload(event, visible),
                         **self._frame_payload(frame),
                     },
+                    outbox_key=_frame_key(event.highlight_id, frame.id),
                 )
 
     @staticmethod
@@ -423,12 +444,65 @@ class HighlightFederationOutbound(
             highlight.author_user_id, instance_id
         )
 
+    async def may_change_audience(
+        self,
+        old_kind: str,
+        old_audience: tuple[str, ...],
+        kind: str,
+        audience: tuple[str, ...],
+    ) -> bool:
+        """Whether a change of today's audience may go ahead: every
+        household it takes people away from understands v_70.
+
+        A household loses people when it drops out, or stays with fewer of
+        its people (a household-wide audience narrowed to picked people, or
+        picked people removed). An older household applies the removal but
+        keeps no record of it, so a frame still in flight to it, or an older
+        re-sent slice, would bring the highlight back for people the author
+        just removed. Widening is safe for every version (an older household
+        gets the frames it is now meant to have) and is never refused.
+        """
+        before = await self._audience_per_target(old_kind, old_audience)
+        after = await self._audience_per_target(kind, audience)
+        paired: set[str] | None = None
+        for instance_id, had in before.items():
+            if instance_id in after:
+                kept = after[instance_id]
+                if kind != "users":
+                    continue  # household-wide now: everyone there sees it
+                if old_kind == "users" and not set(had) - set(kept):
+                    continue  # picked people before and now, nobody removed
+            if paired is None:
+                paired = set(await self.list_confirmed_peer_ids())
+            if instance_id not in paired:
+                continue  # not paired (any more): it holds nothing to protect
+            if not await self._federation.peer_supports(
+                instance_id,
+                min_version=FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE,
+            ):
+                log.info(
+                    "highlight-outbound: narrowing refused — %s is below v_%d",
+                    instance_id,
+                    FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE,
+                )
+                return False
+        return True
+
     async def _may_send(self, author_user_id: str, instance_id: str) -> bool:
         """The author isn't hidden from *instance_id* (§Privacy) and no
         guardian block covers someone homed there (§CP.F2)."""
         if author_user_id in await self.hidden_for_peer(instance_id):
             return False
         return not await self._guardian_blocks_household(author_user_id, instance_id)
+
+    async def _may_remove(self, author_user_id: str, instance_id: str) -> bool:
+        """A removal is never held back by a guardian block (§CP.F2): it only
+        takes away what the household already holds, which may predate the
+        block. It is skipped only where the author is hidden (§Privacy) —
+        hiding sent ``USER_REMOVED``, which already removed every highlight
+        of theirs there, and a removal would name someone that household no
+        longer knows."""
+        return author_user_id not in await self.hidden_for_peer(instance_id)
 
     async def _fan_to_audience(
         self,
@@ -438,14 +512,64 @@ class HighlightFederationOutbound(
         event_type: FederationEventType,
         payload: dict,
         author_user_id: str,
+        outbox_key: str | None = None,
+        removal: bool = False,
+        drop_queued_for: str | None = None,
     ) -> None:
+        """Send to each household of the audience, its own slice in the body.
+
+        ``removal`` is gated by :meth:`_may_remove` only.
+        ``drop_queued_for`` (a highlight id) first drops that household's
+        queued envelopes for the highlight, which would land after the
+        removal and undo it. ``outbox_key`` keys the queued send (see
+        :func:`_frame_key`)."""
         targets = await self._audience_per_target(audience_kind, audience)
         for instance_id, visible in targets.items():
-            if not await self._may_send(author_user_id, instance_id):
+            if removal:
+                if not await self._may_remove(author_user_id, instance_id):
+                    continue
+            elif not await self._may_send(author_user_id, instance_id):
                 continue
+            if drop_queued_for is not None:
+                await self._drop_queued_for(instance_id, drop_queued_for)
             body = payload
             if "audience" in payload:
                 # Per-target copy: never the whole list (see
                 # :meth:`_audience_per_target`).
                 body = {**payload, "audience": list(visible)}
-            await self.send_to_instance(instance_id, event_type, body)
+            await self.send_to_instance(
+                instance_id, event_type, body, outbox_key=outbox_key
+            )
+
+    async def _drop_queued_for(self, instance_id: str, highlight_id: str) -> None:
+        """Drop every envelope for *highlight_id* still queued for
+        *instance_id* (keyed by :func:`_frame_key` / :func:`_removal_key`)."""
+        dropped = await self._federation.drop_queued_with_key_prefix(
+            instance_id, _highlight_key_prefix(highlight_id)
+        )
+        if dropped:
+            log.info(
+                "highlight-outbound: dropped %d queued envelope(s) for %s to %s",
+                dropped,
+                highlight_id,
+                instance_id,
+            )
+
+
+#: Outbox keys (the local-only ``supersede_key`` column) of a queued highlight
+#: envelope. One per frame and one for a removal, so nothing is replaced but
+#: a re-send of the same frame (a newer slice of the audience); the shared
+#: prefix lets a removal drop everything queued for the highlight first.
+_KEY_PREFIX = "highlight:"
+
+
+def _highlight_key_prefix(highlight_id: str) -> str:
+    return f"{_KEY_PREFIX}{highlight_id}:"
+
+
+def _frame_key(highlight_id: str, frame_id: str) -> str:
+    return f"{_highlight_key_prefix(highlight_id)}frame:{frame_id}"
+
+
+def _removal_key(highlight_id: str) -> str:
+    return f"{_highlight_key_prefix(highlight_id)}removed"

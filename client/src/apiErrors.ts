@@ -71,6 +71,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   HIGHLIGHT_AUDIENCE_MISMATCH: () => t('error.highlight_audience_mismatch'),
   HIGHLIGHT_NOT_TODAY: () => t('error.highlight_not_today'),
   HIGHLIGHT_AUDIENCE_EMPTY: () => t('error.highlight_audience_empty'),
+  HIGHLIGHT_AUDIENCE_PEER_TOO_OLD: () => t('error.highlight_audience_peer_too_old'),
   SPACE_NOT_PUBLIC: () => t('error.space_not_public'),
   // Listing a space on a GFS: only a global space, on servers its owner
   // picks. Publishing a public space would make it global (a tier change).

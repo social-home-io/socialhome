@@ -1269,12 +1269,9 @@ async def test_change_audience_needs_auth(client):
     assert r.status == 401
 
 
-async def test_change_audience_sends_federation_to_dropped_and_new_households(
-    client, monkeypatch
-):
-    """Wired end to end: all paired → one household drops the other."""
+async def _pair(client, *peers: tuple[str, int]) -> None:
     fed_repo = client.app[federation_repo_key]
-    for iid in ("peer-bob", "peer-dora"):
+    for iid, version in peers:
         await fed_repo.save_instance(
             RemoteInstance(
                 id=iid,
@@ -1286,8 +1283,16 @@ async def test_change_audience_sends_federation_to_dropped_and_new_households(
                 local_inbox_id=f"wh-{iid}",
                 status=PairingStatus.CONFIRMED,
                 source=InstanceSource.MANUAL,
+                proto_version=version,
             )
         )
+
+
+async def test_change_audience_sends_federation_to_dropped_and_new_households(
+    client, monkeypatch
+):
+    """Wired end to end: all paired → one household drops the other."""
+    await _pair(client, ("peer-bob", 70), ("peer-dora", 70))
     sent: list[tuple[str, FederationEventType]] = []
 
     async def _capture(_self, *, to_instance_id, event_type, payload, **_kw):
@@ -1318,3 +1323,122 @@ async def test_change_audience_sends_federation_to_dropped_and_new_households(
             ("peer-dora", FederationEventType.HIGHLIGHT_DELETED),
         ]
     )
+
+
+async def test_narrowing_away_from_an_older_household_is_409(client, monkeypatch):
+    """A household below v_70 keeps no record of a removal: taking the
+    highlight away from it waits (409 HIGHLIGHT_AUDIENCE_PEER_TOO_OLD,
+    nothing changed, nothing sent); widening to it is never refused."""
+    await _pair(client, ("peer-bob", 70), ("peer-dora", 69))
+    sent: list[tuple[str, FederationEventType]] = []
+
+    async def _capture(_self, *, to_instance_id, event_type, payload, **_kw):
+        sent.append((to_instance_id, event_type))
+
+    monkeypatch.setattr(
+        type(client.app[federation_service_key]), "send_event", _capture
+    )
+    first = await client.post(
+        "/api/highlights/frames",
+        json={
+            "frame_type": "image",
+            "media_url": "/api/media/a.webp",
+            "audience_kind": "households",
+            "audience": ["peer-bob"],
+        },
+        headers=_auth(client),
+    )
+    highlight_id = (await first.json())["highlight"]["id"]
+    resp = await _patch_audience(client, highlight_id, {"audience_kind": "all_paired"})
+    assert resp.status == 200
+    sent.clear()
+    resp = await _patch_audience(
+        client, highlight_id, {"audience_kind": "households", "audience": ["peer-bob"]}
+    )
+    assert resp.status == 409
+    assert (await resp.json())["error"]["code"] == "HIGHLIGHT_AUDIENCE_PEER_TOO_OLD"
+    assert sent == []
+    detail = await client.get(f"/api/highlights/{highlight_id}", headers=_auth(client))
+    assert (await detail.json())["highlight"]["audience_kind"] == "all_paired"
+
+
+async def test_changing_the_audience_is_rate_limited_per_author(client):
+    """Six changes an hour per author: each one can send the day's frames
+    to every newly added household, so the PATCH has its own bucket."""
+    first = await client.post(
+        "/api/highlights/frames",
+        json={"frame_type": "image", "media_url": "/api/media/a.webp"},
+        headers=_auth(client),
+    )
+    highlight_id = (await first.json())["highlight"]["id"]
+    kinds = ["households", "all_paired"] * 3
+    for kind in kinds:
+        resp = await _patch_audience(
+            client, highlight_id, {"audience_kind": kind, "audience": ["peer-x"]}
+        )
+        assert resp.status == 200, kind
+    resp = await _patch_audience(client, highlight_id, {"audience_kind": "all_paired"})
+    assert resp.status == 429
+    # Reading it is not limited by the change bucket.
+    detail = await client.get(f"/api/highlights/{highlight_id}", headers=_auth(client))
+    assert detail.status == 200
+
+
+async def test_the_author_reads_where_else_todays_highlight_opens(client):
+    """``GET …/audience`` (author only): the audience, whether it has a public
+    link, and the live shares — the household feed and each space by name —
+    so the change sheet says plainly who can still open it."""
+    h = _auth(client)
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Trip Group", "space_type": "private"},
+        headers=h,
+    )
+    space_id = (await r.json())["id"]
+    r = await client.post(
+        "/api/highlights/frames",
+        json={
+            "frame_type": "image",
+            "media_url": "/api/media/x.webp",
+            "audience_kind": "households",
+        },
+        headers=h,
+    )
+    highlight_id = (await r.json())["highlight"]["id"]
+    resp = await client.get(f"/api/highlights/{highlight_id}/audience", headers=h)
+    assert resp.status == 200
+    assert await resp.json() == {
+        "audience_kind": "households",
+        "audience": [],
+        "published": False,
+        "shared": {"household": False, "spaces": []},
+    }
+    for body in (
+        {"scope": "household"},
+        {"scope": "space", "space_id": space_id},
+    ):
+        r = await client.post(
+            f"/api/highlights/{highlight_id}/share", json=body, headers=h
+        )
+        assert r.status in (201, 202), await r.text()
+    resp = await client.get(f"/api/highlights/{highlight_id}/audience", headers=h)
+    body = await resp.json()
+    assert body["shared"] == {
+        "household": True,
+        "spaces": [{"id": space_id, "name": "Trip Group"}],
+    }
+
+
+async def test_only_the_author_reads_where_it_opens(client):
+    """A housemate who reads it gets 403; an unknown id the usual 404."""
+    _, anna = await _local_user(client, "anna")
+    r = await client.post(
+        "/api/highlights/frames",
+        json={"frame_type": "image", "media_url": "/api/media/x.webp"},
+        headers=_auth(client),
+    )
+    highlight_id = (await r.json())["highlight"]["id"]
+    resp = await client.get(f"/api/highlights/{highlight_id}/audience", headers=anna)
+    assert resp.status == 403
+    resp = await client.get("/api/highlights/nope/audience", headers=_auth(client))
+    assert resp.status == 404

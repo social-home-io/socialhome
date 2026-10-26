@@ -75,6 +75,8 @@ def stack():
     federation = MagicMock()
     federation.own_instance_id = "self"
     federation.send_event = AsyncMock()
+    federation.drop_queued_with_key_prefix = AsyncMock(return_value=0)
+    federation.peer_supports = AsyncMock(return_value=True)
     federation_repo = MagicMock()
     user_repo = MagicMock()
     bus = MagicMock()  # not used in unit tests; .wire() is exercised separately
@@ -631,7 +633,13 @@ async def test_narrowing_deletes_at_dropped_households_only(audience_stack):
         ("peer-dora", FederationEventType.HIGHLIGHT_DELETED)
     ]
     deleted = next(p for to, _, p in sent if to == "peer-dora")
-    assert set(deleted) == {"highlight_id", "author_user_id", "occurred_at"}
+    # v_70: ``expires_at`` bounds how long the receiver remembers it.
+    assert set(deleted) == {
+        "highlight_id",
+        "author_user_id",
+        "expires_at",
+        "occurred_at",
+    }
     bob = [(ev, p) for to, ev, p in sent if to == "peer-bob"]
     assert [ev for ev, _ in bob] == [FederationEventType.HIGHLIGHT_CREATED]
     assert bob[0][1]["audience_kind"] == "households"
@@ -754,3 +762,175 @@ async def test_a_remote_authors_change_is_never_re_fanned(audience_stack):
         _audience_event("all_paired", (), "households", (), author="uid-bob")
     )
     assert _sent(fed) == []
+
+
+# ─── #1191 review: queued envelopes, removals, the v_70 gate ─────────────
+
+
+def _keys(fed) -> dict[tuple[str, FederationEventType, str | None], str | None]:
+    return {
+        (
+            c.kwargs["to_instance_id"],
+            c.kwargs["event_type"],
+            c.kwargs["payload"].get("frame_id"),
+        ): c.kwargs.get("outbox_key")
+        for c in fed.send_event.call_args_list
+    }
+
+
+async def test_every_frame_envelope_is_keyed_per_frame(stack):
+    """Each frame is queued under its own key — a later frame never replaces
+    an earlier one, and a re-send of the same frame replaces its older
+    slice."""
+    out, fed, fed_repo, user_repo = stack
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-a")])
+    await out._on_frame_added(_frame_event(is_first=True))
+    assert fed.send_event.call_args.kwargs["outbox_key"] == "highlight:s-1:frame:f-1"
+
+
+async def test_a_removal_drops_what_is_still_queued_for_the_highlight_first(
+    audience_stack,
+):
+    """Dora's household drops out: its queued envelopes for the highlight
+    are dropped before the removal is sent, so none lands after it."""
+    out, fed = audience_stack
+    order: list[str] = []
+
+    async def _drop(iid, prefix):
+        order.append(f"drop {iid} {prefix}")
+        return 0
+
+    async def _send(**kw):
+        order.append(f"send {kw['to_instance_id']} {kw['event_type'].value}")
+
+    fed.drop_queued_with_key_prefix.side_effect = _drop
+    fed.send_event.side_effect = _send
+    await out._on_audience_changed(
+        _audience_event("all_paired", (), "households", ("peer-bob",))
+    )
+    dora = [o for o in order if "peer-dora" in o]
+    assert dora == [
+        "drop peer-dora highlight:s-1:",
+        f"send peer-dora {FederationEventType.HIGHLIGHT_DELETED.value}",
+    ]
+    assert _keys(fed)[("peer-dora", FederationEventType.HIGHLIGHT_DELETED, None)] == (
+        "highlight:s-1:removed"
+    )
+    # Bob's household stays: nothing of its queue is dropped, and its
+    # re-sent first frame replaces a queued older slice by key.
+    assert not any(o.startswith("drop peer-bob") for o in order)
+    assert _keys(fed)[("peer-bob", FederationEventType.HIGHLIGHT_CREATED, "f-1")] == (
+        "highlight:s-1:frame:f-1"
+    )
+
+
+async def test_a_new_household_drops_a_queued_removal_before_the_day(
+    audience_stack,
+):
+    """Widening again: a removal still queued for Dora's household from an
+    earlier narrowing must not land after the day it now gets."""
+    out, fed = audience_stack
+    await out._on_audience_changed(
+        _audience_event("households", ("peer-bob",), "all_paired", ())
+    )
+    fed.drop_queued_with_key_prefix.assert_awaited_once_with(
+        "peer-dora", "highlight:s-1:"
+    )
+
+
+async def test_a_removal_is_not_held_back_by_a_guardian_block(stack):
+    """§CP.F2 keeps a protected account's content from a household — never
+    the removal of what it already holds."""
+    out, fed, fed_repo, user_repo = stack
+    out.attach_child_protection(_HouseholdBlockCp())
+    homes = {"uid-kid": "self", "uid-x": "peer-ok"}
+
+    async def _home(uid):
+        return homes.get(uid)
+
+    user_repo.get_instance_for_user = AsyncMock(side_effect=_home)
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[_peer("peer-ok"), _peer("peer-blocked")],
+    )
+    await out._on_audience_changed(
+        _audience_event("all_paired", (), "households", ("peer-ok",), author="uid-kid")
+    )
+    assert ("peer-blocked", FederationEventType.HIGHLIGHT_DELETED) in {
+        (to, ev) for to, ev, _ in _sent(fed)
+    }
+
+
+async def test_a_deleted_highlight_reaches_a_guardian_blocked_household(stack):
+    out, fed, fed_repo, user_repo = stack
+    out.attach_child_protection(_HouseholdBlockCp())
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-blocked")])
+    await out._on_highlight_removed(
+        HighlightRemoved(
+            highlight_id="s-1",
+            author_user_id="uid-kid",
+            audience_kind="all_paired",
+            audience=(),
+        )
+    )
+    call = fed.send_event.call_args.kwargs
+    assert call["event_type"] is FederationEventType.HIGHLIGHT_DELETED
+    assert call["outbox_key"] == "highlight:s-1:removed"
+    fed.drop_queued_with_key_prefix.assert_awaited_once_with(
+        "peer-blocked", "highlight:s-1:"
+    )
+
+
+async def test_a_removal_skips_a_household_the_author_is_hidden_from(
+    audience_stack,
+):
+    """Hiding sent USER_REMOVED there (every highlight of theirs is gone);
+    a removal would only name someone that household no longer knows."""
+    out, fed = audience_stack
+    out._visibility_repo = _FakeVisibilityRepo({"peer-dora": frozenset({"uid-author"})})
+    await out._on_audience_changed(
+        _audience_event("all_paired", (), "households", ("peer-bob",))
+    )
+    assert "peer-dora" not in {to for to, _, _ in _sent(fed)}
+
+
+@pytest.mark.parametrize(
+    ("old_kind", "old", "kind", "new", "asked"),
+    [
+        # Dora's household drops out.
+        ("all_paired", (), "households", ("peer-bob",), {"peer-dora"}),
+        # Bob's household stays but keeps only Bea.
+        ("users", ("uid-bob", "uid-bea"), "users", ("uid-bea",), {"peer-bob"}),
+        # Household-wide → picked people: Bob's household loses everyone else.
+        ("households", ("peer-bob",), "users", ("uid-bob",), {"peer-bob"}),
+    ],
+)
+async def test_a_narrowing_waits_for_households_below_v70(
+    audience_stack, old_kind, old, kind, new, asked
+):
+    out, fed = audience_stack
+    fed.peer_supports = AsyncMock(return_value=False)
+    assert not await out.may_change_audience(old_kind, old, kind, new)
+    assert {c.args[0] for c in fed.peer_supports.call_args_list} == asked
+    assert all(c.kwargs["min_version"] == 70 for c in fed.peer_supports.call_args_list)
+    fed.peer_supports = AsyncMock(return_value=True)
+    assert await out.may_change_audience(old_kind, old, kind, new)
+
+
+@pytest.mark.parametrize(
+    ("old_kind", "old", "kind", "new"),
+    [
+        ("households", ("peer-bob",), "all_paired", ()),
+        ("users", ("uid-bob",), "users", ("uid-bob", "uid-bea", "uid-dora")),
+        ("users", ("uid-bob",), "households", ("peer-bob",)),
+        ("all_paired", (), "households", ("peer-bob", "peer-dora")),
+    ],
+)
+async def test_widening_is_never_gated_on_version(
+    audience_stack, old_kind, old, kind, new
+):
+    out, fed = audience_stack
+    fed.peer_supports = AsyncMock(return_value=False)
+    assert await out.may_change_audience(old_kind, old, kind, new)
+    fed.peer_supports.assert_not_awaited()

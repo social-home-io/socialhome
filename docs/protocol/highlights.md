@@ -93,48 +93,96 @@ the author has posted today: "Goes to: <audience> — you chose this at
 08:12. New frames go to the same people." The one way to change it is
 explicit — **Change for all of today…** (owner decision 1):
 `PATCH /api/highlights/{id}/audience` `{audience_kind, audience}`, author
-only, today's highlight only (`409 HIGHLIGHT_NOT_TODAY` otherwise). The
-sheet says what changes for everyone, and that watching can't be undone:
-people who already watched keep what they saw.
+only, today's highlight only (`409 HIGHLIGHT_NOT_TODAY` otherwise), at
+most 6 changes an hour per author (`429`). The sheet says what changes for
+everyone, and that watching can't be undone: people who already watched
+keep what they saw.
+
+The audience is only one way in, and the sheet never overpromises. On
+opening it reads `GET /api/highlights/{id}/audience` (author only:
+`{audience_kind, audience, published, shared: {household, spaces: [{id,
+name}]}}`). A narrowing then says plainly who can still open it — "Everyone
+in your household can still open it from your post in the household feed",
+"People in <space> can still open it from your post" (a `?via_post=` read
+follows the share, not the audience) — and, when it has a public link,
+offers **Also remove the public link**, pre-ticked: confirmed, the SPA
+unpublishes it (`DELETE /api/highlights/{id}/publish`) right after the
+change. Unticked, the sheet says anyone with the link can still watch it.
 
 `HighlightService.change_audience` updates the row and publishes
 `HighlightAudienceChanged` (old and new audience, the day's frames).
-Locally, members outside the new audience lose it at once — every read
-goes through `_IN_AUDIENCE_SQL` on the row. The outbound compares the
-per-household slices before and after
-(`HighlightFederationOutbound._audience_per_target`) and tells each
-household only what changed for it, with the events every receiver already
-applies:
+**Appending a frame and changing the audience are serialized per author**
+(an `asyncio.Lock` held from reading today's row to publishing the event),
+so a frame is always addressed with the audience it is stored under — a
+frame racing a narrowing never reaches the household that just dropped
+out, and one racing a widening reaches the new household. Locally, members
+outside the new audience lose it at once — every read goes through
+`_IN_AUDIENCE_SQL` on the row. The outbound compares the per-household
+slices before and after (`HighlightFederationOutbound._audience_per_target`)
+and tells each household only what changed for it, with the existing event
+types:
 
-| Household | Sent | Receiver does (any version since #158) |
+| Household | Sent | Receiver does |
 |---|---|---|
-| drops out | `HIGHLIGHT_DELETED` (no audience) | deletes the highlight, its frames, views and reactions (`_on_highlight_deleted`); no later frame is addressed to it |
-| stays, slice changed (kind, or its own picked people) | `HIGHLIGHT_CREATED` re-sent: the row with its new trimmed slice, plus the first frame | upserts the audience (`save_highlight` `ON CONFLICT(id) DO UPDATE`), re-gates its users at read time; the frame upsert is a no-op |
-| new | `HIGHLIGHT_CREATED` (first frame) + `HIGHLIGHT_FRAME_APPENDED` per later frame, in order | stores the day as if it had been there from the start |
+| drops out | its queued envelopes for the highlight are dropped first, then `HIGHLIGHT_DELETED` (no audience; v_70 adds `expires_at`) | deletes the highlight, its frames, views and reactions (`_on_highlight_deleted`); v_70 remembers the removal (below) |
+| stays, slice changed (kind, or its own picked people) | `HIGHLIGHT_CREATED` re-sent: the row with its new trimmed slice, plus the first frame — queued under the first frame's key, so it replaces a still-queued older slice | upserts the audience (`save_highlight`), re-gates its users at read time; v_70 only when newer than the audience it holds |
+| new | its queued envelopes for the highlight (an earlier removal) are dropped, then `HIGHLIGHT_CREATED` (first frame) + `HIGHLIGHT_FRAME_APPENDED` per later frame, in order | stores the day as if it had been there from the start |
 | stays, slice unchanged | nothing | — |
 
-Hidden authors (§Privacy) and guardian blocks (§CP.F2) gate every send as
-for any frame. The per-household trim (#1173) holds for every envelope.
-Only today's frames travel — never an earlier day.
+Hidden authors (§Privacy) and guardian blocks (§CP.F2) gate every send of
+content as for any frame. **A removal is never held back by a guardian
+block** — it only takes away what the household already holds, which may
+predate the block (this holds for an author's own delete too). It is skipped
+only where the author is hidden: hiding sent `USER_REMOVED`, which already
+removed every highlight of theirs there. The per-household trim (#1173)
+holds for every envelope. Only today's frames travel — never an earlier day.
 
-**No protocol version.** These are the existing event types with their
-existing payload shapes. Every receiver since the Highlights pillar (#158)
-deletes on `HIGHLIGHT_DELETED` and upserts the audience on
-`HIGHLIGHT_CREATED`, so an older peer applies a narrowing, a re-gate and a
-widening exactly as a current one. No sync stream carries highlights, so
-`SYNC_RECORD_LINES` is untouched.
+**Envelopes arrive out of order.** The outbox retries by `next_attempt_at`
+while live sends go straight out, so without more care a frame sent before
+a narrowing could land after the removal (the lazy-parent path of
+`HIGHLIGHT_FRAME_APPENDED` would recreate the highlight), and an older
+re-sent slice could land after a newer one. Two defences:
 
-**Cost per change** (once per author action, never on a timer): one small
-envelope (~0.3 kB) per dropped or re-gated household, plus ≤ 30 frame
-envelopes per newly added household. Worst realistic case: widening a
-30-frame day from one household to 20 paired households = 19 × 30 = 570
-envelopes (~0.5 kB each, ≈ 0.3 MB) — the cost of posting the day again,
-once. Media isn't re-sent by this flow.
+* **Sender (every receiver version).** Every highlight envelope is queued
+  under a local outbox key (`supersede_key`): `highlight:<id>:frame:<frame
+  id>` per frame, `highlight:<id>:removed` for a removal. Before a removal
+  (an audience change or the author's delete) the household's queued rows
+  with prefix `highlight:<id>:` are dropped
+  (`FederationService.drop_queued_with_key_prefix`), so nothing queued
+  lands after it; a re-sent first frame replaces its queued older slice by
+  key.
+* **Receiver (v_70).** A household remembers, per remote highlight, the
+  author's `occurred_at` of the newest audience it applied and of the
+  newest removal (`highlight_stamps`, migration 0128, kept until the
+  highlight would have expired). A `HIGHLIGHT_CREATED` /
+  `HIGHLIGHT_FRAME_APPENDED` no newer than a removal is refused — also for
+  a highlight it never held (the removal carries `expires_at`, capped at 90
+  days); one older than the newest audience keeps the stored audience; a
+  `HIGHLIGHT_DELETED` older than the newest audience is stale (the author
+  narrowed, then widened again). Widening again later is newer than the
+  removal, so it brings the highlight back as it should.
 
-What a change can't reach: someone who reads it through a feed / space
-share (`?via_post=`) or a public link — those follow the share, not the
-audience. The composer's lock card says so when the highlight has a
-public link ("wherever you shared it" otherwise).
+**Protocol version v_70** (`MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE`). An older
+receiver applies a removal but keeps no record of it, so a frame already
+in flight could still bring the highlight back for people the author just
+removed. A change that **takes people away** from a household below v_70
+— it drops out, or stays with fewer of its people (a household-wide
+audience narrowed to picked people, or picked people removed) — is
+refused with `409 HIGHLIGHT_AUDIENCE_PEER_TOO_OLD` ("Some paired
+households need to update Social Home before you can take today's
+highlight away from people there"), before anything is stored or sent.
+**Widening is never refused**: an older household simply gets the frames.
+No sync stream carries highlights, so `SYNC_RECORD_LINES` is untouched.
+
+**Cost per change** (once per author action, never on a timer, at most 6 an
+hour per author): one small envelope (~0.3 kB) per dropped or re-gated
+household, plus ≤ 30 frame envelopes per newly added household. Worst
+realistic case: widening a 30-frame day from one household to 20 paired
+households = 19 × 30 = 570 envelopes (~0.5 kB each, ≈ 0.3 MB) — the cost of
+posting the day again, once; at the rate limit ≤ 6 × 570 ≈ 3 400 envelopes
+(≈ 1.7 MB) an hour for one author flipping between the two. Media isn't
+re-sent by this flow. The outbox purge before a removal is one indexed
+read per dropped household (a delete only when something is queued).
 
 ```mermaid
 sequenceDiagram
@@ -147,17 +195,19 @@ sequenceDiagram
     participant E as Emil's HFS<br/>(new)
 
     U->>SA: PATCH /api/highlights/{id}/audience<br/>{audience_kind, audience}
-    SA->>SA: author? today? set_audience
+    SA->>SA: author lock: author? today?<br/>v_70 gate (narrowing)? set_audience
     SA->>Out: HighlightAudienceChanged<br/>(old, new, frames)
     Out->>Out: per-household slices before / after
-    Out->>D: HIGHLIGHT_DELETED
-    Note over D: delete highlight + frames
+    Out->>Out: drop D's queued envelopes<br/>for the highlight
+    Out->>D: HIGHLIGHT_DELETED (expires_at)
+    Note over D: delete highlight + frames,<br/>stamp removed_at (v_70)
     Out->>B: HIGHLIGHT_CREATED (new slice, frame 1)
-    Note over B: upsert audience,<br/>re-gate users at read time
+    Note over B: newer than its audience?<br/>upsert, re-gate users at read time
+    Out->>Out: drop E's queued envelopes<br/>for the highlight
     Out->>E: HIGHLIGHT_CREATED (frame 1)
     Out->>E: HIGHLIGHT_FRAME_APPENDED × (n − 1)
     SA-->>U: 200 {highlight}
-    Note over U,E: later frames go to B and E only
+    Note over U,E: later frames go to B and E only;<br/>a stale frame reaching D is refused
 ```
 
 `tests/protocol/test_highlight_audience_change.py`.

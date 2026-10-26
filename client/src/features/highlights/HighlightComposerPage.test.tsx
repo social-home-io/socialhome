@@ -39,6 +39,7 @@ import HighlightComposerPage, { audienceFromFriends } from './HighlightComposerP
 const get = api.get as ReturnType<typeof vi.fn>
 const post = api.post as ReturnType<typeof vi.fn>
 const patch = api.patch as ReturnType<typeof vi.fn>
+const del = api.delete as ReturnType<typeof vi.fn>
 const me = currentUser.value as unknown as Record<string, unknown>
 const TODAY = new Date().toISOString().slice(0, 10)
 
@@ -71,7 +72,15 @@ const FRIENDS = {
 
 function mockServer(
   today: { kind: string, ids: string[], frames?: number } | null,
-  { friends = FRIENDS as unknown, published = false }: { friends?: unknown, published?: boolean } = {},
+  {
+    friends = FRIENDS as unknown,
+    published = false,
+    shared = { household: false, spaces: [] as Array<{ id: string, name: string }> },
+  }: {
+    friends?: unknown
+    published?: boolean
+    shared?: { household: boolean, spaces: Array<{ id: string, name: string }> }
+  } = {},
 ) {
   get.mockReset()
   get.mockImplementation((path: string) => {
@@ -90,6 +99,9 @@ function mockServer(
       }] : [])
     }
     if (path === '/api/highlights/h1/publish') return Promise.resolve({ published })
+    if (path === '/api/highlights/h1/audience' && today) {
+      return Promise.resolve({ audience_kind: today.kind, audience: today.ids, published, shared })
+    }
     return Promise.reject(new Error(`unexpected GET ${path}`))
   })
 }
@@ -375,6 +387,67 @@ describe('Change for all of today…', () => {
     expect((await sheet.findByRole('alert')).textContent).toContain("Couldn't change it")
     expect((sheet.getByLabelText(/Your household only/) as HTMLInputElement).checked).toBe(true)
     expect(view.getByText('Goes to: all your paired households')).toBeTruthy()
+  })
+
+  it('a narrowing with a public link offers to remove it, pre-ticked, and does on confirm', async () => {
+    mockServer({ kind: 'all_paired', ids: [], frames: 2 }, { published: true })
+    const view = render(<HighlightComposerPage />)
+    await view.findByText('Goes to: all your paired households')
+    fireEvent.click(view.getByRole('button', { name: 'Change for all of today…' }))
+    const sheet = within(await view.findByRole('dialog'))
+    // Widening or no change: nothing about the link.
+    expect(sheet.queryByLabelText('Also remove the public link')).toBeNull()
+    fireEvent.click(sheet.getByLabelText(/Your household only/))
+    const box = await sheet.findByLabelText('Also remove the public link') as HTMLInputElement
+    expect(box.checked).toBe(true)
+    expect(sheet.queryByText('Anyone with the public link can still watch it.')).toBeNull()
+    patch.mockResolvedValue({
+      highlight: { id: 'h1', author_user_id: 'u-me', highlight_date: TODAY, audience_kind: 'households', audience: [] },
+    })
+    del.mockReset()
+    del.mockResolvedValue(undefined)
+    fireEvent.click(sheet.getByRole('button', { name: 'Change for everyone' }))
+    await waitFor(() => expect(del).toHaveBeenCalledWith('/api/highlights/h1/publish'))
+    expect(patch.mock.invocationCallOrder[0]).toBeLessThan(del.mock.invocationCallOrder[0])
+    // The lock card no longer mentions a public link.
+    expect(await view.findByText(/They also show wherever you shared it\./)).toBeTruthy()
+  })
+
+  it('unticked, the link stays — and the sheet says so', async () => {
+    mockServer({ kind: 'all_paired', ids: [], frames: 2 }, { published: true })
+    const view = render(<HighlightComposerPage />)
+    await view.findByText('Goes to: all your paired households')
+    fireEvent.click(view.getByRole('button', { name: 'Change for all of today…' }))
+    const sheet = within(await view.findByRole('dialog'))
+    fireEvent.click(sheet.getByLabelText(/Your household only/))
+    fireEvent.click(await sheet.findByLabelText('Also remove the public link'))
+    expect(sheet.getByText('Anyone with the public link can still watch it.')).toBeTruthy()
+    expect(sheet.getByText("Won't see it in their Highlights any more:")).toBeTruthy()
+    patch.mockResolvedValue({
+      highlight: { id: 'h1', author_user_id: 'u-me', highlight_date: TODAY, audience_kind: 'households', audience: [] },
+    })
+    del.mockReset()
+    fireEvent.click(sheet.getByRole('button', { name: 'Change for everyone' }))
+    await waitFor(() => expect(view.queryByRole('dialog')).toBeNull())
+    expect(del).not.toHaveBeenCalled()
+  })
+
+  it('a narrowing of a shared highlight says who can still open it from the post', async () => {
+    mockServer(
+      { kind: 'all_paired', ids: [], frames: 2 },
+      { shared: { household: true, spaces: [{ id: 's1', name: 'Trip Group' }, { id: 's2', name: 'Book club' }] } },
+    )
+    const view = render(<HighlightComposerPage />)
+    await view.findByText('Goes to: all your paired households')
+    fireEvent.click(view.getByRole('button', { name: 'Change for all of today…' }))
+    const sheet = within(await view.findByRole('dialog'))
+    fireEvent.click(sheet.getByLabelText(/Your household only/))
+    expect(await sheet.findByText(
+      'Everyone in your household can still open it from your post in the household feed.',
+    )).toBeTruthy()
+    expect(sheet.getByText('People in Trip Group, Book club can still open it from your post.')).toBeTruthy()
+    expect(sheet.getByText("Won't see it in their Highlights any more:")).toBeTruthy()
+    expect(sheet.queryByLabelText('Also remove the public link')).toBeNull()
   })
 
   it('Keep closes it and changes nothing', async () => {

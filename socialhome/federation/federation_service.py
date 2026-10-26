@@ -623,6 +623,13 @@ class FederationService:
         (a guardian block, §CP.F2, may have come since)."""
         return await self._outbox_repo.delete_pending_of_types(instance_id, event_types)
 
+    async def drop_queued_with_key_prefix(self, instance_id: str, prefix: str) -> int:
+        """Drop the not-yet-delivered envelopes for ``instance_id`` whose
+        outbox key starts with *prefix*; return how many. A highlight's
+        removal drops the frames still queued for it (they would land after
+        the removal and bring it back)."""
+        return await self._outbox_repo.drop_pending_with_key_prefix(instance_id, prefix)
+
     def _claim_state_send(self, instance_id: str, state_key: str | None) -> int | None:
         """Mark this send as the newest one of a latest-only state to
         ``instance_id``; return its ticket (``None`` for ordinary events)."""

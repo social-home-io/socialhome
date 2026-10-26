@@ -372,6 +372,18 @@ class InMemoryOutboxRepo:
         ]
         return before - len(self.enqueued)
 
+    async def drop_pending_with_key_prefix(self, instance_id: str, prefix: str) -> int:
+        before = len(self.enqueued)
+        self.enqueued = [
+            e
+            for e in self.enqueued
+            if not (
+                e["instance_id"] == instance_id
+                and (e.get("supersede_key") or "").startswith(prefix)
+            )
+        ]
+        return before - len(self.enqueued)
+
     async def list_due(self, limit: int = 50):
         return []
 
@@ -5762,6 +5774,30 @@ async def test_drop_queued_drops_only_that_households_envelopes_of_those_types()
     assert [(e["instance_id"], e["event_type"]) for e in outbox.enqueued] == [
         ("peer-b", FederationEventType.SPACE_POST_CREATED),
         ("peer-c", FederationEventType.USER_UPDATED),
+    ]
+
+
+async def test_drop_queued_with_key_prefix_drops_only_that_households_keyed_rows():
+    """A highlight's removal drops what is still queued for the highlight
+    to that household (outbox key prefix) — nothing else."""
+    outbox = InMemoryOutboxRepo()
+    svc, _ = _make_service(outbox_repo=outbox)
+    HA = FederationEventType.HIGHLIGHT_FRAME_APPENDED
+    for inst, key in (
+        ("peer-b", "highlight:h1:frame:f1"),
+        ("peer-b", "highlight:h1:frame:f2"),
+        ("peer-b", "highlight:h2:frame:f3"),
+        ("peer-b", None),
+        ("peer-c", "highlight:h1:frame:f1"),
+    ):
+        await outbox.enqueue(
+            instance_id=inst, event_type=HA, payload_json="{}", supersede_key=key
+        )
+    assert await svc.drop_queued_with_key_prefix("peer-b", "highlight:h1:") == 2
+    assert [(e["instance_id"], e["supersede_key"]) for e in outbox.enqueued] == [
+        ("peer-b", "highlight:h2:frame:f3"),
+        ("peer-b", None),
+        ("peer-c", "highlight:h1:frame:f1"),
     ]
 
 

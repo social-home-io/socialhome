@@ -1108,3 +1108,29 @@ async def test_relayed_deletes_past_an_origins_cap_are_queued_ordinary(
         assert left > timedelta(days=29)
     for left in by_kind["capped"]:
         assert timedelta(days=6) < left <= timedelta(days=7)
+
+
+async def test_pending_rows_are_dropped_by_key_prefix(env):
+    """A highlight's removal drops every envelope still queued for that
+    highlight to that peer — every frame, any earlier removal — and nothing
+    of another highlight, another peer, or an already-delivered row."""
+    repo = env.outbox_repo
+    HC = FederationEventType.HIGHLIGHT_CREATED
+    HA = FederationEventType.HIGHLIGHT_FRAME_APPENDED
+    for eid, key, ev in (
+        ("f1", "highlight:h1:frame:f1", HC),
+        ("f2", "highlight:h1:frame:f2", HA),
+        ("rm", "highlight:h1:removed", FederationEventType.HIGHLIGHT_DELETED),
+        ("done", "highlight:h1:frame:f3", HA),
+        ("other", "highlight:h10:frame:f9", HA),
+    ):
+        await _seed_keyed(
+            env, eid, key=key, created_at="2026-01-01T00:00:00+00:00", event_type=ev
+        )
+    await env.db.enqueue(
+        "UPDATE federation_outbox SET status='delivered' WHERE id='done'"
+    )
+    assert await repo.drop_pending_with_key_prefix("peer", "highlight:h1:") == 3
+    assert await repo.drop_pending_with_key_prefix("peer", "highlight:h1:") == 0
+    assert await repo.drop_pending_with_key_prefix("other-peer", "highlight:h") == 0
+    assert await _pending_ids(env, "peer") == {"other"}
