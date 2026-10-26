@@ -36,6 +36,8 @@ const { api } = await import('@/api')
 const { PersonSheet, openPerson, closePerson } = await import('./PersonSheet')
 const blocks = await import('@/store/blocks')
 const follows = await import('@/store/follows')
+const momentPublic = await import('@/store/momentPublic')
+const auth = await import('@/store/auth')
 const { statusEditorOpen, StatusEditorHost } = await import('./StatusEditor')
 
 const apiMock = api as unknown as Record<'get' | 'post' | 'delete', ReturnType<typeof vi.fn>>
@@ -97,6 +99,9 @@ beforeEach(() => {
   callPickerSpy.mockReset()
   blocks._resetBlocksForTest()
   follows._resetFollowsForTest()
+  momentPublic._resetGfsConnectionsForTests()
+  momentPublic.follows.value = []
+  ;(auth.currentUser.value as unknown as Record<string, unknown>).restrictions = []
   apiDefaults()
 })
 
@@ -489,5 +494,97 @@ describe('PersonSheet', () => {
     expect(q(document, 'person-sheet')).toBeNull()
     expect(document.activeElement).toBe(opener)
     opener.remove()
+  })
+})
+
+describe('PersonSheet — one Follow (decision 7)', () => {
+  const DEMO = { id: 'g1', display_name: 'Demo GFS', status: 'active' }
+  const GFS_FOLLOW = {
+    follower_user_id: 'u-me', followed_user_id: 'u-noor', gfs_id: 'g1',
+    followed_username: 'noor', followed_display_name: 'Noor Haddad', created_at: '',
+  }
+  /** Someone known only from their public moments: the household lookup
+   *  404s, and the opener says which GFS they came through. */
+  const noor = { display_name: 'Noor Haddad', bio: 'Beekeeper.', public_via: { gfs_id: 'g1' } }
+  const followRow = () => q(document, 'person-follow')!
+
+  it('a paired person: one household Follow row that says what it does, nothing in the buttons', async () => {
+    render(<PersonSheet />)
+    await act(async () => { openPerson('ru-chidi', { person: chidi({ personal_alias: null }) }) })
+    const row = followRow()
+    expect(row.classList.contains('sh-person-sheet__row--btn')).toBe(true)
+    expect(row.closest('.sh-person-sheet__actions')).toBeNull()
+    expect(document.querySelectorAll('[data-testid="person-follow"]')).toHaveLength(1)
+    expect(row.textContent).toContain('Follow')
+    expect(row.textContent).toContain(
+      'See \u2068Chidi Okafor\u2069’s moments for as long as they keep them, instead of 24 hours · stays between your households')
+    await act(async () => { fireEvent.click(row) })
+    expect(apiMock.post).toHaveBeenCalledWith('/api/moments/follows', { user_id: 'ru-chidi' })
+    expect(apiMock.post).not.toHaveBeenCalledWith('/api/moments/public/follows', expect.anything())
+  })
+
+  it('own household: the same Follow label as everyone else', async () => {
+    render(<PersonSheet />)
+    await act(async () => { openPerson('u-oma', { person: oma() }) })
+    expect(followRow().querySelector('.sh-person-sheet__row-value')?.textContent).toBe('Follow')
+  })
+
+  it('someone known only from a GFS: a GFS follow that says the GFS learns it', async () => {
+    apiDefaults(path => (path === '/api/gfs/connections' ? [DEMO] : path === '/api/moments/public/follows' ? [] : undefined))
+    apiMock.post.mockResolvedValueOnce(GFS_FOLLOW)
+    render(<PersonSheet />)
+    await act(async () => { openPerson('u-noor', { person: noor }) })
+    await waitFor(() => expect(followRow().textContent)
+      .toContain('Through \u2068Demo GFS\u2069 — the GFS learns that you follow them'))
+    expect(followRow().getAttribute('aria-pressed')).toBe('false')
+    await act(async () => { fireEvent.click(followRow()) })
+    expect(apiMock.post).toHaveBeenCalledWith('/api/moments/public/follows',
+      { gfs_id: 'g1', followed_user_id: 'u-noor' })
+    expect(apiMock.post).not.toHaveBeenCalledWith('/api/moments/follows', expect.anything())
+    await waitFor(() => expect(followRow().getAttribute('aria-pressed')).toBe('true'))
+    expect(followRow().textContent).toContain('Following')
+  })
+
+  it('an existing GFS follow is recognised without the opener naming the GFS, and unfollows there', async () => {
+    apiDefaults(path => (path === '/api/gfs/connections' ? [DEMO]
+      : path === '/api/moments/public/follows' ? [GFS_FOLLOW] : undefined))
+    apiMock.delete.mockResolvedValueOnce({})
+    render(<PersonSheet />)
+    await act(async () => { openPerson('u-noor', { person: { display_name: 'Noor Haddad' } }) })
+    await waitFor(() => expect(followRow().getAttribute('aria-pressed')).toBe('true'))
+    expect(followRow().textContent).toContain('Through \u2068Demo GFS\u2069')
+    await act(async () => { fireEvent.click(followRow()) })
+    expect(apiMock.delete).toHaveBeenCalledWith('/api/moments/public/follows/g1/u-noor')
+    expect(apiMock.delete).not.toHaveBeenCalledWith('/api/moments/follows/u-noor')
+  })
+
+  it('a paired person also followed through a GFS: the household row, and the GFS follow said out loud with a way to stop it', async () => {
+    const chidiOnGfs = { ...GFS_FOLLOW, followed_user_id: 'ru-chidi' }
+    apiDefaults(path => (path === '/api/gfs/connections' ? [DEMO]
+      : path === '/api/moments/public/follows' ? [chidiOnGfs] : undefined))
+    apiMock.delete.mockResolvedValueOnce({})
+    render(<PersonSheet />)
+    await act(async () => { openPerson('ru-chidi', { person: chidi({ personal_alias: null }) }) })
+    const also = await waitFor(() => {
+      const el = q(document, 'person-follow-gfs-also')
+      expect(el).not.toBeNull()
+      return el!
+    })
+    expect(also.textContent).toContain('You also follow them through \u2068Demo GFS\u2069')
+    expect(followRow().textContent).toContain('stays between your households')
+    const stop = also.querySelector('button')!
+    expect(stop.textContent).toBe('Stop')
+    await act(async () => { fireEvent.click(stop) })
+    expect(apiMock.delete).toHaveBeenCalledWith('/api/moments/public/follows/g1/ru-chidi')
+    await waitFor(() => expect(q(document, 'person-follow-gfs-also')).toBeNull())
+  })
+
+  it('a protected account gets no GFS follow (it can\'t follow through a GFS)', async () => {
+    ;(auth.currentUser.value as unknown as Record<string, unknown>).restrictions = ['public_moments']
+    apiDefaults(path => (path === '/api/gfs/connections' ? [DEMO] : undefined))
+    render(<PersonSheet />)
+    await act(async () => { openPerson('u-noor', { person: noor }) })
+    await waitFor(() => expect(q(document, 'person-limited')).not.toBeNull())
+    expect(q(document, 'person-follow')).toBeNull()
   })
 })

@@ -15,6 +15,8 @@ vi.mock('@/ws', () => ({
   ws: { on: (type: string, fn: () => void) => { wsHandlers.set(type, fn); return () => undefined } },
 }))
 
+vi.mock('./PublicSharingRow', () => ({ PublicSharingRow: () => <a data-testid="sharing-row" /> }))
+
 import { api } from '@/api'
 import { currentUser } from '@/store/auth'
 import type { Moment, User } from '@/types'
@@ -197,5 +199,14 @@ describe('MomentumYoursTab', () => {
     wsHandlers.get('moment.deleted')!()
     expect((await findByRole('status')).textContent).toContain("Couldn't refresh")
     expect(container.textContent).toContain('text m1')
+  })
+})
+
+describe('Yours › Public sharing', () => {
+  it('links to Settings › Privacy › Public sharing from the posted list', async () => {
+    where.url = '/momentum/yours'
+    serve(() => [])
+    const { findByTestId } = render(<MomentumYoursTab />)
+    expect(await findByTestId('sharing-row')).toBeTruthy()
   })
 })

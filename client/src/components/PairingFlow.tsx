@@ -1302,7 +1302,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
                   // to a raw absolute path (escapes the ingress prefix +
                   // forces a full reload). See CLAUDE.md "Frontend & ingress".
                   open.value = false
-                  loc.route('/momentum/public/sharing')
+                  loc.route('/settings#public-sharing')
                 }}>
                   {t('gfs.open_publishing')}
                 </Button>

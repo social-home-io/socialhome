@@ -1,8 +1,8 @@
-import { describe, it, expect, vi } from 'vitest'
-import { render, fireEvent } from '@testing-library/preact'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, fireEvent, cleanup } from '@testing-library/preact'
 import { useState } from 'preact/hooks'
 import { createRef } from 'preact'
-import { OverflowMenu, type MenuItem } from './OverflowMenu'
+import { OverflowMenu, visibleBottom, type MenuItem } from './OverflowMenu'
 
 const items = (onSelect = vi.fn()): MenuItem[] => [
   { label: 'Aldi', onSelect: () => onSelect('Aldi') },
@@ -165,5 +165,95 @@ describe('OverflowMenu — Home / End and type-ahead', () => {
     expect(document.activeElement).toBe(opts[0])
     fireEvent.keyDown(opts[0], { key: 'z' })
     expect(document.activeElement).toBe(opts[0])
+  })
+})
+
+describe('OverflowMenu near the bottom of a phone screen (#1190 follow-up)', () => {
+  const rect = (top: number, height: number, left = 300, width = 40) => ({
+    top, bottom: top + height, height, left, right: left + width, width, x: left, y: top,
+    toJSON: () => ({}),
+  }) as DOMRect
+  const MENU_H = 160
+  let nav: HTMLElement | null = null
+
+  /** A 390×844 phone with the bottom tab bar (64 px) at y 780. */
+  function phone(withNav = true) {
+    vi.stubGlobal('innerHeight', 844)
+    vi.stubGlobal('innerWidth', 390)
+    if (withNav) {
+      nav = document.createElement('nav')
+      nav.className = 'sh-mobile-nav'
+      document.body.appendChild(nav)
+      vi.spyOn(nav, 'getBoundingClientRect').mockReturnValue(rect(780, 64, 0, 390))
+    }
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this === nav) return rect(780, 64, 0, 390)
+      if (this.classList.contains('sh-post-menu')) return rect(0, MENU_H, 0, 200)
+      return rect(this.dataset.top ? Number(this.dataset.top) : 100, 40)
+    })
+  }
+
+  afterEach(() => {
+    cleanup()
+    nav?.remove()
+    nav = null
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('the visible bottom stops above the bottom tab bar', () => {
+    phone()
+    expect(visibleBottom()).toBe(780 - 8)
+    nav!.remove()
+    expect(visibleBottom()).toBe(844 - 8)
+  })
+
+  it('opens upward when it would end under the tab bar', () => {
+    phone()
+    const { getByRole, container } = render(
+      <OverflowMenu label="More" items={items()}>⋯</OverflowMenu>,
+    )
+    const trigger = getByRole('button', { name: 'More' })
+    trigger.dataset.top = '700'
+    fireEvent.click(trigger)
+    const menu = container.querySelector('.sh-post-menu')!
+    expect(menu.classList.contains('sh-post-menu--up')).toBe(true)
+  })
+
+  it('opening never scrolls the page to the first item (it may be flipping upward)', () => {
+    phone()
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus')
+    const { getByRole } = render(
+      <OverflowMenu label="More" items={items()}>⋯</OverflowMenu>,
+    )
+    const trigger = getByRole('button', { name: 'More' })
+    trigger.dataset.top = '700'
+    fireEvent.click(trigger)
+    const itemFocus = focus.mock.calls.find((_, i) => (focus.mock.instances[i] as unknown as HTMLElement)?.getAttribute?.('role')?.startsWith('menuitem'))
+    expect(itemFocus?.[0]).toEqual({ preventScroll: true })
+  })
+
+  it('opens downward when there is room', () => {
+    phone()
+    const { getByRole, container } = render(
+      <OverflowMenu label="More" items={items()}>⋯</OverflowMenu>,
+    )
+    const trigger = getByRole('button', { name: 'More' })
+    trigger.dataset.top = '200'
+    fireEvent.click(trigger)
+    expect(container.querySelector('.sh-post-menu')!.classList.contains('sh-post-menu--up')).toBe(false)
+  })
+
+  it('a floating menu is placed above its trigger when below would be covered', () => {
+    phone()
+    const { getByRole, container } = render(
+      <OverflowMenu label="More" items={items()} floating>⋯</OverflowMenu>,
+    )
+    const trigger = getByRole('button', { name: 'More' })
+    trigger.dataset.top = '720'
+    fireEvent.click(trigger)
+    const menu = container.querySelector('.sh-post-menu') as HTMLElement
+    // Trigger top 720 − 4 px gap − 160 px menu.
+    expect(menu.style.top).toBe(`${720 - 4 - MENU_H}px`)
   })
 })

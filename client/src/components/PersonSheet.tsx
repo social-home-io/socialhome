@@ -13,10 +13,18 @@
  *     photo instead of a lonely pill. Someone known only from their
  *     public moments (a GFS-followed author) keeps the public bio the
  *     caller passed even though the household lookup finds nobody.
- *   • Message (primary), then Call for your own household or Follow for
- *     everyone else.
- *   • Rows: Household, Follow their moments (own household), Edit
- *     nickname.
+ *   • Message (primary), then Call for your own household.
+ *   • Rows: Household, Follow, Edit nickname.
+ *   • One Follow (decision 7), labelled "Follow" for everyone, with a line
+ *     that says what it does. Someone the household knows — its own people
+ *     and paired households' (the lookup below finds them), or a 2–3-hop
+ *     author it can't look up — gets the household follow, which never
+ *     leaves the household. Someone known only from a GFS (Discover, a
+ *     moment that came through one: ``person.public_via``, or an existing
+ *     GFS follow) gets the GFS follow, and the line says the GFS learns
+ *     it. Never both silently: a paired person still followed through a
+ *     GFS sees that follow named, with Stop. A protected account can't
+ *     follow through a GFS, so it gets no GFS row.
  *   • A quiet bottom line: Report… (other households) · Block… — or
  *     Unblock once blocked.
  *
@@ -38,6 +46,14 @@ import { t, formatLocale } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
 import { blockUser, unblockUser, isBlocked, blockedUsers, loadBlocks } from '@/store/blocks'
 import { followUser, unfollowUser, isFollowing, loadFollows } from '@/store/follows'
+import {
+  followUser as followOnGfs,
+  gfsFollowOf,
+  gfsName,
+  loadFollows as loadGfsFollows,
+  loadGfsConnections,
+  unfollowUser as unfollowOnGfs,
+} from '@/store/momentPublic'
 import { ConnIcon } from '@/features/connections/ConnIcon'
 import type { UserStatus } from '@/types'
 import { Modal } from './Modal'
@@ -49,6 +65,7 @@ import { openReport } from './ReportDialog'
 import { openAliasDialog } from './AliasDialog'
 import { openCallTypePicker } from './CallTypePickerDialog'
 import { openStatusEditor } from './StatusEditor'
+import { isRestricted } from './ProtectedNotice'
 
 /** Where a person lives, as ``GET /api/friends/{user_id}`` returns it. */
 export interface PersonHousehold {
@@ -76,6 +93,9 @@ export interface PersonView {
   status?: UserStatus | null
   bio?: string | null
   household?: PersonHousehold | null
+  /** Known only from their public moments on this GFS (Discover, a moment
+   *  that came through it): their Follow is a GFS follow (decision 7). */
+  public_via?: { gfs_id: string } | null
 }
 
 export interface PersonContext {
@@ -97,7 +117,7 @@ interface SheetState {
 }
 
 const sheet = signal<SheetState | null>(null)
-const busy = signal<'message' | 'call' | 'follow' | null>(null)
+const busy = signal<'message' | 'call' | 'follow' | 'gfs-stop' | null>(null)
 const confirmBlock = signal(false)
 /** Bumps on every open so a slow fetch for an earlier person never
  *  paints over the one on screen now. */
@@ -132,6 +152,12 @@ export function openPerson(userId: string, context: PersonContext = {}): void {
   }
   void loadBlocks()
   void loadFollows()
+  // A GFS follow is only possible — and only worth reading — with a GFS.
+  if (!isRestricted('public_moments')) {
+    void loadGfsConnections().then((conns) => {
+      if (conns && conns.length > 0) void loadGfsFollows()
+    })
+  }
   if (complete) return
   api.get(`/api/friends/${encodeURIComponent(userId)}`).then((row) => {
     if (seq !== openSeq || !sheet.value) return
@@ -170,6 +196,11 @@ function untilLabel(iso: string | null | undefined): string | null {
   return t('person.status_until', { time: when })
 }
 
+/** Bidi-isolate a name inside a translated sentence (U+2068 … U+2069). */
+function isolate(name: string): string {
+  return `\u2068${name}\u2069`
+}
+
 function errText(e: unknown): string {
   return String((e as Error)?.message ?? e)
 }
@@ -199,7 +230,21 @@ export function PersonSheet() {
   // Until the fetch settles we don't know local vs remote, so actions
   // wait rather than flicker from Follow to Call.
   const settled = s.load !== 'loading'
-  const following = isFollowing(p.user_id)
+  // One Follow (decision 7): the household follow for someone this
+  // household knows or can't look up; the GFS follow for someone known
+  // only through a GFS.
+  const gfsFollow = gfsFollowOf(p.user_id)
+  const knownHere = s.load === 'ready' && (p.is_local === true || !!household)
+  const viaGfs = p.public_via?.gfs_id ?? gfsFollow?.gfs_id ?? null
+  const followKind: 'household' | 'gfs' | null = isSelf || blocked
+    ? null
+    : !knownHere && viaGfs
+      ? (isRestricted('public_moments') ? null : 'gfs')
+      : 'household'
+  const following = followKind === 'gfs' ? !!gfsFollow : isFollowing(p.user_id)
+  // Names go into a sentence of the UI's language: isolate them (FSI…PDI)
+  // so an Arabic name doesn't reorder an English line, or the reverse.
+  const viaName = isolate(gfsName(followKind === 'gfs' ? viaGfs : gfsFollow?.gfs_id) ?? 'GFS')
 
   const status = !limited ? p.status : null
   const statusText = status?.text?.trim() || null
@@ -254,18 +299,33 @@ export function PersonSheet() {
     if (busy.value) return
     busy.value = 'follow'
     try {
-      if (following) {
+      if (followKind === 'gfs') {
+        if (gfsFollow) await unfollowOnGfs(gfsFollow.gfs_id, p.user_id)
+        else if (viaGfs) await followOnGfs(viaGfs, p.user_id)
+      } else if (following) {
         await unfollowUser(p.user_id)
-        showToast(t('user_actions.unfollowed', { name: shown }), 'success')
       } else {
         await followUser(p.user_id)
-        showToast(t('user_actions.followed', { name: shown }), 'success')
       }
+      showToast(t(following ? 'user_actions.unfollowed' : 'user_actions.followed', { name: shown }), 'success')
     } catch (e: unknown) {
       showToast(t(
         following ? 'user_actions.unfollow_failed' : 'user_actions.follow_failed',
         { error: errText(e) },
       ), 'error')
+    } finally {
+      busy.value = null
+    }
+  }
+
+  /** Stop a GFS follow of someone the household follows itself. */
+  const onStopGfsFollow = async () => {
+    if (busy.value || !gfsFollow) return
+    busy.value = 'gfs-stop'
+    try {
+      await unfollowOnGfs(gfsFollow.gfs_id, p.user_id)
+    } catch (e: unknown) {
+      showToast(t('user_actions.unfollow_failed', { error: errText(e) }), 'error')
     } finally {
       busy.value = null
     }
@@ -412,18 +472,16 @@ export function PersonSheet() {
                 {t('person.edit_status')}
               </Button>
             </div>
-          ) : (canMessage || (!blocked && !isOwnHousehold)) && (
+          ) : canMessage && (
             <div class="sh-person-sheet__actions">
-              {canMessage && (
-                <Button
-                  onClick={onMessage}
-                  loading={busy.value === 'message'}
-                  data-testid="person-message"
-                >
-                  <ConnIcon name="message" />
-                  {t('friends.message')}
-                </Button>
-              )}
+              <Button
+                onClick={onMessage}
+                loading={busy.value === 'message'}
+                data-testid="person-message"
+              >
+                <ConnIcon name="message" />
+                {t('friends.message')}
+              </Button>
               {canCall && (
                 <Button
                   variant="secondary"
@@ -433,18 +491,6 @@ export function PersonSheet() {
                 >
                   <ConnIcon name="phone" />
                   {t('person.call')}
-                </Button>
-              )}
-              {!blocked && !isOwnHousehold && (
-                <Button
-                  variant="secondary"
-                  onClick={onToggleFollow}
-                  loading={busy.value === 'follow'}
-                  aria-pressed={following ? 'true' : 'false'}
-                  data-testid="person-follow"
-                >
-                  {following && <ConnIcon name="check" />}
-                  {following ? t('person.following') : t('user_actions.follow')}
                 </Button>
               )}
             </div>
@@ -464,23 +510,47 @@ export function PersonSheet() {
                   </span>
                 </div>
               )}
-              {!isSelf && !blocked && isOwnHousehold && (
+              {followKind !== null && (
                 <button
                   type="button"
-                  class="sh-person-sheet__row sh-person-sheet__row--btn"
+                  class="sh-person-sheet__row sh-person-sheet__row--btn sh-person-sheet__follow"
                   onClick={onToggleFollow}
                   disabled={busy.value === 'follow'}
                   aria-pressed={following ? 'true' : 'false'}
+                  aria-describedby="sh-person-follow-what"
                   data-testid="person-follow"
                 >
                   <ConnIcon name={following ? 'check' : 'plus'} />
                   <span class="sh-person-sheet__row-body">
                     <span class="sh-person-sheet__row-value">
-                      {following ? t('person.following_moments') : t('person.follow_moments')}
+                      {following ? t('person.following') : t('user_actions.follow')}
+                    </span>
+                    <span id="sh-person-follow-what" class="sh-person-sheet__row-hint">
+                      {followKind === 'gfs'
+                        ? t('person.follow_gfs_hint', { gfs: viaName })
+                        : t('person.follow_hint', { name: isolate(shown) })}
                     </span>
                   </span>
                   <span />
                 </button>
+              )}
+              {followKind === 'household' && gfsFollow && (
+                <div class="sh-person-sheet__row sh-person-sheet__also" data-testid="person-follow-gfs-also">
+                  <ConnIcon name="info" />
+                  <span class="sh-person-sheet__row-body">
+                    <span id="sh-person-follow-also" class="sh-person-sheet__row-hint">
+                      {t('person.follow_gfs_also', { gfs: viaName })}
+                    </span>
+                  </span>
+                  <Button
+                    variant="secondary"
+                    onClick={onStopGfsFollow}
+                    loading={busy.value === 'gfs-stop'}
+                    aria-describedby="sh-person-follow-also"
+                  >
+                    {t('person.follow_gfs_stop')}
+                  </Button>
+                </div>
               )}
               {!isSelf && !blocked && (
                 <button

@@ -9,6 +9,7 @@
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import type {
+  GfsConnection,
   MomentPublicDirectoryUser,
   MomentPublicFollow,
   MomentPublicRegistration,
@@ -110,4 +111,49 @@ export async function fetchGfsDirectory(
     users?: MomentPublicDirectoryUser[]
   }
   return data.users ?? []
+}
+
+/** This household's active GFS connections (``null`` = not read yet or
+ *  the read failed — never "none"). Discover, the person sheet's GFS
+ *  follow and Settings › Public sharing read them; once per session. */
+export const gfsConnections = signal<GfsConnection[] | null>(null)
+/** The last read of the connections failed (an error, not "no GFS"). */
+export const gfsConnectionsFailed = signal(false)
+let gfsLoading: Promise<GfsConnection[] | null> | null = null
+
+export function loadGfsConnections(force = false): Promise<GfsConnection[] | null> {
+  if (gfsLoading && !force) return gfsLoading
+  gfsLoading = Promise.resolve()
+    .then(() => api.get<GfsConnection[]>('/api/gfs/connections'))
+    .then((rows) => {
+      // Only an active server serves a directory, takes a follow or a
+      // registration (``_require_active_gfs``).
+      gfsConnections.value = (rows ?? []).filter((c) => c.status === 'active')
+      gfsConnectionsFailed.value = false
+      return gfsConnections.value
+    })
+    .catch(() => {
+      gfsConnectionsFailed.value = true
+      gfsLoading = null
+      return gfsConnections.value
+    })
+  return gfsLoading
+}
+
+/** A connection's display name, or ``null`` when unknown. */
+export function gfsName(gfsId: string | null | undefined): string | null {
+  if (!gfsId) return null
+  return gfsConnections.value?.find((g) => g.id === gfsId)?.display_name ?? null
+}
+
+/** The caller's GFS follow of *userId* (on any server), if any. */
+export function gfsFollowOf(userId: string): MomentPublicFollow | undefined {
+  return follows.value.find((f) => f.followed_user_id === userId)
+}
+
+/** Tests only. */
+export function _resetGfsConnectionsForTests(): void {
+  gfsLoading = null
+  gfsConnections.value = null
+  gfsConnectionsFailed.value = false
 }

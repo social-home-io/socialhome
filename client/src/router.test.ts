@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { routes } from './router'
 
 describe('router', () => {
-  it('defines 42 routes', () => {
+  it('defines 45 routes', () => {
     // Routes added / removed across recent passes:
     //   /dms/:id/calls   — per-conversation call history
     //   /calls/:callId   — in-call page
@@ -18,12 +18,12 @@ describe('router', () => {
     //   /highlights, /highlights/new, /highlights/:highlightId — Highlights pillar (§Highlights)
     //   /highlights/archive — the Archive tab of the Highlights page (§Highlights)
     //   /momentum, /momentum/new, /momentum/:id, /momentum/:id/reply,
-    //     /momentum/archive, /momentum/yours — Momentum pillar (§Momentum)
+    //     /momentum/archive, /momentum/yours, /momentum/discover — Momentum pillar (§Momentum)
     //   /organize        — replaces standalone /tasks /shopping /stickies
     //                      (3 routes collapsed into 1 hub).
     //   /apps            — Social Home Apps browse/install page (§Apps)
     //   /apps/:appId     — sandboxed AppHost iframe launcher (§Apps)
-    expect(Object.keys(routes).length).toBe(44)
+    expect(Object.keys(routes).length).toBe(45)
   })
 
   it('a space and its sections are ONE route, after the fixed space sub-pages', () => {
@@ -46,6 +46,16 @@ describe('router', () => {
     expect(keys.indexOf('/momentum/yours')).toBeLessThan(keys.indexOf('/momentum/:momentId'))
   })
 
+  it('Discover is a Momentum tab ahead of the moment page; the old public addresses still resolve', () => {
+    const keys = Object.keys(routes)
+    expect(routes['/momentum/discover']).toBeTruthy()
+    expect(keys.indexOf('/momentum/discover')).toBeLessThan(keys.indexOf('/momentum/:momentId'))
+    // Old links (pairing, bookmarks) redirect: Discover → the tab,
+    // sharing → Settings › Privacy.
+    expect(routes['/momentum/public/discover']).toBe(routes['/momentum/discover'])
+    expect(routes['/momentum/public/sharing']).toBeTruthy()
+  })
+
   it('the settings sections are one route, so a section jump keeps the page', () => {
     expect(routes['/spaces/:id/settings/:section?']).toBeTruthy()
     expect(routes['/spaces/:id/settings']).toBeUndefined()
@@ -61,7 +71,7 @@ describe('router', () => {
       '/settings', '/admin', '/connections',
       '/gallery', '/search', '/calls', '/parent', '/momentum',
       '/corner', '/dashboard', '/apps',
-      '/momentum/public/discover', '/momentum/public/sharing']) {
+      '/momentum/discover', '/momentum/public/discover', '/momentum/public/sharing']) {
       expect(routes[path]).toBeTruthy()
     }
   })

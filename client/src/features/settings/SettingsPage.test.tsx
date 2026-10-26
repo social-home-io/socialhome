@@ -128,8 +128,8 @@ describe('SettingsPage', () => {
     }
   })
 
-  it.each(['#highlights', '#momentum'])(
-    '%s (the Highlights / Momentum "Settings" links) opens the Privacy tab with that section',
+  it.each(['#highlights', '#momentum', '#public-sharing'])(
+    '%s (the Highlights / Momentum / Public sharing links) opens the Privacy tab with that section',
     async (hash) => {
       const { default: SettingsPage } = await import('./SettingsPage')
       window.location.hash = hash

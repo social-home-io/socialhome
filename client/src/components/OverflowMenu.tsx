@@ -19,6 +19,12 @@
  * inside the same popup, and the menu points at it with
  * ``aria-describedby`` so a screen reader still hears it. Arrow keys and
  * type-ahead never land on it.
+ *
+ * The popup stays where it can be seen: when it would end below the
+ * visible area — under the phone's bottom tab bar, or below the safe-area
+ * inset when there is no bar — and there is more room above the trigger,
+ * it opens upward (``sh-post-menu--up``; a ``floating`` menu is placed
+ * above the trigger).
  */
 import type { ComponentChildren, Ref } from 'preact'
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hooks'
@@ -72,6 +78,43 @@ interface Props {
 }
 
 const MENU_W = 200
+/** Breathing room between a popup and the edge it must not cross. */
+const EDGE = 8
+
+let safeProbe: HTMLElement | null = null
+
+/** The bottom safe-area inset in px (``env(safe-area-inset-bottom)``, read
+ *  through a probe element — the value itself can't be read from JS). */
+function safeAreaBottom(): number {
+  if (!safeProbe || !safeProbe.isConnected) {
+    safeProbe = document.createElement('div')
+    safeProbe.className = 'sh-safe-area-probe'
+    safeProbe.setAttribute('aria-hidden', 'true')
+    document.body.appendChild(safeProbe)
+  }
+  const px = parseFloat(getComputedStyle(safeProbe).paddingBottom)
+  return Number.isFinite(px) ? px : 0
+}
+
+/** The lowest y a popup may reach: the visual viewport's bottom, above
+ *  the mobile bottom tab bar when it shows (the bar pads for the safe
+ *  area itself), else above the safe-area inset. */
+export function visibleBottom(): number {
+  const vv = window.visualViewport
+  let bottom = vv && vv.height > 0 ? vv.offsetTop + vv.height : window.innerHeight
+  const r = document.querySelector('.sh-mobile-nav')?.getBoundingClientRect()
+  if (r && r.height > 0 && r.top < bottom) bottom = r.top
+  else bottom -= safeAreaBottom()
+  return bottom - EDGE
+}
+
+/** Open upward: the popup would cross the visible bottom below the
+ *  trigger, and there is more room above it. */
+function shouldOpenUp(trigger: DOMRect, menuHeight: number): boolean {
+  const limit = visibleBottom()
+  if (trigger.bottom + 4 + menuHeight <= limit) return false
+  return trigger.top - EDGE > limit - trigger.bottom
+}
 
 export function OverflowMenu({
   label, items, triggerClass = '', wrapClass = '', children, floating = false,
@@ -89,6 +132,8 @@ export function OverflowMenu({
   const setOpenRef = useRef(setOpen)
   setOpenRef.current = setOpen
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const [up, setUp] = useState(false)
+  const popupRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const setTrigger = useCallback((el: HTMLButtonElement | null) => {
     triggerRef.current = el
@@ -107,7 +152,10 @@ export function OverflowMenu({
   useEffect(() => {
     if (!open) return
     const list = menuItems()
-    ;(list.find(el => el.getAttribute('aria-checked') === 'true') ?? list[0])?.focus()
+    // No scroll: the menu may still be flipping above its trigger (the
+    // layout effect below), and scrolling to where it was about to be
+    // would jump the page under a phone's tab bar.
+    ;(list.find(el => el.getAttribute('aria-checked') === 'true') ?? list[0])?.focus({ preventScroll: true })
   }, [open])
   useEffect(() => {
     if (!open) return
@@ -127,7 +175,9 @@ export function OverflowMenu({
       if (!r) return
       if (r.bottom < 0 || r.top > window.innerHeight) { setOpenRef.current(false); return }
       const left = Math.max(8, Math.min(r.right - menuWidth, window.innerWidth - menuWidth - 8))
-      setPos({ top: r.bottom + 4, left })
+      const h = popupRef.current?.getBoundingClientRect().height ?? 0
+      const top = shouldOpenUp(r, h) ? Math.max(EDGE, r.top - 4 - h) : r.bottom + 4
+      setPos({ top, left })
     }
     place()
     window.addEventListener('scroll', place, true)
@@ -137,6 +187,15 @@ export function OverflowMenu({
       window.removeEventListener('resize', place)
     }
   }, [open, floating, menuWidth])
+
+  // An in-flow menu opens under its trigger unless that would hide it
+  // under the bottom tab bar / past the visible bottom.
+  useLayoutEffect(() => {
+    if (!open || floating) { setUp(false); return }
+    const r = triggerRef.current?.getBoundingClientRect()
+    const h = popupRef.current?.getBoundingClientRect().height ?? 0
+    setUp(!!r && shouldOpenUp(r, h))
+  }, [open, floating])
 
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape' && open) {
@@ -180,7 +239,7 @@ export function OverflowMenu({
   // would close the menu before the click lands).
   const keepFocus = (e: PointerEvent) => e.preventDefault()
 
-  const popupClass = `sh-post-menu${floating ? ' sh-timetable-menu--floating' : ''} ${menuClass}`.trim()
+  const popupClass = `sh-post-menu${floating ? ' sh-timetable-menu--floating' : ''}${up ? ' sh-post-menu--up' : ''} ${menuClass}`.trim()
   const popupStyle = floating && pos
     ? { top: `${pos.top}px`, left: `${pos.left}px`, width: `${menuWidth}px` }
     : undefined
@@ -231,11 +290,12 @@ export function OverflowMenu({
         {children}
       </button>
       {open && (header == null ? (
-        <div ref={menuRef} class={popupClass} role="menu" aria-label={label} style={popupStyle}>
+        <div ref={(el) => { menuRef.current = el; popupRef.current = el }}
+             class={popupClass} role="menu" aria-label={label} style={popupStyle}>
           {renderItems()}
         </div>
       ) : (
-        <div class={`${popupClass} sh-post-menu--with-header`} style={popupStyle}>
+        <div ref={popupRef} class={`${popupClass} sh-post-menu--with-header`} style={popupStyle}>
           <div id={headerId} class="sh-post-menu__header">{header}</div>
           <div ref={menuRef} class="sh-post-menu__items" role="menu" aria-label={label}
                aria-describedby={headerId}>

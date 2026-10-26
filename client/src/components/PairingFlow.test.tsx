@@ -593,7 +593,7 @@ describe('PairingFlow — GFS pending-approval success dialog', () => {
     const cta = screen.getByText('gfs.open_publishing')
     fireEvent.click(cta)
     await new Promise(r => setTimeout(r, 0))
-    expect(routeSpy).toHaveBeenCalledWith('/momentum/public/sharing')
+    expect(routeSpy).toHaveBeenCalledWith('/settings#public-sharing')
   })
 })
 

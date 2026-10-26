@@ -1,5 +1,8 @@
 import { lazy } from 'preact-iso'
 
+/** One Momentum host for its tabs (Moments, Yours, Discover). */
+const MomentumPage = lazy(() => import('@/features/momentum/MomentumPage'))
+
 export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/':               lazy(() => import('@/features/feed/LandingDispatch')),
   '/feed':           lazy(() => import('@/features/feed/FeedPage')),
@@ -44,14 +47,17 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/highlights/archive': lazy(() => import('@/features/highlights/HighlightsPage')),
   '/highlights/new':    lazy(() => import('@/features/highlights/HighlightComposerPage')),
   '/highlights/:highlightId': lazy(() => import('@/features/highlights/HighlightViewerPage')),
-  '/momentum':              lazy(() => import('@/features/momentum/MomentumPage')),
+  '/momentum':              MomentumPage,
   '/momentum/archive':      lazy(() => import('@/features/momentum/MomentumArchiveRedirect')),
   // Yours is a tab with its own address — ahead of ``/momentum/:momentId``
   // (the first match wins).
-  '/momentum/yours':        lazy(() => import('@/features/momentum/MomentumPage')),
+  '/momentum/yours':        MomentumPage,
+  '/momentum/discover':     MomentumPage,
   '/momentum/new':          lazy(() => import('@/features/momentum/MomentumComposerRedirect')),
-  '/momentum/public/discover': lazy(() => import('@/features/momentum/PublicDiscoveryPage')),
-  '/momentum/public/sharing':  lazy(() => import('@/features/momentum/PublicSharingSettings')),
+  // Old addresses: Discover is a tab now (MomentumPage redirects), Public
+  // sharing lives in Settings › Privacy.
+  '/momentum/public/discover': MomentumPage,
+  '/momentum/public/sharing':  lazy(() => import('@/features/momentum/PublicSharingRedirect')),
   '/momentum/:momentId':    lazy(() => import('@/features/momentum/MomentumDetailPage')),
   // The moment page with its reply field focused — the one reply entry point.
   '/momentum/:momentId/reply': lazy(() => import('@/features/momentum/MomentumDetailPage')),

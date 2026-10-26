@@ -473,6 +473,21 @@ await check('router-keeps-prefix', async () => {
   await go('/highlights/archive')
   await history(() => page.reload({ waitUntil: 'load' }), '/highlights/archive')
   await history(() => page.goBack(), '/highlights')
+  // The old public-Momentum pages redirect inside the prefix: Discover is
+  // a Momentum tab now, Public sharing a section of Settings › Privacy
+  // (the composer, Yours and pairing link to /settings#public-sharing).
+  await page.goto(APP + 'momentum/public/discover', { waitUntil: 'load' })
+  await step(`redirect to ${PREFIX}/momentum/discover`,
+    page.waitForFunction(w => location.pathname === w, {}, PREFIX + '/momentum/discover'))
+  await settled(page)
+  seen.push(pathOf(page))
+  await page.goto(APP + 'momentum/public/sharing', { waitUntil: 'load' })
+  await step(`redirect to ${PREFIX}/settings#public-sharing`,
+    page.waitForFunction(w => location.pathname === w && location.hash === '#public-sharing', {}, PREFIX + '/settings'))
+  await step('the Public sharing section in Settings › Privacy',
+    page.waitForFunction(() => !!document.getElementById('public-sharing')))
+  await settled(page)
+  seen.push(pathOf(page) + '#public-sharing')
   return { problems: [], seen }
 })
 
