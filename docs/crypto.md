@@ -501,7 +501,11 @@ disjoint from `moment-origin:` / `moment-reaction:` and every other
 identity-key signature. Through a GFS the totals ride the existing
 public-moment envelope (`op: "counts"`, AES-256-GCM under the moment's item
 key of today's step, the author household's `sign_wire` signature) — no new
-key or suite there. The PQ path: an `"ed25519+mldsa65"` sibling constant with
+key or suite there; its plaintext is padded to exactly 640 bytes
+(`COUNTS_BODY_BYTES`, `pad_json_object`'s `_pad` key inside the AEAD) so the
+ciphertext length is the same for every totals update. Receivers refuse a
+mesh `rev` more than 25 h old or not newer than the one kept before any rate
+budget is charged (a replayed genuine signature spends nothing). The PQ path: an `"ed25519+mldsa65"` sibling constant with
 both signatures in parallel, the wire shape unchanged.
 
 **Link-preview author signature (GFS public relay)**

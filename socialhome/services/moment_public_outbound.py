@@ -85,6 +85,7 @@ from ..moment_origin import delete_cert_of, sign_moment_origin
 from ..moment_public_seal import (
     AUTHOR_KEYWRAP_PK_FIELD,
     AUTHOR_KEYWRAP_SUITE_FIELD,
+    COUNTS_BODY_BYTES,
     MOMENT_OP_COUNTS,
     item_key,
     seal_body,
@@ -411,31 +412,43 @@ class MomentPublicOutbound(ProtectionGateMixin):
             await self._media.withdraw(event.author_user_id, event.moment_id)
 
     async def send_counts(
-        self, moment: Moment, *, rev: int, counts: dict[str, int], total: int
-    ) -> int:
+        self,
+        moment: Moment,
+        *,
+        rev: int,
+        counts: dict[str, int],
+        total: int,
+        skip: frozenset[str] = frozenset(),
+    ) -> tuple[frozenset[str], frozenset[str]]:
         """Post *moment*'s reaction totals (v_69) to every GFS the author is
         registered on that proves ``encrypted_moments`` and ``moment_counts``
-        — the same sealed bytes to each. Only a public moment written here,
-        never a protected account's. Returns how many GFSs it went to."""
+        (but those in *skip*, which took this checkpoint already) — the same
+        sealed bytes to each, padded to one size
+        (:data:`~socialhome.moment_public_seal.COUNTS_BODY_BYTES`). Only a
+        public moment written here, never a protected account's. Returns
+        ``(accepted, refused)``: the GFSs that answered ``2xx``, and those
+        that didn't (``429``, an error, unreachable) — retried later."""
+        nothing: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
         if (
             not moment.is_public
             or moment.received_via != "self"
             or not await self._is_local(moment.author_user_id)
         ):
-            return 0
+            return nothing
         if await self._is_restricted(
             moment.author_user_id, ProtectedCapability.PUBLIC_MOMENTS
         ):
-            return 0
+            return nothing
         regs = await self._regs.list_for_user(moment.author_user_id)
         targets = [
             r.gfs_id
             for r in regs
-            if await self._delivers_to(r.gfs_id)
+            if r.gfs_id not in skip
+            and await self._delivers_to(r.gfs_id)
             and await self._gfs_service.moment_counts_supported(r.gfs_id)
         ]
         if not targets:
-            return 0
+            return nothing
         # Today's step, as a delete: followers keep only the newest step key.
         gen, step, key = await self._keys.publish_key(moment.author_user_id)
         envelope = self._envelope(
@@ -451,10 +464,13 @@ class MomentPublicOutbound(ProtectionGateMixin):
                 "counts": dict(counts),
                 "total": total,
             },
+            pad_to=COUNTS_BODY_BYTES,
         )
+        accepted: set[str] = set()
         for gfs_id in targets:
-            await self._post_to_gfs(gfs_id, envelope, kind="counts")
-        return len(targets)
+            if await self._post_to_gfs(gfs_id, envelope, kind="counts"):
+                accepted.add(gfs_id)
+        return frozenset(accepted), frozenset(targets) - accepted
 
     async def _post_delete_cert(self, event: MomentDeleted, gfs_ids: list[str]) -> None:
         """Hand the delete's signed certificate (v_66) to every GFS in
@@ -601,6 +617,7 @@ class MomentPublicOutbound(ProtectionGateMixin):
         step: int,
         key: bytes,
         body: dict,
+        pad_to: int | None = None,
     ) -> dict:
         if self._signing_key is None:
             raise RuntimeError("MomentPublicOutbound used before attach_identity")
@@ -624,16 +641,18 @@ class MomentPublicOutbound(ProtectionGateMixin):
                     key_step=step,
                     moment_id=moment_id,
                     body=body,
+                    pad_to=pad_to,
                 ),
             },
         )
 
-    async def _post_to_gfs(self, gfs_id: str, signed: dict, *, kind: str) -> None:
+    async def _post_to_gfs(self, gfs_id: str, signed: dict, *, kind: str) -> bool:
+        """POST *signed* to one GFS; whether it answered ``2xx``."""
         if self._http_client is None or self._signing_key is None:
-            return
+            return False
         conn = await self._gfs.get(gfs_id)
         if conn is None or conn.status != "active":
-            return
+            return False
         path = _PATHS[kind]
         try:
             async with self._http_client.post(
@@ -649,6 +668,8 @@ class MomentPublicOutbound(ProtectionGateMixin):
                         kind,
                         resp.status,
                     )
+                    return False
+                return True
         except aiohttp.ClientError as exc:
             log.warning(
                 "moment_public.outbound: GFS %s %s failed: %s",
@@ -656,6 +677,7 @@ class MomentPublicOutbound(ProtectionGateMixin):
                 kind,
                 exc,
             )
+            return False
 
 
 #: Where each kind of post goes on a GFS.

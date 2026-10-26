@@ -74,14 +74,21 @@ from socialhome.global_server.server import create_gfs_app
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 from socialhome.moment_counts import counts_signing_bytes, sign_counts, verify_counts
 from socialhome.moment_public_seal import (
+    COUNTS_BODY_BYTES,
     ENVELOPE_FIELDS,
     FRAME_MOMENT_COUNTS,
     open_body,
     seal_body,
     sign_wire,
 )
+from socialhome.rate_limiter import RateLimiter
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.moment_public_key_inbound import MomentPublicKeyInbound
+from socialhome.services.moment_reaction_counts import (
+    GFS_RETRY_S,
+    MESH_SENDS_PER_TICK,
+    NEW_REVS_PER_ORIGIN_PER_MIN,
+)
 
 pytestmark = pytest.mark.security
 
@@ -508,14 +515,6 @@ async def test_no_relay_totals_are_refused_when_relayed(env):
     assert sent == []
 
 
-async def test_stale_totals_are_kept_if_newer_but_not_relayed(env):
-    app, db, sent, *_ = env
-    await _moment(db, "m-noor", NOOR, ORIGIN, "household")
-    await _dispatch(app, _signed(rev=_now_ms(-30 * 3600)))
-    assert await _summary(db) is not None
-    assert sent == []
-
-
 async def test_a_relay_at_the_hop_cap_stops(env):
     app, db, sent, *_ = env
     await _moment(db, "m-noor", NOOR, ORIGIN, "household")
@@ -531,7 +530,7 @@ def test_hop_count_is_outside_the_signature():
 # ═══ API: the full count, with the viewer's own reaction overlaid ═════════
 
 
-async def test_api_shows_the_authors_totals_plus_my_newer_reaction(env):
+async def test_api_shows_the_authors_totals_and_marks_my_reaction(env):
     app, db, _sent, _own, anna, _counts, _client = env
     await _moment(db, "m-noor", NOOR, ORIGIN, "household")
     await _dispatch(app, _signed(rev=_now_ms(-120), counts={"🔥": 7}, total=9))
@@ -544,7 +543,9 @@ async def test_api_shows_the_authors_totals_plus_my_newer_reaction(env):
             [moment], viewer_user_id=anna, reach={"m-noor": "author"}
         )
     )["m-noor"]
-    assert (view.total, view.counts) == (10, {"🔥": 7, "👏": 1})
+    # Never over-counted: whether Anna is in them already can't be told, so
+    # the totals stand until the next checkpoint (adversarial review #1184).
+    assert (view.total, view.counts) == (9, {"🔥": 7})
     assert view.my_reaction == "👏" and isinstance(view.totals_rev, int)
     # Where reactions stay here, the household's own reactions show instead.
     local = (
@@ -941,10 +942,14 @@ class _Resp:
 class _Session:
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict]] = []
+        #: host → HTTP status to answer (202 otherwise).
+        self.status_for: dict[str, int] = {}
 
     def post(self, url, *, json=None, **_kw):
         self.posts.append((url, json))
-        return _Resp()
+        resp = _Resp()
+        resp.status = self.status_for.get(url.split("/gfs")[0], 202)
+        return resp
 
 
 async def test_author_posts_sealed_totals_only_to_a_gfs_that_proved_it(
@@ -977,7 +982,7 @@ async def test_author_posts_sealed_totals_only_to_a_gfs_that_proved_it(
     outbound._http_client = session
     moment = await app[moment_reaction_counts_key]._moments.get("m-anna")
     sent = await outbound.send_counts(moment, rev=123, counts={"🔥": 2}, total=2)
-    assert sent == 1
+    assert sent == (frozenset({"g1"}), frozenset())
     [(url, body)] = session.posts
     assert url == "https://g1.example/gfs/moments/counts"
     assert set(body) == ENVELOPE_FIELDS  # nothing the GFS could read
@@ -986,3 +991,288 @@ async def test_author_posts_sealed_totals_only_to_a_gfs_that_proved_it(
     opened = open_body(step_key=key, envelope=body)
     assert opened["op"] == "counts"
     assert (opened["counts"], opened["total"], opened["rev"]) == ({"🔥": 2}, 2, 123)
+
+
+# ═══ Adversarial review of #1184: budgets, pacing, padding, overlay ═══════
+
+
+async def test_replayed_old_totals_spend_none_of_the_origins_minute(env):
+    """A neighbour replays genuinely signed but stale totals of the origin
+    (moments not held here, two days old): refused before any budget, so
+    the origin's real fresh totals still land."""
+    app, db, *_ = env
+    await _moment(db, "m-noor", NOOR, ORIGIN, "household")
+    old = _now_ms(-2 * 86400)
+    for i in range(10):
+        await _dispatch(app, _signed(moment_id=f"m-old-{i}", rev=old + i))
+    await _dispatch(app, _signed(rev=_now_ms(), counts={"🔥": 9}, total=9))
+    assert (await _summary(db))["total"] == 9
+
+
+async def test_replayed_unheld_fresh_totals_spend_none_of_the_origins_minute(env):
+    """Fresh genuine totals for moments neither held nor relayed here are
+    neither kept nor relayed — so they cost the origin nothing."""
+    app, db, *_ = env
+    await _moment(db, "m-noor", NOOR, ORIGIN, "household")
+    for i in range(10):
+        await _dispatch(app, _signed(moment_id=f"m-else-{i}", rev=_now_ms(-60) + i))
+    await _dispatch(app, _signed(rev=_now_ms(), counts={"🔥": 9}, total=9))
+    assert (await _summary(db))["total"] == 9
+
+
+async def test_replayed_older_revs_spend_none_of_the_moments_day(env):
+    """Receivers keep only the newest rev. Older genuine revs replayed by a
+    neighbour are not newer than the kept one: refused before the day
+    budget, so the next real checkpoint is still taken."""
+    app, db, *_ = env
+    await _moment(db, "m-noor", NOOR, ORIGIN, "household")
+    base = _now_ms(-3600)
+    await _dispatch(app, _signed(rev=base + 10, counts={"🔥": 3}, total=3))
+    for i in range(3):
+        await _dispatch(app, _signed(rev=base + i, counts={"🔥": 1}, total=1))
+    await _dispatch(app, _signed(rev=_now_ms(), counts={"🔥": 8}, total=8))
+    assert (await _summary(db))["total"] == 8
+
+
+async def test_a_replay_of_the_kept_rev_after_a_restart_spends_nothing(env):
+    """The kept rev itself, replayed once the in-memory seen set is gone (a
+    restart), is not newer than what the database holds: refused, free."""
+    app, db, sent, *_ = env
+    counts = app[moment_reaction_counts_key]
+    await _moment(db, "m-noor", NOOR, ORIGIN, "household")
+    kept = _signed(rev=_now_ms(-3600), counts={"🔥": 3}, total=3)
+    await _dispatch(app, kept)
+    counts._seen_revs.clear()
+    sent.clear()
+    for _ in range(5):
+        await _dispatch(app, kept, from_instance=OTHER)
+    assert sent == []  # not relayed again either
+    for i in range(3):
+        await _dispatch(
+            app, _signed(rev=_now_ms(-60) + i, counts={"🔥": 4 + i}, total=4 + i)
+        )
+    assert (await _summary(db))["total"] == 6
+
+
+async def test_totals_older_than_a_day_are_neither_kept_nor_relayed(env):
+    app, db, sent, *_ = env
+    await _moment(db, "m-noor", NOOR, ORIGIN, "household")
+    await _dispatch(app, _signed(rev=_now_ms(-26 * 3600)))
+    assert await _summary(db) is None
+    assert sent == []
+
+
+async def test_eleven_moments_at_one_checkpoint_all_reach_a_receiver(env):
+    """The author sends at most MESH_SENDS_PER_TICK a tick — under every
+    receiver's per-origin minute budget — and the rest the next tick, so
+    eleven moments due together all get through."""
+    _app, db, sent, own, anna, counts, _client = env
+    start = datetime.now(UTC) - timedelta(minutes=11)
+    for i in range(11):
+        await _moment(db, f"m-{i}", anna, own, "self", created=start)
+        await _react(db, f"m-{i}", "u-x", "🔥")
+    clock = [int(time.time() * 1000)]
+    counts._clock_ms = lambda: clock[0]
+    first = await counts.tick()
+    assert 0 < first <= MESH_SENDS_PER_TICK < NEW_REVS_PER_ORIGIN_PER_MIN
+    clock[0] += 61_000
+    assert first + await counts.tick() == 11
+    assert {s[2]["moment_id"] for s in sent} == {f"m-{i}" for i in range(11)}
+    clock[0] += 61_000
+    assert await counts.tick() == 0  # each sent once
+
+
+async def test_paced_sends_all_pass_the_receivers_minute_budget(env):
+    """Receiver side of the same burst: MESH_SENDS_PER_TICK a minute from
+    one origin, for two minutes, are all kept."""
+    app, db, *_ = env
+    counts = app[moment_reaction_counts_key]
+    mono = [1000.0]
+    counts._limiter = RateLimiter(monotonic=lambda: mono[0])
+    for i in range(16):
+        await _moment(db, f"m-{i}", NOOR, ORIGIN, "household")
+    for i in range(16):
+        if i == MESH_SENDS_PER_TICK:
+            mono[0] += 61
+        await _dispatch(app, _signed(moment_id=f"m-{i}", rev=_now_ms() + i))
+    missing = [i for i in range(16) if await _summary(db, f"m-{i}") is None]
+    assert missing == []
+
+
+async def test_a_mesh_send_that_fails_is_retried_next_tick(env, monkeypatch):
+    """'Last sent' is recorded only once the update was handed to the
+    outbox: a send that raised is tried again."""
+    _app, db, sent, own, anna, counts, _client = env
+    start = datetime.now(UTC) - timedelta(minutes=11)
+    await _moment(db, "m-anna", anna, own, "self", created=start)
+    await _react(db, "m-anna", "u-x", "🔥")
+    cls = type(counts._outbound)
+    real = cls.fan_counts
+    calls = []
+
+    async def _boom(_self, payload, *, author_user_id):
+        calls.append(payload)
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(cls, "fan_counts", _boom)
+    assert await counts.tick() == 0
+    assert len(calls) == 1
+    monkeypatch.setattr(cls, "fan_counts", real)
+    assert await counts.tick() == 1
+    assert {s[2]["moment_id"] for s in sent} == {"m-anna"}
+
+
+async def test_a_gfs_429_is_retried_and_only_a_2xx_counts_as_sent(env, monkeypatch):
+    app, db, _sent, own, anna, counts, _client = env
+    for gid in ("g1", "g2"):
+        await db.enqueue(
+            "INSERT INTO gfs_connections(id, gfs_instance_id, display_name,"
+            " public_key, inbox_url, status, paired_at) VALUES(?, ?, 'G', ?, ?,"
+            " 'active', datetime('now'))",
+            (gid, gid, "aa" * 32, f"https://{gid}.example"),
+        )
+        await db.enqueue(
+            "INSERT INTO moment_public_registrations(user_id, gfs_id) VALUES(?, ?)",
+            (anna, gid),
+        )
+    start = datetime.now(UTC) - timedelta(minutes=11)
+    await _moment(db, "m-anna", anna, own, "self", created=start, public=1)
+    await _react(db, "m-anna", "u-x", "🔥")
+
+    async def _yes(_self, _gfs_id):
+        return True
+
+    monkeypatch.setattr(GfsConnectionService, "encrypted_moments_supported", _yes)
+    monkeypatch.setattr(GfsConnectionService, "moment_counts_supported", _yes)
+    outbound = app[moment_public_outbound_key]
+    session = _Session()
+    session.status_for = {"https://g2.example": 429}
+    outbound._http_client = session
+    clock = [int(time.time() * 1000)]
+    counts._clock_ms = lambda: clock[0]
+    await counts.tick()
+    hosts = [u.split("/gfs")[0] for u, _ in session.posts]
+    assert sorted(hosts) == ["https://g1.example", "https://g2.example"]
+    session.posts.clear()
+    session.status_for = {}
+    await counts.tick()
+    assert session.posts == []  # not before the retry interval
+    clock[0] += GFS_RETRY_S * 1000 + 1000
+    await counts.tick()
+    # Only the GFS that refused is posted again — g1 already has them.
+    assert [u.split("/gfs")[0] for u, _ in session.posts] == ["https://g2.example"]
+    session.posts.clear()
+    clock[0] += GFS_RETRY_S * 1000 + 1000
+    await counts.tick()
+    assert session.posts == []
+
+
+def _counts_ciphertext_len(counts: dict, total: int) -> int:
+    return len(
+        seal_body(
+            step_key=b"k" * 32,
+            author_user_id=NOOR,
+            key_gen=1,
+            key_step=1,
+            moment_id="m",
+            body={
+                "op": "counts",
+                "author_user_id": NOOR,
+                "rev": _now_ms(),
+                "counts": counts,
+                "total": total,
+                "sent_at": int(time.time()),
+            },
+            pad_to=COUNTS_BODY_BYTES,
+        )["ciphertext"]
+    )
+
+
+def test_sealed_totals_are_one_size_whatever_they_say():
+    """The GFS sees the ciphertext length: padded to one fixed size, it
+    can't tell one reaction from a hundred or one emoji from eight."""
+    worst = dict.fromkeys(
+        ("👨‍👩‍👧‍👦", "🏳️‍🌈", "👩🏽‍🚀", "🧑🏿‍🤝‍🧑🏻", "❤️‍🔥", "🫶🏾", "🙋🏽‍♀️", "🤦🏼‍♂️"),
+        125_000,
+    )
+    sizes = {
+        _counts_ciphertext_len({"🔥": 1}, 1),
+        _counts_ciphertext_len({"🔥": 100}, 100),
+        _counts_ciphertext_len(dict.fromkeys("🔥👏😂❤🎉😮😢🙏", 1), 8),
+        _counts_ciphertext_len(worst, 1_000_000),
+        _counts_ciphertext_len({}, 0),
+    }
+    assert len(sizes) == 1, sizes
+
+
+async def test_author_posts_totals_padded_to_one_size(env, monkeypatch):
+    app, db, _sent, own, anna, *_ = env
+    await db.enqueue(
+        "INSERT INTO gfs_connections(id, gfs_instance_id, display_name,"
+        " public_key, inbox_url, status, paired_at) VALUES('g1', 'g1', 'G', ?,"
+        " 'https://g1.example', 'active', datetime('now'))",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO moment_public_registrations(user_id, gfs_id) VALUES(?, 'g1')",
+        (anna,),
+    )
+    await _moment(db, "m-anna", anna, own, "self", public=1)
+
+    async def _yes(_self, _gfs_id):
+        return True
+
+    monkeypatch.setattr(GfsConnectionService, "encrypted_moments_supported", _yes)
+    monkeypatch.setattr(GfsConnectionService, "moment_counts_supported", _yes)
+    outbound = app[moment_public_outbound_key]
+    session = _Session()
+    outbound._http_client = session
+    moment = await app[moment_reaction_counts_key]._moments.get("m-anna")
+    await outbound.send_counts(moment, rev=_now_ms(), counts={"🔥": 1}, total=1)
+    await outbound.send_counts(
+        moment,
+        rev=_now_ms() + 1,
+        counts=dict.fromkeys("🔥👏😂❤🎉😮😢🙏", 125_000),
+        total=1_000_000,
+    )
+    a, b = (body for _url, body in session.posts)
+    assert len(a["ciphertext"]) == len(b["ciphertext"])
+    _gen, _step, key = await outbound._keys.publish_key(anna)
+    assert open_body(step_key=key, envelope=a)["counts"] == {"🔥": 1}
+
+
+async def test_changing_my_emoji_after_the_totals_never_counts_me_twice(env):
+    """Anna's 🔥 is in the author's totals (5); she switches to 👏 later.
+    The view must not show 6: the totals' numbers stand (one checkpoint
+    stale at most), her emoji is marked as hers."""
+    app, db, _sent, _own, anna, *_ = env
+    await _moment(db, "m-noor", NOOR, ORIGIN, "household")
+    await db.enqueue(
+        "INSERT INTO moment_reactions(moment_id, reactor_user_id, emoji, reacted_at)"
+        " VALUES('m-noor', ?, '🔥', datetime('now','-1 hour'))",
+        (anna,),
+    )
+    await _dispatch(app, _signed(rev=_now_ms(-60), counts={"🔥": 5}, total=5))
+    await db.enqueue(
+        "UPDATE moment_reactions SET emoji='👏', reacted_at=datetime('now')"
+        " WHERE moment_id='m-noor' AND reactor_user_id=?",
+        (anna,),
+    )
+    svc = app[moment_service_key]
+    m = await svc.get_moment("m-noor")
+    reach = {"m-noor": "author"}
+    v = (await svc.reaction_totals([m], viewer_user_id=anna, reach=reach))["m-noor"]
+    assert (v.total, v.counts, v.my_reaction) == (5, {"🔥": 5}, "👏")
+
+
+async def test_my_newer_reaction_never_adds_a_ninth_emoji(env):
+    app, db, _sent, _own, anna, *_ = env
+    await _moment(db, "m-noor", NOOR, ORIGIN, "household")
+    eight = dict.fromkeys("🔥👏😂❤🎉😮😢🙏", 1)
+    await _dispatch(app, _signed(rev=_now_ms(-120), counts=eight, total=8))
+    await _react(db, "m-noor", anna, "🥳")
+    svc = app[moment_service_key]
+    m = await svc.get_moment("m-noor")
+    reach = {"m-noor": "author"}
+    v = (await svc.reaction_totals([m], viewer_user_id=anna, reach=reach))["m-noor"]
+    assert v.total == 8 and v.counts == eight and v.my_reaction == "🥳"

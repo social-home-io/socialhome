@@ -1777,9 +1777,9 @@ public moment after e's 🔥: e must hold ``{"🔥": 1}`` from a through the GFS
 (sealed, ``incoming_public_moment_counts``), with the GFS log and database
 still free of the emoji. ``verify`` pins ``MIN_FOR_MOMENT_REACTION_COUNTS``
 at v_69, requires the GFS's signed ``moment_counts``, and re-checks e's
-totals (13z). On a re-run of ``verify`` (the same moment, its checkpoint
-already sent) d's 🔥 is taken back and made again after c's totals, so d's API
-overlays it once more — the check allows exactly that overlay.
+totals (13z). d's API shows exactly c's totals — its own reaction is marked
+(``my_reaction``), never added on top — so a re-run of ``verify`` (d's 🔥
+taken back and made again after c's checkpoint) shows the same count.
 
 **Reactions through the GFS (v_68).** e keeps a's key-wrap key from the
 signed moment (``moment_public_follows.followed_keywrap_pk``, with its

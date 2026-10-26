@@ -15059,26 +15059,12 @@ def _verify_moment_totals(state: dict, moment_id: str) -> list[str]:
         ]
     s, detail = _request(f"{d_url}/api/moments/{moment_id}", token=d["token"])
     m = (detail or {}).get("moment") or {}
-    # d's own reaction is overlaid when made after the totals were sent: on a
-    # re-run (the same moment, its checkpoint already sent) d's 🔥 was taken
-    # back and made again since, so the API shows the totals + 1 until c's
-    # next checkpoint — documented in momentum.md.
-    kept = got.get("d") or {}
-    overlay = int(
-        m.get("my_reaction") == "🔥"
-        and isinstance(m.get("reaction_totals_at"), int)
-        and m.get("reaction_totals_at") == kept.get("rev")
-        and _rows(
-            "d",
-            "SELECT 1 FROM moment_reactions WHERE moment_id=? AND reactor_user_id=?"
-            " AND (julianday(reacted_at) - 2440587.5) * 86400000 > ?",
-            (moment_id, d.get("user_id"), kept.get("rev")),
-        )
-        != []
-    )
+    # Exactly c's totals: d's own reaction is marked (my_reaction), never
+    # added on top — so a re-run of verify (d's 🔥 taken back and made again
+    # after c's checkpoint) shows the same count (momentum.md, "API").
     if (
         s != 200
-        or m.get("reaction_count") != want + overlay
+        or m.get("reaction_count") != want
         or m.get("reaction_totals_at") is None
     ):
         failures.append(

@@ -212,24 +212,15 @@ def test_reaction_counts_valid(counts, total, ok):
 
 def test_merged_reaction_view():
     summary = MomentReactionSummary(rev=1_000, counts=(("🔥", 4),), total=5)
-    assert merged_reaction_view(summary=None, local={"👏": 2}, mine=None) == (
+    assert merged_reaction_view(summary=None, local={"👏": 2}) == (
         {"👏": 2},
         2,
         None,
     )
-    assert merged_reaction_view(summary=summary, local={"👏": 1}, mine=None) == (
-        {"🔥": 4},
-        5,
-        1_000,
-    )
-    # Mine, made after the totals were sent, is overlaid…
-    assert merged_reaction_view(summary=summary, local={}, mine=("👏", 2_000)) == (
-        {"🔥": 4, "👏": 1},
-        6,
-        1_000,
-    )
-    # …one made before is already in them.
-    assert merged_reaction_view(summary=summary, local={}, mine=("🔥", 500)) == (
+    # The author household's totals, exactly — the reactions held here (and
+    # the viewer's own, newer or not) are never added on top: a changed
+    # emoji would count twice (adversarial review #1184).
+    assert merged_reaction_view(summary=summary, local={"👏": 1}) == (
         {"🔥": 4},
         5,
         1_000,

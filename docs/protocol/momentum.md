@@ -542,10 +542,17 @@ at its own live moments once a minute
 **+10 min, +6 h and +3 days** after it was made — the last only while
 followers still keep the moment (`expires_at` past it) — and **only when
 they changed** since its last send on the mesh. A moment nobody reacted to
-sends nothing. What was last sent is kept in memory only; after a restart
-each own live moment of the last 24 h that has reactions gets one
-checkpoint (its latest due one), older ones wait for their next. Public
-moments also go through their GFSs, on their own checkpoints
+sends nothing. **Paced:** at most 8 mesh updates a tick (ticks ≥ 60 s
+apart — under every receiver's 10-a-minute budget per origin, with room
+for delivery jitter); more due at once wait for the next ticks, a
+restart's catch-up after live checkpoints. A checkpoint counts as sent only
+once handed to the outbox — a send that fails stays due and is tried again
+next tick. What was last sent is kept in memory only; after a restart each
+own live moment of the last 24 h that has reactions gets one checkpoint
+(its latest due one), older ones wait for their next — so a restart costs
+at most one update per moment of the last day, spread at 8 a minute (60
+such moments: ~8 minutes). Public moments also go through their GFSs, on
+their own checkpoints
 ([`momentum_public.md`](momentum_public.md#reaction-totals-through-the-gfs-v_69)).
 
 **Wire.** New event `MOMENT_REACTIONS_COUNTED`, hop-encrypted like every
@@ -569,13 +576,18 @@ only when: the shape is exact (≤ 8 emoji, each one emoji of ≤ 32 bytes,
 counts ≤ total); the origin is not this household and the author not one of
 its people; the signature verifies against the key pinned for the origin, or
 a shipped key that derives to it (§4.1.2) — an unknown suite is refused,
-never defaulted; `rev` is at most 5 min ahead; the moment is held here, live
-(not a tombstone, not expired), by that author **and** that origin; and
-`rev` is newer than the one kept. A household takes at most 10 new
-(moment, rev) a minute per origin and 4 per moment a day (3 checkpoints + a
-restart) — counted once per rev, not per copy, and per signing origin, so a
-household naming another origin's moment id spends only its own budget. A delete's tombstone wipes
-the totals (trigger) and refuses new ones. Realtime: the household's open
+never defaulted; `rev` is at most 5 min ahead and at most 25 h old; the
+moment is held here, live (not a tombstone, not expired), by that author
+**and** that origin; and `rev` is newer than the one kept (read from the
+database, so it holds across a restart). **Budgets come last:** a household
+takes at most 10 new (moment, rev) a minute per origin and 4 per moment a
+day (3 checkpoints + a restart), charged only for totals it actually kept
+or relayed — once per rev, not per copy, and per signing origin (a
+household naming another origin's moment id spends only its own budget).
+Every refusal above happens before a budget is touched, so a neighbour
+replaying genuine old, older-than-kept or unheld totals spends nobody's
+budget. A delete's tombstone wipes the totals (trigger) and refuses new
+ones. Realtime: the household's open
 views get a `moment.reaction_changed` hint (no reactor), except anyone who
 blocked the author.
 
@@ -584,24 +596,36 @@ the seen-map relays it once per **(moment, rev)** (or again from closer),
 only when this household holds the moment from the mesh or relayed its
 create — as **that origin's** moment (a household that never passed the
 moment on has nobody downstream who holds it; totals signed by another
-household for that moment id are refused outright) — only while `rev` is under 25 h old, never a `no_relay` one
+household for that moment id are refused outright) — only while `rev` is
+under 25 h old and newer than the last one it passed on, never a `no_relay` one
 (a protected account's moment — its totals go to paired households only and
 a receiver refuses one relayed), only below hop 3, and **only to v_69 peers**
 (`peer_supports(…, MIN_FOR_MOMENT_REACTION_COUNTS)`) under the same hide
 list, guardian blocks and relay policy as the moment. A copy that came only
 through a GFS is never relayed to the mesh.
 
+**Who receives totals.** The author's household sends them to **every**
+confirmed v_69 peer, and each relay to every v_69 peer of its own — the
+same audience a create reaches, plus any household paired since the moment
+was made. A household that neither holds the moment nor relayed its create
+drops them (nothing kept, nothing relayed, no budget spent), but it can read
+that one update: the moment's id, author and totals — never who reacted.
+Narrowing the first hop to the households that got the create would not
+narrow the relays, so it is not done.
+
 **API.** For a moment from another household whose reactions reach the
 author (`reactions_reach: "author"`) the API returns the author household's
 totals once it sent any — `reaction_count`, `reaction_counts` and
-`reaction_totals_at` (its `rev`) — plus the caller's own reaction
-(`my_reaction`, from the rows here), added to the totals when made after
-them. Everywhere else — this household's own moments (every reaction is
-here), a moment whose reactions stay here (`reactions_reach: "household"`
-keeps its note), or no totals yet — the reactions held here. Known edge:
-a viewer who takes a reaction back and makes one again after the totals were
-sent is counted once more until the next checkpoint (the totals say nothing
-about who, so the overlay can't tell).
+`reaction_totals_at` (its `rev`) — **exactly**, and the caller's own
+reaction (`my_reaction`, from the rows here) marked separately, never added
+on top: **never over-counted, at most one checkpoint stale.** A reaction
+row keeps only its latest emoji and time, so one changed or made after the
+totals can't be told from one already in them — adding it counted a changed
+emoji twice (and a `rev` skewed up to 5 min did the same, or added a ninth
+emoji). The next checkpoint brings the caller's reaction into the numbers.
+Everywhere else — this household's own moments (every reaction is here), a
+moment whose reactions stay here (`reactions_reach: "household"` keeps its
+note), or no totals yet — the reactions held here.
 
 ```mermaid
 sequenceDiagram
@@ -630,7 +654,14 @@ create ~1.6 KB.
 * *Sparse mesh (degree ~4):* 4 + 12 + 36 = 52 (≤ ~100 with overlaps)
   envelopes ≈ **57–110 KB per update**.
 * *Worst case per origin:* the receiver budgets cap what any origin can make
-  a household take and relay — 10 new revs a minute, 4 per moment a day.
+  a household take and relay — 10 new revs a minute, 4 per moment a day —
+  and a relay replaying genuine old totals costs one signature check each,
+  no budget and no relay.
+* *Residual — a burst through an offline peer's outbox.* The author paces
+  its sends, but a peer offline for a while gets every queued update
+  (latest-only per moment) when it comes back, in one outbox drain. Past 10
+  a minute from one origin the rest are refused there and wait for those
+  moments' next checkpoint — stale, never wrong.
 
 ## Mermaid sequence — local author posts a moment
 

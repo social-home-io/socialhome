@@ -960,8 +960,7 @@ sign-off.
 Owner decision 10, 2026-10-25 (the owner was told: counts are totals only —
 never who reacted — sent at checkpoints, only on change). Only a moment's
 author household holds every reaction to it, so it re-broadcasts the
-totals to the households that hold the moment — over the mesh and through
-the GFSs its public moments go to
+totals over the mesh and through the GFSs its public moments go to
 ([`protocol/momentum.md`](./protocol/momentum.md#reaction-totals-v_69),
 [`protocol/momentum_public.md`](./protocol/momentum_public.md#reaction-totals-through-the-gfs-v_69)).
 What this tells whom:
@@ -972,8 +971,7 @@ What this tells whom:
    from people it doesn't know: the mesh learns how much GFS followers
    reacted, and GFS followers how much the author's paired households did.
    Never who, never which household. Encrypted on every hop (hop-encrypted
-   on the mesh, sealed under the moment's item key through a GFS); a
-   household that doesn't hold (or relay) the moment never gets them.
+   on the mesh, sealed under the moment's item key through a GFS).
 2. **Residual — a small count plus timing can hint at who.** A total of 1,
    or a change of 1 between two checkpoints, combined with what a household
    already knows (who it showed the moment to, when someone said they
@@ -981,16 +979,24 @@ What this tells whom:
    +3 h, +3 d / +24 h), never per reaction, blunt the timing; they don't
    remove it for a moment with very few reactions.
 3. **Residual — the GFS learns that totals changed.** It reads no count: it
-   pushes an opaque envelope of fixed fields. It does learn that moment M's
-   totals changed before checkpoint *k* — an update arrived — and so, over
-   a moment's life, roughly whether it drew reactions early or late. It is
-   not told how many, which emoji, or from whom.
-4. **Nothing travels further than the moment did.** Totals go only to
-   households that hold the moment (or relayed it), under the same hide
-   list, guardian blocks and relay policy; a protected account's totals go
-   to paired households only and are never relayed; a GFS pushes them only
-   to followers that are connected and asked for them, and never queues
-   them.
+   pushes an opaque envelope of fixed fields, its sealed body padded to one
+   fixed size, so not even the length differs between one reaction and a
+   million, or one emoji and eight. It does learn that moment M has at
+   least one reaction and its totals changed before checkpoint *k* — an
+   update arrived — and so, over a moment's life, roughly whether it drew
+   reactions early or late. It is not told how many, which emoji, or from
+   whom.
+4. **Mesh totals go to paired v_69 households, kept only where the moment
+   is.** The author's household sends them to every confirmed v_69 peer,
+   and a relay to every v_69 peer of its own — the audience a create
+   reaches, plus any household paired since the moment was made. Only a
+   household that holds the moment (or relayed its create) keeps or relays
+   them; one that doesn't drops them, but can read that one update — the
+   moment's id, author and totals, never who reacted. The same hide list,
+   guardian blocks and relay policy apply as to the moment; a protected
+   account's totals go to paired households only and are never relayed; a
+   GFS pushes them only to followers that are connected and asked for
+   them, and never queues them.
 5. **No new key.** The mesh totals are signed with the author household's
    existing identity key (a new `moment-counts:v1:` domain); the GFS totals
    ride the existing moment envelope and key.

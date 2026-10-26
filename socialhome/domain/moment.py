@@ -364,23 +364,22 @@ def merged_reaction_view(
     *,
     summary: MomentReactionSummary | None,
     local: dict[str, int],
-    mine: tuple[str, int] | None,
 ) -> tuple[dict[str, int], int, int | None]:
     """What the API shows for one moment: ``(counts, total, totals_rev)``.
 
     Without a *summary* (the author's household sent none, or reactions here
-    don't reach it): the reactions held here (*local*). With one: its totals,
-    plus the viewer's own reaction (*mine* = ``(emoji, reacted_at_ms)``) when
-    it was made after the summary was sent — it can't be in it yet.
-    ``totals_rev`` is the summary's ``rev`` (``None`` for local counts)."""
+    don't reach it): the reactions held here (*local*). With one: exactly
+    its totals — **never over-counted, at most one checkpoint stale**. The
+    viewer's own reaction is not added on top: a reaction row keeps only its
+    latest emoji and time, so a reaction changed or made after the totals
+    can't be told from one already in them (adding it counted a changed
+    emoji twice, and a skewed ``rev`` the same). The API marks the viewer's
+    own emoji separately (``my_reaction``); the next checkpoint brings it
+    into the numbers. ``totals_rev`` is the summary's ``rev`` (``None`` for
+    local counts)."""
     if summary is None:
         return dict(local), sum(local.values()), None
-    counts = dict(summary.counts)
-    total = summary.total
-    if mine is not None and mine[1] > summary.rev:
-        counts[mine[0]] = counts.get(mine[0], 0) + 1
-        total += 1
-    return counts, total, summary.rev
+    return dict(summary.counts), summary.total, summary.rev
 
 
 #: Cap on how many tags survive per moment. Twitter is generous on

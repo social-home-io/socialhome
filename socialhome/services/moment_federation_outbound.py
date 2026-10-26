@@ -64,6 +64,7 @@ from ..domain.moment import (
     moment_too_old_to_relay,
 )
 from ..infrastructure.event_bus import EventBus
+from ..moment_counts import MAX_COUNTS_REV_AGE_MS
 from ..moment_origin import (
     NO_RELAY_FIELD,
     carries_no_relay,
@@ -96,9 +97,10 @@ RELAY_SEEN_MAX: int = 50_000
 
 #: v_69 — a household relays a moment's totals only while they are this
 #: fresh (by their signed ``rev``): a day of outbox retries plus clock skew.
-#: Older totals are a replay and go no further (a receiver still refuses
-#: anything not newer than what it holds).
-COUNTS_RELAY_MAX_AGE_MS: int = 25 * 3600 * 1000
+#: Older totals are a replay — neither kept nor passed on (the receiver
+#: refuses them before any budget, :data:`~socialhome.moment_counts
+#: .MAX_COUNTS_REV_AGE_MS`).
+COUNTS_RELAY_MAX_AGE_MS: int = MAX_COUNTS_REV_AGE_MS
 
 
 def counts_outbox_key(moment_id: str) -> str:
@@ -326,7 +328,7 @@ class MomentFederationOutbound(
         from_instance: str,
         holds_moment: bool = False,
         now_ms: int | None = None,
-    ) -> None:
+    ) -> int:
         """Re-broadcast an inbound moment envelope to *our* paired peers,
         bumping ``hop_count`` and excluding both the original origin
         and the immediate sender. No-op when the payload already hit
@@ -341,6 +343,8 @@ class MomentFederationOutbound(
         household holds the moment from the mesh (*holds_moment*) or relayed
         its create, only while its ``rev`` is younger than
         :data:`COUNTS_RELAY_MAX_AGE_MS` (*now_ms*), and only to v_69 peers.
+
+        Returns how many peers it was handed to (0: not relayed).
         """
         # No-redistribute rule for §Momentum-public: a moment that
         # arrived through a GFS public fan-out must not bleed back into
@@ -348,16 +352,16 @@ class MomentFederationOutbound(
         # payload so we can skip the relay here without consulting
         # local DB state on the inbound hot path.
         if str(payload.get("received_via") or "") == "gfs":
-            return
+            return 0
         # v_38: a ``no_relay`` moment (a protected account's) goes no further.
         if carries_no_relay(payload):
-            return
+            return 0
         try:
             hop = int(payload.get("hop_count") or 0)
         except TypeError, ValueError:
             hop = 0
         if hop <= 0 or hop >= MOMENT_MAX_HOPS:
-            return
+            return 0
         # v_65: a moment lives up to 30 days, so an old signed create is a
         # replay worth refusing to spread — kept here, not passed on past
         # 48 h after its signed ``occurred_at``.
@@ -369,19 +373,19 @@ class MomentFederationOutbound(
                 payload.get("moment_id"),
                 MOMENT_RELAY_MAX_AGE_HOURS,
             )
-            return
+            return 0
         moment_id = str(payload.get("moment_id") or "")
         seen_key: tuple[str, ...] = (event_type.value, moment_id)
         min_version: int | None = None
         outbox_key: str | None = None
         if event_type == FederationEventType.MOMENT_REACTIONS_COUNTED:
             if not self._counts_relayable(payload, moment_id, holds_moment, now_ms):
-                return
+                return 0
             seen_key = (event_type.value, moment_id, str(payload.get("rev")))
             min_version = FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS
             outbox_key = counts_outbox_key(moment_id)
         if not self._relay_is_new(seen_key, hop):
-            return
+            return 0
         origin = str(payload.get("origin_instance_id") or "")
         # §Momentum-relay-policy: don't relay a moment whose source
         # is on the household ban list, or whose author / moment is
@@ -392,7 +396,7 @@ class MomentFederationOutbound(
             author_user_id=str(payload.get("author_user_id") or "") or None,
             target_id=str(payload.get("moment_id") or "") or None,
         ):
-            return
+            return 0
         self._remember_relay(seen_key, hop)
         if event_type == FederationEventType.MOMENT_CREATED and origin:
             # v_69: which origin's create this was — totals for the moment
@@ -412,7 +416,7 @@ class MomentFederationOutbound(
                     to_instance=peer_id,
                 )
 
-        await self._fan_to_peers(
+        return await self._fan_to_peers(
             event_type=event_type,
             payload=next_payload,
             origin_instance_id=origin,
@@ -435,7 +439,7 @@ class MomentFederationOutbound(
         the moment on has nobody downstream who holds it), and only while
         fresh."""
         origin = str(payload.get("origin_instance_id") or "")
-        if not holds_moment and not self._relayed_create(moment_id, origin):
+        if not holds_moment and not self.relayed_create(moment_id, origin):
             log.debug(
                 "moment relay: totals for %s — moment neither held nor relayed",
                 moment_id,
@@ -448,7 +452,7 @@ class MomentFederationOutbound(
             return False
         return True
 
-    def _relayed_create(self, moment_id: str, origin: str) -> bool:
+    def relayed_create(self, moment_id: str, origin: str) -> bool:
         """Whether this household relayed *moment_id*'s create, as *origin*'s
         moment, lately (the seen-map entry still lives)."""
         held = self._relayed.get(("origin", moment_id, origin))

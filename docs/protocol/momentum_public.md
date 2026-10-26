@@ -573,7 +573,12 @@ the GFSs its followers read the moment on:
 * **When:** at **+10 min, +3 h and +24 h** after the moment was made (the
   last only while it is still in its window) and **only when they changed**
   since the last GFS send; after a restart, one checkpoint for each own live
-  public moment of the last 24 h that has reactions.
+  public moment of the last 24 h that has reactions. At most 8 posts a tick
+  (≥ 60 s apart — under the GFS's 10 a minute); the rest wait for the next
+  ticks. A checkpoint counts as sent to a GFS only on a `2xx`: one that
+  answered `429` or failed is posted again after 5 min — only that GFS, at
+  most 3 posts a checkpoint — then left to the next checkpoint, which goes to
+  every GFS even if the totals didn't change since.
 * **Where:** every GFS the author is registered on that proves the signed
   `encrypted_moments` **and** `moment_counts` capabilities; an older GFS gets
   nothing (its followers keep their own counts).
@@ -581,7 +586,11 @@ the GFSs its followers read the moment on:
   fields of a publish — the totals are sealed: `{op: "counts",
   author_user_id, rev, counts, total, sent_at}` under the item key of
   **today's** step for that moment id (followers keep only the newest step
-  key, as for a delete). The GFS reads no count.
+  key, as for a delete). The body is **padded to exactly 640 bytes**
+  (`COUNTS_BODY_BYTES`, a `_pad` key inside the AEAD; the largest possible
+  body — eight 32-byte emoji at 1 000 000 each — is 499), so every totals
+  ciphertext is the same length: the GFS reads no count, and can't tell one
+  reaction from a million, or one emoji from eight, by size either.
 * **GFS:** checks the shape, that the signer is the household the author
   registered from, that the step is today's, and its seen cache (a retried
   post is a no-op that spends nothing); then its budgets, cluster-wide:
@@ -592,7 +601,15 @@ the GFSs its followers read the moment on:
   follower households that declared `ops: ["counts"]` and are **connected**
   — on this node, and on the others through the cluster audience
   `count_followers` — and **never queues it**: a follower offline now gets
-  the next checkpoint, or keeps its own count.
+  the next checkpoint, or keeps its own count. Bounded residuals of the
+  cluster-wide day cap: two posts of one moment landing on two nodes at the
+  same moment both pass before either is forwarded (≤ one extra per node,
+  and the author sends at most 3 + a retried one anyway); a node whose
+  forward buffer is full forwards nothing, so the others don't count that
+  one; and during a rolling upgrade an older node ignores the
+  `count_followers` audience — it pushes nothing to its followers and counts
+  nothing, so the cap is per node (≤ 3 × nodes a day) until it is upgraded.
+  None of these reaches a follower that didn't ask, or queues anything.
 * **Follower:** declares `ops: ["counts"]` (in its follow and its suites
   declaration) only to a GFS that proved `moment_counts` — an older one
   refuses the unknown key — and declares again once a server it follows
@@ -626,18 +643,21 @@ sequenceDiagram
 
 ### Bounds and cost
 
-Measured with the real encoders: a counts post is **0.57 KB** (one emoji) to
-**0.70 KB** (eight), a pushed frame **0.63–0.75 KB**. An author with
-**10 000 follower households** and 200 reactions in the first hour: the
-moment is ~12 MB through the GFS; each totals update ≤ 10 000 × 0.63–0.75 KB
-≈ **6.3–7.5 MB** (≈ 3.8–4.5 MB with 60 % connected), at most 3 a moment and
-only on change — typically 2 ≈ 12.6–15 MB. Pushing every reaction instead:
-200 × 10 000 × 0.63 KB ≈ 1.26 GB. The GFS keeps no totals at rest; the seen
+Measured with the real encoders: a counts post is **1.22 KB** and a pushed
+frame **1.27 KB**, whatever the totals (padded; unpadded they were
+0.55–0.70 KB and their length told the GFS roughly how many emoji and how
+big). An author with **10 000 follower households** and 200 reactions in the
+first hour: the moment is ~12 MB through the GFS; each totals update ≤
+10 000 × 1.27 KB ≈ **12.7 MB** (≈ 7.6 MB with 60 % connected), at most 3 a
+moment and only on change — typically 2 ≈ 25 MB. A refused post is retried
+to that GFS only (≤ 2 more 1.22 KB posts a checkpoint, no push). Pushing
+every reaction instead: 200 × 10 000 × 1.27 KB ≈ 2.5 GB. The GFS keeps no totals at rest; the seen
 cache and the per-moment counters are in memory, bounded like the publish
 cache.
 
 **What the GFS learns** ([`principles.md`](../principles.md)): that moment
-M's totals changed before checkpoint *k* (an update came) — not the counts.
+M has at least one reaction and its totals changed before checkpoint *k* (an
+update came) — not the counts, and not their size.
 
 ## Event types
 

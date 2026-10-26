@@ -92,18 +92,6 @@ def _has_expired(moment: Moment) -> bool:
     return expires <= datetime.now(UTC)
 
 
-def _reacted_at_ms(value: str) -> int:
-    """A ``moment_reactions.reacted_at`` (naive UTC, seconds or ms) in Unix
-    milliseconds; ``0`` when it doesn't parse."""
-    try:
-        when = datetime.fromisoformat(value)
-    except ValueError:
-        return 0
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    return int(when.timestamp() * 1000)
-
-
 def _expiry_key(value: str) -> datetime:
     """Sort key for an ISO ``expires_at`` (naive = UTC; junk sorts last so
     ``min`` keeps the other)."""
@@ -637,8 +625,10 @@ class MomentService:
 
         A moment from another household whose reactions reach its author
         (``reach`` ``author``) shows the totals its author's household last
-        sent, when it sent any — plus the viewer's own reaction if made since
-        (it can't be in them yet). Everything else — the viewer's own
+        sent, when it sent any — exactly, never with the viewer's own
+        reaction added on top (:func:`~socialhome.domain.moment
+        .merged_reaction_view`: never over-counted, at most one checkpoint
+        stale). Everything else — the viewer's own
         household's moments (all reactions are here), a moment whose
         reactions stay here, or no totals yet — shows the reactions held
         here. Always the viewer's own emoji, from the rows here."""
@@ -661,7 +651,6 @@ class MomentService:
             counts, total, rev = merged_reaction_view(
                 summary=summaries.get(m.id),
                 local=local.get(m.id, {}),
-                mine=(own[0], _reacted_at_ms(own[1])) if own is not None else None,
             )
             out[m.id] = MomentReactionTotals(
                 counts=counts,

@@ -82,6 +82,11 @@ COUNTS_FIELDS: frozenset[str] = frozenset(
 #: Longest id-shaped field (moment, user, instance id).
 MAX_COUNTS_ID_CHARS: int = 256
 
+#: Oldest a totals ``rev`` may be (now − ``rev``, ms) and still be kept or
+#: relayed: a day of outbox retries for an offline peer plus clock skew.
+#: Anything older is a replay — refused before any budget is touched.
+MAX_COUNTS_REV_AGE_MS: int = 25 * 3600 * 1000
+
 #: Fields outside the signature.
 _UNSIGNED = frozenset({"hop_count", COUNTS_SIG_FIELD})
 
@@ -222,6 +227,7 @@ __all__ = [
     "COUNTS_SIG_SUITE_ED25519",
     "COUNTS_SIG_SUITE_FIELD",
     "MAX_COUNTS_ID_CHARS",
+    "MAX_COUNTS_REV_AGE_MS",
     "NO_RELAY_FIELD",
     "ORIGIN_IDENTITY_PK_FIELD",
     "SUPPORTED_COUNTS_SIG_SUITES",
