@@ -285,6 +285,7 @@ class MomentService:
                 moment_id=moment_id,
                 author_user_id=moment.author_user_id,
                 origin_instance_id=moment.origin_instance_id,
+                is_public=moment.is_public,
             )
         )
 

@@ -59,9 +59,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: A share copy lives no longer than a moment can (the GFS refuses more).
-SHARE_KEEP_AT_MOST_S: int = 7 * 86_400
-
 
 class ShareLinkUnavailableError(CodedError):
     """No link can be minted right now: no pinned viewer is configured, or
@@ -216,7 +213,9 @@ class MomentPublicShareService:
         self, moment: Moment, share: MomentPublicShare, item_key: bytes, gfs_id: str
     ) -> str:
         author = await self._users.get_by_user_id(moment.author_user_id)
-        expires = min(_unix(moment.expires_at), int(time.time()) + SHARE_KEEP_AT_MOST_S)
+        # As long as the moment lives — each GFS keeps it as long as it
+        # allows (``MomentPublicMediaOutbound.keep_until``, v_66).
+        expires = _unix(moment.expires_at)
         media = await self._media_on(gfs_id, moment, share, item_key, expires)
         body = {
             "v": 1,

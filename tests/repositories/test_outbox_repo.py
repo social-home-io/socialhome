@@ -7,7 +7,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from socialhome.domain import federation_retention as fr
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.federation_retention import (
+    CAPPED_DELETE_KEY_PREFIX,
+    capped_delete_key,
+    moment_delete_key,
+    relayed_delete_prefix,
+)
 from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     MAX_ATTEMPTS,
@@ -983,3 +990,121 @@ async def test_drop_superseded_removes_the_queued_older_state(env):
     assert await repo.drop_superseded("peer", "location:s1:u1") == 1
     assert await repo.drop_superseded("peer", "location:s1:u1") == 0
     assert await _pending_ids(env, "peer") == {other}
+
+
+async def _seed_keyed(env, eid, *, key, created_at, event_type=None):
+    await env.db.enqueue(
+        "INSERT INTO federation_outbox(id, instance_id, event_type,"
+        " payload_json, status, created_at, supersede_key)"
+        " VALUES(?,?,?,?,'pending',?,?)",
+        (
+            eid,
+            "peer",
+            (event_type or FederationEventType.MOMENT_DELETED).value,
+            "{}",
+            created_at,
+            key,
+        ),
+    )
+
+
+async def test_pending_rows_are_counted_by_key_prefix(env):
+    MD = FederationEventType.MOMENT_DELETED
+    for i, origin in enumerate(("x", "x", "y", "xy")):
+        key = moment_delete_key(
+            MD,
+            {"moment_id": f"m{i}", "origin_instance_id": origin},
+            own_instance_id="me",
+        )
+        await _seed_keyed(env, f"r{i}", key=key, created_at="2026-01-01T00:00:00+00:00")
+    count = env.outbox_repo.count_pending_with_key_prefix
+    assert await count("peer", relayed_delete_prefix("x")) == 2
+    assert await count("peer", relayed_delete_prefix("y")) == 1
+    assert await count("other-peer", relayed_delete_prefix("x")) == 0
+
+
+async def test_eviction_takes_a_relayed_delete_before_our_own_events(env):
+    """Adversarial review F2: at the per-peer cap, a delete we only relay goes
+    before anything of our own — even an older one of ours."""
+    MD = FederationEventType.MOMENT_DELETED
+    await _seed_pending(
+        env,
+        "ours-old",
+        instance_id="peer",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        created_at="2025-12-31T00:00:00+00:00",
+    )
+    await _seed_keyed(
+        env,
+        "our-delete",
+        key=moment_delete_key(
+            MD, {"moment_id": "m0", "origin_instance_id": "me"}, own_instance_id="me"
+        ),
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    await _seed_keyed(
+        env,
+        "relayed",
+        key=moment_delete_key(
+            MD, {"moment_id": "m1", "origin_instance_id": "x"}, own_instance_id="me"
+        ),
+        created_at="2026-01-03T00:00:00+00:00",
+    )
+    await _seed_keyed(
+        env,
+        "relayed-capped",
+        key=capped_delete_key("x", "m2"),
+        created_at="2026-01-02T00:00:00+00:00",
+    )
+    assert await env.outbox_repo.evict_oldest_droppable("peer") is True
+    assert await env.outbox_repo.evict_oldest_droppable("peer") is True
+    assert await _pending_ids(env, "peer") == {"ours-old", "our-delete"}
+    assert await env.outbox_repo.evict_oldest_droppable("peer") is True
+    assert await _pending_ids(env, "peer") == {"our-delete"}
+
+
+async def test_relayed_deletes_past_an_origins_cap_are_queued_ordinary(
+    env, monkeypatch
+):
+    """Adversarial review F2: a paired household signing deletes for made-up
+    ids under its own origin gets at most MAX_LONG_LIVED_RELAYED_PER_ORIGIN of
+    them queued 30 days for one peer — the rest in the ordinary class (7 days,
+    given up at MAX_ATTEMPTS). Our own deletes stay long-lived past it."""
+    monkeypatch.setattr(fr, "MAX_LONG_LIVED_RELAYED_PER_ORIGIN", 3)
+    MD = FederationEventType.MOMENT_DELETED
+    for i in range(5):
+        for origin in ("mallory", "me"):
+            await env.outbox_repo.enqueue(
+                instance_id="peer",
+                event_type=MD,
+                payload_json="{}",
+                supersede_key=moment_delete_key(
+                    MD,
+                    {"moment_id": f"m{i}", "origin_instance_id": origin},
+                    own_instance_id="me",
+                ),
+            )
+    rows = await env.db.fetchall(
+        "SELECT supersede_key, expires_at FROM federation_outbox"
+    )
+    by_kind: dict[str, list[datetime]] = {}
+    for r in rows:
+        key = r["supersede_key"]
+        kind = (
+            "capped"
+            if key.startswith(CAPPED_DELETE_KEY_PREFIX)
+            else "relayed"
+            if key.startswith(relayed_delete_prefix("mallory"))
+            else "ours"
+        )
+        left = datetime.fromisoformat(r["expires_at"]) - datetime.now(UTC)
+        by_kind.setdefault(kind, []).append(left)
+    assert {k: len(v) for k, v in by_kind.items()} == {
+        "relayed": 3,
+        "capped": 2,
+        "ours": 5,
+    }
+    for left in by_kind["relayed"] + by_kind["ours"]:
+        assert left > timedelta(days=29)
+    for left in by_kind["capped"]:
+        assert timedelta(days=6) < left <= timedelta(days=7)

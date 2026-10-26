@@ -18,6 +18,7 @@ from .federation import GfsFederationService
 from .highlight_publications import HighlightPublicationRegistry
 from .invites import GfsInviteService
 from .member_publish import GfsMemberPublishService
+from .moment_delete_log import MomentDeleteLog
 from .moment_media import GfsMomentMediaStore
 from .moment_public_registry import MomentPublicRegistry
 from .node_route import MisrouteWarning
@@ -92,6 +93,8 @@ gfs_user_picture_repo_key: AppKey[AbstractGfsUserPictureRepo] = AppKey(
 gfs_moment_media_store_key: AppKey[GfsMomentMediaStore] = AppKey(
     "gfs_moment_media_store"
 )
+#: Signed public-moment delete certificates, kept 30 days (v_66).
+gfs_moment_delete_log_key: AppKey[MomentDeleteLog] = AppKey("gfs_moment_delete_log")
 
 #: Store-and-forward queue backing ``POST /gfs/envelope`` (§D2b).
 gfs_envelope_queue_repo_key: AppKey[AbstractGfsEnvelopeQueueRepo] = AppKey(

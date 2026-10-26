@@ -64,6 +64,7 @@ from .highlight_publications import HighlightPublicationRegistry
 from .invites import INVITE_MINT_MAX_PER_MINUTE, GfsInviteService
 from .maintenance import GfsMaintenanceScheduler
 from .member_publish import GfsMemberPublishService, build_member_publish_rate_limit
+from .moment_delete_log import MomentDeleteLog
 from .moment_media import GfsMomentMediaStore
 from .moment_public_registry import MomentPublicRegistry
 from .node_route import MisrouteWarning
@@ -90,6 +91,7 @@ from .repositories import (
     SqliteGfsHighlightPublicationRepo,
     SqliteGfsHighlightTokenRepo,
     SqliteGfsInviteRepo,
+    SqliteGfsMomentDeleteLogRepo,
     SqliteGfsMomentFollowRepo,
     SqliteGfsMomentKeyMailboxRepo,
     SqliteGfsMomentMediaRepo,
@@ -313,6 +315,7 @@ class GfsApp:
             moment_public_follows=SqliteGfsMomentFollowRepo(db),
             moment_key_mailbox=SqliteGfsMomentKeyMailboxRepo(db),
             moment_media=SqliteGfsMomentMediaRepo(db),
+            moment_delete_log=SqliteGfsMomentDeleteLogRepo(db),
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
             space_epochs=SqliteGfsSpaceEpochRepo(db),
@@ -476,8 +479,18 @@ class GfsApp:
         # ran out (the GFS otherwise has no recurring cleanup loop; these
         # tables would grow without bound).
         moment_media = GfsMomentMediaStore(repos.moment_media, config.media_dir)
+        # v_66 — signed delete certificates, pushed to a follower household
+        # that reconnects after missing a delete (shared database: whichever
+        # node takes the hello reads the same rows).
+        moment_delete_log = MomentDeleteLog(
+            repos.moment_delete_log,
+            repos.moment_public_follows,
+            ws_registry,
+            cluster=cluster,
+        )
         maintenance = GfsMaintenanceScheduler(
             moment_media=moment_media,
+            moment_delete_log=moment_delete_log,
             admin_repo=repos.admin,
             highlight_repo=repos.highlight_pubs,
             envelope_queue_repo=repos.envelope_queue,
@@ -489,6 +502,7 @@ class GfsApp:
             cluster=cluster,
             maintenance=maintenance,
             moment_media=moment_media,
+            moment_delete_log=moment_delete_log,
             admin_auth=AdminAuth(repos.admin),
             admin=admin,
             tokens=PairingTokenService(repos.admin),
@@ -570,6 +584,7 @@ class GfsApp:
         a[K.gfs_moment_public_registry_key] = self.services.moment_public
         a[K.gfs_user_picture_repo_key] = self.repos.moment_public_pictures
         a[K.gfs_moment_media_store_key] = self.services.moment_media
+        a[K.gfs_moment_delete_log_key] = self.services.moment_delete_log
         a[K.gfs_envelope_queue_repo_key] = self.repos.envelope_queue
         a[K.gfs_envelope_relay_key] = self.services.envelope_relay
         a[K.gfs_space_epoch_repo_key] = self.repos.space_epochs
@@ -632,6 +647,8 @@ class GfsApp:
         log.info("GFS: shutting down")
         # Background envelope accepts write to the DB — settle them first.
         await self.services.envelope_relay.close()
+        # Delete-certificate drains move cursors in the DB (v_66).
+        await self.services.moment_delete_log.close()
         await self.services.maintenance.stop()
         await self.services.member_publish.stop()
         await self.services.addressee.stop()

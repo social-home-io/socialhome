@@ -14,6 +14,7 @@ import time
 
 import pytest
 
+from socialhome.crypto import derive_instance_id, ed25519_public_key
 from socialhome.domain.events import (
     MediaTranscodeFailed,
     MediaTranscodeReady,
@@ -24,7 +25,13 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.moment import Moment
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.moment_public_seal import ENVELOPE_FIELDS, item_key, open_body
+from socialhome.moment_origin import DELETE_CERT_FIELDS, delete_cert_refusal
+from socialhome.moment_public_seal import (
+    ENVELOPE_FIELDS,
+    item_key,
+    open_body,
+    verify_wire,
+)
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.moment_public_repo import (
     SqliteMomentPublicRegistrationRepo,
@@ -39,6 +46,7 @@ class _StubResp:
     def __init__(self, status: int = 200, body: dict | None = None) -> None:
         self.status = status
         self._body = body or {}
+        self.headers: dict[str, str] = {}
 
     async def __aenter__(self):
         return self
@@ -53,10 +61,15 @@ class _StubResp:
 class _StubSession:
     def __init__(self, status: int = 200) -> None:
         self.status = status
+        #: Per-path status overrides (path suffix → status).
+        self.status_for: dict[str, int] = {}
         self.posts: list[tuple[str, dict]] = []
 
     def post(self, url, *, json=None, **_kw):
         self.posts.append((url, json or {}))
+        for suffix, status in self.status_for.items():
+            if url.endswith(suffix):
+                return _StubResp(status)
         return _StubResp(self.status)
 
 
@@ -73,13 +86,18 @@ class _Keys:
 
 
 class _Gfs:
-    """Which connections proved ``encrypted_moments``."""
+    """Which connections proved ``encrypted_moments`` — and (v_66)
+    ``moment_delete_log``."""
 
-    def __init__(self, proven: set[str]) -> None:
+    def __init__(self, proven: set[str], delete_log: set[str] | None = None) -> None:
         self.proven = proven
+        self.delete_log = delete_log or set()
 
     async def encrypted_moments_supported(self, gfs_id: str) -> bool:
         return gfs_id in self.proven
+
+    async def moment_delete_log_supported(self, gfs_id: str) -> bool:
+        return gfs_id in self.delete_log
 
 
 def _opened(envelope: dict) -> dict:
@@ -327,6 +345,7 @@ async def test_delete_event_fans_tombstone_to_each_registered_gfs(outbound_setup
         moment_id="m-1",
         author_user_id="u1",
         origin_instance_id="inst-self",
+        is_public=True,
     )
     await s["bus"].publish(delete)
     assert len(s["session"].posts) == 2
@@ -342,6 +361,57 @@ async def test_delete_event_fans_tombstone_to_each_registered_gfs(outbound_setup
     }
     # v_64: when it was signed, inside the signed ciphertext.
     assert isinstance(sent_at, int) and abs(sent_at - time.time()) < 5
+
+
+async def test_a_private_moments_delete_reaches_no_gfs(outbound_setup):
+    """v_66: a moment no GFS ever carried is not named to one when it goes —
+    neither the sealed delete nor a certificate."""
+    s = outbound_setup
+    s["gfs"].delete_log = {"g1", "g2"}
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1", author_user_id="u1", origin_instance_id="inst-self"
+        )
+    )
+    assert s["session"].posts == []
+
+
+async def test_a_delete_certificate_goes_only_where_the_log_is_proven(
+    outbound_setup,
+):
+    """v_66: the delete's signed certificate goes to each GFS that proved
+    ``moment_delete_log`` — one signed body, the same for each — and a GFS
+    that didn't gets only the sealed delete. The certificate is the mesh
+    MOMENT_DELETED's origin signature: it verifies under the household's
+    identity key and names nothing but who deleted which moment when."""
+    s = outbound_setup
+    s["gfs"].delete_log = {"g2"}
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["regs"].upsert(user_id="u1", gfs_id="g2")
+    seed = b"\x01" * 32
+    pk = ed25519_public_key(seed)
+    s["sub"].attach_identity(own_instance_id=derive_instance_id(pk), signing_key=seed)
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="ignored",
+            is_public=True,
+        )
+    )
+    certs = [p for p in s["session"].posts if p[0].endswith("/delete_cert")]
+    assert [u for u, _ in certs] == ["https://gfs2.example/gfs/moments/delete_cert"]
+    body = certs[0][1]
+    assert set(body) == {"instance_id", "cert", "signature"}
+    assert verify_wire(body, pk.hex())
+    cert = body["cert"]
+    assert set(cert) == DELETE_CERT_FIELDS
+    assert cert["moment_id"] == "m-1" and cert["author_user_id"] == "u1"
+    assert cert["origin_instance_id"] == derive_instance_id(pk)
+    assert delete_cert_refusal(cert, identity_pk_hex=pk.hex()) is None
+    # Both servers still got the sealed delete.
+    assert sum(u.endswith("/gfs/moments/delete") for u, _ in s["session"].posts) == 2
 
 
 async def test_outbound_used_before_attach_skips_silently(db):
@@ -405,7 +475,10 @@ async def test_protected_author_can_still_retract_a_moment(outbound_setup):
     await s["regs"].upsert(user_id="u1", gfs_id="g1")
     await s["bus"].publish(
         MomentDeleted(
-            moment_id="m-1", author_user_id="u1", origin_instance_id="inst-self"
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="inst-self",
+            is_public=True,
         )
     )
     assert len(s["session"].posts) == 1
@@ -667,7 +740,10 @@ async def test_a_delete_withdraws_the_media(outbound_setup):
     await s["regs"].upsert(user_id="u1", gfs_id="g1")
     await s["bus"].publish(
         MomentDeleted(
-            moment_id="m-1", author_user_id="u1", origin_instance_id="inst-self"
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="inst-self",
+            is_public=True,
         )
     )
     assert ("withdraw", "m-1") in media.calls
@@ -714,3 +790,65 @@ async def test_a_gfs_that_refused_the_file_is_not_recorded_as_holding_it(
     await s["regs"].upsert(user_id="u1", gfs_id="g1")
     await s["bus"].publish(_created_event())
     assert recorded == [{}]
+
+
+@pytest.mark.parametrize("status", [503, 404, 422, 429])
+async def test_a_failed_delete_certificate_is_queued_for_retry(outbound_setup, status):
+    """Adversarial review F3: a certificate post that fails — the GFS down,
+    or an old node of a cluster mid-upgrade answering 404 / 422 — is retried
+    for up to a day, not posted once and lost."""
+    s = outbound_setup
+    s["gfs"].delete_log = {"g1"}
+    s["session"].status_for = {"/delete_cert": status}
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="inst-self",
+            is_public=True,
+        )
+    )
+    retry = s["sub"]._cert_retry
+    assert retry.pending_count() == 1
+    # The retry re-posts the very same signed body.
+    first = [b for u, b in s["session"].posts if u.endswith("/delete_cert")]
+    s["session"].status_for = {}
+    outcome = await s["sub"]._send_cert("g1", first[0])
+    assert outcome.kind == "delivered"
+    again = [b for u, b in s["session"].posts if u.endswith("/delete_cert")]
+    assert again == [first[0], first[0]]
+
+
+async def test_a_refused_delete_certificate_is_not_retried(outbound_setup):
+    s = outbound_setup
+    s["gfs"].delete_log = {"g1"}
+    s["session"].status_for = {"/delete_cert": 409}
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="inst-self",
+            is_public=True,
+        )
+    )
+    assert s["sub"]._cert_retry.pending_count() == 0
+
+
+async def test_a_certificate_retry_to_a_gone_gfs_is_dropped(outbound_setup, db):
+    s = outbound_setup
+    await db.enqueue("UPDATE gfs_connections SET status='suspended' WHERE id='g1'")
+    outcome = await s["sub"]._send_cert("g1", {"x": 1})
+    assert outcome.kind == "permanent"
+    assert s["session"].posts == []
+
+
+async def test_the_certificate_retry_starts_and_stops_with_the_outbound(
+    outbound_setup,
+):
+    sub = outbound_setup["sub"]
+    await sub.start()
+    assert sub._cert_retry._task is not None
+    await sub.stop()
+    assert sub._cert_retry._task is None

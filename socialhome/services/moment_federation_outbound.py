@@ -46,12 +46,12 @@ from ..domain.moment import (
     MOMENT_RELAY_MAX_AGE_HOURS,
     moment_too_old_to_relay,
 )
-from ..federation.moment_origin import (
+from ..infrastructure.event_bus import EventBus
+from ..moment_origin import (
     NO_RELAY_FIELD,
     carries_no_relay,
     sign_moment_origin,
 )
-from ..infrastructure.event_bus import EventBus
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
 from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin

@@ -16,7 +16,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
-from socialhome.federation.moment_origin import (
+from socialhome.moment_origin import (
     ORIGIN_IDENTITY_PK_FIELD,
     ORIGIN_SIG_FIELD,
     ORIGIN_SIG_SUITE_FIELD,

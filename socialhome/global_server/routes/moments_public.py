@@ -12,6 +12,8 @@ Three surfaces:
     envelope (v_62; any other shape is refused — the GFS never carries a
     public moment in plaintext).
   - ``POST /gfs/moments/delete`` — fan out an encrypted tombstone.
+  - ``POST /gfs/moments/delete_cert`` — keep the delete's signed
+    certificate 30 days for followers offline when it went out (v_66).
   - ``POST /gfs/moments/keys`` — deliver sealed moment keys, each to the
     one follower household it names (v_62).
   - ``POST /gfs/moments/users/{user_id}/key_request`` — a follower
@@ -33,11 +35,13 @@ import base64
 import hashlib
 import logging
 import time
+from datetime import UTC, datetime
 
 import orjson
 from aiohttp import web
 
 from ...csp import media_response_headers
+from ...moment_origin import delete_cert_refusal
 from ...moment_public_media import MAX_BLOB_BYTES
 from ...moment_public_seal import (
     DELIVERY_FIELDS,
@@ -79,6 +83,19 @@ MAX_USER_ID_LEN = AUDIENCE_KEY_MAX_LEN
 #: Body cap for an encrypted publish / delete: the ciphertext cap plus the
 #: routing fields and signature.
 _MAX_ENVELOPE_BYTES = MAX_CIPHERTEXT_CHARS + 2048
+
+#: Body cap for ``POST /gfs/moments/delete_cert`` — a certificate is ~0.35 KB
+#: (v_66).
+_MAX_DELETE_CERT_BYTES = 4096
+
+#: A certificate is posted the moment its delete happens, and retried for
+#: up to a day when that fails (adversarial review F3,
+#: ``services.moment_delete_cert_retry``): one whose delete time is older
+#: than this (a day and an hour of slack), or further ahead than the skew,
+#: is refused — so a captured old one can't restart its 30 days here. A
+#: replay within it changes nothing (one row per author × moment).
+DELETE_CERT_MAX_AGE_S: int = 25 * 3600
+DELETE_CERT_MAX_SKEW_S: int = 300
 
 #: Sealed keys one ``POST /gfs/moments/keys`` may carry, and its body cap
 #: (a sealed key is ~0.6 KB).
@@ -341,6 +358,66 @@ class GfsMomentPublicDeleteView(GfsBaseView):
         registry = self.svc(K.gfs_moment_public_registry_key)
         delivered = await registry.fan_out_delete(envelope=body)
         return web.json_response({"delivered": delivered})
+
+
+class GfsMomentDeleteCertView(GfsBaseView):
+    """``POST /gfs/moments/delete_cert`` — keep a delete's signed certificate
+    (v_66) for followers offline when the delete went out.
+
+    Signed by the author's household: ``{instance_id, cert}``, where
+    ``cert`` is the ``MOMENT_DELETED`` origin certificate
+    (:data:`~socialhome.moment_origin.DELETE_CERT_FIELDS`) — checked here
+    against the key that household registered with, and again by every
+    follower against the key it pinned. Plaintext, but nothing beyond what
+    ``/gfs/moments/delete`` already shows this server, save the delete time.
+    """
+
+    async def post(self) -> web.Response:
+        result = await _rtc_authenticate(self, max_bytes=_MAX_DELETE_CERT_BYTES)
+        if isinstance(result, web.Response):
+            return result
+        body, sender = result
+        cert = body.get("cert")
+        if set(body) != {"instance_id", "cert"} or not isinstance(cert, dict):
+            return web.json_response({"error": "invalid_cert"}, status=422)
+        inst = await self.svc(K.gfs_fed_repo_key).get_instance(sender)
+        refusal = delete_cert_refusal(
+            cert, identity_pk_hex=inst.public_key if inst is not None else ""
+        )
+        if refusal is not None:
+            log.info("moment_public.delete_cert: refused — %s", refusal)
+            return web.json_response({"error": "invalid_cert"}, status=422)
+        registry = self.svc(K.gfs_moment_public_registry_key)
+        author = cert["author_user_id"]
+        if cert["origin_instance_id"] != sender or not (
+            await registry.is_author_household(author, sender)
+        ):
+            return web.json_response({"error": "instance_mismatch"}, status=403)
+        if not _delete_time_fresh(cert["occurred_at"], time.time()):
+            return web.json_response({"error": "stale_cert"}, status=409)
+        delete_log = self.svc(K.gfs_moment_delete_log_key)
+        if not delete_log.allow_post(sender):
+            resp = web.json_response({"error": "rate_limited"}, status=429)
+            resp.headers["Retry-After"] = "60"
+            return resp
+        outcome = await delete_log.keep(author_user_id=author, cert=cert)
+        if outcome == "full":
+            return web.json_response({"error": "author_delete_quota"}, status=429)
+        return web.json_response({"kept": outcome == "kept"})
+
+
+def _delete_time_fresh(occurred_at: str, now: float) -> bool:
+    """Whether a certificate's signed delete time is now-ish (within
+    :data:`DELETE_CERT_MAX_AGE_S` before, :data:`DELETE_CERT_MAX_SKEW_S`
+    after)."""
+    try:
+        when = datetime.fromisoformat(occurred_at)
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    at = when.timestamp()
+    return now - DELETE_CERT_MAX_AGE_S <= at <= now + DELETE_CERT_MAX_SKEW_S
 
 
 def _delivery_ok(item: object, sender: str) -> bool:

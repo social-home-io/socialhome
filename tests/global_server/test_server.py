@@ -309,6 +309,10 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "sealed_highlight_stream": True,
         "encrypted_moments": True,
         "encrypted_moment_media": True,
+        # v_66 — keeps signed delete certificates 30 days, and a moment blob
+        # as long as its moment (≤ 30 days).
+        "moment_delete_log": True,
+        "moment_media_30d": True,
         # #5b — a follower that missed a space key asks for it.
         "space_key_pull": True,
         # Step 12 — counts followers that cannot read member items.

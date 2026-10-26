@@ -488,7 +488,8 @@ Outbound envelopes go to `federation_outbox` first
 fixed cadence, picks the best transport for each peer (RTC if open,
 HTTPS otherwise), and retries with exponential backoff. Structural /
 security-critical events have `expires_at = NULL` and never age out;
-ordinary events have a 7-day TTL (§4.4.7). A delivered envelope's row is
+ordinary events have a 7-day TTL (§4.4.7), and a moment's delete
+(`LONG_LIVED`, v_66) 30 days of retries on the ceiling backoff. A delivered envelope's row is
 **deleted on success** (`mark_delivered`) — the receiver's 2xx satisfies
 at-least-once and nothing reads delivered rows, so the queue never keeps
 a tombstone per delivered event. The processor also runs a periodic

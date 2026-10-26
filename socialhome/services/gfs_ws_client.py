@@ -447,6 +447,7 @@ class GfsWebSocketClient:
             "incoming_public_moment",
             "incoming_public_moment_delete",
             "moment_key",
+            "moment_delete_certs",
         ):
             if self._on_moment_public is None:
                 log.debug(

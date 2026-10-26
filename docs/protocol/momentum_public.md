@@ -113,7 +113,9 @@ directory. Nothing more is claimed.
   older (v_64) follower keeps whatever the author sealed and holds a
   never-seen delete 7 days. The GFS's own windows (the 25 h `sent_at`
   check, the 24 h offline queue, the seen cache) are delivery windows, not
-  the moment's life, and are unchanged.
+  the moment's life, and are unchanged. A delete a follower was away for
+  reaches it later through the GFS's 30-day certificate log
+  ([v_66](#late-deletes-delete-certificates-v_66)).
 * **Signed send time (v_64).** Every sealed body — create and delete —
   carries `sent_at`, the Unix second the author's household signed the
   envelope. It is inside the ciphertext the envelope signature covers (and
@@ -236,6 +238,183 @@ The alternative was a send time in plaintext for the GFS to check. It was
 rejected: it would be one more field the GFS reads, it would need a protocol
 bump, and older GFSs refuse unknown envelope fields.
 
+## Late deletes: delete certificates (v_66)
+
+A public moment may live 30 days at a follower (v_65), but its delete crossed
+a GFS only live, or from the 24 h offline queue. A follower household offline
+longer kept showing a moment its author had deleted. Owner decision 6c and
+sign-off 4 (2026-10-25): **the GFS keeps each public delete's signed
+certificate for 30 days** and hands it to a follower household when it
+reconnects.
+
+**The certificate is the mesh delete's own signature.** A `MOMENT_DELETED`
+already carries the origin household's Ed25519 identity signature over
+`b"moment-origin:v1:"` + canonical JSON of `{event_type, sig_suite,
+moment_id, author_user_id, origin_instance_id, occurred_at}`
+(`socialhome/moment_origin.py`). Those four fields plus `origin_identity_pk`,
+`origin_sig_suite` and `origin_sig` are, on their own, a self-verifying
+delete certificate: who deleted which moment and when — no content. No new
+key, no new signature format, no new suite (the suite tag is the existing
+`origin_sig_suite`; an unknown one is refused).
+
+* **Author household.** On a public moment's delete it posts, to every GFS
+  whose signed `/gfs/info` proves `moment_delete_log`, `POST
+  /gfs/moments/delete_cert` signed by the household: `{instance_id, cert}`.
+  One signature, the same body to every such GFS. The sealed delete
+  (`/gfs/moments/delete`) still goes as before. A post that fails for a
+  reason a later try can fix — transport error, 408, 429 (its `Retry-After`
+  honoured), 5xx, and 404 / 422 (an older node of a cluster mid-upgrade
+  behind a server that advertised the log) — is retried with backoff (1 min,
+  5 min, 15 min, then hourly) for up to 24 h after the delete, the same
+  signed body each time (`services/moment_delete_cert_retry.py`, in memory,
+  ≤ 1 000 queued, ≤ 500 per GFS). Any other answer (409, 403) is final. A
+  moment that was never
+  public reaches no GFS at all when it is deleted — neither the sealed
+  delete nor a certificate (`MomentDeleted.is_public`).
+* **GFS.** Keeps it only when it checks out against the key that household
+  registered with (`delete_cert_refusal`): exactly the seven fields, each a
+  string ≤ 256 chars, `origin_identity_pk` = the sender's registered key and
+  deriving to `origin_instance_id` = the sender, a known suite, a signature
+  over a *delete* (a create's signature never passes). The author must be
+  registered here by that household (else 403), the delete time within the
+  last 25 h — a day of the author's retries plus slack (else `409
+  stale_cert`, so a captured old certificate can't restart its 30 days) —
+  and someone must follow the author here (else it is
+  accepted but not kept). One row per (author, moment), `INSERT OR IGNORE` —
+  a replay changes nothing. Kept in `gfs_moment_delete_log` (GFS migration
+  0024) and pruned 30 days after it was written (maintenance sweep).
+* **Reconnect.** When a household's `/gfs/ws` hello is accepted, the node
+  that took it drains what the household is owed from the shared log:
+  certificates of authors a user of that household follows, written after
+  that follow began, within the last 30 days. What is owed is tracked per
+  (household, author) by a delivery cursor (`gfs_moment_delete_cursor`,
+  GFS migration 0024): a push first opens a cursor for every followed
+  author with certificates since the household was last seen
+  (`relay_seen_at`, refreshed hourly while its socket is open, minus 2 h;
+  a household never seen: the whole 30 days), moves it past each
+  `moment_delete_certs` frame (≤ 50) that went out, and closes it once that
+  author is drained. The seen mark only decides where a *new* cursor
+  starts — an open one ignores it — so a capped push, a socket that drops
+  mid-push, or a flood never makes the GFS skip a certificate. One push
+  carries ≤ 200, ≤ 100 of one author, dealt round-robin (each author's
+  oldest owed first, the newest of each round first — a certificate
+  written weeks ago is about a moment that has nearly run out anyway);
+  while more is owed and the socket stays open, another push follows a
+  minute later. A followed author posting certificates for made-up ids
+  (up to 1 000) delays only its own.
+* **Follower.** Checks each certificate again — against the key it pinned
+  when it followed (`moment_public_follows.followed_instance_pk`), never one
+  riding with the certificate — refuses one older than 31 days or dated ahead, and
+  applies it exactly like a delete through the GFS: owner-bound ids, the
+  stored row's author and origin win, a moment held is wiped to a tombstone
+  (and `MomentDeleted` published), an id never held gets a 30-day tombstone
+  so a later create is refused, and a tombstone already held changes
+  nothing.
+
+The GFS can neither forge nor alter a certificate; it can only withhold one,
+as it can withhold any delete. What it learns beyond the sealed delete is
+the delete time, which it already saw as the time of the POST.
+
+**Cluster.** The log lives in the shared database and the push runs on the
+node holding the household's socket, so no forward is needed.
+
+### Sequence: a follower that was away catches up
+
+```mermaid
+sequenceDiagram
+  participant A as Author SH
+  participant G as GFS
+  participant B as Follower SH (offline 4 days)
+
+  A->>A: author deletes a public moment
+  A->>G: POST /gfs/moments/delete (sealed, as before)
+  G-->>G: B has no socket, not seen in 24 h — nothing queued
+  A->>A: sign MOMENT_DELETED origin fields (moment-origin:v1)
+  A->>G: POST /gfs/moments/delete_cert {instance_id, cert} (signed)
+  opt the post failed (down, 5xx, 429, 404 / 422 from an old node)
+    A->>G: same body again — backoff, for up to 24 h after the delete
+  end
+  G->>G: cert checks out against A's registered key? A registers the author? fresh? someone follows?
+  G->>G: INSERT OR IGNORE gfs_moment_delete_log (30 days)
+  Note over B: four days later
+  B->>G: /gfs/ws hello
+  G->>G: open a cursor per followed author with certs since B was last seen − 2 h
+  G->>G: owed past each cursor: ≤ 100 per author, ≤ 200 in all, round-robin
+  loop each frame of ≤ 50
+    G->>B: WS moment_delete_certs {certs: [≤ 50]}
+    G->>G: move each author's cursor past it (close it when drained)
+  end
+  Note over G: more owed and the socket still open? push again in a minute
+  B->>B: verify against pinned followed_instance_pk · ≤ 31 days old
+  B->>B: tombstone the moment · MomentDeleted on the bus
+```
+
+### Bounds and cost
+
+* **Rate:** 30 certificate posts a minute per author household, across the
+  cluster (`DELETE_CERT_POSTS_PER_MINUTE`, each node its `node_share`;
+  `429 rate_limited`, `Retry-After: 60`) — the same budget as publishes and
+  deletes, counted apart so a delete's two posts don't halve it.
+* **Size:** body ≤ 4 KB (413 past it), each field ≤ 256 chars. A real
+  certificate is ~0.35 KB.
+* **Storage:** at most 1 000 live certificates per author
+  (`MAX_DELETE_CERTS_PER_AUTHOR`, `429 author_delete_quota` past it; the
+  live delete still goes), so ≤ ~350 KB per author. A GFS with 50 000
+  authors each deleting 3 moments a month holds ~150 000 rows ≈ 52 MB.
+* **Per delete:** one extra POST of ~0.6 KB per GFS the author publishes
+  through — not per follower. A failing GFS gets at most ~27 tries of it
+  over 24 h (1 min, 5 min, 15 min, then hourly), then nothing.
+* **Per push:** ≤ 200 certificates ≈ 70 KB, ≤ 100 of one author, only
+  what that household is owed; one push a minute while more is owed and
+  its socket stays open. The cursor table holds a row only per (household,
+  author) with something still owed — written when a push finds some,
+  moved per frame (≤ 4 writes per author per push), deleted when drained,
+  pruned 30 days after last moved. Worst realistic case: a household
+  following 200 authors who each deleted one moment while it was away —
+  200 certificates in one push, 200 cursor rows opened and closed. Worst
+  hostile case: a followed author posting its whole 1 000-certificate
+  allowance of made-up ids (34 minutes at 30 a minute) — ≈ 350 KB to each
+  follower household that comes back, in ten pushes over ~10 minutes,
+  while every other author's deletes ride in the first push. Typical:
+  none.
+
+**Older households and servers.** Gated on the GFS's signed capability,
+never on a peer version. A GFS that doesn't prove `moment_delete_log` gets
+no certificate (its followers get the live delete or the 24 h queue, as
+before). A v_65 follower ignores the unknown frame. A v_65 author sends no
+certificate.
+
+**Residuals (best effort, signed off 2026-10-25, see
+[`principles.md`](../principles.md)).** A certificate lives 30 days. One
+whose post kept failing for 24 h — or whose author household restarted
+while it was still failing (the retry queue is in memory) — is not kept.
+The 30-day GFS log, the per-push caps and the cursor bound the work, never
+what is eventually handed over: a household is owed everything it missed
+until each certificate's 30 days run out. An author who leaves the
+directory takes their certificates with them (and their follows, so nobody
+would be pushed them).
+
+### Media lives as long as its moment (v_66)
+
+A share link's viewer fetches a moment's file from the GFS for as long as
+the moment lives, but a blob was kept at most 7 days (a GFS refused more
+than 8), so a link to a 30-day moment lost its picture after a week. A GFS
+that proves the signed `moment_media_30d` capability now keeps a blob (and a
+share copy) up to 31 days. The author's household asks for the moment's
+own expiry, at most 30 days there and 7 days anywhere else
+(`MomentPublicMediaOutbound.keep_until`). The per-author cap of 256 MiB of
+live ciphertext (`MAX_AUTHOR_LIVE_BYTES`) still bounds what one author
+holds, so a GFS's worst case does not change; only an author who picks a
+longer lifetime holds more of it. An author posting one 1 MB picture a day
+with a 30-day lifetime holds ~30 MB. Past the cap an upload is refused and
+that GFS's followers get the moment without its file.
+
+**A cluster mid-upgrade.** `/gfs/info` may prove `moment_media_30d` while
+the node that takes a `PUT` is still an older one, which answers `422` to an
+expiry past 8 days. The author's household then asks again for a week (the
+same blob, the rest of that moment's blobs too) instead of failing the
+publish; only a share link outliving that week loses its picture.
+
 ## Event types
 
 | Event type (federation) | Direction | Purpose |
@@ -253,6 +432,7 @@ verifies the author's signature directly.
 | `moment_public_delete` | author SH → GFS (HTTP `POST /gfs/moments/delete`) | Signed, encrypted tombstone. |
 | `incoming_public_moment` | GFS → follower SH | Forwarded envelope, signature intact — only to households that declared the seal suite. |
 | `incoming_public_moment_delete` | GFS → follower SH | Forwarded tombstone. |
+| `moment_delete_certs` | GFS → follower SH (v_66) | `{certs: [≤ 50 delete certificates]}` on reconnect — only of authors that household follows, what it is owed past its per-author delivery cursor, ≤ 200 a push (≤ 100 of one author), a push a minute until drained. See [Late deletes](#late-deletes-delete-certificates-v_66). An older household ignores the frame. |
 | `follow_changed` | GFS → author SH | A follower came or went. `action: "add"` (v_62) carries `follower: {instance_id, identity_public_key, keywrap_public_key, kem_suite, keywrap_sig, moment_suites}`; `action: "remove"` carries `follower_instance_id` and `household_still_follows`. |
 | `moment_key_request` | GFS → author SH (v_62) | A follower household lacks the key for `want_gen` and the mailbox had none: `{followed_user_id, want_gen, follower_user_ids, follower}`. Only for a household that follows; ≤ 2 a minute per (household, author). |
 | `moment_key` | GFS → follower SH (v_62) | One sealed key `{author_user_id, instance_id, to, key_gen, key_step, key_suite, sealed: {kem_suite, eph_pk, ciphertext}, signature}`, pushed to the `to` household only — at once, or from the mailbox when it reconnects. |
@@ -270,7 +450,8 @@ verifies the author's signature directly.
 | POST   | `/gfs/moments/users/{user_id}/picture` | Signed body — push avatar bytes. |
 | POST   | `/gfs/moments/publish` | Signed, encrypted envelope — fan out. Anything but the eight envelope fields: `422 encryption_required`. |
 | POST   | `/gfs/moments/delete` | Signed, encrypted tombstone — fan out the delete. Same shape rule. |
-| PUT / GET | `/gfs/moments/media/{blob_id}` | v_63. `PUT` header-signed by the author's household: one encrypted, padded blob addressed by its SHA-256 (≤ 8 MB + overhead; 422 for a wrong address / size / expiry, 429 over the author's quota). `GET` anonymous, immutable, CORS `*`: the ciphertext. |
+| POST   | `/gfs/moments/delete_cert` | v_66. Signed by the author's household: `{instance_id, cert}` — the delete's origin certificate (`moment_id, author_user_id, origin_instance_id, occurred_at, origin_identity_pk, origin_sig_suite, origin_sig`). Kept 30 days for followers that were away. `422 invalid_cert` (shape, key, suite, signature), `403 instance_mismatch`, `409 stale_cert` (delete time not within the last 25 h), `413` past 4 KB, `429 rate_limited` / `author_delete_quota`. Returns `{kept}`. |
+| PUT / GET | `/gfs/moments/media/{blob_id}` | v_63. `PUT` header-signed by the author's household: one encrypted, padded blob addressed by its SHA-256 (≤ 8 MB + overhead; expiry ≤ 31 days ahead since v_66 — `moment_media_30d`, 8 before; 422 for a wrong address / size / expiry, 429 over the author's quota). `GET` anonymous, immutable, CORS `*`: the ciphertext. |
 | POST   | `/gfs/moments/media/{blob_id}/delete` | v_63. Signed by the author's household: withdraw a blob (its moment was deleted). |
 | POST   | `/gfs/moments/suites` | v_62. Signed by a follower household: `{instance_id, moment_suites: {kem, seal}}` — what it can open, recorded on every follow it holds here (a follow made before it upgraded declared nothing). Sent once per process per server on (re)connect, only when a local user follows someone there. Returns `{updated}`. |
 | POST   | `/gfs/moments/keys` | v_62. Signed by the author's household: `{instance_id, deliveries: [≤ 100 sealed keys]}`. Each is kept (latest per author + household) and pushed to its `to` household only while it follows the author. |
@@ -571,11 +752,12 @@ author's household. Now the file itself travels — encrypted, once:
   a GFS whose signed `/gfs/info` proves `encrypted_moment_media`. The GFS
   checks the signer is the author's registered household, the body's
   SHA-256 is the address, the size is a padded bucket, and the expiry is no
-  later than 8 days out (the author asks for the moment's expiry, at most a
-  week: a blob only has to outlast delivery — followers fetch it when the
-  moment reaches them, within the 25 h `sent_at` window, and keep their own
-  copy — so a moment living up to 30 days (v_65) needs no longer blob and
-  the GFS caps are unchanged); it caps each author at 256 MB live and 60 blobs an
+  later than 31 days out (8 before v_66). Followers fetch the file when the
+  moment reaches them and keep their own copy, but a share link's viewer
+  fetches it here as long as the moment lives, so the author asks for the
+  moment's expiry — at most 30 days on a GFS that proves `moment_media_30d`,
+  a week on an older one ([v_66](#media-lives-as-long-as-its-moment-v_66)).
+  It caps each author at 256 MB live and 60 blobs an
   hour, and drops blobs when they expire, when the author deletes the moment
   (`POST /gfs/moments/media/{id}/delete`, signed) or deregisters.
 * **A video still transcoding** is held by the author's household until
@@ -615,7 +797,7 @@ the author's uplink carries **2 MB once per GFS** (before: nothing reached
 followers at all; a "stream it from home" design would be N × 2 MB = 20 GB
 from the household). The GFS serves N × 2 MB = 20 GB to followers that open
 it — fetched once per household, not per user, and only by households that
-can open it; it stores 2 MB until the moment expires (at most a week). Each
+can open it; it stores 2 MB until the moment expires (≤ 30 days, v_66). Each
 follower household keeps its own 2 MB for the author's chosen lifetime
 (1–30 days, v_65). The moment frame
 itself grows by ~0.2 KB. Worst case per author: 256 MB live on a GFS,

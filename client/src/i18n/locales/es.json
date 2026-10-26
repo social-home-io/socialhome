@@ -1857,6 +1857,7 @@
   "capability.public_moment_media": "Fotos y vídeos en momentos públicos",
   "capability.public_moment_sent_at": "Momentos públicos con marca de tiempo",
   "capability.follower_moment_retention": "Elige cuánto tiempo conservan tus momentos tus seguidores",
+  "capability.late_moment_deletes": "Los borrados llegan a cada copia de un momento",
   "space.settings_page.moderation.queue_meta": "Publicaciones por revisar, solicitudes y denuncias",
   "space.settings_page.moderation.days": "días",
   "space.settings_page.danger.summary": "Archivar, ceder o eliminar",

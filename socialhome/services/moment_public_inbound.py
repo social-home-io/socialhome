@@ -32,6 +32,12 @@ handler:
 7. Re-publishes :class:`MomentCreated` on the bus so the existing
    realtime + notification surfaces light up exactly as for a
    household-relayed moment.
+8. Applies the signed delete certificates (v_66) the GFS hands it on a
+   reconnect (``moment_delete_certs``) — deletes it missed while offline.
+   Each is checked against the key this household pinned for the author
+   when it followed (never one riding with the certificate) and applied as
+   a delete (owner-bound ids, the stored row's author, tombstone rules — a
+   replay changes nothing).
 """
 
 from __future__ import annotations
@@ -54,6 +60,7 @@ from ..domain.moment_public import (
 )
 from ..federation.owner_bound_id import MOMENT_KIND, owner_bound_id_refused
 from ..infrastructure.event_bus import EventBus
+from ..moment_origin import delete_cert_refusal
 from ..moment_public_seal import (
     ENVELOPE_FIELDS,
     UnsupportedMomentSealSuite,
@@ -91,6 +98,14 @@ SENT_AT_MAX_AGE_S: int = 25 * 3600
 
 #: v_64: how far ahead of this household's clock a send time may be.
 SENT_AT_MAX_SKEW_S: int = 300
+
+#: v_66: certificates applied from one ``moment_delete_certs`` frame, at most
+#: (a GFS sends ≤ 50 a frame, ≤ 200 a push).
+MAX_DELETE_CERTS_PER_FRAME: int = 50
+
+#: v_66: a delete certificate signed longer ago than a moment can live (plus
+#: a day of slack) is refused — the GFS keeps them 30 days.
+DELETE_CERT_MAX_AGE_S: int = (MOMENT_MAX_LIFETIME_DAYS + 1) * 86_400
 
 #: The frame type an envelope arrives in → the ``op`` its sealed body names.
 _OPS: dict[str, str] = {
@@ -145,6 +160,8 @@ class MomentPublicInbound:
             gen = await self._keys.import_delivery(payload, gfs_id=gfs_id)
             if gen is not None:
                 await self._release(str(payload.get("author_user_id") or ""), gen)
+        elif ftype == "moment_delete_certs":
+            await self._on_delete_certs(frame.get("certs"), gfs_id=gfs_id)
         else:
             log.debug("moment_public.inbound: ignoring frame type=%r", ftype)
 
@@ -215,6 +232,58 @@ class MomentPublicInbound:
             )
         else:
             await self._on_delete(body, outer_instance_id=str(env["instance_id"]))
+
+    async def _on_delete_certs(self, certs: Any, *, gfs_id: str) -> int:
+        """Apply the delete certificates (v_66) of one ``moment_delete_certs``
+        frame; returns how many changed something here.
+
+        Each must be a genuine certificate of an author followed through
+        *gfs_id*: signed by the identity key pinned in that follow
+        (``followed_instance_pk`` — never one riding with it), that key
+        deriving to the certificate's origin household, a known suite, and a
+        delete time within :data:`DELETE_CERT_MAX_AGE_S`. It is then applied
+        exactly like a delete through the GFS (:meth:`_on_delete`)."""
+        if not isinstance(certs, list):
+            return 0
+        changed = 0
+        pins: dict[str, str | None] = {}
+        for cert in certs[:MAX_DELETE_CERTS_PER_FRAME]:
+            if not isinstance(cert, dict):
+                continue
+            author = str(cert.get("author_user_id") or "")
+            if author not in pins:
+                follow = await self._follow_of(
+                    {"author_user_id": author}, gfs_id=gfs_id
+                )
+                pins[author] = follow.followed_instance_pk if follow else None
+            pin = pins[author]
+            refusal = (
+                "author not followed through this GFS"
+                if not pin
+                else delete_cert_refusal(cert, identity_pk_hex=pin)
+            ) or _delete_cert_age_refusal(cert.get("occurred_at"))
+            if refusal is not None:
+                log.warning(
+                    "moment_public.inbound: delete certificate for author %s "
+                    "refused — %s",
+                    author,
+                    refusal,
+                )
+                continue
+            if await self._on_delete(
+                {
+                    "moment_id": cert["moment_id"],
+                    "author_user_id": author,
+                    "origin_instance_id": cert["origin_instance_id"],
+                },
+                outer_instance_id=cert["origin_instance_id"],
+            ):
+                changed += 1
+        if changed:
+            log.info(
+                "moment_public.inbound: %d delete(s) caught up from %s", changed, gfs_id
+            )
+        return changed
 
     def _send_time_refusal(self, author: str, op: str, body: dict) -> str | None:
         """Why the signed send time (v_64) refuses *body*, or ``None``.
@@ -417,17 +486,19 @@ class MomentPublicInbound:
             )
         )
 
-    async def _on_delete(self, env: dict, *, outer_instance_id: str) -> None:
-        # The signature (checked on the envelope) is what keeps a malicious
-        # peer from taking down a moment it doesn't own.
+    async def _on_delete(self, env: dict, *, outer_instance_id: str) -> bool:
+        """Apply a verified delete; ``True`` when it changed something here
+        (a moment removed, or a tombstone recorded for one never held)."""
+        # The signature (checked on the envelope or the certificate) is what
+        # keeps a malicious peer from taking down a moment it doesn't own.
         moment_id = str(env.get("moment_id") or "")
         if not moment_id:
-            return
+            return False
         author_user_id = str(env.get("author_user_id") or "")
         # The author household names itself on the signed envelope.
         origin_instance_id = str(env.get("origin_instance_id") or outer_instance_id)
         if _moment_id_refused(env, "delete"):
-            return  # never tombstoned: it would refuse the real moment
+            return False  # never tombstoned: it would refuse the real moment
         stored = await self._moments.get(moment_id, include_deleted=True)
         if not _row_binds(
             stored,
@@ -436,12 +507,12 @@ class MomentPublicInbound:
             what="delete",
             moment_id=moment_id,
         ):
-            return
+            return False
         existing = stored if stored is not None and stored.deleted_at is None else None
         # Tombstoned whether or not we hold it, so a create that arrives
         # later (or is replayed) is refused — held for the longest a moment
         # can live when we never saw it.
-        await self._moments.tombstone(
+        outcome = await self._moments.tombstone(
             moment_id,
             author_user_id=author_user_id,
             origin_instance_id=origin_instance_id,
@@ -450,7 +521,7 @@ class MomentPublicInbound:
             ).isoformat(),
         )
         if existing is None:
-            return
+            return outcome.changed
         if self._media is not None:
             await self._media.forget(existing.media_url)
         await self._bus.publish(
@@ -460,6 +531,7 @@ class MomentPublicInbound:
                 origin_instance_id=existing.origin_instance_id,
             )
         )
+        return True
 
     async def _follow_of(self, env: dict, *, gfs_id: str) -> MomentPublicFollow | None:
         author = str(env.get("author_user_id") or "")
@@ -509,6 +581,21 @@ def _unix_or_none(value: object) -> float | None:
     if when.tzinfo is None:
         when = when.replace(tzinfo=UTC)
     return when.timestamp()
+
+
+def _delete_cert_age_refusal(occurred_at: object) -> str | None:
+    """Why a delete certificate's signed time refuses it, or ``None``: older
+    than :data:`DELETE_CERT_MAX_AGE_S` (no moment it names can still be
+    live) or more than :data:`SENT_AT_MAX_SKEW_S` ahead of the clock."""
+    at = _unix_or_none(occurred_at)
+    if at is None:
+        return "malformed delete time"
+    now = time.time()
+    if at > now + SENT_AT_MAX_SKEW_S:
+        return "deleted in the future"
+    if now - at > DELETE_CERT_MAX_AGE_S:
+        return "deleted too long ago"
+    return None
 
 
 def _still_live(body: dict) -> bool:

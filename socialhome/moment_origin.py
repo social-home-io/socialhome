@@ -39,6 +39,16 @@ can neither strip it (the remaining v1 bytes don't verify) nor forge it. A
 moment without the mark signs exactly the v1 bytes, so older receivers
 verify it unchanged; the origin never sends a marked moment to a household
 below v_38 at all (it might relay it).
+
+**v_66 — the delete certificate.** A ``MOMENT_DELETED``'s signed fields plus
+its three origin-signature fields are, on their own, a self-verifying
+*delete certificate*: who deleted which moment, when, signed by the
+author's household — no content. A GFS keeps it 30 days (``POST
+/gfs/moments/delete_cert``) and hands it to a follower household that was
+offline when the delete went out (:func:`delete_cert_refusal`). No new key
+or signature: the bytes are the same ``moment-origin:v1:`` bytes the mesh
+delete carries. This module is import-light on purpose — the GFS checks
+certificates too.
 """
 
 from __future__ import annotations
@@ -46,15 +56,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..canonical_json import canonical_utf8_bytes
-from ..crypto import (
+from .canonical_json import canonical_utf8_bytes
+from .crypto import (
     b64url_decode,
     b64url_encode,
     derive_instance_id,
     sign_ed25519,
     verify_ed25519,
 )
-from ..domain.federation import FederationEventType
+from .domain.federation import FederationEventType
 
 #: Signature suite for the moment origin signature. Same tag vocabulary as
 #: ``Encoder.sig_suite``; Phase 2 of ``docs/crypto.md`` adds
@@ -200,6 +210,77 @@ def verify_moment_origin(
     )
 
 
+#: The fields of a delete certificate (v_66): the signed ``MOMENT_DELETED``
+#: fields plus the three origin-signature fields — exactly these, nothing
+#: else (no content, no ``hop_count``).
+DELETE_CERT_FIELDS: frozenset[str] = frozenset(
+    {
+        *_SIGNED_FIELDS[FederationEventType.MOMENT_DELETED],
+        ORIGIN_IDENTITY_PK_FIELD,
+        ORIGIN_SIG_SUITE_FIELD,
+        ORIGIN_SIG_FIELD,
+    }
+)
+
+#: Longest value of any one certificate field. A moment id, a user id, an
+#: instance id, an ISO time, a 64-hex key and a b64url Ed25519 signature are
+#: all far shorter; this keeps a certificate under ~1.8 KB whatever it names.
+MAX_DELETE_CERT_FIELD_CHARS: int = 256
+
+
+def delete_cert_of(payload: dict[str, Any]) -> dict[str, str]:
+    """The delete certificate inside a signed ``MOMENT_DELETED`` *payload*
+    (its :data:`DELETE_CERT_FIELDS`, as strings)."""
+    return {k: str(payload.get(k) or "") for k in DELETE_CERT_FIELDS}
+
+
+def delete_cert_refusal(cert: object, *, identity_pk_hex: str) -> str | None:
+    """Why *cert* is not a genuine delete certificate of the household whose
+    identity key is *identity_pk_hex* — or ``None`` when it is.
+
+    The checks, all of them, on both the GFS and the follower side:
+
+    * exactly :data:`DELETE_CERT_FIELDS`, every value a non-empty string of
+      at most :data:`MAX_DELETE_CERT_FIELD_CHARS`;
+    * ``origin_identity_pk`` is *identity_pk_hex* (the key the checker
+      already pins for that household — the registered sender on the GFS,
+      the followed author's ``followed_instance_pk`` on a follower) and
+      derives to ``origin_instance_id`` (§4.1.2);
+    * the suite is a known one (an unknown suite is refused, never verified
+      under a default);
+    * the origin signature verifies over the ``moment-origin:v1:`` bytes of
+      a ``MOMENT_DELETED`` — so a create's signature can never pass.
+
+    Never raises. How old the certificate may be is the caller's rule.
+    """
+    if not isinstance(cert, dict) or set(cert) != DELETE_CERT_FIELDS:
+        return "not a delete certificate"
+    if not all(
+        isinstance(v, str) and 0 < len(v) <= MAX_DELETE_CERT_FIELD_CHARS
+        for v in cert.values()
+    ):
+        return "malformed field"
+    shipped = cert[ORIGIN_IDENTITY_PK_FIELD].lower()
+    if not identity_pk_hex or shipped != identity_pk_hex.lower():
+        return "signed by another household"
+    try:
+        key = bytes.fromhex(shipped)
+        derived = derive_instance_id(key)
+    except ValueError:
+        return "malformed origin_identity_pk"
+    if derived != cert["origin_instance_id"]:
+        return "origin_identity_pk does not derive to the origin"
+    try:
+        ok = verify_moment_origin(
+            identity_pk=key,
+            event_type=FederationEventType.MOMENT_DELETED,
+            payload=cert,
+        )
+    except UnsupportedMomentOriginSuite:
+        return "unsupported origin_sig_suite"
+    return None if ok else "origin signature does not verify"
+
+
 @dataclass(slots=True, frozen=True)
 class OriginCheck:
     """Outcome of :func:`check_relayed_moment_origin`.
@@ -284,6 +365,8 @@ def check_relayed_moment_origin(
 
 
 __all__ = [
+    "DELETE_CERT_FIELDS",
+    "MAX_DELETE_CERT_FIELD_CHARS",
     "MOMENT_ORIGIN_SIG_SUITE_ED25519",
     "NO_RELAY_FIELD",
     "ORIGIN_IDENTITY_PK_FIELD",
@@ -295,6 +378,8 @@ __all__ = [
     "UnsupportedMomentOriginSuite",
     "carries_no_relay",
     "check_relayed_moment_origin",
+    "delete_cert_of",
+    "delete_cert_refusal",
     "moment_origin_signing_bytes",
     "sign_moment_origin",
     "verify_moment_origin",

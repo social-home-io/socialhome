@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from socialhome.crypto import b64url_encode, sign_ed25519
+from socialhome.crypto import b64url_encode, derive_instance_id, sign_ed25519
 from socialhome.domain.events import MomentCreated
 from socialhome.domain.moment import MOMENT_MAX_LIFETIME_DAYS, Moment
 from socialhome.global_server.envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
@@ -38,6 +38,7 @@ from tests.moment_public_wire import (
     TEST_KEY,
     TEST_STEP,
     StubMomentKeys,
+    delete_cert,
     encrypted_envelope,
     now_iso,
 )
@@ -706,3 +707,36 @@ async def test_a_public_delete_for_an_unseen_moment_is_held_thirty_days(db):
     held = datetime.fromisoformat(tomb.expires_at)
     want = datetime.now(UTC) + timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
     assert abs((held - want).total_seconds()) < 60
+
+
+# ── Delete certificates (v_66) ─────────────────────────────────────────
+
+
+async def test_a_malformed_certificate_frame_is_ignored(db):
+    inbound, _ = await _env(db)
+    for certs in (None, "x", {"a": 1}, [1, "two", None]):
+        await inbound.handle(
+            {"type": "moment_delete_certs", "certs": certs}, gfs_id="g1"
+        )
+
+
+async def test_a_frame_applies_at_most_its_cap(db, monkeypatch):
+    """A GFS sends ≤ 50 certificates a frame; more are not even looked at."""
+    monkeypatch.setattr(moment_public_inbound, "MAX_DELETE_CERTS_PER_FRAME", 2)
+    inbound, _ = await _env(db)
+    seed = _SEED
+    pk = bytes.fromhex(_pk(seed))
+    origin = derive_instance_id(pk)
+    certs = [
+        delete_cert(
+            seed,
+            pk,
+            moment_id=f"m-{i}",
+            author_user_id="u-noor",
+            origin_instance_id=origin,
+        )
+        for i in range(3)
+    ]
+    changed = await inbound._on_delete_certs(certs, gfs_id="g1")
+    assert changed == 2
+    assert await SqliteMomentRepo(db).get("m-2", include_deleted=True) is None

@@ -373,7 +373,7 @@ signature}` signed the same way; the GFS refuses any other shape and keeps
 only the latest sealed key per (author, follower household), which it can't
 open.
 
-**Moment origin signature (v_35)** (`federation/moment_origin.py`) — a
+**Moment origin signature (v_35)** (`moment_origin.py`) — a
 moment travels up to three hops, and each relay re-sends it under its own
 envelope signature, so the envelope proves only the last hop. The origin
 household therefore signs every `MOMENT_CREATED` / `MOMENT_DELETED` it
@@ -414,6 +414,13 @@ the routed-origin signature it is Ed25519-only today; the tag plus the
 hard reject make the `"ed25519+mldsa65"` sibling a drop-in. Direct
 deliveries need no origin signature: there the envelope signer *is* the
 origin.
+
+**Delete certificate (v_66).** The same signature, cut out of a
+`MOMENT_DELETED`: its four signed fields plus `origin_identity_pk`,
+`origin_sig_suite` and `origin_sig` (`moment_origin.delete_cert_refusal`).
+A GFS keeps it 30 days for followers that were away; both the GFS and the
+follower verify it against a key they already pin. No new key, format or
+suite; an unknown `origin_sig_suite` is refused.
 
 **Link-preview author signature (GFS public relay)**
 (`services/space_public_author.py`) — a public/global space post's

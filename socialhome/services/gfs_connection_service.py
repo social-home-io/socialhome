@@ -372,6 +372,8 @@ class GfsConnectionService:
         "_member_publish_strict",
         "_member_publish_trusted",
         "_member_servers",
+        "_moment_delete_log",
+        "_moment_media_30d",
         "_on_disconnect",
         "_on_listings_changed",
         "_on_rebound",
@@ -486,6 +488,12 @@ class GfsConnectionService:
         # …and ``encrypted_moment_media`` (v_63): the GFS keeps encrypted
         # moment blobs (``/gfs/moments/media``).
         self._encrypted_moment_media: dict[str, bool] = {}
+        # …and ``moment_delete_log`` (v_66): the GFS keeps a public moment's
+        # signed delete certificate 30 days for followers that were offline.
+        self._moment_delete_log: dict[str, bool] = {}
+        # …and ``moment_media_30d`` (v_66): the GFS keeps a moment blob as
+        # long as its moment lives, up to 30 days (an older one: 8).
+        self._moment_media_30d: dict[str, bool] = {}
         # …and ``space_key_pull`` (#5b): the GFS takes a follower's
         # ``/gfs/spaces/{id}/key_request``. Asked only once proved.
         self._space_key_pull: dict[str, bool] = {}
@@ -723,6 +731,8 @@ class GfsConnectionService:
             self._sealed_highlight_stream,
             self._encrypted_moments,
             self._encrypted_moment_media,
+            self._moment_delete_log,
+            self._moment_media_30d,
             self._space_key_pull,
             self._space_item_followers,
             self._payload_zlib1,
@@ -3188,6 +3198,29 @@ class GfsConnectionService:
             return False
         return await self._signed_capability_supported(
             conn, "encrypted_moment_media", self._encrypted_moment_media
+        )
+
+    async def moment_delete_log_supported(self, gfs_id: str) -> bool:
+        """Whether the GFS *gfs_id* proved ``moment_delete_log`` (v_66) under
+        a valid signature: it keeps a public moment's signed delete
+        certificate 30 days (``POST /gfs/moments/delete_cert``). Certificates
+        go only to such a server."""
+        conn = await self._repo.get(gfs_id)
+        if conn is None or conn.status != "active" or not conn.inbox_url:
+            return False
+        return await self._signed_capability_supported(
+            conn, "moment_delete_log", self._moment_delete_log
+        )
+
+    async def moment_media_30d_supported(self, gfs_id: str) -> bool:
+        """Whether the GFS *gfs_id* proved ``moment_media_30d`` (v_66) under
+        a valid signature: it keeps a moment blob up to 30 days. A blob is
+        asked past a week only there (an older server refuses it)."""
+        conn = await self._repo.get(gfs_id)
+        if conn is None or conn.status != "active" or not conn.inbox_url:
+            return False
+        return await self._signed_capability_supported(
+            conn, "moment_media_30d", self._moment_media_30d
         )
 
     async def space_item_followers_supported(self, conn: GfsConnection) -> bool:

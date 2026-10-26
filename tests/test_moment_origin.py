@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`socialhome.federation.moment_origin`."""
+"""Unit tests for :mod:`socialhome.moment_origin`."""
 
 from __future__ import annotations
 
@@ -6,13 +6,17 @@ import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.federation import FederationEventType
-from socialhome.federation.moment_origin import (
+from socialhome.moment_origin import (
+    DELETE_CERT_FIELDS,
+    MAX_DELETE_CERT_FIELD_CHARS,
     MOMENT_ORIGIN_SIG_SUITE_ED25519,
     NO_RELAY_FIELD,
     SIGNED_MOMENT_EVENT_TYPES,
     SUPPORTED_MOMENT_ORIGIN_SIG_SUITES,
     UnsupportedMomentOriginSuite,
     check_relayed_moment_origin,
+    delete_cert_of,
+    delete_cert_refusal,
     moment_origin_signing_bytes,
     sign_moment_origin,
     verify_moment_origin,
@@ -243,4 +247,81 @@ def test_a_forged_no_relay_mark_does_not_verify():
         identity_pk=KEY.public_key,
         event_type=FET.MOMENT_CREATED,
         payload={**signed, NO_RELAY_FIELD: True},
+    )
+
+
+# ── Delete certificates (v_66) ──────────────────────────────────────────
+
+
+def _cert(key=KEY, **over) -> dict:
+    payload = {
+        "moment_id": "m-1",
+        "author_user_id": "u-1",
+        "origin_instance_id": derive_instance_id(key.public_key),
+        "occurred_at": "2026-10-25T12:00:00+00:00",
+        "hop_count": 2,
+        **over,
+    }
+    return delete_cert_of(_sign(FET.MOMENT_DELETED, payload, key=key))
+
+
+def test_a_delete_certificate_is_the_mesh_deletes_signature():
+    """The certificate is the MOMENT_DELETED's signed fields + its origin
+    signature — no hop count, no content — and checks out on its own."""
+    cert = _cert()
+    assert set(cert) == DELETE_CERT_FIELDS
+    assert "hop_count" not in cert
+    assert delete_cert_refusal(cert, identity_pk_hex=KEY.public_key.hex()) is None
+    # Hex case of the pinned key doesn't matter.
+    assert (
+        delete_cert_refusal(cert, identity_pk_hex=KEY.public_key.hex().upper()) is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "why"),
+    [
+        (lambda c: {**c, "moment_id": "m-2"}, "origin signature does not verify"),
+        (lambda c: {**c, "occurred_at": "2026-10-26T00:00:00+00:00"}, "verify"),
+        (lambda c: {**c, "origin_sig_suite": "ed25519+mldsa65"}, "unsupported"),
+        (lambda c: {**c, "content": "x"}, "not a delete certificate"),
+        (lambda c: {k: v for k, v in c.items() if k != "origin_sig"}, "not a"),
+        (lambda c: {**c, "author_user_id": ""}, "malformed field"),
+        (
+            lambda c: {**c, "moment_id": "m" * (MAX_DELETE_CERT_FIELD_CHARS + 1)},
+            "malformed field",
+        ),
+        (lambda c: {**c, "origin_instance_id": "someone-else"}, "derive"),
+        (lambda c: {**c, "origin_identity_pk": "zz" * 32}, "another household"),
+    ],
+)
+def test_a_tampered_delete_certificate_is_refused(mutate, why):
+    refusal = delete_cert_refusal(mutate(_cert()), identity_pk_hex=KEY.public_key.hex())
+    assert refusal is not None and why in refusal
+
+
+def test_a_certificate_of_another_household_is_refused():
+    """Genuine, but signed by a household other than the one pinned."""
+    cert = _cert(key=OTHER)
+    assert delete_cert_refusal(cert, identity_pk_hex=OTHER.public_key.hex()) is None
+    assert delete_cert_refusal(cert, identity_pk_hex=KEY.public_key.hex()) == (
+        "signed by another household"
+    )
+    assert delete_cert_refusal(cert, identity_pk_hex="") is not None
+
+
+def test_a_create_signature_never_passes_as_a_delete_certificate():
+    """The event type is inside the signed bytes."""
+    signed = _sign(FET.MOMENT_CREATED, _create())
+    forged = {k: str(signed.get(k) or "") for k in DELETE_CERT_FIELDS}
+    assert delete_cert_refusal(forged, identity_pk_hex=KEY.public_key.hex()) == (
+        "origin signature does not verify"
+    )
+
+
+def test_a_malformed_key_or_not_a_dict_is_refused_not_raised():
+    assert delete_cert_refusal("cert", identity_pk_hex="aa") is not None
+    cert = {**_cert(), "origin_identity_pk": "abc"}
+    assert delete_cert_refusal(cert, identity_pk_hex="abc") == (
+        "malformed origin_identity_pk"
     )

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.federation_retention import capped_delete_key
 from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     JITTER_RATIO,
@@ -512,5 +513,69 @@ async def test_retry_after_still_spends_the_attempt_budget():
     proc = OutboxProcessor(repo, _deliver)
     await proc.drain_once()
 
+    repo.mark_failed.assert_awaited_once_with(entry.id)
+    repo.reschedule.assert_not_called()
+
+
+async def test_a_moment_delete_keeps_retrying_past_max_attempts():
+    """v_66: a MOMENT_DELETED (LONG_LIVED) is pinned on the ceiling backoff
+    past MAX_ATTEMPTS — not marked failed — so a household offline for days
+    still gets it; the 30-day ``expires_at`` (retention sweep) ends it."""
+    entry = OutboxEntry(
+        id="del-1",
+        instance_id="inst-abc",
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload_json="{}",
+        status="pending",
+        attempts=MAX_ATTEMPTS + 40,
+        next_attempt_at=datetime.now(UTC).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
+    )
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=[entry])
+    repo.reschedule = AsyncMock()
+    repo.mark_failed = AsyncMock()
+    proc = OutboxProcessor(
+        repo, AsyncMock(return_value=DeliveryOutcome.TRANSIENT), rng=lambda: 0.5
+    )
+    await proc.drain_once()
+    repo.mark_failed.assert_not_called()
+    (_eid, next_at), kw = repo.reschedule.await_args
+    assert kw["attempts"] == MAX_ATTEMPTS + 41
+    delay = (datetime.fromisoformat(next_at) - datetime.now(UTC)).total_seconds()
+    assert abs(delay - BACKOFF_SECONDS[-1]) < 60
+
+
+async def test_an_ordinary_event_still_gives_up_at_max_attempts():
+    entry = _make_entry(attempts=MAX_ATTEMPTS - 1)
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=[entry])
+    repo.mark_failed = AsyncMock()
+    repo.reschedule = AsyncMock()
+    proc = OutboxProcessor(repo, AsyncMock(return_value=DeliveryOutcome.TRANSIENT))
+    await proc.drain_once()
+    repo.mark_failed.assert_awaited_once_with(entry.id)
+
+
+async def test_a_capped_relayed_delete_gives_up_like_an_ordinary_event():
+    """Adversarial review F2: a relayed delete past its origin's long-lived
+    cap is queued in the ordinary class — it gives up at MAX_ATTEMPTS."""
+    entry = OutboxEntry(
+        id="del-2",
+        instance_id="inst-abc",
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload_json="{}",
+        status="pending",
+        attempts=MAX_ATTEMPTS - 1,
+        next_attempt_at=datetime.now(UTC).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
+        supersede_key=capped_delete_key("mallory", "m-fake"),
+    )
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=[entry])
+    repo.reschedule = AsyncMock()
+    repo.mark_failed = AsyncMock()
+    proc = OutboxProcessor(repo, AsyncMock(return_value=DeliveryOutcome.TRANSIENT))
+    await proc.drain_once()
     repo.mark_failed.assert_awaited_once_with(entry.id)
     repo.reschedule.assert_not_called()

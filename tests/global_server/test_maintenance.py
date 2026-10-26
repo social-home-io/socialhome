@@ -223,3 +223,39 @@ async def test_a_moment_media_sweep_failure_is_contained():
     )
     await sched._maintain_once()
     assert len(admin.purge_calls) == 1
+
+
+class _StubDeleteLog:
+    def __init__(self, *, boom: bool = False) -> None:
+        self.boom = boom
+        self.prune_calls: list[int | None] = []
+
+    async def prune(self, now: int | None = None) -> int:
+        self.prune_calls.append(now)
+        if self.boom:
+            raise RuntimeError("db gone")
+        return 3
+
+
+async def test_maintain_once_prunes_old_moment_delete_certs():
+    """v_66: delete certificates go 30 days after they were written."""
+    certs = _StubDeleteLog()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=_StubAdminRepo(),
+        highlight_repo=_StubHighlightRepo(),
+        moment_delete_log=certs,  # type: ignore[arg-type]
+    )
+    await sched._maintain_once()
+    assert len(certs.prune_calls) == 1
+    assert abs((certs.prune_calls[0] or 0) - time.time()) < 5
+
+
+async def test_a_delete_cert_prune_failure_is_contained():
+    admin = _StubAdminRepo()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=admin,
+        highlight_repo=_StubHighlightRepo(),
+        moment_delete_log=_StubDeleteLog(boom=True),  # type: ignore[arg-type]
+    )
+    await sched._maintain_once()
+    assert len(admin.purge_calls) == 1

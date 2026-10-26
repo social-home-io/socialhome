@@ -166,6 +166,12 @@ class GfsWebSocketView(web.View):
         self.request.app[K.gfs_moment_public_registry_key].schedule_follower_connected(
             instance_id
         )
+        # v_66 — signed delete certificates of followed authors written while
+        # this household was away (the live delete and the 24 h queue missed
+        # it). An older household ignores the frame.
+        self.request.app[K.gfs_moment_delete_log_key].schedule_household_connected(
+            instance_id
+        )
 
         # §D2b — flush any sealed envelopes that arrived while this household
         # was offline, oldest first, deleting each row only after its frame

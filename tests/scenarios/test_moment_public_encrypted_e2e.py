@@ -121,6 +121,12 @@ class _Proven:
     async def encrypted_moment_media_supported(self, gfs_id: str) -> bool:
         return True
 
+    async def moment_media_30d_supported(self, gfs_id: str) -> bool:
+        return True
+
+    async def moment_delete_log_supported(self, gfs_id: str) -> bool:
+        return True
+
 
 async def _db(path) -> AsyncDatabase:
     db = AsyncDatabase(path, batch_timeout_ms=10)

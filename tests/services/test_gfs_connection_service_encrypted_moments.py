@@ -52,3 +52,23 @@ async def test_encrypted_moment_media_needs_its_own_proof(env):
     assert await svc.encrypted_moment_media_supported("nope") is False
     svc._forget_listing("g1")
     assert "g1" not in svc._encrypted_moment_media
+
+
+async def test_the_delete_log_and_month_long_media_need_their_own_proofs(env):
+    """v_66: certificates go only to a server that proved
+    ``moment_delete_log``; a blob is asked past a week only of one that
+    proved ``moment_media_30d``."""
+    svc = await _svc(env)
+    svc._encrypted_moments["g1"] = True
+    svc._encrypted_moment_media["g1"] = True
+    assert await svc.moment_delete_log_supported("g1") is False
+    assert await svc.moment_media_30d_supported("g1") is False
+    svc._moment_delete_log["g1"] = True
+    svc._moment_media_30d["g1"] = True
+    assert await svc.moment_delete_log_supported("g1") is True
+    assert await svc.moment_media_30d_supported("g1") is True
+    assert await svc.moment_delete_log_supported("nope") is False
+    assert await svc.moment_media_30d_supported("nope") is False
+    svc._forget_listing("g1")
+    assert "g1" not in svc._moment_delete_log
+    assert "g1" not in svc._moment_media_30d

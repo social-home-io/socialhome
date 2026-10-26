@@ -36,11 +36,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: A blob is kept for delivery only: followers fetch it when the moment
-#: reaches them (an envelope is refused 25 h after it was sent) and keep
-#: their own copy, so a moment living up to 30 days (v_65) needs no longer
-#: blob here. Authors ask ≤ 7 days; a blob a day past that is refused.
-MAX_TTL_S: int = 8 * 86_400
+#: Longest a blob is kept. Followers fetch it when the moment reaches them
+#: and keep their own copy, but a share link's viewer fetches it here for
+#: as long as the moment lives — up to 30 days (v_65). So a blob may live
+#: that long (v_66, ``moment_media_30d``; an older server allowed 8 days),
+#: plus a day of clock slack. The per-author live-bytes cap
+#: (:data:`MAX_AUTHOR_LIVE_BYTES`) bounds what an author holds whatever the
+#: lifetime.
+MAX_TTL_S: int = 31 * 86_400
 
 #: Live ciphertext one author may hold here.
 MAX_AUTHOR_LIVE_BYTES: int = 256 * 1024 * 1024
