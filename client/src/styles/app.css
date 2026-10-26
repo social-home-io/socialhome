@@ -19209,22 +19209,6 @@ a.sh-btn--ghost:hover {
   justify-content: space-between;
   gap: var(--sh-space-md);
 }
-.sh-highlight-viewer-overflow {
-  background: none;
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-full);
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  font-size: 0.95rem;
-  line-height: 1;
-  cursor: pointer;
-  color: inherit;
-}
-.sh-highlight-viewer-overflow:hover {
-  background: var(--sh-bg-secondary);
-}
-
 /* Settings → Privacy → Blocked accounts */
 .sh-blocked-accounts {
   margin-top: var(--sh-space-md);
@@ -19671,297 +19655,392 @@ a.sh-hl-row:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-off
 }
 .sh-home-today__chev { flex-shrink: 0; color: var(--sh-text-muted); }
 
-/* Viewer chrome — full-screen, dark, tap-zoned. */
-.sh-highlight-viewer {
-  position: fixed;
-  inset: 0;
-  background: #000;
-  color: #fff;
-  display: grid;
-  grid-template-rows: auto auto 1fr auto;
-  /* Above the page chrome, below every dialog and toast: the viewer opens
-   * the publish / report dialogs and shows toasts, all on the shared layer
-   * tokens. At its old 1000 they rendered BEHIND it — "Publish public link"
-   * looked like it did nothing. */
-  z-index: calc(var(--sh-z-modal) - 1);
-}
-.sh-highlight-progress {
-  display: flex;
-  gap: 4px;
-  padding: 6px 12px;
-}
-.sh-highlight-progress-seg {
-  flex: 1;
-  height: 3px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.22);
-  overflow: hidden;
-  position: relative;
-}
-.sh-highlight-progress-fill {
-  display: block;
-  height: 100%;
-  width: 0;
-  background: rgba(255, 255, 255, 0.92);
-  transform-origin: left;
-}
-.sh-highlight-progress-seg--done .sh-highlight-progress-fill {
-  width: 100%;
-}
-/* Active segment runs an explicit keyframe — width 0→100% over the
- * frame's own duration. The duration is delivered via the inline
- * ``--seg-dur`` custom property set on the segment from the JSX.
- * Pausing the viewer (hold-to-pause) freezes the animation via
- * animation-play-state. */
-.sh-highlight-progress-seg--active .sh-highlight-progress-fill {
-  background: var(--sh-primary);
-  animation: sh-highlight-fill var(--seg-dur, 6000ms) linear forwards;
-}
-.sh-highlight-viewer--paused
-  .sh-highlight-progress-seg--active
-  .sh-highlight-progress-fill {
-  animation-play-state: paused;
-}
-@keyframes sh-highlight-fill {
-  from { width: 0; }
-  to   { width: 100%; }
-}
-
-/* Paused hint — small "⏸ Paused" pill that floats top-center while
- * the user is holding the frame.  Hidden by default; the
- * ``sh-highlight-viewer--paused`` modifier flips it on. */
-.sh-highlight-paused-hint {
-  position: absolute;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  font-size: 0.85rem;
-  padding: 4px 12px;
-  border-radius: 999px;
-  pointer-events: none;
-  letter-spacing: 0.02em;
-  z-index: 3;
-}
-
-/* Per-frame mute toggle — only renders for video frames. Sits
- * top-right inside the frame stage, above the tap-zone overlay so
- * clicks don't get swallowed. */
-.sh-highlight-mute-btn {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 36px;
-  height: 36px;
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.45);
-  color: #fff;
-  font-size: 1.05rem;
-  cursor: pointer;
-  z-index: 3;
-  display: flex; align-items: center; justify-content: center;
-}
-.sh-highlight-mute-btn:hover,
-.sh-highlight-mute-btn:focus-visible {
-  background: rgba(0, 0, 0, 0.7);
-}
-.sh-highlight-mute-btn:focus-visible {
-  outline: 2px solid #fff;
-  outline-offset: 2px;
-}
-.sh-highlight-viewer-header {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-md);
-  padding: 0 var(--sh-space-md) var(--sh-space-sm);
-}
-/* The viewer is black in both themes. Its chrome takes viewer-scoped ink
- * tokens so the shared pieces in it — the ghost Close / "Publish public
- * link" buttons, the muted date, the ⋯ chip, focus rings — read light on
- * black in the light theme too (they took the page's dark ink: Close was
- * 1.18:1). Dialogs the viewer opens (Seen by, publish, report) are not
- * inside the header / footer and keep the page theme. */
-.sh-highlight-viewer-header,
-.sh-highlight-viewer-footer {
+/* Highlight viewer (r3) — always dark, in both themes. Everything in it,
+ * the sheets it opens included, takes viewer-scoped ink tokens so shared
+ * pieces (Avatar, Modal, focus rings) read light on black: in the light
+ * theme they took the page's dark ink (Close was 1.18:1). Logical sides
+ * throughout, so right-to-left mirrors the tap zones, ‹ › and the people
+ * beside the frame (C17). */
+.sh-hlv {
   --sh-text: #FFFFFF;
   --sh-text-muted: #C9C2B6;
   --sh-bg: #000000;
   --sh-bg-secondary: #2A2620;
-  --sh-bg-tertiary: #2A2620;
+  --sh-bg-tertiary: #1C1A17;
   --sh-border: #6B6358;
   --sh-border-strong: #A39A8C;
   --sh-focus-ring: #FFFFFF;
+  position: fixed;
+  inset: 0;
+  background: #000000;
   color: var(--sh-text);
+  display: flex;
+  justify-content: center;
+  /* Above the page chrome, below every dialog and toast it opens (publish,
+   * report, confirm): those sit on the shared layer tokens. */
+  z-index: calc(var(--sh-z-modal) - 1);
 }
-/* Scoped under the viewer because the highlight composer also has a
- * ``.sh-highlight-frame`` class (its per-frame editor row) further
- * down in this file with a cream background that would otherwise win
- * the cascade and leak warm cream into the dark story stage. */
-.sh-highlight-viewer .sh-highlight-frame {
+.sh-hlv__col {
   position: relative;
+  width: min(100%, 440px);
+  height: 100%;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  min-height: 0;
-  background: transparent;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px 12px;
+  box-sizing: border-box;
 }
-.sh-highlight-frame-media {
-  max-height: 100%;
-  max-width: 100%;
-  object-fit: contain;
-}
-.sh-highlight-frame-caption {
-  position: absolute;
-  bottom: var(--sh-space-md);
-  left: var(--sh-space-md);
-  right: var(--sh-space-md);
-  background: rgba(0, 0, 0, 0.45);
-  border-radius: var(--sh-radius-sm);
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  margin: 0;
-  text-align: center;
-}
-.sh-highlight-frame-caption-emoji {
-  margin-right: 6px;
-  font-size: 1.2em;
-}
-.sh-highlight-tap-left, .sh-highlight-tap-right {
-  position: absolute;
-  top: 0; bottom: 0;
-  width: 33%;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  z-index: 2;
-}
-.sh-highlight-tap-left  { left: 0; }
-.sh-highlight-tap-right { right: 0; width: 67%; }
-.sh-highlight-viewer-footer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--sh-space-md);
-  padding: var(--sh-space-md);
-  background: rgba(0, 0, 0, 0.45);
-}
-.sh-highlight-react-btn,
-.sh-highlight-reply-btn,
-.sh-highlight-report-btn {
-  background: rgba(255, 255, 255, 0.15);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: var(--sh-radius-full);
-  padding: 6px 14px;
-  cursor: pointer;
-}
-.sh-highlight-react-btn:focus-visible,
-.sh-highlight-reply-btn:focus-visible,
-.sh-highlight-report-btn:focus-visible {
-  outline: 2px solid #fff;
-  outline-offset: 2px;
-}
-.sh-highlight-author-meta {
-  flex: 1;
-  text-align: center;
-  opacity: 0.85;
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  border-radius: var(--sh-radius-full);
-  padding: 6px 14px;
-  font: inherit;
-  cursor: pointer;
-}
-.sh-highlight-author-meta:hover,
-.sh-highlight-author-meta:focus-visible {
-  opacity: 1;
-  background: rgba(255, 255, 255, 0.2);
-}
-.sh-highlight-author-meta:focus-visible {
-  outline: 2px solid #fff;
+.sh-hlv :focus-visible {
+  outline: 2px solid #FFFFFF;
   outline-offset: 2px;
 }
 
-/* "Seen by" sheet — opened from the eye chip in the highlight viewer
- * footer. Lives inside the standard sh-modal so focus-trap / Escape /
- * scroll behaviour is shared with every other dialog. */
-.sh-seenby-section {
-  margin-top: var(--sh-space-md);
+/* Progress — one segment per frame; the current one fills over the
+ * frame's own duration and freezes while paused. */
+.sh-hlv__prog { display: flex; gap: 4px; }
+.sh-hlv__seg {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.3);
+  overflow: hidden;
 }
-.sh-seenby-section:first-of-type {
-  margin-top: 0;
+.sh-hlv__fill { display: block; height: 100%; width: 0; background: #FFFFFF; }
+.sh-hlv__seg--done .sh-hlv__fill { width: 100%; }
+.sh-hlv__seg--active .sh-hlv__fill {
+  animation: sh-hlv-fill var(--seg-dur, 6000ms) linear forwards;
 }
-.sh-seenby-heading {
-  margin: 0 0 var(--sh-space-sm) 0;
-  font-size: 0.95rem;
-  font-weight: 600;
+.sh-hlv--paused .sh-hlv__seg--active .sh-hlv__fill { animation-play-state: paused; }
+@keyframes sh-hlv-fill {
+  from { width: 0; }
+  to { width: 100%; }
 }
-.sh-seenby-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-xs);
+/* Reduced motion: the bar steps — the current frame's segment lights up
+ * at once (dimmer than the done ones) instead of filling. */
+@media (prefers-reduced-motion: reduce) {
+  .sh-hlv__seg--active .sh-hlv__fill {
+    animation: none;
+    width: 100%;
+    background: rgba(255, 255, 255, 0.62);
+  }
 }
-.sh-seenby-row {
+
+/* Header — who, when, who sees it; Pause / More / Close at 44 px. */
+.sh-hlv__head { display: flex; align-items: center; gap: 6px; }
+.sh-hlv__who {
   display: flex;
   align-items: center;
-  gap: var(--sh-space-sm);
-  padding: 6px 8px;
-  border-radius: var(--sh-radius-sm);
-}
-.sh-seenby-row:hover {
-  background: color-mix(in srgb, var(--sh-text) 6%, transparent);
-}
-.sh-seenby-name {
+  gap: 10px;
   flex: 1;
-  font-weight: 500;
-  /* The sheet mounts inside the always-dark viewer (``color: #fff``);
-   * take the dialog's own text colour so names read on a light theme. */
-  color: var(--sh-text);
+  min-width: 0;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
 }
-.sh-seenby-emoji {
-  font-size: 1.15rem;
+span.sh-hlv__who { cursor: default; }
+.sh-hlv__whotext { display: flex; flex-direction: column; min-width: 0; }
+.sh-hlv__name {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-/* A light pill: the outline emoji (😂 😮 😢) draw dark strokes that all but
- * vanished on the old dark tray. Light in both themes, like the frame
- * stage is black in both. */
-.sh-highlight-react-tray {
+.sh-hlv__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 0.8125rem;
+  color: var(--sh-text-muted);
+  white-space: nowrap;
+}
+.sh-hlv__meta svg { flex-shrink: 0; }
+.sh-hlv__aud { overflow: hidden; text-overflow: ellipsis; }
+.sh-hlv__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: #FFFFFF;
+  cursor: pointer;
+}
+.sh-hlv__btn:hover { background: rgba(255, 255, 255, 0.24); }
+.sh-hlv__btn:disabled { opacity: 0.6; cursor: default; }
+
+/* The frame — media letterboxed on black, the caption inside it. */
+.sh-hlv__stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #111111;
+  touch-action: manipulation;
+}
+.sh-hlv__media {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+/* Tap zones: the start third goes back, the rest goes on. */
+.sh-hlv__tap {
   position: absolute;
-  bottom: 84px;
+  inset-block: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  z-index: 1;
+}
+.sh-hlv__tap--back { inset-inline-start: 0; width: 33%; }
+.sh-hlv__tap--next { inset-inline-end: 0; width: 67%; }
+.sh-hlv__tap:focus-visible { outline-offset: -4px; }
+.sh-hlv__mute {
+  position: absolute;
+  top: 12px;
+  inset-inline-end: 12px;
+  z-index: 2;
+  background: rgba(0, 0, 0, 0.55);
+}
+.sh-hlv__paused {
+  position: absolute;
+  top: 12px;
   left: 50%;
   transform: translateX(-50%);
-  display: flex;
-  gap: var(--sh-space-xs);
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
-  border-radius: var(--sh-radius-full);
-  padding: 6px 10px;
-  z-index: 3;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.65);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  pointer-events: none;
 }
-.sh-highlight-react-tray-btn {
-  color: #1A1814;
-  background: none;
-  border: none;
+.sh-hlv__paused svg { width: 14px; height: 14px; }
+/* The caption sits inside the frame on a gradient and grows upwards with
+ * its text — never cut off at the frame's edge (H6). Taps go through it
+ * to the zones underneath. */
+.sh-hlv__cap {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 2;
+  margin: 0;
+  padding: 48px 16px 16px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.8) 45%);
+  color: #FFFFFF;
+  font-size: 1rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+/* Under the frame: your reaction, a private reply. */
+.sh-hlv__tray { display: flex; flex-direction: column; gap: 8px; }
+.sh-hlv__emo { display: flex; justify-content: space-between; gap: 4px; }
+.sh-hlv__emobtn {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
   border-radius: 50%;
-  font-size: 1.6rem;
+  background: rgba(255, 255, 255, 0.16);
+  color: #FFFFFF;
+  font-size: 22px;
   line-height: 1;
   cursor: pointer;
-  padding: 4px;
-  min-width: 44px;
+}
+.sh-hlv__emobtn:hover { background: rgba(255, 255, 255, 0.26); }
+.sh-hlv__emobtn.is-on {
+  background: #5A2E14;
+  box-shadow: inset 0 0 0 3px #F08A4B;
+}
+.sh-hlv__reply { display: flex; align-items: center; gap: 8px; }
+/* Beats the global field rule (``input:not([type=…])…``, 0-3-1). */
+.sh-hlv .sh-hlv__reply input.sh-hlv__replyin {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 44px;
+  padding: 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 999px;
+  background: transparent;
+  color: #FFFFFF;
+  font: inherit;
+  font-size: 1rem;
+}
+.sh-hlv .sh-hlv__reply input.sh-hlv__replyin::placeholder { color: var(--sh-text-muted); opacity: 1; }
+.sh-hlv__send { background: var(--sh-primary); }
+
+/* Your own: Seen by, reactions, Share. */
+.sh-hlv__foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 48px; }
+.sh-hlv__grow { flex: 1; }
+.sh-hlv__stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   min-height: 44px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #FFFFFF;
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.875rem;
+  white-space: nowrap;
+  cursor: pointer;
 }
-.sh-highlight-react-tray-btn:hover {
-  background: rgba(0, 0, 0, 0.08);
+.sh-hlv__stat:hover { background: rgba(255, 255, 255, 0.24); }
+.sh-hlv__stat-emo { font-size: 1.05rem; letter-spacing: 1px; }
+
+/* Desktop: ‹ › for frames, and the people before and up next. */
+.sh-hlv__side {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--sh-text-muted);
+  font-size: 0.8125rem;
+  text-align: center;
 }
-.sh-highlight-react-tray-btn:focus-visible {
-  outline: 2px solid #1A1814;
-  outline-offset: 1px;
+.sh-hlv__side--start { inset-inline-end: calc(100% + 16px); }
+.sh-hlv__side--end { inset-inline-start: calc(100% + 16px); }
+.sh-hlv__peek {
+  position: relative;
+  width: 96px;
+  aspect-ratio: 9 / 16;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #222222;
+  cursor: pointer;
 }
+.sh-hlv__peek-still {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.55;
+  display: block;
+}
+.sh-hlv__peek-avatar {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #F08A4B;
+  line-height: 0;
+}
+.sh-hlv__peek:hover .sh-hlv__peek-still { opacity: 0.8; }
+.sh-hlv__peek-label {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 768px) {
+  .sh-hlv__col { padding: 8px 10px 10px; gap: 8px; }
+  .sh-hlv__side { display: none; }
+}
+
+/* Sheets the viewer opens — dark like the viewer, a heading and a 40 px ✕. */
+.sh-modal.sh-hlv-sheet { max-width: 440px; }
+.sh-modal.sh-hlv-sheet::before { display: none; }
+.sh-hlv-sheet .sh-modal-header { border-bottom: 0; padding-bottom: var(--sh-space-xs); }
+.sh-modal-header .sh-hlv-sheet__title {
+  flex: 1;
+  font-family: var(--sh-font-family);
+  white-space: normal;
+  letter-spacing: normal;
+  min-width: 0;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.sh-hlv-sheet__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: #FFFFFF;
+  cursor: pointer;
+}
+.sh-hlv-sheet__close svg { width: 20px; height: 20px; }
+.sh-hlv-sheet .sh-modal-body { padding: 0 var(--sh-space-sm) var(--sh-space-md); }
+.sh-hlv-sheet__hint {
+  margin: var(--sh-space-xs) var(--sh-space-sm);
+  color: var(--sh-text-muted);
+  font-size: 0.875rem;
+}
+.sh-hlv-menu { display: flex; flex-direction: column; }
+.sh-hlv-menu__sep { border: 0; border-top: 1px solid rgba(255, 255, 255, 0.14); margin: 4px 8px; }
+.sh-hlv-row,
+.sh-hlv-seen__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px;
+  border-radius: 12px;
+  color: var(--sh-text);
+  text-align: start;
+}
+.sh-hlv-row {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.sh-hlv-row:hover { background: rgba(255, 255, 255, 0.07); }
+.sh-hlv-row:disabled { opacity: 0.6; cursor: default; }
+.sh-hlv-row__ic {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.1);
+}
+.sh-hlv-row__emoji { font-size: 1.25rem; line-height: 1; }
+.sh-hlv-row__body { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.sh-hlv-row__t { font-weight: 600; overflow-wrap: anywhere; }
+.sh-hlv-row__m { color: var(--sh-text-muted); font-size: 0.875rem; overflow-wrap: anywhere; }
+.sh-hlv-row--danger .sh-hlv-row__t { color: #FF8A80; }
+.sh-hlv-seen { list-style: none; margin: 0; padding: 0; }
+.sh-hlv-seen__row + .sh-hlv-seen__row { box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.08); }
+.sh-hlv-seen__emoji { font-size: 1.4rem; line-height: 1; }
 
 /* Highlight archive — month-grid browser at /highlights/archive. Reuses
  * the same 5×7 layout as the calendar route: day cells with highlights
@@ -21175,10 +21254,6 @@ a.sh-hl-row:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-off
   }
   .sh-highlight-archive-day-num {
     font-size: 0.75rem;
-  }
-  .sh-highlight-viewer-footer {
-    flex-wrap: wrap;
-    gap: var(--sh-space-xs);
   }
 }
 

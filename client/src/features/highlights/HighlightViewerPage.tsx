@@ -1,11 +1,26 @@
 /**
- * HighlightViewerPage — full-screen tap-through viewer for one highlight (§Highlights).
+ * HighlightViewerPage — watch one person's highlight (§Highlights, r3
+ * design "Watching a highlight: pause, react, reply").
  *
- * Renders frames sequentially with a top progress bar (one segment per
- * frame). Tap left/right to navigate, hold to pause, swipe up (or click
- * the reactions chip) to drop a quick reaction. When viewing someone
- * else's frame a "Reply" chip surfaces below the frame; tapping it
- * routes to the DM thread with the frame's snapshot pre-loaded.
+ * - **Chrome** is dark in both themes, with 44 px Pause / Play, More (⋯)
+ *   and Close. Space or K pauses (the video with the timer); ← / → step
+ *   frames (mirrored right-to-left); Esc closes. The progress bar steps
+ *   instead of filling under ``prefers-reduced-motion``.
+ * - **The frame** keeps its caption inside, on a gradient that never
+ *   clips it (H6). Tap the start third for back, the rest for next
+ *   (logical sides, so RTL mirrors — C17); press and hold to pause.
+ * - **Watching someone else's:** the emoji tray sits under the frame and
+ *   shows *your* reaction (``my_reaction``); tap it again to remove, tap
+ *   another to change. "Reply to <name> privately…" sends the reply into
+ *   your 1:1 chat with them, quoting the frame (owner decision 11).
+ * - **Your own:** Seen by N (each viewer with their reaction), the
+ *   reactions, Share; ⋯ also publishes a link and deletes a frame or the
+ *   whole day.
+ * - **Every sheet** pauses the timer and has a heading and a ✕.
+ * - **Between people** (C8): desktop has ‹ › for frames and the people
+ *   before / up next; after the last frame the viewer moves on to the
+ *   next person with unseen frames (Today order), else closes back to
+ *   where it was opened from (a share card, Home, Highlights).
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -15,62 +30,80 @@ import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
 import { isRestricted } from '@/components/ProtectedNotice'
 import { Avatar } from '@/components/Avatar'
-import { Modal, openDialogCount } from '@/components/Modal'
+import { openDialogCount } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
 import { viaPostQuery } from '@/components/HighlightShareCard'
-import { currentUser } from '@/store/auth'
-import {
-  loadHouseholdUsers,
-  namedPersonLabel,
-  namedPersonPicture,
-  type NamedPerson,
-} from '@/store/householdUsers'
-import { relativeDocsTime } from '@/utils/relativeTime'
-import type { Highlight, HighlightFrame } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 import { openReport } from '@/components/ReportDialog'
 import { openPerson } from '@/components/PersonSheet'
+import { currentUser } from '@/store/auth'
+import { loadHouseholdUsers, namedPersonLabel, namedPersonPicture } from '@/store/householdUsers'
+import { localSinceTime } from '@/utils/relativeTime'
+import type { Highlight, HighlightFrame, HighlightInboxItem } from '@/types'
 import { ws } from '@/ws'
-import { openPublishMenu } from './HighlightPublishMenu'
 import { t, isOne } from '@/i18n/i18n'
-import { highlightDateLabel } from '@/utils/highlightDate'
+import { openPublishMenu } from './HighlightPublishMenu'
+import { audienceChip, type TodayPerson } from './today'
+import { CHIP_ICON, VIEWER_ICON } from './icons'
+import { neighbours } from './viewerQueue'
+import { viewerOpenedFrom } from './viewerReturn'
+import { replyPrivately } from './privateReply'
+import {
+  SeenBySheet, SheetRow, ShareSheet, ViewerSheet, type SeenReaction, type SeenView,
+} from './viewerSheets'
 
 interface HighlightDetail {
   highlight: Highlight
   frames: HighlightFrame[]
-  views?: Record<string, HighlightView[]>
-  reactions?: Record<string, HighlightReaction[]>
+  views?: Record<string, SeenView[]>
+  reactions?: Record<string, SeenReaction[]>
 }
 
-/** A "Seen by" row — the server names the person (a friend on another
- *  household included). */
-interface HighlightView extends NamedPerson {
-  viewer_user_id: string
-  viewed_at: string
-}
-
-interface HighlightReaction extends NamedPerson {
-  reactor_user_id: string
-  emoji: string
-}
-
-const QUICK_REACTIONS = ['❤️', '🔥', '😂', '😮', '😢', '👏'] as const
+const QUICK_REACTIONS = ['❤️', '😂', '😮', '😢', '🔥', '👏'] as const
 
 const FRAME_DURATION_MS = 6000  // image default; video uses its own length
+
+type Sheet = 'more' | 'seen' | 'share' | null
 
 const detail = signal<HighlightDetail | null>(null)
 const loading = signal<boolean>(true)
 const currentIndex = signal<number>(0)
 /** Press-and-hold on the frame. */
-const paused = signal<boolean>(false)
-/** The frame the reaction tray was opened on, or null when it's closed —
- *  a reaction always goes to that frame, never to one the viewer moved
- *  on to meanwhile. */
-const reactionsFrameId = signal<string | null>(null)
-/** Author-only "Seen by" sheet — when null, sheet is closed. Holds the
- *  frame_id so a later frame change reopens onto the right list. */
-const seenBySheetFrameId = signal<string | null>(null)
+const held = signal<boolean>(false)
+/** Pause / Play, Space or K. */
+const userPaused = signal<boolean>(false)
+/** The reply field has focus: the frame waits while they type. */
+const typing = signal<boolean>(false)
+const sheet = signal<Sheet>(null)
+/** Today, for who comes before / up next. Empty until loaded. */
+const today = signal<HighlightInboxItem[]>([])
+/** People watched in this session: their views may not be on the server
+ *  yet, and they are never "up next" again. */
+const watched = new Set<string>()
 
+/** A key aimed at a text field: its arrows move the caret, never a frame. */
+function isEditable(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return target.isContentEditable || !!target.closest('input, textarea, select, [contenteditable="true"]')
+}
+
+function isRtl(): boolean {
+  return document.documentElement.dir === 'rtl'
+}
+
+/** "3 reactions" / "1 reaction" in the UI language. */
+function reactionsLabel(n: number): string {
+  return t(isOne(n) ? 'highlight.reactions_one' : 'highlight.reactions', { n: String(n) })
+}
+
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function personFirstName(p: TodayPerson): string {
+  const name = namedPersonLabel(p.authorId, p.highlight.author)
+  return name.split(/\s+/)[0] || name
+}
 
 export default function HighlightViewerPage() {
   const { params, query } = useRoute()
@@ -80,20 +113,22 @@ export default function HighlightViewerPage() {
   // lets a reader outside the audience see it — every call carries it.
   const via = viaPostQuery(query?.via_post)
   const myId = currentUser.value?.user_id
-  // Video frames default muted so a tap into the inbox doesn't blast
-  // sound through a quiet room. The user can flip the toggle per-
-  // viewer (signal lives outside the component so the choice persists
-  // across frame transitions in the same session).
+  // Video frames start muted so opening one doesn't blast sound through a
+  // quiet room; the choice holds across frames in this visit.
   const [muted, setMuted] = useState(true)
+  const [reply, setReply] = useState('')
+  const [sending, setSending] = useState(false)
 
-  // ── Load the highlight detail on mount / id change ─────────────────────
+  // ── Load the highlight detail (and Today, for the people around it) ──
   useEffect(() => {
     loading.value = true
     detail.value = null
     currentIndex.value = 0
-    paused.value = false
-    reactionsFrameId.value = null
-    seenBySheetFrameId.value = null
+    held.value = false
+    userPaused.value = false
+    typing.value = false
+    sheet.value = null
+    setReply('')
     // Resolve raw user_ids (author + viewer + reactor) to display names.
     void loadHouseholdUsers()
     const refetch = (initial: boolean) =>
@@ -108,15 +143,18 @@ export default function HighlightViewerPage() {
               t('highlight.viewer.load_failed', { error: String((err as Error)?.message ?? err) }),
               'error',
             )
-            loc.route('/highlights')
+            loc.route('/highlights', true)
           }
         })
     void refetch(true)
-    // Live counters for authors viewing their own highlight page —
-    // ``highlight.frame_viewed`` / ``highlight.frame_reaction_changed`` arrive
-    // when a viewer marks a frame seen or reacts. The frames carry only the
-    // person's id, and a friend on another household is not in the local
-    // cache — refetch so the "Seen by" rows come back named by the server.
+    // Up next / before: a glance, so a failed read just leaves them out.
+    api.get('/api/highlights')
+      .then((rows: HighlightInboxItem[]) => { today.value = rows ?? [] })
+      .catch(() => { today.value = [] })
+    // Live counters for authors viewing their own highlight —
+    // ``highlight.frame_viewed`` / ``highlight.frame_reaction_changed``
+    // carry only the person's id, and a friend on another household is not
+    // in the local cache: refetch so "Seen by" comes back named.
     const matches = (data: { highlight_id?: string }) => data.highlight_id === highlightId
     const onActivity = (e: { data: unknown }) => {
       if (matches(e.data as { highlight_id?: string }) && detail.value) void refetch(false)
@@ -128,26 +166,58 @@ export default function HighlightViewerPage() {
     return () => { dispose.forEach(d => d()) }
   }, [highlightId, via])
 
-  // The frame stands still while the person holds it, while the reaction
-  // tray is up, and while any dialog or sheet is open (Seen by, publish,
-  // report, delete confirm, person sheet) — nothing moves under them.
+  // The frame stands still while held, paused, while they type a reply
+  // and while any dialog or sheet is open — nothing moves under them.
+  const stopped = held.value || userPaused.value || typing.value || openDialogCount.value > 0
   const curFrameId = detail.value?.frames[currentIndex.value]?.id
-  const trayOpen = reactionsFrameId.value !== null && reactionsFrameId.value === curFrameId
-  const stopped = paused.value || trayOpen || openDialogCount.value > 0
+  const authorId = detail.value?.highlight.author_user_id ?? null
+  const around = authorId ? neighbours(today.value, myId, authorId, watched) : null
 
-  // A tray opened on an earlier frame never carries over to the next one.
-  useEffect(() => {
-    if (reactionsFrameId.value !== null && reactionsFrameId.value !== curFrameId) {
-      reactionsFrameId.value = null
+  /** Back to where the viewer was opened from (C8); a deep link closes
+   *  to Highlights. Moving between people replaced the history entry,
+   *  so the opener is one step back. */
+  const close = () => {
+    if (viewerOpenedFrom() !== null) window.history.back()
+    else loc.route('/highlights', true)
+  }
+
+  const goToPerson = (p: TodayPerson) => {
+    if (authorId) watched.add(authorId)
+    loc.route(`/highlights/${p.openId}`, true)
+  }
+
+  const advance = () => {
+    if (!detail.value) return
+    if (currentIndex.value < detail.value.frames.length - 1) {
+      currentIndex.value += 1
+      return
     }
-  }, [curFrameId])
+    // The end of this person: the next one with unseen frames, else out.
+    if (around?.upNext) goToPerson(around.upNext)
+    else {
+      if (authorId) watched.add(authorId)
+      close()
+    }
+  }
+  const goBack = () => {
+    if (currentIndex.value > 0) currentIndex.value -= 1
+  }
 
-  // Auto-progress: a per-frame timer that ticks the index. A pause keeps
-  // what is left of the frame (``remainingRef``), so the timer resumes
-  // where the progress bar's paused animation stands.
+  const togglePause = () => {
+    if (stopped) {
+      userPaused.value = false
+      held.value = false
+      if (typing.value && document.activeElement instanceof HTMLElement) document.activeElement.blur()
+      typing.value = false
+    } else {
+      userPaused.value = true
+    }
+  }
+
+  // Auto-progress: a per-frame timer. A pause keeps what is left of the
+  // frame (``remainingRef``), so it resumes where the bar stands.
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const remainingRef = useRef<{ frameId: string, ms: number } | null>(null)
-
   useEffect(() => {
     if (!detail.value || loading.value) return
     const frame = detail.value.frames[currentIndex.value]
@@ -167,9 +237,9 @@ export default function HighlightViewerPage() {
       if (timerRef.current) clearTimeout(timerRef.current)
       left.ms = Math.max(0, left.ms - (Date.now() - startedAt))
     }
-  }, [currentIndex.value, detail.value?.highlight.id, stopped, loading.value])
+  }, [currentIndex.value, detail.value?.highlight.id, stopped, loading.value, around?.upNext?.openId])
 
-  // A video frame stops with the timer — else it plays on under a dialog
+  // A video frame stops with the timer — else it plays on under a sheet
   // and its ``ended`` advances the viewer anyway.
   const videoRef = useRef<HTMLVideoElement | null>(null)
   useEffect(() => {
@@ -188,37 +258,29 @@ export default function HighlightViewerPage() {
     api.post(`/api/highlights/frames/${frame.id}/view${via}`, {}).catch(() => {})
   }, [currentIndex.value, detail.value?.highlight.id, via])
 
-  const advance = () => {
-    if (!detail.value) return
-    if (currentIndex.value < detail.value.frames.length - 1) {
-      currentIndex.value += 1
-    } else {
-      loc.route('/highlights')  // end of highlight → back to inbox
-    }
-  }
-  const goBack = () => {
-    if (currentIndex.value > 0) currentIndex.value -= 1
-  }
-
-  // Keyboard navigation — left/right arrows step through frames, Esc
-  // closes the viewer. Bound on `window` so users don't have to focus
-  // the tap zones first. Never while a dialog is open (it owns its keys),
-  // and never for a key typed in a field: the caret must move.
+  // Keys on ``window`` so nothing needs focus first. Never while a dialog
+  // is open (it owns its keys) or for a key typed in a field.
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       if (openDialogCount.value > 0 || isEditable(ev.target)) return
-      if (ev.key === 'ArrowRight') { ev.preventDefault(); advance() }
-      else if (ev.key === 'ArrowLeft') { ev.preventDefault(); goBack() }
-      else if (ev.key === 'Escape') {
+      if (ev.altKey || ev.ctrlKey || ev.metaKey) return
+      const forward = isRtl() ? 'ArrowLeft' : 'ArrowRight'
+      const backward = isRtl() ? 'ArrowRight' : 'ArrowLeft'
+      if (ev.key === forward) { ev.preventDefault(); advance() }
+      else if (ev.key === backward) { ev.preventDefault(); goBack() }
+      else if (ev.key === ' ' || ev.key === 'k' || ev.key === 'K') {
+        // A focused button's Space is its click — that click is the toggle.
+        if (ev.key === ' ' && ev.target instanceof HTMLButtonElement) return
         ev.preventDefault()
-        // Escape takes the tray down first, the viewer only after.
-        if (reactionsFrameId.value !== null) reactionsFrameId.value = null
-        else loc.route('/highlights')
+        togglePause()
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault()
+        close()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [detail.value?.highlight.id])
+  })
 
   if (loading.value) return <Spinner />
   if (!detail.value) return null
@@ -228,364 +290,476 @@ export default function HighlightViewerPage() {
   const frame = frames[currentIndex.value]
   if (!frame) {
     return (
-      <div class="sh-highlight-viewer">
-        <p class="sh-muted">{t('highlight.viewer.no_frames')}</p>
-        <Button onClick={() => loc.route('/highlights')}>{t('common.back')}</Button>
+      <div class="sh-hlv">
+        <div class="sh-hlv__col">
+          <p>{t('highlight.viewer.no_frames')}</p>
+          <Button onClick={close}>{t('common.back')}</Button>
+        </div>
       </div>
     )
   }
   const isAuthor = highlight.author_user_id === myId
   const authorName = namedPersonLabel(highlight.author_user_id, highlight.author)
   const authorPicture = namedPersonPicture(highlight.author_user_id, highlight.author)
+  const authorFirst = authorName.split(/\s+/)[0] || authorName
+  const chip = audienceChip(highlight, isAuthor)
+  const frameOf = t('highlight.composer.frame_of', { n: String(currentIndex.value + 1), total: String(frames.length) })
+  const views = detail.value.views?.[frame.id] ?? []
+  const reactions = detail.value.reactions?.[frame.id] ?? []
+  const mine = frame.my_reaction ?? null
 
-  const onTapLeft = (e: Event) => { e.preventDefault(); goBack() }
-  const onTapRight = (e: Event) => { e.preventDefault(); advance() }
+  const setMine = (frameId: string, emoji: string | null) => {
+    const d = detail.value
+    if (!d) return
+    detail.value = { ...d, frames: d.frames.map(f => (f.id === frameId ? { ...f, my_reaction: emoji } : f)) }
+  }
 
-  const react = async (frameId: string, emoji: string) => {
+  const react = async (emoji: string) => {
+    // Always the frame the tap landed on, never one the timer moved to.
+    const target = frame
+    const before = target.my_reaction ?? null
+    const next = before === emoji ? null : emoji
+    setMine(target.id, next)
     try {
-      await api.put(`/api/highlights/frames/${frameId}/reaction${via}`, { emoji })
-      if (reactionsFrameId.value === frameId) reactionsFrameId.value = null
-      showToast(t('highlight.viewer.reaction_sent'), 'success')
+      const url = `/api/highlights/frames/${target.id}/reaction${via}`
+      if (next === null) await api.delete(url)
+      else await api.put(url, { emoji })
     } catch (err: unknown) {
+      setMine(target.id, before)
       showToast(t('highlight.viewer.reaction_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
-  const dmReply = () => {
-    // The snapshot is built server-side; the SPA jumps to the DM list
-    // pre-filled with the author so the user can pick / start a thread.
-    loc.route(`/dms?highlight_frame_id=${encodeURIComponent(frame.id)}`)
+  const sendReply = async (ev: Event) => {
+    ev.preventDefault()
+    const text = reply.trim()
+    if (!text || sending) return
+    setSending(true)
+    try {
+      const conversationId = await replyPrivately({
+        frameId: frame.id, authorId: highlight.author_user_id, content: text, via,
+      })
+      setReply('')
+      showToast(t('highlight.viewer.reply_sent', { name: authorFirst }), 'success', {
+        action: { label: t('highlight.viewer.reply_open'), onClick: () => loc.route(`/dms/${conversationId}`) },
+      })
+    } catch (err: unknown) {
+      showToast(t('highlight.viewer.reply_failed', { error: String((err as Error)?.message ?? err) }), 'error')
+    } finally {
+      setSending(false)
+    }
   }
 
   const deleteFrame = async () => {
     if (!await confirmDialog(t('highlight.viewer.delete_confirm'), { destructive: true })) return
     try {
       await api.delete(`/api/highlights/frames/${frame.id}`)
+      sheet.value = null
       showToast(t('highlight.viewer.frame_removed'), 'info')
-      // Drop the frame from local state and re-index.
       const next = frames.filter(f => f.id !== frame.id)
+      if (next.length === 0) { close(); return }
       detail.value = { ...detail.value!, frames: next }
-      if (currentIndex.value >= next.length) {
-        currentIndex.value = Math.max(0, next.length - 1)
-      }
-      if (next.length === 0) loc.route('/highlights')
+      if (currentIndex.value >= next.length) currentIndex.value = next.length - 1
     } catch (err: unknown) {
       showToast(t('highlight.viewer.delete_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
-  // Build a per-frame views/reactions footer the author sees.
-  const myViews = detail.value.views?.[frame.id] ?? []
-  const myReactions = detail.value.reactions?.[frame.id] ?? []
+  const deleteDay = async () => {
+    const n = frames.length
+    const ok = await confirmDialog(
+      t(isOne(n) ? 'highlight.viewer.delete_day_confirm_one' : 'highlight.viewer.delete_day_confirm', { n: String(n) }),
+      { destructive: true, confirmLabel: t('highlight.viewer.delete_day_confirm_button') },
+    )
+    if (!ok) return
+    try {
+      await api.delete(`/api/highlights/${highlight.id}`)
+      sheet.value = null
+      showToast(t('highlight.viewer.highlight_removed'), 'info')
+      close()
+    } catch (err: unknown) {
+      showToast(t('highlight.viewer.delete_failed', { error: String((err as Error)?.message ?? err) }), 'error')
+    }
+  }
 
-  // Active-segment fill animation duration matches the frame's own
-  // duration so the progress bar tracks the timer one-to-one. Videos
-  // use their explicit duration_ms; images fall back to the default.
-  const activeFillDuration = frame.duration_ms && frame.duration_ms > 0
-    ? frame.duration_ms
-    : FRAME_DURATION_MS
+  const others = frames.length - 1
+  const isToday = highlight.highlight_date === todayKey()
+  const canPublish = !isRestricted('public_links') || !!highlight.public_gfs_id
+
+  // Active-segment fill runs for the frame's own duration so the bar
+  // tracks the timer one-to-one.
+  const activeFillDuration = frame.duration_ms && frame.duration_ms > 0 ? frame.duration_ms : FRAME_DURATION_MS
+  const viewerLabel = isAuthor ? t('highlight.today.yours_title') : t('highlight.viewer.dialog_aria', { name: authorName })
+
+  const who = (
+    <>
+      <Avatar name={authorName} src={authorPicture} size={36} />
+      <span class="sh-hlv__whotext">
+        <span class="sh-hlv__name">
+          {isAuthor ? t('highlight.today.yours_title') : <bdi dir="auto">{authorName}</bdi>}
+        </span>
+        <span class="sh-hlv__meta">
+          <bdi><time dateTime={frame.created_at}>{localSinceTime(frame.created_at)}</time></bdi>
+          <span aria-hidden="true">·</span>
+          {CHIP_ICON[chip.icon]}
+          <span class="sr-only">{t('highlight.chip.aria', { who: chip.text })}</span>
+          <span class="sh-hlv__aud" aria-hidden="true">{chip.text}</span>
+        </span>
+      </span>
+    </>
+  )
 
   return (
     <div
-      class={
-        stopped
-          ? 'sh-highlight-viewer sh-highlight-viewer--paused'
-          : 'sh-highlight-viewer'
-      }
+      class={stopped ? 'sh-hlv sh-hlv--paused' : 'sh-hlv'}
+      role="region"
+      aria-label={viewerLabel}
     >
-      {/* Progress bar — one segment per frame. The active segment's
-       *  inner fill animates from 0 → 100% over the frame's duration,
-       *  giving the same "story" pacing cue Instagram / Snapchat use.
-       *  Pause freezes the animation via animation-play-state. */}
-      <div class="sh-highlight-progress" aria-hidden="true">
-        {frames.map((_, i) => (
-          <span
-            key={i}
-            class={
-              i < currentIndex.value
-                ? 'sh-highlight-progress-seg sh-highlight-progress-seg--done'
-                : i === currentIndex.value
-                  ? 'sh-highlight-progress-seg sh-highlight-progress-seg--active'
-                  : 'sh-highlight-progress-seg'
-            }
-          >
+      <div class="sh-hlv__col">
+        {/* One segment per frame; the active one fills over the frame's
+         *  duration and freezes while paused. */}
+        <div class="sh-hlv__prog" aria-hidden="true">
+          {frames.map((_, i) => (
             <span
-              class="sh-highlight-progress-fill"
-              // Setting the duration only on the active fill keeps the
-              // CSS lean — done/queued segments don't need it.
-              style={
-                i === currentIndex.value
-                  ? `--seg-dur: ${activeFillDuration}ms`
-                  : undefined
-              }
-            />
-          </span>
-        ))}
-      </div>
-      <span class="sr-only" aria-live="polite">
-        {t('highlight.composer.frame_of', { n: String(currentIndex.value + 1), total: String(frames.length) })}
-      </span>
-
-      <header class="sh-highlight-viewer-header">
-        <Avatar
-          name={authorName}
-          src={authorPicture}
-          size={32}
-        />
-        <strong>{authorName}</strong>
-        <span class="sh-muted">{highlightDateLabel(highlight.highlight_date)}</span>
-        {!isAuthor && (
-          <button
-            type="button"
-            class="sh-highlight-viewer-overflow"
-            aria-label={t('highlight.more_actions', { name: authorName })}
-            onClick={() => openPerson(highlight.author_user_id, {
-              person: { display_name: authorName, picture_url: authorPicture },
-            })}
-          >
-            ⋯
-          </button>
-        )}
-        <Button variant="ghost" onClick={() => loc.route('/highlights')}>{t('common.close')}</Button>
-      </header>
-
-      <div
-        class="sh-highlight-frame"
-        // Press-and-hold on the frame stage pauses the timer — Instagram
-        // / Snapchat behaviour. Bound here (not on the whole viewer) so
-        // tapping the React/Reply/Report footer does not get re-routed
-        // through pause-resume on every click.
-        onPointerDown={() => { paused.value = true }}
-        onPointerUp={() => { paused.value = false }}
-        onPointerLeave={() => { paused.value = false }}
-        onPointerCancel={() => { paused.value = false }}
-      >
-        <button class="sh-highlight-tap-left"  onClick={onTapLeft}  aria-label={t('highlight.viewer.prev_frame')} />
-        <button class="sh-highlight-tap-right" onClick={onTapRight} aria-label={t('highlight.viewer.next_frame')} />
-        {frame.frame_type === 'image' ? (
-          <img src={frame.media_url} alt={frame.caption_text ?? ''} class="sh-highlight-frame-media" />
-        ) : (
-          // Story UX (autoplay-muted, controls=false, tap-to-advance) so this
-          // stays a raw <video> rather than VideoMedia. Trade-off: a frame
-          // still mid-transcode (frame.media_status === 'processing') shows a
-          // black frame here — the status isn't surfaced in the story viewer
-          // yet (documented follow-up).
-          <video
-            // ``key`` forces a fresh element when the frame id changes
-            // — without it, switching from one video to another keeps
-            // the previous element + its currentTime, which made the
-            // new frame stutter on entry.
-            key={frame.id}
-            ref={videoRef}
-            src={frame.media_url}
-            class="sh-highlight-frame-media"
-            autoPlay
-            playsInline
-            muted={muted}
-            controls={false}
-            onEnded={advance}
-          />
-        )}
-        {/* Per-frame mute toggle — only meaningful on video frames, but
-         *  rendering it consistently keeps the chrome stable when the
-         *  user steps between image and video frames. */}
-        {frame.frame_type === 'video' && (
-          <button
-            type="button"
-            class="sh-highlight-mute-btn"
-            onClick={(ev) => { ev.stopPropagation(); setMuted(m => !m) }}
-            aria-pressed={muted}
-            aria-label={muted ? t('highlight.viewer.unmute_aria') : t('highlight.viewer.mute_aria')}
-            title={muted ? t('highlight.viewer.unmute') : t('highlight.viewer.mute')}
-          >
-            {muted ? '🔇' : '🔊'}
-          </button>
-        )}
-        {(frame.caption_text || frame.caption_emoji) && (
-          <p class="sh-highlight-frame-caption">
-            {frame.caption_emoji && (
-              <span class="sh-highlight-frame-caption-emoji" aria-hidden="true">
-                {frame.caption_emoji}
-              </span>
-            )}
-            {frame.caption_text}
-          </p>
-        )}
-        {/* "Paused" hint appears while the frame stands still — held,
-         *  or under the reaction tray / a dialog. It reassures them the
-         *  timer has actually stopped, and tells first-time users that
-         *  hold-to-pause is a thing. */}
-        {stopped && (
-          <span class="sh-highlight-paused-hint" aria-hidden="true">
-            ⏸ {t('highlight.viewer.paused')}
-          </span>
-        )}
-      </div>
-
-      <footer class="sh-highlight-viewer-footer">
-        {!isAuthor && (
-          <>
-            <button
-              type="button"
-              class="sh-highlight-react-btn"
-              onClick={() => { reactionsFrameId.value = trayOpen ? null : frame.id }}
-              aria-label={t('highlight.viewer.react')}
-              aria-expanded={trayOpen}
-            >
-              😊 {t('highlight.viewer.react')}
-            </button>
-            <button
-              type="button"
-              class="sh-highlight-reply-btn"
-              onClick={dmReply}
-              aria-label={t('highlight.viewer.reply_aria')}
-            >
-              💬 {t('highlight.viewer.reply')}
-            </button>
-            <button
-              type="button"
-              class="sh-highlight-report-btn"
-              onClick={() => openReport('highlight', highlight.id)}
-              aria-label={t('highlight.viewer.report_aria')}
-            >
-              🚩 {t('report.action')}
-            </button>
-          </>
-        )}
-        {isAuthor && (
-          <>
-            <button
-              type="button"
-              class="sh-highlight-author-meta"
-              onClick={() => { seenBySheetFrameId.value = frame.id }}
-              aria-label={
-                myViews.length === 0 && myReactions.length === 0
-                  ? t('highlight.viewer.no_views')
-                  : t('highlight.viewer.seen_by_aria', { views: String(myViews.length), reactions: reactionsLabel(myReactions.length) })
+              key={i}
+              class={
+                i < currentIndex.value
+                  ? 'sh-hlv__seg sh-hlv__seg--done'
+                  : i === currentIndex.value ? 'sh-hlv__seg sh-hlv__seg--active' : 'sh-hlv__seg'
               }
             >
-              👁 {myViews.length} · {reactionsLabel(myReactions.length)}
-            </button>
-            {/* §CP.R: a protected account can't mint a public link; it
-             *  keeps the button only to unpublish one made before. */}
-            {(!isRestricted('public_links') || !!highlight.public_gfs_id) && (
-              <Button
-                variant="ghost"
-                onClick={() => openPublishMenu(highlight.id, !!highlight.public_gfs_id)}
-              >
-                🔗 {t('highlight.viewer.publish')}
-              </Button>
-            )}
-            <Button variant="danger" onClick={deleteFrame}>{t('highlight.viewer.delete_frame')}</Button>
-          </>
-        )}
-      </footer>
-
-      {isAuthor && seenBySheetFrameId.value === frame.id && (
-        <HighlightSeenBySheet
-          views={myViews}
-          reactions={myReactions}
-          onClose={() => { seenBySheetFrameId.value = null }}
-        />
-      )}
-
-      {trayOpen && (
-        <div class="sh-highlight-react-tray" role="group" aria-label={t('highlight.viewer.quick_reactions')}>
-          {QUICK_REACTIONS.map(emoji => (
-            <button
-              key={emoji}
-              type="button"
-              class="sh-highlight-react-tray-btn"
-              onClick={() => void react(frame.id, emoji)}
-            >
-              {emoji}
-            </button>
+              <span
+                class="sh-hlv__fill"
+                style={i === currentIndex.value ? `--seg-dur: ${activeFillDuration}ms` : undefined}
+              />
+            </span>
           ))}
         </div>
+        <span class="sr-only" aria-live="polite">{frameOf}</span>
+
+        <header class="sh-hlv__head">
+          {isAuthor
+            ? <span class="sh-hlv__who">{who}</span>
+            : (
+              <button
+                type="button"
+                class="sh-hlv__who"
+                aria-label={t('highlight.viewer.menu_profile', { name: authorName })}
+                onClick={() => openPerson(highlight.author_user_id, {
+                  person: { display_name: authorName, picture_url: authorPicture },
+                })}
+              >
+                {who}
+              </button>
+            )}
+          <button
+            type="button"
+            class="sh-hlv__btn"
+            aria-label={stopped ? t('highlight.viewer.play_aria') : t('highlight.viewer.pause_aria')}
+            aria-keyshortcuts="Space K"
+            onClick={togglePause}
+          >
+            {stopped ? VIEWER_ICON.play : VIEWER_ICON.pause}
+          </button>
+          <button
+            type="button"
+            class="sh-hlv__btn"
+            aria-label={t('highlight.viewer.more_aria')}
+            aria-haspopup="dialog"
+            onClick={() => { sheet.value = 'more' }}
+          >
+            {VIEWER_ICON.more}
+          </button>
+          <button
+            type="button"
+            class="sh-hlv__btn"
+            aria-label={t('highlight.viewer.close_aria')}
+            aria-keyshortcuts="Escape"
+            onClick={close}
+          >
+            {VIEWER_ICON.close}
+          </button>
+        </header>
+
+        <div
+          class="sh-hlv__stage"
+          // Press-and-hold pauses (the stage only, so the controls under
+          // it never pause-resume on every click).
+          onPointerDown={() => { held.value = true }}
+          onPointerUp={() => { held.value = false }}
+          onPointerLeave={() => { held.value = false }}
+          onPointerCancel={() => { held.value = false }}
+        >
+          {frame.frame_type === 'image' ? (
+            <img src={frame.media_url} alt={frame.caption_text ?? ''} class="sh-hlv__media" />
+          ) : (
+            // Story UX (autoplay-muted, no controls, tap to advance), so a
+            // raw <video>. ``key`` gives each frame a fresh element.
+            <video
+              key={frame.id}
+              ref={videoRef}
+              src={frame.media_url}
+              poster={frame.thumbnail_url}
+              class="sh-hlv__media"
+              autoPlay
+              playsInline
+              muted={muted}
+              controls={false}
+              onEnded={advance}
+            />
+          )}
+          <button
+            type="button"
+            class="sh-hlv__tap sh-hlv__tap--back"
+            onClick={(e) => { e.preventDefault(); goBack() }}
+            aria-label={t('highlight.viewer.prev_frame')}
+          />
+          <button
+            type="button"
+            class="sh-hlv__tap sh-hlv__tap--next"
+            onClick={(e) => { e.preventDefault(); advance() }}
+            aria-label={t('highlight.viewer.next_frame')}
+          />
+          {frame.frame_type === 'video' && (
+            <button
+              type="button"
+              class="sh-hlv__btn sh-hlv__mute"
+              onClick={(ev) => { ev.stopPropagation(); setMuted(m => !m) }}
+              onPointerDown={(ev) => ev.stopPropagation()}
+              aria-pressed={!muted}
+              aria-label={muted ? t('highlight.viewer.unmute_aria') : t('highlight.viewer.mute_aria')}
+            >
+              {muted ? VIEWER_ICON.muted : VIEWER_ICON.sound}
+            </button>
+          )}
+          {stopped && (
+            <span class="sh-hlv__paused" aria-hidden="true">
+              {VIEWER_ICON.pause}{t('highlight.viewer.paused')}
+            </span>
+          )}
+          {(frame.caption_text || frame.caption_emoji) && (
+            <p class="sh-hlv__cap" dir="auto">
+              {frame.caption_emoji && <span class="sh-hlv__capemoji" aria-hidden="true">{frame.caption_emoji} </span>}
+              {frame.caption_text}
+            </p>
+          )}
+        </div>
+
+        {!isAuthor && (
+          <div class="sh-hlv__tray">
+            <div class="sh-hlv__emo" role="group" aria-label={t('highlight.viewer.react_group')}>
+              {QUICK_REACTIONS.map(emoji => (
+                <button
+                  key={emoji}
+                  type="button"
+                  class={mine === emoji ? 'sh-hlv__emobtn is-on' : 'sh-hlv__emobtn'}
+                  aria-pressed={mine === emoji}
+                  aria-label={mine === emoji
+                    ? t('highlight.viewer.react_mine_aria', { emoji })
+                    : t('highlight.viewer.react_aria', { emoji })}
+                  onClick={() => void react(emoji)}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+            <form class="sh-hlv__reply" onSubmit={(e) => void sendReply(e)}>
+              <input
+                type="text"
+                class="sh-hlv__replyin"
+                dir="auto"
+                value={reply}
+                maxLength={2000}
+                placeholder={t('highlight.viewer.reply_placeholder', { name: authorFirst })}
+                aria-label={t('highlight.viewer.reply_placeholder', { name: authorFirst })}
+                onInput={(e) => setReply((e.target as HTMLInputElement).value)}
+                onFocus={() => { typing.value = true }}
+                onBlur={() => { typing.value = false }}
+                onKeyDown={(e) => { if (e.key === 'Escape') (e.target as HTMLInputElement).blur() }}
+              />
+              {reply.trim() && (
+                <button
+                  type="submit"
+                  class="sh-hlv__btn sh-hlv__send"
+                  disabled={sending}
+                  aria-label={t('highlight.viewer.reply_send')}
+                >
+                  {VIEWER_ICON.send}
+                </button>
+              )}
+            </form>
+          </div>
+        )}
+
+        {isAuthor && (
+          <div class="sh-hlv__foot">
+            <button
+              type="button"
+              class="sh-hlv__stat"
+              aria-haspopup="dialog"
+              onClick={() => { sheet.value = 'seen' }}
+            >
+              {VIEWER_ICON.eye}
+              {views.length === 0
+                ? t('highlight.viewer.no_views')
+                : t('highlight.viewer.seen_n', { n: String(views.length) })}
+            </button>
+            {reactions.length > 0 && (
+              <button
+                type="button"
+                class="sh-hlv__stat"
+                aria-haspopup="dialog"
+                aria-label={reactionsLabel(reactions.length)}
+                onClick={() => { sheet.value = 'seen' }}
+              >
+                <span class="sh-hlv__stat-emo" aria-hidden="true">
+                  {[...new Set(reactions.map(r => r.emoji))].slice(0, 3).join('')}
+                </span>
+                <span aria-hidden="true">{reactions.length}</span>
+              </button>
+            )}
+            <span class="sh-hlv__grow" />
+            <button
+              type="button"
+              class="sh-hlv__stat"
+              aria-haspopup="dialog"
+              onClick={() => { sheet.value = 'share' }}
+            >
+              {VIEWER_ICON.share}
+              {t('highlight.viewer.share')}
+            </button>
+          </div>
+        )}
+
+        <div class="sh-hlv__side sh-hlv__side--start">
+          <button type="button" class="sh-hlv__btn" onClick={goBack} aria-label={t('highlight.viewer.prev_frame')}>
+            {VIEWER_ICON.prev}
+          </button>
+          {around?.prev && (
+            <PersonPeek
+              person={around.prev}
+              label={personFirstName(around.prev)}
+              aria={t('highlight.viewer.prev_person_aria', {
+                name: namedPersonLabel(around.prev.authorId, around.prev.highlight.author),
+              })}
+              onClick={() => goToPerson(around.prev!)}
+            />
+          )}
+        </div>
+        <div class="sh-hlv__side sh-hlv__side--end">
+          <button type="button" class="sh-hlv__btn" onClick={advance} aria-label={t('highlight.viewer.next_frame')}>
+            {VIEWER_ICON.next}
+          </button>
+          {around?.next && (
+            <PersonPeek
+              person={around.next}
+              label={around.upNext
+                ? t('highlight.viewer.up_next', { name: personFirstName(around.next) })
+                : personFirstName(around.next)}
+              aria={t(around.upNext ? 'highlight.viewer.up_next_aria' : 'highlight.viewer.next_person_aria',
+                { name: namedPersonLabel(around.next.authorId, around.next.highlight.author) })}
+              onClick={() => goToPerson(around.next!)}
+            />
+          )}
+        </div>
+      </div>
+
+      {sheet.value === 'more' && (
+        <ViewerSheet
+          title={t('highlight.viewer.menu_heading', { n: String(currentIndex.value + 1), total: String(frames.length) })}
+          onClose={() => { sheet.value = null }}
+        >
+          <div class="sh-hlv-menu">
+            {isAuthor ? (
+              <>
+                <SheetRow
+                  icon={VIEWER_ICON.share}
+                  title={t('highlight.viewer.menu_share')}
+                  sub={t('highlight.viewer.share_note')}
+                  onClick={() => { sheet.value = 'share' }}
+                />
+                {canPublish && (
+                  <SheetRow
+                    icon={VIEWER_ICON.link}
+                    title={highlight.public_gfs_id ? t('highlight.viewer.menu_public_link') : t('highlight.viewer.menu_publish')}
+                    sub={highlight.public_gfs_id ? t('highlight.viewer.menu_public_link_sub') : t('highlight.viewer.menu_publish_sub')}
+                    onClick={() => { sheet.value = null; openPublishMenu(highlight.id, !!highlight.public_gfs_id) }}
+                  />
+                )}
+                <hr class="sh-hlv-menu__sep" />
+                <SheetRow
+                  danger
+                  icon={VIEWER_ICON.trash}
+                  title={t('highlight.viewer.menu_delete_frame')}
+                  sub={others === 0
+                    ? t('highlight.viewer.menu_delete_frame_only')
+                    : t(isOne(others) ? 'highlight.viewer.menu_delete_frame_sub_one' : 'highlight.viewer.menu_delete_frame_sub',
+                      { n: String(others) })}
+                  onClick={() => void deleteFrame()}
+                />
+                <SheetRow
+                  danger
+                  icon={VIEWER_ICON.trash}
+                  title={isToday ? t('highlight.viewer.menu_delete_today') : t('highlight.viewer.menu_delete_highlight')}
+                  sub={t(isOne(frames.length) ? 'highlight.viewer.menu_delete_day_sub_one' : 'highlight.viewer.menu_delete_day_sub',
+                    { n: String(frames.length) })}
+                  onClick={() => void deleteDay()}
+                />
+              </>
+            ) : (
+              <>
+                <SheetRow
+                  icon={VIEWER_ICON.person}
+                  title={t('highlight.viewer.menu_profile', { name: authorName })}
+                  onClick={() => {
+                    sheet.value = null
+                    openPerson(highlight.author_user_id, { person: { display_name: authorName, picture_url: authorPicture } })
+                  }}
+                />
+                <SheetRow
+                  icon={VIEWER_ICON.flag}
+                  title={t('highlight.viewer.menu_report')}
+                  onClick={() => { sheet.value = null; openReport('highlight', highlight.id) }}
+                />
+              </>
+            )}
+          </div>
+        </ViewerSheet>
+      )}
+      {sheet.value === 'seen' && isAuthor && (
+        <SeenBySheet
+          frameLabel={t('highlight.viewer.frame_lower', { n: String(currentIndex.value + 1), total: String(frames.length) })}
+          views={views}
+          reactions={reactions}
+          onClose={() => { sheet.value = null }}
+        />
+      )}
+      {sheet.value === 'share' && isAuthor && myId && (
+        <ShareSheet highlight={highlight} me={myId} onClose={() => { sheet.value = null }} />
       )}
     </div>
   )
 }
 
-
-/** A key aimed at a text field: its arrows move the caret, never a frame. */
-function isEditable(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false
-  return target.isContentEditable || !!target.closest('input, textarea, select, [contenteditable="true"]')
-}
-
-/** "3 reactions" / "1 reaction" in the UI language. */
-function reactionsLabel(n: number): string {
-  return t(isOne(n) ? 'highlight.reactions_one' : 'highlight.reactions', { n: String(n) })
-}
-
-/**
- * HighlightSeenBySheet — modal-backed list of who has viewed this frame
- * and who has dropped a reaction. Author-only; opens from the viewer
- * footer's eye chip. Empty arrays show their own gentle empty state so
- * a brand-new highlight doesn't look broken.
- */
-function HighlightSeenBySheet({
-  views, reactions, onClose,
-}: {
-  views: HighlightView[]
-  reactions: HighlightReaction[]
-  onClose: () => void
+/** A person before / after this one: a dimmed still with their avatar. */
+function PersonPeek({ person, label, aria, onClick }: {
+  person: TodayPerson
+  label: string
+  aria: string
+  onClick: () => void
 }) {
-  const totalActivity = views.length + reactions.length
+  const first = person.frames[person.frames.length - 1]
+  const still = first ? (first.frame_type === 'video' ? first.thumbnail_url : first.media_url) : undefined
+  const name = namedPersonLabel(person.authorId, person.highlight.author)
   return (
-    <Modal open={true} onClose={onClose} title={t('highlight.seen_by.title')}>
-      {totalActivity === 0 && (
-        <p class="sh-muted" style={{ marginTop: 0 }}>
-          {t('highlight.seen_by.empty')}
-        </p>
-      )}
-
-      {views.length > 0 && (
-        <section class="sh-seenby-section" aria-label={t('highlight.seen_by.viewers')}>
-          <h3 class="sh-seenby-heading">
-            {t('highlight.seen_by.viewers')} <span class="sh-muted">({views.length})</span>
-          </h3>
-          <ul class="sh-seenby-list">
-            {views.map(v => (
-              <li key={v.viewer_user_id} class="sh-seenby-row">
-                <Avatar
-                  name={namedPersonLabel(v.viewer_user_id, v)}
-                  src={namedPersonPicture(v.viewer_user_id, v)}
-                  size={32}
-                />
-                <span class="sh-seenby-name">
-                  {namedPersonLabel(v.viewer_user_id, v)}
-                </span>
-                <time class="sh-muted">{relativeDocsTime(v.viewed_at)}</time>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {reactions.length > 0 && (
-        <section class="sh-seenby-section" aria-label={t('highlight.seen_by.reactions')}>
-          <h3 class="sh-seenby-heading">
-            {t('highlight.seen_by.reactions')} <span class="sh-muted">({reactions.length})</span>
-          </h3>
-          <ul class="sh-seenby-list">
-            {reactions.map(r => (
-              <li key={r.reactor_user_id} class="sh-seenby-row">
-                <Avatar
-                  name={namedPersonLabel(r.reactor_user_id, r)}
-                  src={namedPersonPicture(r.reactor_user_id, r)}
-                  size={32}
-                />
-                <span class="sh-seenby-name">
-                  {namedPersonLabel(r.reactor_user_id, r)}
-                </span>
-                <span class="sh-seenby-emoji" aria-hidden="true">{r.emoji}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-    </Modal>
+    <>
+      <button type="button" class="sh-hlv__peek" aria-label={aria} onClick={onClick}>
+        {still && <img class="sh-hlv__peek-still" src={still} alt="" />}
+        <span class="sh-hlv__peek-avatar">
+          <Avatar name={name} src={namedPersonPicture(person.authorId, person.highlight.author)} size={40} />
+        </span>
+      </button>
+      <span class="sh-hlv__peek-label" aria-hidden="true"><bdi dir="auto">{label}</bdi></span>
+    </>
   )
 }

@@ -285,6 +285,9 @@ class HighlightDetailView(BaseView):
             highlight_id, ctx.user_id, via_post_id=_via_post(self)
         )
         statuses = await _frame_statuses(self, frames)
+        # Everyone's own reaction per frame, so the tray shows it and a
+        # second tap changes or removes it.
+        mine = await svc.my_reactions(ctx.user_id, frames)
         # Authors get the per-frame views + reactions inline so the
         # viewer can render "Viewed by N" without a second request.
         is_author = highlight.author_user_id == ctx.user_id
@@ -307,7 +310,11 @@ class HighlightDetailView(BaseView):
                 highlight, ctx.user_id, author=people[highlight.author_user_id]
             ),
             "frames": [
-                _frame_dict(f, media_status=_frame_status(statuses, f)) for f in frames
+                {
+                    **_frame_dict(f, media_status=_frame_status(statuses, f)),
+                    "my_reaction": mine.get(f.id),
+                }
+                for f in frames
             ],
         }
         if is_author:

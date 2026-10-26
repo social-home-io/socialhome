@@ -1118,3 +1118,32 @@ async def test_a_video_frame_carries_a_signed_poster(client):
     assert poster.split("?", 1)[0].endswith(fn.replace(".webm", ".webp"))
     assert "sig=" in poster
     assert "thumbnail_url" not in frames[image_frame_id]
+
+
+# ─── Watching: your own reaction per frame ────────────────────────────────
+
+
+async def test_the_detail_tells_each_viewer_their_own_reaction(client):
+    """``my_reaction`` per frame is the caller's own emoji — so the
+    viewer's tray shows it — never someone else's, and it follows a
+    change and a clear."""
+    bob_uid, bob = await _local_user(client, "bob")
+    carol_uid, carol = await _local_user(client, "carol")
+    highlight_id, frame_id = await _highlight_for(client, [bob_uid, carol_uid])
+
+    async def _mine(headers: dict) -> str | None:
+        r = await client.get(f"/api/highlights/{highlight_id}", headers=headers)
+        assert r.status == 200, await r.text()
+        (frame,) = (await r.json())["frames"]
+        return frame["my_reaction"]
+
+    assert await _mine(bob) is None
+    url = f"/api/highlights/frames/{frame_id}/reaction"
+    assert (await client.put(url, json={"emoji": "❤️"}, headers=bob)).status == 200
+    assert await _mine(bob) == "❤️"
+    assert await _mine(carol) is None
+    assert await _mine(_auth(client)) is None
+    assert (await client.put(url, json={"emoji": "🔥"}, headers=bob)).status == 200
+    assert await _mine(bob) == "🔥"
+    assert (await client.delete(url, headers=bob)).status == 200
+    assert await _mine(bob) is None

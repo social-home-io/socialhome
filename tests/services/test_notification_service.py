@@ -22,6 +22,7 @@ from socialhome.domain.events import (
     DmMessageCreated,
     DmMessageDeleted,
     DmMessageUpdated,
+    HighlightFrameReactionChanged,
     MomentCreated,
     PostEdited,
     SpaceAdminSeedsRetiredAfterRestore,
@@ -1848,6 +1849,47 @@ async def test_moment_reaction_remote_author_silent(stack):
     # No local user has an unfilled bell — the reactor (bob) doesn't
     # get a self-ping, and the remote author has no local row.
     assert await stack.notif_repo.list(b.user_id, limit=10) == []
+
+
+def _hl_reaction(reactor: str, author: str, emoji: str | None):
+    return HighlightFrameReactionChanged(
+        highlight_id="h-1",
+        frame_id="f-1",
+        reactor_user_id=reactor,
+        author_user_id=author,
+        emoji=emoji,
+    )
+
+
+async def test_highlight_reaction_notifies_the_author(stack):
+    """A reaction on your highlight — a household member's, or one that
+    arrived from a paired household (the same local event) — pings you
+    once, linked to the highlight."""
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(_hl_reaction(b.user_id, a.user_id, "❤️"))
+    notifs = await stack.notif_repo.list(a.user_id, limit=10)
+    assert [(n.type, n.link_url) for n in notifs] == [
+        ("highlight_reacted", "/highlights/h-1")
+    ]
+    assert "❤️" in notifs[0].title
+    assert await stack.notif_repo.list(b.user_id, limit=10) == []
+
+
+async def test_highlight_reaction_quiet_cases(stack):
+    """Your own reaction, a cleared one, a remote author (their household
+    notifies them) and a blocked reactor send nothing."""
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(_hl_reaction(a.user_id, a.user_id, "🔥"))
+    await stack.bus.publish(_hl_reaction(b.user_id, a.user_id, None))
+    await stack.bus.publish(_hl_reaction(b.user_id, "uid-remote", "🔥"))
+    assert await stack.notif_repo.list(a.user_id, limit=10) == []
+    assert await stack.notif_repo.list(b.user_id, limit=10) == []
+
+    await SqliteUserRepo(stack.db).block(a.user_id, b.user_id)
+    await stack.bus.publish(_hl_reaction(b.user_id, a.user_id, "🔥"))
+    assert await stack.notif_repo.list(a.user_id, limit=10) == []
 
 
 async def test_moment_top_level_no_notification(stack):

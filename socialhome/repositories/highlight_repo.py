@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import builtins
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
@@ -127,6 +128,11 @@ class AbstractHighlightRepo(Protocol):
         self,
         frame_id: str,
     ) -> builtins.list[HighlightFrameReaction]: ...
+    async def reactions_by(
+        self,
+        reactor_user_id: str,
+        frame_ids: Iterable[str],
+    ) -> dict[str, str]: ...
     async def delete_frame(self, frame_id: str) -> None: ...
     async def delete_highlight(self, highlight_id: str) -> None: ...
     async def delete_by_author(self, author_user_id: str) -> int: ...
@@ -486,6 +492,24 @@ class SqliteHighlightRepo:
             "DELETE FROM highlight_frame_reactions WHERE frame_id=? AND reactor_user_id=?",
             (frame_id, reactor_user_id),
         )
+
+    async def reactions_by(
+        self,
+        reactor_user_id: str,
+        frame_ids: Iterable[str],
+    ) -> dict[str, str]:
+        """``{frame_id: emoji}`` for the frames ``reactor_user_id`` reacted
+        to — the viewer's own reaction per frame, in one read."""
+        ids = list(frame_ids)
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        rows = await self._db.fetchall(
+            "SELECT frame_id, emoji FROM highlight_frame_reactions "
+            f"WHERE reactor_user_id=? AND frame_id IN ({placeholders})",
+            (reactor_user_id, *ids),
+        )
+        return {r["frame_id"]: r["emoji"] for r in rows_to_dicts(rows)}
 
     async def list_reactions_for_frame(
         self,

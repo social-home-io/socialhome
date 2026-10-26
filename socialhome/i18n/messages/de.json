@@ -1,6 +1,7 @@
 {
   "notification.post.created": "{author} hat einen neuen Beitrag verfasst",
   "notification.post.commented": "{author} hat deinen Beitrag kommentiert",
+  "notification.highlight.reacted": "{name} hat mit {emoji} auf dein Highlight reagiert",
   "notification.moment.reacted": "{name} hat mit {emoji} auf deinen Moment reagiert",
   "notification.moment.replied": "{name} hat auf deinen Moment geantwortet",
   "notification.user.followed": "{name} folgt dir jetzt",

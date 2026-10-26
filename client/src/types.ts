@@ -197,6 +197,9 @@ export interface HighlightFrame {
   media_status?: 'processing' | 'failed' | 'ready'
   /** Video frames only: the signed ``.webp`` poster next to the ``.webm``. */
   thumbnail_url?: string
+  /** ``GET /api/highlights/{id}`` only: the caller's own reaction on this
+   *  frame, ``null`` when they haven't reacted. */
+  my_reaction?: string | null
 }
 
 /** Per-author per-day highlight aggregate. */

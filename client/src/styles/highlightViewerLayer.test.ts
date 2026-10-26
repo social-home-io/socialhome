@@ -35,7 +35,7 @@ function resolve(value: string): number {
 }
 
 describe('highlight viewer layering', () => {
-  const z = resolve(/z-index\s*:\s*([^;]+);/.exec(body(app, '.sh-highlight-viewer'))![1])
+  const z = resolve(/z-index\s*:\s*([^;]+);/.exec(body(app, '.sh-hlv'))![1])
 
   it('sits below dialogs and toasts it opens', () => {
     expect(z).toBeLessThan(token('--sh-z-modal'))

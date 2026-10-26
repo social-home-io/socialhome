@@ -205,13 +205,31 @@ A frame whose `media_url` is not a local media reference
   ``HighlightFrameReactionChanged``) fan ``highlight.frame_viewed`` /
   ``highlight.frame_reaction_changed`` only to the *author's* WS
   sessions — unrelated household members don't need the noise.
-- Routes: `socialhome/routes/highlights.py`.
+- Notifications: ``NotificationService.on_highlight_reaction_changed``
+  writes a local ``highlight_reacted`` row ("Anna reacted ❤️ to your
+  highlight", linked to the viewer) for the author when a
+  ``HighlightFrameReactionChanged`` lands on the author's household — a
+  household member's reaction, or a paired household's
+  ``HIGHLIGHT_FRAME_REACTED`` already on its way to the author's home.
+  Nothing new crosses the wire; a cleared reaction, your own, a blocked
+  reactor and an author on another household stay silent.
+- Routes: `socialhome/routes/highlights.py`. The detail read carries the
+  caller's own reaction per frame (`my_reaction`, read-time from
+  `highlight_frame_reactions`) so the viewer's tray shows it.
+- Private reply (owner decision 11): the SPA gets or creates the 1:1 DM
+  with the author (`POST /api/conversations/dm`, idempotent), then calls
+  `POST /api/highlights/frames/{id}/dm-reply`; the reply rides the normal
+  DM path, with the frame snapshot frozen on the message.
 - Retention scheduler:
   `socialhome/infrastructure/highlight_retention_scheduler.py` (copies the
   `_stop: asyncio.Event` template from `replay_cache_scheduler.py`).
 - Frontend: `client/src/features/highlights/` (4 pages — inbox, viewer,
   composer, archive), `client/src/components/HighlightShareCard.tsx`, and
   `client/src/components/HighlightPickerDialog.tsx` for sharing into a feed.
+  The viewer's own Share (`viewerSheets.tsx`) asks first when the feed or
+  space reaches more people than the highlight's audience
+  (`shareReach.ts`): a share opens all of that day's frames to everyone
+  who can read the post.
 
 ## Spec refs
 
