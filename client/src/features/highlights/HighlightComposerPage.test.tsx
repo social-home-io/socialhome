@@ -442,12 +442,17 @@ describe('Change for all of today…', () => {
     fireEvent.click(view.getByRole('button', { name: 'Change for all of today…' }))
     const sheet = within(await view.findByRole('dialog'))
     fireEvent.click(sheet.getByLabelText(/Your household only/))
-    expect(await sheet.findByText(
-      'Everyone in your household can still open it from your post in the household feed.',
-    )).toBeTruthy()
-    expect(sheet.getByText('People in Trip Group, Book club can still open it from your post.')).toBeTruthy()
+    expect(await sheet.findByText('People in Trip Group, Book club can still open it from your post.')).toBeTruthy()
     expect(sheet.getByText("Won't see it in their Highlights any more:")).toBeTruthy()
     expect(sheet.queryByLabelText('Also remove the public link')).toBeNull()
+    // Household-wide: every housemate sees it anyway — no feed note.
+    const feedNote = 'Everyone in your household can still open it from your post in the household feed.'
+    expect(sheet.queryByText(feedNote)).toBeNull()
+    // Picked people leave housemates out: the feed post still opens it.
+    fireEvent.click(sheet.getByLabelText(/Choose households or people/))
+    fireEvent.click(sheet.getByRole('button', { name: 'People' }))
+    fireEvent.click(await sheet.findByLabelText(/Uncle Bob/))
+    expect(await sheet.findByText(feedNote)).toBeTruthy()
   })
 
   it('Keep closes it and changes nothing', async () => {

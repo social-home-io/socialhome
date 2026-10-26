@@ -3636,6 +3636,16 @@ class FederationInboundService(ProtectionGateMixin):
             return None
         at = _occurred_at(event.payload)
         stamp = await self._highlight_repo.get_stamp(highlight.id)
+        if stamp is not None and stamp.author_user_id != highlight.author_user_id:
+            # The id is stamped for another author (it outlives the row
+            # ``_highlight_write_binds`` checks against) — never theirs.
+            log.warning(
+                "%s from %s: highlight id %s is stamped for another author — refusing",
+                event.event_type,
+                event.from_instance,
+                highlight.id,
+            )
+            return None
         if stamp is not None and stamp.removed_at is not None:
             removed = _parse_stamp(stamp.removed_at)
             if at is None or removed is None or at <= removed:

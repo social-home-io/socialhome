@@ -538,3 +538,20 @@ async def test_a_narrowing_waits_for_a_household_below_v70(net):
     await net.change(highlight.id, "households", [BOB_HOME, DORA_HOME])
     await net.deliver()
     assert await net.held(DORA_HOME, highlight.id) == (1, 1)
+
+
+async def test_an_id_stamped_for_another_author_is_refused(net):
+    """A stamp outlives the highlight row, so it binds the id to its author
+    like the row did: an envelope naming that id for anyone else lands
+    nothing."""
+    dora_db = net.receivers[DORA_HOME][0][db_key]
+    highlight, _ = await net.post_frame(1, "all_paired", [])
+    await dora_db.enqueue(
+        "INSERT INTO highlight_stamps(highlight_id, author_user_id, removed_at,"
+        " expires_at) VALUES(?, 'u-someone-else', '2000-01-01T00:00:00+00:00',"
+        " '2999-01-01T00:00:00+00:00')",
+        (highlight.id,),
+    )
+    await net.deliver()
+    assert await net.held(DORA_HOME, highlight.id) == (0, 0)
+    assert await net.held(BOB_HOME, highlight.id) == (1, 1)

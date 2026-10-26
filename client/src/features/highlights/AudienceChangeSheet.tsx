@@ -111,8 +111,11 @@ export function AudienceChangeSheet(props: Props) {
   const narrowing = !same && losses.length > 0
   const offerUnlink = narrowing && reach.published
   const spaceNames = reach.shared.spaces.map(s => s.name)
+  // The household feed post matters only when picked people leave out
+  // housemates — a household-wide audience has every housemate anyway.
+  const householdPost = narrowing && reach.shared.household && next.kind === 'users'
   const stillOpens = narrowing
-    && ((reach.published && !removeLink) || reach.shared.household || spaceNames.length > 0)
+    && ((reach.published && !removeLink) || householdPost || spaceNames.length > 0)
 
   const confirm = async () => {
     if (same || !complete || busy) return
@@ -196,7 +199,7 @@ export function AudienceChangeSheet(props: Props) {
             {narrowing && reach.published && !removeLink && (
               <p>{t('highlight.change.link_stays')}</p>
             )}
-            {narrowing && reach.shared.household && (
+            {householdPost && (
               <p>{t('highlight.change.household_post')}</p>
             )}
             {narrowing && spaceNames.length > 0 && (
