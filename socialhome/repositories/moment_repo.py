@@ -257,7 +257,15 @@ class AbstractMomentRepo(Protocol):
         limit: int = 50,
         tag: str | None = None,
         max_hops: int = 3,
+        top_level: bool = False,
     ) -> list[Moment]: ...
+    async def latest_replies(
+        self,
+        parent_ids: list[str],
+        viewer_user_id: str,
+        *,
+        max_hops: int = 3,
+    ) -> dict[str, Moment]: ...
     async def list_public_for(
         self,
         author_user_id: str,
@@ -543,6 +551,7 @@ class SqliteMomentRepo:
         limit: int = 50,
         tag: str | None = None,
         max_hops: int = 3,
+        top_level: bool = False,
     ) -> list[Moment]:
         """One query covers blocks, retention, hop visibility, and
         the cursor.
@@ -559,6 +568,8 @@ class SqliteMomentRepo:
           fetches from newest.
         * ``tag`` (lowercase) restricts the result to moments tagged
           with that hashtag — used by the Browse / archive page.
+        * ``top_level`` leaves replies out (the Moments list shows each
+          thread once, under its root — replies never eat the page, B13).
         """
         limit = max(1, min(int(limit), 100))
         normalised_tag = normalize_hashtag(tag) if tag else None
@@ -570,6 +581,7 @@ class SqliteMomentRepo:
             f"""
             SELECT m.* FROM moments AS m
              WHERE {_VISIBLE_SQL}
+               AND (? = 0 OR m.parent_moment_id IS NULL)
                AND (? IS NULL OR m.created_at < ?)
                AND (
                  ? IS NULL OR EXISTS (
@@ -583,6 +595,7 @@ class SqliteMomentRepo:
             (
                 *(viewer_user_id,) * _VISIBLE_VIEWER_BINDS,
                 capped_hops,
+                1 if top_level else 0,
                 before,
                 before,
                 normalised_tag,
@@ -722,6 +735,41 @@ class SqliteMomentRepo:
                 (parent_moment_id, *_thread_params(viewer_user_id, max_hops)),
             )
         return [m for m in (_row_to_moment(d) for d in rows_to_dicts(rows)) if m]
+
+    async def latest_replies(
+        self,
+        parent_ids: list[str],
+        viewer_user_id: str,
+        *,
+        max_hops: int = 3,
+    ) -> dict[str, Moment]:
+        """``{root id: its newest reply}`` that *viewer_user_id* may read
+        (:data:`_THREAD_READABLE_SQL`, the rule :meth:`list_replies` and the
+        reply count use) — the reply a list card shows nested under its
+        root. Roots without a readable reply are absent. One query."""
+        if not parent_ids:
+            return {}
+        placeholders = ",".join("?" for _ in parent_ids)
+        rows = await self._db.fetchall(
+            f"""
+            SELECT * FROM (
+                SELECT m.*, ROW_NUMBER() OVER (
+                    PARTITION BY m.parent_moment_id
+                    ORDER BY m.created_at DESC, m.id DESC
+                ) AS rn
+                  FROM moments AS m
+                 WHERE m.parent_moment_id IN ({placeholders})
+                   AND {_THREAD_READABLE_SQL}
+            ) WHERE rn = 1
+            """,
+            (*parent_ids, *_thread_params(viewer_user_id, max_hops)),
+        )
+        out: dict[str, Moment] = {}
+        for d in rows_to_dicts(rows):
+            m = _row_to_moment(d)
+            if m is not None and m.parent_moment_id is not None:
+                out[m.parent_moment_id] = m
+        return out
 
     async def count_recent_for_author(
         self,

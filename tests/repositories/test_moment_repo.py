@@ -1438,3 +1438,58 @@ async def test_a_far_moment_is_not_stored_for_a_protected_only_household(db, rep
     assert not await repo.has_visible_recipient(author_user_id="u-a", hop_count=3)
     await _user(db, "u-me")
     assert await repo.has_visible_recipient(author_user_id="u-a", hop_count=2)
+
+
+# ── Threads on the list (B13) ────────────────────────────────────────────
+
+
+async def test_list_visible_top_level_drops_replies(db, repo):
+    """``top_level`` keeps replies out of the list, so they never eat the
+    page limit (B13)."""
+    await repo.save(_moment(id="m-root", created_offset_min=-10))
+    await repo.save(_moment(id="m-reply", parent_moment_id="m-root"))
+    everything = await repo.list_visible_to("u-me")
+    assert {m.id for m in everything} == {"m-root", "m-reply"}
+    top = await repo.list_visible_to("u-me", top_level=True)
+    assert [m.id for m in top] == ["m-root"]
+
+
+async def test_list_visible_top_level_pages_with_before(db, repo):
+    for i in range(3):
+        await repo.save(_moment(id=f"m-{i}", created_offset_min=-i))
+        await repo.save(
+            _moment(id=f"r-{i}", parent_moment_id=f"m-{i}", created_offset_min=-i)
+        )
+    first = await repo.list_visible_to("u-me", top_level=True, limit=2)
+    assert [m.id for m in first] == ["m-0", "m-1"]
+    rest = await repo.list_visible_to(
+        "u-me", top_level=True, limit=2, before=first[-1].created_at
+    )
+    assert [m.id for m in rest] == ["m-2"]
+
+
+async def test_latest_replies_newest_readable_per_root(db, repo):
+    await repo.save(_moment(id="m-a", created_offset_min=-30))
+    await repo.save(_moment(id="m-b", created_offset_min=-30))
+    await repo.save(_moment(id="a-old", parent_moment_id="m-a", created_offset_min=-20))
+    await repo.save(_moment(id="a-new", parent_moment_id="m-a", created_offset_min=-5))
+    # The newest reply on m-b is from someone the viewer blocked: the one
+    # before it shows instead.
+    await repo.save(
+        _moment(id="b-ok", author="u-ok", parent_moment_id="m-b", created_offset_min=-9)
+    )
+    await repo.save(
+        _moment(
+            id="b-hidden", author="u-bad", parent_moment_id="m-b", created_offset_min=-1
+        )
+    )
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?, ?)",
+        ("u-me", "u-bad"),
+    )
+    latest = await repo.latest_replies(["m-a", "m-b", "m-none"], "u-me")
+    assert {k: v.id for k, v in latest.items()} == {"m-a": "a-new", "m-b": "b-ok"}
+
+
+async def test_latest_replies_empty_ids(db, repo):
+    assert await repo.latest_replies([], "u-me") == {}

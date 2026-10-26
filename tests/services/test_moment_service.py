@@ -301,6 +301,22 @@ async def test_replies_skip_rate_limit(stack):
     )
 
 
+async def test_top_level_inbox_and_latest_reply(stack):
+    a = await stack.provision("alice")
+    root = await stack.moment_svc.create_moment(
+        author_user_id=a.user_id, content="root"
+    )
+    reply = await stack.moment_svc.create_moment(
+        author_user_id=a.user_id, content="reply", parent_moment_id=root.id
+    )
+    every = await stack.moment_svc.list_inbox(viewer_user_id=a.user_id)
+    assert {m.id for m in every} == {root.id, reply.id}
+    top = await stack.moment_svc.list_inbox(viewer_user_id=a.user_id, top_level=True)
+    assert [m.id for m in top] == [root.id]
+    latest = await stack.moment_svc.latest_replies([root.id], viewer_user_id=a.user_id)
+    assert latest[root.id].id == reply.id
+
+
 async def test_reply_to_reply_attaches_to_root(stack):
     """Threads stay flat — replies-to-replies use the original parent."""
     a = await stack.provision("alice")

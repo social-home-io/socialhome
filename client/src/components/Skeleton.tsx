@@ -342,52 +342,32 @@ export function NotificationListSkeleton({ count = 5 }: { count?: number } = {})
 }
 
 
-/** Stand-in for ``MomentumPage``: composer entry + 3 rows. Each row
- *  has the avatar + author/time meta + 1-2 content bars + the
- *  reply/reaction chip strip so the layout doesn't shift when the real
- *  inbox lands. */
+/** Stand-in for the Moments list (below the composer entry): card
+ *  shapes — avatar + name/time, two text bars, the reaction/Reply foot —
+ *  so the layout doesn't shift when the real list lands. */
 export function MomentumInboxSkeleton({ count = 3 }: { count?: number } = {}) {
   return (
-    <div class="sh-momentum sh-momentum--skeleton" aria-busy="true">
-      <header class="sh-momentum-header">
-        <Skeleton shape="line" width={120} height={22} />
-      </header>
-      <Skeleton
-        shape="rect"
-        width="100%"
-        height={48}
-        class="sh-skeleton-momentum-compose"
-      />
-      <ul class="sh-momentum-list">
-        {Array.from({ length: count }).map((_, i) => (
-          <li key={i} class="sh-momentum-row sh-momentum-row--skeleton">
-            <Skeleton shape="circle" width={36} height={36} />
-            <div class="sh-momentum-row-body">
-              <div class="sh-momentum-row-head">
-                <Skeleton shape="line" width="30%" height={12} />
-                <Skeleton
-                  shape="line"
-                  width={40}
-                  height={10}
-                  class="sh-skeleton-spaced"
-                />
-              </div>
-              <Skeleton shape="line" width="85%" height={12} />
-              <Skeleton
-                shape="line"
-                width="65%"
-                height={12}
-                class="sh-skeleton-spaced"
-              />
-              <div class="sh-momentum-row-chips">
-                <Skeleton shape="rect" width={48} height={20} />
-                <Skeleton shape="rect" width={48} height={20} />
+    <ul class="sh-momentum-cards sh-momentum--skeleton" aria-busy="true">
+      {Array.from({ length: count }).map((_, i) => (
+        <li key={i}>
+          <div class="sh-moment-card">
+            <div class="sh-moment-card__head">
+              <Skeleton shape="circle" width={40} height={40} />
+              <div class="sh-moment-card__who">
+                <Skeleton shape="line" width="40%" height={14} />
+                <Skeleton shape="line" width={48} height={10} class="sh-skeleton-spaced" />
               </div>
             </div>
-          </li>
-        ))}
-      </ul>
-    </div>
+            <Skeleton shape="line" width="85%" height={12} />
+            <Skeleton shape="line" width="60%" height={12} class="sh-skeleton-spaced" />
+            <div class="sh-moment-card__foot">
+              <Skeleton shape="rect" width={56} height={36} />
+              <Skeleton shape="rect" width={72} height={36} />
+            </div>
+          </div>
+        </li>
+      ))}
+    </ul>
   )
 }
 

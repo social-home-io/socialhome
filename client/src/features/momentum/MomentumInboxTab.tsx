@@ -1,363 +1,202 @@
 /**
- * MomentumInboxTab — inbox for the Momentum pillar (§Momentum).
+ * MomentumInboxTab — the Moments list (§Momentum, UX r3 PR 8).
  *
- * Twitter-style row layout: tight rows with an inline name + relative
- * time header, content, and a chip row of reply / reaction counts.
- * One-tap reaction (default ❤️) lands without opening the detail page.
+ * One list of top-level moments (``GET /api/moments?top_level=1``): each
+ * thread once, under its root, with its newest reply nested — replies
+ * never eat the page (B13). ``Load older`` pages with the ``before``
+ * cursor (B14). A hashtag filter (``/momentum?tag=…``, the host's chip)
+ * goes to the server with the list.
  *
- * The top of the tab is a sticky inline composer entry that routes
- * to the standalone composer for full text + media. The tab also
- * subscribes to the ``moment.*`` WS frames and refetches the inbox on
- * any update. The host :class:`MomentumPage` switches between this
- * and :class:`MomentumArchiveTab`.
+ * On top, the composer entry with the honest reach sub-line — where a
+ * moment goes, narrower for a protected account (its moments reach its
+ * household and paired households only). States: skeleton, error card
+ * with Try again, stale notice after a failed refresh, empty. At the end,
+ * what "everything" means: the last 24 hours, and moments from people
+ * you follow kept as long as their authors chose (1–30 days, per author).
+ *
+ * ``moment.*`` WS frames refresh the pages already loaded.
  */
 import { useEffect } from 'preact/hooks'
-import { signal, useSignal } from '@preact/signals'
-import { useLocation } from 'preact-iso'
+import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { Avatar } from '@/components/Avatar'
-import { openLightbox } from '@/components/ImageLightbox'
+import { Button } from '@/components/Button'
 import { openMomentumComposer } from '@/components/MomentumComposerDialog'
-import { VideoMedia } from '@/components/VideoMedia'
 import { MomentumInboxSkeleton } from '@/components/Skeleton'
-import { showToast } from '@/components/Toast'
 import { LoadErrorState, StaleNotice } from '@/components/LoadErrorState'
 import { INITIAL_LOAD, clockTime, loadFailed, loadSucceeded, type LoadStatus } from '@/utils/loadStatus'
-import { openPerson } from '@/components/PersonSheet'
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
-import {
-  householdDisplayName,
-  householdPictureUrl,
-  namedPersonLabel,
-  namedPersonPicture,
-  loadHouseholdUsers,
-} from '@/store/householdUsers'
+import { householdDisplayName, householdPictureUrl, loadHouseholdUsers } from '@/store/householdUsers'
 import { currentUser } from '@/store/auth'
 import { ws } from '@/ws'
 import type { Moment } from '@/types'
-import { renderHashtagged } from './hashtags'
-import { MomentSaveToggle } from './MomentSaveToggle'
-import { t, isOne, formatLocale } from '@/i18n/i18n'
+import { t } from '@/i18n/i18n'
+import { MomentCard } from './MomentCard'
+
+/** Moments per page. */
+export const INBOX_PAGE = 30
+/** The server's page cap — a refresh re-reads at most this many. */
+const MAX_PAGE = 100
 
 const moments = signal<Moment[]>([])
 const loading = signal<boolean>(true)
+const hasMore = signal<boolean>(false)
+const loadingOlder = signal<boolean>(false)
 /** A failed load is never "No moments yet" (``utils/loadStatus``). */
 const status = signal<LoadStatus>(INITIAL_LOAD)
+/** The filter the loaded list belongs to. */
+let listTag: string | null = null
 
-/** Load (or refresh, on a ``moment.*`` frame) the inbox. */
-function fetchInbox(initial: boolean): Promise<void> {
-  return api.get('/api/moments')
-    .then((rows: Moment[]) => {
-      moments.value = rows ?? []
+function params(tag: string | null, limit: number, before?: string): Record<string, string> {
+  const p: Record<string, string> = { top_level: '1', limit: String(limit) }
+  if (tag) p.tag = tag
+  if (before) p.before = before
+  return p
+}
+
+/** First page, or — on a refresh — every page loaded so far (up to the
+ *  server's cap), so a new moment doesn't drop what "Load older" added. */
+function fetchFirst(tag: string | null, refresh: boolean): Promise<void> {
+  const limit = refresh ? Math.min(MAX_PAGE, Math.max(INBOX_PAGE, moments.value.length)) : INBOX_PAGE
+  return api.get<Moment[]>('/api/moments', params(tag, limit))
+    .then(rows => {
+      if (tag !== listTag) return
+      const list = rows ?? []
+      moments.value = list
+      hasMore.value = list.length >= limit
       status.value = loadSucceeded(status.value)
     })
-    .catch(() => { status.value = loadFailed(status.value) })
-    .finally(() => { if (initial) loading.value = false })
+    .catch(() => { if (tag === listTag) status.value = loadFailed(status.value) })
+    .finally(() => { if (tag === listTag) loading.value = false })
 }
 
-const CONTENT_TRUNCATE_AT = 280
-const DEFAULT_REACTION = '❤️'
-
-
-function relativeTime(iso: string): string {
-  const dt = new Date(iso)
-  if (Number.isNaN(dt.getTime())) return iso
-  const ms = Date.now() - dt.getTime()
-  const m = Math.floor(ms / 60_000)
-  if (m < 1)   return t('moment.time.now')
-  if (m < 60)  return narrowUnit(m, 'minute')
-  const h = Math.floor(m / 60)
-  if (h < 24)  return narrowUnit(h, 'hour')
-  const d = Math.floor(h / 24)
-  if (d < 7)   return narrowUnit(d, 'day')
-  return dt.toLocaleDateString(formatLocale(), { month: 'short', day: 'numeric' })
-}
-
-/** ``5m`` / ``5 Min.`` / ``5j`` — the UI language's narrow unit form. */
-function narrowUnit(n: number, unit: 'minute' | 'hour' | 'day'): string {
+async function loadOlder(tag: string | null): Promise<void> {
+  const last = moments.value[moments.value.length - 1]
+  if (!last || loadingOlder.value) return
+  loadingOlder.value = true
   try {
-    return new Intl.NumberFormat(formatLocale(), {
-      style: 'unit', unit, unitDisplay: 'narrow',
-    }).format(n)
+    const rows = await api.get<Moment[]>('/api/moments', params(tag, INBOX_PAGE, last.created_at)) ?? []
+    if (tag !== listTag) return
+    const seen = new Set(moments.value.map(m => m.id))
+    moments.value = [...moments.value, ...rows.filter(m => !seen.has(m.id))]
+    hasMore.value = rows.length >= INBOX_PAGE
   } catch {
-    // An engine without unit formatting: the translated short form.
-    return t(NARROW_FALLBACK[unit], { n: String(n) })
+    status.value = loadFailed(status.value)
+  } finally {
+    loadingOlder.value = false
   }
 }
 
-const NARROW_FALLBACK = {
-  minute: 'time.minutes_ago_short',
-  hour: 'time.hours_ago_short',
-  day: 'time.days_ago_short',
-} as const
+function patch(id: string, p: Partial<Moment>) {
+  moments.value = moments.value.map(m => m.id === id ? { ...m, ...p } : m)
+}
 
+function drop(id: string) {
+  moments.value = moments.value.filter(m => m.id !== id)
+}
 
-export default function MomentumInboxTab() {
-  const loc = useLocation()
+export default function MomentumInboxTab({ tag }: { tag: string | null }) {
   const me = currentUser.value?.user_id
 
   useEffect(() => {
+    listTag = tag
     loading.value = true
     status.value = INITIAL_LOAD
+    moments.value = []
+    hasMore.value = false
     void loadBlocks()
-    void loadHouseholdUsers()  // resolve display names + avatars from raw user_ids
-    void fetchInbox(true)
+    void loadHouseholdUsers()  // names + pictures for this household's people
+    void fetchFirst(tag, false)
+    const refresh = () => { void fetchFirst(tag, true) }
     const dispose = [
-      ws.on('moment.created',          () => { void fetchInbox(false) }),
-      ws.on('moment.deleted',          () => { void fetchInbox(false) }),
-      ws.on('moment.reaction_changed', () => { void fetchInbox(false) }),
+      ws.on('moment.created', refresh),
+      ws.on('moment.deleted', refresh),
+      ws.on('moment.reaction_changed', refresh),
     ]
     return () => { dispose.forEach(d => d()) }
-  }, [])
-
-  if (loading.value) return <MomentumInboxSkeleton />
+  }, [tag])
 
   const blocked = blockedUserIds.value
-  const visible = moments.value.filter(m => !blocked.has(m.author_user_id))
-  const topLevel = visible.filter(m => !m.parent_moment_id)
-
-  const myDisplayName = me ? householdDisplayName(me) : '?'
-  const myPicture = householdPictureUrl(me)
-
-  const quickReact = async (m: Moment, ev: Event) => {
-    ev.preventDefault()
-    ev.stopPropagation()
-    // Optimistic bump + server PUT. The next refetch (post WS frame)
-    // confirms the count.
-    const idx = moments.value.findIndex(x => x.id === m.id)
-    if (idx >= 0) {
-      moments.value = moments.value.map((x, i) =>
-        i === idx ? { ...x, reaction_count: x.reaction_count + 1 } : x,
-      )
-    }
-    try {
-      await api.put(`/api/moments/${m.id}/reaction`, { emoji: DEFAULT_REACTION })
-    } catch (err: unknown) {
-      // Roll back on failure.
-      if (idx >= 0) {
-        moments.value = moments.value.map((x, i) =>
-          i === idx ? { ...x, reaction_count: Math.max(0, x.reaction_count - 1) } : x,
-        )
-      }
-      showToast(t('highlight.viewer.reaction_failed', { error: String((err as Error)?.message ?? err) }), 'error')
-    }
-  }
+  const visible = moments.value.filter(m => !blocked.has(m.author_user_id) && !m.parent_moment_id)
+  const retry = () => void fetchFirst(tag, true)
 
   return (
     <div class="sh-momentum">
-      {/* Inline composer entry — Twitter's "What's happening?" pattern.
-          Tap routes to the full composer page; the inline box is
-          intentionally read-only so we don't duplicate the rich-media
-          flow inline. */}
       <button
         type="button"
-        class="sh-momentum-compose-entry"
+        class="sh-momentum-entry"
+        aria-label={t('moment.composer.placeholder')}
+        aria-describedby="sh-momentum-entry-reach"
         onClick={() => openMomentumComposer()}
       >
-        <Avatar name={myDisplayName} src={myPicture} size={32} />
-        <span class="sh-momentum-compose-prompt">{t('moment.inbox.prompt')}</span>
+        <Avatar name={me ? householdDisplayName(me) : '?'} src={householdPictureUrl(me)} size={40} />
+        <span class="sh-momentum-entry__text">
+          <span class="sh-momentum-entry__prompt">{t('moment.composer.placeholder')}</span>
+          <span id="sh-momentum-entry-reach" class="sh-momentum-entry__reach">
+            {t(currentUser.value?.protected ? 'moment.entry.reach_protected' : 'moment.entry.reach')}
+          </span>
+        </span>
+        <svg class="sh-momentum-entry__icon" width="22" height="22" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+          aria-hidden="true" focusable="false">
+          <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" />
+          <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" />
+        </svg>
       </button>
 
-      {status.value.failed && (
-        <LoadErrorState
-          message={t('moment.inbox.load_failed_title')}
-          detail={t('load.household_quiet')}
-          retryLabel={t('load.try_again')}
-          onRetry={() => void fetchInbox(false)}
-        />
-      )}
-      {status.value.staleSince !== null && (
-        <StaleNotice
-          message={t('moment.inbox.stale', { time: clockTime(status.value.staleSince) })}
-          onRetry={() => void fetchInbox(false)}
-        />
-      )}
+      {loading.value ? <MomentumInboxSkeleton /> : (
+        <>
+          {status.value.failed && (
+            <LoadErrorState
+              message={t('moment.inbox.load_failed_title')}
+              detail={t('load.household_quiet')}
+              retryLabel={t('load.try_again')}
+              onRetry={retry}
+            />
+          )}
+          {status.value.staleSince !== null && (
+            <StaleNotice
+              message={t('moment.inbox.stale', { time: clockTime(status.value.staleSince) })}
+              onRetry={retry}
+            />
+          )}
 
-      {!status.value.failed && topLevel.length === 0 && (
-        <div class="sh-empty-state">
-          <div aria-hidden="true">🌅</div>
-          <h3>{t('moment.inbox.empty_title')}</h3>
-          <p>
-            {t('moment.inbox.empty_body')}
-          </p>
-        </div>
-      )}
+          {!status.value.failed && visible.length === 0 && (
+            tag ? (
+              <div class="sh-empty-state">
+                <p>{t('moment.archive.empty_tag', { tag })}</p>
+              </div>
+            ) : (
+              <div class="sh-empty-state">
+                <div aria-hidden="true">🌅</div>
+                <h3>{t('moment.inbox.empty_title')}</h3>
+                <p>{t('moment.inbox.empty_body')}</p>
+              </div>
+            )
+          )}
 
-      {topLevel.length > 0 && <ul class="sh-momentum-list" aria-label={t('moment.inbox.list_aria')}>
-        {topLevel.map(m => (
-          <MomentRow
-            key={m.id}
-            m={m}
-            mine={m.author_user_id === me}
-            authorName={namedPersonLabel(m.author_user_id, m.author)}
-            authorPicture={namedPersonPicture(m.author_user_id, m.author)}
-            onOpen={() => loc.route(`/momentum/${m.id}`)}
-            onReact={(ev) => void quickReact(m, ev)}
-            onTagClick={(t) => loc.route(`/momentum?tag=${encodeURIComponent(t)}`)}
-          />
-        ))}
-      </ul>}
+          {visible.length > 0 && (
+            <ul class="sh-momentum-cards" aria-label={t('moment.inbox.list_aria')}>
+              {visible.map(m => (
+                <li key={m.id}>
+                  <MomentCard m={m} me={me} onPatch={patch} onDeleted={drop} />
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {hasMore.value && (
+            <div class="sh-momentum-more">
+              <Button variant="secondary" loading={loadingOlder.value} onClick={() => void loadOlder(tag)}>
+                {t('moment.yours.load_older')}
+              </Button>
+            </div>
+          )}
+          {!hasMore.value && !tag && visible.length > 0 && (
+            <p class="sh-muted sh-momentum-end">{t('moment.inbox.end')}</p>
+          )}
+        </>
+      )}
     </div>
-  )
-}
-
-
-function MomentRow({
-  m,
-  mine,
-  authorName,
-  authorPicture,
-  onOpen,
-  onReact,
-  onTagClick,
-}: {
-  m: Moment
-  mine: boolean
-  authorName: string
-  authorPicture: string | null
-  onOpen: () => void
-  onReact: (ev: Event) => void
-  onTagClick: (tag: string) => void
-}) {
-  const expanded = useSignal(false)
-  const longContent = m.content.length > CONTENT_TRUNCATE_AT
-  const visibleText = longContent && !expanded.value
-    ? m.content.slice(0, CONTENT_TRUNCATE_AT) + '…'
-    : m.content
-
-  // v_67: a reaction that can't reach the author's household stays here —
-  // React is still offered, and says so.
-  // A visible line under the chips (not a hover title) so touch users see
-  // it too; the React chip is described by it.
-  const householdOnly = !mine && m.reactions_reach === 'household'
-  const reachNoteId = `sh-moment-reach-${m.id}`
-
-  return (
-    <li class="sh-momentum-row" onClick={onOpen}>
-      <Avatar name={authorName} src={authorPicture} size={36} />
-      <div class="sh-momentum-row-body">
-        <div class="sh-momentum-row-head">
-          <strong class="sh-momentum-row-author">
-            {mine ? t('highlight.inbox.you') : authorName}
-          </strong>
-          <span class="sh-muted">· {relativeTime(m.created_at)}</span>
-          {m.received_via === 'gfs' && (
-            <span
-              class="sh-momentum-row-via-gfs"
-              title={t('moment.inbox.via_gfs')}
-            >
-              · {t('moment.inbox.via_gfs_chip')}
-            </span>
-          )}
-          {!mine && (
-            <button
-              type="button"
-              class="sh-momentum-row-overflow"
-              aria-label={t('highlight.more_actions', { name: authorName })}
-              onClick={(ev) => {
-                ev.preventDefault()
-                ev.stopPropagation()
-                openPerson(m.author_user_id, {
-                  person: {
-                    display_name: authorName,
-                    picture_url: authorPicture,
-                    bio: m.author?.bio ?? null,
-                  },
-                })
-              }}
-            >
-              ⋯
-            </button>
-          )}
-        </div>
-
-        {m.content && (
-          <p class="sh-momentum-row-content">
-            {renderHashtagged(visibleText, (t, ev) => {
-              ev.preventDefault()
-              ev.stopPropagation()
-              onTagClick(t)
-            })}
-            {longContent && !expanded.value && (
-              <button
-                type="button"
-                class="sh-momentum-row-more"
-                onClick={(ev) => {
-                  ev.preventDefault()
-                  ev.stopPropagation()
-                  expanded.value = true
-                }}
-              >
-                {t('moment.inbox.show_more')}
-              </button>
-            )}
-          </p>
-        )}
-
-        {m.media_type === 'image' && m.media_url && (
-          <button
-            type="button"
-            class="sh-momentum-row-media-button"
-            aria-label={t('moment.open_photo')}
-            onClick={(ev) => {
-              ev.preventDefault()
-              ev.stopPropagation()
-              openLightbox({
-                items: [{
-                  url:       m.media_url!,
-                  item_type: 'photo',
-                  caption:   m.content || null,
-                }],
-              })
-            }}
-          >
-            <img
-              src={m.media_url}
-              alt={m.content ? '' : t('moment.photo_from', { name: authorName })}
-              loading="lazy"
-              class="sh-momentum-row-media"
-            />
-          </button>
-        )}
-        {m.media_type === 'video' && m.media_url && (
-          <span onClick={(ev) => ev.stopPropagation()}>
-            <VideoMedia
-              src={m.media_url}
-              poster={m.media_thumbnail_url}
-              mediaStatus={m.media_status}
-              class="sh-momentum-row-media"
-            />
-          </span>
-        )}
-
-        {/* Engagement chip row — Twitter-style icons + counts. */}
-        <div class="sh-momentum-row-chips">
-          <button
-            type="button"
-            class="sh-momentum-chip"
-            aria-label={t(isOne(m.reply_count) ? 'moment.detail.replies_one' : 'moment.detail.replies', { n: String(m.reply_count) })}
-            onClick={onOpen}
-          >
-            💬 {m.reply_count > 0 ? m.reply_count : ''}
-          </button>
-          <button
-            type="button"
-            class="sh-momentum-chip"
-            aria-label={t('moment.detail.react_aria', { emoji: DEFAULT_REACTION })}
-            aria-describedby={householdOnly ? reachNoteId : undefined}
-            disabled={mine}
-            onClick={mine ? undefined : onReact}
-          >
-            {DEFAULT_REACTION} {m.reaction_count > 0 ? m.reaction_count : ''}
-          </button>
-          {!mine && <MomentSaveToggle moment={m} variant="chip" />}
-        </div>
-        {householdOnly && (
-          <p id={reachNoteId} class="sh-muted sh-momentum-row-reach">
-            {t('moment.detail.reactions_household_only')}
-          </p>
-        )}
-      </div>
-    </li>
   )
 }

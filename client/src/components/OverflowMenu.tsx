@@ -67,6 +67,8 @@ interface Props {
   header?: ComponentChildren
   /** Width of a ``floating`` menu in px (default 200). */
   menuWidth?: number
+  /** ``aria-describedby`` on the trigger (a note next to it). */
+  triggerDescribedBy?: string
 }
 
 const MENU_W = 200
@@ -74,7 +76,7 @@ const MENU_W = 200
 export function OverflowMenu({
   label, items, triggerClass = '', wrapClass = '', children, floating = false,
   menuClass = '', bareTrigger = false, title, open: openProp, onOpenChange, ref,
-  header, menuWidth = MENU_W,
+  header, menuWidth = MENU_W, triggerDescribedBy,
 }: Props) {
   const [openState, setOpenState] = useState(false)
   const open = openProp ?? openState
@@ -220,6 +222,7 @@ export function OverflowMenu({
         type="button"
         class={bareTrigger ? triggerClass : `sh-post-overflow ${triggerClass}`.trim()}
         aria-label={label}
+        aria-describedby={triggerDescribedBy}
         title={title ?? label}
         aria-haspopup="menu"
         aria-expanded={open}

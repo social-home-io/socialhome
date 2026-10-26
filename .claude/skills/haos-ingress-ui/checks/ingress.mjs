@@ -462,6 +462,11 @@ await check('router-keeps-prefix', async () => {
   await history(() => page.goBack(), '/spaces')
   await history(() => page.goBack(), '/')
   await history(() => page.goForward(), '/spaces')
+  // Momentum's tabs are links too (/momentum, /momentum/yours): following
+  // one keeps the prefix, and Back returns to the other tab.
+  await go('/momentum')
+  await go('/momentum/yours')
+  await history(() => page.goBack(), '/momentum')
   return { problems: [], seen }
 })
 

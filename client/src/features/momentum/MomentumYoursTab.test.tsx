@@ -5,7 +5,7 @@ vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }))
 const route = vi.hoisted(() => vi.fn())
-const where = vi.hoisted(() => ({ url: '/momentum?tab=yours' }))
+const where = vi.hoisted(() => ({ url: '/momentum/yours' }))
 vi.mock('preact-iso', () => ({
   useLocation: () => ({ route, url: where.url, path: '/momentum' }),
 }))
@@ -69,9 +69,9 @@ describe('archiveStatus', () => {
 
 describe('yoursShowFromUrl', () => {
   it('shows your posts unless the URL asks for the saved ones', () => {
-    expect(yoursShowFromUrl('/momentum?tab=yours')).toBe('posted')
-    expect(yoursShowFromUrl('/momentum?tab=yours&show=saved')).toBe('saved')
-    expect(yoursShowFromUrl('/momentum?tab=yours&show=nope')).toBe('posted')
+    expect(yoursShowFromUrl('/momentum/yours')).toBe('posted')
+    expect(yoursShowFromUrl('/momentum/yours?show=saved')).toBe('saved')
+    expect(yoursShowFromUrl('/momentum/yours?show=nope')).toBe('posted')
   })
 })
 
@@ -80,7 +80,7 @@ describe('MomentumYoursTab', () => {
     wsHandlers.clear()
     vi.mocked(api.get).mockReset()
     route.mockReset()
-    where.url = '/momentum?tab=yours'
+    where.url = '/momentum/yours'
   })
 
   it('switches between your posts and the moments you saved', async () => {
@@ -90,11 +90,11 @@ describe('MomentumYoursTab', () => {
     const posted = getByRole('button', { name: 'Posted' })
     expect(posted.getAttribute('aria-pressed')).toBe('true')
     fireEvent.click(getByRole('button', { name: 'Saved' }))
-    expect(route).toHaveBeenCalledWith('/momentum?tab=yours&show=saved', true)
+    expect(route).toHaveBeenCalledWith('/momentum/yours?show=saved', true)
   })
 
   it('the Saved view lists scope=saved and the usage counts saved pictures too', async () => {
-    where.url = '/momentum?tab=yours&show=saved'
+    where.url = '/momentum/yours?show=saved'
     serve((params) => (params?.scope === 'saved'
       ? [mine('m-saved', 3 * DAY, { author_user_id: 'ru-amaka', saved_by_me: true, saved_at: new Date().toISOString() })]
       : [mine('m-own', HOUR)]))

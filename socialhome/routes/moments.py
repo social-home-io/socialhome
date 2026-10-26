@@ -9,7 +9,9 @@ JSON.
 Routes:
 
 * ``POST   /api/moments``                     — create a moment (text + media + parent_moment_id?)
-* ``GET    /api/moments``                     — list visible moments (24h default; followers until expires_at)
+* ``GET    /api/moments``                     — list visible moments (24h default; followers until expires_at);
+  ``?top_level=1`` — roots only, each with its newest reply (``latest_reply``);
+  ``?tag=`` — one hashtag; ``?before=`` / ``?limit=`` — paging
 * ``GET    /api/moments/archive``             — full retention-window list (same data, full window);
   ``?scope=own`` — the caller's own archive (every moment they wrote here);
   ``?scope=saved`` — the moments the caller saved (decision 6b)
@@ -113,6 +115,9 @@ def _moment_dict(
         # v_67: ``author`` when a reaction reaches the author's household,
         # ``household`` when it is seen in this household only.
         "reactions_reach": reach,
+        # How far away it was written: 1 = this household or a paired one,
+        # 2–3 = relayed (the card's provenance line, "2 hops away").
+        "hop_count": m.hop_count,
     }
     if counts is not None:
         base["reaction_count"] = counts.get("reaction_count", 0)
@@ -178,11 +183,15 @@ async def _moment_list(
     viewer_user_id: str,
     *,
     saved_at: dict[str, str] | None = None,
+    latest: dict[str, Moment] | None = None,
 ) -> list[dict]:
     """The inbox / archive body: counts, video status, named authors and
     the caller's save state. ``saved_at`` (the Saved list) adds each
-    item's ``saved_at`` — the paging cursor."""
+    item's ``saved_at`` — the paging cursor. ``latest`` (the top-level
+    list) adds each root's ``latest_reply`` — the newest reply the caller
+    may read, or ``null``."""
     svc = view.svc(moment_service_key)
+    replies = list(latest.values()) if latest is not None else []
     counts = await svc.count_engagement(
         [m.id for m in moments], viewer_user_id=viewer_user_id
     )
@@ -191,9 +200,10 @@ async def _moment_list(
     totals = await svc.reaction_totals(
         moments, viewer_user_id=viewer_user_id, reach=reach
     )
-    statuses = await _video_statuses(view, moments)
+    statuses = await _video_statuses(view, [*moments, *replies])
     authors = await view.named_people(
-        (m.author_user_id for m in moments), gfs_via=_gfs_via(moments)
+        (m.author_user_id for m in (*moments, *replies)),
+        gfs_via=_gfs_via((*moments, *replies)),
     )
     items = []
     for m in moments:
@@ -208,6 +218,17 @@ async def _moment_list(
         )
         if saved_at is not None:
             item["saved_at"] = saved_at[m.id]
+        if latest is not None:
+            reply = latest.get(m.id)
+            item["latest_reply"] = (
+                _moment_dict(
+                    reply,
+                    media_status=_moment_status(statuses, reply),
+                    author=authors[reply.author_user_id],
+                )
+                if reply is not None
+                else None
+            )
         items.append(item)
     return view.sign_media(items)
 
@@ -256,12 +277,22 @@ class MomentCollectionView(BaseView):
             limit = int(self.request.query.get("limit", 50))
         except ValueError:
             limit = 50
+        top_level = self.request.query.get("top_level") in ("1", "true")
         moments = await svc.list_inbox(
             viewer_user_id=ctx.user_id,
             before=before,
             limit=limit,
+            tag=self.request.query.get("tag") or None,
+            top_level=top_level,
         )
-        return self._json(await _moment_list(self, moments, ctx.user_id))
+        latest = (
+            await svc.latest_replies(
+                [m.id for m in moments], viewer_user_id=ctx.user_id
+            )
+            if top_level
+            else None
+        )
+        return self._json(await _moment_list(self, moments, ctx.user_id, latest=latest))
 
     async def post(self) -> web.Response:
         ctx = self.user
