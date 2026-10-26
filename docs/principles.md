@@ -897,19 +897,63 @@ What each household on the way learns, and what it doesn't:
 4. **No new key, no stored state on relays.** The seal reuses the static
    key-wrap key, the tokens a key derived from the existing routing secret;
    relays keep only short-lived rate counters.
-5. **Never for a protected account, never through a GFS.** A `no_relay`
-   moment carries no key-wrap key and its origin refuses routed reactions;
-   a moment that came through a GFS has no route — its reactions stay in
-   the household.
+5. **Never for a protected account; never through a GFS on the mesh
+   route.** A `no_relay` moment carries no key-wrap key and its origin
+   refuses routed reactions; a moment that came through a GFS has no mesh
+   route — its reactions go back through that GFS instead, under the
+   separate sign-off below (v_68).
 6. **Never around a per-pair hide list.** A reaction is routed only toward
    an origin household this one is not paired with. When the origin is a
    confirmed peer — even one whose author is not on the roster yet — the
    direct path is used and a person hidden from that household reaches it
    by neither path ([`protocol/pairing.md`](./protocol/pairing.md)).
 
-Anything that lets a relay read the reaction, lets a token name more than
-one neighbour, or routes reactions through a GFS is a §2-principle change
-requiring a new sign-off.
+Anything that lets a relay read the reaction or lets a token name more than
+one neighbour is a §2-principle change requiring a new sign-off.
+
+### Sign-off: a GFS learns that a follower household reacted to an author (v_68)
+
+Owner decision 9, sign-off 1, 2026-10-25. So that a reaction to a public
+moment that came through a GFS reaches its author, the follower household
+posts it to that GFS, which pushes it to the author's household
+([`protocol/momentum_public.md`](./protocol/momentum_public.md#reactions-through-the-gfs-v_68)).
+What the GFS learns, and what it doesn't:
+
+1. **The GFS learns that follower household F sent author A's household a
+   reaction or a removal, and when and how often.** It already knows F
+   follows A (the follow graph) and authenticates F's post. It is **not
+   told** which person reacted, with which emoji, to which moment, or
+   whether it was an add or a removal: the reaction is signed by F's
+   household, padded to one size and sealed end to end to A's household
+   key-wrap key; the post carries exactly `{instance_id, sealed}` and the
+   GFS refuses anything else.
+
+   **Residual — timing.** The GFS can still *guess* from timing what it is
+   not told. It knows each public moment of A's it pushed to F, and when: a
+   post soon after one push, or while A has only one live moment, points at
+   that moment; two posts in quick succession hint at an add and its
+   removal (or a change of emoji). The 3 s coalescing per (moment, person)
+   blunts the last, not the first. No moment id, person or emoji ever
+   reaches it — only the inference its own push log allows.
+2. **Nothing new about A or F reaches anyone else.** The frame goes to A's
+   household only; `from_instance` is F, which the GFS authenticated and A
+   learns from the signed reaction anyway. The GFS tells F nothing back —
+   not whether A was online, reached on another node or queued.
+3. **Households met through the GFS still never talk directly.** F posts to
+   the GFS the moment came on and nowhere else; A answers nothing.
+4. **The author decides on the signed reaction alone** — the same checks as
+   a routed reaction, plus: the household the GFS authenticated is the
+   reactor's own, and the moment is public. The GFS can withhold or delay a
+   reaction, as it can any moment; it can't forge, alter or replay one
+   past those checks.
+5. **No new key.** The seal reuses the author household's existing static
+   key-wrap key, named inside its signed, encrypted moments; the follower
+   keeps it next to the identity key it already pins for that author.
+
+Anything that lets the GFS read who reacted, with what, or to which moment
+(rather than guess it from timing, item 1), or that delivers a reaction to
+anyone but the author's household, is a §2-principle change requiring a new
+sign-off.
 
 ## No third-party fetches from user content
 

@@ -1832,6 +1832,7 @@
   "capability.follower_moment_retention": "Kies hoe lang volgers je momenten houden",
   "capability.late_moment_deletes": "Verwijderingen bereiken elke kopie van een moment",
   "capability.routed_moment_reactions": "Reacties bereiken ook auteurs verder weg",
+  "capability.gfs_moment_reactions": "Reacties bereiken auteurs die je via een GFS volgt",
   "space.settings_page.moderation.queue_meta": "Berichten om te beoordelen, verzoeken en meldingen",
   "space.settings_page.moderation.days": "dagen",
   "space.settings_page.danger.summary": "Archiveren, overdragen of verwijderen",

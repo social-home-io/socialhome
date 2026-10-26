@@ -352,6 +352,7 @@ from .services.moment_public_media_outbound import MomentPublicMediaOutbound
 from .services.moment_public_outbound import MomentPublicOutbound
 from .services.moment_public_service import MomentPublicService
 from .services.moment_public_share_service import MomentPublicShareService
+from .services.moment_reaction_gfs import MomentReactionGfs
 from .services.moment_reaction_router import MomentReactionRouter
 from .services.moment_service import MomentService
 from .services.online_status_service import OnlineStatusService
@@ -3312,6 +3313,13 @@ def create_app(config: Config | None = None) -> web.Application:
         gfs_repo=repos.gfs_connection, media_dir=pathlib.Path(config.media_path)
     )
     moment_public_inbound.attach_media(moment_public_media_inbound)
+    # v_68 — a reaction to a public moment that came through a GFS goes back
+    # through that GFS, sealed to the author household's key-wrap key.
+    moment_reaction_gfs = MomentReactionGfs(
+        gfs_repo=repos.gfs_connection,
+        follow_repo=moment_public_follow_repo,
+        capabilities=gfs_connection_service,
+    )
     moment_public_service.attach_key_inbound(moment_public_key_inbound)
     moment_public_service.attach_key_outbound(moment_public_key_outbound)
     # A local author blocking someone marks their moment key for rotation.
@@ -3854,7 +3862,16 @@ def create_app(config: Config | None = None) -> web.Application:
         moment_public_outbound.attach_identity(
             own_instance_id=real_instance_id,
             signing_key=identity_seed,
+            # v_68: named in every sealed create body, for followers'
+            # reactions through a GFS.
+            keywrap_public_key=identity.keywrap_public_key,
         )
+        moment_reaction_gfs.attach_session(http_session)
+        moment_reaction_gfs.attach_identity(
+            own_instance_id=real_instance_id, signing_key=identity_seed
+        )
+        # Failed reaction posts to a GFS are retried for a day (v_68).
+        await moment_reaction_gfs.start()
         moment_public_key_outbound.attach_session(http_session)
         moment_public_key_outbound.attach_identity(
             own_instance_id=real_instance_id,
@@ -4204,6 +4221,10 @@ def create_app(config: Config | None = None) -> web.Application:
             keywrap_sig=identity.keywrap_sig,
             routing_secret=identity.routing_secret,
         )
+        # v_68: reactions to GFS moments go through their GFS; a follower's
+        # ``moment_reaction`` frame is opened and checked by the router.
+        fed.moment_reaction_router.attach_gfs(moment_reaction_gfs)
+        moment_public_inbound.attach_reactions(fed.moment_reaction_router)
         # Cross-household private-space invites (§D1b) need a live
         # ``FederationService``. Wire it now that ``_wire_federation_stack``
         # has returned the real one — see the matching deferral note
@@ -5295,6 +5316,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # Sends any reaction still waiting for its 3 s debounce (v_67).
         if (reaction_router := app.get(K.moment_reaction_router_key)) is not None:
             await reaction_router.stop()
+        await moment_reaction_gfs.stop()
         await moment_public_media_inbound.stop()
         # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()

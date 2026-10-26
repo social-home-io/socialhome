@@ -2656,6 +2656,9 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         max_per_recipient: int,
         max_bytes_per_recipient: int,
         max_total_bytes: int,
+        kind_prefix: str | None = None,
+        max_kind_per_recipient: int = 0,
+        max_kind_row_bytes: int = 0,
     ) -> bool: ...
 
     async def count_for(self, to_instance: str) -> int: ...
@@ -2816,6 +2819,9 @@ class SqliteGfsEnvelopeQueueRepo:
         max_per_recipient: int,
         max_bytes_per_recipient: int,
         max_total_bytes: int,
+        kind_prefix: str | None = None,
+        max_kind_per_recipient: int = 0,
+        max_kind_row_bytes: int = 0,
     ) -> bool:
         """Queue one member-published RELAY item, making room fairly.
 
@@ -2828,20 +2834,56 @@ class SqliteGfsEnvelopeQueueRepo:
         own seat therefore only ever evicts itself, and no group of
         recipients can starve another below a fair share. Envelope rows are
         never touched. Returns ``False`` only when the item alone exceeds a
-        cap."""
+        cap.
+
+        A *capped kind* (*kind_prefix* set — v_68 sealed reactions, whose
+        rows start with it and are at most *max_kind_row_bytes*) is held to
+        its own ``max_kind_per_recipient`` rows and makes room ONLY from its
+        own kind: its recipient's oldest row of that kind goes, never a
+        public moment or space item; when the recipient's caps can't be met
+        that way, or the server-wide cap is reached, the new item is dropped
+        (``False``) instead (#1179 F1). Anyone following a public author can
+        send reactions, so they must not be able to evict anything else."""
         size = len(frame_json)
+        kinded = kind_prefix is not None
         if (
             max_per_recipient <= 0
             or size > max_bytes_per_recipient
             or size > max_total_bytes
         ):
             return False
+        if kinded and (
+            max_kind_per_recipient <= 0
+            or size > max_kind_row_bytes
+            or not frame_json.startswith(str(kind_prefix))
+        ):
+            return False
 
         # Every sum and the largest-holder pick read ``size_bytes`` through
         # the covering index ``idx_gfs_envelope_queue_relay_size`` (0014) —
         # never the blobs — so this transaction stays short at a full cap.
+        # A capped kind's rows are told apart by their first bytes, read only
+        # from this recipient's rows no longer than ``max_kind_row_bytes``.
         def _run(conn) -> bool:
             live = "frame_type='relay' AND expires_at > ?"
+            own = f"to_instance=? AND {live}"
+            own_args: tuple = (to_instance, created_at)
+            if kinded:
+                own += " AND size_bytes <= ? AND substr(sealed_json, 1, ?) = ?"
+                own_args += (max_kind_row_bytes, len(str(kind_prefix)), kind_prefix)
+            evict_own = (
+                "DELETE FROM gfs_envelope_queue WHERE id = (SELECT id FROM"
+                f" gfs_envelope_queue WHERE {own}"
+                " ORDER BY created_at ASC, id ASC LIMIT 1)"
+            )
+            while kinded:
+                count = conn.execute(
+                    f"SELECT COUNT(*) FROM gfs_envelope_queue WHERE {own}",
+                    own_args,
+                ).fetchone()[0]
+                if int(count) < max_kind_per_recipient:
+                    break
+                conn.execute(evict_own, own_args)
             while True:
                 row = conn.execute(
                     "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)"
@@ -2853,12 +2895,7 @@ class SqliteGfsEnvelopeQueueRepo:
                     and int(row[1]) + size <= max_bytes_per_recipient
                 ):
                     break
-                cur = conn.execute(
-                    "DELETE FROM gfs_envelope_queue WHERE id = (SELECT id FROM"
-                    f" gfs_envelope_queue WHERE to_instance=? AND {live}"
-                    " ORDER BY created_at ASC, id ASC LIMIT 1)",
-                    (to_instance, created_at),
-                )
+                cur = conn.execute(evict_own, own_args)
                 if not cur.rowcount:
                     return False
             while True:
@@ -2869,6 +2906,8 @@ class SqliteGfsEnvelopeQueueRepo:
                 ).fetchone()[0]
                 if int(total) + size <= max_total_bytes:
                     break
+                if kinded:
+                    return False
                 # The largest holder; on a tie, someone other than the
                 # recipient being written to (it must not evict itself while
                 # an equal holder exists).

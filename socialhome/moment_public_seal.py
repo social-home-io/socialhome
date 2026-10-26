@@ -36,6 +36,16 @@ Wire shapes (every one suite-tagged; receivers refuse unknown suites):
   (``kem_suite``-tagged) to the ``to`` household; inside, the key repeats
   the routing fields so a sealed blob can't be lifted into another delivery;
   ``key_suite`` is :data:`KEY_SUITE_AESGCM_256` (the space content-key tag).
+* **Reaction (v_68)** ``POST /gfs/moments/users/{author}/react`` with
+  ``{instance_id, sealed}`` — ``sealed`` is the v_67 sealed reaction
+  (:mod:`socialhome.federation.moment_reaction_route`, ``kem_suite``-tagged,
+  padded to one size) to the author household's key-wrap key, which the
+  author's household names inside every sealed create body
+  (``author_keywrap_pk`` + ``author_keywrap_suite``). The GFS pushes it to
+  the author's household as ``{type: "moment_reaction", from_instance,
+  sealed}`` and is never told who reacted, with what, to which moment, or
+  whether it is an add or a removal (timing can hint at the moment —
+  ``docs/principles.md``).
 
 Pure and dependency-light (only ``cryptography``, ``orjson`` + :mod:`socialhome.crypto`,
 like :mod:`socialhome.authority_sig`), so the content-blind GFS process can
@@ -99,6 +109,32 @@ FRAME_MOMENT: str = "incoming_public_moment"
 FRAME_MOMENT_DELETE: str = "incoming_public_moment_delete"
 MOMENT_FRAME_TYPES: frozenset[str] = frozenset({FRAME_MOMENT, FRAME_MOMENT_DELETE})
 
+#: v_68 — the WebSocket frame type a follower household's sealed reaction
+#: reaches the author's household under: ``{"type": ..., "from_instance":
+#: <the follower household the GFS authenticated>, "sealed": {...}}``.
+FRAME_MOMENT_REACTION: str = "moment_reaction"
+
+#: v_68 — fields of ``POST /gfs/moments/users/{author}/react`` (besides the
+#: household's wire ``signature``). Nothing else rides: no moment id, no
+#: user, no emoji, no add/remove flag — all of that is inside ``sealed``.
+REACT_BODY_FIELDS: frozenset[str] = frozenset({"instance_id", "sealed"})
+
+#: v_68 — longest ``sealed.ciphertext`` a GFS relays (one 1 KB padding
+#: bucket is ~1.4 K chars; room for two, as on the mesh —
+#: ``moment_reaction_route.MAX_SEALED_CHARS``, a test pins them equal).
+MAX_REACT_SEALED_CHARS: int = 3_000
+
+#: v_68 — body cap of a react post: the sealed reaction (~1.5 KB), the
+#: household id and its signature, with room for a two-bucket reaction.
+MAX_REACT_BODY_BYTES: int = 4096
+
+#: v_68 — sealed create body fields naming the author household's static
+#: key-wrap key (hex) and its KEM suite. Under the envelope signature (it
+#: covers the ciphertext) and the AEAD — a GFS can't swap them. A follower
+#: that does not know the suite ignores the key (its reactions stay home).
+AUTHOR_KEYWRAP_PK_FIELD: str = "author_keywrap_pk"
+AUTHOR_KEYWRAP_SUITE_FIELD: str = "author_keywrap_suite"
+
 #: The fields of a key delivery (``moment_key`` frame / ``POST
 #: /gfs/moments/keys`` item).
 DELIVERY_FIELDS: frozenset[str] = frozenset(
@@ -153,6 +189,28 @@ def require_known_key_suite(suite: object) -> str:
 def is_wire_int(value: object) -> bool:
     """A non-negative JSON integer (``True`` / ``False`` are not)."""
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def react_sealed_ok(sealed: object) -> bool:
+    """Whether *sealed* has the shape of a sealed reaction a GFS relays —
+    exactly ``{kem_suite, eph_pk, ciphertext}``, short strings. The GFS
+    can't open it and doesn't interpret the suite (the author's household
+    refuses one it doesn't know)."""
+    if not isinstance(sealed, dict) or set(sealed) != {
+        "kem_suite",
+        "eph_pk",
+        "ciphertext",
+    }:
+        return False
+    suite, eph, ct = sealed["kem_suite"], sealed["eph_pk"], sealed["ciphertext"]
+    return (
+        isinstance(suite, str)
+        and 0 < len(suite) <= 32
+        and isinstance(eph, str)
+        and 0 < len(eph) <= 64
+        and isinstance(ct, str)
+        and 0 < len(ct) <= MAX_REACT_SEALED_CHARS
+    )
 
 
 def _hkdf(key: bytes, info: bytes) -> bytes:
@@ -346,15 +404,21 @@ def verify_wire(body: dict[str, Any], pubkey_hex: str | None) -> bool:
 
 
 __all__ = [
+    "AUTHOR_KEYWRAP_PK_FIELD",
+    "AUTHOR_KEYWRAP_SUITE_FIELD",
     "DELIVERY_FIELDS",
     "ENVELOPE_FIELDS",
+    "FRAME_MOMENT_REACTION",
     "KEY_SUITE_AESGCM_256",
     "MAX_CIPHERTEXT_CHARS",
     "MAX_MOMENT_ID_CHARS",
     "MAX_RATCHET_STEPS",
+    "MAX_REACT_BODY_BYTES",
+    "MAX_REACT_SEALED_CHARS",
     "MOMENT_KEY_BYTES",
     "MOMENT_SEAL_SUITE_AESGCM256",
     "RATCHET_STEP_S",
+    "REACT_BODY_FIELDS",
     "SUPPORTED_KEY_SUITES",
     "SUPPORTED_MOMENT_SEAL_SUITES",
     "UnsupportedMomentSealSuite",
@@ -366,6 +430,7 @@ __all__ = [
     "open_with_item_key",
     "parse_key_plaintext",
     "ratchet",
+    "react_sealed_ok",
     "require_known_key_suite",
     "require_known_suite",
     "seal_body",

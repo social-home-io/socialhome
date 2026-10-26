@@ -80,7 +80,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from ..canonical_json import canonical_str
-from ..moment_public_seal import MOMENT_FRAME_TYPES
+from ..moment_public_seal import FRAME_MOMENT_REACTION, MOMENT_FRAME_TYPES
 from .envelope_relay import (
     ENVELOPE_INSTANCE_ID_RE,
     RELAY_FAN_OUT_CONCURRENCY,
@@ -134,7 +134,13 @@ HIGHLIGHT_SIGNAL_FRAME_TYPE: str = "highlight_signal"
 TYPED_FRAME_TYPES: dict[str, frozenset[str]] = {
     AUDIENCE_FOLLOWERS: MOMENT_FRAME_TYPES,
     AUDIENCE_INSTANCE: frozenset(
-        {"follow_changed", "moment_key_request", HIGHLIGHT_SIGNAL_FRAME_TYPE}
+        {
+            "follow_changed",
+            "moment_key_request",
+            HIGHLIGHT_SIGNAL_FRAME_TYPE,
+            # v_68 — a follower's sealed reaction for the author's household.
+            FRAME_MOMENT_REACTION,
+        }
     ),
     AUDIENCE_ALL: frozenset({"server_info_updated"}),
 }

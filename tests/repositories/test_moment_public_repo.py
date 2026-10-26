@@ -81,6 +81,38 @@ async def test_set_profile_updates_every_follow_on_that_gfs_only(db):
     assert by_key[("u1", "g2")].followed_bio is None
 
 
+async def test_set_keywrap_keeps_the_key_on_that_gfs_only_and_survives_a_refollow(
+    db,
+):
+    """v_68: the author household's key-wrap key lands on every follow of
+    them through that GFS; a re-follow (upsert) keeps it."""
+    repo = await _seed(db)
+    await repo.set_keywrap(
+        followed_user_id="u-noor",
+        gfs_id="g1",
+        keywrap_pk="ab" * 32,
+        keywrap_suite="x25519",
+    )
+    rows = await repo.followers_of("u-noor")
+    by_key = {(r.follower_user_id, r.gfs_id): r for r in rows}
+    assert by_key[("u1", "g1")].followed_keywrap_pk == "ab" * 32
+    assert by_key[("u2", "g1")].followed_keywrap_pk == "ab" * 32
+    # …with the suite it was named under (#1179).
+    assert by_key[("u1", "g1")].followed_keywrap_suite == "x25519"
+    assert by_key[("u1", "g2")].followed_keywrap_pk is None
+    assert by_key[("u1", "g2")].followed_keywrap_suite is None
+    await repo.upsert(
+        follower_user_id="u1",
+        followed_user_id="u-noor",
+        gfs_id="g1",
+        followed_instance_pk="cc" * 32,
+        followed_username="noor",
+        followed_display_name="Noor",
+    )
+    got = await repo.get(follower_user_id="u1", followed_user_id="u-noor", gfs_id="g1")
+    assert got is not None and got.followed_keywrap_pk == "ab" * 32
+
+
 async def test_list_for_followed_reads_many_authors_at_once(db):
     repo = await _seed(db)
     rows = await repo.list_for_followed(["u-noor", "u-sam"])

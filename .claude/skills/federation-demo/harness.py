@@ -9477,6 +9477,18 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_67 routed moment reactions gate in place ✓")
+    # v_68 — reactions reach authors followed through a GFS. Gated on the
+    # GFS's signed ``moment_reactions`` (checked below) and the author's
+    # key-wrap key in its signed moment, never on ``peer_supports``; the OURS
+    # round-trip above proves every pair is at >= v_68, and
+    # ``gfs-moment-profile`` carries e's reaction to a through the GFS.
+    if int(_Cap.MIN_FOR_GFS_MOMENT_REACTIONS) != 68 or _OURS < 68:
+        failures.append(
+            "MIN_FOR_GFS_MOMENT_REACTIONS moved off v_68 (or OURS fell below it) "
+            "— reactions to GFS moments would stay in the follower's household"
+        )
+    else:
+        print("  v_68 GFS moment reactions gate in place ✓")
     if state.get("gfs") and _gfs_alive(state):
         s, info = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/info")
         caps = (info or {}).get("capabilities") or {} if s == 200 else {}
@@ -9491,6 +9503,13 @@ def cmd_verify() -> None:
             )
         else:
             print("  v_66 GFS signs moment_delete_log + moment_media_30d ✓")
+        if caps.get("moment_reactions") is not True:
+            failures.append(
+                f"GFS /gfs/info does not sign moment_reactions (HTTP {s}, "
+                f"caps={sorted(caps)!r})"
+            )
+        else:
+            print("  v_68 GFS signs moment_reactions ✓")
     gmld = state.get("gfs_moment_late_delete")
     if gmld:
         held = _rows(
@@ -11364,6 +11383,22 @@ def cmd_verify() -> None:
         )
         if not rows or rows[0][0] != gmp["display_name"] or not rows[0][2]:
             failures.append(f"e: moment_public_follows profile is {rows!r}")
+        # v_68 — e's reaction to Noor's public moment reached a through the
+        # GFS (and nothing paired them).
+        if gmp.get("reaction"):
+            held = _rows(
+                "a",
+                "SELECT emoji FROM moment_reactions"
+                " WHERE moment_id = ? AND reactor_user_id = ?",
+                (gmp["moment_id"], e.get("user_id")),
+            )
+            if held != [(gmp["reaction"],)]:
+                failures.append(
+                    f"a: e's reaction through the GFS is {held!r}, expected "
+                    f"{gmp['reaction']!r}"
+                )
+            else:
+                print("  v_68 a holds e's reaction that came through the GFS ✓")
 
     # 14. Log audit — scan each backend's stdout/stderr for unhandled
     #    exceptions, ERROR-level lines, federation-pipeline rejects.
@@ -18237,18 +18272,109 @@ def cmd_gfs_moment_profile() -> None:
         "the GFS never logged the key, and the profile page shows no moments ✓"
     )
 
+    # v_68 — a reaction from e reaches a through the GFS.
+    _gfs_moment_reaction(state, moment_id, author_uid)
+
     state["gfs_moment_profile"] = {
         "moment_id": moment_id,
         "user_id": author_uid,
         "display_name": name,
         "bio": bio,
         "gfs_id": e_gfs,
+        "reaction": "🔥",
     }
     _save(state)
     print(
         f"gfs-moment-profile: ok (e names {name!r} with bio + GFS-mirrored "
         "picture; the GFS directory already held both; the moment reached e "
         "encrypted from the GFS)"
+    )
+
+
+def _gfs_moment_reaction(state: dict, moment_id: str, author_uid: str) -> None:
+    """v_68: e (paired with nobody, follows Noor through the GFS) reacts to
+    her public moment. The reaction is sealed to a's key-wrap key (named in
+    the signed moment), posted to the GFS the moment came through, and
+    pushed to a only. a must hold it within 30 s, then drop e's removal; the
+    GFS log and database must hold neither the emoji nor the reactor."""
+    a, e = state["instances"]["a"], state["instances"]["e"]
+    e_url = f"http://127.0.0.1:{e['port']}"
+    e_user = e.get("user_id")
+    kw = _rows(
+        "e",
+        "SELECT followed_keywrap_pk, followed_keywrap_suite"
+        " FROM moment_public_follows WHERE followed_user_id = ?",
+        (author_uid,),
+    )
+    if not kw or not kw[0][0] or kw[0][1] != "x25519":
+        raise SystemExit(
+            f"gfs-moment-profile: e kept no key-wrap key for a's author ({kw!r})"
+        )
+    s, detail = _request(f"{e_url}/api/moments/{moment_id}", token=e["token"])
+    reach = ((detail or {}).get("moment") or {}).get("reactions_reach")
+    if s != 200 or reach != "author":
+        raise SystemExit(
+            f"gfs-moment-profile: e's moment says reactions_reach={reach!r} "
+            f"(HTTP {s}) — expected 'author' through the GFS"
+        )
+    gfs_off = _gfs_log_size()
+
+    def _a_holds() -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT emoji FROM moment_reactions"
+            " WHERE moment_id = ? AND reactor_user_id = ?",
+            (moment_id, e_user),
+        )
+
+    def _wait(want: list[tuple], what: str) -> None:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if _a_holds() == want:
+                return
+            time.sleep(1)
+        refused = _log_lines_matching("a", "moment_reaction via GFS")
+        raise SystemExit(
+            f"gfs-moment-profile: a holds {_a_holds()!r} after e's {what}, "
+            f"expected {want!r}; a refused: {refused[-2:]!r}"
+        )
+
+    for emoji, what in (("👏", "reaction"), (None, "removal"), ("🔥", "reaction")):
+        if emoji is None:
+            s, body = _request(
+                f"{e_url}/api/moments/{moment_id}/reaction",
+                token=e["token"],
+                method="DELETE",
+            )
+            want: list[tuple] = []
+        else:
+            s, body = _request(
+                f"{e_url}/api/moments/{moment_id}/reaction",
+                token=e["token"],
+                method="PUT",
+                body={"emoji": emoji},
+            )
+            want = [(emoji,)]
+        _must(f"gfs-moment-profile: e {what}", s, body, ok=(200, 204))
+        _wait(want, what)
+    for secret in ("👏", "🔥", e_user or "-", moment_id):
+        if _gfs_log_lines_matching(secret, offset=gfs_off):
+            raise SystemExit(f"gfs-moment-profile: the GFS log names {secret!r}")
+    for db_file in ("gfs.db", "gfs.db-wal"):
+        try:
+            raw = (GFS_DIR / db_file).read_bytes()
+        except OSError:
+            continue
+        for secret in ("👏", "🔥"):
+            if secret.encode() in raw:
+                raise SystemExit(
+                    f"gfs-moment-profile: the GFS's {db_file} holds {secret!r}"
+                )
+    if _rows("e", "SELECT 1 FROM remote_instances WHERE id = ?", (a["instance_id"],)):
+        raise SystemExit("gfs-moment-profile: e and a became paired")
+    print(
+        "  v_68 e's reaction (and its removal) reached a through the GFS, sealed "
+        "— the GFS holds no emoji, a and e still unpaired ✓"
     )
 
 

@@ -112,6 +112,7 @@ class DeleteCertRetryQueue:
         "_task",
         "_wake",
         "_wall",
+        "_what",
     )
 
     def __init__(
@@ -120,8 +121,12 @@ class DeleteCertRetryQueue:
         *,
         monotonic: Callable[[], float] = time.monotonic,
         wall: Callable[[], float] = time.time,
+        what: str = "delete certificate",
     ) -> None:
         self._send = send
+        #: What is retried, for the logs — the same queue retries a sealed
+        #: reaction's GFS post (v_68, :mod:`.moment_reaction_gfs`).
+        self._what = what
         self._monotonic = monotonic
         self._wall = wall
         #: (gfs_id, moment_id) → pending post. A re-queue of the same
@@ -162,8 +167,8 @@ class DeleteCertRetryQueue:
                 if not self._full_logged:
                     self._full_logged = True
                     log.warning(
-                        "moment delete certificate retry queue is full — a"
-                        " failed certificate post to %s is lost",
+                        "%s retry queue is full — a failed post to %s is lost",
+                        self._what,
                         gfs_id,
                     )
                 return False
@@ -175,12 +180,18 @@ class DeleteCertRetryQueue:
         self._wake.set()
         return True
 
+    def discard(self, gfs_id: str, key: str) -> None:
+        """Forget the pending post *key* to *gfs_id* (a newer one went out)."""
+        self._pending.pop((gfs_id, key), None)
+
     async def start(self) -> None:
         """Start the retry loop. Idempotent."""
         if self._task is not None and not self._task.done():
             return
         self._stop.clear()
-        self._task = asyncio.create_task(self._loop(), name="moment-delete-cert-retry")
+        self._task = asyncio.create_task(
+            self._loop(), name=f"{self._what.replace(' ', '-')}-retry"
+        )
 
     async def stop(self) -> None:
         """Stop the loop, wait for it, and drop what is still pending (in
@@ -195,8 +206,8 @@ class DeleteCertRetryQueue:
             self._task = None
         if self._pending:
             log.warning(
-                "moment delete certificate retry: dropping %d pending post(s)"
-                " on shutdown",
+                "%s retry: dropping %d pending post(s) on shutdown",
+                self._what,
                 len(self._pending),
             )
         self._pending.clear()
@@ -214,9 +225,7 @@ class DeleteCertRetryQueue:
             try:
                 await self.run_due()
             except Exception as exc:  # pragma: no cover — defensive
-                log.warning(
-                    "delete certificate retry pass failed: %s", exc, exc_info=True
-                )
+                log.warning("%s retry pass failed: %s", self._what, exc, exc_info=True)
             if self._stop.is_set():
                 return
             timeout = None
@@ -240,8 +249,8 @@ class DeleteCertRetryQueue:
             if self._wall() >= item.give_up_at:
                 del self._pending[key]
                 log.warning(
-                    "moment delete certificate retry: giving up on %s at %s"
-                    " after %d tries",
+                    "%s retry: giving up on %s at %s after %d tries",
+                    self._what,
                     key[1],
                     key[0],
                     item.tries,
@@ -251,7 +260,8 @@ class DeleteCertRetryQueue:
                 outcome = await self._send(key[0], item.body)
             except Exception:
                 log.warning(
-                    "delete certificate retry to %s raised; treating it as transient",
+                    "%s retry to %s raised; treating it as transient",
+                    self._what,
                     key[0],
                     exc_info=True,
                 )
@@ -262,7 +272,8 @@ class DeleteCertRetryQueue:
                 del self._pending[key]
                 if outcome.kind != "delivered":
                     log.warning(
-                        "delete certificate retry: %s refused %s for good",
+                        "%s retry: %s refused %s for good",
+                        self._what,
                         key[0],
                         key[1],
                     )

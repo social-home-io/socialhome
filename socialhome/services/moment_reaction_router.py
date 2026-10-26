@@ -26,10 +26,21 @@ path the moment came — the wire shapes and crypto are in
   ``docs/protocol/momentum.md`` § Authority). Relays keep no state and learn
   only their own neighbours.
 
+* **Through a GFS (v_68).** A reaction to a public moment that came through
+  a GFS takes the same sealed reaction to the GFS it came on
+  (:class:`~.moment_reaction_gfs.MomentReactionGfs`); the author's
+  household gets it as a ``moment_reaction`` frame
+  (:meth:`on_gfs_reaction`) and applies it after the same checks, plus: the
+  household the GFS authenticated is the reactor's own, and the moment is
+  public.
+
 **Privacy residual (signed off 2026-10-25).** A relay learns that its direct
 neighbour (or that neighbour's part of the mesh) reacted to moment M — not
 who, not with what (the seal is padded to one size) — and no household
-learns any non-adjacent part of the pairing graph. ``docs/principles.md``.
+learns any non-adjacent part of the pairing graph. A GFS learns that a
+follower household sent an author's household a reaction or a removal, and
+when — not who, with what, to which moment, or which of the two.
+``docs/principles.md``.
 """
 
 from __future__ import annotations
@@ -60,10 +71,11 @@ from ..domain.moment import (
     REACTION_REACH_AUTHOR,
     REACTION_REACH_HOUSEHOLD,
     Moment,
+    MomentGfsReactionTarget,
     MomentReactionRoute,
     clamp_moment_expiry,
 )
-from ..federation.keywrap_seal import UnsupportedKemSuite
+from ..federation.keywrap_seal import SUPPORTED_KEM_SUITES, UnsupportedKemSuite
 from ..federation.moment_reaction_route import (
     MAX_ID_CHARS,
     RETURN_TOKEN_SUITE_AESGCM_256,
@@ -95,6 +107,7 @@ if TYPE_CHECKING:
     from ..repositories.instance_ban_repo import AbstractHouseholdInstanceBanRepo
     from ..repositories.moment_repo import AbstractMomentRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .moment_reaction_gfs import MomentReactionGfs
 
 log = logging.getLogger(__name__)
 
@@ -120,7 +133,16 @@ SEEN_MAX: int = 50_000
 RELAY_PER_NEIGHBOUR_PER_MIN: int = 60
 RELAY_PER_MOMENT_PER_MIN: int = 10
 ORIGIN_PER_REACTOR_PER_MIN: int = 60
+#: v_68 — ``moment_reaction`` frames opened a minute per GFS connection,
+#: before any crypto (each reactor household is then held to
+#: :data:`ORIGIN_PER_REACTOR_PER_MIN` after every check). A GFS already
+#: holds each follower household to 30 a minute per author.
+ORIGIN_PER_GFS_PER_MIN: int = 600
 _WINDOW_S: int = 60
+
+#: Where a reaction goes: back along the moment's route (v_67), or through
+#: the GFS it came on (v_68).
+ReactionTarget = MomentReactionRoute | MomentGfsReactionTarget
 
 
 def _now_ms() -> int:
@@ -156,6 +178,7 @@ class MomentReactionRouter(ProtectionGateMixin):
         "_debounce_s",
         "_federation",
         "_federation_repo",
+        "_gfs",
         "_keywrap_priv",
         "_keywrap_pub",
         "_keywrap_sig",
@@ -188,6 +211,8 @@ class MomentReactionRouter(ProtectionGateMixin):
         self._users = user_repo
         self._ban_repo = ban_repo
         self._child_protection = None
+        #: v_68 — the GFS transport. Unwired: GFS moments' reactions stay.
+        self._gfs: MomentReactionGfs | None = None
         self._debounce_s = debounce_s
         self._clock_ms = clock_ms
         self._limiter = RateLimiter(monotonic=monotonic)
@@ -219,6 +244,10 @@ class MomentReactionRouter(ProtectionGateMixin):
         self._keywrap_pub = keywrap_public_key
         self._keywrap_sig = keywrap_sig
         self._token_key = return_token_key(routing_secret)
+
+    def attach_gfs(self, gfs: MomentReactionGfs) -> None:
+        """v_68 — carry reactions to GFS moments through their GFS."""
+        self._gfs = gfs
 
     def attach_to(self, federation_service: FederationService) -> None:
         """Register the ``MOMENT_REACTION_ROUTED`` inbound handler."""
@@ -400,6 +429,9 @@ class MomentReactionRouter(ProtectionGateMixin):
                 return False
         except ValueError:
             return False
+        return self._live(moment)
+
+    def _live(self, moment: Moment) -> bool:
         expires = _epoch_s(moment.expires_at)
         return expires is not None and expires * 1000 > self._clock_ms()
 
@@ -413,6 +445,7 @@ class MomentReactionRouter(ProtectionGateMixin):
         )
         direct: dict[tuple[str, str], bool] = {}
         via_ok: dict[str, bool] = {}
+        gfs_ok: dict[tuple[str, str | None], bool] = {}
         out: dict[str, str] = {}
         for m in items:
             if m.received_via == "self":
@@ -430,6 +463,12 @@ class MomentReactionRouter(ProtectionGateMixin):
                     via_ok[route.via] = await self._routable_via(route.via)
                 if via_ok[route.via]:
                     reach = REACTION_REACH_AUTHOR
+            elif self._gfs is not None and m.received_via == "gfs" and self._live(m):
+                key = (m.author_user_id, m.received_via_gfs_id)
+                if key not in gfs_ok:
+                    gfs_ok[key] = await self._gfs.target(m) is not None
+                if gfs_ok[key]:
+                    reach = REACTION_REACH_AUTHOR
             out[m.id] = reach
         return out
 
@@ -441,12 +480,13 @@ class MomentReactionRouter(ProtectionGateMixin):
         emoji: str | None,
         occurred_at: datetime,
     ) -> bool:
-        """Queue a local reaction change for the routed path. Returns whether
-        it will be routed — ``False`` leaves it in this household (no
-        complete route, or the neighbour is older than v_67)."""
+        """Queue a local reaction change for the routed path (or, v_68, the
+        GFS the moment came through). Returns whether it will be sent —
+        ``False`` leaves it in this household (no complete route, the
+        neighbour is older than v_67, or the GFS / author can't take it)."""
         if self._keywrap_priv is None:
             return False
-        if await self._usable_route(moment_id) is None:
+        if await self._usable_target(moment_id) is None:
             log.debug(
                 "moment %s: no route to its author — reaction stays here", moment_id
             )
@@ -457,16 +497,21 @@ class MomentReactionRouter(ProtectionGateMixin):
             self._tasks[key] = asyncio.create_task(self._flush_later(key))
         return True
 
-    async def _usable_route(
+    async def _usable_target(
         self, moment_id: str
-    ) -> tuple[Moment, MomentReactionRoute] | None:
+    ) -> tuple[Moment, ReactionTarget] | None:
         moment = await self._moments.get(moment_id)
-        if moment is None or moment.received_via != "household":
+        if moment is None or moment.received_via not in ("household", "gfs"):
             return None
         if await self._is_confirmed(moment.origin_instance_id):
             # A paired origin is reached directly, under the hide list —
-            # never routed past it (#1178 F1).
+            # never routed past it (#1178 F1), nor through a GFS.
             return None
+        if moment.received_via == "gfs":
+            if self._gfs is None or not self._live(moment):
+                return None
+            target = await self._gfs.target(moment)
+            return None if target is None else (moment, target)
         route = (await self._moments.get_reaction_routes([moment_id])).get(moment_id)
         if route is None or not self._route_usable(moment, route):
             return None
@@ -502,10 +547,23 @@ class MomentReactionRouter(ProtectionGateMixin):
         emoji: str | None,
         occurred_at_ms: int,
     ) -> None:
-        found = await self._usable_route(moment_id)
+        found = await self._usable_target(moment_id)
         if found is None:
             return
         moment, route = found
+        if (
+            isinstance(route, MomentGfsReactionTarget)
+            and route.keywrap_suite not in SUPPORTED_KEM_SUITES
+        ):
+            # Sealed only under the suite the author named its key under,
+            # and only one this build implements — never an assumed X25519.
+            log.warning(
+                "moment %s: the author's key names an unsupported key-wrap "
+                "suite %r — reaction not sent",
+                moment_id,
+                route.keywrap_suite,
+            )
+            return
         user = await self._users.get_by_user_id(reactor_user_id)
         if user is None:
             return
@@ -534,6 +592,16 @@ class MomentReactionRouter(ProtectionGateMixin):
         sealed = seal_reaction(
             origin_keywrap_pub=bytes.fromhex(route.keywrap_pk), inner=inner
         )
+        if isinstance(route, MomentGfsReactionTarget):
+            assert self._gfs is not None
+            await self._gfs.send(
+                route,
+                author_user_id=moment.author_user_id,
+                sealed=sealed,
+                retry_key=f"{moment_id}|{reactor_user_id}",
+                occurred_at_s=occurred_at_ms / 1000,
+            )
+            return
         await self._federation.send_event(
             to_instance_id=route.via,
             event_type=FET.MOMENT_REACTION_ROUTED,
@@ -641,33 +709,93 @@ class MomentReactionRouter(ProtectionGateMixin):
         moment_id: str,
         sealed: dict[str, str],
     ) -> None:
-        if self._keywrap_priv is None:
-            self._refuse(event, "no key-wrap key attached")
+        inner, reason = await self._open_checked(sealed, moment_id=moment_id)
+        if reason is not None:
+            self._refuse(
+                event, reason, reactor=str((inner or {}).get("reactor_user_id") or "")
+            )
             return
+        assert inner is not None
+        await self._apply(inner)
+
+    async def on_gfs_reaction(self, frame: dict[str, Any], *, gfs_id: str) -> None:
+        """A ``moment_reaction`` frame (v_68): a follower household's sealed
+        reaction to one of our public moments, relayed by the GFS *gfs_id*.
+
+        ``from_instance`` is the household the GFS authenticated. Opened and
+        checked exactly like a routed reaction at its origin, plus: the
+        reactor's household is that household (a follower can't pass off
+        another household's reaction), and the moment is public — only a
+        public moment ever crossed a GFS. The GFS learns nothing back."""
+        sender = frame.get("from_instance")
+        sealed = frame.get("sealed")
+        if not (
+            isinstance(sender, str)
+            and 0 < len(sender) <= MAX_ID_CHARS
+            and sealed_shape_ok(sealed)
+        ):
+            self._refuse_gfs(gfs_id, sender, "malformed moment_reaction frame")
+            return
+        assert isinstance(sealed, dict)
+        self._limiter.prune(window_s=_WINDOW_S)
+        if not self._limiter.is_allowed(
+            f"g:{gfs_id}", limit=ORIGIN_PER_GFS_PER_MIN, window_s=_WINDOW_S
+        ):
+            self._refuse_gfs(gfs_id, sender, "GFS over its reaction rate")
+            return
+        inner, reason = await self._open_checked(sealed, gfs_sender=sender)
+        if reason is not None:
+            self._refuse_gfs(
+                gfs_id,
+                sender,
+                reason,
+                reactor=str((inner or {}).get("reactor_user_id") or ""),
+            )
+            return
+        assert inner is not None
+        await self._apply(inner)
+
+    async def _open_checked(
+        self,
+        sealed: dict[str, str],
+        *,
+        moment_id: str | None = None,
+        gfs_sender: str | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Open *sealed* with our key-wrap key and run every origin check:
+        ``(inner, None)`` when it may be applied, else ``(inner or None,
+        why not)``. *moment_id* is the one a routed envelope names;
+        *gfs_sender* the household a GFS authenticated (v_68)."""
+        if self._keywrap_priv is None:
+            return None, "no key-wrap key attached"
         try:
             inner = open_reaction(sealed=sealed, keywrap_priv=self._keywrap_priv)
         except UnsupportedKemSuite:
-            self._refuse(event, "unsupported kem_suite")
-            return
+            return None, "unsupported kem_suite"
         except (InvalidTag, ValueError) as exc:
-            self._refuse(
-                event,
-                f"sealed reaction does not open here ({exc or type(exc).__name__})",
+            return None, (
+                f"sealed reaction does not open here ({exc or type(exc).__name__})"
             )
-            return
         try:
             reason = verify_reaction(inner)
         except UnsupportedReactionSigSuite:
             reason = "unsupported reaction_sig_suite"
         if reason is None:
-            reason = await self._origin_refusal(inner, moment_id, sealed)
-        if reason is not None:
-            self._refuse(event, reason, reactor=str(inner.get("reactor_user_id")))
-            return
-        await self._apply(inner)
+            reason = await self._origin_refusal(
+                inner,
+                str(inner["moment_id"]) if moment_id is None else moment_id,
+                sealed,
+                gfs_sender=gfs_sender,
+            )
+        return inner, reason
 
     async def _origin_refusal(
-        self, inner: dict[str, Any], moment_id: str, sealed: dict[str, str]
+        self,
+        inner: dict[str, Any],
+        moment_id: str,
+        sealed: dict[str, str],
+        *,
+        gfs_sender: str | None = None,
     ) -> str | None:
         """Why the origin refuses a well-signed reaction, or ``None``."""
         own = self._federation.own_instance_id
@@ -675,6 +803,8 @@ class MomentReactionRouter(ProtectionGateMixin):
         reactor_home = str(inner["reactor_instance_id"])
         if inner["moment_id"] != moment_id or inner["origin_instance_id"] != own:
             return "sealed reaction names another moment or origin"
+        if gfs_sender is not None and reactor_home != gfs_sender:
+            return "the GFS sender is not the reactor's household"
         if reactor_home == own or await self._users.get_by_user_id(reactor) is not None:
             return "reactor claims to be from this household"
         pinned = await self._federation.peer_identity_public_key(reactor_home)
@@ -697,6 +827,9 @@ class MomentReactionRouter(ProtectionGateMixin):
             return "sealed reaction names another author"
         if await self._users.get_by_user_id(moment.author_user_id) is None:
             return "moment is not authored here"
+        if gfs_sender is not None and not moment.is_public:
+            # Only a public moment ever went to a GFS.
+            return "moment is not public"
         expires = _epoch_s(moment.expires_at)
         if expires is None or expires * 1000 <= now:
             return "moment has ended"
@@ -710,11 +843,14 @@ class MomentReactionRouter(ProtectionGateMixin):
             return "a guardian block separates them"
         if await self._is_protected(moment.author_user_id):
             return "moment is for paired households only (no_relay)"
-        # The reactor household's budget is charged only for a reaction that
-        # passed every other check: a relay re-sending one genuine sealed
-        # reaction (a replay) must not starve that household's real ones
-        # (#1178 F2). The per-neighbour limit ran before any crypto.
-        if not self._limiter.is_allowed(
+        # The reactor household's budget is only looked at here; it is
+        # charged in ``_apply``, and only for a reaction that changed
+        # something. A replay — refused above while the replay cache holds
+        # it, and after a restart (the cache is in memory) a no-op against
+        # the stored reaction and removal — must not starve that household's
+        # real ones (#1178 F2, #1179 F3). The per-neighbour / per-GFS limits
+        # ran before any crypto and stay the flood backstop.
+        if not self._limiter.has_room(
             f"r:{reactor_home}",
             limit=ORIGIN_PER_REACTOR_PER_MIN,
             window_s=_WINDOW_S,
@@ -736,6 +872,11 @@ class MomentReactionRouter(ProtectionGateMixin):
         )
         if not changed:
             return
+        self._limiter.is_allowed(
+            f"r:{inner['reactor_instance_id']}",
+            limit=ORIGIN_PER_REACTOR_PER_MIN,
+            window_s=_WINDOW_S,
+        )
         moment = await self._moments.get(moment_id)
         if moment is None:  # pragma: no cover — deleted in between
             return
@@ -768,6 +909,18 @@ class MomentReactionRouter(ProtectionGateMixin):
         return True
 
     @staticmethod
+    def _refuse_gfs(
+        gfs_id: str, sender: object, reason: str, *, reactor: str = ""
+    ) -> None:
+        log.warning(
+            "moment_reaction via GFS %s from %s: %s — refusing%s",
+            gfs_id,
+            sender,
+            reason,
+            f" (reactor={reactor})" if reactor else "",
+        )
+
+    @staticmethod
     def _refuse(event: FederationEvent, reason: str, *, reactor: str = "") -> None:
         log.warning(
             "%s from %s: %s — refusing (moment=%s%s)",
@@ -782,6 +935,7 @@ class MomentReactionRouter(ProtectionGateMixin):
 __all__ = [
     "DEBOUNCE_S",
     "MAX_REACTION_AGE_MS",
+    "ORIGIN_PER_GFS_PER_MIN",
     "ORIGIN_PER_REACTOR_PER_MIN",
     "RELAY_PER_MOMENT_PER_MIN",
     "RELAY_PER_NEIGHBOUR_PER_MIN",

@@ -38,6 +38,12 @@ handler:
    when it followed (never one riding with the certificate) and applied as
    a delete (owner-bound ids, the stored row's author, tombstone rules — a
    replay changes nothing).
+9. Keeps the author household's key-wrap key (v_68, ``author_keywrap_pk``
+   in a verified create body, under a known KEM suite) on the follow rows
+   (``moment_public_follows.followed_keywrap_pk``), and hands a
+   ``moment_reaction`` frame — a follower's sealed reaction to a local
+   author — to the reaction router (:mod:`.moment_reaction_router`), which
+   opens and checks it like a routed one.
 """
 
 from __future__ import annotations
@@ -58,10 +64,13 @@ from ..domain.moment_public import (
     public_author_name,
     public_picture_digest,
 )
+from ..federation.keywrap_seal import SUPPORTED_KEM_SUITES
 from ..federation.owner_bound_id import MOMENT_KIND, owner_bound_id_refused
 from ..infrastructure.event_bus import EventBus
 from ..moment_origin import delete_cert_refusal
 from ..moment_public_seal import (
+    AUTHOR_KEYWRAP_PK_FIELD,
+    AUTHOR_KEYWRAP_SUITE_FIELD,
     ENVELOPE_FIELDS,
     UnsupportedMomentSealSuite,
     is_wire_int,
@@ -78,6 +87,7 @@ if TYPE_CHECKING:
     from ..repositories.moment_repo import AbstractMomentRepo
     from .moment_public_key_inbound import MomentPublicKeyInbound
     from .moment_public_media_inbound import MomentPublicMediaInbound
+    from .moment_reaction_router import MomentReactionRouter
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +132,7 @@ class MomentPublicInbound:
         "_keys",
         "_media",
         "_moments",
+        "_reactions",
         "_sends_time",
     )
 
@@ -146,9 +157,15 @@ class MomentPublicInbound:
         #: one without it can only be an older envelope replayed. Bounded by
         #: the follows — only a followed author's signature verifies.
         self._sends_time: set[str] = set()
+        #: v_68 — opens a follower's sealed reaction to a local author.
+        #: Unwired: ``moment_reaction`` frames are dropped.
+        self._reactions: MomentReactionRouter | None = None
 
     def attach_media(self, media: MomentPublicMediaInbound) -> None:
         self._media = media
+
+    def attach_reactions(self, router: MomentReactionRouter) -> None:
+        self._reactions = router
 
     async def handle(self, frame: dict[str, Any], *, gfs_id: str) -> None:
         """Dispatch a single WS frame from the GFS this handler is bound to."""
@@ -162,6 +179,9 @@ class MomentPublicInbound:
                 await self._release(str(payload.get("author_user_id") or ""), gen)
         elif ftype == "moment_delete_certs":
             await self._on_delete_certs(frame.get("certs"), gfs_id=gfs_id)
+        elif ftype == "moment_reaction":
+            if self._reactions is not None:
+                await self._reactions.on_gfs_reaction(frame, gfs_id=gfs_id)
         else:
             log.debug("moment_public.inbound: ignoring frame type=%r", ftype)
 
@@ -420,6 +440,8 @@ class MomentPublicInbound:
             # Only a live moment we have not seen refreshes the profile, so a
             # replay of an old envelope cannot roll a newer one back.
             await self._refresh_profile(env["profile"], follow, gfs_id=gfs_id)
+        if stored is None and follow is not None:
+            await self._keep_keywrap(env, follow, gfs_id=gfs_id)
         media = env.get("media")
         if isinstance(media, dict) and self._media is not None:
             # v_63: kept once its file is here (fetched off the GFS socket).
@@ -544,6 +566,35 @@ class MomentPublicInbound:
                 return row
         return None
 
+    async def _keep_keywrap(
+        self, body: dict, follow: MomentPublicFollow, *, gfs_id: str
+    ) -> None:
+        """Keep the author household's key-wrap key a verified create carried
+        (v_68) — what a reaction to their public moments is sealed to. Under
+        an unknown suite, or malformed, it is ignored: that author's moments
+        keep their reactions here, as with an older author."""
+        named = _keywrap_of(body)
+        if named is None:
+            if body.get(AUTHOR_KEYWRAP_PK_FIELD) is not None:
+                log.info(
+                    "moment_public.inbound: author %s names a key-wrap key this"
+                    " build can't use — reactions to it stay here",
+                    follow.followed_user_id,
+                )
+            return
+        keywrap, suite = named
+        if (keywrap, suite) == (
+            follow.followed_keywrap_pk,
+            follow.followed_keywrap_suite,
+        ):
+            return
+        await self._follows.set_keywrap(
+            followed_user_id=follow.followed_user_id,
+            gfs_id=gfs_id,
+            keywrap_pk=keywrap,
+            keywrap_suite=suite,
+        )
+
     async def _refresh_profile(
         self, profile: dict, follow: MomentPublicFollow, *, gfs_id: str
     ) -> None:
@@ -570,6 +621,25 @@ class MomentPublicInbound:
             bio=bio,
             picture_digest=digest,
         )
+
+
+def _keywrap_of(body: dict) -> tuple[str, str] | None:
+    """The author household's key-wrap key a sealed public-moment create body
+    names (v_68, ``author_keywrap_pk``) as 64 lowercase hex chars, with the
+    KEM suite it is named under (``author_keywrap_suite``) — kept together,
+    so the key is never read under an assumed suite. ``None`` when it names
+    none, names it under a suite this build does not implement (refused,
+    never read under a default), or is malformed."""
+    pk = body.get(AUTHOR_KEYWRAP_PK_FIELD)
+    suite = body.get(AUTHOR_KEYWRAP_SUITE_FIELD)
+    if pk is None or not isinstance(suite, str) or suite not in SUPPORTED_KEM_SUITES:
+        return None
+    if not isinstance(pk, str) or len(pk) != 64:
+        return None
+    try:
+        return bytes.fromhex(pk).hex(), suite
+    except ValueError:
+        return None
 
 
 def _unix_or_none(value: object) -> float | None:

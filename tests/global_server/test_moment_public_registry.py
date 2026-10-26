@@ -9,6 +9,7 @@ import orjson
 import pytest
 
 from socialhome.global_server import federation as federation_mod
+from socialhome.global_server import moment_public_registry as registry_mod
 from socialhome.global_server.domain import GfsMomentKeyMail
 from socialhome.global_server.moment_public_registry import (
     MOMENT_PUBLISHES_PER_MINUTE,
@@ -707,3 +708,102 @@ async def test_an_older_key_after_a_newer_one_is_neither_kept_nor_pushed(
     assert await _deliver(8, 3) == 1
     kept = await mailbox.get("u-author", "inst-follower")
     assert kept is not None and (kept.key_gen, kept.key_step) == (8, 3)
+
+
+# ── Reactions (v_68) ──────────────────────────────────────────────────────
+
+_SEALED = {"kem_suite": "x25519", "eph_pk": "e", "ciphertext": "n:c"}
+_REACTION = {
+    "type": "moment_reaction",
+    "from_instance": "inst-follower",
+    "sealed": _SEALED,
+}
+
+
+async def test_a_reaction_goes_to_the_authors_socket_here(gfs_setup, gfs_db):
+    reg, relay, _cluster, _mb = await _cluster_world(gfs_setup, gfs_db)
+    author_ws = _StubWs()
+    await gfs_setup["ws"].register("inst-author", author_ws)  # type: ignore[arg-type]
+    outcome = await reg.relay_reaction(
+        follower_instance_id="inst-follower",
+        followed_user_id="u-author",
+        sealed=dict(_SEALED),
+    )
+    assert outcome == "accepted"
+    assert [orjson.loads(s) for s in author_ws.sent] == [_REACTION]
+    assert relay.queued == []
+
+
+async def test_on_one_node_a_reaction_is_queued_for_an_offline_author(
+    gfs_setup, gfs_db
+):
+    reg, relay, _cluster, _mb = await _cluster_world(gfs_setup, gfs_db)
+    await reg.relay_reaction(
+        follower_instance_id="inst-follower",
+        followed_user_id="u-author",
+        sealed=dict(_SEALED),
+    )
+    assert relay.queued == [(["inst-author"], _REACTION)]
+
+
+async def test_a_forward_refused_queues_the_reaction_here(gfs_setup, gfs_db):
+    fan_out = _FanOut(accept=False)
+    reg, relay, _cluster, _mb = await _cluster_world(gfs_setup, gfs_db, fan_out=fan_out)
+    await reg.relay_reaction(
+        follower_instance_id="inst-follower",
+        followed_user_id="u-author",
+        sealed=dict(_SEALED),
+    )
+    assert fan_out.forwarded[0]["kind"] == "instance"
+    assert relay.queued == [(["inst-author"], _REACTION)]
+
+
+async def test_a_reaction_forwarded_to_another_node_charges_no_queue_budget(
+    gfs_setup, gfs_db
+):
+    """#1179 F2: the registry keeps no queued-reaction budget of its own —
+    every reaction that found no socket here names the author's household
+    as the offline candidate, and only a row actually queued counts (the
+    queue's own reaction cap, ``RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT``)."""
+    fan_out = _FanOut()
+    reg, relay, _cluster, _mb = await _cluster_world(gfs_setup, gfs_db, fan_out=fan_out)
+    for n in range(25):
+        await reg.relay_reaction(
+            follower_instance_id="inst-follower",
+            followed_user_id="u-author",
+            sealed={**_SEALED, "ciphertext": f"n:{n}"},
+        )
+    assert [f["queue_for"] for f in fan_out.forwarded] == [["inst-author"]] * 25
+    assert relay.queued == []
+
+
+async def test_the_reaction_budgets_are_shared_across_the_cluster(
+    gfs_setup, gfs_db, monkeypatch
+):
+    """Each node allows its share of the per-(household, author) limit."""
+    monkeypatch.setattr(registry_mod, "REACTIONS_PER_AUTHOR_PER_MINUTE", 4)
+    reg, _relay, cluster, _mb = await _cluster_world(gfs_setup, gfs_db)
+    cluster.nodes = 2
+    outcomes = [
+        await reg.relay_reaction(
+            follower_instance_id="inst-follower",
+            followed_user_id="u-author",
+            sealed={**_SEALED, "ciphertext": f"n:{n}"},
+        )
+        for n in range(3)
+    ]
+    assert outcomes == ["accepted", "accepted", "rate_limited"]
+
+
+async def test_a_suspended_author_takes_no_reactions(gfs_setup, gfs_db):
+    reg, relay, _cluster, _mb = await _cluster_world(gfs_setup, gfs_db)
+    await gfs_db.enqueue(
+        "UPDATE gfs_user_registrations SET status='suspended' WHERE user_id='u-author'"
+    )
+    outcome = await reg.relay_reaction(
+        follower_instance_id="inst-follower",
+        followed_user_id="u-author",
+        sealed=dict(_SEALED),
+    )
+    assert outcome == "not_following"
+    assert relay.queued == []

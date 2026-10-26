@@ -740,3 +740,76 @@ async def test_a_frame_applies_at_most_its_cap(db, monkeypatch):
     changed = await inbound._on_delete_certs(certs, gfs_id="g1")
     assert changed == 2
     assert await SqliteMomentRepo(db).get("m-2", include_deleted=True) is None
+
+
+# ── v_68: the author household's key-wrap key, and reaction frames ────────
+
+
+async def test_a_verified_create_keeps_the_authors_keywrap_key(db):
+    """v_68: a create that verified and opened leaves the author household's
+    key-wrap key on every local follow of them through that GFS."""
+    inbound, follows = await _env(db, followers=("u1", "u2"))
+    kw = "ab" * 32
+    await _create(inbound, _moment(author_keywrap_pk=kw, author_keywrap_suite="x25519"))
+    for uid in ("u1", "u2"):
+        follow = await _follow(follows, uid)
+        assert follow.followed_keywrap_pk == kw
+        assert follow.followed_keywrap_suite == "x25519"  # stored with its suite
+
+
+async def test_a_forged_or_unusable_keywrap_key_is_not_kept(db):
+    """A bad signature, an unknown KEM suite (refused, never defaulted) or a
+    malformed key leaves the follow without one — reactions stay home."""
+    inbound, follows = await _env(db)
+    await _create(
+        inbound,
+        _moment("m-forged", author_keywrap_pk="cd" * 32, author_keywrap_suite="x25519"),
+        seed=_OTHER_SEED,
+    )
+    await _create(
+        inbound,
+        _moment(
+            "m-pq", author_keywrap_pk="ef" * 32, author_keywrap_suite="x25519+mlkem768"
+        ),
+    )
+    await _create(inbound, _moment("m-nosuite", author_keywrap_pk="ef" * 32))
+    await _create(
+        inbound,
+        _moment("m-short", author_keywrap_pk="ef" * 8, author_keywrap_suite="x25519"),
+    )
+    await _create(
+        inbound,
+        _moment("m-nothex", author_keywrap_pk="zz" * 32, author_keywrap_suite="x25519"),
+    )
+    assert (await _follow(follows)).followed_keywrap_pk is None
+
+
+async def test_a_moment_already_held_does_not_change_the_keywrap_key(db):
+    """Only a live moment not held yet updates the key — a replay of an old
+    envelope can't roll a newer key back."""
+    inbound, follows = await _env(db)
+    await _create(
+        inbound, _moment(author_keywrap_pk="ab" * 32, author_keywrap_suite="x25519")
+    )
+    await _create(
+        inbound, _moment(author_keywrap_pk="cd" * 32, author_keywrap_suite="x25519")
+    )
+    assert (await _follow(follows)).followed_keywrap_pk == "ab" * 32
+
+
+class _Reactions:
+    def __init__(self) -> None:
+        self.frames: list[tuple[dict, str]] = []
+
+    async def on_gfs_reaction(self, frame: dict, *, gfs_id: str) -> None:
+        self.frames.append((frame, gfs_id))
+
+
+async def test_a_moment_reaction_frame_goes_to_the_router(db):
+    inbound, _follows = await _env(db)
+    frame = {"type": "moment_reaction", "from_instance": "inst-f", "sealed": {}}
+    await inbound.handle(frame, gfs_id="g1")  # unwired: dropped
+    reactions = _Reactions()
+    inbound.attach_reactions(reactions)  # type: ignore[arg-type]
+    await inbound.handle(frame, gfs_id="g1")
+    assert reactions.frames == [(frame, "g1")]

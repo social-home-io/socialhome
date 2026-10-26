@@ -18,6 +18,8 @@ Three surfaces:
     one follower household it names (v_62).
   - ``POST /gfs/moments/users/{user_id}/key_request`` — a follower
     household asks the author's household for its current key (v_62).
+  - ``POST /gfs/moments/users/{user_id}/react`` — a follower household's
+    sealed reaction, pushed to the author's household only (v_68).
 * **Public discovery** ``GET /gfs/moments/users`` (JSON, w/ ``?q=``),
   ``GET /gfs/moments/users/{user_id}`` (per-user JSON),
   ``GET /gfs/moments/users/{user_id}/picture`` (avatar bytes).
@@ -48,7 +50,10 @@ from ...moment_public_seal import (
     ENVELOPE_FIELDS,
     MAX_CIPHERTEXT_CHARS,
     MAX_MOMENT_ID_CHARS,
+    MAX_REACT_BODY_BYTES,
+    REACT_BODY_FIELDS,
     is_wire_int,
+    react_sealed_ok,
 )
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
@@ -508,6 +513,44 @@ class GfsMomentKeyRequestView(GfsBaseView):
             want_gen=want if is_wire_int(want) else 0,
         )
         return web.json_response({"queued": True}, status=202)
+
+
+class GfsMomentReactView(GfsBaseView):
+    """``POST /gfs/moments/users/{user_id}/react`` — a follower household's
+    sealed reaction for the author's household (v_68).
+
+    Signed by the follower household; the body is exactly ``{instance_id,
+    sealed}`` (:data:`~socialhome.moment_public_seal.REACT_BODY_FIELDS`):
+    the reaction — who, which moment, which emoji, add or removal — is
+    sealed to the author household's key-wrap key and padded to one size,
+    so this server never reads it. Taken only from a household that follows
+    the author here, under per-(household, author) and per-household rate
+    limits. ``202`` whether the author's household was online, reached on
+    another node, queued or (over its queue budget) not — that is not told
+    back; ``403`` when the sender follows no such author here, ``429`` past
+    a limit."""
+
+    async def post(self) -> web.Response:
+        result = await _rtc_authenticate(self, max_bytes=MAX_REACT_BODY_BYTES)
+        if isinstance(result, web.Response):
+            return result
+        body, sender = result
+        sealed = body.get("sealed")
+        if set(body) != REACT_BODY_FIELDS or not react_sealed_ok(sealed):
+            return web.json_response({"error": "invalid_reaction"}, status=422)
+        registry = self.svc(K.gfs_moment_public_registry_key)
+        outcome = await registry.relay_reaction(
+            follower_instance_id=sender,
+            followed_user_id=self.match("user_id"),
+            sealed=sealed,
+        )
+        if outcome == "not_following":
+            return web.json_response({"error": "not_following"}, status=403)
+        if outcome == "rate_limited":
+            resp = web.json_response({"error": "rate_limited"}, status=429)
+            resp.headers["Retry-After"] = "60"
+            return resp
+        return web.json_response({"accepted": True}, status=202)
 
 
 class GfsMomentFollowerStatsView(GfsBaseView):

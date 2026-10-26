@@ -1859,6 +1859,7 @@
   "capability.follower_moment_retention": "Elige cuánto tiempo conservan tus momentos tus seguidores",
   "capability.late_moment_deletes": "Los borrados llegan a cada copia de un momento",
   "capability.routed_moment_reactions": "Las reacciones llegan a autores más lejanos",
+  "capability.gfs_moment_reactions": "Las reacciones llegan a los autores que sigues a través de un GFS",
   "space.settings_page.moderation.queue_meta": "Publicaciones por revisar, solicitudes y denuncias",
   "space.settings_page.moderation.days": "días",
   "space.settings_page.danger.summary": "Archivar, ceder o eliminar",

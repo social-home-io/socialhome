@@ -150,6 +150,19 @@ def test_retry_after_s_counts_down_to_the_oldest_stamp_leaving_the_window():
     assert rl.retry_after_s("k", window_s=60) == 1  # rounded up, never 0
 
 
+def test_has_room_reads_without_recording():
+    """``has_room`` answers what ``is_allowed`` would, and records nothing —
+    for a caller that charges only once the work turned out to count."""
+    now = [100.0]
+    rl = RateLimiter(monotonic=lambda: now[0])
+    assert rl.has_room("k", limit=1, window_s=60)
+    assert rl.has_room("k", limit=1, window_s=60)
+    assert rl.is_allowed("k", limit=1, window_s=60)
+    assert not rl.has_room("k", limit=1, window_s=60)
+    now[0] = 161.0
+    assert rl.has_room("k", limit=1, window_s=60)
+
+
 def test_retry_after_s_is_zero_for_an_empty_bucket():
     rl = RateLimiter()
     assert rl.retry_after_s("never-seen", window_s=60) == 0

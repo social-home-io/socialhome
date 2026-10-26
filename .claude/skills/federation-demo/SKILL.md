@@ -220,6 +220,11 @@ That single command runs the full sequence:
      reaction within 30 s (naming any ``refusing`` log line if not), then
      that d's removal reaches c too. Pins ``MIN_FOR_ROUTED_MOMENT_REACTIONS``
      at v_67.
+   - **v_68 reactions through a GFS.** Pins ``MIN_FOR_GFS_MOMENT_REACTIONS``
+     at v_68, requires the GFS's signed ``/gfs/info`` to prove
+     ``moment_reactions``, and — when ``gfs-moment-profile`` ran — that a
+     holds e's 🔥 on Noor's public moment (13z): e, paired with nobody,
+     reacted through the GFS.
    - **v_49 writer certificates.** Every confirmed peer must advertise
      ``OURS`` = 49 (the check above), and — when the ``gfs-invite-link``
      chain has run — the link-joined household **e** must hold a writer
@@ -1758,6 +1763,19 @@ viewer does in WebCrypto) and expects the moment's text, the author's name
 and a media descriptor whose picture blob the GFS serves. The GFS log since
 the request must not contain ``k``, and the GFS's ``/moments/{user}`` page
 shows the profile only — not the moment's text.
+
+**Reactions through the GFS (v_68).** e keeps a's key-wrap key from the
+signed moment (``moment_public_follows.followed_keywrap_pk``, with its
+``followed_keywrap_suite``) and its
+``GET /api/moments/{id}`` says ``reactions_reach: "author"``. e reacts 👏,
+takes it back, then reacts 🔥 — each sealed to a's key-wrap key and posted to
+``POST /gfs/moments/users/{author}/react`` on the GFS the moment came
+through, which pushes ``moment_reaction`` to a only. a's
+``moment_reactions`` must follow each change within 30 s (naming any
+``moment_reaction via GFS … refusing`` line if not); the GFS log since the
+first post must not contain either emoji, e's user id or the moment id,
+``gfs.db`` / ``gfs.db-wal`` neither emoji, and e and a must still be
+unpaired.
 
 ### ``gfs-moment-late-delete`` — a public delete leaves its signed certificate on the GFS (v_66)
 

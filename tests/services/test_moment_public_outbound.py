@@ -219,6 +219,38 @@ async def test_public_local_moment_fans_to_each_registered_gfs(outbound_setup):
     assert s["session"].posts[1][1] == envelope
 
 
+async def test_a_create_names_the_households_keywrap_key_sealed(outbound_setup):
+    """v_68: the author household's key-wrap key + its suite ride inside the
+    sealed create body (under the envelope signature) — never in the clear,
+    never on a delete — and not before the key is attached."""
+    s = outbound_setup
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["moments"].save(_moment(moment_id="m-0"))
+    await s["bus"].publish(_created_event("m-0"))
+    assert "author_keywrap_pk" not in _opened(s["session"].posts[-1][1])
+    kw = bytes(range(32))
+    s["sub"].attach_identity(
+        own_instance_id="inst-self", signing_key=b"\x01" * 32, keywrap_public_key=kw
+    )
+    await s["moments"].save(_moment())
+    await s["bus"].publish(_created_event())
+    envelope = s["session"].posts[-1][1]
+    assert kw.hex() not in str(envelope)
+    body = _opened(envelope)
+    assert body["author_keywrap_pk"] == kw.hex()
+    assert body["author_keywrap_suite"] == "x25519"
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="inst-self",
+            is_public=True,
+        )
+    )
+    deleted = [b for u, b in s["session"].posts if u.endswith("/gfs/moments/delete")]
+    assert "author_keywrap_pk" not in _opened(deleted[-1])
+
+
 async def test_the_profile_rides_only_when_it_changed(outbound_setup, db):
     """Every moment names the profile_rev; the profile itself rides the
     first moment and then only when it changed."""

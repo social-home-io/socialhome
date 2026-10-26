@@ -701,6 +701,47 @@ async def test_the_relay_queue_keeps_the_newest_at_its_cap(wiring, monkeypatch):
     assert [r.sealed["payload"] for r in rows] == ["second"]
 
 
+def _reaction(n: int) -> dict:
+    # ``type`` last on purpose: the queue writes it first.
+    return {"from_instance": "f" * 32, "sealed": {"n": n}, "type": "moment_reaction"}
+
+
+async def test_queued_reactions_are_capped_and_never_evict_other_rows(
+    wiring, monkeypatch, caplog
+):
+    """#1179 F1: sealed reactions are a capped kind of relay row — the
+    newest ``RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT`` stay, and they never
+    displace a queued moment or space item (a reaction is dropped instead)."""
+    _fed, queue_repo, registry, relay = wiring
+    target = "recipient2home2222222222222222aa"
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_PER_RECIPIENT", 4)
+    monkeypatch.setattr(
+        envelope_relay_mod, "RELAY_QUEUE_MAX_REACTIONS_PER_RECIPIENT", 2
+    )
+    moment = {"type": "incoming_public_moment", "payload": {"moment_id": "m"}}
+    assert await relay.queue_relay_many([target], moment) == 1
+    for n in range(4):
+        assert await relay.queue_relay_many([target], _reaction(n)) == 1
+    assert await relay.queue_relay_many([target], _item("space")) == 1
+    # The household's queue is full: a reaction makes room from its own kind.
+    assert await relay.queue_relay_many([target], _reaction(9)) == 1
+    registry.online.add(target)
+    assert await relay.drain(target) == 4
+    sent = [frame for _t, frame in registry.sent]
+    assert sent[0] == moment
+    assert {**_item("space"), "type": RELAY_FRAME_TYPE} in sent
+    reactions = [f["sealed"] for f in sent if f["type"] == "moment_reaction"]
+    assert reactions == [{"n": 3}, {"n": 9}]
+    # Full of other kinds only: a reaction can't make room — it is dropped.
+    registry.online.discard(target)
+    for i in range(4):
+        assert await relay.queue_relay_many([target], _item(f"s{i}")) == 1
+    with caplog.at_level(logging.INFO, logger="socialhome.global_server"):
+        assert await relay.queue_relay_many([target], _reaction(10)) == 0
+    assert "no room for a queued reaction" in caplog.text
+    assert await queue_repo.count_for(target) == 4
+
+
 async def test_an_item_over_the_caps_on_its_own_is_not_queued(
     wiring, monkeypatch, caplog
 ):

@@ -108,6 +108,13 @@ class RateLimiter:
         self._windows[key] = times
         return True
 
+    def has_room(self, key: str, *, limit: int, window_s: int) -> bool:
+        """Whether :meth:`is_allowed` would allow ``key`` now. Pure read:
+        records nothing — for a caller that charges (``is_allowed``) only
+        once the work turned out to count."""
+        cutoff = self._monotonic() - window_s
+        return sum(1 for t in self._windows.get(key, ()) if t > cutoff) < limit
+
     def retry_after_s(self, key: str, *, window_s: int) -> int:
         """Whole seconds until ``key``'s oldest request leaves the window.
 

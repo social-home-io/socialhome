@@ -331,7 +331,11 @@ couple two trust models and leak block-list shape to peers.
   cache). A relay forwards one only when its own return token opens (this
   moment, handed back by the neighbour it was minted for, not expired) to a
   confirmed v_67 household. Everything else is refused at WARNING
-  (`tests/protocol/test_moment_reaction_routed.py`).
+  (`tests/protocol/test_moment_reaction_routed.py`). A reaction that came
+  through a GFS (`moment_reaction` frame, v_68) gets the same checks plus:
+  the household the GFS authenticated is the reactor's own, and the moment
+  is public ([`momentum_public.md`](momentum_public.md#reactions-through-the-gfs-v_68),
+  `tests/protocol/test_moment_reaction_gfs.py`).
 * Refused events are logged at WARNING and never relayed
   (`tests/protocol/test_moment_scope.py`).
 
@@ -457,8 +461,14 @@ reaction goes back along the path the moment came.
   restart wiped the in-memory replay cache — never brings it back, and an
   identical replay of the newest change is a no-op. A reactor the origin doesn't know shows
   as "Someone" — no new column.
+* **Through a GFS (v_68).** A moment that came through a GFS has no mesh
+  route; its reactions take the same sealed reaction back through that GFS
+  to the author's household instead (`POST
+  /gfs/moments/users/{author}/react`, pushed as `moment_reaction`) — see
+  [`momentum_public.md` § Reactions through the GFS](momentum_public.md#reactions-through-the-gfs-v_68).
 * **Degraded.** No complete route (an older origin or relay on the path, a
-  moment that came through a GFS, a first neighbour below v_67): the
+  first neighbour below v_67), or a moment from a GFS that can't take it (an
+  older GFS, an author household that named no key-wrap key): the
   reaction stays in the reactor's household, as before. Every API item
   carries `reactions_reach` — `author` or `household` — and the SPA keeps
   React on every card and says "Reactions here are seen in your household
@@ -588,6 +598,9 @@ instance.
 - Service: `socialhome/services/moment_service.py`.
 - Outbound federation:
   ``socialhome/services/moment_federation_outbound.py``.
+- Reactions through a GFS (v_68): `services/moment_reaction_gfs.py`
+  (follower side), `MomentReactionRouter.on_gfs_reaction` (author side) —
+  see [`momentum_public.md`](momentum_public.md#reactions-through-the-gfs-v_68)
 - Routed reactions (v_67): wire + crypto
   ``socialhome/federation/moment_reaction_route.py``; reactor / relay /
   origin ``socialhome/services/moment_reaction_router.py``.

@@ -29,7 +29,11 @@ from socialhome.domain.federation import (
     InstanceSource,
     RemoteInstance,
 )
-from socialhome.domain.moment import Moment, MomentReactionRoute
+from socialhome.domain.moment import (
+    Moment,
+    MomentGfsReactionTarget,
+    MomentReactionRoute,
+)
 from socialhome.federation.moment_reaction_route import (
     build_reaction,
     open_reaction,
@@ -562,3 +566,205 @@ def test_seen_cache_is_bounded_and_expires(router, monkeypatch):
     assert not router.r._remember_seen(bytes([4]), now)
     # Past the window everything is forgotten.
     assert router.r._remember_seen(bytes([4]), now + mrr.MAX_REACTION_AGE_MS + 1)
+
+
+# ── v_68: through the GFS a public moment came on ────────────────────────
+
+
+class _Gfs:
+    """``MomentReactionGfs`` stand-in."""
+
+    def __init__(self, ok: bool = True, suite: str = "x25519") -> None:
+        self.ok = ok
+        self.suite = suite
+        self.sent: list[dict] = []
+
+    async def target(self, moment):
+        if not self.ok or moment.received_via != "gfs":
+            return None
+        return MomentGfsReactionTarget(
+            gfs_id=moment.received_via_gfs_id,
+            keywrap_pk=ORIGIN_KW.public_key.hex(),
+            keywrap_suite=self.suite,
+        )
+
+    async def send(self, target, **kwargs):
+        self.sent.append({"target": target, **kwargs})
+
+
+def _gfs_moment(mid: str = "m-g", **over) -> Moment:
+    return _moment(
+        mid,
+        received_via="gfs",
+        received_via_gfs_id="g1",
+        is_public=True,
+        hop_count=1,
+        **over,
+    )
+
+
+async def test_reach_for_a_gfs_moment(router):
+    gfs = _Gfs()
+    router.r.attach_gfs(gfs)
+    moments = [
+        _gfs_moment("gfs-ok"),
+        _gfs_moment("gfs-ended", expires_at="2000-01-01T00:00:00+00:00"),
+    ]
+    assert await router.r.reach_for(moments) == {
+        "gfs-ok": "author",
+        "gfs-ended": "household",
+    }
+    gfs.ok = False
+    assert await router.r.reach_for([_gfs_moment("gfs-no")]) == {"gfs-no": "household"}
+
+
+async def test_a_gfs_moment_reaction_is_sealed_and_posted_through_its_gfs(router):
+    anna = _local_user(router)
+    gfs = _Gfs()
+    router.r.attach_gfs(gfs)
+    router.moments.rows["m-g"] = _gfs_moment()
+    now = datetime.now(UTC)
+    for emoji in ("👏", "🔥"):
+        assert await router.r.queue_reaction(
+            moment_id="m-g", reactor_user_id=anna, emoji=emoji, occurred_at=now
+        )
+    await asyncio.sleep(0.05)
+    [sent] = gfs.sent
+    assert sent["target"].gfs_id == "g1"
+    assert sent["author_user_id"] == "u-far"
+    assert sent["retry_key"] == f"m-g|{anna}"
+    assert router.fed.sent == []  # nothing on the mesh
+    inner = open_reaction(sealed=sent["sealed"], keywrap_priv=ORIGIN_KW.private_key)
+    assert (inner["emoji"], inner["origin_instance_id"]) == ("🔥", "origin")
+
+
+async def test_a_gfs_target_under_an_unknown_suite_is_never_sealed_to(router, caplog):
+    """#1179: the author's key is sealed to only under a suite this build
+    supports — an unknown one is never read as X25519; nothing is sent."""
+    anna = _local_user(router)
+    gfs = _Gfs(suite="x25519+mlkem768")
+    router.r.attach_gfs(gfs)
+    router.moments.rows["m-g"] = _gfs_moment()
+    await router.r.queue_reaction(
+        moment_id="m-g", reactor_user_id=anna, emoji="👏", occurred_at=datetime.now(UTC)
+    )
+    await asyncio.sleep(0.05)
+    assert gfs.sent == []
+    assert "unsupported key-wrap suite" in caplog.text
+
+
+async def test_a_gfs_moment_stays_home_without_the_transport_or_a_target(router):
+    anna = _local_user(router)
+    router.moments.rows["m-g"] = _gfs_moment()
+    now = datetime.now(UTC)
+    assert not await router.r.queue_reaction(
+        moment_id="m-g", reactor_user_id=anna, emoji="👏", occurred_at=now
+    )
+    router.r.attach_gfs(_Gfs(ok=False))
+    assert not await router.r.queue_reaction(
+        moment_id="m-g", reactor_user_id=anna, emoji="👏", occurred_at=now
+    )
+    router.moments.rows["m-x"] = _moment("m-x", received_via="self")
+    assert not await router.r.queue_reaction(
+        moment_id="m-x", reactor_user_id=anna, emoji="👏", occurred_at=now
+    )
+
+
+async def test_a_gfs_moment_of_a_paired_origin_goes_direct(router):
+    """#1178 F1 holds for GFS moments too: a paired origin is reached
+    directly under the hide list, never through a GFS."""
+    anna = _local_user(router)
+    gfs = _Gfs()
+    router.r.attach_gfs(gfs)
+    router.repo.peers["origin"] = _peer("origin")
+    router.moments.rows["m-g"] = _gfs_moment()
+    assert not await router.r.queue_reaction(
+        moment_id="m-g",
+        reactor_user_id=anna,
+        emoji="👏",
+        occurred_at=datetime.now(UTC),
+    )
+    assert await router.r.direct_target("u-far", moment_id="m-g") == "origin"
+
+
+def _gfs_frame(sender=None, *, reactor=None, emoji="👏") -> dict:
+    reactor = reactor or generate_identity_keypair()
+    inner = build_reaction(
+        seed=reactor.private_key,
+        identity_pk=reactor.public_key,
+        reactor_instance_id=derive_instance_id(reactor.public_key),
+        reactor_user_id=derive_user_id(reactor.public_key, "r"),
+        reactor_anchor="r",
+        moment_id="m-own",
+        author_user_id="u-anna",
+        origin_instance_id=OWN,
+        emoji=emoji,
+        occurred_at_ms=int(datetime.now(UTC).timestamp() * 1000),
+    )
+    return {
+        "type": "moment_reaction",
+        "from_instance": sender or derive_instance_id(reactor.public_key),
+        "sealed": seal_reaction(origin_keywrap_pub=OWN_KW.public_key, inner=inner),
+    }
+
+
+def _own_public_moment(router, *, public: bool = True) -> None:
+    router.users.local["u-anna"] = SimpleNamespace(user_id="u-anna")
+    router.moments.rows["m-own"] = _moment(
+        "m-own",
+        author_user_id="u-anna",
+        origin_instance_id=OWN,
+        received_via="self",
+        is_public=public,
+    )
+
+
+async def test_the_author_applies_a_gfs_frame(router):
+    _own_public_moment(router)
+    await router.r.on_gfs_reaction(_gfs_frame(), gfs_id="g1")
+    assert len(router.moments.applied) == 1
+    assert isinstance(router.bus.events[0], MomentReactionChanged)
+
+
+async def test_the_author_refuses_a_bad_gfs_frame(router, caplog):
+    _own_public_moment(router)
+    with caplog.at_level("WARNING"):
+        await router.r.on_gfs_reaction(_gfs_frame(sender="inst-other"), gfs_id="g1")
+        await router.r.on_gfs_reaction({"type": "moment_reaction"}, gfs_id="g1")
+        bare = _gfs_frame()
+        bare["sealed"] = {"kem_suite": "x25519"}
+        await router.r.on_gfs_reaction(bare, gfs_id="g1")
+    assert router.moments.applied == []
+    assert caplog.text.count("refusing") == 3
+
+
+async def test_the_author_refuses_a_gfs_frame_for_a_private_moment(router, caplog):
+    _own_public_moment(router, public=False)
+    with caplog.at_level("WARNING"):
+        await router.r.on_gfs_reaction(_gfs_frame(), gfs_id="g1")
+    assert router.moments.applied == []
+    assert "moment is not public" in caplog.text
+
+
+async def test_the_author_refuses_gfs_frames_before_attaching_its_key():
+    r = MomentReactionRouter(
+        bus=_Bus(),
+        federation_service=_Fed(_FedRepo()),
+        federation_repo=_FedRepo(),
+        moment_repo=_Moments(),
+        user_repo=_Users(),
+        ban_repo=_Bans(),
+    )
+    await r.on_gfs_reaction(_gfs_frame(), gfs_id="g1")
+
+
+async def test_a_gfs_over_its_rate_is_refused_before_any_crypto(
+    router, monkeypatch, caplog
+):
+    _own_public_moment(router)
+    monkeypatch.setattr(mrr, "ORIGIN_PER_GFS_PER_MIN", 1)
+    with caplog.at_level("WARNING"):
+        await router.r.on_gfs_reaction(_gfs_frame(), gfs_id="g1")
+        await router.r.on_gfs_reaction(_gfs_frame(), gfs_id="g1")
+    assert len(router.moments.applied) == 1
+    assert "GFS over its reaction rate" in caplog.text

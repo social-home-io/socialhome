@@ -103,6 +103,7 @@ from .moments_public import (
     GfsMomentMediaView,
     GfsMomentPublicDeleteView,
     GfsMomentPublicPublishView,
+    GfsMomentReactView,
     GfsMomentSuitesView,
     GfsUserDeregisterView,
     GfsUserDetailHtmlView,
@@ -313,6 +314,8 @@ def register_routes(
     app.router.add_view(
         "/gfs/moments/users/{user_id}/key_request", GfsMomentKeyRequestView
     )
+    # v_68 — a follower household's sealed reaction, to the author only.
+    app.router.add_view("/gfs/moments/users/{user_id}/react", GfsMomentReactView)
     app.router.add_view(
         "/gfs/moments/users/{user_id}/follower_stats", GfsMomentFollowerStatsView
     )
