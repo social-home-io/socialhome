@@ -345,6 +345,25 @@ class GfsMomentMedia:
 
 
 @dataclass(slots=True, frozen=True)
+class GfsPendingDeleteCert:
+    """One signed moment delete certificate still owed to a follower
+    household (v_66), as the reconnect push reads it.
+
+    ``rank`` is its place in its author's backlog (1 = the oldest still
+    owed) and ``author_left`` how many of that author are owed in all — the
+    push shares itself out by ``rank`` and closes the author's cursor once
+    it sent ``author_left``.
+    """
+
+    author_user_id: str
+    moment_id: str
+    created_at: int
+    cert: str
+    rank: int
+    author_left: int
+
+
+@dataclass(slots=True, frozen=True)
 class GfsMomentKeyMail:
     """The latest sealed moment key for one follower household (v_62).
 

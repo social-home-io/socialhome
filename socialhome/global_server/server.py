@@ -647,6 +647,8 @@ class GfsApp:
         log.info("GFS: shutting down")
         # Background envelope accepts write to the DB — settle them first.
         await self.services.envelope_relay.close()
+        # Delete-certificate drains move cursors in the DB (v_66).
+        await self.services.moment_delete_log.close()
         await self.services.maintenance.stop()
         await self.services.member_publish.stop()
         await self.services.addressee.stop()

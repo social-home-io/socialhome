@@ -21,14 +21,19 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain import federation_retention
 from ..domain.federation import FederationEventType, PairingStatus
 from ..domain.federation_retention import (
+    ANY_RELAYED_DELETE_KEY_PREFIX,
     MAX_PENDING_PER_PEER,
     NEVER_DROP,
+    RELAYED_DELETE_KEY_PREFIX,
+    RETENTION_DAYS,
+    capped_delete_key,
     retention_expires_at,
 )
 from .base import rows_to_dicts
@@ -76,6 +81,9 @@ class AbstractOutboxRepo(Protocol):
     ) -> int: ...
     async def count_pending_for(self, instance_id: str) -> int: ...
     async def count_failed_for(self, instance_id: str) -> int: ...
+    async def count_pending_with_key_prefix(
+        self, instance_id: str, prefix: str
+    ) -> int: ...
     async def evict_oldest_droppable(self, instance_id: str) -> bool: ...
     async def delete_for_instance(self, instance_id: str) -> None: ...
     async def delete_pending_of_types(
@@ -125,6 +133,14 @@ class SqliteOutboxRepo:
         reached here can no longer strand a row behind the purge.
         """
         entry_id = msg_id or uuid.uuid4().hex
+        if (
+            supersede_key is not None
+            and supersede_key.startswith(RELAYED_DELETE_KEY_PREFIX)
+            and expires_at is None
+        ):
+            supersede_key, expires_at = await self._relayed_delete_class(
+                instance_id, supersede_key
+            )
         # §4.4.7: default the retention deadline from the event type so every
         # AbstractOutboxRepo caller (today: send_event) gets a 7-day TTL on
         # ordinary events and NULL (retry forever) on NEVER_DROP ones. An
@@ -184,6 +200,37 @@ class SqliteOutboxRepo:
             )
             return None
         return entry_id
+
+    async def _relayed_delete_class(
+        self, instance_id: str, key: str
+    ) -> tuple[str, str | None]:
+        """The key and expiry a delete relayed for another origin is queued
+        under: long-lived (as is) while that origin holds fewer than
+        :data:`~socialhome.domain.federation_retention
+        .MAX_LONG_LIVED_RELAYED_PER_ORIGIN` pending rows for *instance_id*,
+        otherwise the ordinary class (adversarial review F2) — a household
+        signing deletes for made-up ids can't pin a peer's queue for a month."""
+        origin, _, moment_id = key[len(RELAYED_DELETE_KEY_PREFIX) :].partition(":")
+        held = await self.count_pending_with_key_prefix(
+            instance_id, f"{RELAYED_DELETE_KEY_PREFIX}{origin}:"
+        )
+        if held < federation_retention.MAX_LONG_LIVED_RELAYED_PER_ORIGIN:
+            return key, None
+        ordinary = datetime.now(UTC) + timedelta(days=RETENTION_DAYS)
+        return capped_delete_key(origin, moment_id), ordinary.isoformat()
+
+    async def count_pending_with_key_prefix(self, instance_id: str, prefix: str) -> int:
+        """Pending rows for *instance_id* whose key starts with *prefix*
+        (a range over ``idx_federation_outbox_supersede``)."""
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM federation_outbox WHERE instance_id=?"
+                " AND supersede_key >= ? AND supersede_key < ?"
+                " AND status='pending'",
+                (instance_id, prefix, prefix + "\uffff"),
+                default=0,
+            )
+        )
 
     async def drop_superseded(self, instance_id: str, supersede_key: str) -> int:
         """Delete ``instance_id``'s PENDING row(s) carrying ``supersede_key``;
@@ -372,6 +419,9 @@ class SqliteOutboxRepo:
 
         Returns True iff a row was evicted. NEVER_DROP rows (security /
         structural state) are excluded — they are never dropped to make room.
+        A moment's delete we only relay for another household goes first
+        (adversarial review F2): a household flooding deletes can crowd out
+        other relayed ones, never our own events.
         """
         never = sorted(e.value for e in NEVER_DROP)
         placeholders = ",".join("?" * len(never))
@@ -380,10 +430,16 @@ class SqliteOutboxRepo:
             SELECT id FROM federation_outbox
              WHERE instance_id=? AND status='pending'
                AND event_type NOT IN ({placeholders})
-             ORDER BY datetime(created_at) ASC, id ASC
+             ORDER BY COALESCE(substr(supersede_key, 1, ?) = ?, 0) DESC,
+                      datetime(created_at) ASC, id ASC
              LIMIT 1
             """,
-            (instance_id, *never),
+            (
+                instance_id,
+                *never,
+                len(ANY_RELAYED_DELETE_KEY_PREFIX),
+                ANY_RELAYED_DELETE_KEY_PREFIX,
+            ),
         )
         if row is None:
             return False
@@ -491,4 +547,5 @@ def _row_to_entry(row: dict) -> OutboxEntry:
         expires_at=row.get("expires_at"),
         delivered_at=row.get("delivered_at"),
         failed_at=row.get("failed_at"),
+        supersede_key=row.get("supersede_key"),
     )

@@ -6,13 +6,20 @@ from datetime import UTC, datetime, timedelta
 
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_retention import (
+    CAPPED_DELETE_KEY_PREFIX,
     LONG_LIVED,
     LONG_LIVED_TTL,
     NEVER_DROP,
+    OWN_DELETE_KEY_PREFIX,
+    RELAYED_DELETE_KEY_PREFIX,
     RETENTION_DAYS,
     SHORT_LIVED,
     SHORT_LIVED_TTL,
     TERMINAL_GRACE,
+    capped_delete_key,
+    is_long_lived,
+    moment_delete_key,
+    relayed_delete_prefix,
     retention_expires_at,
     supersede_key,
 )
@@ -200,3 +207,34 @@ def test_a_moment_delete_lives_thirty_days():
     # A moment's create keeps the ordinary week.
     created = retention_expires_at(FederationEventType.MOMENT_CREATED, now=base)
     assert datetime.fromisoformat(created) == base + timedelta(days=7)
+
+
+def test_a_moment_delete_is_keyed_by_who_signed_it():
+    """Adversarial review F2: our own delete and a relayed one are told apart
+    (and a relayed one per origin), so the outbox can cap the relayed ones."""
+    MD = FederationEventType.MOMENT_DELETED
+    own = {"moment_id": "m1", "origin_instance_id": "me"}
+    relayed = {"moment_id": "m1", "origin_instance_id": "them"}
+    assert moment_delete_key(MD, own, own_instance_id="me") == (
+        f"{OWN_DELETE_KEY_PREFIX}m1"
+    )
+    key = moment_delete_key(MD, relayed, own_instance_id="me")
+    assert key == f"{RELAYED_DELETE_KEY_PREFIX}them:m1"
+    assert key.startswith(relayed_delete_prefix("them"))
+    assert not key.startswith(relayed_delete_prefix("the"))
+    assert capped_delete_key("them", "m1").startswith(CAPPED_DELETE_KEY_PREFIX)
+    # Anything else, or a delete missing its ids, has no such key.
+    assert (
+        moment_delete_key(FederationEventType.MOMENT_CREATED, own, own_instance_id="me")
+        is None
+    )
+    assert moment_delete_key(MD, {"moment_id": "m1"}, own_instance_id="me") is None
+
+
+def test_only_an_uncapped_moment_delete_is_long_lived():
+    MD = FederationEventType.MOMENT_DELETED
+    assert is_long_lived(MD, None)  # queued before keys existed
+    assert is_long_lived(MD, f"{OWN_DELETE_KEY_PREFIX}m1")
+    assert is_long_lived(MD, f"{RELAYED_DELETE_KEY_PREFIX}them:m1")
+    assert not is_long_lived(MD, capped_delete_key("them", "m1"))
+    assert not is_long_lived(FederationEventType.MOMENT_CREATED, None)

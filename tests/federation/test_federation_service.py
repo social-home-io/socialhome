@@ -25,6 +25,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
+from socialhome.domain import federation_retention as fr
 from socialhome.domain.events import (
     ConnectionReachable,
     PairingConfirmed,
@@ -5745,4 +5746,29 @@ async def test_drop_queued_drops_only_that_households_envelopes_of_those_types()
     assert [(e["instance_id"], e["event_type"]) for e in outbox.enqueued] == [
         ("peer-b", FederationEventType.SPACE_POST_CREATED),
         ("peer-c", FederationEventType.USER_UPDATED),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_queued_delete_is_keyed_by_who_signed_it():
+    """Adversarial review F2: a delete queued for an offline peer carries its
+    origin in the outbox key — ours apart from relayed ones, relayed ones per
+    origin — so the outbox can cap how many relayed ones stay 30 days."""
+    svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
+    for moment_id, origin in (
+        ("fake-1", "inst-mallory"),
+        ("ours-1", svc.own_instance_id),
+    ):
+        await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=FederationEventType.MOMENT_DELETED,
+            payload={
+                "moment_id": moment_id,
+                "author_user_id": "u",
+                "origin_instance_id": origin,
+            },
+        )
+    assert [r["supersede_key"] for r in outbox_repo.enqueued] == [
+        f"{fr.relayed_delete_prefix('inst-mallory')}fake-1",
+        f"{fr.OWN_DELETE_KEY_PREFIX}ours-1",
     ]

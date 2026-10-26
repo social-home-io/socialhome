@@ -8,11 +8,15 @@ after a long absence too — on both paths:
 
 * **Paired households (mesh).** A ``MOMENT_DELETED`` keeps retrying on the
   outbox's ceiling backoff for 30 days instead of giving up after ~10 h, so
-  a household offline for days still gets it; past 30 days it goes.
+  a household offline for days still gets it; past 30 days it goes. A
+  household relaying for another origin keeps at most 100 of that origin's
+  deletes per peer that long (adversarial review F2).
 * **GFS followers.** The author household hands the GFS the delete's signed
-  certificate (the mesh delete's origin signature — no content); the GFS
-  keeps it 30 days and pushes it to a follower household when it
-  reconnects, only for authors that household follows, at most 200 a time.
+  certificate (the mesh delete's origin signature — no content), retrying a
+  failed post for a day (F3); the GFS keeps it 30 days and pushes it to a
+  follower household when it reconnects, only for authors that household
+  follows, ≤ 200 a push and ≤ 100 of one author, past a per-author delivery
+  cursor — so one author's flood never crowds out another's delete (F1).
   The follower checks it against the key it pinned when it followed — a
   forged certificate, another household's, an unknown suite or one older
   than a moment can live changes nothing — and a replay changes nothing.
@@ -34,16 +38,21 @@ from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import MomentDeleted
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.federation_retention import (
+    MAX_LONG_LIVED_RELAYED_PER_ORIGIN,
+    moment_delete_key,
+)
 from socialhome.domain.moment import Moment
 from socialhome.global_server.moment_delete_log import (
+    DELETE_CERTS_PER_AUTHOR_PER_PUSH,
     DELETE_LOG_TTL_S,
-    MAX_DELETE_CERTS_PER_CONNECT,
     MomentDeleteLog,
 )
 from socialhome.global_server.repositories import (
     SqliteGfsMomentDeleteLogRepo,
     SqliteGfsMomentFollowRepo,
 )
+from socialhome.global_server.routes.moments_public import DELETE_CERT_MAX_AGE_S
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.outbox_processor import (
@@ -54,6 +63,10 @@ from socialhome.infrastructure.outbox_processor import (
 from socialhome.repositories.moment_public_repo import SqliteMomentPublicFollowRepo
 from socialhome.repositories.moment_repo import SqliteMomentRepo
 from socialhome.repositories.outbox_repo import SqliteOutboxRepo
+from socialhome.services.moment_delete_cert_retry import (
+    DELETE_CERT_RETRY_WINDOW_S,
+    classify_cert_status,
+)
 from socialhome.services.moment_public_inbound import MomentPublicInbound
 from tests.moment_public_wire import StubMomentKeys, delete_cert, now_iso
 
@@ -163,6 +176,57 @@ async def test_a_delete_stops_after_thirty_days(db):
         (ends + timedelta(seconds=1)).isoformat()
     )
     assert expired == 1 and (await _status(db, deleted))[0] == "failed"
+
+
+async def test_a_relaying_household_cannot_pin_a_peers_queue_for_a_month(db):
+    """Adversarial review F2: a paired household signs deletes for made-up
+    ids under its own origin; each is new here, so we relay it — to a peer
+    that is offline. Only MAX_LONG_LIVED_RELAYED_PER_ORIGIN of them keep
+    retrying for 30 days; the rest give up like any ordinary event. Our own
+    deletes keep their 30 days whatever that household floods."""
+    await _peer(db, "peer-away")
+    repo = SqliteOutboxRepo(db)
+    MD = FET.MOMENT_DELETED
+    flood = MAX_LONG_LIVED_RELAYED_PER_ORIGIN + 20
+    for i in range(flood):
+        await repo.enqueue(
+            instance_id="peer-away",
+            event_type=MD,
+            payload_json="{}",
+            supersede_key=moment_delete_key(
+                MD,
+                {"moment_id": f"fake-{i}", "origin_instance_id": "inst-mallory"},
+                own_instance_id=ORIGIN,
+            ),
+        )
+    ours = await repo.enqueue(
+        instance_id="peer-away",
+        event_type=MD,
+        payload_json="{}",
+        supersede_key=moment_delete_key(
+            MD,
+            {"moment_id": "m-ours", "origin_instance_id": ORIGIN},
+            own_instance_id=ORIGIN,
+        ),
+    )
+
+    async def deliver(entry):
+        return DeliveryOutcome.TRANSIENT
+
+    proc = OutboxProcessor(repo, deliver)
+    for _ in range(MAX_ATTEMPTS + 2):
+        await db.enqueue(
+            "UPDATE federation_outbox SET next_attempt_at=? WHERE status='pending'",
+            (datetime.now(UTC).isoformat(),),
+        )
+        while await proc.drain_once():
+            pass
+    pending = await db.fetchval(
+        "SELECT COUNT(*) FROM federation_outbox WHERE status='pending' AND id<>?",
+        (ours,),
+    )
+    assert pending == MAX_LONG_LIVED_RELAYED_PER_ORIGIN
+    assert (await _status(db, ours))[0] == "pending"
 
 
 # ── GFS followers: signed delete certificates ──────────────────────────
@@ -387,18 +451,85 @@ async def test_the_gfs_pushes_only_followed_authors_within_thirty_days_capped(gf
         cert='{"moment_id": "m-old"}',
         now=now - DELETE_LOG_TTL_S - 1,
     )
-    for i in range(MAX_DELETE_CERTS_PER_CONNECT + 5):
+    total = DELETE_CERTS_PER_AUTHOR_PER_PUSH + 5
+    for i in range(total):
         await repo.add(
             author_user_id="u-dana",
             moment_id=f"m{i:04d}",
             cert=orjson.dumps({"moment_id": f"m{i:04d}"}).decode(),
             now=now - 1000 + i,
         )
+    # One push carries one author's fair share…
     assert await gfs.log.push_to("inst-follower", now=now) == (
-        MAX_DELETE_CERTS_PER_CONNECT
+        DELETE_CERTS_PER_AUTHOR_PER_PUSH
     )
+    # …and the rest is still owed after the household is marked seen
+    # (adversarial review F1: never skipped by the seen mark).
+    await gfs.db.enqueue(
+        "UPDATE client_instances SET relay_seen_at=? WHERE instance_id=?",
+        (now + 60, "inst-follower"),
+    )
+    assert await gfs.log.push_to("inst-follower", now=now + 7200) == 5
     ids = [c["moment_id"] for f in _frames(gfs.sock) for c in f["certs"]]
-    assert len(ids) == MAX_DELETE_CERTS_PER_CONNECT
+    assert sorted(ids) == [f"m{i:04d}" for i in range(total)]
     assert "m-sam" not in ids and "m-old" not in ids
     # Pruned past its 30 days, never pushed again.
     assert await gfs.log.prune(now) == 1
+
+
+async def test_a_flood_by_one_followed_author_never_loses_anothers_delete(db, gfs):
+    """Adversarial review F1: a followed author posts certificates for
+    hundreds of made-up ids while the follower is away; the real delete of
+    another followed author still reaches it — in the first push, and even
+    after the household is marked seen."""
+    now = int(time.time())
+    repo = SqliteGfsMomentDeleteLogRepo(gfs.db)
+    await gfs.db.enqueue(
+        "INSERT INTO gfs_moment_follows(follower_user_id, follower_instance_id,"
+        " followed_user_id, created_at) VALUES('u2', 'inst-follower', 'u-sam', 1)"
+    )
+    await gfs.db.enqueue(
+        "UPDATE client_instances SET relay_seen_at=? WHERE instance_id=?",
+        (now - 10 * 86_400, "inst-follower"),
+    )
+    for i in range(300):
+        await repo.add(
+            author_user_id="u-sam",
+            moment_id=f"fake-{i:03d}",
+            cert=orjson.dumps({"moment_id": f"fake-{i:03d}"}).decode(),
+            now=now - 86_400 + i,
+        )
+    env = await _follower(db)
+    await _hold(env)
+    await repo.add(
+        author_user_id="u-dana",
+        moment_id="m-1",
+        cert=orjson.dumps(_cert()).decode(),
+        now=now - 86_400 + 400,
+    )
+    await gfs.log.push_to("inst-follower", now=now)
+    first = _frames(gfs.sock)[0]
+    assert "m-1" in [c["moment_id"] for c in first["certs"]]
+    for frame in _frames(gfs.sock):
+        await env.inbound.handle(frame, gfs_id="g1")
+    assert not await _live(env)
+    # The flood's remainder is still owed after the seen mark moves on.
+    await gfs.db.enqueue(
+        "UPDATE client_instances SET relay_seen_at=? WHERE instance_id=?",
+        (now + 60, "inst-follower"),
+    )
+    for k in range(5):
+        await gfs.log.push_to("inst-follower", now=now + 7200 + k)
+    ids = {c["moment_id"] for f in _frames(gfs.sock) for c in f["certs"]}
+    assert {f"fake-{i:03d}" for i in range(300)} <= ids
+
+
+def test_a_certificate_retried_for_a_day_is_still_fresh_at_the_gfs():
+    """Adversarial review F3: the author household retries a failed
+    certificate post for a day; the GFS takes one at least that old (with
+    slack), and a 404 / 422 from an old node mid-upgrade is retried."""
+    assert DELETE_CERT_MAX_AGE_S >= DELETE_CERT_RETRY_WINDOW_S + 3600
+    for status in (404, 422, 429, 503):
+        assert classify_cert_status(status, None).kind == "transient"
+    for status in (403, 409):
+        assert classify_cert_status(status, None).kind == "permanent"

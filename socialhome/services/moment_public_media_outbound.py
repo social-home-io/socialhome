@@ -220,44 +220,77 @@ class MomentPublicMediaOutbound:
         if conn is None or conn.status != "active":
             return False
         for bid, blob in prepared.blobs.items():
-            ts = int(time.time())
-            signed = sign_wire(
-                self._signing_key,
-                {
-                    "instance_id": self._own_instance_id,
-                    "blob_id": bid,
-                    "author_user_id": author_user_id,
-                    "expires_at": expires_at,
-                    "ts": ts,
-                },
+            status = await self._put_blob(
+                conn.inbox_url, bid, blob, author_user_id, expires_at
             )
-            headers = {
-                "X-SH-Instance": self._own_instance_id,
-                "X-SH-Author": author_user_id,
-                "X-SH-Expires": str(expires_at),
-                "X-SH-Timestamp": str(ts),
-                "X-SH-Signature": signed["signature"],
-                "Content-Type": "application/octet-stream",
-            }
-            try:
-                async with self._http_client.put(
-                    f"{conn.inbox_url}/gfs/moments/media/{bid}",
-                    data=blob,
-                    headers=headers,
-                    allow_redirects=False,
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as resp:
-                    if resp.status >= 300:
-                        log.warning(
-                            "moment_public.media: GFS %s refused a blob — HTTP %d",
-                            gfs_id,
-                            resp.status,
-                        )
-                        return False
-            except (aiohttp.ClientError, TimeoutError) as exc:
-                log.warning("moment_public.media: upload to %s failed: %s", gfs_id, exc)
+            short = int(time.time()) + MEDIA_KEEP_SHORT_S
+            if status == 422 and expires_at > short:
+                # A cluster mid-upgrade (F3): an old node behind a server
+                # that proved ``moment_media_30d`` refuses past 8 days. Keep
+                # the week an older server takes — a share link's picture
+                # outliving it is the only loss — rather than fail the
+                # publish. The rest of this moment's blobs ask the same.
+                log.info(
+                    "moment_public.media: GFS %s refused a month-long blob —"
+                    " asking a week",
+                    gfs_id,
+                )
+                expires_at = short
+                status = await self._put_blob(
+                    conn.inbox_url, bid, blob, author_user_id, expires_at
+                )
+            if status is None:
+                return False
+            if status >= 300:
+                log.warning(
+                    "moment_public.media: GFS %s refused a blob — HTTP %d",
+                    gfs_id,
+                    status,
+                )
                 return False
         return True
+
+    async def _put_blob(
+        self,
+        inbox_url: str,
+        bid: str,
+        blob: bytes,
+        author_user_id: str,
+        expires_at: int,
+    ) -> int | None:
+        """PUT one blob; its HTTP status, or ``None`` on a transport error."""
+        assert self._http_client is not None and self._signing_key is not None
+        ts = int(time.time())
+        signed = sign_wire(
+            self._signing_key,
+            {
+                "instance_id": self._own_instance_id,
+                "blob_id": bid,
+                "author_user_id": author_user_id,
+                "expires_at": expires_at,
+                "ts": ts,
+            },
+        )
+        headers = {
+            "X-SH-Instance": self._own_instance_id,
+            "X-SH-Author": author_user_id,
+            "X-SH-Expires": str(expires_at),
+            "X-SH-Timestamp": str(ts),
+            "X-SH-Signature": signed["signature"],
+            "Content-Type": "application/octet-stream",
+        }
+        try:
+            async with self._http_client.put(
+                f"{inbox_url}/gfs/moments/media/{bid}",
+                data=blob,
+                headers=headers,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                return int(resp.status)
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            log.warning("moment_public.media: upload to %s failed: %s", inbox_url, exc)
+            return None
 
     def remember(
         self, author_user_id: str, moment_id: str, gfs_id: str, prepared: PreparedMedia

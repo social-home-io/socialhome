@@ -72,3 +72,26 @@ def test_the_prune_and_author_reads_have_an_index(conn):
         "idx_gfs_moment_delete_log_author",
         "idx_gfs_moment_delete_log_created",
     } <= names
+
+
+def test_a_delivery_cursor_is_one_per_household_and_author_and_cascades(conn):
+    ins = (
+        "INSERT INTO gfs_moment_delete_cursor(instance_id, author_user_id,"
+        " after_created_at, after_moment_id, updated_at)"
+        " VALUES('inst-a', 'u-a', 1, '', 1)"
+    )
+    conn.execute(ins)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(ins)
+    conn.execute("DELETE FROM gfs_user_registrations WHERE user_id='u-a'")
+    left = conn.execute("SELECT COUNT(*) FROM gfs_moment_delete_cursor")
+    assert left.fetchone()[0] == 0
+    conn.execute(
+        "INSERT INTO gfs_user_registrations(user_id, instance_id, username,"
+        " display_name, home_instance_pk, registered_at, status)"
+        " VALUES('u-a', 'inst-a', 'a', 'A', 'bb', 1, 'active')"
+    )
+    conn.execute(ins)
+    conn.execute("DELETE FROM client_instances WHERE instance_id='inst-a'")
+    left = conn.execute("SELECT COUNT(*) FROM gfs_moment_delete_cursor")
+    assert left.fetchone()[0] == 0

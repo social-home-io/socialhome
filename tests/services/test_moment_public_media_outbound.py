@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -229,3 +230,44 @@ async def test_withdraw_deletes_what_was_uploaded(env):
     assert verify_wire(body, KP.public_key.hex())
     assert json.dumps(body).count(bid) == 1
     assert await env["svc"].withdraw("u-noor", "m1") == 0
+
+
+class _OldNodeSession(_Session):
+    """A cluster mid-upgrade: this node predates ``moment_media_30d`` and
+    refuses an expiry past 8 days with 422, though the server advertised it."""
+
+    def put(self, url, *, data=None, headers=None, **_kw):
+        self.puts.append((url, data, headers or {}))
+        expires = int((headers or {}).get("X-SH-Expires", "0"))
+        return _Resp(422 if expires > time.time() + 8 * 86_400 else 201)
+
+
+async def test_an_old_node_refusing_a_month_long_blob_gets_a_week(env):
+    """Adversarial review F3: a 422 for a blob asked past a week — an old
+    node behind a server that proved ``moment_media_30d`` — is retried with
+    the week an older server takes, instead of failing the publish."""
+    svc = env["svc"]
+    svc._gfs.month = {"g1"}
+    session = _OldNodeSession()
+    svc._http_client = session  # attach_session keeps the first one
+    (env["dir"] / "p1.webp").write_bytes(b"RIFF" + b"p" * 2000)
+    prepared = await svc.prepare(_moment("api/media/p1.webp"), item_key=ITEM)
+    month = int(time.time()) + 20 * 86_400
+    assert await svc.upload("g1", prepared, author_user_id="u-noor", expires_at=month)
+    asked = [int(h["X-SH-Expires"]) for _u, _d, h in session.puts]
+    assert asked[0] == month
+    assert asked[-1] <= int(time.time()) + MEDIA_KEEP_SHORT_S
+    assert len(asked) == len(prepared.blobs) + 1
+
+
+async def test_a_422_for_a_week_long_blob_still_fails(env):
+    svc = env["svc"]
+    session = _Session(status=422)
+    svc._http_client = session  # attach_session keeps the first one
+    (env["dir"] / "p1.webp").write_bytes(b"RIFF" + b"p" * 2000)
+    prepared = await svc.prepare(_moment("api/media/p1.webp"), item_key=ITEM)
+    week = int(time.time()) + 5 * 86_400
+    assert not await svc.upload(
+        "g1", prepared, author_user_id="u-noor", expires_at=week
+    )
+    assert len(session.puts) == 1

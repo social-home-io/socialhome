@@ -46,3 +46,35 @@ CREATE INDEX IF NOT EXISTS idx_gfs_moment_delete_log_author
     ON gfs_moment_delete_log(author_user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_gfs_moment_delete_log_created
     ON gfs_moment_delete_log(created_at);
+
+-- Per (follower household, author) delivery cursor of the reconnect push.
+-- A row exists only while that household has certificates of that author
+-- still to receive: written when a push finds some, moved past each frame
+-- that went out, deleted once drained. Without it the push window started
+-- at the household's ``relay_seen_at`` mark, which a lasting session moves
+-- forward — so whatever one push did not reach (a capped push, a dropped
+-- socket, a flood of certificates by one author) was never delivered.
+--
+-- Audit (CLAUDE.md): ``client_instances.relay_seen_at`` is the only other
+-- per-household mark and means "online lately" for the 24 h queue — moving
+-- it back would queue sealed copies to households that are not; one cursor
+-- per household would serve authors oldest-first only, letting one author's
+-- flood delay everyone else's deletes (a per-author cursor gives each author
+-- a fair share per push); keeping it in memory loses it on a restart or on
+-- another cluster node. Same unshipped migration as the log above, so no
+-- extra ratchet. Rows: households × authors with a backlog, pruned 30 days
+-- after last moved (by then every certificate it points past is gone).
+CREATE TABLE IF NOT EXISTS gfs_moment_delete_cursor (
+    instance_id       TEXT NOT NULL
+        REFERENCES client_instances(instance_id) ON DELETE CASCADE,
+    author_user_id    TEXT NOT NULL
+        REFERENCES gfs_user_registrations(user_id) ON DELETE CASCADE,
+    -- The last certificate delivered, as its (created_at, moment_id) key;
+    -- the next push starts just after it.
+    after_created_at  INTEGER NOT NULL,
+    after_moment_id   TEXT NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    PRIMARY KEY (instance_id, author_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_gfs_moment_delete_cursor_updated
+    ON gfs_moment_delete_cursor(updated_at);

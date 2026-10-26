@@ -3845,6 +3845,8 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         # Sealed moment keys go to the GFS in batches (v_62).
         await moment_public_key_outbound.start()
+        # Failed delete certificate posts are retried for a day (v_66).
+        await moment_public_outbound.start()
         moment_public_media_outbound.attach_session(http_session)
         moment_public_media_outbound.attach_identity(
             own_instance_id=real_instance_id,
@@ -5254,6 +5256,7 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_ws_supervisor.stop()
         # Before the HTTP session closes: queued sealed moment keys ride it.
         await moment_public_key_outbound.stop()
+        await moment_public_outbound.stop()
         await moment_public_media_inbound.stop()
         # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()

@@ -46,6 +46,7 @@ class _StubResp:
     def __init__(self, status: int = 200, body: dict | None = None) -> None:
         self.status = status
         self._body = body or {}
+        self.headers: dict[str, str] = {}
 
     async def __aenter__(self):
         return self
@@ -60,10 +61,15 @@ class _StubResp:
 class _StubSession:
     def __init__(self, status: int = 200) -> None:
         self.status = status
+        #: Per-path status overrides (path suffix → status).
+        self.status_for: dict[str, int] = {}
         self.posts: list[tuple[str, dict]] = []
 
     def post(self, url, *, json=None, **_kw):
         self.posts.append((url, json or {}))
+        for suffix, status in self.status_for.items():
+            if url.endswith(suffix):
+                return _StubResp(status)
         return _StubResp(self.status)
 
 
@@ -784,3 +790,65 @@ async def test_a_gfs_that_refused_the_file_is_not_recorded_as_holding_it(
     await s["regs"].upsert(user_id="u1", gfs_id="g1")
     await s["bus"].publish(_created_event())
     assert recorded == [{}]
+
+
+@pytest.mark.parametrize("status", [503, 404, 422, 429])
+async def test_a_failed_delete_certificate_is_queued_for_retry(outbound_setup, status):
+    """Adversarial review F3: a certificate post that fails — the GFS down,
+    or an old node of a cluster mid-upgrade answering 404 / 422 — is retried
+    for up to a day, not posted once and lost."""
+    s = outbound_setup
+    s["gfs"].delete_log = {"g1"}
+    s["session"].status_for = {"/delete_cert": status}
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="inst-self",
+            is_public=True,
+        )
+    )
+    retry = s["sub"]._cert_retry
+    assert retry.pending_count() == 1
+    # The retry re-posts the very same signed body.
+    first = [b for u, b in s["session"].posts if u.endswith("/delete_cert")]
+    s["session"].status_for = {}
+    outcome = await s["sub"]._send_cert("g1", first[0])
+    assert outcome.kind == "delivered"
+    again = [b for u, b in s["session"].posts if u.endswith("/delete_cert")]
+    assert again == [first[0], first[0]]
+
+
+async def test_a_refused_delete_certificate_is_not_retried(outbound_setup):
+    s = outbound_setup
+    s["gfs"].delete_log = {"g1"}
+    s["session"].status_for = {"/delete_cert": 409}
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1",
+            author_user_id="u1",
+            origin_instance_id="inst-self",
+            is_public=True,
+        )
+    )
+    assert s["sub"]._cert_retry.pending_count() == 0
+
+
+async def test_a_certificate_retry_to_a_gone_gfs_is_dropped(outbound_setup, db):
+    s = outbound_setup
+    await db.enqueue("UPDATE gfs_connections SET status='suspended' WHERE id='g1'")
+    outcome = await s["sub"]._send_cert("g1", {"x": 1})
+    assert outcome.kind == "permanent"
+    assert s["session"].posts == []
+
+
+async def test_the_certificate_retry_starts_and_stops_with_the_outbound(
+    outbound_setup,
+):
+    sub = outbound_setup["sub"]
+    await sub.start()
+    assert sub._cert_retry._task is not None
+    await sub.stop()
+    assert sub._cert_retry._task is None

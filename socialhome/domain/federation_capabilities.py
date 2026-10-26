@@ -1006,7 +1006,7 @@ from __future__ import annotations
 #:   later** (decision 6c, sign-offs 3 + 4). On the mesh a ``MOMENT_DELETED``
 #:   is outbox-``LONG_LIVED``: it keeps retrying on the 4 h ceiling for 30
 #:   days instead of giving up after ~10 h, and every relay hop queues its
-#:   own copy. Over a GFS the author household also posts the delete's
+#:   own copy (≤ 100 of one relayed origin per peer). Over a GFS the author household also posts the delete's
 #:   signed certificate (the same ``moment-origin:v1:`` signature — moment
 #:   id, author, origin, time; no content) to every GFS whose signed
 #:   ``/gfs/info`` proves ``moment_delete_log``; the GFS keeps it 30 days

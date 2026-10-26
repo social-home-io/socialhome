@@ -145,14 +145,30 @@ A (author)  ────►  B (paired)  ────►  C (B's paired)  ──
   ``LONG_LIVED`` (``domain/federation_retention.py``): past the ladder it
   keeps retrying on the 4 h ceiling until 30 days after it was queued, then
   the retention sweep ends it. It is still evictable under the per-peer
-  cap (1 000 pending), unlike ``NEVER_DROP``. Every hop queues its own
+  cap (1 000 pending), unlike ``NEVER_DROP`` — and a delete we only relay
+  is evicted before anything of our own. Every hop queues its own
   copy, so a delete crosses all three hops even when the households between
   were offline for weeks; a pure pass-through household relays it as
-  before, only when it changed something there. **Cost:** per delete, the
-  same ≤ 3-hop fan-out as before; a peer that stays offline costs at most
-  ~180 extra delivery attempts over 30 days (one per 4 h, ±30 % jitter),
-  each a re-signed envelope of < 1 KB. A household offline for 30 days with
-  1 000 deletes queued for it is ~1 000 rows of < 1 KB. Older (v_65) relays
+  before, only when it changed something there.
+* **A relayed household's deletes are capped per origin** (adversarial
+  review F2). A paired household can sign deletes for made-up ids under its
+  own origin; each is new to us, so we relay it, and an offline peer used to
+  get every one as a 30-day row. The outbox key of a queued delete says who
+  signed it (``moment_delete_key``: ours, or relayed for origin X); a peer
+  holds at most ``MAX_LONG_LIVED_RELAYED_PER_ORIGIN`` (100) long-lived
+  deletes relayed for one origin — past that, a relayed delete is queued in
+  the ordinary class (7 days, given up after ~10 h). Our own deletes are
+  never capped. **Cost:** per delete, the same ≤ 3-hop fan-out as before; a
+  peer that stays offline costs at most ~180 extra delivery attempts over
+  30 days per queued delete (one per 4 h, ±30 % jitter), each a re-signed
+  envelope of < 1 KB. A household offline for 30 days with 1 000 of our own
+  deletes queued for it is ~1 000 rows of < 1 KB. Hostile worst case: one
+  flooding origin, N households that each relay to the same offline peer —
+  each relaying household queues its own copies, so the peer is owed
+  N × 100 long-lived rows, N × 100 × ~180 ≈ N × 18 000 attempts over the
+  month (before: N × 1 000 × ~180 ≈ N × 180 000, and each relaying household's
+  own events evicted by the flood); the flood's remainder costs N × ≤ 13
+  attempts per row over ~10 h and is evicted first at the cap. Older (v_65) relays
   give up after ~10 h as before; a delete reaching a public follower
   through a GFS is covered by the GFS's certificate log
   ([`momentum_public.md`](./momentum_public.md#late-deletes-delete-certificates-v_66)).

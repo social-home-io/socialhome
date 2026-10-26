@@ -81,7 +81,7 @@ from ..domain.federation import (
     pending_kind,
 )
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.federation_retention import supersede_key
+from ..domain.federation_retention import moment_delete_key, supersede_key
 from ..domain.media_validator import validate_inbound_media_meta
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
@@ -1566,7 +1566,13 @@ class FederationService:
         msg_id = envelope_dict["msg_id"]
         # §4.4.7 latest-only state (online status, a pin on a space map):
         # at most one queued row per person (and space) for this peer.
-        state_key = supersede_key(event_type, space_id=space_id, payload=payload)
+        # A moment's delete is keyed by who signed it, so the outbox can cap
+        # how many it keeps 30 days per relayed origin (adversarial review F2).
+        state_key = supersede_key(
+            event_type, space_id=space_id, payload=payload
+        ) or moment_delete_key(
+            event_type, payload, own_instance_id=self._own_instance_id
+        )
         state_ticket = self._claim_state_send(to_instance_id, state_key)
 
         # Dispatch the envelope. When a FederationTransport facade is

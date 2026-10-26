@@ -846,7 +846,12 @@ saved past the moment's expiry — **as far as the delete can reach**:
 
 * **30-day horizon.** The mesh keeps a delete queued 30 days per hop and a
   GFS keeps its certificate 30 days. A household away longer, or reachable
-  only through a relay that dropped it, keeps its copy.
+  only through a relay that dropped it, keeps its copy. A relay keeps at
+  most 100 deletes of one origin per peer that long (more go in the ordinary
+  ~10 h class, so a household flooding made-up deletes can't pin its peers'
+  queues); our own are never capped. A certificate whose post to a GFS
+  kept failing for a day, or across a restart of the author's household,
+  is not kept there.
 * **Reachable households only.** A household the author's household can no
   longer reach — unpaired, its GFS gone, banned — gets no delete. A
   household that ignores deletes (modified software) is outside what any

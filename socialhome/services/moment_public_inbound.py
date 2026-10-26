@@ -100,7 +100,7 @@ SENT_AT_MAX_AGE_S: int = 25 * 3600
 SENT_AT_MAX_SKEW_S: int = 300
 
 #: v_66: certificates applied from one ``moment_delete_certs`` frame, at most
-#: (a GFS sends ≤ 50 a frame, ≤ 200 a reconnect).
+#: (a GFS sends ≤ 50 a frame, ≤ 200 a push).
 MAX_DELETE_CERTS_PER_FRAME: int = 50
 
 #: v_66: a delete certificate signed longer ago than a moment can live (plus

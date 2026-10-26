@@ -66,6 +66,8 @@ from ..domain.moment_public import public_author_bio, public_profile_rev
 from ..infrastructure.event_bus import EventBus
 from ..moment_origin import delete_cert_of, sign_moment_origin
 from ..moment_public_seal import item_key, seal_body, sign_wire
+from .gfs_publish_retry import PublishOutcome
+from .moment_delete_cert_retry import DeleteCertRetryQueue, classify_cert_status
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
@@ -96,6 +98,7 @@ PROFILE_RESEND_S: float = 86_400.0
 class MomentPublicOutbound(ProtectionGateMixin):
     __slots__ = (
         "_bus",
+        "_cert_retry",
         "_child_protection",
         "_gfs",
         "_gfs_service",
@@ -156,6 +159,15 @@ class MomentPublicOutbound(ProtectionGateMixin):
         self._shares: MomentPublicShareService | None = None
         #: media file name → the moment waiting for its transcode.
         self._waiting_media: dict[str, MomentCreated] = {}
+        #: Delete certificate posts that failed, retried for a day (F3).
+        self._cert_retry = DeleteCertRetryQueue(self._send_cert)
+
+    async def start(self) -> None:
+        """Start retrying failed delete certificate posts."""
+        await self._cert_retry.start()
+
+    async def stop(self) -> None:
+        await self._cert_retry.stop()
 
     def attach_shares(self, shares: MomentPublicShareService) -> None:
         self._shares = shares
@@ -365,6 +377,10 @@ class MomentPublicOutbound(ProtectionGateMixin):
         The certificate is the mesh ``MOMENT_DELETED``'s origin signature —
         the same fields, the same ``occurred_at``, so the same bytes. Signed
         once, the same body to every such GFS; any other gets nothing new.
+        A post that fails for a reason a later try can fix (the GFS down, a
+        429, an old node of a cluster mid-upgrade) is retried with backoff
+        for up to a day (:mod:`.moment_delete_cert_retry`) — the GFS takes a
+        certificate up to 25 h old.
         """
         if self._signing_key is None:
             return
@@ -388,8 +404,53 @@ class MomentPublicOutbound(ProtectionGateMixin):
             self._signing_key,
             {"instance_id": self._own_instance_id, "cert": delete_cert_of(signed)},
         )
+        deleted_at = event.occurred_at.timestamp()
         for gfs_id in targets:
-            await self._post_to_gfs(gfs_id, body, kind="delete_cert")
+            outcome = await self._send_cert(gfs_id, body)
+            if outcome.kind == "transient":
+                self._cert_retry.enqueue(
+                    gfs_id,
+                    event.moment_id,
+                    body,
+                    deleted_at=deleted_at,
+                    retry_after_s=outcome.retry_after_s,
+                )
+
+    async def _send_cert(self, gfs_id: str, body: dict) -> PublishOutcome:
+        """POST one signed delete certificate *body* to *gfs_id* — the first
+        try and every retry. A GFS no longer active (or no session) is a
+        permanent miss; a transport error a transient one."""
+        if self._http_client is None:
+            return PublishOutcome.permanent()
+        conn = await self._gfs.get(gfs_id)
+        if conn is None or conn.status != "active":
+            return PublishOutcome.permanent()
+        try:
+            async with self._http_client.post(
+                f"{conn.inbox_url}{_PATHS['delete_cert']}",
+                allow_redirects=False,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                outcome = classify_cert_status(
+                    resp.status, resp.headers.get("Retry-After")
+                )
+                if outcome.kind != "delivered":
+                    log.warning(
+                        "moment_public.outbound: GFS %s refused a delete"
+                        " certificate — HTTP %d (%s)",
+                        gfs_id,
+                        resp.status,
+                        "will retry" if outcome.kind == "transient" else "final",
+                    )
+                return outcome
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            log.warning(
+                "moment_public.outbound: GFS %s delete certificate failed: %s",
+                gfs_id,
+                exc,
+            )
+            return PublishOutcome.transient()
 
     def _hold_for_media(self, media_url: str, event: MomentCreated) -> None:
         """Publish *event* once its video's transcode finishes (bounded)."""

@@ -23,3 +23,6 @@ class OutboxEntry:
     expires_at: str | None = None
     delivered_at: str | None = None
     failed_at: str | None = None
+    #: The local-only latest-only key (``supersede_key``); for a moment's
+    #: delete also who signed it (``federation_retention.moment_delete_key``).
+    supersede_key: str | None = None

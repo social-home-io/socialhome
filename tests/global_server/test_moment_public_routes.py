@@ -1045,9 +1045,21 @@ async def test_a_certificate_for_an_author_of_another_household_is_403(
 
 async def test_an_old_or_future_certificate_is_refused(client, derived_author):
     a = derived_author
-    for occurred_at in (now_iso(hours=-2), now_iso(hours=1), "not a time"):
+    for occurred_at in (now_iso(hours=-26), now_iso(hours=1), "not a time"):
         resp = await _post_cert(client, a.kp, _cert_body(a, occurred_at=occurred_at))
         assert resp.status == 409
+
+
+async def test_a_certificate_retried_for_a_day_is_still_taken(client, derived_author):
+    """Adversarial review F3: the author household retries a failed post for
+    up to 24 h, so the GFS takes a certificate that old (25 h window) — and a
+    replay of it still changes nothing."""
+    a = derived_author
+    body = _cert_body(a, occurred_at=now_iso(hours=-24))
+    resp = await _post_cert(client, a.kp, body)
+    assert resp.status == 200 and (await resp.json()) == {"kept": True}
+    resp = await _post_cert(client, a.kp, body)
+    assert resp.status == 200 and (await resp.json()) == {"kept": False}
 
 
 async def test_a_malformed_or_unsigned_body_is_refused(client, derived_author):

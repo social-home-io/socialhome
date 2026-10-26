@@ -88,10 +88,13 @@ _MAX_ENVELOPE_BYTES = MAX_CIPHERTEXT_CHARS + 2048
 #: (v_66).
 _MAX_DELETE_CERT_BYTES = 4096
 
-#: A certificate is posted the moment its delete happens: one whose delete
-#: time is older than this, or further ahead than the skew, is refused — so
-#: a captured old one can't restart its 30 days here.
-DELETE_CERT_MAX_AGE_S: int = 3600
+#: A certificate is posted the moment its delete happens, and retried for
+#: up to a day when that fails (adversarial review F3,
+#: ``services.moment_delete_cert_retry``): one whose delete time is older
+#: than this (a day and an hour of slack), or further ahead than the skew,
+#: is refused — so a captured old one can't restart its 30 days here. A
+#: replay within it changes nothing (one row per author × moment).
+DELETE_CERT_MAX_AGE_S: int = 25 * 3600
 DELETE_CERT_MAX_SKEW_S: int = 300
 
 #: Sealed keys one ``POST /gfs/moments/keys`` may carry, and its body cap

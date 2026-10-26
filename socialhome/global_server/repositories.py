@@ -38,6 +38,7 @@ from .domain import (
     GfsMomentFollow,
     GfsMomentKeyMail,
     GfsMomentMedia,
+    GfsPendingDeleteCert,
     GfsQueuedEnvelope,
     GfsSpaceEpoch,
     GfsSpaceStrictState,
@@ -2263,10 +2264,43 @@ class AbstractGfsMomentDeleteLogRepo(Protocol):
         self, *, author_user_id: str, moment_id: str, cert: str, now: int
     ) -> bool: ...
     async def count_for_author(self, author_user_id: str, *, since: int) -> int: ...
-    async def for_household(
-        self, instance_id: str, *, now: int, ttl_s: int, seen_slack_s: int, limit: int
-    ) -> list[str]: ...
+    async def open_cursors(
+        self, instance_id: str, *, now: int, ttl_s: int, seen_slack_s: int
+    ) -> None: ...
+    async def pending(
+        self, instance_id: str, *, now: int, ttl_s: int, per_author: int, limit: int
+    ) -> list[GfsPendingDeleteCert]: ...
+    async def advance_cursor(
+        self,
+        instance_id: str,
+        author_user_id: str,
+        *,
+        created_at: int,
+        moment_id: str,
+        now: int,
+    ) -> None: ...
+    async def close_cursor(self, instance_id: str, author_user_id: str) -> None: ...
+    async def close_drained_cursors(
+        self, instance_id: str, *, now: int, ttl_s: int
+    ) -> None: ...
     async def prune(self, *, older_than: int) -> int: ...
+    async def prune_cursors(self, *, older_than: int) -> int: ...
+
+
+#: SQL fragment: the certificate row ``l`` is of an author a user of the
+#: household (the next ``?`` parameter) followed before it was written.
+_FOLLOWED_BY_HOUSEHOLD = (
+    "EXISTS (SELECT 1 FROM gfs_moment_follows f"
+    " WHERE f.follower_instance_id = ?"
+    " AND f.followed_user_id = l.author_user_id"
+    " AND f.created_at <= l.created_at)"
+)
+
+#: SQL fragment: the certificate row ``l`` lies past cursor ``c``.
+_PAST_CURSOR = (
+    "(l.created_at > c.after_created_at OR (l.created_at = c.after_created_at"
+    " AND l.moment_id > c.after_moment_id))"
+)
 
 
 class SqliteGfsMomentDeleteLogRepo:
@@ -2298,33 +2332,118 @@ class SqliteGfsMomentDeleteLogRepo:
         )
         return int(row["c"]) if row is not None else 0
 
-    async def for_household(
-        self, instance_id: str, *, now: int, ttl_s: int, seen_slack_s: int, limit: int
-    ) -> list[str]:
-        """The certificates *instance_id* may have missed, oldest first, at
-        most *limit*: of authors a user of that household follows here,
-        written after that follow began, within the last *ttl_s* — and since
-        the household was last marked seen (``relay_seen_at``, refreshed
-        hourly while its socket is open) minus *seen_slack_s*. A household
-        never marked seen gets the whole *ttl_s* window."""
-        rows = await self._db.fetchall(
-            "SELECT l.cert FROM gfs_moment_delete_log l"
+    async def open_cursors(
+        self, instance_id: str, *, now: int, ttl_s: int, seen_slack_s: int
+    ) -> None:
+        """Open a delivery cursor for every followed author with certificates
+        *instance_id* may have missed and no cursor yet: written within the
+        last *ttl_s*, after that follow began, and since the household was
+        last marked seen (``relay_seen_at``, refreshed hourly while its socket
+        is open) minus *seen_slack_s* — the whole *ttl_s* for a household
+        never seen. The cursor starts just before the oldest of them. An
+        author with a cursor keeps it: whatever it still owes is older than
+        the seen mark and must not be skipped (adversarial review F1)."""
+        await self._db.enqueue(
+            "INSERT OR IGNORE INTO gfs_moment_delete_cursor(instance_id,"
+            " author_user_id, after_created_at, after_moment_id, updated_at)"
+            " SELECT ?, l.author_user_id, MIN(l.created_at) - 1, '', ?"
+            " FROM gfs_moment_delete_log l"
             " WHERE l.created_at >= ?"
             " AND l.created_at >= COALESCE((SELECT ci.relay_seen_at - ?"
             "   FROM client_instances ci WHERE ci.instance_id = ?), 0)"
-            " AND EXISTS (SELECT 1 FROM gfs_moment_follows f"
-            "   WHERE f.follower_instance_id = ?"
-            "   AND f.followed_user_id = l.author_user_id"
-            "   AND f.created_at <= l.created_at)"
-            " ORDER BY l.created_at, l.author_user_id, l.moment_id LIMIT ?",
-            (now - ttl_s, seen_slack_s, instance_id, instance_id, limit),
+            f" AND {_FOLLOWED_BY_HOUSEHOLD}"
+            " GROUP BY l.author_user_id",
+            (instance_id, now, now - ttl_s, seen_slack_s, instance_id, instance_id),
         )
-        return [str(r["cert"]) for r in rows]
+
+    async def pending(
+        self, instance_id: str, *, now: int, ttl_s: int, per_author: int, limit: int
+    ) -> list[GfsPendingDeleteCert]:
+        """The certificates still owed to *instance_id* past each author's
+        cursor — at most *per_author* of one author, at most *limit* in all,
+        dealt round-robin: every author's oldest owed one first (the newest
+        of those first — a certificate written weeks ago is about a moment
+        that has nearly run out anyway), then every author's second, and so
+        on. One author's flood never crowds out another's delete."""
+        rows = await self._db.fetchall(
+            "WITH owed AS ("
+            " SELECT l.author_user_id, l.moment_id, l.created_at, l.cert,"
+            "  ROW_NUMBER() OVER (PARTITION BY l.author_user_id"
+            "   ORDER BY l.created_at, l.moment_id) AS rank,"
+            "  COUNT(*) OVER (PARTITION BY l.author_user_id) AS author_left"
+            " FROM gfs_moment_delete_log l"
+            " JOIN gfs_moment_delete_cursor c ON c.instance_id = ?"
+            "  AND c.author_user_id = l.author_user_id"
+            " WHERE l.created_at >= ?"
+            f" AND {_PAST_CURSOR}"
+            f" AND {_FOLLOWED_BY_HOUSEHOLD}"
+            ") SELECT * FROM owed WHERE rank <= ?"
+            " ORDER BY rank, created_at DESC, author_user_id, moment_id LIMIT ?",
+            (instance_id, now - ttl_s, instance_id, per_author, limit),
+        )
+        return [
+            GfsPendingDeleteCert(
+                author_user_id=str(r["author_user_id"]),
+                moment_id=str(r["moment_id"]),
+                created_at=int(r["created_at"]),
+                cert=str(r["cert"]),
+                rank=int(r["rank"]),
+                author_left=int(r["author_left"]),
+            )
+            for r in rows
+        ]
+
+    async def advance_cursor(
+        self,
+        instance_id: str,
+        author_user_id: str,
+        *,
+        created_at: int,
+        moment_id: str,
+        now: int,
+    ) -> None:
+        """Move the cursor past a delivered certificate."""
+        await self._db.enqueue(
+            "UPDATE gfs_moment_delete_cursor SET after_created_at=?,"
+            " after_moment_id=?, updated_at=? WHERE instance_id=?"
+            " AND author_user_id=?",
+            (created_at, moment_id, now, instance_id, author_user_id),
+        )
+
+    async def close_cursor(self, instance_id: str, author_user_id: str) -> None:
+        """Drop the cursor of an author whose backlog was delivered."""
+        await self._db.enqueue(
+            "DELETE FROM gfs_moment_delete_cursor WHERE instance_id=?"
+            " AND author_user_id=?",
+            (instance_id, author_user_id),
+        )
+
+    async def close_drained_cursors(
+        self, instance_id: str, *, now: int, ttl_s: int
+    ) -> None:
+        """Drop *instance_id*'s cursors with nothing left past them (the
+        certificates aged out, or the follow ended)."""
+        await self._db.enqueue(
+            "DELETE FROM gfs_moment_delete_cursor AS c WHERE c.instance_id=?"
+            " AND NOT EXISTS (SELECT 1 FROM gfs_moment_delete_log l"
+            "  WHERE l.author_user_id = c.author_user_id AND l.created_at >= ?"
+            f"  AND {_PAST_CURSOR} AND {_FOLLOWED_BY_HOUSEHOLD})",
+            (instance_id, now - ttl_s, instance_id),
+        )
 
     async def prune(self, *, older_than: int) -> int:
         """Drop certificates written before *older_than*."""
         return await self._db.enqueue_rowcount(
             "DELETE FROM gfs_moment_delete_log WHERE created_at < ?",
+            (older_than,),
+        )
+
+    async def prune_cursors(self, *, older_than: int) -> int:
+        """Drop delivery cursors not moved since *older_than* — every
+        certificate they point past is gone by then, and a household back
+        after that long is owed its whole window again anyway."""
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_moment_delete_cursor WHERE updated_at < ?",
             (older_than,),
         )
 

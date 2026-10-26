@@ -106,6 +106,68 @@ LONG_LIVED: frozenset[FederationEventType] = frozenset(
 #: life.
 LONG_LIVED_TTL: timedelta = timedelta(days=MOMENT_MAX_LIFETIME_DAYS)
 
+#: Relayed :data:`LONG_LIVED` deletes one peer's queue holds per origin
+#: household (adversarial review F2). A paired household can sign deletes
+#: for made-up ids under its own origin; each is new here, so we relay it,
+#: and an offline peer used to get every one as a 30-day row (up to
+#: :data:`MAX_PENDING_PER_PEER`, evicting our own events). Past this many
+#: pending from one origin, a relayed delete is queued in the ordinary class
+#: (:data:`RETENTION_DAYS`, given up at the outbox's ``MAX_ATTEMPTS``). Our
+#: own deletes are never capped. A household deleting more than this many
+#: moments while one peer is away for over ~10 h is past any honest use.
+MAX_LONG_LIVED_RELAYED_PER_ORIGIN: int = 100
+
+#: Outbox keys (the local-only ``supersede_key`` column) of a queued
+#: ``MOMENT_DELETED``: who signed it, and so which class it is in. A key
+#: makes the row latest-only per (peer, origin, moment) too — the same delete
+#: queued twice is one row.
+OWN_DELETE_KEY_PREFIX: str = "moment-delete:own:"
+RELAYED_DELETE_KEY_PREFIX: str = "moment-delete:relay:"
+#: …a relayed one past :data:`MAX_LONG_LIVED_RELAYED_PER_ORIGIN`: ordinary.
+CAPPED_DELETE_KEY_PREFIX: str = "moment-delete:relay-capped:"
+#: What every relayed delete's key (long-lived or capped) starts with — the
+#: rows the per-peer cap evicts first.
+ANY_RELAYED_DELETE_KEY_PREFIX: str = "moment-delete:relay"
+
+
+def moment_delete_key(
+    event_type: FederationEventType, payload: dict, *, own_instance_id: str
+) -> str | None:
+    """The outbox key of a ``MOMENT_DELETED`` *payload* — ours, or relayed
+    for its origin — or ``None`` for any other event (or one missing its
+    ids)."""
+    if event_type not in LONG_LIVED:
+        return None
+    origin = payload.get("origin_instance_id")
+    moment_id = payload.get("moment_id")
+    if not (isinstance(origin, str) and origin and isinstance(moment_id, str)):
+        return None
+    if not moment_id:
+        return None
+    if origin == own_instance_id:
+        return f"{OWN_DELETE_KEY_PREFIX}{moment_id}"
+    return f"{relayed_delete_prefix(origin)}{moment_id}"
+
+
+def relayed_delete_prefix(origin_instance_id: str) -> str:
+    """What the key of every long-lived delete relayed for
+    *origin_instance_id* starts with."""
+    return f"{RELAYED_DELETE_KEY_PREFIX}{origin_instance_id}:"
+
+
+def capped_delete_key(origin_instance_id: str, moment_id: str) -> str:
+    """The key of a relayed delete queued past its origin's cap."""
+    return f"{CAPPED_DELETE_KEY_PREFIX}{origin_instance_id}:{moment_id}"
+
+
+def is_long_lived(event_type: FederationEventType, key: str | None) -> bool:
+    """Whether a queued entry keeps retrying on the ceiling backoff until its
+    :data:`LONG_LIVED_TTL`: a :data:`LONG_LIVED` event not queued past its
+    origin's cap. (An entry with no key was queued before keys existed.)"""
+    if event_type not in LONG_LIVED:
+        return False
+    return key is None or not key.startswith(CAPPED_DELETE_KEY_PREFIX)
+
 
 def supersede_key(
     event_type: FederationEventType,
