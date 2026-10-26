@@ -177,6 +177,39 @@ describe('MomentCard', () => {
     expect(nested.querySelector('[dir="auto"]')).toBeTruthy()
   })
 
+  it('as the moment page head: no thread or Reply link, ⋯ Reply goes to the page field', async () => {
+    const onReply = vi.fn()
+    const { queryByRole, getByRole, findByRole, getByText, container } = render(
+      <MomentCard
+        m={moment({ reply_count: 2, latest_reply: moment({ id: 'r-1', parent_moment_id: 'm-1' }) })}
+        me={ME} onPatch={vi.fn()} onDeleted={vi.fn()}
+        page={{ onReply, reactedBy: 'Anna reacted', status: <p>status band</p> }}
+      />,
+    )
+    expect(queryByRole('link', { name: 'Reply' })).toBeNull()
+    expect(container.querySelector('.sh-moment-card__thread')).toBeNull()
+    expect(getByText('status band')).toBeTruthy()
+    expect(getByText('Anna reacted')).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: 'More actions for this moment' }))
+    await findByRole('menu')
+    fireEvent.click(getByRole('menuitem', { name: 'Reply' }))
+    expect(onReply).toHaveBeenCalled()
+    expect(route).not.toHaveBeenCalled()
+  })
+
+  it('as the page head, your own moment shows its reactions as chips', () => {
+    const { getByRole, queryByRole } = render(
+      <MomentCard
+        m={moment({ author_user_id: ME, reaction_count: 2, reaction_counts: { '😂': 2 } })}
+        me={ME} onPatch={vi.fn()} onDeleted={vi.fn()} page={{ onReply: vi.fn() }}
+      />,
+    )
+    expect(getByRole('button', { name: /😂.*2/ })).toBeTruthy()
+    // The status band says who sees it; ⋯ has no "Who sees this".
+    fireEvent.click(getByRole('button', { name: 'More actions for this moment' }))
+    expect(queryByRole('menuitem', { name: 'Who sees this' })).toBeNull()
+  })
+
   it('a video is a poster with ▶ and its length; the player comes on tap', () => {
     const { getByRole, container } = renderCard(moment({
       media_type: 'video', media_url: 'api/media/v.webm?sig=s',

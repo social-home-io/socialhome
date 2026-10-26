@@ -1765,6 +1765,9 @@ async def test_moment_reply_notifies_parent_author(stack):
     )
     notifs = await stack.notif_repo.list(a.user_id, limit=10)
     assert any(n.type == "moment_replied" for n in notifs)
+    # The link opens the parent with this reply picked out (UX r3 PR 10).
+    (replied,) = [n for n in notifs if n.type == "moment_replied"]
+    assert replied.link_url == "/momentum/m-root?reply=m-reply"
 
 
 @pytest.mark.parametrize(
