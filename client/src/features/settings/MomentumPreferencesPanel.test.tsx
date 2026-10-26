@@ -83,6 +83,30 @@ describe('Settings › Momentum — how long followers keep your moments', () =>
   })
 })
 
+describe('Settings › Momentum — a protected account', () => {
+  beforeEach(() => {
+    apiMock.patch.mockReset().mockResolvedValue({})
+  })
+
+  it('shows its fixed circle instead of a 3-hop picker it does not have', async () => {
+    currentUser.value = {
+      user_id: 'u-kid', username: 'finn', display_name: 'Finn', protected: true,
+      preferences_json: JSON.stringify({ moments: { max_hops: 3 } }),
+    } as unknown as User
+    const { container, getByText, queryByText } = render(<MomentumPreferencesPanel />)
+    // Only the retention select; no "Show moments up to".
+    expect(selects(container)).toHaveLength(1)
+    expect(queryByText(/Show moments up to/)).toBeNull()
+    expect(queryByText(/up to 3 households away/)).toBeNull()
+    expect(getByText(/you see moments from your household and paired households only/)).toBeTruthy()
+    // Retention still saves, max_hops untouched.
+    fireEvent.change(selects(container)[0], { target: { value: '14' } })
+    await waitFor(() => expect(lastSaved()).toEqual({
+      max_hops: 3, follower_retention_days: 14,
+    }))
+  })
+})
+
 describe('getMomentsPreferences — the server\'s defaults and clamps', () => {
   it.each([
     [null, 7, 3],

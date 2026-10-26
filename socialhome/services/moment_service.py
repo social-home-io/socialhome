@@ -130,8 +130,13 @@ class ReactionReach(Protocol):
 class MomentRateLimitError(Exception):
     """Raised when an author tries to post a top-level moment within
     :data:`MOMENT_RATE_WINDOW` of their last one. Mapped to HTTP 429
-    in :class:`BaseView._iter`.
+    in :class:`BaseView._iter`, with :attr:`next_allowed_at` (UTC ISO
+    8601) so the composer can say when the next moment can go.
     """
+
+    def __init__(self, message: str, *, next_allowed_at: str) -> None:
+        super().__init__(message)
+        self.next_allowed_at = next_allowed_at
 
 
 class MomentService:
@@ -258,15 +263,12 @@ class MomentService:
 
         # Rate-limit only top-level moments (replies are exempt).
         if parent_moment_id is None:
-            since = datetime.now(UTC) - MOMENT_RATE_WINDOW
-            recent = await self._moments.count_recent_for_author(
-                author_user_id,
-                since_iso=since.isoformat(),
-            )
-            if recent >= 1:
+            next_allowed = await self.next_allowed_at(author_user_id)
+            if next_allowed is not None:
                 raise MomentRateLimitError(
                     "You can post one moment every 15 minutes. "
-                    "Replies and reactions don't count."
+                    "Replies and reactions don't count.",
+                    next_allowed_at=next_allowed,
                 )
 
         now = datetime.now(UTC)
@@ -383,6 +385,21 @@ class MomentService:
         )
 
     # ── Reads ──────────────────────────────────────────────────────────
+
+    async def next_allowed_at(self, author_user_id: str) -> str | None:
+        """When the author may post their next top-level moment (UTC ISO
+        8601), or ``None`` when they may post now (decision 13: one per
+        :data:`MOMENT_RATE_WINDOW`; replies and reactions are exempt)."""
+        since = datetime.now(UTC) - MOMENT_RATE_WINDOW
+        last = await self._moments.latest_top_level_at(
+            author_user_id, since_iso=since.isoformat()
+        )
+        if last is None:
+            return None
+        nxt = datetime.fromisoformat(last) + MOMENT_RATE_WINDOW
+        if nxt.tzinfo is None:
+            nxt = nxt.replace(tzinfo=UTC)
+        return nxt.isoformat() if nxt > datetime.now(UTC) else None
 
     async def get_moment(self, moment_id: str) -> Moment:
         return await self._require(moment_id)

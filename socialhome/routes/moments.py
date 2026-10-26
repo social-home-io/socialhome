@@ -17,6 +17,8 @@ Routes:
   ``?scope=saved`` — the moments the caller saved (decision 6b)
 * ``GET    /api/moments/archive/usage``       — the caller's archived media vs. the household cap
 * ``PUT    /api/admin/moments/archive-cap``   — admin sets the per-person archive cap
+* ``GET    /api/moments/limits``              — ``{next_allowed_at}``: when the caller's next
+  top-level moment can go (``null`` = now; the 429 carries the same field)
 * ``GET    /api/moments/{id}``                — detail incl. replies + reactions
 * ``DELETE /api/moments/{id}``                — author / admin delete
 * ``PUT    /api/moments/{id}/reaction``       — set / change reaction
@@ -406,6 +408,20 @@ class MomentArchiveCapView(BaseView):
             body.get("cap_bytes"), actor_is_admin=ctx.is_admin
         )
         return self._json({"cap_bytes": cap})
+
+
+class MomentLimitsView(BaseView):
+    """``GET /api/moments/limits`` — ``{next_allowed_at}``: when the caller
+    may post their next top-level moment (UTC ISO 8601), ``null`` when they
+    may post now. The composer reads it before writing (decision 13); the
+    ``429 MOMENT_RATE_LIMIT`` carries the same field."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        if ctx is None:
+            return error_response(401, "UNAUTHENTICATED", "Login required.")
+        svc = self.svc(moment_service_key)
+        return self._json({"next_allowed_at": await svc.next_allowed_at(ctx.user_id)})
 
 
 class MomentHashtagsView(BaseView):

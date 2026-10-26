@@ -957,3 +957,41 @@ async def test_a_saved_moment_outlives_expiry_until_the_author_deletes(stack):
     assert await svc.list_saved(user_id=me.user_id) == []
     with pytest.raises(MomentNotFoundError):
         await svc.get_for_viewer("m-1", me.user_id)
+
+
+# ── Next allowed moment (decision 13) ──────────────────────────────────────
+
+
+async def test_next_allowed_at_is_none_before_the_first_moment(stack):
+    a = await stack.provision("alice")
+    assert await stack.moment_svc.next_allowed_at(a.user_id) is None
+
+
+async def test_next_allowed_at_is_15_minutes_after_the_last_moment(stack):
+    a = await stack.provision("alice")
+    m = await stack.moment_svc.create_moment(author_user_id=a.user_id, content="one")
+    nxt = await stack.moment_svc.next_allowed_at(a.user_id)
+    assert nxt is not None
+    delta = datetime.fromisoformat(nxt) - datetime.fromisoformat(m.created_at)
+    assert delta == timedelta(minutes=15)
+
+
+async def test_next_allowed_at_ignores_replies(stack):
+    a = await stack.provision("alice")
+    b = await stack.provision("bob")
+    parent = await stack.moment_svc.create_moment(
+        author_user_id=a.user_id, content="root"
+    )
+    await stack.moment_svc.create_moment(
+        author_user_id=b.user_id, content="reply", parent_moment_id=parent.id
+    )
+    assert await stack.moment_svc.next_allowed_at(b.user_id) is None
+
+
+async def test_rate_limit_error_carries_next_allowed_at(stack):
+    a = await stack.provision("alice")
+    m = await stack.moment_svc.create_moment(author_user_id=a.user_id, content="one")
+    with pytest.raises(MomentRateLimitError) as exc:
+        await stack.moment_svc.create_moment(author_user_id=a.user_id, content="two")
+    expected = datetime.fromisoformat(m.created_at) + timedelta(minutes=15)
+    assert datetime.fromisoformat(exc.value.next_allowed_at) == expected

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { render, waitFor, fireEvent } from '@testing-library/preact'
 
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -53,5 +53,29 @@ describe('PublicSharingSettings', () => {
     expect(notes).toHaveLength(1)
     expect(notes[0].closest('li')?.textContent).toContain('Lakeside GFS')
     expect(notes[0].textContent).toContain(': 2.')
+  })
+})
+
+describe('PublicSharingSettings — signing up (owner decision 4)', () => {
+  beforeEach(() => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => {
+      if (path === '/api/gfs/connections') return CONNS
+      return []
+    })
+    vi.mocked(api.post).mockReset().mockResolvedValue({
+      user_id: 'u1', gfs_id: 'g-new', registered_at: '', default_share: false, delivery: 'encrypted',
+    })
+  })
+
+  it('signing up leaves "share by default" to the server (off for a new registration)', async () => {
+    const { container, getAllByText } = render(<PublicSharingSettings />)
+    await waitFor(() => expect(container.textContent).toContain('Lakeside GFS'))
+    fireEvent.click(getAllByText('Sign up')[0])
+    await waitFor(() => expect(api.post).toHaveBeenCalled())
+    expect(api.post).toHaveBeenCalledWith('/api/moments/public/registrations', { gfs_id: 'g-new' })
+    await waitFor(() => expect(container.textContent).toContain('Share new moments by default'))
+    const box = container.querySelector('.sh-public-sharing-default input') as HTMLInputElement
+    expect(box.checked).toBe(false)
+    expect(container.textContent).toContain('you switch public on for each moment as you write it')
   })
 })

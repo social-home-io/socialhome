@@ -370,7 +370,6 @@
   "highlight.today.ends": "{when} is a relative future time from Intl, e.g. \"in 2 hours\" / \"in 2 Stunden\". The highlight disappears then.",
   "highlight.today.section_new": "Section heading on Highlights › Today: people with frames you have not watched.",
   "lightbox.copy_reference": "Copies a short code that shows this photo when pasted into a Page (wiki page). Keep short — it's a button label.",
-  "moment.composer.share_public": "Checkbox label. {n} = number of GFS servers this household is registered with (2 or more). Keep 'GFS' untranslated.",
   "apps.uninstall_body": "{name} = app name (e.g. 'Chess'). French/Spanish: 'app' is feminine.",
   "connections.map.you_pin": "Text inside the small round map pin that marks your own household. Very short (≤ 4 chars).",
   "space.public.hosted_by": "Follows the member count on the space's public page: '5 members · hosted by Miller family'. Lowercase.",
@@ -545,5 +544,10 @@
   "moment.discover.unreachable": "{gfs} is the GFS's name. Shown instead of 'no one signed up' when the GFS did not answer.",
   "moment.discover.unreachable_cached": "{age} is a relative time such as '2 h ago' or 'yesterday'.",
   "moment.composer.duration": "Video length next to a stopwatch icon, e.g. '12.3 s'. {len} is already formatted for the language.",
-  "highlight.audience.new_default": "{who} is a list of names or a count such as '2 paired households'."
+  "highlight.audience.new_default": "{who} is a list of names or a count such as '2 paired households'.",
+  "moment.composer.limit_title": "{time} is a clock time already formatted for the language (e.g. 13:24); {n} = whole minutes until then (1 or more).",
+  "moment.composer.post_at": "Button label while the person must wait. {time} is a clock time, e.g. 13:24. Keep it short: it sits next to Cancel on a phone.",
+  "moment.composer.public_on": "{gfs} is the name of a GFS server (e.g. Demo GFS). Keep \"GFS\" untranslated.",
+  "moment.composer.public_on_many": "{n} = number of GFS servers (2 or more). Keep \"GFS\" untranslated.",
+  "moment.composer.reach_more": "{days} is already a translated duration such as \"30 days\" (settings.momentum.days). The quoted name is the label of settings.momentum.show_up_to."
 }

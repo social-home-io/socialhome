@@ -8,9 +8,14 @@
  * line says whether it took. The retention sets the signed ``expires_at``
  * of every moment posted from then on (decision 6d, v_65); the author's own
  * archive keeps their moments regardless (#1174).
+ *
+ * A protected account sees moments from its household and directly paired
+ * households only (#1185), whatever ``max_hops`` says — so it gets that
+ * fixed circle in words instead of a 3-hop picker it doesn't have.
  */
 import { useSignal } from '@preact/signals'
 import { t } from '@/i18n/i18n'
+import { currentUser } from '@/store/auth'
 import {
   getMomentsPreferences,
   MOMENT_RETENTION_CHOICES,
@@ -72,21 +77,27 @@ export function MomentumPreferencesPanel() {
         {t('settings.momentum.retention_hint')}
       </p>
 
-      <p class="sh-muted">{t('settings.momentum.blurb')}</p>
-      <label class="sh-form-row">
-        {t('settings.momentum.show_up_to')}
-        <select
-          value={String(maxHops.value)}
-          onChange={e => {
-            maxHops.value = Number((e.target as HTMLSelectElement).value) as MomentsHops
-            void save()
-          }}
-        >
-          <option value="1">{t('settings.momentum.hop_1')}</option>
-          <option value="2">{t('settings.momentum.hop_2')}</option>
-          <option value="3">{t('settings.momentum.hop_3')}</option>
-        </select>
-      </label>
+      {currentUser.value?.protected ? (
+        <p class="sh-muted sh-settings-momentum-circle">{t('settings.momentum.circle_protected')}</p>
+      ) : (
+        <>
+          <p class="sh-muted">{t('settings.momentum.blurb')}</p>
+          <label class="sh-form-row">
+            {t('settings.momentum.show_up_to')}
+            <select
+              value={String(maxHops.value)}
+              onChange={e => {
+                maxHops.value = Number((e.target as HTMLSelectElement).value) as MomentsHops
+                void save()
+              }}
+            >
+              <option value="1">{t('settings.momentum.hop_1')}</option>
+              <option value="2">{t('settings.momentum.hop_2')}</option>
+              <option value="3">{t('settings.momentum.hop_3')}</option>
+            </select>
+          </label>
+        </>
+      )}
       <p class={status.value === 'failed' ? 'sh-form-error' : 'sh-muted'} role="status">
         {status.value === 'saved' && t('settings.momentum.saved_inline')}
         {status.value === 'failed' && t('settings.momentum.save_failed_inline')}

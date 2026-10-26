@@ -100,7 +100,7 @@ export default function PublicSharingSettings() {
   const isRegistered = (gfsId: string) =>
     registrations.value.some((r) => r.gfs_id === gfsId)
   const defaultShare = (gfsId: string) =>
-    registrations.value.find((r) => r.gfs_id === gfsId)?.default_share ?? true
+    registrations.value.find((r) => r.gfs_id === gfsId)?.default_share ?? false
   // v_62: a server that can't carry encrypted moments gets none at all —
   // say so instead of letting the author think they're shared.
   const unsupported = (gfsId: string) =>
@@ -111,7 +111,7 @@ export default function PublicSharingSettings() {
 
   const onRegister = async (gfsId: string) => {
     try {
-      await registerOnGfs(gfsId, true)
+      await registerOnGfs(gfsId)
       showToast(t('moment.sharing.registered'), 'success')
     } catch (err) {
       showToast(
@@ -182,6 +182,7 @@ export default function PublicSharingSettings() {
                     />
                     {t('moment.sharing.default_on')}
                   </label>
+                  <p class="sh-muted sh-public-sharing-hint">{t('moment.sharing.default_hint')}</p>
                   <Button
                     variant="secondary"
                     onClick={() => void onDeregister(g.id)}

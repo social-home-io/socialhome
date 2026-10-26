@@ -39,14 +39,16 @@ export async function loadFollows(): Promise<void> {
   }
 }
 
+/** Register on a GFS. Without ``defaultShare`` the server decides: off
+ *  for a new registration (owner decision 4 — each moment is public only
+ *  when its author switches it on), unchanged for an existing one. */
 export async function registerOnGfs(
   gfsId: string,
-  defaultShare = true,
+  defaultShare?: boolean,
 ): Promise<void> {
-  const row = (await api.post('/api/moments/public/registrations', {
-    gfs_id: gfsId,
-    default_share: defaultShare,
-  })) as MomentPublicRegistration
+  const body: Record<string, unknown> = { gfs_id: gfsId }
+  if (defaultShare !== undefined) body.default_share = defaultShare
+  const row = (await api.post('/api/moments/public/registrations', body)) as MomentPublicRegistration
   registrations.value = [
     ...registrations.value.filter((r) => r.gfs_id !== gfsId),
     row,

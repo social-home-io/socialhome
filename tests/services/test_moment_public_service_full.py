@@ -735,3 +735,20 @@ async def test_a_follow_declares_ops_where_the_server_takes_them(repos):
     svc.attach_capabilities(caps)  # type: ignore[arg-type]
     await svc.follow(follower_user_id="u1", gfs_id="g1", followed_user_id="u-remote")
     assert sess.posts[0][1]["moment_suites"]["ops"] == ["counts"]
+
+
+async def test_new_registration_does_not_share_by_default(repos):
+    """Owner decision 4: registering lists you; each moment is public only
+    when its author switches it on."""
+    svc = _make_service(repos, session=_StubSession(body={}))
+    reg = await svc.register(user_id="u1", gfs_id="g1")
+    assert reg.default_share is False
+    assert await svc.default_share(user_id="u1", gfs_id="g1") is False
+
+
+async def test_re_registering_keeps_the_existing_setting(repos):
+    """Existing registrations keep their "Make new moments public"."""
+    svc = _make_service(repos, session=_StubSession(body={}))
+    await svc.register(user_id="u1", gfs_id="g1", default_share=True)
+    reg = await svc.register(user_id="u1", gfs_id="g1")
+    assert reg.default_share is True

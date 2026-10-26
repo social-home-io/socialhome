@@ -417,7 +417,7 @@ export default function MomentumDetailPage() {
       )}
       <footer class="sh-momentum-detail-actions">
         {!ended && (
-          <Button onClick={() => openMomentumComposer(m.id, { parentIsPublic: m.is_public === true })}>
+          <Button onClick={() => openMomentumComposer(m.id, { parent: m })}>
             💬 {t('highlight.viewer.reply')}
           </Button>
         )}
@@ -459,7 +459,7 @@ export default function MomentumDetailPage() {
               <div class="sh-momentum-replies-cta">
                 <Button
                   variant="secondary"
-                  onClick={() => openMomentumComposer(m.id, { parentIsPublic: m.is_public === true })}
+                  onClick={() => openMomentumComposer(m.id, { parent: m })}
                 >
                   💬 {t('moment.detail.add_reply')}
                 </Button>

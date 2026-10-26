@@ -127,13 +127,24 @@ async def test_list_replies(db, repo):
     assert {r.id for r in replies} == {"m-r1", "m-r2"}
 
 
-async def test_count_recent_for_author_excludes_replies(db, repo):
+async def test_latest_top_level_at_excludes_replies(db, repo):
     """The 15-min rate-limit ignores replies — they're spam-free."""
-    await repo.save(_moment(id="m-top", author="u-bob"))
+    await repo.save(_moment(id="m-old", author="u-bob", created_offset_min=-30))
+    top = _moment(id="m-top", author="u-bob")
+    await repo.save(top)
     await repo.save(_moment(id="m-r", author="u-bob", parent_moment_id="m-top"))
     since = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
-    n = await repo.count_recent_for_author("u-bob", since_iso=since)
-    assert n == 1
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) == top.created_at
+
+
+async def test_latest_top_level_at_none_without_recent(db, repo):
+    since = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    assert await repo.latest_top_level_at("u-nobody", since_iso=since) is None
+    await repo.save(_moment(id="m-other-root", author="u-other"))
+    await repo.save(
+        _moment(id="m-only-reply", author="u-bob", parent_moment_id="m-other-root")
+    )
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
 
 
 async def test_set_and_clear_reaction(db, repo):
@@ -453,7 +464,7 @@ async def test_tombstones_are_hidden_from_every_read(db, repo):
     assert {m.id for m in await repo.list_visible_to("u-me")} == {"m-reply"}
     assert await repo.list_public_for("u-author") == []
     assert await repo.list_top_hashtags("u-me") == []
-    assert await repo.count_recent_for_author("u-author", since_iso=_now_iso(-5)) == 0
+    assert await repo.latest_top_level_at("u-author", since_iso=_now_iso(-5)) is None
     # Replies detach from a deleted parent, as the old hard delete did.
     reply = await repo.get("m-reply")
     assert reply is not None and reply.parent_moment_id is None
