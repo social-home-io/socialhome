@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -122,6 +123,55 @@ async def test_rate_limit_429_within_window(client):
     assert r.status == 429
     body = await r.json()
     assert body["error"]["code"] == "MOMENT_RATE_LIMIT"
+    # The 429 says when the next moment can go (decision 13).
+    assert isinstance(body["error"]["next_allowed_at"], str)
+
+
+async def test_limits_before_and_after_a_moment(client):
+    """``GET /api/moments/limits`` tells the composer before writing."""
+    r = await client.get("/api/moments/limits", headers=_auth(client._tok))
+    assert r.status == 200
+    assert await r.json() == {"next_allowed_at": None}
+    r = await client.post(
+        "/api/moments", json={"content": "one"}, headers=_auth(client._tok)
+    )
+    assert r.status == 201
+    created = (await r.json())["created_at"]
+    r = await client.get("/api/moments/limits", headers=_auth(client._tok))
+    assert r.status == 200
+    nxt = (await r.json())["next_allowed_at"]
+    assert datetime.fromisoformat(nxt) - datetime.fromisoformat(created) == timedelta(
+        minutes=15
+    )
+    # The same time the 429 carries.
+    r = await client.post(
+        "/api/moments", json={"content": "two"}, headers=_auth(client._tok)
+    )
+    assert r.status == 429
+    assert (await r.json())["error"]["next_allowed_at"] == nxt
+
+
+async def test_limits_ignore_replies(client):
+    r = await client.post(
+        "/api/moments", json={"content": "root"}, headers=_auth(client._tok)
+    )
+    root_id = (await r.json())["id"]
+    # A reply is exempt: it doesn't move the next allowed time.
+    r = await client.get("/api/moments/limits", headers=_auth(client._tok))
+    before = (await r.json())["next_allowed_at"]
+    r = await client.post(
+        "/api/moments",
+        json={"content": "reply", "parent_moment_id": root_id},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    r = await client.get("/api/moments/limits", headers=_auth(client._tok))
+    assert (await r.json())["next_allowed_at"] == before
+
+
+async def test_limits_require_login(client):
+    r = await client.get("/api/moments/limits")
+    assert r.status == 401
 
 
 async def test_video_over_15s_rejected(client):

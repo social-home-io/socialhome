@@ -85,6 +85,10 @@ describe('MomentumInboxTab list', () => {
     await waitFor(() => expect(kid.container.textContent).toContain('No moments yet'))
     expect(kid.getByRole('button', { name: /Share a moment/ }).textContent)
       .toContain('Your household and paired households')
+    // The empty state doesn't promise a 3-step reach a protected account doesn't have.
+    expect(kid.container.textContent).not.toContain('3 steps')
+    expect(kid.container.textContent).toContain(
+      'A moment is a short post for your household and the households you’re paired with.')
   })
 })
 

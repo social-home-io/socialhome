@@ -446,7 +446,12 @@ class BaseView(web.View):
         except HighlightFrameLimitError as exc:
             return error_response(429, "HIGHLIGHT_FRAME_LIMIT", str(exc))
         except MomentRateLimitError as exc:
-            return error_response(429, "MOMENT_RATE_LIMIT", str(exc))
+            return error_response(
+                429,
+                "MOMENT_RATE_LIMIT",
+                str(exc),
+                extra={"next_allowed_at": exc.next_allowed_at},
+            )
         except SpaceZoneLimitError as exc:
             return error_response(409, "ZONE_LIMIT", str(exc))
         except SpaceZoneNameConflictError as exc:

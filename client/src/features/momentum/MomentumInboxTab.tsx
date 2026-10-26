@@ -170,7 +170,7 @@ export default function MomentumInboxTab({ tag }: { tag: string | null }) {
               <div class="sh-empty-state">
                 <div aria-hidden="true">🌅</div>
                 <h3>{t('moment.inbox.empty_title')}</h3>
-                <p>{t('moment.inbox.empty_body')}</p>
+                <p>{t(currentUser.value?.protected ? 'moment.inbox.empty_body_protected' : 'moment.inbox.empty_body')}</p>
               </div>
             )
           )}

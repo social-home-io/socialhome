@@ -287,12 +287,12 @@ class AbstractMomentRepo(Protocol):
         max_hops: int = 3,
     ) -> Moment | None: ...
     async def mark_public(self, moment_id: str) -> None: ...
-    async def count_recent_for_author(
+    async def latest_top_level_at(
         self,
         author_user_id: str,
         *,
         since_iso: str,
-    ) -> int: ...
+    ) -> str | None: ...
     async def has_visible_recipient(
         self,
         *,
@@ -771,20 +771,22 @@ class SqliteMomentRepo:
                 out[m.parent_moment_id] = m
         return out
 
-    async def count_recent_for_author(
+    async def latest_top_level_at(
         self,
         author_user_id: str,
         *,
         since_iso: str,
-    ) -> int:
-        """Top-level moments only — replies are exempt from rate-limit."""
+    ) -> str | None:
+        """``created_at`` of the author's newest top-level moment since
+        ``since_iso``, or ``None``. Top-level moments only — replies are
+        exempt from the rate limit."""
         row = await self._db.fetchone(
-            "SELECT COUNT(*) AS n FROM moments "
+            "SELECT MAX(created_at) AS last FROM moments "
             "WHERE author_user_id=? AND created_at>=? "
             "AND parent_moment_id IS NULL AND deleted_at IS NULL",
             (author_user_id, since_iso),
         )
-        return int(row["n"]) if row else 0
+        return str(row["last"]) if row and row["last"] is not None else None
 
     # ── Reactions ──────────────────────────────────────────────────────
 

@@ -10,9 +10,16 @@ uses.
 
 ## Scope
 
-* Per-user opt-in. The author of each moment chooses whether to fan
-  it out via their registered GFSes; an opt-out checkbox at compose
-  time overrides the per-user default.
+* Per-user opt-in. Registering on a GFS lists the author there; the
+  author of each moment chooses whether to fan it out via their
+  registered GFSes with the composer's public switch (the button then
+  reads "Post publicly"). The switch starts from the per-registration
+  `default_share` ("Make new moments public"), which is **off for a new
+  registration** (owner decision 4, 2026-10-25): `POST
+  /api/moments/public/registrations` without `default_share` stores
+  `false` for a new row and keeps an existing row's value, so
+  registrations made before the change keep theirs. No migration — the
+  column's DB default is unused; the service always writes the value.
 * Multi-GFS publishing. One user can register on several GFSes at
   once. The fan-out posts to each in turn.
 * Follower-side gate. The GFS only forwards a moment to households
@@ -716,7 +723,7 @@ verifies the author's signature directly.
 | Method | Path | Purpose |
 |---|---|---|
 | GET    | `/api/moments/public/registrations` | Caller's registrations, each with `delivery` (`"encrypted"` / `"unsupported_server"`) and `followers_unable` (follower households on an older Social Home, sent none; `null` when unknown). |
-| POST   | `/api/moments/public/registrations` | Register on a GFS. |
+| POST   | `/api/moments/public/registrations` | Register on a GFS. Body `{gfs_id, default_share?}`; without `default_share` a new registration doesn't share by default and a re-registration keeps its setting. |
 | DELETE | `/api/moments/public/registrations/{gfs_id}` | Deregister. |
 | PATCH  | `/api/moments/public/registrations/{gfs_id}` | Toggle `default_share`. |
 | GET    | `/api/moments/public/follows` | Caller's GFS follows. |

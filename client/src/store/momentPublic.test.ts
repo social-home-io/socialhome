@@ -54,6 +54,15 @@ describe('momentPublic store', () => {
     })
   })
 
+  it('registerOnGfs without a choice leaves default_share to the server', async () => {
+    const mod = await import('./momentPublic')
+    apiPost.mockResolvedValueOnce({
+      user_id: 'u1', gfs_id: 'g3', registered_at: '2026-05-06', default_share: false,
+    })
+    await mod.registerOnGfs('g3')
+    expect(apiPost).toHaveBeenLastCalledWith('/api/moments/public/registrations', { gfs_id: 'g3' })
+  })
+
   it('deregisterFromGfs drops the row from the cache', async () => {
     const mod = await import('./momentPublic')
     mod.registrations.value = [

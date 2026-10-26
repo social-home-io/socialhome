@@ -15,7 +15,8 @@ Routes:
   ``followers_unable`` — follower households there on an older Social
   Home, sent no public moments (``null`` when unknown).
 * ``POST   /api/moments/public/registrations`` — body
-  ``{gfs_id, default_share?}``; signs + posts to the GFS.
+  ``{gfs_id, default_share?}`` (absent: off for a new registration, kept
+  for an existing one); signs + posts to the GFS.
 * ``DELETE /api/moments/public/registrations/{gfs_id}`` — deregister.
 * ``PATCH  /api/moments/public/registrations/{gfs_id}`` — body
   ``{default_share}``; flip the per-user default.
@@ -75,7 +76,10 @@ class MomentPublicRegistrationCollectionView(BaseView):
         gfs_id = str(body.get("gfs_id") or "")
         if not gfs_id:
             raise web.HTTPBadRequest(text='{"error":"gfs_id_required"}')
-        default_share = bool(body.get("default_share", True))
+        # Absent → the service decides: off for a new registration, kept
+        # for an existing one (owner decision 4).
+        raw_share = body.get("default_share")
+        default_share = None if raw_share is None else bool(raw_share)
         try:
             reg = await svc.register(
                 user_id=self.user.user_id,

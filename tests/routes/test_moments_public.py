@@ -34,6 +34,8 @@ class _StubService:
             "abc",
         )
         self.register_raises: Exception | None = None
+        #: ``default_share`` as each ``register`` call received it.
+        self.register_defaults: list[bool | None] = []
         self.follow_raises: Exception | None = None
         self.directory_raises: Exception | None = None
         self.picture_raises: Exception | None = None
@@ -49,14 +51,15 @@ class _StubService:
     async def list_registrations(self, user_id):
         return [r for r in self.regs if r.user_id == user_id]
 
-    async def register(self, *, user_id, gfs_id, default_share=True):
+    async def register(self, *, user_id, gfs_id, default_share=None):
+        self.register_defaults.append(default_share)
         if self.register_raises:
             raise self.register_raises
         reg = MomentPublicRegistration(
             user_id=user_id,
             gfs_id=gfs_id,
             registered_at="2026-05-06T12:00:00",
-            default_share=default_share,
+            default_share=bool(default_share),
         )
         self.regs.append(reg)
         return reg
@@ -130,6 +133,19 @@ async def test_register_returns_201(client, stub):
     body = await r.json()
     assert body["gfs_id"] == "g1" and body["default_share"] is True
     assert body["delivery"] == "encrypted"
+
+
+async def test_register_without_default_share_leaves_it_to_the_service(client, stub):
+    """No ``default_share`` in the body → the service decides (off for a new
+    registration, unchanged for an existing one — owner decision 4)."""
+    r = await client.post(
+        "/api/moments/public/registrations",
+        json={"gfs_id": "g1"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    assert stub.register_defaults == [None]
+    assert (await r.json())["default_share"] is False
 
 
 async def test_register_missing_gfs_id_returns_400(client, stub):

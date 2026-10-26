@@ -219,8 +219,13 @@ class MomentPublicService(ProtectionGateMixin):
         *,
         user_id: str,
         gfs_id: str,
-        default_share: bool = True,
+        default_share: bool | None = None,
     ) -> MomentPublicRegistration:
+        """Register ``user_id`` on ``gfs_id``. ``default_share`` ("Make new
+        moments public") is off for a new registration unless asked for
+        (owner decision 4: registering lists you, each moment is public only
+        when its author switches it on); ``None`` on a re-register keeps the
+        existing setting."""
         # §CP.R: a protected account never lists itself in a connection
         # server's public directory.
         await self._require_unrestricted(user_id, ProtectedCapability.PUBLIC_MOMENTS)
@@ -251,6 +256,9 @@ class MomentPublicService(ProtectionGateMixin):
                     )
         except aiohttp.ClientError as exc:
             raise MomentPublicError(f"GFS register failed: {exc}") from exc
+        if default_share is None:
+            existing = await self._regs.get(user_id=user_id, gfs_id=gfs_id)
+            default_share = existing.default_share if existing is not None else False
         reg = await self._regs.upsert(
             user_id=user_id, gfs_id=gfs_id, default_share=default_share
         )
