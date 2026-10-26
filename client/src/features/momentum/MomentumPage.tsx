@@ -2,28 +2,35 @@
  * MomentumPage — host for the Momentum pillar (§Momentum, UX r3 PR 8).
  *
  * Tabs are links in a ``<nav>`` with ``aria-current`` (the Spaces
- * pattern): ``/momentum`` (Moments) and ``/momentum/yours`` (your own
- * moments, decision 6a). Discover joins them in a later slice (decision
- * 5). Next to the tabs: the ``#`` filter — a popover of trending tags,
+ * pattern): ``/momentum`` (Moments), ``/momentum/yours`` (your own
+ * moments, decision 6a) and ``/momentum/discover`` (people sharing
+ * publicly on a GFS, decision 5). Discover shows only once this household
+ * has an active GFS and never for a protected account (it can't follow
+ * through a GFS); its own address still opens it. Next to the tabs: the ``#`` filter — a popover of trending tags,
  * never a permanent row — and the gear (Settings › Momentum).
  *
  * A hashtag filter is ``/momentum?tag=<name>`` and shows as one removable
  * chip above the list. Older links keep working: ``?tab=yours`` and
  * ``?tab=archive`` go to ``/momentum/yours``, ``?tab=archive&tag=…`` to
- * the tag filter, and ``/momentum/archive`` redirects (its own route).
+ * the tag filter, ``/momentum/public/discover`` goes to
+ * ``/momentum/discover``, and ``/momentum/archive`` redirects (its own
+ * route).
  */
 import { useEffect, useId, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { MomentumComposerDialog } from '@/components/MomentumComposerDialog'
+import { isRestricted } from '@/components/ProtectedNotice'
 import { t } from '@/i18n/i18n'
+import { gfsConnections, loadGfsConnections } from '@/store/momentPublic'
 import { useTitle } from '@/store/pageTitle'
 import MomentumInboxTab from './MomentumInboxTab'
 import MomentumYoursTab from './MomentumYoursTab'
+import PublicDiscoveryPage from './PublicDiscoveryPage'
 import { noteMomentumList } from './backLink'
 
-export type MomentumTab = 'moments' | 'yours'
+export type MomentumTab = 'moments' | 'yours' | 'discover'
 
 export interface MomentumView {
   tab: MomentumTab
@@ -36,6 +43,7 @@ export interface MomentumView {
 const TAB_PATH: Readonly<Record<MomentumTab, string>> = {
   moments: '/momentum',
   yours: '/momentum/yours',
+  discover: '/momentum/discover',
 }
 
 const tagPath = (tag: string) => `/momentum?tag=${encodeURIComponent(tag)}`
@@ -44,7 +52,13 @@ const tagPath = (tag: string) => `/momentum?tag=${encodeURIComponent(tag)}`
 export function momentumViewFromUrl(url: string): MomentumView {
   const [path, query = ''] = url.split('?')
   const params = new URLSearchParams(query)
-  if (path.replace(/\/+$/, '') === '/momentum/yours') return { tab: 'yours', tag: null, redirect: null }
+  const clean = path.replace(/\/+$/, '')
+  if (clean === '/momentum/yours') return { tab: 'yours', tag: null, redirect: null }
+  if (clean === '/momentum/discover') return { tab: 'discover', tag: null, redirect: null }
+  // Discover was a page of its own before it became a tab.
+  if (clean === '/momentum/public/discover') {
+    return { tab: 'discover', tag: null, redirect: TAB_PATH.discover }
+  }
   const tab = params.get('tab')
   const tag = params.get('tag') || null
   if (tab === 'yours' || (tab === 'archive' && !tag)) {
@@ -57,26 +71,44 @@ export function momentumViewFromUrl(url: string): MomentumView {
 }
 
 const tabLabel = (tab: MomentumTab): string =>
-  tab === 'yours' ? t('moment.tab.yours') : t('moment.tab.moments')
+  tab === 'yours' ? t('moment.tab.yours')
+    : tab === 'discover' ? t('moment.tab.discover')
+      : t('moment.tab.moments')
+
+const TITLE_KEY: Readonly<Record<MomentumTab, string>> = {
+  moments: 'nav.momentum',
+  yours: 'page_title.moments_yours',
+  discover: 'nav.momentum',
+}
 
 export default function MomentumPage() {
   const loc = useLocation()
   const view = momentumViewFromUrl(loc.url)
   // A moment opened from here goes back to this tab and tag.
   noteMomentumList(view.redirect ?? loc.url)
-  useTitle(view.tab === 'yours' ? t('page_title.moments_yours') : t('nav.momentum'))
+  useTitle(t(TITLE_KEY[view.tab]))
+  const restricted = isRestricted('public_moments')
 
   useEffect(() => {
     if (view.redirect && view.redirect !== loc.url) loc.route(view.redirect, true)
   }, [view.redirect])
+  useEffect(() => {
+    // Fresh per visit: a GFS connected meanwhile (pairing) shows Discover.
+    if (!restricted) void loadGfsConnections(true)
+  }, [restricted])
 
   const { tab, tag } = view
+  // Discover: someone with a GFS to discover on (and allowed to follow
+  // through one); its own address keeps its tab in view.
+  const tabs = (Object.keys(TAB_PATH) as MomentumTab[]).filter(k =>
+    k !== 'discover' || tab === 'discover'
+    || (!restricted && (gfsConnections.value?.length ?? 0) > 0))
   return (
     <div class="sh-momentum-host">
       <div class="sh-space-subheader sh-space-subheader--sections sh-momentum-subheader">
         <nav class="sh-space-sections" aria-label={t('moment.sections_aria')}>
           <ul class="sh-space-sections__row">
-            {(Object.keys(TAB_PATH) as MomentumTab[]).map(k => (
+            {tabs.map(k => (
               <li key={k}>
                 <a
                   href={addBase(TAB_PATH[k])}
@@ -90,7 +122,7 @@ export default function MomentumPage() {
           </ul>
         </nav>
         <div class="sh-space-subheader-actions">
-          <TagPicker />
+          {tab !== 'discover' && <TagPicker />}
           <a class="sh-momentum-iconbtn" href={addBase('/settings#momentum')}
             aria-label={t('moment.settings_aria')} title={t('moment.settings_aria')}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -110,7 +142,9 @@ export default function MomentumPage() {
           </a>
         </div>
       )}
-      {tab === 'yours' ? <MomentumYoursTab /> : <MomentumInboxTab tag={tag} />}
+      {tab === 'yours' ? <MomentumYoursTab />
+        : tab === 'discover' ? <PublicDiscoveryPage />
+          : <MomentumInboxTab tag={tag} />}
       <MomentumComposerDialog />
     </div>
   )

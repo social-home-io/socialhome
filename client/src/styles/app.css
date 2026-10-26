@@ -2592,6 +2592,17 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   border-radius: var(--sh-radius-sm);
 }
 .sh-person-sheet__chev { color: var(--sh-text-muted); display: inline-flex; }
+/* One Follow (decision 7): the row says what it does under its label. */
+.sh-person-sheet__follow { padding-block: 8px; }
+.sh-person-sheet__row-hint {
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+  font-weight: 400;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.sh-person-sheet__also { padding-block: 8px; }
+.sh-person-sheet__also .sh-btn { min-height: 36px; }
 .sh-person-sheet__quiet { display: flex; flex-wrap: wrap; gap: var(--sh-space-lg); }
 .sh-person-sheet__quiet button {
   min-height: 40px;
@@ -3101,6 +3112,19 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   background: color-mix(in srgb, var(--sh-bg) 70%, transparent);
 }
 .sh-post-menu-danger { color: var(--sh-danger) !important; }
+/* Near the bottom of the screen (under a phone's tab bar) the menu opens
+ * upward — OverflowMenu decides from the measured room. */
+.sh-post-menu.sh-post-menu--up { top: auto; bottom: calc(100% + 4px); }
+/* Reads env(safe-area-inset-bottom) for OverflowMenu's "visible bottom". */
+.sh-safe-area-probe {
+  position: fixed;
+  inset-block-end: 0;
+  inline-size: 0;
+  block-size: 0;
+  padding-block-end: env(safe-area-inset-bottom, 0px);
+  visibility: hidden;
+  pointer-events: none;
+}
 
 /* Reactions + comment button */
 .sh-reactions {
@@ -20756,6 +20780,54 @@ span.sh-hlv__who { cursor: default; }
   font-size: var(--sh-font-size-sm);
 }
 .sh-momentum-composer-actions { flex-wrap: wrap; }
+/* "Public sharing settings" under the public row (decision 5). */
+.sh-momentum-composer-public-settings {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding-inline: var(--sh-space-xs);
+  color: var(--sh-primary-text);
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sh-momentum-composer-public-settings:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--sh-radius-sm);
+}
+/* Momentum › Yours: the Public sharing row (→ Settings › Privacy). */
+.sh-momentum-sharing-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 64px;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-tertiary);
+  color: var(--sh-text);
+  text-decoration: none;
+}
+.sh-momentum-sharing-row:hover { border-color: var(--sh-text-muted); }
+.sh-momentum-sharing-row:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 2px; }
+.sh-momentum-sharing-row__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 40px;
+  block-size: 40px;
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text-muted);
+}
+.sh-momentum-sharing-row__text { display: flex; flex-direction: column; min-width: 0; }
+.sh-momentum-sharing-row__text strong { overflow-wrap: anywhere; }
+.sh-momentum-sharing-row__text .sh-muted { font-size: var(--sh-font-size-sm); overflow-wrap: anywhere; }
+.sh-momentum-sharing-row__chev { display: inline-flex; color: var(--sh-text-muted); }
 /* The moment's media ✕ is a real tap target (≥ 36 px), on the
  * inline-end corner in either direction. */
 .sh-momentum-composer-media .sh-composer-remove-attach {
@@ -21284,62 +21356,161 @@ span.sh-hlv__who { cursor: default; }
   padding-top: var(--sh-space-md);
 }
 
-/* ── Public Momentum Discover (§Momentum-public directory) ──────────── */
+/* ── Momentum › Discover (decision 5): people sharing on a GFS ─────── */
 .sh-momentum-discover {
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-md);
+  margin-block-start: var(--sh-space-md);
+}
+.sh-momentum-discover__bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sh-space-sm);
+}
+.sh-momentum-discover__gfs {
+  min-height: 44px;
+  max-inline-size: 100%;
+  padding-inline: var(--sh-space-md);
+  font: inherit;
+  color: var(--sh-text);
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  border-radius: 999px;
 }
 .sh-momentum-discover-search {
-  width: 100%;
-  padding: var(--sh-space-sm) var(--sh-space-md);
+  flex: 1 1 14rem;
+  min-width: 0;
+  min-height: 44px;
+  padding-block: var(--sh-space-sm);
+  padding-inline: var(--sh-space-md);
   font: inherit;
   color: var(--sh-text);
   background: var(--sh-bg);
   border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-sm);
+  border-radius: 999px;
 }
-.sh-momentum-discover-search:focus {
-  outline: none;
-  border-color: var(--hearth);
+.sh-momentum-discover-search:focus-visible,
+.sh-momentum-discover__gfs:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 1px;
+}
+.sh-momentum-discover__title {
+  margin: 0;
+  font-size: var(--sh-font-size-lg);
+  overflow-wrap: anywhere;
+}
+.sh-momentum-discover__note { margin: 0; font-size: var(--sh-font-size-sm); }
+/* A protected account's notice: its link is a real tap target here. */
+.sh-momentum-discover .sh-protected-notice .sh-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
 }
 .sh-momentum-discover-list {
   list-style: none;
   padding: 0;
   margin: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--sh-space-sm);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-tertiary);
+  overflow: hidden;
 }
 .sh-momentum-discover-row {
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: start;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
   gap: var(--sh-space-sm);
-  padding: var(--sh-space-md);
-  background: var(--sh-bg);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  min-height: 64px;
 }
+.sh-momentum-discover-row + .sh-momentum-discover-row { border-block-start: 1px solid var(--sh-border); }
 .sh-momentum-discover-meta {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 2px;
 }
-.sh-momentum-discover-meta strong {
-  display: block;
+.sh-momentum-discover-name {
+  max-inline-size: 100%;
+  min-height: 24px;
+  font-weight: 600;
+  text-align: start;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.sh-momentum-discover-sub {
+  max-inline-size: 100%;
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
+.sh-momentum-discover-tag {
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+}
+.sh-momentum-discover-row .sh-btn { min-height: 40px; }
 .sh-momentum-discover-bio {
-  margin: var(--sh-space-xs) 0 0;
+  margin: 2px 0 0;
   color: var(--sh-text);
-  font-size: 0.9rem;
+  font-size: var(--sh-font-size-sm);
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ── Settings › Privacy › Public sharing (decision 5) ─────────────── */
+.sh-public-sharing { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-public-sharing h3 { margin: 0; }
+.sh-public-sharing-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-tertiary);
+}
+.sh-public-sharing-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+}
+.sh-public-sharing-row + .sh-public-sharing-row { border-block-start: 1px solid var(--sh-border); }
+.sh-public-sharing-head,
+.sh-public-sharing-default {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 48px;
+}
+.sh-public-sharing-default { grid-template-columns: minmax(0, 1fr) auto; }
+.sh-public-sharing-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 40px;
+  block-size: 40px;
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text-muted);
+}
+.sh-public-sharing-name,
+.sh-public-sharing-default__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sh-public-sharing-name .sh-muted,
+.sh-public-sharing-default__text .sh-muted { font-size: var(--sh-font-size-sm); }
+.sh-public-sharing-default label { cursor: pointer; }
+.sh-public-sharing-head .sh-btn,
+.sh-public-sharing-actions .sh-btn { min-height: 40px; }
+.sh-public-sharing-actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-sm); }
 
 /* ───── ConnectionDetail — alias rename row (PR A) ────────────────
  *
@@ -26410,3 +26581,56 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
   font-size: var(--sh-font-size-sm);
 }
 .sh-moment-replyfield__public-text span { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }
+/* One photo or video with a reply (#1190 follow-up): a 40 px button in the
+ * field's row, the preview under it with a 36 px ✕. */
+.sh-moment-replyfield__file { display: none; }
+.sh-moment-replyfield__media {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 40px;
+  block-size: 40px;
+  padding: 0;
+  border: none;
+  border-radius: var(--sh-radius-md);
+  background: transparent;
+  color: var(--sh-text-muted);
+  cursor: pointer;
+}
+.sh-moment-replyfield__media:hover:not(:disabled) { background: var(--sh-bg); color: var(--sh-text); }
+.sh-moment-replyfield__media:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 1px; }
+.sh-moment-replyfield__media:disabled { cursor: default; opacity: 0.55; }
+.sh-moment-replyfield__media[aria-busy='true'] { opacity: 1; }
+@media (prefers-reduced-motion: no-preference) {
+  .sh-moment-replyfield__media[aria-busy='true'] { animation: sh-moment-busy 1.2s ease-in-out infinite; }
+}
+@keyframes sh-moment-busy { 50% { opacity: 0.45; } }
+.sh-moment-replyfield__attachment {
+  position: relative;
+  align-self: flex-start;
+  margin-inline-start: 48px;
+}
+.sh-moment-replyfield__preview {
+  display: block;
+  inline-size: 96px;
+  block-size: 96px;
+  object-fit: cover;
+  border-radius: var(--sh-radius-md);
+  border: 1px solid var(--sh-border);
+  background: var(--sh-bg-secondary);
+}
+.sh-moment-replyfield__remove {
+  position: absolute;
+  inset-block-start: -8px;
+  inset-inline-end: -8px;
+  inline-size: 36px;
+  block-size: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--sh-border);
+  background: var(--sh-bg-tertiary);
+  color: var(--sh-text);
+  font-size: 14px;
+  cursor: pointer;
+}
+.sh-moment-replyfield__remove:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 1px; }

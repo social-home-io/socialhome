@@ -103,3 +103,38 @@ describe('momentPublic store', () => {
     expect(list).toHaveLength(1)
   })
 })
+
+describe('GFS connections for public Momentum', () => {
+  const gfs = (id: string, status: string, name = id) => ({ id, display_name: name, status })
+
+  it('keeps the active ones, once per session; a failed read is not "none"', async () => {
+    const mod = await import('./momentPublic')
+    mod._resetGfsConnectionsForTests()
+    apiGet.mockRejectedValueOnce(new Error('offline'))
+    await mod.loadGfsConnections()
+    expect(mod.gfsConnections.value).toBeNull()
+    expect(mod.gfsConnectionsFailed.value).toBe(true)
+
+    apiGet.mockResolvedValueOnce([gfs('g1', 'active', 'Demo GFS'), gfs('g2', 'pending')])
+    await mod.loadGfsConnections()
+    expect(mod.gfsConnections.value?.map(g => g.id)).toEqual(['g1'])
+    expect(mod.gfsConnectionsFailed.value).toBe(false)
+    expect(mod.gfsName('g1')).toBe('Demo GFS')
+    expect(mod.gfsName('nope')).toBeNull()
+
+    await mod.loadGfsConnections()
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    await mod.loadGfsConnections(true)
+    expect(apiGet).toHaveBeenCalledTimes(3)
+  })
+
+  it('gfsFollowOf finds a GFS follow of a person on any server', async () => {
+    const mod = await import('./momentPublic')
+    mod.follows.value = [{
+      follower_user_id: 'me', followed_user_id: 'u-noor', gfs_id: 'g1',
+      followed_username: 'noor', followed_display_name: 'Noor', created_at: '',
+    }]
+    expect(mod.gfsFollowOf('u-noor')?.gfs_id).toBe('g1')
+    expect(mod.gfsFollowOf('u-else')).toBeUndefined()
+  })
+})

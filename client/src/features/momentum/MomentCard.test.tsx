@@ -66,6 +66,18 @@ describe('MomentCard', () => {
     expect(container.querySelector('.sh-moment-card__name')?.getAttribute('dir')).toBe('auto')
   })
 
+  it('the author of a moment that came through a GFS opens as someone known through it (one Follow)', () => {
+    const { getByRole } = renderCard(moment({ received_via: 'gfs', received_via_gfs_id: 'g1', hop_count: undefined }))
+    fireEvent.click(getByRole('button', { name: 'Bob Berger' }))
+    expect(openPerson).toHaveBeenCalledWith('uid-bob', {
+      person: expect.objectContaining({ public_via: { gfs_id: 'g1' } }),
+    })
+    openPerson.mockReset()
+    const paired = renderCard(moment({ received_via: 'household' }))
+    fireEvent.click(paired.getAllByRole('button', { name: 'Bob Berger' }).at(-1)!)
+    expect(openPerson.mock.calls[0][1].person.public_via).toBeUndefined()
+  })
+
   it('⋯ holds actions on the moment, never the person sheet', async () => {
     const { getByRole, findByRole } = renderCard(moment({ can_save: true }))
     fireEvent.click(getByRole('button', { name: 'More actions for this moment' }))

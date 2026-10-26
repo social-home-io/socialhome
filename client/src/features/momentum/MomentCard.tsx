@@ -164,6 +164,11 @@ export function MomentCard({ m, me, onPatch, onDeleted, page }: Props) {
     display_name: realName,
     picture_url: authorPicture,
     ...(m.author?.bio ? { bio: m.author.bio } : {}),
+    // Came through a GFS: the person sheet's Follow is that GFS follow
+    // unless the household turns out to know them (decision 7).
+    ...(m.received_via === 'gfs' && m.received_via_gfs_id
+      ? { public_via: { gfs_id: m.received_via_gfs_id } }
+      : {}),
   })
   const where = provenance(m)
   // The page counts your own moment's reactions as chips, like anyone's.

@@ -221,7 +221,7 @@ Household-broadcast posts that fan to a 3-hop peer mesh. Replies are themselves 
 | DELETE | `/api/moments/{id}/save` | Remove it from the caller's saved moments. Always `200 {moment_id, saved: false}` — no read needed, says nothing about the moment. |
 | POST | `/api/moments/{id}/report` | Report a moment. Body: `{category, notes?}`. |
 | GET | `/api/moments/follows` | List who I follow: `[{user_id, created_at, display_name, personal_alias, picture_url, household}]` — same person fields as `GET /api/blocks`; `picture_url` is `null` for someone a guardian block (§CP.F2) separates from the caller, either way. |
-| POST | `/api/moments/follows` | Follow a user. Body: `{user_id}`. |
+| POST | `/api/moments/follows` | Follow a user. Body: `{user_id}`. The household follow: stored here only, never sent anywhere. The SPA's person sheet uses it for its own people, paired households' people and relayed authors — never for someone known only through a GFS (decision 7, see `/api/moments/public/follows`). |
 | DELETE | `/api/moments/follows/{user_id}` | Unfollow. |
 | POST | `/api/highlights/{id}/report` | Report a highlight (same `content_reports` queue). |
 
@@ -1074,10 +1074,10 @@ bell for it reads "{sender} in Household chat" and opens `/?tab=chat`.
 |---|---|---|
 | GET / POST | `/api/moments/public/registrations` | List / opt this user into the directory on a GFS. `POST` body `{gfs_id, default_share?}`: without `default_share` a new registration doesn't make new moments public by default (each moment is public only when its author switches it on) and a re-registration keeps its setting. Each row carries `delivery` (v_62): `"encrypted"` — public moments go through this GFS, encrypted from it — or `"unsupported_server"` — the GFS has not proved `encrypted_moments` in its signed `/gfs/info` block, so no public moment is sent through it (never in plaintext) — and `followers_unable`: follower households there on an older Social Home (they declared no moment suites and are sent none), from the GFS's signed `follower_stats` counts; `null` when unknown or not encrypted. |
 | DELETE / PATCH | `/api/moments/public/registrations/{gfs_id}` | Deregister / flip `default_share`. |
-| GET / POST | `/api/moments/public/follows` | List / follow public author. |
+| GET / POST | `/api/moments/public/follows` | List / follow public author. Body `{gfs_id, followed_user_id}`. The GFS learns the follow; the SPA offers it only for someone known through that GFS alone (Discover, a moment that came through it) — a paired person gets the household follow instead (decision 7). |
 | DELETE | `/api/moments/public/follows/{gfs_id}/{user_id}` | Unfollow. |
 | POST | `/api/moments/{id}/share-link` | The author's per-moment share link for their own public moment. Optional body `{gfs_id}` (a string; `400` otherwise). Uploads the 4 KB sealed share copy to that GFS on first use — and the moment's encrypted file, if that GFS didn't take it at publish — and returns `{url}` — `{viewer}/v/<hash>/#g=<GFS>&a=<author>&m=<moment>&b=<share blob>&k=<item key>`, the key in the fragment only. `404` for an unknown, someone else's or non-public moment, and for a reply whose parent isn't public; `409 SHARE_LINK_UNAVAILABLE` when no viewer address is set, no registered GFS keeps encrypted media, the file is still processing, or the GFS refused an upload. See `docs/protocol/momentum_public.md`, "Share links". |
-| GET | `/api/gfs/{gfs_id}/moments/users` | Proxy GFS directory; passes `?q=<substr>` through. Each row's `picture_url` is replaced with our own signed picture-proxy URL (or `null` without a mirrored picture) — the household's self-reported URL never reaches the browser. |
+| GET | `/api/gfs/{gfs_id}/moments/users` | Proxy GFS directory; passes `?q=<substr>` through (Momentum › Discover sends none: it filters in the browser, so the GFS never sees a search). Each row's `picture_url` is replaced with our own signed picture-proxy URL (or `null` without a mirrored picture) — the household's self-reported URL never reaches the browser. |
 | GET | `/api/gfs/{gfs_id}/moments/users/{user_id}/picture` | Proxy GFS-mirrored avatar bytes (used by Discover cards). Accepts the `?exp=&sig=` signed URL from the directory response. |
 
 ## HFS — Child protection

@@ -15,7 +15,8 @@
  *   ``max_hops`` only changes what *you* see, never how far yours go.
  * * **Public** — a separate switch, shown only when the person is
  *   registered on a GFS, and for a reply only under a public moment
- *   (decision 2). It starts from "Make new moments public" (off for new
+ *   (decision 2), with a link to Settings › Privacy › Public sharing
+ *   (decision 5). It starts from "Make new moments public" (off for new
  *   registrations, decision 4); once the person flips it, a late
  *   registrations load never overwrites that (B25). When it's on the
  *   button reads "Post publicly".
@@ -34,7 +35,9 @@
  */
 import { signal } from '@preact/signals'
 import { useEffect, useRef } from 'preact/hooks'
+import { useLocation } from 'preact-iso'
 import { api, ApiError } from '@/api'
+import { addBase } from '@/baseUrl'
 import { Button } from './Button'
 import { confirmDialog } from './confirm'
 import { isRestricted } from './ProtectedNotice'
@@ -42,8 +45,8 @@ import { MediaDropzone } from './MediaDropzone'
 import { Modal } from './Modal'
 import { Switch } from './Switch'
 import { showToast } from './Toast'
-import { UploadProgressBar, uploadWithProgress } from './UploadProgress'
-import { describeUploadError } from '@/utils/uploadErrors'
+import { UploadProgressBar } from './UploadProgress'
+import { MOMENT_MAX_VIDEO_MS, prepareMomentMedia } from '@/features/momentum/momentMedia'
 import { getMomentsPreferences, momentRetentionLabel } from '@/utils/preferences'
 import { localClockTime } from '@/utils/relativeTime'
 import { currentUser } from '@/store/auth'
@@ -54,10 +57,9 @@ import {
 } from '@/store/momentPublic'
 import type { GfsConnection, Moment, MomentDetail } from '@/types'
 import { t, isOne } from '@/i18n/i18n'
-import { formatSeconds, readVideoDurationMs } from '@/utils/videoDuration'
+import { formatSeconds } from '@/utils/videoDuration'
 
 const MAX_CONTENT = 1_000
-const MAX_VIDEO_MS = 15_000
 /** How often the "in N min" countdown re-renders while limited. */
 const LIMIT_TICK_MS = 15_000
 
@@ -181,8 +183,9 @@ function hasDraft(): boolean {
   return content.value.trim() !== '' || mediaUrl.value !== null || mediaBusy.value
 }
 
-/** Close, asking first when there's something to lose (C18). */
-async function requestClose(): Promise<void> {
+/** Close, asking first when there's something to lose (C18). Resolves
+ *  whether it closed. */
+async function requestClose(): Promise<boolean> {
   if (hasDraft()) {
     const ok = await confirmDialog(t('moment.composer.discard_body'), {
       title: t(parentId.value ? 'moment.composer.discard_reply_title' : 'moment.composer.discard_title'),
@@ -190,10 +193,14 @@ async function requestClose(): Promise<void> {
       cancelLabel: t('moment.composer.keep_writing'),
       destructive: true,
     })
-    if (!ok) return
+    if (!ok) return false
   }
   open.value = false
+  return true
 }
+
+/** Settings › Privacy › Public sharing (decision 5). */
+const PUBLIC_SHARING_PATH = '/settings#public-sharing'
 
 function publicTitle(): string {
   const regs = registrations.value
@@ -245,6 +252,7 @@ interface Props {
 }
 
 export function MomentumComposerDialog({ onPosted }: Props = {}) {
+  const loc = useLocation()
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   // Auto-focus the textarea when the dialog opens. The Modal focus-trap
@@ -275,41 +283,16 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
   const acceptFiles = async (files: File[]) => {
     const f = files[0]
     if (!f) return
-    const isVideo = f.type.startsWith('video/')
-    const isImage = f.type.startsWith('image/')
-    if (!isVideo && !isImage) {
-      showToast(t('highlight.quick.pick_media'), 'error')
-      return
-    }
     const seq = openSeq
     mediaBusy.value = true
     try {
-      if (isVideo) {
-        const dur = await readVideoDurationMs(f)
-        if (dur === null) {
-          showToast(t('moment.composer.video_unreadable'), 'error')
-          return
-        }
-        if (dur > MAX_VIDEO_MS + 50) {
-          showToast(
-            t('moment.composer.video_too_long', { max: String(MAX_VIDEO_MS / 1000), len: formatSeconds(dur) }),
-            'error',
-          )
-          return
-        }
-        durationMs.value = Math.round(dur)
-      }
-      const result = await uploadWithProgress(f)
+      // Same checks and upload as the reply field on the moment page.
+      const media = await prepareMomentMedia(f)
       if (seq !== openSeq) return  // the composer was closed meanwhile
-      mediaUrl.value = result.url
-      mediaPreviewUrl.value = result.signed_url
-      mediaType.value = isVideo ? 'video' : 'image'
-    } catch (err: unknown) {
-      showToast(describeUploadError(err, { file: f }), 'error')
-      mediaUrl.value = null
-      mediaPreviewUrl.value = null
-      mediaType.value = null
-      durationMs.value = null
+      mediaUrl.value = media?.url ?? null
+      mediaPreviewUrl.value = media?.previewUrl ?? null
+      mediaType.value = media?.type ?? null
+      durationMs.value = media?.durationMs ?? null
     } finally {
       if (seq === openSeq) mediaBusy.value = false
     }
@@ -466,7 +449,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
               />
               {durationMs.value !== null && (
                 <span class="sh-momentum-composer-duration"
-                      aria-label={t('moment.composer.duration_aria', { len: formatSeconds(durationMs.value), max: String(MAX_VIDEO_MS / 1000) })}>
+                      aria-label={t('moment.composer.duration_aria', { len: formatSeconds(durationMs.value), max: String(MOMENT_MAX_VIDEO_MS / 1000) })}>
                   <span aria-hidden="true">⏱ {t('moment.composer.duration', { len: formatSeconds(durationMs.value) })}</span>
                 </span>
               )}
@@ -531,6 +514,21 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
               }}
             />
           </label>
+        )}
+        {showPublic && (
+          <a
+            class="sh-momentum-composer-public-settings"
+            href={addBase(PUBLIC_SHARING_PATH)}
+            onClick={(e) => {
+              // The router handles the move once the dialog is closed — a
+              // draft is asked about first, like any other way out.
+              e.preventDefault()
+              e.stopPropagation()
+              void requestClose().then((closed) => { if (closed) loc.route(PUBLIC_SHARING_PATH) })
+            }}
+          >
+            {t('moment.composer.public_settings')}
+          </a>
         )}
 
         <div class="sh-form-actions sh-momentum-composer-actions">

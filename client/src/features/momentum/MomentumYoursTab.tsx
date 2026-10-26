@@ -13,7 +13,8 @@
  *
  * A Posted | Saved switch (``/momentum/yours?show=saved``) swaps the list for
  * the moments you saved (decision 6b, :class:`MomentumSavedList`); the
- * usage line counts both.
+ * usage line counts both. Above the posted list, a Public sharing row links
+ * to Settings › Privacy (decision 5).
  *
  * Mounted by :class:`MomentumPage` for ``/momentum/yours``.
  */
@@ -34,6 +35,7 @@ import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { t, isOne, formatLocale } from '@/i18n/i18n'
 import MomentumSavedList from './MomentumSavedList'
+import { PublicSharingRow } from './PublicSharingRow'
 
 /** Rows per page of ``?scope=own``. */
 export const YOURS_PAGE = 30
@@ -233,6 +235,7 @@ export default function MomentumYoursTab() {
   const show = yoursShowFromUrl(loc.url)
   const header = (
     <>
+      {show === 'posted' && <PublicSharingRow />}
       <h2>{t('moment.yours.heading')}</h2>
       <SegmentedSwitch<YoursShow>
         options={SHOWS}

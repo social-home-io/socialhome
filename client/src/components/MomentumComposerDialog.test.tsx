@@ -30,6 +30,9 @@ vi.mock('./Toast', () => ({
   showToast: vi.fn(),
 }))
 
+const routeSpy = vi.hoisted(() => vi.fn())
+vi.mock('preact-iso', () => ({ useLocation: () => ({ route: routeSpy }) }))
+
 vi.mock('./confirm', () => ({
   confirmDialog: vi.fn(),
 }))
@@ -144,6 +147,31 @@ describe('MomentumComposerDialog', () => {
       await new Promise((r) => setTimeout(r, 0))
     })
     expect(publicSwitch(container)!.checked).toBe(false)
+  })
+
+  it('the public row links to Settings › Privacy › Public sharing; leaving asks about a draft first', async () => {
+    regs = [REG_OFF]
+    const { container } = render(<MomentumComposerDialog />)
+    await openAndSettle()
+    const link = await waitFor(() => {
+      const a = container.querySelector('a.sh-momentum-composer-public-settings') as HTMLAnchorElement
+      expect(a).not.toBeNull()
+      return a
+    })
+    expect(link.textContent).toBe('Public sharing settings')
+    expect(link.getAttribute('href')).toBe('/settings#public-sharing')
+    // A draft: the person is asked, and "keep writing" stays here.
+    const ta = container.querySelector('textarea')!
+    await act(async () => { fireEvent.input(ta, { target: { value: 'Half a thought' } }) })
+    vi.mocked(confirmDialog).mockResolvedValueOnce(false)
+    routeSpy.mockReset()
+    await act(async () => { fireEvent.click(link) })
+    expect(confirmDialog).toHaveBeenCalled()
+    expect(routeSpy).not.toHaveBeenCalled()
+    expect(container.querySelector('textarea')).not.toBeNull()
+    vi.mocked(confirmDialog).mockResolvedValueOnce(true)
+    await act(async () => { fireEvent.click(link) })
+    await waitFor(() => expect(routeSpy).toHaveBeenCalledWith('/settings#public-sharing'))
   })
 
   it('no public row without a registration', async () => {

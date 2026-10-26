@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { HighlightsPreferencesPanel } from './HighlightsPreferencesPanel'
 import { MomentumPreferencesPanel } from './MomentumPreferencesPanel'
+import { PublicSharingPanel } from '@/features/momentum/PublicSharingSettings'
 import { useTitle } from '@/store/pageTitle'
 import { signal, useSignal } from '@preact/signals'
 import { currentUser } from '@/store/auth'
@@ -73,12 +74,14 @@ const TAB_LABEL_KEYS: Record<SettingsTab, string> = {
 /** ``/settings#<section>`` → the tab that holds that section:
  *  "See what's limited" on a protected-account notice (#protection),
  *  Friends' blocked › Manage (#privacy), and the Highlights / Momentum
- *  pages' "Settings" links (#highlights, #momentum). */
+ *  pages' "Settings" links (#highlights, #momentum), and Public sharing
+ *  (#public-sharing — Momentum › Yours, the composer, pairing a GFS). */
 const HASH_TABS: Record<string, SettingsTab> = {
   '#protection': 'profile',
   '#privacy': 'privacy',
   '#highlights': 'privacy',
   '#momentum': 'privacy',
+  '#public-sharing': 'privacy',
 }
 
 const errText = (err: unknown): string => String((err as Error)?.message ?? err)
@@ -325,6 +328,7 @@ function PrivacyTab() {
       <SpaceLocationSharingPanel />
       <HighlightsPreferencesPanel />
       <MomentumPreferencesPanel />
+      <PublicSharingPanel />
       <BlockedAccountsPanel />
       <FollowingPanel />
     </section>

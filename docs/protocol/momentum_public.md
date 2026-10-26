@@ -1220,10 +1220,34 @@ identical bytes-for-bytes to the sender's canonical encoding.
 * **Server-side filter** `GET /gfs/moments/users?q=<substr>` matches
   `display_name` and `username` (`LIKE '%q%'`). Capped at 200
   rows; the SH-side proxy passes `q` through.
-* **In-app Discover** at `/momentum/public/discover` — fetches
-  `GET /api/gfs/{gfs_id}/moments/users` (SH proxy), rendering avatar
-  via `GET /api/gfs/{gfs_id}/moments/users/{user_id}/picture` so the UI
-  renders even when the home instance is NAT-shielded.
+* **In-app Discover** is the Momentum tab `/momentum/discover` (the old
+  `/momentum/public/discover` redirects there) — fetches
+  `GET /api/gfs/{gfs_id}/moments/users` (SH proxy, no `q`: the search box
+  filters the list in the browser, so the GFS never learns what someone
+  searched for), rendering avatar via
+  `GET /api/gfs/{gfs_id}/moments/users/{user_id}/picture` so the UI
+  renders even when the home instance is NAT-shielded. The tab shows only
+  with an active GFS and never for a protected account. A GFS that doesn't
+  answer keeps the list it last gave in this session, labelled with its
+  age, next to an inline error with Try again — never "no one signed up".
+  People from the viewer's own or a paired household (matched by
+  `instance_id` against `GET /api/friends`, read locally) are marked
+  "Paired" instead of offering a GFS follow, and the page says that a
+  follow tells the GFS who follows whom.
+* **One Follow** (owner decision 7). The person sheet offers exactly one
+  Follow per person: the household follow (`POST /api/moments/follows`,
+  which never leaves the household) for the viewer's own people, paired
+  households' people and relayed authors; the GFS follow
+  (`POST /api/moments/public/follows`) only for someone known through a
+  GFS alone — a Discover row, or a moment that arrived via the GFS — and
+  its line says the GFS learns the follow. Following a paired person never
+  goes to the GFS; a GFS follow left over from before pairing is named on
+  the sheet, with Stop, rather than kept silently.
+* **Public sharing** (registrations, "Make new moments public" — off
+  unless chosen —, Leave) lives in Settings › Privacy
+  (`/settings#public-sharing`; the old `/momentum/public/sharing`
+  redirects), linked from Momentum › Yours, the composer's public row and
+  the pairing screen.
 * **Profile sync** — `UserProfileUpdated` (published from
   `UserService.patch_profile` and `set_picture`) is consumed by
   `ProfileSyncService`, which calls
