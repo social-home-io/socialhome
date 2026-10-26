@@ -20516,6 +20516,10 @@ h2 + .sh-settings-subcard {
   align-items: center;
   flex-wrap: wrap;
 }
+.sh-momentum-reactions-note {
+  margin: var(--sh-space-xs) 0 0;
+  font-size: 0.85rem;
+}
 .sh-momentum-reaction-btn {
   font-size: 1.2rem;
   width: 36px;

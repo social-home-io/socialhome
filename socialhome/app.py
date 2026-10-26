@@ -352,6 +352,7 @@ from .services.moment_public_media_outbound import MomentPublicMediaOutbound
 from .services.moment_public_outbound import MomentPublicOutbound
 from .services.moment_public_service import MomentPublicService
 from .services.moment_public_share_service import MomentPublicShareService
+from .services.moment_reaction_router import MomentReactionRouter
 from .services.moment_service import MomentService
 from .services.online_status_service import OnlineStatusService
 from .services.page_conflict_service import PageConflictService
@@ -1459,6 +1460,20 @@ def _wire_federation_stack(
         app[K.child_protection_service_key]
     )
     moment_federation_outbound.wire()
+    # v_67 — reactions reach authors further away: the origin's key-wrap key
+    # on creates, return tokens on relays, MOMENT_REACTION_ROUTED inbound.
+    # Its key material is attached in the startup hook.
+    moment_reaction_router = MomentReactionRouter(
+        bus=bus,
+        federation_service=federation_service,
+        federation_repo=federation_repo,
+        moment_repo=moment_repo,
+        user_repo=user_repo,
+        ban_repo=household_instance_ban_repo,
+    )
+    moment_reaction_router.attach_child_protection(app[K.child_protection_service_key])
+    moment_reaction_router.attach_to(federation_service)
+    moment_federation_outbound.attach_reaction_router(moment_reaction_router)
 
     # §24.11 authorship: the users a space-content payload names must be
     # seated on the household that signed it. Writes naming a user (or
@@ -1521,6 +1536,7 @@ def _wire_federation_stack(
     )
     inbound_service.attach_to(federation_service)
     inbound_service.attach_groups(dm_service.groups)
+    inbound_service.attach_moment_reaction_router(moment_reaction_router)
 
     # Move-out redirect (move-out): land USER_MOVED redirects + serve the
     # USER_IDENTITY_RESOLVE pull backstop.
@@ -2130,6 +2146,7 @@ def _wire_federation_stack(
     app[K.peer_unpair_service_key] = peer_unpair_service
     app[K.household_instance_ban_repo_key] = household_instance_ban_repo
     app[K.relay_policy_key] = relay_policy
+    app[K.moment_reaction_router_key] = moment_reaction_router
 
     return SimpleNamespace(
         federation_service=federation_service,
@@ -2140,6 +2157,7 @@ def _wire_federation_stack(
         pairing_relay_queue=pairing_relay_queue,
         household_instance_ban_repo=household_instance_ban_repo,
         relay_policy=relay_policy,
+        moment_reaction_router=moment_reaction_router,
     )
 
 
@@ -4176,6 +4194,16 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager
+        # v_67: ``reactions_reach`` on every moment the API returns; seal /
+        # open routed reactions with the existing key-wrap key, and return
+        # tokens under a key derived from the existing routing secret.
+        moment_service.attach_reaction_reach(fed.moment_reaction_router)
+        fed.moment_reaction_router.attach_identity(
+            keywrap_private_key=identity.keywrap_private_key,
+            keywrap_public_key=identity.keywrap_public_key,
+            keywrap_sig=identity.keywrap_sig,
+            routing_secret=identity.routing_secret,
+        )
         # Cross-household private-space invites (§D1b) need a live
         # ``FederationService``. Wire it now that ``_wire_federation_stack``
         # has returned the real one — see the matching deferral note
@@ -5264,6 +5292,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # Before the HTTP session closes: queued sealed moment keys ride it.
         await moment_public_key_outbound.stop()
         await moment_public_outbound.stop()
+        # Sends any reaction still waiting for its 3 s debounce (v_67).
+        if (reaction_router := app.get(K.moment_reaction_router_key)) is not None:
+            await reaction_router.stop()
         await moment_public_media_inbound.stop()
         # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()

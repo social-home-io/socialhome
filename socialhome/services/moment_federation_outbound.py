@@ -25,12 +25,20 @@ the subscriber gates each event on "is the *actor* (author for create
 local actor's instance fans on the bus path. The relay path is
 explicit (not bus-driven) and runs from inside the inbound handler
 before it republishes anything.
+
+**Reactions further away (v_67).** A reaction is unicast to the author's
+household when it is this one or a paired one. Otherwise the
+:class:`~socialhome.services.moment_reaction_router.MomentReactionRouter`
+carries it back along the moment's return tokens; this service adds the
+origin's key-wrap key to every create it authors and each relay's return
+token to every create it relays (per peer).
 """
 
 from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from collections.abc import Callable
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -61,6 +69,7 @@ if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.peer_user_visibility_repo import AbstractPeerUserVisibilityRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .moment_reaction_router import MomentReactionRouter
     from .relay_policy import RelayPolicy
 
 log = logging.getLogger(__name__)
@@ -89,6 +98,7 @@ class MomentFederationOutbound(
         "_child_protection",
         "_federation",
         "_federation_repo",
+        "_reaction_router",
         "_relay_policy",
         "_relayed",
         "_user_repo",
@@ -115,6 +125,7 @@ class MomentFederationOutbound(
         self._relay_policy = relay_policy
         self._visibility_repo = visibility_repo
         self._child_protection = None
+        self._reaction_router: MomentReactionRouter | None = None
         #: (event type, moment id) → (lowest hop we relayed it at,
         #: monotonic time). In a mesh a household gets one copy of a
         #: moment per relaying neighbour; only the first — or one from
@@ -122,6 +133,11 @@ class MomentFederationOutbound(
         #: Bounded by :data:`RELAY_SEEN_MAX` and :data:`RELAY_SEEN_TTL_S`;
         #: lost on restart (a copy arriving after one is relayed once more).
         self._relayed: OrderedDict[tuple[str, str], tuple[int, float]] = OrderedDict()
+
+    def attach_reaction_router(self, router: MomentReactionRouter) -> None:
+        """Wire the v_67 reaction router (key-wrap key on creates, return
+        tokens on relays, routed reactions to authors further away)."""
+        self._reaction_router = router
 
     def wire(self) -> None:
         self._bus.subscribe(MomentCreated, self._on_created)
@@ -162,9 +178,15 @@ class MomentFederationOutbound(
         no_relay = await self._is_protected(event.author_user_id)
         if no_relay:
             payload[NO_RELAY_FIELD] = True
+        signed = self._origin_signed(FederationEventType.MOMENT_CREATED, payload)
+        if not no_relay and self._reaction_router is not None:
+            # v_67: where a reaction from further away gets sealed to. Outside
+            # the origin signature (older verifiers keep the v1 bytes) and
+            # bound to our identity key instead; older receivers ignore it.
+            signed.update(self._reaction_router.origin_keywrap_fields())
         await self._fan_to_peers(
             event_type=FederationEventType.MOMENT_CREATED,
-            payload=self._origin_signed(FederationEventType.MOMENT_CREATED, payload),
+            payload=signed,
             origin_instance_id=event.origin_instance_id,
             exclude_instances=set(),
             author_user_id=event.author_user_id,
@@ -210,8 +232,22 @@ class MomentFederationOutbound(
         # Reactions are unicast to the author's home instance —
         # everyone else's view of the reaction is hydrated from the
         # author's instance via the next list refresh. (Same shape as
-        # the Highlights back-channel.)
-        target = await self._home_or_none(event.author_user_id)
+        # the Highlights back-channel.) Only a household we are paired with
+        # gets it directly; an author further away is reached along the
+        # moment's return tokens (v_67), or the reaction stays here.
+        router = self._reaction_router
+        if router is not None:
+            target = await router.direct_target(event.author_user_id)
+            if target is None:
+                await router.queue_reaction(
+                    moment_id=event.moment_id,
+                    reactor_user_id=event.reactor_user_id,
+                    emoji=event.emoji,
+                    occurred_at=event.occurred_at,
+                )
+                return
+        else:
+            target = await self._home_or_none(event.author_user_id)
         if target is None or target == self._federation.own_instance_id:
             return
         hidden = await self.hidden_for_peer(target)
@@ -292,12 +328,25 @@ class MomentFederationOutbound(
         self._remember_relay(seen_key, hop)
         next_payload = dict(payload)
         next_payload["hop_count"] = hop + 1
+        router = self._reaction_router
+        payload_for = None
+        if router is not None and event_type == FederationEventType.MOMENT_CREATED:
+            # v_67: each peer's copy carries our return token for it.
+            def payload_for(peer_id: str) -> dict:
+                return router.stamp_relayed_create(
+                    next_payload,
+                    received_hop=hop,
+                    from_instance=from_instance,
+                    to_instance=peer_id,
+                )
+
         await self._fan_to_peers(
             event_type=event_type,
             payload=next_payload,
             origin_instance_id=origin,
             exclude_instances={from_instance},
             author_user_id=str(payload.get("author_user_id") or "") or None,
+            payload_for=payload_for,
         )
 
     # ── Relay seen-map ─────────────────────────────────────────────────
@@ -354,6 +403,7 @@ class MomentFederationOutbound(
         exclude_instances: set[str],
         author_user_id: str | None = None,
         min_version: int | None = None,
+        payload_for: Callable[[str], dict] | None = None,
     ) -> None:
         # ``confirmed_peers`` already drops our own instance + null ids;
         # the relay/origin skip set adds the origin + the immediate sender.
@@ -379,7 +429,11 @@ class MomentFederationOutbound(
                     )
                 if author_user_id in hidden_per_peer[instance_id]:
                     continue
-            await self.send_to_instance(instance_id, event_type, payload)
+            await self.send_to_instance(
+                instance_id,
+                event_type,
+                payload if payload_for is None else payload_for(instance_id),
+            )
 
     async def _is_local_user(self, user_id: str) -> bool:
         return await self._home_or_none(user_id) == self._federation.own_instance_id

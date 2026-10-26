@@ -30,6 +30,7 @@ and are never "saved". Saves are local: nothing goes on the wire.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -43,10 +44,13 @@ from ..domain.federation_capabilities import FederationCapability
 from ..domain.moment import (
     MOMENT_MAX_CONTENT_LEN,
     MOMENT_MAX_VIDEO_MS,
+    REACTION_REACH_AUTHOR,
     Moment,
     MomentOwnSaveError,
+    MomentReactionInvalidError,
     MomentSaveUnavailableError,
     SavedMoment,
+    is_valid_moment_reaction,
 )
 from ..federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
 from ..media.cleanup import unlink_unreferenced
@@ -114,6 +118,13 @@ class GfsDeleteLog(Protocol):
     async def moment_delete_log_supported(self, gfs_id: str) -> bool: ...
 
 
+class ReactionReach(Protocol):
+    """``MomentReactionRouter.reach_for`` — whether a reaction to each
+    moment reaches its author's household (v_67)."""
+
+    async def reach_for(self, moments: Iterable[Moment]) -> dict[str, str]: ...
+
+
 class MomentRateLimitError(Exception):
     """Raised when an author tries to post a top-level moment within
     :data:`MOMENT_RATE_WINDOW` of their last one. Mapped to HTTP 429
@@ -132,6 +143,7 @@ class MomentService:
         "_media_refs",
         "_moments",
         "_own_instance_id",
+        "_reaction_reach",
         "_users",
     )
 
@@ -159,6 +171,13 @@ class MomentService:
         # GFS copy is savable.
         self._federation_repo = federation_repo
         self._gfs_delete_log = gfs_delete_log
+        #: v_67 — where a reaction reaches (``MomentReactionRouter``).
+        self._reaction_reach: ReactionReach | None = None
+
+    def attach_reaction_reach(self, reach: ReactionReach) -> None:
+        """Wire what decides whether a reaction reaches a moment's author
+        (``reactions_reach`` on every API item)."""
+        self._reaction_reach = reach
 
     def attach_instance_id(self, own_instance_id: str) -> None:
         """Late binding for the instance id (set after federation
@@ -329,8 +348,10 @@ class MomentService:
         reactor_user_id: str,
         emoji: str,
     ) -> None:
-        if not emoji:
-            raise ValueError("Reaction emoji is required.")
+        if not is_valid_moment_reaction(emoji):
+            # One emoji of ≤ 32 bytes — the same bound every inbound path
+            # (and a routed reaction's seal, v_67) holds a reaction to.
+            raise MomentReactionInvalidError()
         moment = await self.get_for_viewer(moment_id, reactor_user_id)
         await self._moments.set_reaction(moment_id, reactor_user_id, emoji)
         await self._bus.publish(
@@ -590,6 +611,14 @@ class MomentService:
                 await self.can_save(m, viewer_user_id, _cache=cache),
             )
         return out
+
+    async def reaction_reach(self, moments: list[Moment]) -> dict[str, str]:
+        """``{moment_id: "author" | "household"}`` — whether the caller's
+        reaction reaches the author's household (v_67) or stays here. Every
+        moment reads ``author`` when nothing is wired (unit stacks)."""
+        if self._reaction_reach is None:
+            return {m.id: REACTION_REACH_AUTHOR for m in moments}
+        return await self._reaction_reach.reach_for(moments)
 
     # ── Retention scheduler hook ───────────────────────────────────────
 

@@ -1,0 +1,549 @@
+"""Unit tests for :mod:`socialhome.services.moment_reaction_router` (v_67).
+
+In-memory stubs only; the end-to-end rules against the real registry and
+SQLite are in ``tests/protocol/test_moment_reaction_routed.py``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from socialhome.crypto import (
+    b64url_encode,
+    derive_instance_id,
+    derive_user_id,
+    generate_identity_keypair,
+    generate_routing_secret,
+    generate_x25519_keypair,
+    sign_ed25519,
+)
+from socialhome.domain.events import MomentReactionChanged
+from socialhome.domain.federation import (
+    FederationEvent,
+    FederationEventType,
+    InstanceSource,
+    RemoteInstance,
+)
+from socialhome.domain.moment import Moment, MomentReactionRoute
+from socialhome.federation.moment_reaction_route import (
+    build_reaction,
+    open_reaction,
+    origin_keywrap_fields,
+    seal_reaction,
+)
+from socialhome.services import moment_reaction_router as mrr
+from socialhome.services.moment_reaction_router import MomentReactionRouter
+
+FET = FederationEventType
+OWN_KEY = generate_identity_keypair()
+OWN = derive_instance_id(OWN_KEY.public_key)
+OWN_KW = generate_x25519_keypair()
+ORIGIN_KW = generate_x25519_keypair()
+FUTURE = (datetime.now(UTC) + timedelta(days=3)).isoformat()
+
+
+def _peer(pid: str, *, version: int = 67, **kw) -> RemoteInstance:
+    return RemoteInstance(
+        id=pid,
+        display_name=pid,
+        remote_identity_pk="00" * 32,
+        key_self_to_remote="k",
+        key_remote_to_self="k",
+        remote_inbox_url="https://x",
+        local_inbox_id="w",
+        proto_version=version,
+        **kw,
+    )
+
+
+def _moment(mid: str, **over) -> Moment:
+    base = {
+        "id": mid,
+        "author_user_id": "u-far",
+        "content": "x",
+        "media_url": None,
+        "media_type": None,
+        "duration_ms": None,
+        "parent_moment_id": None,
+        "origin_instance_id": "origin",
+        "created_at": datetime.now(UTC).isoformat(),
+        "expires_at": FUTURE,
+        "hop_count": 2,
+        "received_via": "household",
+    }
+    base.update(over)
+    return Moment(**base)
+
+
+class _Registry:
+    def __init__(self):
+        self.handlers = {}
+
+    def register(self, event_type, handler):
+        self.handlers[event_type] = handler
+
+
+class _Fed:
+    def __init__(self, repo):
+        self.own_instance_id = OWN
+        self.own_identity_seed = OWN_KEY.private_key
+        self.own_identity_pk = OWN_KEY.public_key
+        self._repo = repo
+        self._event_registry = _Registry()
+        self.sent: list[dict] = []
+        self.pinned: dict[str, bytes] = {}
+
+    async def peer_supports(self, instance_id, *, min_version):
+        peer = await self._repo.get_instance(instance_id)
+        return peer is not None and peer.proto_version >= min_version
+
+    async def peer_identity_public_key(self, instance_id):
+        return self.pinned.get(instance_id)
+
+    async def send_event(self, **kwargs):
+        self.sent.append(kwargs)
+
+
+class _FedRepo:
+    def __init__(self):
+        self.peers: dict[str, RemoteInstance] = {}
+
+    async def get_instance(self, instance_id):
+        return self.peers.get(instance_id)
+
+
+class _Moments:
+    def __init__(self):
+        self.rows: dict[str, Moment] = {}
+        self.routes: dict[str, MomentReactionRoute] = {}
+        self.applied: list[tuple] = []
+
+    async def get(self, moment_id):
+        return self.rows.get(moment_id)
+
+    async def get_reaction_routes(self, ids):
+        return {i: self.routes[i] for i in ids if i in self.routes}
+
+    async def apply_reaction_at(self, moment_id, reactor, emoji, *, reacted_at):
+        self.applied.append((moment_id, reactor, emoji, reacted_at))
+        return True
+
+
+class _Users:
+    def __init__(self):
+        self.homes: dict[str, str] = {}
+        self.local: dict[str, SimpleNamespace] = {}
+
+    async def get_instance_for_user(self, user_id):
+        return self.homes.get(user_id)
+
+    async def get_by_user_id(self, user_id):
+        return self.local.get(user_id)
+
+    async def is_blocked(self, a, b):
+        return False
+
+
+class _Bans:
+    async def is_banned(self, instance_id):
+        return False
+
+
+class _Bus:
+    def __init__(self):
+        self.events = []
+
+    async def publish(self, event):
+        self.events.append(event)
+
+
+@pytest.fixture
+def router():
+    repo = _FedRepo()
+    fed = _Fed(repo)
+    moments = _Moments()
+    users = _Users()
+    bus = _Bus()
+    r = MomentReactionRouter(
+        bus=bus,
+        federation_service=fed,
+        federation_repo=repo,
+        moment_repo=moments,
+        user_repo=users,
+        ban_repo=_Bans(),
+        debounce_s=0.01,
+    )
+    r.attach_identity(
+        keywrap_private_key=OWN_KW.private_key,
+        keywrap_public_key=OWN_KW.public_key,
+        keywrap_sig=b64url_encode(sign_ed25519(OWN_KEY.private_key, OWN_KW.public_key)),
+        routing_secret=generate_routing_secret(),
+    )
+    return SimpleNamespace(
+        r=r, fed=fed, repo=repo, moments=moments, users=users, bus=bus
+    )
+
+
+def _local_user(env, name="anna"):
+    uid = derive_user_id(OWN_KEY.public_key, f"{name}-anchor")
+    env.users.local[uid] = SimpleNamespace(
+        user_id=uid, username=name, identity_anchor=f"{name}-anchor"
+    )
+    env.users.homes[uid] = OWN
+    return uid
+
+
+def _route(via="peer-via", tokens=("tok",)) -> MomentReactionRoute:
+    return MomentReactionRoute(
+        keywrap_pk=ORIGIN_KW.public_key.hex(),
+        via=via,
+        tokens=tuple(tokens),
+        token_suite="aesgcm-256",
+    )
+
+
+# ── Wiring ────────────────────────────────────────────────────────────────
+
+
+async def test_nothing_routes_before_the_identity_is_attached():
+    r = MomentReactionRouter(
+        bus=_Bus(),
+        federation_service=_Fed(_FedRepo()),
+        federation_repo=_FedRepo(),
+        moment_repo=_Moments(),
+        user_repo=_Users(),
+        ban_repo=_Bans(),
+    )
+    assert r.origin_keywrap_fields() == {}
+    stamped = r.stamp_relayed_create(
+        {"origin_keywrap_pk": "aa", "rt": ["x"], "rt_suite": "aesgcm-256"},
+        received_hop=1,
+        from_instance="a",
+        to_instance="b",
+    )
+    assert "rt" not in stamped and "rt_suite" not in stamped
+    assert not await r.queue_reaction(
+        moment_id="m", reactor_user_id="u", emoji="👏", occurred_at=datetime.now(UTC)
+    )
+
+
+def test_attach_to_registers_the_routed_handler(router):
+    router.r.attach_to(router.fed)
+    assert FET.MOMENT_REACTION_ROUTED in router.fed._event_registry.handlers
+
+
+def test_origin_keywrap_fields_are_the_keywrap_shape(router):
+    fields = router.r.origin_keywrap_fields()
+    assert fields["origin_keywrap_pk"] == OWN_KW.public_key.hex()
+    assert fields["origin_keywrap_suite"] == "x25519"
+
+
+# ── Relayed creates ───────────────────────────────────────────────────────
+
+
+def _create(**over):
+    base = {
+        "moment_id": "m-1",
+        "occurred_at": datetime.now(UTC).isoformat(),
+        "expires_at": FUTURE,
+        "origin_keywrap_pk": "aa",
+    }
+    base.update(over)
+    return base
+
+
+def test_a_relay_appends_one_token_per_peer(router):
+    first = router.r.stamp_relayed_create(
+        _create(), received_hop=1, from_instance="origin", to_instance="b"
+    )
+    second = router.r.stamp_relayed_create(
+        _create(), received_hop=1, from_instance="origin", to_instance="c"
+    )
+    assert len(first["rt"]) == 1 and first["rt_suite"] == "aesgcm-256"
+    assert first["rt"] != second["rt"]
+    onward = router.r.stamp_relayed_create(
+        _create(rt=first["rt"], rt_suite="aesgcm-256"),
+        received_hop=2,
+        from_instance="b",
+        to_instance="d",
+    )
+    assert onward["rt"][0] == first["rt"][0] and len(onward["rt"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("payload", "hop"),
+    [
+        (_create(origin_keywrap_pk=None), 1),  # older origin
+        (_create(), 2),  # an older relay added no token
+        (_create(rt=["x"], rt_suite="chacha"), 2),  # unknown suite
+        (_create(expires_at="never"), 1),  # unreadable expiry
+    ],
+)
+def test_a_broken_chain_is_stripped(router, payload, hop):
+    stamped = router.r.stamp_relayed_create(
+        payload, received_hop=hop, from_instance="a", to_instance="b"
+    )
+    assert "rt" not in stamped and "rt_suite" not in stamped
+
+
+async def test_route_from_create_needs_a_relayed_copy(router):
+    payload = {"origin_identity_pk": "00", **router.r.origin_keywrap_fields()}
+    assert (
+        await router.r.route_from_create(
+            payload, from_instance="o", origin_instance_id="o", hop_count=2
+        )
+        is None
+    )
+    assert (
+        await router.r.route_from_create(
+            payload, from_instance="b", origin_instance_id="o", hop_count=1
+        )
+        is None
+    )
+
+
+async def test_route_from_create_refuses_an_unknown_token_suite(router, caplog):
+    origin = generate_identity_keypair()
+    kw = generate_x25519_keypair()
+    payload = {
+        "origin_identity_pk": origin.public_key.hex(),
+        **origin_keywrap_fields(
+            kw.public_key,
+            b64url_encode(sign_ed25519(origin.private_key, kw.public_key)),
+        ),
+        "rt": ["tok"],
+        "rt_suite": "chacha",
+    }
+    oid = derive_instance_id(origin.public_key)
+    with caplog.at_level("WARNING"):
+        route = await router.r.route_from_create(
+            payload, from_instance="b", origin_instance_id=oid, hop_count=2
+        )
+    assert route is None
+    assert "chacha" in caplog.text
+    payload["rt_suite"] = "aesgcm-256"
+    route = await router.r.route_from_create(
+        payload, from_instance="b", origin_instance_id=oid, hop_count=2
+    )
+    assert route == MomentReactionRoute(
+        kw.public_key.hex(), "b", ("tok",), "aesgcm-256"
+    )
+
+
+# ── Reactor side ──────────────────────────────────────────────────────────
+
+
+async def test_direct_target(router):
+    router.users.homes["u-here"] = OWN
+    router.users.homes["u-paired"] = "peer-p"
+    router.users.homes["u-roster"] = "peer-gone"  # known, not paired
+    router.repo.peers["peer-p"] = _peer("peer-p")
+    assert await router.r.direct_target("u-here") == OWN
+    assert await router.r.direct_target("u-paired") == "peer-p"
+    assert await router.r.direct_target("u-roster") is None
+    assert await router.r.direct_target("u-unknown") is None
+
+
+async def test_reach_for(router):
+    router.users.homes["u-paired"] = "peer-p"
+    router.repo.peers["peer-p"] = _peer("peer-p")
+    router.repo.peers["peer-via"] = _peer("peer-via")
+    router.repo.peers["peer-old"] = _peer("peer-old", version=66)
+    router.repo.peers["peer-space"] = _peer(
+        "peer-space", source=InstanceSource.SPACE_SESSION
+    )
+    moments = [
+        _moment("own", received_via="self"),
+        _moment("paired", author_user_id="u-paired", hop_count=1),
+        _moment("routed"),
+        _moment("old"),
+        _moment("space"),
+        _moment("ended", expires_at="2000-01-01T00:00:00+00:00"),
+        _moment("gfs", received_via="gfs"),
+        _moment("bad-kw"),
+    ]
+    router.moments.routes.update(
+        {
+            "routed": _route(),
+            "old": _route(via="peer-old"),
+            "space": _route(via="peer-space"),
+            "ended": _route(),
+            "gfs": _route(),
+            "bad-kw": MomentReactionRoute("zz", "peer-via", ("t",), "aesgcm-256"),
+        }
+    )
+    assert await router.r.reach_for(moments) == {
+        "own": "author",
+        "paired": "author",
+        "routed": "author",
+        "old": "household",
+        "space": "household",
+        "ended": "household",
+        "gfs": "household",
+        "bad-kw": "household",
+    }
+
+
+async def test_reactions_are_coalesced_and_sealed_to_the_origin(router):
+    anna = _local_user(router)
+    router.repo.peers["peer-via"] = _peer("peer-via")
+    router.moments.rows["m"] = _moment("m")
+    router.moments.routes["m"] = _route()
+    now = datetime.now(UTC)
+    for emoji in ("👏", "🔥", None, "😂"):
+        assert await router.r.queue_reaction(
+            moment_id="m", reactor_user_id=anna, emoji=emoji, occurred_at=now
+        )
+    await asyncio.sleep(0.05)
+    assert len(router.fed.sent) == 1  # the latest state only
+    sent = router.fed.sent[0]
+    assert sent["to_instance_id"] == "peer-via"
+    assert sent["event_type"] is FET.MOMENT_REACTION_ROUTED
+    assert sent["outbox_key"] == f"moment-reaction:m:{anna}"
+    inner = open_reaction(
+        sealed=sent["payload"]["sealed"], keywrap_priv=ORIGIN_KW.private_key
+    )
+    assert inner["emoji"] == "😂" and inner["reactor_user_id"] == anna
+
+
+async def test_no_route_keeps_the_reaction_home(router):
+    anna = _local_user(router)
+    router.moments.rows["m"] = _moment("m")
+    assert not await router.r.queue_reaction(
+        moment_id="m", reactor_user_id=anna, emoji="👏", occurred_at=datetime.now(UTC)
+    )
+    router.moments.routes["m"] = _route(via="peer-old")
+    router.repo.peers["peer-old"] = _peer("peer-old", version=66)
+    assert not await router.r.queue_reaction(
+        moment_id="m", reactor_user_id=anna, emoji="👏", occurred_at=datetime.now(UTC)
+    )
+    assert router.fed.sent == []
+
+
+async def test_a_user_id_not_derived_from_the_household_key_is_not_routed(router):
+    router.users.local["u-legacy"] = SimpleNamespace(
+        user_id="u-legacy", username="legacy", identity_anchor=None
+    )
+    router.repo.peers["peer-via"] = _peer("peer-via")
+    router.moments.rows["m"] = _moment("m")
+    router.moments.routes["m"] = _route()
+    await router.r.queue_reaction(
+        moment_id="m",
+        reactor_user_id="u-legacy",
+        emoji="👏",
+        occurred_at=datetime.now(UTC),
+    )
+    await asyncio.sleep(0.05)
+    assert router.fed.sent == []
+
+
+async def test_stop_sends_what_waits_for_its_debounce(router):
+    router.r._debounce_s = 60
+    anna = _local_user(router)
+    router.repo.peers["peer-via"] = _peer("peer-via")
+    router.moments.rows["m"] = _moment("m")
+    router.moments.routes["m"] = _route()
+    await router.r.queue_reaction(
+        moment_id="m", reactor_user_id=anna, emoji="👏", occurred_at=datetime.now(UTC)
+    )
+    assert router.fed.sent == []
+    await router.r.stop()
+    assert len(router.fed.sent) == 1
+
+
+# ── Origin side ───────────────────────────────────────────────────────────
+
+
+def _routed_event(router, emoji="👏", at_ms=None, from_instance="peer-n"):
+    reactor = generate_identity_keypair()
+    inner = build_reaction(
+        seed=reactor.private_key,
+        identity_pk=reactor.public_key,
+        reactor_instance_id=derive_instance_id(reactor.public_key),
+        reactor_user_id=derive_user_id(reactor.public_key, "r"),
+        reactor_anchor="r",
+        moment_id="m-own",
+        author_user_id="u-anna",
+        origin_instance_id=OWN,
+        emoji=emoji,
+        occurred_at_ms=at_ms or int(datetime.now(UTC).timestamp() * 1000),
+    )
+    return FederationEvent(
+        msg_id="x",
+        event_type=FET.MOMENT_REACTION_ROUTED,
+        from_instance=from_instance,
+        to_instance=OWN,
+        timestamp=datetime.now(UTC).isoformat(),
+        payload={
+            "moment_id": "m-own",
+            "origin_instance_id": OWN,
+            "rt": [],
+            "sealed": seal_reaction(origin_keywrap_pub=OWN_KW.public_key, inner=inner),
+        },
+    )
+
+
+async def test_origin_applies_and_announces(router):
+    router.users.local["u-anna"] = SimpleNamespace(user_id="u-anna")
+    router.moments.rows["m-own"] = _moment(
+        "m-own", author_user_id="u-anna", origin_instance_id=OWN, received_via="self"
+    )
+    await router.r._on_routed(_routed_event(router))
+    assert len(router.moments.applied) == 1
+    assert isinstance(router.bus.events[0], MomentReactionChanged)
+    assert router.bus.events[0].author_user_id == "u-anna"
+
+
+async def test_malformed_routed_payloads_are_refused(router, caplog):
+    event = _routed_event(router)
+    for bad in (
+        {**event.payload, "moment_id": ""},
+        {**event.payload, "origin_instance_id": None},
+        {**event.payload, "sealed": "x"},
+        {**event.payload, "rt": "x"},
+    ):
+        with caplog.at_level("WARNING"):
+            await router.r._on_routed(dataclasses.replace(event, payload=bad))
+    assert router.moments.applied == []
+    assert caplog.text.count("refusing") == 4
+
+
+async def test_a_relay_without_its_token_refuses(router):
+    event = _routed_event(router)
+    payload = {**event.payload, "origin_instance_id": "elsewhere"}
+    await router.r._on_routed(
+        FederationEvent(
+            msg_id="x",
+            event_type=FET.MOMENT_REACTION_ROUTED,
+            from_instance="peer-n",
+            to_instance=OWN,
+            timestamp=event.timestamp,
+            payload=payload,
+        )
+    )
+    assert router.fed.sent == []
+
+
+def test_seen_cache_is_bounded_and_expires(router, monkeypatch):
+    monkeypatch.setattr(mrr, "SEEN_MAX", 3)
+    now = 10**12
+    for i in range(5):
+        assert router.r._remember_seen(bytes([i]), now)
+    assert len(router.r._seen) <= 3
+    assert not router.r._remember_seen(bytes([4]), now)
+    # Past the window everything is forgotten.
+    assert router.r._remember_seen(bytes([4]), now + mrr.MAX_REACTION_AGE_MS + 1)
+
+
+def test_removal_watermark_is_bounded(router, monkeypatch):
+    monkeypatch.setattr(mrr, "SEEN_MAX", 2)
+    for i in range(4):
+        router.r._remember_removal((f"m{i}", "u"), i)
+    assert len(router.r._removed) == 2
+    router.r._remember_removal(("m3", "u"), 1)
+    assert router.r._removed[("m3", "u")] == 3

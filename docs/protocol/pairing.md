@@ -531,6 +531,12 @@ blocked peer's process:
 - `MOMENT_CREATED`, `MOMENT_DELETED`, `MOMENT_REACTED`,
   `MOMENT_REACTION_REMOVED`
 
+`MOMENT_REACTION_ROUTED` (v_67) is not on the list: the reactor is sealed
+end to end to the moment's origin household — a household this one is
+**not** paired with, so it has no per-pair hide list — and the relays it
+passes see neither who reacted nor with what. Reacting is the person's own
+act toward that author.
+
 **Receiver-side backstop**. `MomentFederationOutbound` runs a 3-hop
 relay (`relay_inbound`) — a household that's *not* the originator
 re-broadcasts moments to its own peers, so a moment from a hidden

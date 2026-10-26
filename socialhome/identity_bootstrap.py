@@ -61,6 +61,7 @@ class IdentityMaterial:
         "keywrap_sig",
         "pq_public_key",
         "pq_seed",
+        "routing_secret",
     )
 
     def __init__(
@@ -74,6 +75,7 @@ class IdentityMaterial:
         keywrap_private_key: bytes,
         keywrap_public_key: bytes,
         keywrap_sig: str,
+        routing_secret: str,
     ) -> None:
         self.identity_seed = identity_seed
         self.identity_public_key = identity_public_key
@@ -87,6 +89,10 @@ class IdentityMaterial:
         #: the GFS-served key-wrap key end-to-end (``verify_keywrap_binding``)
         #: and never trust a substituted value.
         self.keywrap_sig = keywrap_sig
+        #: 32 random bytes (hex), never transmitted (§4.1.8). v_67 derives
+        #: the key of its moment return tokens from it (HKDF,
+        #: ``moment-return:v1``) — no new key is stored.
+        self.routing_secret = routing_secret
 
 
 async def ensure_instance_identity(
@@ -111,7 +117,8 @@ async def ensure_instance_identity(
     row = await db.fetchone(
         "SELECT identity_private_key, identity_public_key, instance_id, "
         "       pq_algorithm, pq_private_key, pq_public_key, "
-        "       keywrap_private_key, keywrap_public_key, keywrap_sig "
+        "       keywrap_private_key, keywrap_public_key, keywrap_sig, "
+        "       routing_secret "
         "FROM instance_identity WHERE id='self'",
     )
     if row is not None:
@@ -182,6 +189,7 @@ async def ensure_instance_identity(
             keywrap_private_key=kw_priv,
             keywrap_public_key=kw_pub,
             keywrap_sig=kw_sig,
+            routing_secret=row["routing_secret"],
         )
 
     # First-start path: mint fresh classical + (optionally) PQ keypairs +
@@ -248,6 +256,7 @@ async def ensure_instance_identity(
         keywrap_private_key=keywrap.private_key,
         keywrap_public_key=keywrap.public_key,
         keywrap_sig=keywrap_sig,
+        routing_secret=routing_secret,
     )
 
 

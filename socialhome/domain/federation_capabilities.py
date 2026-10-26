@@ -1021,7 +1021,22 @@ from __future__ import annotations
 #:   queue, as before) and blobs of a week at most; an older follower
 #:   ignores the unknown frame; an older relay gives up on a delete after
 #:   ~10 h as before. Labelled "Deletes reach every copy of a moment".
-OURS: int = 66
+#: * **v_67** (2026-10-26) — **reactions reach authors further away**
+#:   (decision 9, sign-off 2). A ``MOMENT_CREATED`` carries its origin
+#:   household's static key-wrap key (``origin_keywrap_*``, bound to its
+#:   identity key, outside the origin signature), and each v_67 relay
+#:   appends a return token (``rt``, AES-256-GCM under a key derived from
+#:   its own ``routing_secret`` — it names only the household it got the
+#:   moment from). A reactor two or three hops away sends a new
+#:   ``MOMENT_REACTION_ROUTED`` to the neighbour it got the moment from:
+#:   the reaction is sealed to the origin's key-wrap key and signed by the
+#:   reactor's household; each relay opens its own token and passes it one
+#:   hop back. **Fallback**: a reactor sends only when the origin shipped
+#:   its key, every relay added a token and the first relay is v_67
+#:   (``peer_supports``); otherwise the reaction stays in its household, as
+#:   before. Older households ignore the new create fields. Labelled
+#:   "Reactions reach authors further away".
+OURS: int = 67
 
 
 class FederationCapability:
@@ -1550,6 +1565,12 @@ class FederationCapability:
     #: (decision 6b, ``MomentService.can_save``).
     MIN_FOR_LATE_MOMENT_DELETES = 66
 
+    #: v_67 — reactions reach authors further away: the reactor sends a
+    #: sealed ``MOMENT_REACTION_ROUTED`` to the neighbour it got the moment
+    #: from, only when that neighbour is at least this version (it opens its
+    #: return token and passes the reaction one hop back).
+    MIN_FOR_ROUTED_MOMENT_REACTIONS = 67
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1799,6 +1820,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_LATE_MOMENT_DELETES,
         "Deletes reach every copy of a moment",
     ),
+    (
+        FederationCapability.MIN_FOR_ROUTED_MOMENT_REACTIONS,
+        "Reactions reach authors further away",
+    ),
 ]
 
 
@@ -1876,6 +1901,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_PUBLIC_MOMENT_SENT_AT: "public_moment_sent_at",
     FederationCapability.MIN_FOR_LONG_LIVED_MOMENTS: "follower_moment_retention",
     FederationCapability.MIN_FOR_LATE_MOMENT_DELETES: "late_moment_deletes",
+    FederationCapability.MIN_FOR_ROUTED_MOMENT_REACTIONS: "routed_moment_reactions",
 }
 
 

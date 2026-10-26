@@ -34,10 +34,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
+import orjson
+
 from ..db import AsyncDatabase
 from ..domain.moment import (
     Moment,
     MomentReaction,
+    MomentReactionRoute,
     MomentTombstone,
     SavedMoment,
     extract_hashtags,
@@ -293,6 +296,22 @@ class AbstractMomentRepo(Protocol):
         reactor_user_id: str,
     ) -> None: ...
     async def list_reactions(self, moment_id: str) -> list[MomentReaction]: ...
+    async def apply_reaction_at(
+        self,
+        moment_id: str,
+        reactor_user_id: str,
+        emoji: str | None,
+        *,
+        reacted_at: str,
+    ) -> bool: ...
+
+    # Reaction routes (v_67) -----------------------------------------------
+    async def set_reaction_route(
+        self, moment_id: str, route: MomentReactionRoute
+    ) -> None: ...
+    async def get_reaction_routes(
+        self, moment_ids: list[str]
+    ) -> dict[str, MomentReactionRoute]: ...
 
     # Engagement counters --------------------------------------------------
     async def count_engagement_for(
@@ -713,6 +732,93 @@ class SqliteMomentRepo:
             (moment_id, reactor_user_id),
         )
 
+    async def apply_reaction_at(
+        self,
+        moment_id: str,
+        reactor_user_id: str,
+        emoji: str | None,
+        *,
+        reacted_at: str,
+    ) -> bool:
+        """Apply a reaction made at *reacted_at* (``YYYY-MM-DD HH:MM:SS``
+        UTC, the column's own shape) only when it is not older than the one
+        stored — reactions routed from far away (v_67) can arrive out of
+        order. ``emoji is None`` removes it. Returns whether anything
+        changed; one transaction."""
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT reacted_at FROM moment_reactions"
+                " WHERE moment_id=? AND reactor_user_id=?",
+                (moment_id, reactor_user_id),
+            ).fetchone()
+            if row is not None and str(row[0]) > reacted_at:
+                return False
+            if emoji is None:
+                cur = conn.execute(
+                    "DELETE FROM moment_reactions"
+                    " WHERE moment_id=? AND reactor_user_id=?",
+                    (moment_id, reactor_user_id),
+                )
+                return cur.rowcount > 0
+            cur = conn.execute(
+                "INSERT INTO moment_reactions(moment_id, reactor_user_id, emoji,"
+                " reacted_at) SELECT ?, ?, ?, ? WHERE EXISTS(SELECT 1 FROM"
+                " moments WHERE id=? AND deleted_at IS NULL)"
+                " ON CONFLICT(moment_id, reactor_user_id) DO UPDATE SET"
+                " emoji=excluded.emoji, reacted_at=excluded.reacted_at",
+                (moment_id, reactor_user_id, emoji, reacted_at, moment_id),
+            )
+            return cur.rowcount > 0
+
+        return await self._db.transact(_run)
+
+    # ── Reaction routes (v_67) ─────────────────────────────────────────
+
+    async def set_reaction_route(
+        self, moment_id: str, route: MomentReactionRoute
+    ) -> None:
+        """Keep how a reaction to *moment_id* gets back to its origin. Only
+        on a live moment that arrived from another household (the column's
+        CHECK); a tombstone never keeps one (migration 0125's trigger)."""
+        await self._db.enqueue(
+            "UPDATE moments SET reaction_route=? WHERE id=?"
+            " AND received_via='household' AND deleted_at IS NULL",
+            (
+                orjson.dumps(
+                    {
+                        "kw": route.keywrap_pk,
+                        "via": route.via,
+                        "rt": list(route.tokens),
+                        "rt_suite": route.token_suite,
+                    }
+                ).decode(),
+                moment_id,
+            ),
+        )
+
+    async def get_reaction_routes(
+        self, moment_ids: list[str]
+    ) -> dict[str, MomentReactionRoute]:
+        """The stored route of each live moment in *moment_ids* that has
+        one (an unreadable row is skipped)."""
+        if not moment_ids:
+            return {}
+        out: dict[str, MomentReactionRoute] = {}
+        for start in range(0, len(moment_ids), 500):
+            chunk = moment_ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = await self._db.fetchall(
+                f"SELECT id, reaction_route FROM moments WHERE id IN ({marks})"
+                " AND reaction_route IS NOT NULL AND deleted_at IS NULL",
+                tuple(chunk),
+            )
+            for row in rows:
+                route = _route_from_json(row["reaction_route"])
+                if route is not None:
+                    out[row["id"]] = route
+        return out
+
     async def list_reactions(self, moment_id: str) -> list[MomentReaction]:
         rows = await self._db.fetchall(
             "SELECT moment_id, reactor_user_id, emoji, reacted_at "
@@ -1077,8 +1183,9 @@ def _tombstone_rows(conn, where: str, params: tuple) -> int:
 
     Runs inside :meth:`AsyncDatabase.transact`. Keeps the id, author, origin
     and ``expires_at`` (what a tombstone must remember); drops content,
-    media, tags, reactions and every save (migration 0124's trigger, in this
-    same transaction); detaches replies (``parent_moment_id`` →
+    media, tags, reactions, every save (migration 0124's trigger) and the
+    reaction route (0125's trigger), in this same transaction; detaches
+    replies (``parent_moment_id`` →
     NULL, as the old hard delete's ``ON DELETE SET NULL`` did). Returns the
     number of live moments tombstoned. ``where`` is a fixed column
     predicate from this module, never caller input.
@@ -1104,6 +1211,24 @@ def _tombstone_rows(conn, where: str, params: tuple) -> int:
             (mid,),
         )
     return len(ids)
+
+
+def _route_from_json(text: object) -> MomentReactionRoute | None:
+    """A stored ``reaction_route`` as :class:`MomentReactionRoute`, or
+    ``None`` when it doesn't parse into one."""
+    try:
+        data = orjson.loads(str(text))
+        tokens = data["rt"]
+        if not isinstance(tokens, list) or not all(isinstance(t, str) for t in tokens):
+            return None
+        return MomentReactionRoute(
+            keywrap_pk=str(data["kw"]),
+            via=str(data["via"]),
+            tokens=tuple(tokens),
+            token_suite=str(data["rt_suite"]),
+        )
+    except orjson.JSONDecodeError, KeyError, TypeError:
+        return None
 
 
 def _row_to_moment(row: dict | None) -> Moment | None:

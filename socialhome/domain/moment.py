@@ -23,6 +23,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from .emoji import is_single_emoji
 from .errors import CodedError
 
 #: Hard caps. Composer + service both enforce.
@@ -220,6 +221,58 @@ class MomentReaction:
     reactor_user_id: str
     emoji: str
     reacted_at: str
+
+
+#: Longest reaction a moment takes, in UTF-8 bytes — room for any one emoji
+#: (a ZWJ family or a subdivision flag is ~25 bytes), never a sentence.
+MOMENT_REACTION_MAX_EMOJI_BYTES: int = 32
+
+
+def is_valid_moment_reaction(emoji: object) -> bool:
+    """Whether *emoji* is a reaction a moment takes: exactly one emoji
+    (:func:`~socialhome.domain.emoji.is_single_emoji`) of at most
+    :data:`MOMENT_REACTION_MAX_EMOJI_BYTES` bytes. Enforced on the route, in
+    the service and on every inbound path."""
+    return (
+        isinstance(emoji, str)
+        and len(emoji.encode("utf-8")) <= MOMENT_REACTION_MAX_EMOJI_BYTES
+        and is_single_emoji(emoji)
+    )
+
+
+class MomentReactionInvalidError(CodedError):
+    """A reaction that is not exactly one emoji of ≤ 32 bytes."""
+
+    status = 422
+    code = "INVALID_REACTION"
+    detail = "A reaction is one emoji."
+
+
+#: Where a reaction to a moment reaches (the API's ``reactions_reach``).
+#: ``author``: the author's household gets it — the author is here, on a
+#: paired household, or (v_67) further away along the moment's return
+#: tokens. ``household``: it stays in this household only.
+REACTION_REACH_AUTHOR: str = "author"
+REACTION_REACH_HOUSEHOLD: str = "household"
+
+
+@dataclass(slots=True, frozen=True)
+class MomentReactionRoute:
+    """How a reaction gets back to a moment's origin household (v_67).
+
+    Kept on the moment row (``moments.reaction_route``) of a moment that
+    arrived through relays, so a reaction days later still finds its way:
+    ``keywrap_pk`` is the origin's static X25519 key-wrap key (hex, bound to
+    its identity key when the create was received), ``via`` the neighbour
+    the moment came from, ``tokens`` the relays' return tokens in hop order
+    (one per relay — ``hop_count − 1``) and ``token_suite`` their suite.
+    Only a complete route is ever stored.
+    """
+
+    keywrap_pk: str
+    via: str
+    tokens: tuple[str, ...]
+    token_suite: str
 
 
 #: Cap on how many tags survive per moment. Twitter is generous on

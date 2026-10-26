@@ -225,6 +225,10 @@ function MomentRow({
     ? m.content.slice(0, CONTENT_TRUNCATE_AT) + '…'
     : m.content
 
+  // v_67: a reaction that can't reach the author's household stays here —
+  // React is still offered, and says so.
+  const householdOnly = !mine && m.reactions_reach === 'household'
+
   return (
     <li class="sh-momentum-row" onClick={onOpen}>
       <Avatar name={authorName} src={authorPicture} size={36} />
@@ -336,7 +340,10 @@ function MomentRow({
           <button
             type="button"
             class="sh-momentum-chip"
-            aria-label={t('moment.detail.react_aria', { emoji: DEFAULT_REACTION })}
+            aria-label={householdOnly
+              ? `${t('moment.detail.react_aria', { emoji: DEFAULT_REACTION })}. ${t('moment.detail.reactions_household_only')}`
+              : t('moment.detail.react_aria', { emoji: DEFAULT_REACTION })}
+            title={householdOnly ? t('moment.detail.reactions_household_only') : undefined}
             disabled={mine}
             onClick={mine ? undefined : onReact}
           >

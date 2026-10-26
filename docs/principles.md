@@ -870,6 +870,42 @@ Any change that extends a copy's life past what a delete can reach, keeps
 certificates longer than 30 days, or puts content into a certificate is a
 §2-principle change requiring a new sign-off.
 
+### Sign-off: a relay learns that its neighbour reacted to a moment (v_67)
+
+Owner decision 9, sign-off 2, 2026-10-25. So that a reaction from a
+household two or three hops away reaches the moment's author, it travels
+back along the path the moment came, hop by hop
+([`protocol/momentum.md`](./protocol/momentum.md#routed-reactions-v_67)).
+What each household on the way learns, and what it doesn't:
+
+1. **A relay learns that its direct neighbour — or that neighbour's part of
+   the mesh — reacted to moment M.** It handed M to that neighbour itself,
+   and gets a `MOMENT_REACTION_ROUTED` back from it. It does **not** learn
+   who reacted, with which emoji, or whether it is an add or a removal: the
+   reaction is sealed end to end to the origin's key-wrap key and padded to
+   one size. It cannot tell its neighbour's own reaction from one further
+   out.
+2. **No household learns any non-adjacent part of the pairing graph.** A
+   return token names only the household the relay got the moment from,
+   is readable only by the relay that minted it, and only when handed back
+   by the neighbour it was minted for. A reactor holds its neighbours'
+   tokens as opaque bytes; the origin sees only the neighbour that
+   delivered and the reactor's household, which signs the reaction.
+3. **The origin learns the reactor's household and user id** — as it does
+   for a paired reactor today — and nothing about the path. It decides on
+   the signed reaction alone (its own key, the reactor's key, the moment).
+4. **No new key, no stored state on relays.** The seal reuses the static
+   key-wrap key, the tokens a key derived from the existing routing secret;
+   relays keep only short-lived rate counters.
+5. **Never for a protected account, never through a GFS.** A `no_relay`
+   moment carries no key-wrap key and its origin refuses routed reactions;
+   a moment that came through a GFS has no route — its reactions stay in
+   the household.
+
+Anything that lets a relay read the reaction, lets a token name more than
+one neighbour, or routes reactions through a GFS is a §2-principle change
+requiring a new sign-off.
+
 ## No third-party fetches from user content
 
 Viewing content never makes the viewer's browser contact a host the

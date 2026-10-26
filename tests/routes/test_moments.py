@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
+
 from socialhome.app_keys import (
     config_key,
     federation_repo_key,
@@ -484,6 +486,37 @@ async def test_reaction_empty_emoji_rejected(client):
     assert r.status == 422
 
 
+@pytest.mark.parametrize("emoji", ["hello", "👏👏", "🔥" * 9])
+async def test_reaction_is_one_emoji_of_at_most_32_bytes(client, emoji):
+    r = await client.post(
+        "/api/moments",
+        json={"content": "x"},
+        headers=_auth(client._tok),
+    )
+    moment_id = (await r.json())["id"]
+    r = await client.put(
+        f"/api/moments/{moment_id}/reaction",
+        json={"emoji": emoji},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "INVALID_REACTION"
+
+
+async def test_every_moment_says_where_a_reaction_reaches(client):
+    """v_67: ``reactions_reach`` — an own moment's reactions are here."""
+    r = await client.post(
+        "/api/moments",
+        json={"content": "reach"},
+        headers=_auth(client._tok),
+    )
+    moment_id = (await r.json())["id"]
+    r = await client.get(f"/api/moments/{moment_id}", headers=_auth(client._tok))
+    assert (await r.json())["moment"]["reactions_reach"] == "author"
+    r = await client.get("/api/moments/archive?scope=own", headers=_auth(client._tok))
+    assert all(m["reactions_reach"] == "author" for m in await r.json())
+
+
 async def test_delete_moment_round_trip(client):
     r = await client.post(
         "/api/moments",
@@ -870,6 +903,11 @@ async def test_moment_federation_payload_carries_no_names(client, monkeypatch):
         ORIGIN_IDENTITY_PK_FIELD,
         ORIGIN_SIG_SUITE_FIELD,
         ORIGIN_SIG_FIELD,
+        # v_67: where a reaction from further away is sealed to — a key,
+        # its binding signature and suite; no name.
+        "origin_keywrap_pk",
+        "origin_keywrap_sig",
+        "origin_keywrap_suite",
     }
 
 
